@@ -3,8 +3,7 @@
 # Run deliberately, not from the test suite: sync validation costs ~212 ms/frame
 # against ~0.16 ms without, so this is seconds per frame, not a routine check.
 #
-#   ENV["LAVA_VALIDATION"] = "1"; ENV["LAVA_SYNC_VAL"] = "1"   # before `using Lava`
-#   include("bench/validate.jl"); validate()
+#   include("bench/validate.jl"); syncdevice!(); validate()
 #
 # Mantle emits the swapchain barrier itself (vk_begin_pass! is called with
 # transition=false), so a wrong stage, access mask or layout surfaces here rather
@@ -18,12 +17,36 @@ include(joinpath(@__DIR__, "two_scatters.jl"))
 # `include` is invisible to `record!`, which was compiled in an earlier world.
 include(joinpath(@__DIR__, "targets.jl"))
 
-function validate(frames = 60; na = 20_000, nb = 10_000)
-    # ctx.validation is the message ring, not a flag, so ask the environment the
-    # context was built from.
-    get(ENV, "LAVA_VALIDATION", "0") == "1" ||
-        error("set LAVA_VALIDATION=1 and LAVA_SYNC_VAL=1 before `using Lava`")
+"""
+    syncdevice!()
 
+Rebuild the default device with sync validation on. Call it before anything here.
+
+Validation is a property of the `VkInstance`, so it is chosen when the device is
+built and cannot be switched on afterwards — which is also why the seven `LAVA_*`
+environment variables this file used to ask for are gone. **Every `LavaArray`
+alive becomes invalid**, so this goes first, before any of the builders below.
+"""
+syncdevice!() = vk_reset_device!(debug = DebugConfig(sync_val = true))
+
+"""
+Refuse to report a clean run out of a device that is not instrumented.
+
+The failure this exists for is silent in exactly the wrong direction: a device
+built without the layer produces no messages, which reads the same as a device
+that produced none.
+"""
+function requiresync()
+    ctx = Lava.vk_context()
+    ctx.debug.sync_val || error(
+        "this device has no synchronization validation. It is fixed at device " *
+        "creation, so call `syncdevice!()` first — and note that invalidates " *
+        "every LavaArray that already exists.")
+    nothing
+end
+
+function validate(frames = 60; na = 20_000, nb = 10_000)
+    requiresync()
     Lava.clear_validation_messages!()
     dev = M.Device(Lava)
     win = RenderWindow(W, H; title = "validate", vsync = false)
@@ -58,8 +81,7 @@ lands on memory the first was still being copied from, and per-resource tracking
 cannot see that the two are the same memory.
 """
 function validate_targets(frames = 20; n = 50_000)
-    get(ENV, "LAVA_VALIDATION", "0") == "1" ||
-        error("set LAVA_VALIDATION=1 and LAVA_SYNC_VAL=1 before `using Lava`")
+    requiresync()
     Lava.clear_validation_messages!()
     dev = M.Device(Lava)
     win = RenderWindow(W, H; title = "validate targets", vsync = false)
@@ -92,8 +114,7 @@ write goes in place.
 the read is a storage load in the vertex shader and `Vertices` lowers to that.
 """
 function validate_updates(frames = 20; n = 20_000)
-    get(ENV, "LAVA_VALIDATION", "0") == "1" ||
-        error("set LAVA_VALIDATION=1 and LAVA_SYNC_VAL=1 before `using Lava`")
+    requiresync()
     Lava.clear_validation_messages!()
     dev = M.Device(Lava)
     win = RenderWindow(W, H; title = "validate updates", vsync = false)
@@ -140,8 +161,7 @@ stage or layout is a validation message here and nothing visible on screen, sinc
 RADV renders a wrong-but-tolerated barrier exactly like a right one.
 """
 function validate_depth(frames = 20; n = 20_000)
-    get(ENV, "LAVA_VALIDATION", "0") == "1" ||
-        error("set LAVA_VALIDATION=1 and LAVA_SYNC_VAL=1 before `using Lava`")
+    requiresync()
     Lava.clear_validation_messages!()
     dev = M.Device(Lava)
     win = RenderWindow(W, H; title = "validate depth", vsync = false)
@@ -183,8 +203,7 @@ is a validation message and nothing else — the first target would still look
 right on screen.
 """
 function validate_mrt(frames = 20; n = 20_000)
-    get(ENV, "LAVA_VALIDATION", "0") == "1" ||
-        error("set LAVA_VALIDATION=1 and LAVA_SYNC_VAL=1 before `using Lava`")
+    requiresync()
     Lava.clear_validation_messages!()
     dev = M.Device(Lava)
     win = RenderWindow(W, H; title = "validate mrt", vsync = false)
@@ -252,8 +271,7 @@ Each image pair is primed into its `from` layout first, because `oldLayout` must
 be UNDEFINED or the image's actual current layout, not whatever we claim.
 """
 function validate_matrix()
-    get(ENV, "LAVA_VALIDATION", "0") == "1" ||
-        error("set LAVA_VALIDATION=1 and LAVA_SYNC_VAL=1 before `using Lava`")
+    requiresync()
     be = M.Vulkan()
     dev = M.Device(Lava)
     bq = dev.bq
