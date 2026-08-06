@@ -42,7 +42,7 @@ export PHASES, compile!
 # the one a Makie-shaped caller means — `update!(plot; positions = …)` sets an
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
-export run!, npipelines, capacity, use, peakbytes, storage
+export run!, npipelines, capacity, use, peakbytes, storage, custom!
 export timings, PassTiming, NSAMPLES
 
 function update! end
@@ -50,5 +50,26 @@ function use end
 function peakbytes end
 function storage end
 function capacity end
+
+"""
+    custom!(f, graph, name) -> pass
+
+A pass that declares what it touches but not how. `f` receives the pass handle,
+calls `use` for every resource the work reads or writes, and returns a zero-arg
+callable; that callable runs at record time with the batch open, and may launch
+whatever it likes.
+
+`dispatch!` needs one kernel, its arguments and an ndrange. Work that is a *unit*
+to the caller but several launches underneath — a fused attention block, an ATen
+operator with a host-side branch, a library call — has no way to say so, and
+wrapping each launch as its own pass would declare a resource sequence the caller
+does not actually have. This is the escape hatch: the graph still derives
+lifetimes and barriers from the declaration, and stays out of the body.
+
+The declaration is a promise. Nothing checks that the body touches only what was
+declared, and memory it reaches without saying so is memory the placer is free to
+alias with something else.
+"""
+function custom! end
 
 end

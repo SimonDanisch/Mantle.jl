@@ -40,6 +40,14 @@ Mantle.Window(width::Integer, height::Integer; title::AbstractString = "", vsync
 Base.isopen(w::LavaWindow) = isopen(w.win)
 Base.close(w::LavaWindow) = close(w.win)
 Base.size(w::LavaWindow) = size(w.win)
+"""
+What is on the window now, as a `(width, height)` matrix of BGRA byte tuples.
+
+`(width, height)`, not `(height, width)` — the first index is x. Every caller here
+counts or sums pixels, so it has never mattered, but a Julia image is indexed
+`(row, column)`, and handing this straight to `save` writes the picture rotated a
+quarter turn with no complaint. `permutedims` first if it is going to be looked at.
+"""
 Mantle.screenshot(w::LavaWindow) = Lava.readback_window(w.win)
 
 # ── persistent resources ──────────────────────────────────────────────────────
@@ -364,11 +372,18 @@ mutable struct LavaGraph <: Mantle.Graph
     ids::IdDict{Any,Int}
     updates::Vector{Any}
     recycler::Recycler
+    # Interning for `use(...; range = ...)`. `ids` is an IdDict, so two `use`
+    # calls naming the same slice would otherwise be two objects and two ids —
+    # and a resource that is not the same resource in two passes has no hazards
+    # between them, which is the one answer that must not be reachable by
+    # accident. Keyed by value, so the same slice is the same sub-resource.
+    views::Dict{Tuple{Int,UnitRange{Int}},Any}
 end
 
 Mantle.Graph(dev::LavaDevice) =
     LavaGraph(dev, Pass[], LavaSurface[], Transient[],
-              Dict{Int,Transient}(), Dict{Int,Any}(), IdDict{Any,Int}(), Any[], Recycler())
+              Dict{Int,Transient}(), Dict{Int,Any}(), IdDict{Any,Int}(), Any[], Recycler(),
+              Dict{Tuple{Int,UnitRange{Int}},Any}())
 
 function Mantle.Transient.Buffer(g::LavaGraph, ::Type{T}, n::Integer) where {T}
     t = TransientBuffer{T}(Int(n), typemax(Int), 0, nothing)
@@ -656,15 +671,61 @@ function draw!(p::PassHandle, shader, args, n; frag_args = ())
 end
 
 """
-    use(pass, x; read, write)
+A slice of a buffer, as its own resource.
+
+Two passes writing disjoint halves of one buffer do not race, and tracking the
+buffer whole says they do — a barrier between them orders memory neither touches.
+Handing the slice its own id is what lets the existing per-resource walk answer
+that without knowing anything about ranges: disjoint slices are disjoint
+resources, and the hazard set falls out unchanged.
+
+`range` is in elements, and the barrier is scoped to exactly those bytes. The
+kernel still receives the whole buffer — a range declares what a pass *touches*,
+not what it can address.
+"""
+struct BufferRange
+    parent::Any
+    range::UnitRange{Int}
+end
+
+Mantle.storage(v::BufferRange) = Mantle.storage(v.parent)
+resourcekind(::BufferRange) = BufferKind()
+
+"""Byte span of a usage, for the barrier that scopes to it."""
+barrierspan(r, st) = (UInt64(st.offset), UInt64(sizeof(eltype(st)) * prod(st.dims)))
+barrierspan(v::BufferRange, st) =
+    (UInt64(st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
+     UInt64(length(v.range) * sizeof(eltype(st))))
+
+function slice(g::LavaGraph, x, range::UnitRange{Int})
+    # `length`, not `length(storage(x))`: a transient has no storage until the
+    # placer gives it some, and a range is declared while the graph is built.
+    n = length(x)
+    (first(range) >= 1 && last(range) <= n) || throw(ArgumentError(
+        "use(): range $range is outside the buffer's 1:$n."))
+    pid = resourceid(g, x)
+    get!(g.views, (pid, range)) do
+        BufferRange(x, range)
+    end
+end
+
+"""
+    use(pass, x; read, write, range = nothing)
 
 The ordinary case: this pass reads or writes this resource. Named usages survive
 only where the role can be picked wrongly.
+
+`range` narrows the claim to a slice, in elements. Two passes that name disjoint
+slices of one buffer get no barrier between them, and one that does name a slice
+gets a barrier scoped to exactly those bytes.
 """
-function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false)
+function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false,
+                    range::Union{Nothing,UnitRange{Int}} = nothing)
     read || write || throw(ArgumentError("use() needs read, write, or both"))
     U = Storage{BufferKind, Access{read, write}}
-    push!(p.pass.usages, resourceid(p.graph, x) => U)
+    r = range === nothing ? x : slice(p.graph, x, range)
+    push!(p.pass.usages, resourceid(p.graph, r) => U)
+    # The parent is what the kernel gets, and what liveness has to see touched.
     touch!(p.graph, x)
 end
 
@@ -689,6 +750,20 @@ end
 
 dispatch!(p::PassHandle, kernel, args, ndrange; group = nothing) =
     push!(p.pass.dispatches, Dispatch(kernel, args, ndrange, group))
+
+# The body goes in `dispatches` beside the `Dispatch`es rather than in a field of
+# its own: the compile walks that vector and this is one more thing it can find
+# there, so `Pass` does not grow a field only one kind ever sets.
+function Mantle.custom!(f, g::LavaGraph, name::AbstractString)
+    p = Pass(name, :custom)
+    push!(g.passes, p)
+    body = f(PassHandle(g, p))
+    applicable(body) || throw(ArgumentError(
+        "custom!: the block has to return a zero-argument callable — it is what " *
+        "runs at record time. Declare the uses, then return the work."))
+    push!(p.dispatches, body)
+    p
+end
 
 """
 What `Update` hands back. Calling it stores a reference and nothing else: it runs
@@ -1138,16 +1213,58 @@ on every call and allocates 1840 bytes doing it; `_DependencyInfo` through
 `nothing` when the pass waits for nothing, which is the point: two passes over
 disjoint resources then have no barrier between them at all.
 """
-function build_pass_barrier(ts::Vector{Mantle.Transition})
+function build_pass_barrier(g, ts::Vector{Mantle.Transition})
     isempty(ts) && return nothing
     be = Mantle.Vulkan()
-    src_stage = reduce(|, (Mantle.stages(be, u, Src()) for t in ts for u in t.waits))
-    src_access = reduce(|, (Mantle.access(be, u, Src()) for t in ts for u in t.waits))
-    dst_stage = reduce(|, (Mantle.stages(be, t.to, Dst()) for t in ts))
-    dst_access = reduce(|, (Mantle.access(be, t.to, Dst()) for t in ts))
-    Lava.Vulkan._DependencyInfo([Lava.Vulkan._MemoryBarrier2(;
-        src_stage_mask = src_stage, src_access_mask = src_access,
-        dst_stage_mask = dst_stage, dst_access_mask = dst_access)], [], [])
+    mem = Lava.Vulkan._MemoryBarrier2[]
+    spans = @NamedTuple{buf::Any, handle::UInt64, off::UInt64, len::UInt64,
+                        ss::Any, sa::Any, ds::Any, da::Any}[]
+    for t in ts
+        src_stage = reduce(|, (Mantle.stages(be, u, Src()) for u in t.waits))
+        src_access = reduce(|, (Mantle.access(be, u, Src()) for u in t.waits))
+        dst_stage = Mantle.stages(be, t.to, Dst())
+        dst_access = Mantle.access(be, t.to, Dst())
+        r = t.resource == 0 ? nothing : get(g.by_id, t.resource, nothing)
+        st = r === nothing ? nothing : Mantle.storage(r)
+        if st === nothing
+            push!(mem, Lava.Vulkan._MemoryBarrier2(;
+                src_stage_mask = src_stage, src_access_mask = src_access,
+                dst_stage_mask = dst_stage, dst_access_mask = dst_access))
+        else
+            off, len = barrierspan(r, st)
+            b = st.buf[].buffer
+            push!(spans, (buf = b, handle = UInt64(b.vks), off = off, len = len,
+                          ss = src_stage, sa = src_access, ds = dst_stage, da = dst_access))
+        end
+    end
+
+    # Adjacent segments that ask for the same thing become one barrier — the
+    # merge half of the interval map, without which a whole-buffer usage of a
+    # buffer sliced in four places emits four entries describing one span. Only
+    # touching spans with identical masks merge; anything else stays its own
+    # barrier, which is the whole point of scoping them.
+    sort!(spans, by = s -> (s.handle, s.off))
+    bufs = Lava.Vulkan._BufferMemoryBarrier2[]
+    i = 1
+    while i <= length(spans)
+        s = spans[i]
+        off, len = s.off, s.len
+        j = i + 1
+        while j <= length(spans)
+            t = spans[j]
+            (t.handle == s.handle && t.off == off + len &&
+             t.ss == s.ss && t.sa == s.sa && t.ds == s.ds && t.da == s.da) || break
+            len += t.len
+            j += 1
+        end
+        push!(bufs, Lava.Vulkan._BufferMemoryBarrier2(
+            Lava.Vulkan.QUEUE_FAMILY_IGNORED, Lava.Vulkan.QUEUE_FAMILY_IGNORED,
+            s.buf, off, len;
+            src_stage_mask = s.ss, src_access_mask = s.sa,
+            dst_stage_mask = s.ds, dst_access_mask = s.da))
+        i = j
+    end
+    Lava.Vulkan._DependencyInfo(mem, bufs, [])
 end
 
 function emit_pass_barrier!(bq, dep)
@@ -1203,6 +1320,31 @@ ordered(c::Compile) = isempty(c.order) ? c.graph.passes : c.graph.passes[c.order
 writes_it(U) = Mantle.writes(U)
 
 """
+Whether two resource ids can name the same bytes.
+
+Equal ids do. So does a slice against its own parent, and two slices of one
+parent whose ranges intersect — those are different ids, and a scheduler told
+they are unrelated is free to reorder two passes that write the same memory.
+"""
+function overlapping(g::LavaGraph, a::Int, b::Int)
+    a == b && return true
+    ra, rb = get(g.by_id, a, nothing), get(g.by_id, b, nothing)
+    (ra isa BufferRange || rb isa BufferRange) || return false
+    # `get`, not `resourceid`: this answers a question and must not hand out an
+    # id doing it. A slice's parent is always registered first — `use` touches it
+    # before `slice` is reached — so the fallback is unreachable, but a query that
+    # can grow `by_id` while the compiler is indexing by id is not worth leaving
+    # to that invariant holding.
+    pa = ra isa BufferRange ? get(g.ids, ra.parent, 0) : a
+    pb = rb isa BufferRange ? get(g.ids, rb.parent, 0) : b
+    (pa == 0 || pb == 0) && return false
+    pa == pb || return false
+    # A whole-resource usage covers every slice of it.
+    (ra isa BufferRange && rb isa BufferRange) || return true
+    !isempty(intersect(ra.range, rb.range))
+end
+
+"""
 An edge from i to j when they share a resource and at least one writes it.
 
 Read-after-read is deliberately not an edge: two passes that only read the same
@@ -1210,11 +1352,12 @@ thing may run in either order, which is the freedom the scheduler spends.
 """
 function Mantle.run!(::Mantle.Dag, c::Compile)
     ps = c.graph.passes
+    g = c.graph
     c.deps = [Int[] for _ in ps]
     for j in eachindex(ps), i in 1:(j - 1)
         shared = false
         for (idj, Uj) in ps[j].usages, (idi, Ui) in ps[i].usages
-            idi == idj || continue
+            overlapping(g, idi, idj) || continue
             (writes_it(Ui) || writes_it(Uj)) || continue
             shared = true
             break
@@ -1451,12 +1594,57 @@ end
 
 const EMPTY_HANDOVER = Tuple{Int,Int}[]
 
-"""What a pass does to one resource, or `nothing` if it does not name it."""
-function usage_of(p::Pass, id::Int)
+"""
+What a pass does to one resource, or `nothing` if it does not name it.
+
+A slice counts as naming its parent. The handover asks this about a *transient*,
+and a pass that names only a slice of one would otherwise answer `nothing` — on
+which the caller skips the barrier entirely, which is the hazard no per-resource
+sequence can see going missing without a word.
+"""
+function usage_of(p::Pass, id::Int, g::LavaGraph)
     for (rid, U) in p.usages
-        rid == id && return U
+        overlapping(g, rid, id) && return U
     end
     nothing
+end
+
+"""
+Every id one resource is tracked under: itself, plus each slice of it.
+
+Built once per compile rather than rediscovered per handover. `lastuses` used to
+find these by scanning every tracked state and asking `overlapping`, which is
+O(resources) inside a per-pass loop — invisible on a twenty-pass render graph and
+1.75 s of a 2 s compile at fourteen hundred, which is the scale a model graph
+arrives at. Resources without slices get an empty entry and the O(1) path.
+"""
+function sliceindex(g::LavaGraph)
+    idx = Dict{Int,Vector{Int}}()
+    for ((pid, _), v) in g.views
+        push!(get!(() -> Int[], idx, pid), resourceid(g, v))
+    end
+    idx
+end
+
+"""
+Everything the old tenant was last doing, across however many ids it is tracked
+under. Whole and sliced usages of one transient live under different ids, and the
+handover has to wait for all of them, not for whichever the transient itself
+happens to be keyed by.
+"""
+function lastuses(states::Dict{Int,Mantle.ResourceState}, slices::Dict{Int,Vector{Int}},
+                  id::Int)
+    out = Type[]
+    take(k) = begin
+        st = get(states, k, nothing)
+        st === nothing || st.current === nothing || st.current in out ||
+            push!(out, st.current)
+    end
+    take(id)
+    for sid in get(slices, id, ())
+        take(sid)
+    end
+    out
 end
 
 # ── Barriers ──────────────────────────────────────────────────────────────────
@@ -1518,9 +1706,43 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
     #
     # The layout is unaffected: a discarding destination still transitions from
     # UNDEFINED (see `ImageBarrier`). This is only about what the barrier waits on.
+    # Atomic segments, so a partial overlap is tracked rather than refused.
+    #
+    # This is what VVL's `AccessMap` does incrementally (`layers/sync/sync_access_map.h`:
+    # `Split` at each range bound, then `InfillGaps`), done once instead: by the
+    # time a plan compiles, every range that will ever be declared is known, so
+    # the cuts can be taken up front and the walk left alone. Each usage then
+    # stands for the segments its range covers, and a whole-resource usage stands
+    # for all of them — after which two usages either name the same segment or do
+    # not, which is the only question the per-resource walk knows how to answer.
+    slices = sliceindex(g)
+    segs = Dict{Int,Vector{Int}}()
+    let byparent = Dict{Int,Vector{UnitRange{Int}}}()
+        for ((pid, r), _) in g.views
+            push!(get!(byparent, pid, UnitRange{Int}[]), r)
+        end
+        for (pid, ranges) in byparent
+            parent = g.by_id[pid]
+            n = length(parent)
+            cuts = sort!(unique!(vcat([1, n + 1], first.(ranges), last.(ranges) .+ 1)))
+            spans = [cuts[k]:(cuts[k + 1] - 1) for k in 1:(length(cuts) - 1)]
+            filter!(!isempty, spans)
+            ids = map(spans) do s
+                resourceid(g, get!(() -> BufferRange(parent, s), g.views, (pid, s)))
+            end
+            segs[pid] = ids                      # the whole buffer is every segment
+            for r in ranges
+                sid = resourceid(g, g.views[(pid, r)])
+                segs[sid] = [ids[k] for (k, s) in enumerate(spans) if first(s) >= first(r) &&
+                                                                      last(s) <= last(r)]
+            end
+        end
+    end
+    segments_of(id) = get(segs, id, (id,))
+
     final = Dict{Int,Type}()
-    for p in ordered(c), (id, U) in p.usages
-        final[id] = U
+    for p in ordered(c), (id, U) in p.usages, sid in segments_of(id)
+        final[sid] = U
     end
 
     state(id) = get!(states, id) do
@@ -1533,8 +1755,8 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
 
     for (i, p) in enumerate(ordered(c))
         pre = Mantle.Transition[]
-        for (id, U) in p.usages
-            transition!(pre, be, id, state(id), U)
+        for (id, U) in p.usages, sid in segments_of(id)
+            transition!(pre, be, sid, state(sid), U)
         end
 
         # A layout change is per image, so no barrier on another resource can have
@@ -1542,15 +1764,18 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
         # coalescable; an image transition dropped here never becomes an
         # `ImageBarrier` below, and the copy after a second colour attachment then
         # reads it in COLOR_ATTACHMENT_OPTIMAL.
-        iscovered(t) =
-            !(t.resource != 0 && resourcekind(g.by_id[t.resource]) isa ImageKind) &&
-            get(settled, t.resource, 0) < last_barrier &&
-            subsumed(covered_dst_stage, Mantle.stages(be, t.to, Dst())) &&
-            subsumed(covered_dst_access, Mantle.access(be, t.to, Dst())) &&
-            all(u -> subsumed(covered_src_stage, Mantle.stages(be, u, Src())) &&
-                     subsumed(covered_src_access, Mantle.access(be, u, Src())), t.waits)
-
-        needed = c.coalesce ? filter(!iscovered, pre) : copy(pre)
+        # Coalescing across resources is what a global barrier bought, and it is
+        # exactly what a scoped one cannot: a buffer barrier orders that buffer's
+        # memory and nothing else, so a barrier emitted for resource A never
+        # stands in for a hazard on B however wide its masks are. Dropping one on
+        # that reasoning is a race — it is how the showcase's `sun cull` lost the
+        # barrier between the clear of its counter and the atomic that reads it.
+        #
+        # Nothing is left to remove per resource either: `transition!` emits only
+        # where a resource's own state actually changes, so the walk is already
+        # minimal and `pre` *is* the local hazard set. Kept as a flag because
+        # `bench/` still compiles both ways to measure what the old strategy did.
+        needed = copy(pre)
 
         # The barrier where bytes change hands, derived like every other one.
         #
@@ -1567,14 +1792,14 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
         # wrong, and cannot be checked either.
         handovers = get(c.alias_begins, i, EMPTY_HANDOVER)
         for newi in unique(first(h) for h in handovers)
-            to = usage_of(p, resourceid(g, c.graph.transients[newi]))
+            to = usage_of(p, resourceid(g, c.graph.transients[newi]), g)
             to === nothing && continue
             waits = Type[]
             for (a, o) in handovers
                 a == newi || continue
-                st = get(states, resourceid(g, c.graph.transients[o]), nothing)
-                st === nothing || st.current === nothing || st.current in waits ||
-                    push!(waits, st.current)
+                for u in lastuses(states, slices, resourceid(g, c.graph.transients[o]))
+                    u in waits || push!(waits, u)
+                end
             end
             isempty(waits) && continue
             push!(needed, Mantle.Transition(0, first(waits), waits, to))
@@ -1656,7 +1881,10 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
             argcursor += argalign(nbytes)
         end
         cps = CompiledDispatch[]
-        for d in p.dispatches
+        # A `:custom` pass carries a closure here, not a `Dispatch`. There is
+        # nothing to compile and no arguments to lay out: whatever it launches,
+        # it launches through the backend at record time.
+        for d in (p.kind === :custom ? () : p.dispatches)
             cd = compile_dispatch(g.dev, d, argcursor)
             # Not into `c.pipelines`: that set answers how many shaders the draws
             # resolved to — two draws sharing one is the thing worth counting —
@@ -1664,7 +1892,7 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
             push!(cps, cd)
             argcursor += argalign(cd.argsize)
         end
-        push!(c.passes, PassPlan(p, cds, cps, imgs, need, build_pass_barrier(rest)))
+        push!(c.passes, PassPlan(p, cds, cps, imgs, need, build_pass_barrier(g, rest)))
     end
     c
 end
@@ -1838,10 +2066,16 @@ end
 `:derived` emits the ordering the declarations call for and suppresses Lava's
 automatic per-dispatch barrier. `:backend` does the opposite and exists so the
 two can be measured against each other rather than argued about.
+
+`:both` emits the derived barriers *and* leaves the automatic one in place. It is
+a diagnostic, and the only one that separates the two ways a `custom!` graph can
+be wrong: a result that is correct under `:both` and wrong under `:derived` says
+the declared set is incomplete, while one that is wrong under both says the
+declarations are right and something is reading the wrong bytes.
 """
 function run!(pl::LavaPlan; barriers::Symbol = :derived)
-    barriers in (:derived, :backend) ||
-        throw(ArgumentError("barriers must be :derived or :backend, got $barriers"))
+    barriers in (:derived, :backend, :both) ||
+        throw(ArgumentError("barriers must be :derived, :backend or :both, got $barriers"))
     g = pl.graph
     bq = g.dev.bq
     # Before this frame overwrites them, and without waiting: see `collect!`.
@@ -1878,10 +2112,10 @@ function run!(pl::LavaPlan; barriers::Symbol = :derived)
     if barriers === :derived
         # The group is a scope rather than a flag, so nothing leaks past here.
         Lava.concurrent_dispatch_group() do
-            record!(pl, bq; derived = true)
+            record!(pl, bq; derived = true, suppress = true)
         end
     else
-        record!(pl, bq; derived = false)
+        record!(pl, bq; derived = barriers === :both, suppress = false)
     end
     # What this frame signals covers everything written into the slot. A split
     # mid-frame makes later batches with higher values, and the last one covers
@@ -1922,7 +2156,7 @@ function profiled!(f, pl::LavaPlan, bq, i::Integer)
     r
 end
 
-function record!(pl::LavaPlan, bq; derived::Bool = true)
+function record!(pl::LavaPlan, bq; derived::Bool = true, suppress::Bool = derived)
     g = pl.graph
     if pl.profiler !== nothing
         Lava.Vulkan.cmd_reset_query_pool(Lava.ensure_active_batch!(bq).cmd_buf,
@@ -1931,14 +2165,15 @@ function record!(pl::LavaPlan, bq; derived::Bool = true)
     end
     for (i, pp) in enumerate(pl.passes)
         profiled!(pl, bq, i) do
-            record_pass!(g, bq, pp, derived, pl.args)
+            record_pass!(g, bq, pp, derived, pl.args; suppress)
         end
     end
     nothing
 end
 
 """One pass: its barriers, then whatever its kind does."""
-function record_pass!(g::LavaGraph, bq, pp::PassPlan, derived::Bool, am::ArgMemory)
+function record_pass!(g::LavaGraph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
+                      suppress::Bool = derived)
     p, cds = pp.pass, pp.draws
     # Mantle's own barriers, derived from the declared usage sequence. Layout
     # changes first: a pass may both need an image transitioned and wait on a
@@ -1965,6 +2200,29 @@ function record_pass!(g::LavaGraph, bq, pp::PassPlan, derived::Bool, am::ArgMemo
         base = slotbase(am)
         for d in pp.dispatches
             record_dispatch!(bq, d, am, base)
+        end
+        return nothing
+    elseif p.kind === :custom
+        # The barriers this pass declared are already emitted. Open the batch so
+        # the body records into this frame's command buffer rather than opening
+        # one of its own, then get out of the way.
+        Lava.ensure_active_batch!(bq)
+        # Two launches inside one body may depend on each other — a two-pass
+        # reduction, a split-K matmul, an operator with a scratch buffer — and
+        # nothing declared to the graph says so, because the declaration is about
+        # what the pass touches and not about how. So the surrounding concurrent
+        # group is lifted and Lava's automatic barrier orders the body's own
+        # launches, while the *first* of them skips it: that one is the hazard
+        # this pass just emitted a derived barrier for.
+        Lava.exclusive_dispatch_group() do
+            bq.next_skip_barrier = suppress
+            for body in p.dispatches
+                body()
+            end
+            # A body that recorded no dispatch at all leaves the one-shot armed,
+            # and the next pass's first launch would consume it without anyone
+            # having decided that.
+            bq.next_skip_barrier = false
         end
         return nothing
     elseif p.kind === :update

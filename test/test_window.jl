@@ -5,6 +5,9 @@ using Mantle, Test
 # `@kernel` in it is expanded before any of it runs, so a `using` inside cannot
 # be what binds the macro.
 using KernelAbstractions
+# Same reason as above: a `@kernel` body using `Atomix.@atomic` is expanded with
+# the rest of the branch, so a `using` inside it cannot be what binds the name.
+using Atomix
 const M = Mantle
 
 # The probe has to be at top level: `@eval using GLFW` followed by `GLFW.Init()`
@@ -27,6 +30,13 @@ else
     @kernel function transpose_scale!(dst, @Const(src), w::Int32, h::Int32, a::Float32)
         ix, iy = @index(Global, NTuple)
         @inbounds dst[(ix - Int32(1)) * h + iy] = src[(iy - Int32(1)) * w + ix] * a
+    end
+
+    # Two of these chained is the smallest thing that can tell whether the
+    # launches inside one pass are ordered against each other.
+    @kernel function bump!(dst, @Const(src), k::Float32)
+        i = @index(Global)
+        @inbounds dst[i] = src[i] + k
     end
 
     # A fullscreen pass: the triangle comes from the vertex index, so the vertex
@@ -277,7 +287,7 @@ else
         @test count(p -> p != bg, img) > length(img) ÷ 100
     end
 
-    @testset "a barrier a prior one already covers is not emitted" begin
+    @testset "no barrier is dropped because another resource's covers it" begin
         # Eight independent chains interleaved: stage 1 of every chain is a first
         # touch and needs nothing, and one barrier before stage 2 covers all of
         # them. Emitting per pass without checking coverage gives one barrier per
@@ -298,12 +308,16 @@ else
         tight = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6; alias = false)
         loose = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6;
                                   alias = false, coalesce = false)
-        @test emitted(loose.plan) == length(loose.plan.passes)   # one per pass, uncoalesced
-        @test emitted(tight.plan) < emitted(loose.plan)          # some went away
-        @test emitted(tight.plan) <= 3 * emitted(loose.plan) ÷ 4 # and it is not one or two
+        @test emitted(loose.plan) == length(loose.plan.passes)   # one per pass
+        # This used to assert that a third of them went away, which was true and
+        # was the bug: a barrier scoped to one buffer orders that buffer and
+        # nothing else, so "an earlier barrier already covers this" is only ever
+        # sound about the *same* resource — and the per-resource walk emits only
+        # where a resource's own state changes, so there is nothing left to cover.
+        # Interleaved chains are the case that shows it: eight chains over
+        # disjoint buffers, where the removals were all cross-chain.
+        @test emitted(tight.plan) == emitted(loose.plan)
 
-        # And the other half of the claim: with aliasing on there is nothing to
-        # remove, because every pass takes over bytes somebody else was using.
         s = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6)
         @test emitted(s.plan) == length(s.plan.passes)
 
@@ -315,6 +329,374 @@ else
         M.run!(s.plan; barriers = :derived)
         KernelAbstractions.synchronize(M.backend(dev))
         @test Array(M.storage(s.bufs[1][end])) == reference
+    end
+
+    @kernel function clear_and_tally!(c, tally)
+        c[1] = UInt32(0)
+        Atomix.@atomic tally[1] += UInt32(1)
+    end
+    @kernel function bump_counter!(c)
+        i = @index(Global)
+        Atomix.@atomic c[1] += UInt32(1)
+    end
+
+    @testset "a frame that splits its command buffer still runs every pass" begin
+        # `maybe_split_cb!` ends the current command buffer mid-frame and starts a
+        # fresh one, leaving the first half in `sealed_cmd_bufs`. `present_frame!`
+        # submitted only `batch.cmd_buf`, so for a windowed plan everything before
+        # the split was recorded, never submitted, and silently did not run — no
+        # validation error, because nothing about it is invalid.
+        #
+        # It showed up once every `cb_split_threshold` dispatches: a frame that did
+        # nothing. For this graph — clear a counter in the first pass, accumulate
+        # into it later — a lost clear means the counter never restarts, and the
+        # showcase's cull then indexed past the end of its visible list into the
+        # buffers behind it.
+        #
+        # The threshold is dropped so the split happens every frame instead of
+        # every few thousand; `tally` is monotonic on purpose, because the counter
+        # itself cannot detect this. A skipped frame leaves a cleared-then-refilled
+        # counter at exactly its previous correct value.
+        dev = M.Device(Lava)
+        dev.bq.cb_split_threshold = 3          # every frame, several times over
+        win = M.Window(64, 64; title = "split", vsync = false)
+        g = M.Graph(dev)
+        cnt, tally = M.Buffer(dev, UInt32[0]), M.Buffer(dev, UInt32[0])
+        M.compute!(g, "clear") do p
+            M.dispatch!(p, clear_and_tally!, (M.use(p, cnt; write = true),
+                                              M.use(p, tally; read = true, write = true)), 1)
+        end
+        M.compute!(g, "accumulate") do p
+            M.dispatch!(p, bump_counter!, (M.use(p, cnt; read = true, write = true),), 512)
+        end
+        screen = M.Surface(g, win)
+        M.render!(g, "present", screen => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+        end
+        plan = M.Plan(g)
+        frames = 40
+        for _ in 1:frames
+            M.run!(plan)
+            Lava.flush!(dev.bq, dev.ctx.device)
+        end
+        @test Int(Array(tally)[1]) == frames        # every frame ran its first pass
+        @test Int(Array(cnt)[1]) == 512             # and the counter restarted each time
+        close(win)
+    end
+
+    @kernel function fill_span!(dst, base::Int32, v::Float32)
+        i = @index(Global)
+        @inbounds dst[base + i] = v
+    end
+
+    @testset "disjoint slices of one buffer are not ordered against each other" begin
+        # Ported from Vulkan-ValidationLayers,
+        # tests/unit/sync_val_positive.cpp: PositiveSyncVal.BufferCopyNonOverlappedRegions —
+        # two writes into non-overlapping regions of one buffer, asserted there to
+        # raise no hazard. Tracking a buffer whole says it does, and the barrier
+        # between them orders memory neither pass touches.
+        #
+        # `range` hands the slice its own resource id, so the existing
+        # per-resource walk answers this without knowing anything about ranges.
+        # The count is not the test — each pass still has a real loop-carried WAW
+        # against the previous frame, so both spellings emit two transitions. What
+        # differs is *whose*: one resource means the second waits on the first.
+        dev = M.Device(Lava)
+        n = 256
+        build(ranged) = begin
+            g = M.Graph(dev)
+            b = M.Buffer(dev, zeros(Float32, n))
+            M.compute!(g, "lower") do p
+                w = ranged ? M.use(p, b; write = true, range = 1:128) :
+                             M.use(p, b; write = true)
+                M.dispatch!(p, fill_span!, (w, Int32(0), 1f0), 128)
+            end
+            M.compute!(g, "upper") do p
+                w = ranged ? M.use(p, b; write = true, range = 129:256) :
+                             M.use(p, b; write = true)
+                M.dispatch!(p, fill_span!, (w, Int32(128), 2f0), 128)
+            end
+            (; b, plan = M.Plan(g))
+        end
+        touched(pl) = unique(t.resource for pp in pl.passes for t in pp.pre)
+
+        whole = build(false)
+        @test length(touched(whole.plan)) == 1      # one resource: ordered, needlessly
+
+        sliced = build(true)
+        @test length(touched(sliced.plan)) == 2     # two: independent
+
+        # And it still computes the right thing, which is the point of not
+        # ordering them: both halves land.
+        M.run!(sliced.plan)
+        KernelAbstractions.synchronize(M.backend(dev))
+        got = Array(sliced.b)
+        @test all(==(1f0), got[1:128]) && all(==(2f0), got[129:256])
+
+        # Same file, PositiveSyncVal.WriteAndReadNonOverlappedUniformBufferRegions:
+        # a write to one region and a *read* of another. Write-after-write is not
+        # the only pair that matters — the wait set is built differently for a
+        # read (the one previous state) than for a write (every outstanding
+        # reader), so RAW and WAR go down a different path than the case above.
+        #
+        # Counting resources does not say it here: a slice this graph only ever
+        # reads is seeded from its own last use, so it needs no transition at all
+        # and never appears in the emitted set. What distinguishes the two
+        # spellings is whether the *reader* waits — whole-buffer gives it a
+        # WriteOnly -> ReadOnly against the writer, and disjoint slices give it
+        # nothing to wait for.
+        readerwaits(ranged) = begin
+            g = M.Graph(dev)
+            b = M.Buffer(dev, zeros(Float32, n))
+            M.compute!(g, "write low") do p
+                w = ranged ? M.use(p, b; write = true, range = 1:128) :
+                             M.use(p, b; write = true)
+                M.dispatch!(p, fill_span!, (w, Int32(0), 3f0), 128)
+            end
+            M.compute!(g, "read high") do p
+                r = ranged ? M.use(p, b; read = true, range = 129:256) :
+                             M.use(p, b; read = true)
+                M.dispatch!(p, fill_span!, (r, Int32(128), 4f0), 128)
+            end
+            length(M.Plan(g).passes[2].pre)
+        end
+        @test readerwaits(false) == 1      # whole buffer: RAW against the writer
+        @test readerwaits(true) == 0       # disjoint slices: nothing to wait for
+
+        # The control, and the failure mode that matters: naming a range must not
+        # make everything independent. Identical ranges are the same resource and
+        # stay ordered — if this ever reads 2, ranges have stopped meaning
+        # anything and every test above passes for the wrong reason.
+        gs = M.Graph(dev)
+        bs = M.Buffer(dev, zeros(Float32, n))
+        for nm in ("first", "second")
+            M.compute!(gs, nm) do p
+                M.dispatch!(p, fill_span!, (M.use(p, bs; write = true, range = 1:128),
+                                            Int32(0), 5f0), 128)
+            end
+        end
+        @test length(touched(M.Plan(gs))) == 1
+
+        # Partial overlap. `1:128` and `64:200` share `64:128`, so the two passes
+        # do have a hazard and must stay ordered — while a third pass on `201:256`
+        # touches none of it and must not be dragged in. This is the case the
+        # atomic-segment partition exists for: the cuts fall at 1, 64, 129, 201.
+        gp = M.Graph(dev)
+        bp = M.Buffer(dev, zeros(Float32, n))
+        M.compute!(gp, "low") do p
+            M.dispatch!(p, fill_span!, (M.use(p, bp; write = true, range = 1:128),
+                                        Int32(0), 6f0), 128)
+        end
+        M.compute!(gp, "mid") do p
+            M.dispatch!(p, fill_span!, (M.use(p, bp; write = true, range = 64:200),
+                                        Int32(63), 7f0), 137)
+        end
+        M.compute!(gp, "tail") do p
+            M.dispatch!(p, fill_span!, (M.use(p, bp; write = true, range = 201:256),
+                                        Int32(200), 8f0), 56)
+        end
+        pp = M.Plan(gp)
+        # `mid` overlaps `low`, so it waits; `tail` overlaps neither and does not.
+        @test !isempty(pp.passes[2].pre)
+        lowseg = Set(t.resource for t in pp.passes[1].pre)
+        midseg = Set(t.resource for t in pp.passes[2].pre)
+        tailseg = Set(t.resource for t in pp.passes[3].pre)
+        @test !isempty(intersect(lowseg, midseg))    # they share the 64:128 segment
+        @test isempty(intersect(lowseg, tailseg))    # and share nothing with the tail
+
+        # Slicing a buffer partitions it, and a later whole-buffer usage then
+        # stands for every segment. Those are contiguous and ask for the same
+        # thing, so they lower to one barrier rather than one per segment —
+        # otherwise naming a range anywhere makes every whole use of that buffer
+        # cost a barrier per cut.
+        gm = M.Graph(dev)
+        bm = M.Buffer(dev, zeros(Float32, n))
+        for (k, r) in enumerate((1:64, 65:128, 129:192, 193:256))
+            M.compute!(gm, "part $k") do p
+                M.dispatch!(p, fill_span!, (M.use(p, bm; write = true, range = r),
+                                            Int32(first(r) - 1), Float32(k)), length(r))
+            end
+        end
+        M.compute!(gm, "whole") do p
+            M.dispatch!(p, fill_span!, (M.use(p, bm; read = true, write = true),
+                                        Int32(0), 9f0), n)
+        end
+        pm = M.Plan(gm)
+        whole = pm.passes[5]
+        @test length(whole.pre) == 4                                   # four segments
+        @test Int(whole.barrier.vks.bufferMemoryBarrierCount) == 1      # merged to one
+
+        # Out of bounds is still a mistake worth naming.
+        g2 = M.Graph(dev)
+        b2 = M.Buffer(dev, zeros(Float32, n))
+        @test_throws ArgumentError M.compute!(g2, "past the end") do p
+            M.use(p, b2; write = true, range = 200:400)
+        end
+
+        # A sliced *transient* still gets its handover. The handover is derived
+        # per transient and looked its usage up by that transient's own id, so a
+        # pass naming only a slice answered `nothing` and the caller skipped the
+        # barrier — losing the one hazard no per-resource sequence can see,
+        # silently. `usage_of` counts a slice as naming its parent, and the wait
+        # set is gathered across every id the old tenant is tracked under.
+        g3 = M.Graph(dev)
+        a3 = M.Transient.Buffer(g3, Float32, n)
+        b3 = M.Transient.Buffer(g3, Float32, n)
+        M.compute!(g3, "fill a") do p
+            M.dispatch!(p, fill_span!, (M.use(p, a3; write = true), Int32(0), 1f0), n)
+        end
+        M.compute!(g3, "read a") do p
+            M.dispatch!(p, fill_span!, (M.use(p, a3; read = true), Int32(0), 1f0), n)
+        end
+        M.compute!(g3, "slice of b") do p
+            M.dispatch!(p, fill_span!, (M.use(p, b3; write = true, range = 1:128),
+                                        Int32(0), 2f0), 128)
+        end
+        out3 = M.Buffer(dev, zeros(Float32, n))
+        M.compute!(g3, "drain") do p
+            M.dispatch!(p, fill_span!, (M.use(p, out3; write = true),
+                                        Int32(0), 3f0), n)
+            M.use(p, b3; read = true)
+        end
+        p3 = M.Plan(g3; alias = true)
+        # `b` takes over `a`'s bytes, and the pass that first writes it names only
+        # a slice. The handover is the transition with no resource of its own.
+        @test any(t -> t.resource == 0, vcat((pp.pre for pp in p3.passes)...))
+    end
+
+    @testset "the emitted set is the per-resource hazard set, exactly" begin
+        # What a *scoped* barrier set has to be, written out by hand rather than
+        # counted. A barrier on one buffer cannot stand in for one on another, so
+        # nothing here is droppable: the required set is one entry per genuine
+        # state change on each resource's own usage sequence, and coalescing has
+        # nothing left to remove.
+        #
+        # Two chains of three stages over disjoint buffers, interleaved. Per
+        # chain, with `b[k]` the buffer stage k reads:
+        #   b[1]  read at s1 only          — the replayed state is already
+        #                                    ReadOnly, so no transition at all
+        #   b[2]  written s1, read s2      — WAR at s1, RAW at s2
+        #   b[3]  written s2, read s3      — WAR at s2, RAW at s3
+        #   b[4]  written s3, never read   — WAW at s3 against the last frame
+        # Five per chain, ten in total, landing 1/2/2 across the three passes.
+        #
+        # Asserted as two subset checks rather than one equality, because the two
+        # directions are different bugs and want different messages: a missing
+        # entry is a race, a spurious one is serialisation nobody asked for. The
+        # pair is also what makes the test unsatisfiable by a degenerate answer —
+        # emitting nothing fails the first, one unconditional barrier per pass
+        # fails the second.
+        include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
+        dev = M.Device(Lava)
+        SR = M.Storage{M.BufferKind,M.ReadOnly}
+        SW = M.Storage{M.BufferKind,M.WriteOnly}
+        chains, stages = 2, 3
+        s = Base.invokelatest(build_interleaved, dev, 1 << 10, chains, stages; alias = false)
+
+        required = Set()
+        for c in 1:chains, k in 1:stages
+            k > 1 && push!(required, ("c$c s$k", s.g.ids[s.bufs[c][k]], SW, SR, Set([SW])))
+            from = k == stages ? SW : SR      # the tail buffer is written and never read
+            push!(required, ("c$c s$k", s.g.ids[s.bufs[c][k + 1]], from, SW, Set([from])))
+        end
+        @test length(required) == 10
+
+        emitted(pl) = Set((pp.pass.name, t.resource, t.from, t.to, Set(t.waits))
+                          for pp in pl.passes for t in pp.pre)
+
+        # The per-resource walk itself, with no coalescing on top, is the oracle's
+        # own check: if this disagrees the hand derivation above is wrong, not the
+        # elision.
+        raw = Base.invokelatest(build_interleaved, dev, 1 << 10, chains, stages;
+                                alias = false, coalesce = false)
+        @test emitted(raw.plan) == required
+
+        got = emitted(s.plan)
+        # Too few. Coalescing drops five of the ten, among them chain 2's RAW on
+        # its own `b[2]` — written at `c2 s1`, read at `c2 s2`, nothing touching
+        # that buffer in between. It is dropped because a barrier emitted for
+        # chain 1's buffers is global and happens to stand in the way. That is
+        # not a local barrier set; scope the barriers and it is a race. Same
+        # shape as the showcase losing `sun cull`'s barrier.
+        @test issubset(required, got)
+        # Too many. Nothing spurious is emitted today, and must not start being.
+        @test issubset(got, required)
+    end
+
+    @testset "the hazard set is lowered to scoped barriers, not one catch-all" begin
+        # Everything above asserts the *derived* set. Nothing in it looks at what
+        # is handed to Vulkan, and the two can disagree: a pass could carry ten
+        # correct transitions and still lower them to one `VkMemoryBarrier2` with
+        # the masks ORed together, which orders all memory and is exactly the
+        # thing being removed. The derivation would look perfect and the barrier
+        # would still be a global one.
+        #
+        # So this reads the emitted `VkDependencyInfo`: one buffer barrier per
+        # transition, scoped to that buffer's own range, and no global memory
+        # barrier at all. A handover names two resources and no single buffer, so
+        # it stays global — hence aliasing off here, and its own test elsewhere.
+        include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
+        dev = M.Device(Lava)
+        s = Base.invokelatest(build_interleaved, dev, 1 << 10, 2, 3; alias = false)
+        nbuf = nmem = ntrans = 0
+        for pp in s.plan.passes
+            ntrans += length(pp.pre)
+            pp.barrier === nothing && continue
+            nbuf += Int(pp.barrier.vks.bufferMemoryBarrierCount)
+            nmem += Int(pp.barrier.vks.memoryBarrierCount)
+        end
+        @test ntrans == 10                # the hand-derived set, above
+        @test nbuf == ntrans              # each one lowered, scoped to its buffer
+        @test nmem == 0                   # and nothing ordering all of memory
+    end
+
+    @testset "the local hazard set holds over a corpus, not one topology" begin
+        # One hand-derived topology says the shape is right; it does not say the
+        # derivation is right in general. This drives the same equality from an
+        # oracle built out of the rules — `needs_transition` plus the wait-set
+        # rule — over random read/write/readwrite usages, where WAR, WAW, RAW and
+        # read-after-read all occur without any liveness constraint to arrange.
+        #
+        # Persistent buffers and no aliasing on purpose: an alias handover is a
+        # hazard between two resources that never mention each other, so it comes
+        # from the placer and not from any usage sequence. It has its own test.
+        include(joinpath(@__DIR__, "..", "bench", "stress.jl"))
+        dev = M.Device(Lava)
+        nbufs, npasses, seeds = 5, 12, 1:20
+
+        # Swept over how often a usage names a range, because slicing is the case
+        # the hand-written tests above cover by example only. The generator draws
+        # both bounds from one small set, so identical, disjoint *and* partially
+        # overlapping slices of a buffer all occur — and the oracle derives the
+        # atomic partition itself rather than reading it off the compiler. Both
+        # sides are keyed by `(parent, span)`, so agreeing on ids is not what
+        # makes them agree.
+        walk_is_local = 0; spurious = 0; missing_total = 0; required_total = 0
+        cases = 0
+        for sl in (0.0, 0.5), s in seeds
+            mk(co) = usage_graph(dev, MersenneTwister(s),
+                                 [M.Buffer(dev, fill(Float32(i), 256)) for i in 1:nbufs],
+                                 npasses; coalesce = co, slicing = sl)
+            raw = mk(false)
+            oracle = local_hazards(raw.g, raw.plan)
+            # The compiler's uncoalesced walk must BE the local set. If this
+            # fails the oracle and the walk disagree and neither number below
+            # means anything, so it is checked first and per case.
+            normalized(raw.g, raw.plan) == oracle && (walk_is_local += 1)
+            tight = mk(true)
+            got = normalized(tight.g, tight.plan)
+            required_total += length(oracle)
+            missing_total += length(setdiff(oracle, got))
+            spurious += length(setdiff(got, oracle))
+            cases += 1
+        end
+        @test walk_is_local == cases
+        # Too many: never emit a barrier the hazard set does not call for.
+        @test spurious == 0
+        # Too few: every local hazard must have its own barrier. Coalescing used
+        # to drop about a fifth of them at this size and a third at thirty passes,
+        # each justified only by the emitted barrier being global.
+        @test missing_total == 0
+        @test required_total > 0
     end
 
     @testset "derived barriers agree with the backend on random DAGs" begin
@@ -335,8 +717,118 @@ else
         # previous frame and the real ceiling is one higher. It held only by a
         # margin of one, and narrowing a stage mask — which reduces how much a
         # covering barrier subsumes — was enough to cross it.
-        @test r.emitted_total < r.uncoalesced_total
+        # Equal, not fewer: a scoped barrier cannot subsume another resource's, so
+        # the emitted set is the per-resource hazard set and compiling with
+        # coalescing off changes nothing. It was `<` while barriers were global.
+        @test r.emitted_total == r.uncoalesced_total
         @test r.emitted_total > 0
+    end
+
+    @kernel function sched_write!(dst, v::Float32)
+        i = @index(Global)
+        @inbounds dst[i] = v
+    end
+    @kernel function sched_accum!(dst, @Const(src))
+        i = @index(Global)
+        @inbounds dst[i] += src[i]
+    end
+
+    @testset "the schedule matches RPS on its own benchmark" begin
+        # Ported from AMD's Render Pipeline Shaders,
+        # tests/console/test_scheduler.rpsl :: memory_saving, with the expected
+        # orders from test_scheduler.cpp. Six independent producer/consumer pairs
+        # over six transients, every consumer writing one output.
+        #
+        # RPS asserts the whole node sequence, which is the part worth taking: our
+        # own scheduler test pins two pass names, and two names are satisfied by
+        # schedules that are wrong from the third onwards. Their two expectations
+        # map exactly onto our two policies —
+        #   default / performance   PushExpectedRange(0, 12, 1)   -> 0..11
+        #   RPS_SCHEDULE_PREFER_MEMORY_SAVING_BIT
+        #                           PushExpectedRange(i, i+7, 6)  -> (0,6) (1,7) ...
+        # — which is `Overlap` and `Compact`, and Mantle produces both.
+        dev = M.Device(Lava)
+        n = 256
+        mk(pol) = begin
+            g = M.Graph(dev)
+            out = M.Buffer(dev, zeros(Float32, n))
+            ts = [M.Transient.Buffer(g, Float32, n) for _ in 1:6]
+            for i in 1:6
+                M.compute!(g, "draw$(i-1)") do p
+                    M.dispatch!(p, sched_write!, (M.use(p, ts[i]; write = true), Float32(i)), n)
+                end
+            end
+            for i in 1:6
+                M.compute!(g, "blt$(i-1)") do p
+                    M.dispatch!(p, sched_accum!, (M.use(p, out; read = true, write = true),
+                                                  M.use(p, ts[i]; read = true)), n)
+                end
+            end
+            M.Plan(g; policy = pol)
+        end
+        order(pl) = [pp.pass.name for pp in pl.passes]
+
+        fast, small = mk(M.Overlap()), mk(M.Compact())
+        @test order(fast) == vcat(["draw$i" for i in 0:5], ["blt$i" for i in 0:5])
+        @test order(small) == vcat([["draw$i", "blt$i"] for i in 0:5]...)
+        # And the reason the second order exists: one transient alive at a time
+        # instead of six.
+        @test M.peakbytes(small) * 6 == M.peakbytes(fast)
+
+        # Their other case, `program_order` — draws 0-5, blts 6-11, then twelve
+        # alternating draw/blt over the same transients — is deliberately *not*
+        # asserted by sequence. RPS expects the second round of draws hoisted
+        # (12,14..22 then 13,15..23); we keep declaration order, and measured,
+        # the two cost exactly the same: 24 barriers, 36 transitions, 6144 peak,
+        # for their order and ours alike. Grouping independent work paid when a
+        # barrier stopped everything; per-resource barriers already scope to what
+        # each pass touches, so the choice is between equals.
+        #
+        # Which is what their own harness says to do about it — `unorderedEqual`,
+        # for graphs where several orders are legal. So: assert the schedule is a
+        # linear extension of the DAG, and that it costs no more than theirs.
+        # `hoist` picks between the two declaration orders for passes 12-23.
+        program_order(hoist) = begin
+            g = M.Graph(dev)
+            out = M.Buffer(dev, zeros(Float32, n))
+            ts = [M.Transient.Buffer(g, Float32, n) for _ in 1:6]
+            dr = (id, i) -> M.compute!(g, "$id") do p
+                M.dispatch!(p, sched_write!, (M.use(p, ts[i]; write = true), Float32(id)), n)
+            end
+            bl = (id, i) -> M.compute!(g, "$id") do p
+                M.dispatch!(p, sched_accum!, (M.use(p, out; read = true, write = true),
+                                              M.use(p, ts[i]; read = true)), n)
+            end
+            for i in 1:6; dr(i - 1, i); end
+            for i in 1:6; bl(i + 5, i); end
+            if hoist                                    # RPS: every draw, then every blt
+                for i in 1:6; dr(10 + 2i, i); end
+                for i in 1:6; bl(11 + 2i, i); end
+            else                                        # as declared: alternating
+                for i in 1:6; dr(10 + 2i, i); bl(11 + 2i, i); end
+            end
+            M.Plan(g; policy = M.Overlap())
+        end
+        forced, ours = program_order(true), program_order(false)
+        cost(pl) = (count(pp -> !isempty(pp.pre), pl.passes),
+                    sum(length(pp.pre) for pp in pl.passes),
+                    M.peakbytes(pl))
+        @test cost(ours) == cost(forced)
+
+        # A linear extension of the DAG: a pass declared earlier that shares a
+        # written resource has to still come first. Rebuilt from the usages here,
+        # rather than read off the compiler, so a scheduler that reordered past a
+        # dependency would fail this and not merely disagree with RPS.
+        decl = ours.graph.passes
+        pos = Dict(pp.pass.name => k for (k, pp) in enumerate(ours.passes))
+        ok = true
+        for j in eachindex(decl), i in 1:(j - 1)
+            dep = any(((idi, Ui),) -> any(((idj, Uj),) ->
+                          idi == idj && (M.writes(Ui) || M.writes(Uj)), decl[j].usages),
+                      decl[i].usages)
+            dep && pos[decl[i].name] > pos[decl[j].name] && (ok = false)
+        end
+        @test ok
     end
 
     @testset "scheduling reorders passes and cuts peak memory" begin
@@ -1116,6 +1608,82 @@ else
                                    M.use(p, src; read = true), 2.0f0), 1 << 10)
         end
         @test_throws "is never used by any pass" M.Plan(g)
+    end
+
+    @testset "a custom pass declares what it touches, not how" begin
+        # `dispatch!` takes one kernel, its arguments and an ndrange. Work that is
+        # one unit to the caller and several launches underneath — an ATen
+        # operator, a fused block, a library call — has no way to say so, and
+        # splitting it into a pass per launch would declare a resource sequence
+        # the caller does not have. `custom!` is the declaration without the how.
+        n = 1 << 12
+        dev = M.Device(Lava)
+        g = M.Graph(dev)
+        src = M.Buffer(dev, fill(1f0, n))
+        mid = M.Transient.Buffer(g, Float32, n)
+        out = M.Buffer(dev, zeros(Float32, n))
+        M.custom!(g, "two launches") do p
+            a = M.use(p, mid; read = true, write = true)
+            b = M.use(p, src; read = true)
+            c = M.use(p, out; write = true)
+            return function ()
+                bump!(Lava.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
+                bump!(Lava.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
+            end
+        end
+        plan = M.Plan(g)
+        @test length(plan.passes) == 1
+        M.run!(plan)
+        KernelAbstractions.synchronize(M.backend(dev))
+        @test all(==(12f0), Array(out))      # 1 + 1, then + 10
+    end
+
+    @testset "the launches inside a custom pass are ordered against each other" begin
+        # The graph derives hazards between *passes*. Inside one it derives
+        # nothing, because the body did not say — and a body's second launch
+        # reading what its first wrote is the ordinary case, not an exotic one: a
+        # two-pass reduction, a split-K matmul, an operator with scratch.
+        #
+        # `run!(; barriers = :derived)` records inside a `concurrent_dispatch_group`
+        # so that Lava's automatic per-dispatch barrier does not double up with the
+        # derived ones. Left switched on through a custom body that suppressed
+        # exactly the barrier nobody else was going to emit, which is why SAM 2's
+        # image encoder came back as NaN through this path and matched to the bit
+        # under `:backend`.
+        #
+        # Two assertions, because the numeric one alone passes on a lucky day: the
+        # group has to be *lifted* for the body, and the result has to be right.
+        #
+        # `n` is SMALL on purpose. Two unordered dispatches only produce a wrong
+        # answer where the second one's workgroups can start before the first has
+        # finished, and a big grid saturates the device so thoroughly that they
+        # cannot. Measured here, wrong elements over ten runs of the same pair
+        # inside a `concurrent_dispatch_group`: 1<<14 fails 10/10 and mostly
+        # everywhere, 1<<16 fails 3/10, 1<<18 and up 0/10.
+        n = 1 << 14
+        dev = M.Device(Lava)
+        g = M.Graph(dev)
+        src = M.Buffer(dev, fill(1f0, n))
+        mid = M.Transient.Buffer(g, Float32, n)
+        out = M.Buffer(dev, zeros(Float32, n))
+        active = Bool[]
+        M.custom!(g, "dependent launches") do p
+            a = M.use(p, mid; read = true, write = true)
+            b = M.use(p, src; read = true)
+            c = M.use(p, out; write = true)
+            return function ()
+                push!(active, Lava.CONCURRENT_GROUP_ACTIVE[])
+                bump!(Lava.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
+                bump!(Lava.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
+            end
+        end
+        plan = M.Plan(g)
+        for mode in (:derived, :backend, :both), _ in 1:5
+            M.run!(plan; barriers = mode)
+            KernelAbstractions.synchronize(M.backend(dev))
+            @test all(==(12f0), Array(out))
+        end
+        @test all(!, active)                 # the group is lifted in every mode
     end
 
     @testset "a dispatch takes a workgroup size" begin
