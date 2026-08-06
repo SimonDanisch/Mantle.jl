@@ -8,6 +8,27 @@
 #
 # This is the shape §9's claim needs: on a purely linear chain every stage really
 # does depend on the last, so derivation can only match, never win.
+#
+# Measured, and the answer is no — not on this hardware, not on either shape.
+# Both arms warmed before either is timed and the rounds interleaved, because a
+# first timed loop runs ~2.6x slow and derived-then-backend otherwise measures the
+# order rather than the arms:
+#
+#   8 chains x 6 stages, 1<<20 floats   derived 2.362 ms   backend 2.371 ms  (1.004x)
+#   the showcase, 20 passes             derived 1.187 ms   backend 1.176 ms  (0.991x)
+#
+# Inside the noise both times, and the derived spread (2.02-2.71) is wider than
+# the backend one (2.32-2.43). So scoping barriers per resource is not what makes
+# a frame faster here. The likely reason is that RADV's barrier granularity is the
+# cache hierarchy rather than the buffer: a `VkBufferMemoryBarrier2` and a global
+# `VkMemoryBarrier2` cost the same flush, so naming less memory does not let more
+# overlap — that part is a hypothesis, not a measurement.
+#
+# Which leaves the reason the derivation is scoped anyway, and it is not speed: a
+# barrier that names one buffer cannot stand in for a hazard on another, so what
+# runs is what the graph derived, and a dependency the graph missed stops being
+# silently supplied by a barrier that happened to be wide enough. That is what the
+# hazard-set tests in `test/test_window.jl` can check and a global barrier cannot.
 
 import Mantle
 using Lava, GeometryBasics, KernelAbstractions

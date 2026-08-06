@@ -74,6 +74,31 @@ end
     end
 end
 
+"""minimalloc names each instance `<letter>.<capacity>.csv` — the height it is
+   known to be solvable at, which is the only external number in the corpus."""
+capacity(f) = parse(Int, split(basename(f), ".")[2])
+
+@testset "the gap to minimalloc's capacity does not grow" begin
+    # `valid` and `height >= maxload` say the packing is legal and not below the
+    # lower bound. Neither says anything about how *good* it is, so packing could
+    # get arbitrarily worse and every placement test would still pass.
+    #
+    # minimalloc solves all twelve of these at 1048576 with an exact search; a
+    # greedy first-fit does not, and is not meant to. Measured, the overshoot is
+    # 1.23x (D) to 1.41x (I). Pinned a little above that: this is a ratchet, so a
+    # change that packs worse fails here, and one that packs better fails too and
+    # gets the bound lowered on purpose rather than by accident.
+    worst = 0.0
+    for f in readdir(joinpath(BENCH, "challenging"); join = true)
+        p, cap = readproblem(f), capacity(f)
+        for strategy in (LowestFit(), BestFit())
+            worst = max(worst, place(p, strategy).height / cap)
+        end
+    end
+    @test worst <= 1.45
+    @test worst > 1.0        # if this ever fails we are matching an exact solver
+end
+
 @testset "lowest fit is not worse than best fit" begin
     ratios = map(readdir(joinpath(BENCH, "challenging"); join = true)) do f
         p = readproblem(f)
@@ -107,6 +132,17 @@ end
 # Two items whose windows are disjoint can interlock: MiniMalloc packs the Tetris
 # case into 3 units where a size-only placer needs 4 (minimalloc_test.cc:91-99).
 # Gaps currently narrow the lower bound but not the placement, so we take 4.
+# `conflicts` compares only the time segments of two items and ignores the offset
+# window a `Gap` carries, so two items that could interleave within each other's
+# bytes are forced disjoint. Reaching 3 means testing candidate offsets against
+# the window — the collision is a function of both offsets, not a static property
+# of the pair, so `blocked` would become forbidden *offset* intervals rather than
+# occupied byte ranges, and both strategies would move with it.
+#
+# Left alone on purpose. Nothing generates gaps: the Place phase builds its items
+# as `Item(id, span, size; alignment)` and never passes any, and no benchmark CSV
+# has a gaps column — the whole corpus is `id,lower,upper,size`. So this would be
+# a rewrite of a placer the benchmarks do exercise, to improve one they do not.
 @testset "gaps do not yet tighten placement" begin
     p = Problem([Item("a", Span(0, 10), 2; gaps = [Gap(Span(0, 5), OffsetWindow(0, 1))]),
                  Item("b", Span(0, 10), 2; gaps = [Gap(Span(5, 10), OffsetWindow(1, 2))])], 16)
