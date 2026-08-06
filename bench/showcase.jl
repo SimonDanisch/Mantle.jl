@@ -155,12 +155,18 @@ end
     p / sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
 end
 
-# `slot` comes off an atomic, so it is a number the GPU chose and the CPU cannot
-# check. Bounding it here is not defensive programming — an unbounded index into
-# a device buffer is a write into whatever the allocator put next, and the pool
-# puts other buffers there. The symptom is that a *different* buffer quietly
-# fills with ascending instance indices some minutes into a run.
-@kernel function cull!(visible, counter, @Const(centers), vp::Mat4f, n::UInt32)
+# One increment per instance and `ndrange` is `NINST`, so `slot` cannot exceed
+# the list — unless a frame's clear never ran, which is what used to happen:
+# `present_frame!` submitted only the last command-buffer segment, so a split
+# mid-frame dropped everything recorded before it. The counter then carried over
+# and the write walked off the end into whatever the pool put next, which here is
+# the light buffers: the crystals collapsed to the origin and stopped emitting.
+#
+# `slot` was bounded here for a while. That is gone on purpose. The bound could
+# only ever fire when something upstream was already broken, so keeping it meant
+# a demo that quietly rendered a wrong scene instead of a demo that shows the
+# bug — and surfacing infrastructure bugs is what this file is for.
+@kernel function cull!(visible, counter, @Const(centers), vp::Mat4f)
     i = @index(Global)
     @inbounds begin
         c = centers[i]
@@ -171,15 +177,13 @@ end
         end
         if keep
             slot = Atomix.@atomic counter[1] += UInt32(1)
-            if slot <= n
-                visible[slot] = UInt32(i)
-            end
+            visible[slot] = UInt32(i)
         end
     end
 end
 
-@kernel function write_draw!(cmds, @Const(counter), vpb::UInt32, n::UInt32)
-    @inbounds cmds[1] = DrawIndirectCommand(min(counter[1], n) * vpb, UInt32(1), UInt32(0), UInt32(0))
+@kernel function write_draw!(cmds, @Const(counter), vpb::UInt32)
+    @inbounds cmds[1] = DrawIndirectCommand(counter[1] * vpb, UInt32(1), UInt32(0), UInt32(0))
 end
 
 # Moves the lights and the crystals that stand for them: the last NLIGHT
@@ -708,18 +712,18 @@ end
 M.compute!(graph, "cull") do p
     M.dispatch!(p, cull!, (M.use(p, visible; write = true),
                            M.use(p, counter; read = true, write = true),
-                           M.use(p, centers; read = true), cullref, UInt32(NINST)), NINST)
+                           M.use(p, centers; read = true), cullref), NINST)
 end
 M.compute!(graph, "sun cull") do p
     M.dispatch!(p, cull!, (M.use(p, sunvisible; write = true),
                            M.use(p, suncounter; read = true, write = true),
-                           M.use(p, centers; read = true), sunvpref, UInt32(NINST)), NINST)
+                           M.use(p, centers; read = true), sunvpref), NINST)
 end
 M.compute!(graph, "draw count") do p
     M.dispatch!(p, write_draw!, (M.use(p, drawcmd; write = true),
-                                 M.use(p, counter; read = true), UInt32(VPB), UInt32(NINST)), 1)
+                                 M.use(p, counter; read = true), UInt32(VPB)), 1)
     M.dispatch!(p, write_draw!, (M.use(p, sundrawcmd; write = true),
-                                 M.use(p, suncounter; read = true), UInt32(VPB), UInt32(NINST)), 1)
+                                 M.use(p, suncounter; read = true), UInt32(VPB)), 1)
 end
 M.render!(graph, "shadow", shadow => M.Clear(1f0)) do p
     args = (M.Attribute(p, pp), M.Attribute(p, sunvisible), M.Attribute(p, centers),
