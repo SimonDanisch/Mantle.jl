@@ -109,7 +109,84 @@ end
 # asserted the scheduler would fix it. It does not, and should not: the
 # declaration is the program, as in RPS. That test was wrong and is not here.
 #
-# What should discriminate is `Compact`, which actively reorders to save memory
-# and so needs the edges to know what it may not move past — build the same
-# graph with `policy = Mantle.Compact()` and check the order against a
-# dependency-free DAG. NOT YET WRITTEN.
+# What discriminates is `Compact`, which actively reorders to save memory and so
+# needs the edges to know what it may not move past. That is the testset below.
+
+"""
+    buildtemptation(dev, big, small) -> Graph
+
+A graph `Compact` wants to schedule in an order the DAG forbids.
+
+`fill` writes a large transient: pure allocation, no free, the worst memory score
+available. `drain` reads it and writes a tiny one: it FREES the large buffer, so
+`Compact`'s memory term wants it first — and it is declared second, so even the
+declaration-order tiebreak does not rescue the right answer.
+
+Only the dependency stops it. That is the point: `buildprobe` cannot see a broken
+`Dag` (measured — see the note above), and neither can `buildprobe` under
+`Compact`: its two branches genuinely have no dependencies, so a correct DAG and
+an empty one agree, and both produce
+`["branch1", "branch2", "chain1", "chain2", "chain3"]`. Here they disagree.
+"""
+function buildtemptation(dev, big::Integer, small::Integer)
+    g = M.Graph(dev)
+    src = M.Buffer(dev, fill(1.0f0, big))
+    t = M.Transient.Buffer(g, Float32, big)
+    u = M.Transient.Buffer(g, Float32, small)
+    M.compute!(g, "fill") do p
+        M.dispatch!(p, goldenscale!, (M.use(p, t; write = true),
+                                      M.use(p, src; read = true), 2.0f0), big)
+    end
+    M.compute!(g, "drain") do p
+        M.dispatch!(p, goldenscale!, (M.use(p, u; write = true),
+                                      M.use(p, t; read = true), 3.0f0), small)
+    end
+    return g
+end
+
+"""
+The backend's compilation context, so a phase can be run and read on its own.
+
+`Plan` exposes only what a frame needs. Asserting a phase's OUTPUT means reaching
+the context it writes into, which is what `compile!(ctx, prefix)` was built for.
+"""
+compilectx(g) = Base.get_extension(Mantle, :MantleLavaExt).Compile(g)
+
+@testset "Dag: the edges themselves" begin
+    dev = M.Device(Lava)
+    c = M.compile!(compilectx(buildtemptation(dev, 1 << 18, 1 << 4)), (M.Dag(),))
+    # "drain" reads what "fill" wrote. One edge, and it points backwards.
+    @test M.analysis(c).deps == [Int[], [1]]
+
+    c2 = M.compile!(compilectx(buildprobe(dev, 1 << 12)), (M.Dag(),))
+    # chain2 <- chain1, chain3 <- chain2. The two branches only READ `src`, and
+    # read-after-read is deliberately not an edge, so they depend on nothing.
+    @test M.analysis(c2).deps == [Int[], [1], [2], Int[], Int[]]
+end
+
+# Asserted directly, and not through the schedule, for a measured reason: THREE
+# attempts to observe `Dag` through `Schedule` all came back identical with the
+# phase stubbed out to find nothing.
+#
+#   buildprobe under Overlap  — same order, peak, barriers, intervals
+#   buildprobe under Compact  — same order (["branch1","branch2","chain1",…])
+#   buildtemptation, Compact  — same order (["fill","drain"])
+#
+# The last is the interesting one. It was built specifically so `Compact` would
+# want to hoist the pass that frees a megabyte, and it does not: reading a
+# transient nothing has written yet counts that transient as an ALLOCATION in the
+# memory term, so the illegal order already scores worst. The scoring disfavours
+# illegal schedules on its own, which makes the edges nearly unobservable
+# downstream on graphs this size — and is why guarding `Dag` by pinning a
+# schedule is guarding nothing.
+
+@testset "alias = false gives every transient the whole timeline" begin
+    dev = M.Device(Lava)
+    g = buildprobe(dev, 1 << 16)
+    plan = M.Plan(g; alias = false)
+    # Nothing may share bytes, so the peak IS the naive sum — 5 x 65536 Float32.
+    # This is what guards `Liveness`: the intervals are the only thing `alias`
+    # changes, and if they stopped being derived from use this would still come
+    # back 524_288 like the aliased case.
+    @test M.peakbytes(plan) == 1_310_720
+end

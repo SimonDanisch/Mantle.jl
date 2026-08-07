@@ -1293,17 +1293,6 @@ mutable struct Compile
     # What the backend-independent phases compute. Held rather than spread over
     # fields here, so those phases can live in core and read one thing.
     analysis::Mantle.Analysis
-    order::Vector{Int}                                # Schedule
-    items::Vector{Mantle.Item}                        # Liveness
-    slabs::Vector{Any}                                # Place
-    slab::Any
-    peak::Int
-    naive::Int
-    offsets::Vector{Int}
-    # Aliasing: pass index => the (new, old) transient pairs whose bytes change
-    # hands there. The old index is kept because the barrier is derived from what
-    # that transient was last doing, not assumed to be everything.
-    alias_begins::Dict{Int,Vector{Tuple{Int,Int}}}
     transitions::Vector{Mantle.Transition}            # Barriers
     prepass::IdDict{Pass,Vector{Mantle.Transition}}
     passes::Vector{PassPlan}                          # Pipelines
@@ -1311,8 +1300,7 @@ mutable struct Compile
 end
 
 Compile(g::LavaGraph; alias = true, coalesce = true, policy = Mantle.Overlap()) =
-    Compile(g, alias, coalesce, policy, Mantle.Analysis(), Int[], Mantle.Item[], Any[], nothing,
-            0, 0, Int[], Dict{Int,Vector{Tuple{Int,Int}}}(), Mantle.Transition[],
+    Compile(g, alias, coalesce, policy, Mantle.Analysis(), Mantle.Transition[],
             IdDict{Pass,Vector{Mantle.Transition}}(), PassPlan[], Set{Any}())
 
 # What core's phases ask of a compilation context. Everything else about
@@ -1322,9 +1310,13 @@ Mantle.passes(c::Compile) = c.graph.passes
 Mantle.usages(p::Pass) = p.usages
 Mantle.overlapping(c::Compile, a::Int, b::Int) = overlapping(c.graph, a, b)
 Mantle.policy(c::Compile) = c.policy
-
-"""Passes in execution order, which is the scheduled order once Schedule has run."""
-ordered(c::Compile) = isempty(c.order) ? c.graph.passes : c.graph.passes[c.order]
+Mantle.alias(c::Compile) = c.alias
+Mantle.transients(c::Compile) = c.graph.transients
+Mantle.transientbyid(c::Compile) = c.graph.transient_by_id
+Mantle.nbytes(t::Transient) = nbytes(t)
+Mantle.alignment(t::Transient) = alignment(t)
+Mantle.arena(t::Transient) = arena(t)
+Mantle.describe(t::Transient) = describe(t)
 
 # ── Dag ───────────────────────────────────────────────────────────────────────
 writes_it(U) = Mantle.writes(U)
@@ -1360,162 +1352,15 @@ An edge from i to j when they share a resource and at least one writes it.
 Read-after-read is deliberately not an edge: two passes that only read the same
 thing may run in either order, which is the freedom the scheduler spends.
 """
-# ── Schedule ──────────────────────────────────────────────────────────────────
-# Width of each memory term in the packed score; two of them share the range.
-const SCORE_MAX = 0x1fff
-
-"""
-Greedy list scheduling under a packed priority score.
-
-Objectives live in disjoint bit ranges of one integer and are OR'd, so comparing
-candidates is one integer compare and the policy is chosen by moving a bit range
-rather than by writing a different comparator. That trick is the best single idea
-in RPS (`rps_dag_schedule.hpp:180-208`).
-
-The memory term prefers a candidate that frees more bytes than it allocates,
-counting a transient's first touch as an allocation and its last as a free.
-"""
-function Mantle.run!(::Mantle.Schedule, c::Compile)
-    ps = c.graph.passes
-    n = length(ps)
-    n == 0 && return c
-
-    deps = Mantle.analysis(c).deps
-    remaining = [length(d) for d in deps]
-    dependents = [Int[] for _ in 1:n]
-    for j in 1:n, i in deps[j]
-        push!(dependents[i], j)
-    end
-
-    # How many *passes* touch each transient, so "last use" is known. Counting
-    # usages instead would double-count a pass that binds the same resource
-    # twice, which makes every candidate tie and the schedule collapse to
-    # declaration order.
-    ids(p) = unique(first(u) for u in p.usages)
-    touches = Dict{Int,Int}()
-    for p in ps, id in ids(p)
-        touches[id] = get(touches, id, 0) + 1
-    end
-    seen = Dict{Int,Int}()
-    bytesof = Dict{Int,Int}()
-    for (id, t) in c.graph.transient_by_id
-        bytesof[id] = nbytes(t)
-    end
-
-    maxalloc = max(1, maximum(eachindex(ps); init = 0) do i
-        sum(id -> get(bytesof, id, 0), ids(ps[i]); init = 0)
-    end)
-    mshift = Mantle.memory_shift(c.policy)
-    oshift = Mantle.order_shift(c.policy)
-    order = Int[]
-    ready = [i for i in 1:n if remaining[i] == 0]
-
-    while !isempty(ready)
-        best, bestscore = 0, -1
-        for k in eachindex(ready)
-            i = ready[k]
-            alloc = 0
-            freed = 0
-            for id in ids(ps[i])
-                b = get(bytesof, id, 0)
-                b == 0 && continue
-                get(seen, id, 0) == 0 && (alloc += b)
-                get(seen, id, 0) + 1 == touches[id] && (freed += b)
-            end
-            # Two non-negative terms, not their difference. A difference has to
-            # be clamped at zero to fit the bit range, and that clamp throws away
-            # exactly the distinction being measured: a pass that breaks even and
-            # one that allocates two buffers both come out at zero.
-            #
-            # Scaled by the largest per-pass allocation rather than by a fixed
-            # shift. RPS shifts by 16 (`rps_dag_schedule.hpp:351`) because its
-            # buffers are megabytes; ours can be any size, and a fixed shift sends
-            # every 16 kB buffer to zero and collapses the schedule back to
-            # declaration order.
-            mem = clamp((SCORE_MAX * (maxalloc - alloc)) ÷ maxalloc, 0, SCORE_MAX) +
-                  clamp((SCORE_MAX * freed) ÷ maxalloc, 0, SCORE_MAX)
-            # Clamped because the fields are OR'd, not added: a term that spills
-            # its 16 bits would silently corrupt the one above it.
-            ord = clamp(n - i, 0, 0xffff)                # earlier declaration scores higher
-            score = (mem << mshift) | (ord << oshift)
-            if score > bestscore
-                best, bestscore = k, score
-            end
-        end
-        i = ready[best]
-        deleteat!(ready, best)
-        push!(order, i)
-        for id in ids(ps[i])
-            seen[id] = get(seen, id, 0) + 1
-        end
-        for j in dependents[i]
-            remaining[j] -= 1
-            remaining[j] == 0 && push!(ready, j)
-        end
-    end
-
-    length(order) == n || error("scheduling left $(n - length(order)) passes unreachable: cycle in the DAG")
-    c.order = order
-    c
-end
-
-# ── Liveness ──────────────────────────────────────────────────────────────────
-"""
-Intervals come from which passes touched a resource, recorded by `touch!` as the
-graph was built. Liveness is therefore never a second statement that could
-disagree with use.
-
-With `alias = false` every transient claims the whole timeline, so none can share
-bytes. That is not a tuning knob so much as a bisection tool: it is how the
-aliasing hazard was isolated.
-"""
-function Mantle.run!(::Mantle.Liveness, c::Compile)
-    ts = c.graph.transients
-    isempty(ts) && return c
-    # Recomputed from the scheduled order, not from declaration order: reordering
-    # passes is exactly what changes a transient's interval.
-    for t in ts
-        t.first, t.last = typemax(Int), 0
-    end
-    for (pos, p) in enumerate(ordered(c)), (id, _) in p.usages
-        t = get(c.graph.transient_by_id, id, nothing)
-        t === nothing && continue
-        t.first = min(t.first, pos)
-        t.last = max(t.last, pos)
-    end
-    # A transient nothing touched has no interval, and the placer's `Span` reports
-    # that as an inverted range with `typemax(Int)` in it — a message about the
-    # allocator for a mistake in the graph.
-    for (i, t) in enumerate(ts)
-        t.last == 0 && throw(ArgumentError(
-            "transient $i ($(describe(t))) is never used by any pass. A transient's " *
-            "interval is derived from use, so one that nothing reads or writes has " *
-            "nothing to place. Give it to a pass, or drop the declaration."))
-    end
-    lastpass = maximum(t -> t.last, ts) + 1
-    c.items = [Mantle.Item(string(i),
-                           c.alias ? Mantle.Span(t.first, t.last + 1) : Mantle.Span(0, lastpass),
-                           nbytes(t); alignment = alignment(t))
-               for (i, t) in enumerate(ts)]
-    c
-end
-
 # ── Place ─────────────────────────────────────────────────────────────────────
-"""One allocation backing an arena, and the transients placed in it."""
-struct Slab
-    memory::Any
-    bytes::Int
-    indices::Vector{Int}
-end
-
 """Back an arena. Buffers get a Lava array; images get raw device memory."""
 # The arena is one allocation shared by transients of several element types, so
 # its usage bits are the union of what they ask for.
-allocate(::Buffers, c::Compile, bytes::Int, ts) =
+Mantle.allocate(::Buffers, c::Compile, bytes::Int, ts) =
     Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),);
                             extra_usage = reduce(|, (extrausage(eltype(t)) for t in ts)))
 
-function allocate(::Images, c::Compile, bytes::Int, ts)
+function Mantle.allocate(::Images, c::Compile, bytes::Int, ts)
     # The memory has to satisfy every image in it at once, so the type bits are
     # the intersection. `device_memory` errors if that is empty rather than
     # picking a type some image cannot use.
@@ -1524,68 +1369,17 @@ function allocate(::Images, c::Compile, bytes::Int, ts)
 end
 
 """Give a placed transient its storage."""
-function materialize!(t::TransientBuffer, slab, offset)
+function Mantle.materialize!(t::TransientBuffer, slab, offset)
     t.view = Lava.LavaArray{eltype(t),1}(copy(slab.buf), (t.n,); offset)
 end
 
-function materialize!(t::TransientImage{T}, slab, offset) where {T}
+function Mantle.materialize!(t::TransientImage{T}, slab, offset) where {T}
     t.memory = slab                       # the image outlives the call; the slab must too
     Lava.bind_image!(Lava.vk_context(), t.image, slab, offset)
     t.view = Lava.image_view(Lava.vk_context(), t.image, t.format, aspect(T))
 end
 
-"""
-Assign offsets, one placement per arena.
-
-Peak is summed over arenas because they are separate allocations; the alternative
-would be to report the larger and pretend the other is free.
-"""
-function Mantle.run!(::Mantle.Place, c::Compile)
-    isempty(c.items) && return c
-    ts = c.graph.transients
-    c.offsets = zeros(Int, length(ts))
-    c.peak = 0
-    c.naive = sum(nbytes, ts)
-    for a in unique(map(arena, ts))
-        idx = findall(t -> arena(t) == a, ts)
-        pl = Mantle.place(Mantle.Problem(c.items[idx], typemax(Int)))
-        mem = allocate(a, c, pl.height, ts[idx])
-        push!(c.slabs, Slab(mem, pl.height, idx))
-        c.peak += pl.height
-        for i in idx
-            c.offsets[i] = pl.offsets[string(i)]
-            materialize!(ts[i], mem, c.offsets[i])
-        end
-    end
-    c.slab = isempty(c.slabs) ? nothing : first(c.slabs).memory
-    c
-end
-
 # ── Aliasing ──────────────────────────────────────────────────────────────────
-"""
-Which passes begin a transient that took over another's bytes.
-
-Aliasing creates a hazard between two resources the usage tracker sees as
-unrelated: Y's first write lands on memory X was still reading. Nothing in the
-per-resource state can know that, so placement has to say so. RPS carries the
-same thing as ResourceAliasingInfo with srcDeactivating / dstActivating.
-
-Found by fuzzing: with aliasing on, derived barriers gave a different answer run
-to run; with aliasing off, every seed was stable.
-"""
-function Mantle.run!(::Mantle.Aliasing, c::Compile)
-    ts = c.graph.transients
-    for (i, y) in enumerate(ts), (j, x) in enumerate(ts)
-        i == j && continue
-        arena(x) == arena(y) || continue   # offsets in different allocations never overlap
-        x.last < y.first || continue
-        c.offsets[i] < c.offsets[j] + nbytes(x) &&
-            c.offsets[j] < c.offsets[i] + nbytes(y) || continue
-        push!(get!(() -> Tuple{Int,Int}[], c.alias_begins, y.first), (i, j))
-    end
-    c
-end
-
 const EMPTY_HANDOVER = Tuple{Int,Int}[]
 
 """
@@ -1735,7 +1529,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
     segments_of(id) = get(segs, id, (id,))
 
     final = Dict{Int,Type}()
-    for p in ordered(c), (id, U) in p.usages, sid in segments_of(id)
+    for p in Mantle.ordered(c), (id, U) in p.usages, sid in segments_of(id)
         final[sid] = U
     end
 
@@ -1747,7 +1541,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
                         Mantle.ResourceState(resourcekind(r), u)
     end
 
-    for (i, p) in enumerate(ordered(c))
+    for (i, p) in enumerate(Mantle.ordered(c))
         pre = Mantle.Transition[]
         for (id, U) in p.usages, sid in segments_of(id)
             transition!(pre, be, sid, state(sid), U)
@@ -1784,7 +1578,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
         # It used to name every stage and both access directions instead. That is
         # correct and says nothing: a barrier that waits for everything cannot be
         # wrong, and cannot be checked either.
-        handovers = get(c.alias_begins, i, EMPTY_HANDOVER)
+        handovers = get(Mantle.analysis(c).alias_begins, i, EMPTY_HANDOVER)
         for newi in unique(first(h) for h in handovers)
             to = usage_of(p, resourceid(g, c.graph.transients[newi]), g)
             to === nothing && continue
@@ -1830,7 +1624,7 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
     # barrier, so the needed transitions split by resource kind: images become an
     # image barrier each, everything else is ORed into the memory barrier.
     isimage(t) = t.resource != 0 && resourcekind(g.by_id[t.resource]) isa ImageKind
-    for p in ordered(c)
+    for p in Mantle.ordered(c)
         need = c.prepass[p]
         imgs = [ImageBarrier(g.by_id[t.resource], t) for t in need if isimage(t)]
         rest = filter(!isimage, need)
@@ -1930,7 +1724,8 @@ dispatchrange(x) = count(x)
 Mantle.Plan(g::LavaGraph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Mantle.Policy = Mantle.Overlap()) =
     let c = Mantle.compile!(Compile(g; alias, coalesce, policy))
-        LavaPlan(g, c.transitions, c.passes, c.pipelines, c.slabs, c.peak, c.naive,
+        LavaPlan(g, c.transitions, c.passes, c.pipelines, Mantle.analysis(c).slabs,
+                 Mantle.analysis(c).peak, Mantle.analysis(c).naive,
                  profile ? Profiler(g.dev.ctx, c.passes) : nothing,
                  alias, coalesce, policy, ArgMemory(g.dev, c.passes))
     end
@@ -1958,7 +1753,7 @@ function refit!(pl::LavaPlan)
     moved || return false
     c = Mantle.compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
-    pl.slabs, pl.peak, pl.naive = c.slabs, c.peak, c.naive
+    let a = Mantle.analysis(c); pl.slabs, pl.peak, pl.naive = a.slabs, a.peak, a.naive end
     # A recompile can change the draws and therefore the layout, so the argument
     # memory is laid out again with them. The old slots are still being read by
     # frames in flight; `sync_swapchain!` waited for the device before any of
