@@ -1290,7 +1290,9 @@ mutable struct Compile
     alias::Bool
     coalesce::Bool
     policy::Mantle.Policy
-    deps::Vector{Vector{Int}}                         # Dag
+    # What the backend-independent phases compute. Held rather than spread over
+    # fields here, so those phases can live in core and read one thing.
+    analysis::Mantle.Analysis
     order::Vector{Int}                                # Schedule
     items::Vector{Mantle.Item}                        # Liveness
     slabs::Vector{Any}                                # Place
@@ -1309,9 +1311,17 @@ mutable struct Compile
 end
 
 Compile(g::LavaGraph; alias = true, coalesce = true, policy = Mantle.Overlap()) =
-    Compile(g, alias, coalesce, policy, Vector{Int}[], Int[], Mantle.Item[], Any[], nothing,
+    Compile(g, alias, coalesce, policy, Mantle.Analysis(), Int[], Mantle.Item[], Any[], nothing,
             0, 0, Int[], Dict{Int,Vector{Tuple{Int,Int}}}(), Mantle.Transition[],
             IdDict{Pass,Vector{Mantle.Transition}}(), PassPlan[], Set{Any}())
+
+# What core's phases ask of a compilation context. Everything else about
+# `Compile` is this backend's business.
+Mantle.analysis(c::Compile) = c.analysis
+Mantle.passes(c::Compile) = c.graph.passes
+Mantle.usages(p::Pass) = p.usages
+Mantle.overlapping(c::Compile, a::Int, b::Int) = overlapping(c.graph, a, b)
+Mantle.policy(c::Compile) = c.policy
 
 """Passes in execution order, which is the scheduled order once Schedule has run."""
 ordered(c::Compile) = isempty(c.order) ? c.graph.passes : c.graph.passes[c.order]
@@ -1350,23 +1360,6 @@ An edge from i to j when they share a resource and at least one writes it.
 Read-after-read is deliberately not an edge: two passes that only read the same
 thing may run in either order, which is the freedom the scheduler spends.
 """
-function Mantle.run!(::Mantle.Dag, c::Compile)
-    ps = c.graph.passes
-    g = c.graph
-    c.deps = [Int[] for _ in ps]
-    for j in eachindex(ps), i in 1:(j - 1)
-        shared = false
-        for (idj, Uj) in ps[j].usages, (idi, Ui) in ps[i].usages
-            overlapping(g, idi, idj) || continue
-            (writes_it(Ui) || writes_it(Uj)) || continue
-            shared = true
-            break
-        end
-        shared && push!(c.deps[j], i)
-    end
-    c
-end
-
 # ── Schedule ──────────────────────────────────────────────────────────────────
 # Width of each memory term in the packed score; two of them share the range.
 const SCORE_MAX = 0x1fff
@@ -1387,9 +1380,10 @@ function Mantle.run!(::Mantle.Schedule, c::Compile)
     n = length(ps)
     n == 0 && return c
 
-    remaining = [length(d) for d in c.deps]
+    deps = Mantle.analysis(c).deps
+    remaining = [length(d) for d in deps]
     dependents = [Int[] for _ in 1:n]
-    for j in 1:n, i in c.deps[j]
+    for j in 1:n, i in deps[j]
         push!(dependents[i], j)
     end
 

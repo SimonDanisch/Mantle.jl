@@ -21,6 +21,60 @@ function run!(phase::Phase, ctx)
     throw(MethodError(run!, (phase, ctx)))
 end
 
+# ── what a backend's compilation context has to answer ────────────────────────
+#
+# Five of the seven phases are graph analyses and contain nothing backend-shaped;
+# only Barriers and Pipelines do. They used to live in the Lava extension anyway,
+# which meant a second backend had to copy a scheduler — and two copies of a
+# scheduler drift in exactly the places fuzzing found bugs. They live here now,
+# and a backend supplies the five methods below.
+
+"""
+Everything the backend-independent phases compute.
+
+One struct rather than a field-per-phase interface: a context holds one of these
+and answers [`analysis`](@ref) with it, so adding a phase output does not add an
+accessor pair to every backend.
+"""
+mutable struct Analysis
+    deps::Vector{Vector{Int}}                   # Dag
+    order::Vector{Int}                          # Schedule
+    items::Vector{Item}                         # Liveness
+    peak::Int                                   # Place
+    naive::Int
+    offsets::Vector{Int}
+    # Aliasing: pass index => the (new, old) transient pairs whose bytes change
+    # hands there. The old index is kept because the barrier is derived from what
+    # that transient was last doing, not assumed to be everything.
+    alias_begins::Dict{Int,Vector{Tuple{Int,Int}}}
+end
+Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
+                      Dict{Int,Vector{Tuple{Int,Int}}}())
+
+"""The [`Analysis`](@ref) a compilation context carries. One method per backend."""
+function analysis end
+
+"""The passes a context is compiling, in DECLARATION order."""
+function passes end
+
+"""A pass's declared resource usages, as `id => Usage` pairs."""
+function usages end
+
+"""
+    overlapping(ctx, a::Int, b::Int) -> Bool
+
+Whether two resource ids can name the same bytes.
+
+Equal ids do, and so does any slicing relationship a backend supports — a slice
+against its own parent, two intersecting slices of one parent. A scheduler told
+that two such ids are unrelated is free to reorder two passes that write the same
+memory, so a backend with no slices still has to answer `a == b`.
+"""
+function overlapping end
+
+"""The scheduling [`Policy`](@ref) a context was built with."""
+function policy end
+
 """
 Which pass depends on which, from the resources they share.
 
@@ -29,6 +83,23 @@ them writes it. Read-after-read is not an edge, which is what leaves independent
 work free to be reordered.
 """
 struct Dag <: Phase end
+
+function run!(::Dag, c)
+    ps = passes(c)
+    a = analysis(c)
+    a.deps = [Int[] for _ in ps]
+    for j in eachindex(ps), i in 1:(j - 1)
+        shared = false
+        for (idj, Uj) in usages(ps[j]), (idi, Ui) in usages(ps[i])
+            overlapping(c, idi, idj) || continue
+            (writes(Ui) || writes(Uj)) || continue
+            shared = true
+            break
+        end
+        shared && push!(a.deps[j], i)
+    end
+    return c
+end
 
 """
 Choose an execution order consistent with the DAG.

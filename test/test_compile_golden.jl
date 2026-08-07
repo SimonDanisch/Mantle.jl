@@ -86,3 +86,30 @@ compileresult(g, plan) = (
 
     @test r.intervals == [(1, 2), (2, 3), (3, 3), (4, 4), (5, 5)]
 end
+
+# ── KNOWN GAP: nothing above guards `Dag` ─────────────────────────────────────
+#
+# MEASURED 2026-08-07, by stubbing the phase out entirely:
+#
+#     Mantle.run!(::Mantle.Dag, c) =
+#         (Mantle.analysis(c).deps = [Int[] for _ in Mantle.passes(c)]; c)
+#
+# With the DAG finding NO dependencies at all, every assertion above still
+# passes — identical peak, order, barriers and intervals. So this file currently
+# proves nothing about `Dag`, and a refactor could break it silently.
+#
+# Why: `Dag` only ever makes pass j depend on an EARLIER-declared pass i
+# (`for j in eachindex(ps), i in 1:(j-1)`), so declaration order is by
+# construction a legal topological order, and `Overlap` prefers declaration
+# order. An empty DAG therefore schedules identically. Liveness intervals come
+# from `touch!` during graph construction, not from deps, so the peak does not
+# move either.
+#
+# A first attempt at a discriminating probe declared the chain BACKWARDS and
+# asserted the scheduler would fix it. It does not, and should not: the
+# declaration is the program, as in RPS. That test was wrong and is not here.
+#
+# What should discriminate is `Compact`, which actively reorders to save memory
+# and so needs the edges to know what it may not move past — build the same
+# graph with `policy = Mantle.Compact()` and check the order against a
+# dependency-free DAG. NOT YET WRITTEN.
