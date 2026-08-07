@@ -150,7 +150,7 @@ The backend's compilation context, so a phase can be run and read on its own.
 `Plan` exposes only what a frame needs. Asserting a phase's OUTPUT means reaching
 the context it writes into, which is what `compile!(ctx, prefix)` was built for.
 """
-compilectx(g) = Base.get_extension(Mantle, :MantleLavaExt).Compile(g)
+compilectx(g; kw...) = Base.get_extension(Mantle, :MantleLavaExt).Compile(g; kw...)
 
 @testset "Dag: the edges themselves" begin
     dev = M.Device(Lava)
@@ -179,6 +179,23 @@ end
 # illegal schedules on its own, which makes the edges nearly unobservable
 # downstream on graphs this size — and is why guarding `Dag` by pinning a
 # schedule is guarding nothing.
+
+@testset "Schedule: the order itself, and that the policy decides it" begin
+    dev = M.Device(Lava)
+    prefix = (M.Dag(), M.Schedule())
+    order(g; kw...) = M.analysis(M.compile!(compilectx(g; kw...), prefix)).order
+
+    # Overlap prefers declaration order and there is nothing forcing it off.
+    @test order(buildprobe(dev, 1 << 12)) == [1, 2, 3, 4, 5]
+
+    # Compact prefers whatever frees more than it allocates, and reaches a
+    # DIFFERENT legal order on the same graph. Pinned exactly, because "they
+    # differ" alone would survive a scoring change that made them differ wrongly.
+    @test order(buildprobe(dev, 1 << 12); policy = M.Compact()) == [4, 5, 1, 2, 3]
+
+    # …and no policy may put `drain` before the `fill` it reads.
+    @test order(buildtemptation(dev, 1 << 18, 1 << 4); policy = M.Compact()) == [1, 2]
+end
 
 @testset "alias = false gives every transient the whole timeline" begin
     dev = M.Device(Lava)
