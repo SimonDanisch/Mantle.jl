@@ -132,6 +132,43 @@ The strategies do still differ by kind:
   Which is also why `Images` already intersects `req.type_bits` — the constraint
   was visible in the existing code.
 
+## 3a. Where the pool work actually stands, and the one open hazard
+
+Done and pushed:
+
+* `src/memory/pool.jl` — `Pool`/`Block`/`Region`, first-fit with coalescing
+  release, growth that ADDS a block rather than moving one. Four backend
+  primitives, no policy: `rawalloc`, `rawfree`, `constraintof`, `compatible`.
+  15 tests against a fake device that allocates nothing and counts calls — it
+  needs no backend at all, which is the assertion that no policy leaked out.
+* Lava `bind_buffer!` + `unbound_buffer` + `buffer_requirements`, mirroring the
+  image family. Verified on the RTX 4000: two 4096-byte buffers into one
+  8192-byte `device_memory` at offsets 0 and 4096. Before this there was nowhere
+  to bind a suballocated buffer — every `bind_buffer_memory` in Lava passed 0 —
+  which is *why* the buffer arena took the `LavaArray` shortcut.
+
+Not done: `Place` still calls `allocate` and gets a fresh slab, and a `LavaPlan`
+still owns its memory instead of holding regions it releases.
+
+**THE OPEN HAZARD, and it must be settled before wiring Lava's `rawalloc`.**
+Whether a `LavaArray` built over an existing buffer OWNS that buffer is
+unverified. Evidence points both ways:
+
+* Lava's memory.jl says "a sub-allocation is returned to its block by a
+  **finalizer**", so LavaArrays do finalize.
+* But `VkManagedBuffer.pool_block` is documented "nothing = non-pooled", and
+  Mantle's current `materialize!` already does
+  `LavaArray{T,1}(copy(slab.buf), (n,); offset)` on every transient without
+  double-freeing — so either that path is non-owning, or the copy carries a null
+  `pool_block`.
+
+Get this wrong and memory Mantle owns is returned to Lava's pool by the GC
+thread. That is the exact shape of three bugs this codebase has already paid
+for — the pool free-list finalizer race that became a SIGSEGV, the buffer
+lifetime OOM, and the device loss in #13. So: an MWE with a negative control
+first (allocate, wrap, drop, GC, assert the memory is still valid), and only then
+the `rawalloc` wiring. Do not infer it from reading.
+
 ## 4. Moving the editor
 
 Composition needs no new concept: build one graph from parts, so the placer sees
