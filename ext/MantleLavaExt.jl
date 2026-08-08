@@ -21,7 +21,23 @@ end
 LavaDevice(ctx, bq) = LavaDevice(ctx, bq, Mantle.Pool())
 Mantle.pool(d::LavaDevice) = d.pool
 
-Mantle.Device(::typeof(Lava)) = LavaDevice(Lava.vk_context(), Lava.vk_context().default_bq)
+"""
+One `LavaDevice` per `VkContext`, cached.
+
+Not a convenience: the device OWNS the pool, so a second `Device(Lava)` would be
+a second `Pool` over one VkDevice — two allocators again, and every workload that
+asked separately would get its own memory instead of sharing. Caching is what
+makes "the device owns the pools" mean anything.
+
+Measured before the cache: `reserved(pool(Device(Lava)))` came back 0 immediately
+after a 120-frame render that had reserved 64 MiB, because the probe had made a
+different device.
+"""
+const DEVICES = IdDict{Any,LavaDevice}()
+Mantle.Device(::typeof(Lava)) = get!(DEVICES, Lava.vk_context()) do
+    ctx = Lava.vk_context()
+    LavaDevice(ctx, ctx.default_bq)
+end
 Mantle.Device() = Mantle.Device(Lava)
 
 """The KernelAbstractions backend, for kernels the graph does not own."""
@@ -230,9 +246,11 @@ mutable struct TransientBuffer{T} <: Transient
     n::Int
     first::Int
     last::Int
-    # Nothing until the placer gives it storage; a two-member union splits, an
-    # `Any` does not.
-    view::Union{Nothing,Lava.LavaArray{T,1}}
+    # Where in the pool this landed. The BLOCK is kept, not just the fused
+    # address, because a Vulkan buffer barrier scopes to (VkBuffer, offset, size)
+    # and an address alone cannot name the buffer.
+    block::Any            # ::BufferBlock once placed
+    offset::Int
 end
 
 Base.length(t::TransientBuffer) = t.n
@@ -389,7 +407,7 @@ Mantle.Graph(dev::LavaDevice) =
               Dict{Tuple{Int,UnitRange{Int}},Any}())
 
 function Mantle.Transient.Buffer(g::LavaGraph, ::Type{T}, n::Integer) where {T}
-    t = TransientBuffer{T}(Int(n), typemax(Int), 0, nothing)
+    t = TransientBuffer{T}(Int(n), typemax(Int), 0, nothing, 0)
     push!(g.transients, t)
     t
 end
@@ -696,6 +714,13 @@ resourcekind(::BufferRange) = BufferKind()
 
 """Byte span of a usage, for the barrier that scopes to it."""
 barrierspan(r, st) = (UInt64(st.offset), UInt64(sizeof(eltype(st)) * prod(st.dims)))
+# A pooled transient's storage is a `LavaDeviceArray` — `(ptr, dims)`, which
+# names no buffer and carries no offset. The transient knows both, so it answers.
+barrierspan(t::TransientBuffer, st) = (UInt64(t.offset), UInt64(nbytes(t)))
+"""The `VkBuffer` a barrier names. Same split as `barrierspan`."""
+barrierbuffer(r, st) = st.buf[].buffer
+barrierbuffer(t::TransientBuffer, st) = t.block.buffer
+
 barrierspan(v::BufferRange, st) =
     (UInt64(st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
      UInt64(length(v.range) * sizeof(eltype(st))))
@@ -1191,7 +1216,15 @@ end
 Mantle.storage(x::LavaBuffer) = x.store
 Mantle.storage(x::LavaScalar) = x.store
 Mantle.storage(a::Attr) = Mantle.storage(a.resource)
-Mantle.storage(t::TransientBuffer) = t.view
+# What a kernel receives: `LavaDeviceArray` is `(ptr, dims)` and owns nothing, so
+# there is no ownership question to answer here — which is why Mantle holding the
+# array type removes the problem instead of managing it.
+# A borrowed view, not an owning array: the `DataRef` releaser is a no-op, so
+# `copy` here bumps a refcount that frees nothing and Mantle stays the owner.
+# `todevice` turns this into the `(ptr, dims)` a kernel receives; a host-side
+# caller (copy_framebuffer!, a library) gets the handle it needs.
+Mantle.storage(t::TransientBuffer{T}) where {T} =
+    Lava.LavaArray{T,1}(copy(t.block.ref), (t.n,); offset = t.offset)
 Mantle.storage(x) = x
 
 # What a draw hands the shader: the device-side array, not the host handle. Doing
@@ -1235,7 +1268,7 @@ function build_pass_barrier(g, ts::Vector{Mantle.Transition})
                 dst_stage_mask = dst_stage, dst_access_mask = dst_access))
         else
             off, len = barrierspan(r, st)
-            b = st.buf[].buffer
+            b = barrierbuffer(r, st)
             push!(spans, (buf = b, handle = UInt64(b.vks), off = off, len = len,
                           ss = src_stage, sa = src_access, ds = dst_stage, da = dst_access))
         end
@@ -1361,12 +1394,49 @@ thing may run in either order, which is the freedom the scheduler spends.
 """Back an arena. Buffers get a Lava array; images get raw device memory."""
 # The arena is one allocation shared by transients of several element types, so
 # its usage bits are the union of what they ask for.
-# STAGED: the buffer block is still a `LavaArray`, i.e. still suballocated out of
-# Lava's own pool. `bind_buffer!`/`unbound_buffer` now exist in Lava for the raw
-# migration, and that is the next commit; this one moves the LAYER above it onto
-# Mantle's pool without changing what a block is made of.
-Mantle.rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage) =
-    Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),); extra_usage = usage)
+"""
+The buffer arena's block: one raw `vkAllocateMemory` with a `VkBuffer` bound into
+it, and the buffer's device address.
+
+Deliberately NOT a `LavaArray`. That would put Mantle's suballocation on top of
+Lava's pool — two allocators with the lower one invisible — and it would drag in
+a `DataRef` whose finalizer frees memory Mantle owns. Nothing here finalizes and
+nothing refcounts: the Block owns the memory, the Pool owns the Block, `trim!`
+frees.
+"""
+struct BufferBlock
+    buffer::Any
+    memory::Any
+    address::UInt64
+    bytes::Int
+    # A `DataRef` whose releaser DOES NOTHING. This is Lava's shape of the
+    # `unsafe_wrap(..., own = false)` hatch every GPU array package provides for
+    # foreign memory: a transient's `storage` is a `LavaArray` view over it, so
+    # host-side operations (copies, library calls) work — while the free stays
+    # Mantle's, because the Block owns the memory and `trim!` frees.
+    ref::Any
+end
+
+function Mantle.rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage)
+    n = max(bytes, 1)
+    # SHADER_DEVICE_ADDRESS is not optional: kernels reach a suballocated
+    # transient by `address + offset`, which is the whole bridge.
+    u = Lava.Vulkan.BufferUsageFlag(usage) |
+        Lava.Vulkan.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        Lava.Vulkan.BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        Lava.Vulkan.BUFFER_USAGE_TRANSFER_SRC_BIT |
+        Lava.Vulkan.BUFFER_USAGE_TRANSFER_DST_BIT
+    buf = Lava.unbound_buffer(dev.ctx, n, u)
+    req = Lava.buffer_requirements(dev.ctx, buf)
+    mem = Lava.device_memory(dev.ctx, req.size, req.type_bits)
+    Lava.bind_buffer!(dev.ctx, buf, mem, 0)
+    addr = Lava.Vulkan.get_buffer_device_address(
+        dev.ctx.device, Lava.Vulkan.BufferDeviceAddressInfo(buf))
+    managed = Lava.VkManagedBuffer(buf, mem, UInt64(addr), Ptr{UInt8}(C_NULL), Int(req.size),
+                                   0, nothing, nothing, Lava.BUF_STATE_ALIVE, 0, false, dev.ctx)
+    ref = Lava.GPUArrays.DataRef(_ -> nothing, managed)
+    return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
+end
 
 Mantle.rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
     Lava.device_memory(dev.ctx, max(bytes, 1), bits)
@@ -1387,8 +1457,9 @@ Mantle.compatible(::LavaDevice, blk::Integer, req::Integer) = (blk & req) == req
 Mantle.compatible(::LavaDevice, blk, req) = blk == req
 
 """Give a placed transient its storage."""
-function Mantle.materialize!(t::TransientBuffer, slab, offset)
-    t.view = Lava.LavaArray{eltype(t),1}(copy(slab.buf), (t.n,); offset)
+function Mantle.materialize!(t::TransientBuffer, blk::BufferBlock, offset::Int)
+    t.block, t.offset = blk, offset
+    return t
 end
 
 function Mantle.materialize!(t::TransientImage{T}, slab, offset) where {T}

@@ -35,15 +35,29 @@ end
 HostDevice(backend) = HostDevice(backend, Mantle.Pool())
 Mantle.pool(d::HostDevice) = d.pool
 """
-    Device(Host())
+    Device(Host())              # KA.CPU()
     Device(KA.CPU())
+    Device(LavaBackend())       # or CUDABackend, MetalBackend, …
 
-Dispatched on the backend TAG, not on the module.
+**One Mantle device per physical device.** This one is for KA backends that have
+no Mantle backend of their own — the CPU today.
 
-`MantleLavaExt` defines `Device(::typeof(Lava))`, and `typeof(Lava)` is `Module`
-— so a `Device(::typeof(KernelAbstractions))` here would be the same signature,
-and whichever extension loaded second would silently replace the other. Both do
-load in any session that has a GPU and a host graph.
+It deliberately does NOT accept a `LavaBackend`. A draft did, on the theory that
+a KA workload wants "scheduling and allocation, not render passes and barriers",
+which is true and beside the point: it would hand `DNNKernels` a second
+`Mantle.Device` with a second `Pool` sitting beside the real `LavaDevice` over one
+VkDevice. Two pools, no sharing — the two-paths problem again, one level up, and
+the sharing is the entire reason any of this exists.
+
+**Fidelity is per PASS, not per backend, and it already exists.** `dispatch!` is
+a KA launch, `render!` is a render pass, `custom!` is anything else. A model uses
+`dispatch!` and never touches `render!` — same graph, same device, same pool as
+an editor's chain. There is nothing for a second backend to add.
+
+Dispatched on the backend TAG, never on the module: `MantleLavaExt` defines
+`Device(::typeof(Lava))` and `typeof(Lava)` is `Module`, so a
+`Device(::typeof(KernelAbstractions))` here would be the SAME signature and
+whichever extension loaded second would silently replace the other.
 """
 Mantle.Device(::Mantle.Host) = HostDevice(KA.CPU())
 Mantle.Device(b::KA.CPU) = HostDevice(b)
@@ -195,7 +209,8 @@ Mantle.pool(c::Compile) = Mantle.pool(c.graph.dev)
 
 # The four primitives core asks of a backend. No policy here: which block, what
 # offset, when to grow and when to release are all decided in `Mantle.Pool`.
-Mantle.rawalloc(::HostDevice, ::HostArena, bytes::Int, constraint) = zeros(UInt8, max(bytes, 1))
+Mantle.rawalloc(d::HostDevice, ::HostArena, bytes::Int, constraint) =
+    zeros(UInt8, max(bytes, 1))
 Mantle.rawfree(::HostDevice, mem) = nothing
 # Host memory is not VRAM: a 64 MiB block would fault in pages nobody asked for,
 # and an allocation here is cheap enough that a small block is the right trade.
