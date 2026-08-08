@@ -89,10 +89,33 @@ annotation someone forgot to update. The concrete win is unchanged: SAM 2's
 activations and the editor's per-frame transients cannot coexist — a click stalls
 the preview by construction — so today that is gigabytes held twice.
 
-**The part that cannot be hand-waved:** reclaiming a region means rebinding when
-the plan comes back — `bind_image!` + `image_view` per transient. Reclaim is not
-free, the policy has to know its price, and nobody has measured it. That is the
-real content of this section, and it is a measurement rather than a decision.
+**The part that cannot be hand-waved — and it is two different problems.**
+"Rebinding" was the wrong word for it; buffers and images do not pay the same
+price, and only one of them can move at all.
+
+*Buffers move freely.* `materialize!(t::TransientBuffer, slab, offset)` builds a
+`LavaArray` over the slab at an offset, and the `copy(slab.buf)` in it copies a
+handle struct, not bytes. Moving one is constructing a Julia view. The driver is
+not involved, and everything above applies unchanged.
+
+*Images cannot be rebound.* `vkBindImageMemory` is once-only — an image that
+already has memory bound may never be bound again. So moving an image transient
+is: destroy the old `VkImage` (once it is out of flight), `image_2d` a new one,
+re-query `image_requirements` (alignment and type bits may differ), `bind_image!`,
+and `image_view`. Four driver object operations per image plus a deferred
+destroy.
+
+That is not hypothetical machinery: `refit!` already does exactly this for the
+resize case, so the price is in the codebase today and can be measured without
+building anything.
+
+So the residency strategies differ by kind, which is the substantive consequence:
+
+* buffers — memory-level suballocation, offsets are free to move
+* images — the unit of reuse is the IMAGE OBJECT, not the region: a pool keyed by
+  `(extent, format, usage)` handing out a `VkImage` whose memory was bound once.
+  Which is also why `Images` already intersects `req.type_bits` — the constraint
+  was visible in the existing code.
 
 ## 4. Moving the editor
 
@@ -148,9 +171,10 @@ claimed.
 
 **Assumed, and load-bearing:**
 
-* That reclaiming a plan's region is affordable. It costs `bind_image!` +
-  `image_view` per transient on return, and nothing has measured that. It is the
-  number the residency policy in §3 turns on.
+* That reclaiming an IMAGE region is affordable. It is a destroy + recreate +
+  rebind + new view per image, not a rebind, and nothing has measured it. `refit!`
+  already performs exactly that sequence, so it can be timed today. Buffers are
+  not in question — moving one is a Julia view.
 
 * That the Host numbers say anything about Lava. They do not — Lava's `allocate`
   is `device_memory` and its `materialize!` is `bind_image!` + `image_view` per
