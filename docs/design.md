@@ -109,7 +109,22 @@ That is not hypothetical machinery: `refit!` already does exactly this for the
 resize case, so the price is in the codebase today and can be measured without
 building anything.
 
-So the residency strategies differ by kind, which is the substantive consequence:
+**But ask how often this happens before pricing it.** Plan construction: once.
+Structural edit: a user action, seconds apart. Residency eviction: rare by
+construction, since the plan being evicted is the one not running. In the steady
+state — scrubbing, playing, matting — nothing moves and images stay bound.
+
+So reclaim cost is NOT load-bearing for this design, and an earlier draft of this
+section treated it as the main event. It is not. The one genuinely hot case is
+already in the tree and has nothing to do with residency: `refit!(pl)` runs every
+frame inside `run!`, and during a window-edge drag it fires for real — every image
+destroyed and recreated plus a full recompile, at 60 Hz. THAT is what to measure.
+
+Which also means an image pool keyed by `(extent, format, usage)` is probably
+unnecessary complexity. Bind once at plan construction, pay on structural change.
+The pool earns its keep only if the resize drag measures badly.
+
+The strategies do still differ by kind:
 
 * buffers — memory-level suballocation, offsets are free to move
 * images — the unit of reuse is the IMAGE OBJECT, not the region: a pool keyed by
