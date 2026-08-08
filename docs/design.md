@@ -147,8 +147,23 @@ Done and pushed:
   to bind a suballocated buffer — every `bind_buffer_memory` in Lava passed 0 —
   which is *why* the buffer arena took the `LavaArray` shortcut.
 
-Not done: `Place` still calls `allocate` and gets a fresh slab, and a `LavaPlan`
-still owns its memory instead of holding regions it releases.
+`Place` now suballocates from the device's pool. Measured on the RTX 4000: ten
+plans of 524_288 bytes peak went from ten device allocations (5_242_880 bytes) to
+ONE 64 MiB block, with plans 6-10 reaching the device zero times.
+
+Still staged: Lava's BUFFER block is a `LavaArray`, so it is carved out of Lava's
+own pool. Images already take raw `device_memory`. The raw migration is the last
+piece and its plumbing is now verified end to end on the RTX 4000:
+
+    unbound_buffer -> buffer_requirements -> device_memory -> bind_buffer!
+      -> VkManagedBuffer(buf, mem, addr, ...) -> valid device address
+
+i.e. a buffer bound into Mantle-owned memory, wrapped so Lava can use it, with a
+working BDA. What remains untested is the last hop — a `LavaArray` over that
+managed buffer, and specifically whether dropping one frees memory Mantle owns.
+The MWE for it is: build the array, `copyto!` a pattern, drop it, `GC.gc()` three
+times, rebuild an array over the SAME memory and assert the pattern survived. Run
+that before wiring `rawalloc(::Buffers)`, not after.
 
 **THE HAZARD IS GONE, because the question was wrong.** An earlier draft here
 said the next step was blocked on whether a `LavaArray` built over an existing
