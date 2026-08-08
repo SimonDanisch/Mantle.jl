@@ -55,7 +55,19 @@ export timings, PassTiming, NSAMPLES
 function update! end
 function use end
 function peakbytes end
-function storage end
+"""
+    storage(x)
+
+The backend object behind a resource: what actually gets bound, copied or
+launched with. Anything that is already one is itself.
+
+The identity fallback lives HERE and not in an extension. Both extensions had
+their own copy, and with both loaded the second overwrote the first — which is an
+error during precompilation, so SAM2Runner simply failed to build. One
+implementation, in core, is the same rule that moved `Buffer` and the phases; a
+one-line method is not an exception to it.
+"""
+storage(x) = x
 function capacity end
 
 """

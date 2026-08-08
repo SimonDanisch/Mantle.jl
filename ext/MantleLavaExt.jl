@@ -1216,7 +1216,6 @@ Mantle.storage(a::Attr) = Mantle.storage(a.resource)
 # caller (copy_framebuffer!, a library) gets the handle it needs.
 Mantle.storage(t::TransientBuffer{T}) where {T} =
     Lava.LavaArray{T,1}(copy(t.block.ref), (t.n,); offset = t.offset)
-Mantle.storage(x) = x
 
 # What a draw hands the shader: the device-side array, not the host handle. Doing
 # the conversion here rather than through `Adapt` also drops the per-draw pin —

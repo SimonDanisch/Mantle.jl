@@ -83,7 +83,6 @@ Mantle.download(::HostDevice, a::Mantle.DeviceArray) = collect(hostview(a))
 Mantle.devicecopy!(::HostDevice, dst::Mantle.DeviceArray, src::Mantle.DeviceArray, n::Integer) =
     (copyto!(hostview(dst), 1, hostview(src), 1, n); dst)
 
-storage(x) = x
 
 # ── transients ────────────────────────────────────────────────────────────────
 """
