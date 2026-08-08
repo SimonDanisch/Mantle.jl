@@ -193,6 +193,47 @@ Mantle owns its array types, I spent two commits deriving a careful rule about
 safely borrowing somebody else's. The tell was that the rule needed remembering
 at all.)
 
+## 3b. Backend kernels and libraries, with Mantle owning the array type
+
+Two consumers, two conversions, and only one of them is interesting.
+
+**KA kernels take a plain device struct.** `LavaDeviceArray{T,N}` is `(ptr, dims)`;
+`CuDeviceArray` and `MtlDeviceArray` are the same shape. `DeviceArray` converts by
+pointer arithmetic at BAKE time — free, and no ownership involved because the
+struct owns nothing.
+
+**Libraries take a host-side handle.** cuBLAS/cuDNN want a `CuArray` or a raw
+`CuPtr` plus descriptors; MPS wants an `MTLBuffer` and an offset. That needs the
+owning array type — except non-owning, which every mature package already
+provides, because interop with a foreign allocator is a normal requirement:
+
+    CUDA.unsafe_wrap(CuArray, ptr::CuPtr{T}, dims; own = false)
+    Metal.unsafe_wrap(MtlArray, buf, offset, dims)
+
+So the conversion is that call. Nothing is invented; the hatch exists for exactly
+this.
+
+**The handle shape differs by backend and this is a requirement, not a detail.**
+CUDA gives a flat device pointer. Vulkan and Metal are BUFFER + OFFSET — there is
+no raw pointer to hand a descriptor. A `Region` must therefore express both,
+which it does only because `memoryof(region)` is opaque and the backend
+interprets it. Anything that narrows that field to a pointer breaks Metal and
+Vulkan silently.
+
+Alignment is already per request (`acquire!` takes it), which is what libraries
+with stronger requirements than 256 B need.
+
+**Where the one-allocator claim actually leaks: workspaces.** cuDNN and cuBLAS
+want scratch, and left alone they allocate it themselves — two allocators again,
+with the lower one invisible, which is precisely what was removed from the buffer
+path. They all take an explicit workspace pointer, so it must come from the pool:
+
+    ws = allocate(pool(dev), dev, kind, UInt8, nbytes)
+    cudnnConvolutionForward(..., pointer(ws), sizeof(ws))
+
+A library integration that skips this looks like it works and quietly reintroduces
+the thing this design exists to prevent.
+
 ## 4. Moving the editor
 
 Composition needs no new concept: build one graph from parts, so the placer sees
