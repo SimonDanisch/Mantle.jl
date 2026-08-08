@@ -159,54 +159,39 @@ piece and its plumbing is now verified end to end on the RTX 4000:
       -> VkManagedBuffer(buf, mem, addr, ...) -> valid device address
 
 i.e. a buffer bound into Mantle-owned memory, wrapped so Lava can use it, with a
-working BDA. **ANSWERED, from the source.** `src/array/lavaarray.jl:12`:
+working BDA. **AND THEN THE QUESTION DISSOLVED.** An earlier draft of this paragraph
+concluded "Mantle must never hand a bare `VkManagedBuffer` to `LavaArray`" — a
+rule for a situation that should not arise. Mantle owns its array type; it has no
+business constructing a `LavaArray` at all.
 
-    mutable struct LavaArray{T,N} <: AbstractGPUArray{T,N}
-        buf::GPUArrays.DataRef{VkManagedBuffer}
-        ...
-        # Register `unsafe_free!` as a GC finalizer so LavaArrays that fall out
-        # of scope without an explicit `unsafe_free!` call actually release
-        # their memory.
+What was missing is that *what a transient IS* and *what a kernel RECEIVES* are
+different things. Lava's kernel-argument type is
 
-A `LavaArray` DOES free its buffer on GC. But `buf` is a refcounted
-`GPUArrays.DataRef`, and `copy(::DataRef)` increments the count rather than
-duplicating — which is precisely why today's `materialize!` is safe: the block's
-array and every transient's array share one ref, and the free happens when the
-last one goes. (A bare `VkManagedBuffer` has no `copy` method at all, which is
-how the MWE surfaced this instead of crashing.)
+    struct LavaDeviceArray{T,N} <: GPUArrays.AbstractDeviceArray{T,N}
+        ptr::Ptr{T}
+        dims::NTuple{N,Int}
+    end
 
-So the rule for the raw migration, and it is not optional: **Mantle must never
-hand a bare `VkManagedBuffer` to `LavaArray`.** The buffer `Block` holds a
-`DataRef`, each transient gets a `copy` of it, and the refcount does what it
-already does correctly.
+— a plain, non-owning struct. So the chain is:
 
-One nuance follows that CORRECTS section 3 rather than confirming it: for that
-arena `trim!` does not free immediately. Dropping Mantle's ref only decrements;
-`vkFreeMemory` lands when the last transient's array is collected. So buffers are
-refcount-released while images are Mantle-released, and "the Block owns the
-memory, the Pool owns the Block, `trim!` frees" is true of one and not the
-other.
+* a transient's storage is Mantle's `DeviceArray`: region + dims + `T`, owning
+  nothing;
+* at BAKE time the extension converts it to
+  `LavaDeviceArray(Ptr{T}(block.address + offset(region) + transient_offset), dims)`.
 
-**THE HAZARD IS GONE, because the question was wrong.** An earlier draft here
-said the next step was blocked on whether a `LavaArray` built over an existing
-buffer OWNS it — and stopped to say so, which was the wrong call twice over.
-Building the MWE is the work, not a precondition for it; and Mantle should never
-have been reaching for a backend's array type in the first place.
+No `LavaArray` is constructed anywhere, so there is no finalizer, no `DataRef`,
+no refcount and no rule to remember. The block's device address is the entire
+bridge, and it is already verified: `unbound_buffer` -> `bind_buffer!` ->
+`VkManagedBuffer` gave a working BDA on the RTX 4000.
 
-Mantle owns its array types. `DeviceArray{T,N}` is a typed handle on a `Region`,
-and ownership is stated once, here, not negotiated per backend:
+Which also retracts the §3 nuance from the previous draft: buffers are NOT
+refcount-released. Nothing refcounts them. The Block owns the memory, the Pool
+owns the Block, `trim!` frees — one rule, both kinds, as originally written.
 
-> the Block owns the memory, the Pool owns the Block, `trim!` frees.
-
-A `DeviceArray` owns nothing. Dropping one frees nothing, has no finalizer, and
-cannot race the GC thread — which is the failure this codebase has paid for three
-times (the free-list race that became a SIGSEGV, the buffer-lifetime OOM, #13's
-device loss). The question of what Lava's finalizers do stops being Mantle's
-problem rather than being answered.
-
-This is also the direction of travel: Lava's high-level surface moves into Mantle
-over time and Lava becomes the mechanism underneath, so the array type belonging
-here is where it was always going.
+(Kept as a record because the wrong turn is instructive: having established that
+Mantle owns its array types, I spent two commits deriving a careful rule about
+safely borrowing somebody else's. The tell was that the rule needed remembering
+at all.)
 
 ## 4. Moving the editor
 
