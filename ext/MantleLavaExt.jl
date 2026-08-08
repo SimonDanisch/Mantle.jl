@@ -38,6 +38,20 @@ Mantle.Device(::typeof(Lava)) = get!(DEVICES, Lava.vk_context()) do
     ctx = Lava.vk_context()
     LavaDevice(ctx, ctx.default_bq)
 end
+
+"""
+    Device(LavaBackend())
+
+The Mantle device for a KA backend.
+
+The missing link for a KA workload that wants the pool: `DNNKernels` holds a
+`LavaBackend`, not a module, and allocating through `KA.allocate` puts its slab
+somewhere Mantle cannot see. This maps the backend it does have onto the cached
+device — same VkContext, same pool, so a model's scratch and an editor's
+transients land in one allocator.
+"""
+Mantle.Device(::Lava.LavaBackend) = Mantle.Device(Lava)
+
 Mantle.Device() = Mantle.Device(Lava)
 
 """The KernelAbstractions backend, for kernels the graph does not own."""
