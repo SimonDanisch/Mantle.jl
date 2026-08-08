@@ -25,7 +25,7 @@ module MantleHostExt
 using Mantle
 using Mantle: Storage, BufferKind, Access
 import KernelAbstractions as KA
-import Mantle: storage, dispatch!, compute!, run!
+import Mantle: storage, dispatch!, compute!, run!, free!
 
 # ── device ────────────────────────────────────────────────────────────────────
 struct HostDevice <: Mantle.Device
@@ -290,7 +290,7 @@ struct HostPlan <: Mantle.Plan
 end
 
 """Give this plan's pool regions back. Explicit — see `Mantle.trim!`."""
-free!(pl::HostPlan) = (foreach(Mantle.release!, pl.regions); empty!(pl.regions); nothing)
+Mantle.free!(pl::HostPlan) = (foreach(Mantle.release!, pl.regions); empty!(pl.regions); nothing)
 
 function Mantle.Plan(g::HostGraph; alias = true, policy = Mantle.Overlap())
     c = Mantle.compile!(Compile(g; alias, policy))

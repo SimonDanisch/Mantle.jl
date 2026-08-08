@@ -10,7 +10,7 @@ using Mantle: Usage, Storage, ColorAttachment, Depth, Sampled, Present, Undefine
               Src, Dst, transitions
 import Lava
 import Mantle: storage, Surface, Attribute, draw!, dispatch!, render!, compute!,
-               run!, npipelines, stride, count
+               run!, npipelines, stride, count, free!
 
 # ── device ────────────────────────────────────────────────────────────────────
 struct LavaDevice <: Mantle.Device
@@ -941,9 +941,10 @@ function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::AbstractVector{T
     src = data isa Vector{T} ? data : collect(data)
     GC.@preserve src Base.unsafe_copyto!(host.mapped_ptr, Ptr{UInt8}(pointer(src)), nbytes)
 
-    fmb = fresh.buf[]
+    fview = Mantle.deviceview(dst.dev, fresh)
+    fmb = fview.buf[]
     Lava.cmd_copy_buffer!(bq, host.buffer, fmb, nbytes;
-                          dst_off = fmb.pool_offset + fresh.offset)
+                          dst_off = fmb.pool_offset + fview.offset)
 
     dst.store = fresh
     signal = Lava.ensure_active_batch!(bq).signal_value
@@ -2204,6 +2205,13 @@ function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::I
                       d.tlas ? Lava.find_tlas_in_args(args) : nothing)
     nothing
 end
+
+"""
+Give this plan's regions back to the pool. The argument memory and the
+pipelines are ordinary Lava objects — the GC reclaims those; the regions are
+the thing only an explicit release can return, because nothing here finalizes.
+"""
+Mantle.free!(pl::LavaPlan) = (foreach(Mantle.release!, pl.slabs); empty!(pl.slabs); nothing)
 
 Base.close(::LavaPlan) = nothing
 Base.isopen(s::LavaSurface) = isopen(s.win)

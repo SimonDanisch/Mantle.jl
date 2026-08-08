@@ -193,18 +193,38 @@ device, and the compositor's intermediates alias against the UI's scratch.
 
 | | | done when |
 |---|---|---|
-| 0 | Delete the 5 redundant node syncs (#96); drop `isneutral` from `graphof` | suite unchanged; makes any later A/B honest rather than flattering |
-| 1 | `source → colour → blur` as a Mantle graph on Lava, behind a flag | **pixel-identical** to `execute!`; `peakbytes` vs the pool's high-water mark |
-| 2 | Parameters as `Scalar` + `Update` instead of baked constants | a keyframed σ costs a store, not a recompile |
+| 0 | Delete the 5 redundant node syncs (#96) | **landed** — suite unchanged |
+| 1 | The clip chain as a Mantle graph | **landed, not behind a flag** — see below |
+| 2 | Parameters as `Ref`s read at record time | **landed** — a keyframed σ costs a store, not a recompile |
 | 3 | Result store + `PlaneOp` (#94, #95) | matte/restore/stabilize are nodes, not special cases; five storage schemes become one |
-| 4 | Compositor — `placelayer!`, `layermatrix`, `mattealpha!` | currently outside `execute!` entirely |
+| 4 | Compositor — `placelayer!`, `layermatrix`, `mattealpha!` | currently outside the graph entirely |
 | 5 | VkMakie | the readback round-trip is gone |
 
-Stage 1 is the falsification step and everything after it is porting. It will
-surface what design cannot: how the decoded frame arrives (`Update` vs a
-`custom!` decode pass), what `cropaway!` becomes while crop is not a node, and
-whether `gaussianblur!`'s separable two-pass form fits `custom!` as cleanly as
-claimed.
+**What landed for 1–2, and how it differs from the guess above.** `execute!`,
+`FxGraph`, `BufferPool` and the per-node `eval_node!`s are *deleted*, not
+flagged: a clip's chain is a Mantle graph, one `custom!` pass per node. Every
+node is `custom!` rather than `dispatch!` because the bodies are multi-launch
+or host-branching — a decode, a model call, a separable blur with a scratch
+buffer — and `dispatch!` expresses exactly one kernel. That choice also settled
+stage 2's mechanism: a `custom!` body reads its node's parameters from a `Ref`
+at record time, so per-frame values need no `Scalar`+`Update` at all (that pair
+is the mechanism for `dispatch!`/`draw!` *arguments*, and no node is one). The
+engine caches one compiled plan per (node types in order, frame size), and the
+graph is rebuilt only when the structure changes. The compositor's scratch
+(`accum`/`warpbuf`/`cover`/`alphalayer`) is persistent `Mantle.Buffer`s on the
+same pool — inside its own graph is stage 4. Plan teardown is `Mantle.free!`,
+called by `emptyengine!`.
+
+Verified: GPU old-vs-new is **bit-identical** on both source types (CPU-frame
+upload and `GpuVideoStream` hardware decode); the CPU graph is bit-identical to
+the same kernels applied by hand; a param change reuses the plan; aliasing
+engages (opacity→blur→sharpen at 320×180: peak 3 frames, naive 5).
+
+What the falsification step surfaced: how the decoded frame arrives (a `custom!`
+source pass reading `FxState` — not `Update`, because the source object itself
+changes per call), what `cropaway!` becomes while crop is not a node (it stays
+one, applied to the output view after `run!`), and that `gaussianblur!`'s
+separable two-pass form fits `custom!` exactly as claimed.
 
 ## 5. Measured vs assumed
 

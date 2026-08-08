@@ -49,7 +49,7 @@ export PHASES, compile!
 # the one a Makie-shaped caller means — `update!(plot; positions = …)` sets an
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
-export run!, npipelines, capacity, use, peakbytes, storage, custom!
+export run!, npipelines, capacity, use, peakbytes, storage, custom!, free!
 export timings, PassTiming, NSAMPLES
 
 function update! end

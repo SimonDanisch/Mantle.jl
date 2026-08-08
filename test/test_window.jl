@@ -932,8 +932,9 @@ else
         loose = Base.invokelatest(build_targets, dev, 20_000; points = pts, alias = false)
 
         E = Base.get_extension(Mantle, :MantleLavaExt)
-        imgbytes(p) = only(s.bytes for s in p.slabs
-                           if E.arena(p.graph.transients[first(s.indices)]) isa E.Images)
+        imgbytes(p) = only(length(s) for s in p.slabs
+                           if any(t -> t isa E.TransientImage && t.memory === M.memoryof(s),
+                                  p.graph.transients))
         one = E.nbytes(first(t for t in tight.plan.graph.transients if t isa E.TransientImage))
 
         # Exactly one target's worth when they share, and two when they do not.
