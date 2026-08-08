@@ -53,40 +53,46 @@ Open, in the order they need answering:
    every value's producer. No conventional allocator has that, and it is the
    whole differentiator — not a smaller peak, a *graceful* one.
 
-## 3. Arenas across plans
+## 3. The device owns the pools
 
-Scheduling and memory are different axes and should not be split the same way.
+Scheduling and memory are different axes. A plan decides what runs and in what
+order; the **device** decides where bytes live, across every plan it knows about.
 
-A plan decides what runs and in what order. The **device** decides where bytes
-live, across every plan it knows about. Two transients that are never live
-together share bytes; two *plans* that never run together should too — and that
-is the same solver one level up, since `Item`/`Span`/`place` do not care whether
-the thing placed is a transient or a whole plan's arena.
+Nothing about that should reach the caller:
 
 ```julia
-pool   = ArenaPool(dev)
-editor = Plan(gframe; pool)                    # 60 Hz
-sam2   = Plan(gsam2;  pool, group = :models)   # on a click
-matte  = Plan(gmatte; pool, group = :models)   # per analysis step
+plan = Plan(g)      # that is all. `g` knows its device; the device owns the pools.
 ```
 
-A `group` promises its members never run concurrently. The concrete win: SAM 2's
+An earlier draft of this file had `ArenaPool(dev)` passed in and plans declaring
+`group = :models`. Both were wrong in the same way — they made the caller plumb
+and promise the things Mantle exists to decide, against the standing rule that
+memory management is centralized and high-level code never manages GPU resources.
+
+**One pool per memory kind, held by the device, permanently.** The mechanism is
+already in embryo: `arena(t)` returns `Buffers()` or `Images()` and `Place` runs
+one placement per arena. That is a *derived* per-transient property — the
+transient says what kind of memory it needs, nothing declares where it lands.
+Extending `arena` is then how a new workload gets its memory right without new
+API: device-local, host-visible/BAR, images keyed by `req.type_bits` (already why
+`Images` intersects them), acceleration-structure scratch for RT.
+
+`allocate` changes meaning with it: not "make an allocation" but "give me `bytes`
+in the pool for this kind, growing it if needed". That also removes the
+per-compile allocation — on Lava, `device_memory` plus `bind_image!` per
+transient, every compile, where it should be per *growth*.
+
+**Residency is observed, not declared.** `run!` makes a plan resident; a plan
+that has not run holds a region that is a reclaim candidate. No promise for
+anyone to get wrong, and it degrades on real behaviour rather than on an
+annotation someone forgot to update. The concrete win is unchanged: SAM 2's
 activations and the editor's per-frame transients cannot coexist — a click stalls
 the preview by construction — so today that is gigabytes held twice.
 
-Two things make this harder than the transient case:
-
-* **Rebinding is not free on Vulkan.** `materialize!` does `bind_image!` plus
-  `image_view` *per transient*. A base offset that moves on activation rebinds
-  everything, so the pool wants to hand a stable region per plan and reshuffle
-  only when membership changes — a suballocator with defragmentation, not
-  acquire/release.
-* **Plan liveness is dynamic; transient liveness is static.** `Liveness` derives
-  intervals from the schedule; nothing derives when a user clicks. So overlap is
-  *declared*, and a declaration nothing checks is how two plans stomp each other
-  — which on a GPU is a corrupted frame or a fault far from the cause. That wants
-  a debug mode that poisons a group's arena on activation, the way `alias = false`
-  exists as a bisection tool.
+**The part that cannot be hand-waved:** reclaiming a region means rebinding when
+the plan comes back — `bind_image!` + `image_view` per transient. Reclaim is not
+free, the policy has to know its price, and nobody has measured it. That is the
+real content of this section, and it is a measurement rather than a decision.
 
 ## 4. Moving the editor
 
@@ -141,6 +147,10 @@ claimed.
 * The five lifted phases contain **zero** `Lava.` references between them.
 
 **Assumed, and load-bearing:**
+
+* That reclaiming a plan's region is affordable. It costs `bind_image!` +
+  `image_view` per transient on return, and nothing has measured that. It is the
+  number the residency policy in §3 turns on.
 
 * That the Host numbers say anything about Lava. They do not — Lava's `allocate`
   is `device_memory` and its `materialize!` is `bind_image!` + `image_view` per
