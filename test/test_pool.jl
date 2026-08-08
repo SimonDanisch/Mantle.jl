@@ -118,3 +118,43 @@ end
     @test_throws ArgumentError M.DeviceArray{Float32}(r, (16,))   # needs 64, has 16
     @test M.DeviceArray{Float32}(r, (4,)) isa M.DeviceArray{Float32,1}
 end
+
+# ── persistent resources: one implementation, no backend ──────────────────────
+
+M.rawalloc(d::FakeDev, ::M.Persistent, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+M.blocksize(::FakeDev) = 1 << 16
+M.upload!(::FakeDev, a::M.DeviceArray{T}, first, data) where {T} =
+    (v = reinterpret(T, view(M.memoryof(a), (M.offset(a)+1):(M.offset(a)+sizeof(a))));
+     copyto!(v, first, data, 1, length(data)); a)
+M.download(::FakeDev, a::M.DeviceArray{T}) where {T} =
+    collect(reinterpret(T, view(M.memoryof(a), (M.offset(a)+1):(M.offset(a)+sizeof(a)))))
+M.devicecopy!(d::FakeDev, dst, src, n) =
+    (M.upload!(d, dst, 1, M.download(d, src)[1:n]); dst)
+M.deviceview(::FakeDev, a) = a
+
+@testset "Buffer/Scalar are core types over pool regions" begin
+    d = FakeDev(); p = M.Pool(); dev = d
+    # the pool has to be reachable from the device, as it is for a real one
+    @eval M.pool(::$(typeof(d))) = $p
+
+    b = M.Buffer(dev, Float32[1, 2, 3]; capacity = 8)
+    @test length(b) == 3 && M.capacity(b) == 8 && eltype(b) == Float32
+    @test Array(b) == Float32[1, 2, 3]
+    @test length(d.allocs) == 1                     # ONE block, not one per resource
+
+    s = M.Scalar(dev, 7.0f0)
+    @test length(d.allocs) == 1                     # …shared with the buffer
+    M.update!(s, 9.0f0)
+
+    # within capacity: no reallocation, no new region
+    M.update!(b, 4:6, Float32[4, 5, 6])
+    @test length(b) == 6 && Array(b) == Float32[1, 2, 3, 4, 5, 6]
+    @test length(d.allocs) == 1
+
+    # past capacity: a fresh region, the contents carried over, the old one back
+    before = M.offset(M.region(b.store))
+    resize!(b, 32)
+    @test M.capacity(b) == 32
+    @test Array(b) == Float32[1, 2, 3, 4, 5, 6]     # devicecopy! ran before release!
+    @test M.offset(M.region(b.store)) != before
+end

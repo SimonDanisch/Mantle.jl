@@ -25,7 +25,7 @@ module MantleHostExt
 using Mantle
 using Mantle: Storage, BufferKind, Access
 import KernelAbstractions as KA
-import Mantle: storage, Buffer, Scalar, dispatch!, compute!, run!, capacity
+import Mantle: storage, dispatch!, compute!, run!
 
 # ── device ────────────────────────────────────────────────────────────────────
 struct HostDevice <: Mantle.Device
@@ -64,20 +64,24 @@ Mantle.Device(b::KA.CPU) = HostDevice(b)
 Mantle.backend(d::HostDevice) = d.backend
 
 # ── persistent resources ──────────────────────────────────────────────────────
-mutable struct HostBuffer{T} <: Mantle.Resource
-    store::Vector{T}
-end
-Buffer(::HostDevice, data::AbstractVector{T}) where {T} = HostBuffer{T}(collect(data))
-storage(b::HostBuffer) = b.store
-capacity(b::HostBuffer) = length(b.store)
-Mantle.update!(b::HostBuffer, data::AbstractVector) = (copyto!(b.store, data); b)
+#
+# `HostBuffer`/`HostScalar` are gone: `Mantle.Buffer` and `Mantle.Scalar` are core
+# types over pool regions, so a backend supplies four primitives and no type.
 
-mutable struct HostScalar{T} <: Mantle.Resource
-    store::Vector{T}
-end
-Scalar(::HostDevice, x::T) where {T} = HostScalar{T}([x])
-storage(s::HostScalar) = s.store
-Mantle.update!(s::HostScalar, x) = (s.store[1] = x; s)
+Mantle.rawalloc(::HostDevice, ::Mantle.Persistent, bytes::Int, c) = zeros(UInt8, max(bytes, 1))
+Mantle.constraintof(::HostDevice, ::Mantle.Persistent, ts) = nothing
+
+"The bytes of `a`, as a `T` view into its block. Host memory is directly addressable,
+so this is a reinterpret rather than a mapping."
+hostview(a::Mantle.DeviceArray{T}) where {T} =
+    reinterpret(T, view(Mantle.memoryof(a), (Mantle.offset(a) + 1):(Mantle.offset(a) + sizeof(a))))
+
+Mantle.deviceview(::HostDevice, a::Mantle.DeviceArray) = hostview(a)
+Mantle.upload!(::HostDevice, a::Mantle.DeviceArray, first::Integer, data::AbstractVector) =
+    (copyto!(hostview(a), first, data, 1, length(data)); a)
+Mantle.download(::HostDevice, a::Mantle.DeviceArray) = collect(hostview(a))
+Mantle.devicecopy!(::HostDevice, dst::Mantle.DeviceArray, src::Mantle.DeviceArray, n::Integer) =
+    (copyto!(hostview(dst), 1, hostview(src), 1, n); dst)
 
 storage(x) = x
 

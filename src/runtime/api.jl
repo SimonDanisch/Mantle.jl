@@ -86,8 +86,6 @@ discards(::KeepOp) = false
 discards(::DiscardOp) = true
 discards(::Clear) = true
 
-function Buffer end
-function Scalar end
 function Surface end
 function Attribute end
 """

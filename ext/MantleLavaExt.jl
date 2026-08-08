@@ -9,7 +9,7 @@ using Mantle: Usage, Storage, ColorAttachment, Depth, Sampled, Present, Undefine
               CopySrc, CopyDst, ReadOnly, WriteOnly, ReadWrite, NoAccess, ImageKind, BufferKind,
               Src, Dst, transitions
 import Lava
-import Mantle: storage, Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!,
+import Mantle: storage, Surface, Attribute, draw!, dispatch!, render!, compute!,
                run!, npipelines, stride, count
 
 # ── device ────────────────────────────────────────────────────────────────────
@@ -70,79 +70,46 @@ quarter turn with no complaint. `permutedims` first if it is going to be looked 
 Mantle.screenshot(w::LavaWindow) = Lava.readback_window(w.win)
 
 # ── persistent resources ──────────────────────────────────────────────────────
-"""
-Length and capacity are separate so a count that changes every frame never
-reallocates. `store` is always at capacity; `len` is what a draw covers.
-"""
-mutable struct LavaBuffer{T} <: Mantle.Resource
-    # Concrete, not `Any`: a rename swaps the store for a fresh one but never for
-    # a different type, and `Any` here made every `storage(buf)` in the per-frame
-    # argument path return a boxed value.
-    store::Lava.LavaArray{T,1}
-    len::Int
-    capacity::Int
-    dev::LavaDevice
-end
+#
+# `LavaBuffer`/`LavaScalar` are gone. `Mantle.Buffer` and `Mantle.Scalar` are core
+# types over pool regions, so this supplies primitives and no type — and their
+# memory now comes from the same pool as every transient, which is the point:
+# one allocator sees both.
 
 """
 Usage bits an element type asks for beyond the ordinary ones, which is one type
 and one bit: a buffer of draw commands is read by the command processor, and a
 buffer without `INDIRECT_BUFFER_BIT` is a validation error at the draw rather
 than where it was allocated.
+
+This is `Mantle.bufferusage`'s answer for this backend — "what memory can host a
+`T`" is Vulkan vocabulary, so the backend owns it.
 """
 extrausage(::Type) = UInt32(0)
 extrausage(::Type{Lava.DrawIndirectCommand}) = UInt32(Lava.Vulkan.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+Mantle.bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
-function Buffer(dev::LavaDevice, data::AbstractVector{T}; capacity = length(data)) where {T}
-    cap = max(capacity, length(data))
-    store = Lava.LavaArray{T,1}(undef, (cap,); extra_usage = extrausage(T))
-    copyto!(store, 1, data, 1, length(data))
-    LavaBuffer{T}(store, length(data), cap, dev)
-end
+Mantle.rawalloc(dev::LavaDevice, ::Mantle.Persistent, bytes::Int, usage) =
+    Mantle.rawalloc(dev, Buffers(), bytes, usage)
+Mantle.constraintof(::LavaDevice, ::Mantle.Persistent, ts) = UInt32(0)
 
-Buffer(dev::LavaDevice, ::Type{T}, n::Integer) where {T} =
-    LavaBuffer{T}(Lava.LavaArray{T,1}(undef, (Int(n),); extra_usage = extrausage(T)),
-                  Int(n), Int(n), dev)
+"""
+A borrowed `LavaArray` over a region.
 
-"""One value shared by every element. A distinct type, not a length-1 buffer:
-"shared by all" is a claim about meaning, not a length that happens to be one."""
-mutable struct LavaScalar{T} <: Mantle.Resource
-    store::Lava.LavaArray{T,1}
-    dev::LavaDevice
-end
+The `DataRef` releaser is a NO-OP, so `copy` bumps a refcount that frees nothing
+and Mantle stays the owner — Lava's shape of `unsafe_wrap(…, own = false)`. What
+a kernel gets is `todevice` of this; what a copy or a library gets is this.
+"""
+Mantle.deviceview(::LavaDevice, a::Mantle.DeviceArray{T}) where {T} =
+    Lava.LavaArray{T,1}(copy(Mantle.memoryof(a).ref), (length(a),); offset = Mantle.offset(a))
 
-Scalar(dev::LavaDevice, x::T) where {T} = LavaScalar{T}(Lava.LavaArray(T[x]), dev)
-
-Base.length(b::LavaBuffer) = b.len
-Base.length(::LavaScalar) = 1
-Mantle.capacity(b::LavaBuffer) = b.capacity
-count(b::LavaBuffer) = b.len
-count(::LavaScalar) = 1
-
-stride(::LavaBuffer) = 1
-stride(::LavaScalar) = 0
-
-Base.eltype(::LavaBuffer{T}) where {T} = T
-Base.eltype(::LavaScalar{T}) where {T} = T
-
-Mantle.update!(b::LavaBuffer, data::AbstractVector) = (Mantle.update!(b, 1:length(data), data); b)
-function Mantle.update!(b::LavaBuffer, r::AbstractUnitRange, data::AbstractVector)
-    length(r) == length(data) || throw(DimensionMismatch("range $r vs $(length(data)) elements"))
-    last(r) <= b.capacity || throw(BoundsError(b, r))
-    copyto!(b.store, first(r), data, 1, length(data))
-    b.len = max(b.len, last(r))
-    b
-end
-Mantle.update!(b::LavaBuffer, i::Integer, x) = Mantle.update!(b, i:i, [x])
-Mantle.update!(s::LavaScalar, x) = (copyto!(s.store, 1, [x], 1, 1); s)
-
-function Base.resize!(b::LavaBuffer, n::Integer)
-    n <= b.capacity || throw(ArgumentError("resize beyond capacity is not implemented yet"))
-    b.len = Int(n)
-    b
-end
-
-Base.Array(b::LavaBuffer) = Array(b.store)[1:b.len]
+Mantle.upload!(d::LavaDevice, a::Mantle.DeviceArray{T}, first::Integer,
+               data::AbstractVector) where {T} =
+    (copyto!(Mantle.deviceview(d, a), Int(first), collect(T, data), 1, length(data)); a)
+Mantle.download(d::LavaDevice, a::Mantle.DeviceArray) = Array(Mantle.deviceview(d, a))
+Mantle.devicecopy!(d::LavaDevice, dst::Mantle.DeviceArray, src::Mantle.DeviceArray,
+                   n::Integer) =
+    (copyto!(Mantle.deviceview(d, dst), 1, Mantle.deviceview(d, src), 1, Int(n)); dst)
 
 # ── the window ────────────────────────────────────────────────────────────────
 """
@@ -347,14 +314,25 @@ function takehost!(r::Recycler, bq, n::Integer)
     Lava.host_buffer(bq, n)
 end
 
-"""Take a buffer of exactly `n` bytes, recycled if one is available."""
+"""
+A region for `n` elements of `T`, recycled if one of that size is idle.
+
+From Mantle's pool, not `LavaArray{T,1}(undef, …)` — a rename is an allocation
+like any other, and one that bypassed the pool would be invisible to it while
+being exactly the kind of churn a pool exists to absorb.
+
+The recycler stays in front of the pool rather than being replaced by it: it
+holds a region until the queue timeline says the GPU is done reading, which is a
+question about submitted work that the allocator has no way to answer.
+"""
 function take!(r::Recycler, dev::LavaDevice, ::Type{T}, n::Integer) where {T}
     bytes = Int(n) * sizeof(T)
-    pool = get(r.free, bytes, nothing)
-    if pool !== nothing && !isempty(pool)
-        return pop!(pool)::Lava.LavaArray{T,1}
+    free = get(r.free, bytes, nothing)
+    if free !== nothing && !isempty(free)
+        return pop!(free)::Mantle.DeviceArray{T,1}
     end
-    Lava.LavaArray{T,1}(undef, (Int(n),))
+    Mantle.allocate(Mantle.pool(dev), dev, Mantle.Persistent(), T, (Int(n),);
+                    align = 256, blocksize = Mantle.blocksize(dev))
 end
 
 """Hand a buffer back, reusable once the queue timeline passes `signal`."""
@@ -670,7 +648,7 @@ decide it. The element type is what says which, because a buffer of draw command
 is not something anything else would be.
 """
 drawover(p::PassHandle, n) = n
-drawover(p::PassHandle, n::LavaBuffer{Lava.DrawIndirectCommand}) = indirectcount!(p, n)
+drawover(p::PassHandle, n::Mantle.Buffer{Lava.DrawIndirectCommand}) = indirectcount!(p, n)
 drawover(p::PassHandle, n::TransientBuffer{Lava.DrawIndirectCommand}) = indirectcount!(p, n)
 
 function indirectcount!(p::PassHandle, n)
@@ -846,7 +824,7 @@ Renaming a buffer to change one element would device-copy everything that did
 not change, and writing a whole 2 MB array in place would need the hazard
 handled. Each route is bad at the other's job, which is why both exist.
 """
-write_update!(g::LavaGraph, bq, r::UpdateRef, data::LavaBuffer) =
+write_update!(g::LavaGraph, bq, r::UpdateRef, data::Mantle.Buffer) =
     write_update!(g, bq, r, Mantle.storage(data))
 
 # A scalar attribute is a one-element buffer, so a new value is a one-element
@@ -878,15 +856,16 @@ anything else that never went through the host — needs no staging buffer and n
 the same two routes as above, differing only in where the source is, so it is a
 method rather than a branch.
 """
-function rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::Lava.LavaArray{T,1}) where {T}
+function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::Lava.LavaArray{T,1}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
+    fview = Mantle.deviceview(dst.dev, fresh)
 
-    smb, fmb = data.buf[], fresh.buf[]
+    smb, fmb = data.buf[], fview.buf[]
     Lava.cmd_copy_buffer!(bq, smb, fmb, nbytes;
                           src_off = smb.pool_offset + data.offset,
-                          dst_off = fmb.pool_offset + fresh.offset)
+                          dst_off = fmb.pool_offset + fview.offset)
 
     dst.store = fresh
     retire!(g.recycler, old, dst.capacity * sizeof(T),
@@ -904,9 +883,9 @@ function inplace!(bq, dst, data::Lava.LavaArray{T,1}, from::Integer) where {T}
 end
 
 # A Mantle buffer says the same thing as its store, so it takes the same route.
-rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::LavaBuffer{T}) where {T} =
+rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::Mantle.Buffer{T}) where {T} =
     rename!(g, bq, dst, Mantle.storage(data))
-inplace!(bq, dst, data::LavaBuffer, from::Integer) =
+inplace!(bq, dst, data::Mantle.Buffer, from::Integer) =
     inplace!(bq, dst, Mantle.storage(data), from)
 
 """In-place, inline in the command buffer. Falls back to renaming when the
@@ -939,7 +918,7 @@ The staging buffer is recycled by size for the same reason the stores are: it is
 the same size every frame, and a recorded copy reads it later, so it cannot be
 handed out again until the GPU is past this frame.
 """
-function rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::AbstractVector{T}) where {T}
+function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::AbstractVector{T}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
@@ -1213,8 +1192,6 @@ mutable struct LavaPlan <: Mantle.Plan
 end
 
 """The backend object behind a resource: what actually gets bound or copied."""
-Mantle.storage(x::LavaBuffer) = x.store
-Mantle.storage(x::LavaScalar) = x.store
 Mantle.storage(a::Attr) = Mantle.storage(a.resource)
 # What a kernel receives: `LavaDeviceArray` is `(ptr, dims)` and owns nothing, so
 # there is no ownership question to answer here — which is why Mantle holding the

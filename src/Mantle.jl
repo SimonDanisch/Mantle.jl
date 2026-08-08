@@ -14,6 +14,7 @@ include("sync/transition.jl")
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("phases.jl")
+include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is deliberately not exported: it is a Span predicate nothing outside
@@ -22,6 +23,7 @@ export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved
 export DeviceArray, releaseregions!, blocksize
+export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
 export rawalloc, rawfree, constraintof, compatible
 export readproblem
 
