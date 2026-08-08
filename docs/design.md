@@ -159,11 +159,33 @@ piece and its plumbing is now verified end to end on the RTX 4000:
       -> VkManagedBuffer(buf, mem, addr, ...) -> valid device address
 
 i.e. a buffer bound into Mantle-owned memory, wrapped so Lava can use it, with a
-working BDA. What remains untested is the last hop — a `LavaArray` over that
-managed buffer, and specifically whether dropping one frees memory Mantle owns.
-The MWE for it is: build the array, `copyto!` a pattern, drop it, `GC.gc()` three
-times, rebuild an array over the SAME memory and assert the pattern survived. Run
-that before wiring `rawalloc(::Buffers)`, not after.
+working BDA. **ANSWERED, from the source.** `src/array/lavaarray.jl:12`:
+
+    mutable struct LavaArray{T,N} <: AbstractGPUArray{T,N}
+        buf::GPUArrays.DataRef{VkManagedBuffer}
+        ...
+        # Register `unsafe_free!` as a GC finalizer so LavaArrays that fall out
+        # of scope without an explicit `unsafe_free!` call actually release
+        # their memory.
+
+A `LavaArray` DOES free its buffer on GC. But `buf` is a refcounted
+`GPUArrays.DataRef`, and `copy(::DataRef)` increments the count rather than
+duplicating — which is precisely why today's `materialize!` is safe: the block's
+array and every transient's array share one ref, and the free happens when the
+last one goes. (A bare `VkManagedBuffer` has no `copy` method at all, which is
+how the MWE surfaced this instead of crashing.)
+
+So the rule for the raw migration, and it is not optional: **Mantle must never
+hand a bare `VkManagedBuffer` to `LavaArray`.** The buffer `Block` holds a
+`DataRef`, each transient gets a `copy` of it, and the refcount does what it
+already does correctly.
+
+One nuance follows that CORRECTS section 3 rather than confirming it: for that
+arena `trim!` does not free immediately. Dropping Mantle's ref only decrements;
+`vkFreeMemory` lands when the last transient's array is collected. So buffers are
+refcount-released while images are Mantle-released, and "the Block owns the
+memory, the Pool owns the Block, `trim!` frees" is true of one and not the
+other.
 
 **THE HAZARD IS GONE, because the question was wrong.** An earlier draft here
 said the next step was blocked on whether a `LavaArray` built over an existing
