@@ -168,6 +168,15 @@ it just gave back, whole.
 function release!(r::Region)
     blk = r.block
     i = searchsortedfirst_lower(blk.free, r.span.lower)
+    # A double release is silent otherwise: the span goes on the list twice, two
+    # later `acquire!`s hand out the same bytes, and the corruption surfaces
+    # nowhere near here. Overlapping a neighbour is the only way that happens, so
+    # checking two entries catches it at the moment it is committed.
+    for j in (i - 1, i)
+        1 <= j <= length(blk.free) && overlaps(blk.free[j], r.span) &&
+            error("release!: $(r.span) overlaps free $(blk.free[j]) — released twice, " *
+                  "or a Region outlived the block it came from")
+    end
     insert!(blk.free, i, r.span)
     # merge with the previous, then the next; at most two joins per release
     if i > 1 && blk.free[i - 1].upper == blk.free[i].lower

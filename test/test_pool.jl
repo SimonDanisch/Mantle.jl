@@ -158,3 +158,18 @@ M.deviceview(::FakeDev, a) = a
     @test Array(b) == Float32[1, 2, 3, 4, 5, 6]     # devicecopy! ran before release!
     @test M.offset(M.region(b.store)) != before
 end
+
+@testset "release! catches a double release instead of corrupting" begin
+    d, p = FakeDev(), M.Pool()
+    a = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    b = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    M.release!(a)
+    # Without the guard this inserts a's span twice, and the NEXT two acquires
+    # hand out the same bytes — corruption with no error anywhere near it.
+    @test_throws ErrorException M.release!(a)
+    # …and a legitimate release of a different region still works.
+    M.release!(b)
+    c = M.acquire!(p, d, :buf, nothing, 128; blocksize = 4096)
+    @test M.offset(c) == 0                      # both spans coalesced back
+    @test d.allocs == [4096]
+end
