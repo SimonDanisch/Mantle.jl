@@ -16,7 +16,10 @@ import Mantle: storage, Buffer, Scalar, Surface, Attribute, draw!, dispatch!, re
 struct LavaDevice <: Mantle.Device
     ctx::Any
     bq::Any
+    pool::Mantle.Pool          # the device owns it; nothing about it reaches the caller
 end
+LavaDevice(ctx, bq) = LavaDevice(ctx, bq, Mantle.Pool())
+Mantle.pool(d::LavaDevice) = d.pool
 
 Mantle.Device(::typeof(Lava)) = LavaDevice(Lava.vk_context(), Lava.vk_context().default_bq)
 Mantle.Device() = Mantle.Device(Lava)
@@ -1310,6 +1313,8 @@ Mantle.passes(c::Compile) = c.graph.passes
 Mantle.usages(p::Pass) = p.usages
 Mantle.overlapping(c::Compile, a::Int, b::Int) = overlapping(c.graph, a, b)
 Mantle.policy(c::Compile) = c.policy
+Mantle.device(c::Compile) = c.graph.dev
+Mantle.pool(c::Compile) = c.graph.dev.pool
 Mantle.alias(c::Compile) = c.alias
 Mantle.transients(c::Compile) = c.graph.transients
 Mantle.transientbyid(c::Compile) = c.graph.transient_by_id
@@ -1356,17 +1361,30 @@ thing may run in either order, which is the freedom the scheduler spends.
 """Back an arena. Buffers get a Lava array; images get raw device memory."""
 # The arena is one allocation shared by transients of several element types, so
 # its usage bits are the union of what they ask for.
-Mantle.allocate(::Buffers, c::Compile, bytes::Int, ts) =
-    Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),);
-                            extra_usage = reduce(|, (extrausage(eltype(t)) for t in ts)))
+# STAGED: the buffer block is still a `LavaArray`, i.e. still suballocated out of
+# Lava's own pool. `bind_buffer!`/`unbound_buffer` now exist in Lava for the raw
+# migration, and that is the next commit; this one moves the LAYER above it onto
+# Mantle's pool without changing what a block is made of.
+Mantle.rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage) =
+    Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),); extra_usage = usage)
 
-function Mantle.allocate(::Images, c::Compile, bytes::Int, ts)
-    # The memory has to satisfy every image in it at once, so the type bits are
-    # the intersection. `device_memory` errors if that is empty rather than
-    # picking a type some image cannot use.
-    bits = reduce(&, (t.req.type_bits for t in ts))
-    Lava.device_memory(c.graph.dev.ctx, max(bytes, 1), bits)
-end
+Mantle.rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
+    Lava.device_memory(dev.ctx, max(bytes, 1), bits)
+
+Mantle.rawfree(::LavaDevice, mem) = nothing   # Lava frees its own; see the staging note
+
+# What memory the given transients can legally share. For images that is the
+# INTERSECTION of their type bits — `device_memory` errors on an empty one rather
+# than picking a type some image cannot use.
+Mantle.constraintof(::LavaDevice, ::Images, ts) = reduce(&, (t.req.type_bits for t in ts))
+Mantle.constraintof(::LavaDevice, ::Buffers, ts) =
+    reduce(|, (extrausage(eltype(t)) for t in ts))
+
+# A block may host a request when its memory satisfies it: for images the block's
+# type bits must still include a type the request allows; for buffers the block's
+# usage flags must be a superset of what the request needs.
+Mantle.compatible(::LavaDevice, blk::Integer, req::Integer) = (blk & req) == req
+Mantle.compatible(::LavaDevice, blk, req) = blk == req
 
 """Give a placed transient its storage."""
 function Mantle.materialize!(t::TransientBuffer, slab, offset)
@@ -1724,7 +1742,7 @@ dispatchrange(x) = count(x)
 Mantle.Plan(g::LavaGraph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Mantle.Policy = Mantle.Overlap()) =
     let c = Mantle.compile!(Compile(g; alias, coalesce, policy))
-        LavaPlan(g, c.transitions, c.passes, c.pipelines, Mantle.analysis(c).slabs,
+        LavaPlan(g, c.transitions, c.passes, c.pipelines, Mantle.analysis(c).regions,
                  Mantle.analysis(c).peak, Mantle.analysis(c).naive,
                  profile ? Profiler(g.dev.ctx, c.passes) : nothing,
                  alias, coalesce, policy, ArgMemory(g.dev, c.passes))
@@ -1753,7 +1771,7 @@ function refit!(pl::LavaPlan)
     moved || return false
     c = Mantle.compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
-    let a = Mantle.analysis(c); pl.slabs, pl.peak, pl.naive = a.slabs, a.peak, a.naive end
+    let a = Mantle.analysis(c); pl.slabs, pl.peak, pl.naive = a.regions, a.peak, a.naive end
     # A recompile can change the draws and therefore the layout, so the argument
     # memory is laid out again with them. The old slots are still being read by
     # frames in flight; `sync_swapchain!` waited for the device before any of

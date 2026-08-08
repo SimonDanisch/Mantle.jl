@@ -47,11 +47,12 @@ mutable struct Analysis
     # hands there. The old index is kept because the barrier is derived from what
     # that transient was last doing, not assumed to be everything.
     alias_begins::Dict{Int,Vector{Tuple{Int,Int}}}
-    slabs::Vector{Any}                          # Place: one per arena, kept alive by the plan
-    slab::Any
+    # Place: one region per arena, suballocated from the device's pool. Held by
+    # the plan; `release!`d when it is torn down, never by a finalizer.
+    regions::Vector{Any}
 end
 Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
-                      Dict{Int,Vector{Tuple{Int,Int}}}(), Any[], nothing)
+                      Dict{Int,Vector{Tuple{Int,Int}}}(), Any[])
 
 """The [`Analysis`](@ref) a compilation context carries. One method per backend."""
 function analysis end
@@ -76,6 +77,25 @@ function overlapping end
 
 """The scheduling [`Policy`](@ref) a context was built with."""
 function policy end
+
+"""The device a context compiles for. Where its [`Pool`](@ref) lives."""
+function device end
+
+"""
+The device's [`Pool`](@ref) — one per memory kind, owned by the device and never
+by the caller. `Place` suballocates from it instead of allocating per compile.
+"""
+function pool end
+
+"""
+Smallest block the pool takes from this device.
+
+A device property rather than a Mantle constant: 64 MiB is right for discrete
+VRAM, where an allocation is expensive and a driver has a limit on how many you
+may hold, and wrong for host memory, where over-allocating just faults in pages
+nobody asked for.
+"""
+blocksize(dev) = 64 << 20
 
 """Whether transients may share bytes. `false` gives every one the whole
 timeline, which is a bisection tool rather than a tuning knob — it is how the
@@ -344,17 +364,33 @@ function run!(::Place, c)
     for ar in unique(map(arena, ts))
         idx = findall(t -> arena(t) == ar, ts)
         pl = place(Problem(a.items[idx], typemax(Int)))
-        mem = allocate(ar, c, pl.height, ts[idx])
-        push!(a.slabs, Slab(mem, pl.height, idx))
+        # Suballocated from the device's pool, not allocated here. A second
+        # compile of the same graph reaches the device only if the pool has to
+        # grow — which is the whole point, since this used to be one fresh
+        # device allocation per arena per compile.
+        reg = acquire!(pool(c), device(c), ar, ts[idx], pl.height;
+                       blocksize = blocksize(device(c)))
+        push!(a.regions, reg)
         a.peak += pl.height
         for i in idx
             a.offsets[i] = pl.offsets[string(i)]
-            materialize!(ts[i], mem, a.offsets[i])
+            # The transient's offset is relative to the REGION; the region's is
+            # relative to the block. Adding them is where a suballocated plan
+            # differs from one that owns its allocation outright.
+            materialize!(ts[i], memoryof(reg), offset(reg) + a.offsets[i])
         end
     end
-    a.slab = isempty(a.slabs) ? nothing : first(a.slabs).memory
     return c
 end
+
+"""
+Give a compilation's regions back to the pool.
+
+Explicit, and never a finalizer — see [`trim!`](@ref). A plan that is replaced
+without this leaks its regions until the pool is trimmed, which is a leak rather
+than a crash, and the right way round.
+"""
+releaseregions!(a::Analysis) = (foreach(release!, a.regions); empty!(a.regions); nothing)
 
 """
 Which passes begin using memory another transient just finished with.

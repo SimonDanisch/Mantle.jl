@@ -67,8 +67,11 @@ end
     # bug — which is the only reason it uses one arena instead of three arrays.
     @test M.peakbytes(plan) < HOSTEXT.naivebytes(plan)
 
-    # …and the arena is genuinely one allocation the views point into.
-    @test length(plan.arena) == M.peakbytes(plan)
+    # …and the arena is genuinely one allocation the views point into. It is now
+    # a POOL BLOCK, so it is at least the peak rather than exactly it — the plan
+    # holds a region inside it, and that region is what matches the peak.
+    @test length(plan.arena) >= M.peakbytes(plan)
+    @test length(only(plan.regions)) == M.peakbytes(plan)
     M.run!(plan)
     @test !all(iszero, plan.arena)
 end

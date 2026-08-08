@@ -30,7 +30,10 @@ import Mantle: storage, Buffer, Scalar, dispatch!, compute!, run!, capacity
 # ── device ────────────────────────────────────────────────────────────────────
 struct HostDevice <: Mantle.Device
     backend::Any
+    pool::Mantle.Pool          # the device owns it; nothing about it reaches the caller
 end
+HostDevice(backend) = HostDevice(backend, Mantle.Pool())
+Mantle.pool(d::HostDevice) = d.pool
 """
     Device(Host())
     Device(KA.CPU())
@@ -187,8 +190,18 @@ Mantle.transientbyid(c::Compile) = c.graph.transient_by_id
 # No slices on this backend, so two ids name the same bytes exactly when they are
 # the same id — which the `overlapping` docstring says is the floor.
 Mantle.overlapping(::Compile, a::Int, b::Int) = a == b
+Mantle.device(c::Compile) = c.graph.dev
+Mantle.pool(c::Compile) = Mantle.pool(c.graph.dev)
 
-Mantle.allocate(::HostArena, ::Compile, bytes::Int, ts) = zeros(UInt8, max(bytes, 1))
+# The four primitives core asks of a backend. No policy here: which block, what
+# offset, when to grow and when to release are all decided in `Mantle.Pool`.
+Mantle.rawalloc(::HostDevice, ::HostArena, bytes::Int, constraint) = zeros(UInt8, max(bytes, 1))
+Mantle.rawfree(::HostDevice, mem) = nothing
+# Host memory is not VRAM: a 64 MiB block would fault in pages nobody asked for,
+# and an allocation here is cheap enough that a small block is the right trade.
+Mantle.blocksize(::HostDevice) = 1 << 20
+Mantle.constraintof(::HostDevice, ::HostArena, ts) = nothing   # host memory is host memory
+Mantle.compatible(::HostDevice, a, b) = true
 
 """
 Give a transient its slice of the arena.
@@ -255,13 +268,17 @@ struct HostPlan <: Mantle.Plan
     arena::Vector{UInt8}
     peak::Int
     naive::Int
+    regions::Vector{Any}       # held; given back by `free!`, never by a finalizer
 end
+
+"""Give this plan's pool regions back. Explicit — see `Mantle.trim!`."""
+free!(pl::HostPlan) = (foreach(Mantle.release!, pl.regions); empty!(pl.regions); nothing)
 
 function Mantle.Plan(g::HostGraph; alias = true, policy = Mantle.Overlap())
     c = Mantle.compile!(Compile(g; alias, policy))
     a = Mantle.analysis(c)
-    arena = isempty(a.slabs) ? UInt8[] : first(a.slabs).memory
-    return HostPlan(g, c.steps, arena, a.peak, a.naive)
+    arena = isempty(a.regions) ? UInt8[] : Mantle.memoryof(first(a.regions))
+    return HostPlan(g, c.steps, arena, a.peak, a.naive, a.regions)
 end
 
 Mantle.peakbytes(pl::HostPlan) = pl.peak

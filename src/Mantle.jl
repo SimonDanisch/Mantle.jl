@@ -21,7 +21,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved
-export DeviceArray
+export DeviceArray, releaseregions!, blocksize
 export rawalloc, rawfree, constraintof, compatible
 export readproblem
 
