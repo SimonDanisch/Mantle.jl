@@ -1,7 +1,11 @@
 using Mantle, Test
 
 
-const BENCH = "/sim/Programmieren/VulkanDev/dev/minimalloc/benchmarks"
+# Relative to this checkout, not to the tree it was first written in: `dev/Mantle`
+# and `dev/minimalloc` are siblings wherever the project is checked out, and an
+# absolute path here silently reads another tree's benchmarks — or fails on a
+# machine that has only one of them.
+const BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks"))
 
 @testset "Mantle" begin
 
@@ -347,4 +351,8 @@ import Vulkan
         @test Mantle.reads(ColorAttachment{false})
     end
 end
+# Needs a GPU but no display — every graph in it is headless, which is also the
+# only kind `bake!` takes — so it runs before the window tests rather than inside
+# their DISPLAY guard.
+include(joinpath(@__DIR__, "test_arena_bake.jl"))
 include(joinpath(@__DIR__, "test_window.jl"))

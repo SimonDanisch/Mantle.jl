@@ -10,6 +10,75 @@ abstract type Graph end
 abstract type Plan end
 
 """
+    DeviceCaps
+
+What a kernel has to know about the GPU it will run on, in terms every GPU has.
+
+Nothing here is Vulkan's. The vocabulary is — "subgroup" is SPIR-V's word, Metal
+says simdgroup and CUDA says warp; "workgroup" is SPIR-V's, Metal says threadgroup
+— but every field is a fact about the hardware that each of them reports under
+some name. Kept in that vocabulary rather than renamed, because a kernel library
+already speaks it and a rename buys nothing a comment cannot.
+
+Why it lives here and not in the backend: a kernel that picks its tiling from
+these numbers is portable exactly to the extent that these numbers are, and the
+whole point of the `tile` field is that Metal's `simdgroup_matrix` is 8x8 where
+RDNA 3.5 is 16x16 — a different *number*, not a different kernel.
+
+`coopmat` is a floor, not a promise about every operation: cooperative matrices
+that exist everywhere are load, store and multiply-add. Anything narrower —
+per-element application, in-tile reduction — is `VK_NV_cooperative_matrix2` and
+not portable even across Vulkan, so a kernel that wants it asks separately and
+carries the answer. See `FlashCMPlan.rescale` for the shape that takes.
+
+    coopmat           cooperative-matrix multiply-add is usable at all
+    tile              its tile extent: 16 on RDNA 3.5, 8 for Metal's simdgroup
+    subgroup          lanes per subgroup — 32 on NVIDIA, 32 or 64 on RDNA3
+    coopmatsubgroup   …and the width a cooperative-matrix kernel actually gets
+    sharedbudget      bytes of workgroup-shared memory
+    workgrouplimit    threads per workgroup
+    cores             SMs / CUs; 0 when the device will not say
+    warps             max resident subgroups per core; 0 = ditto
+"""
+struct DeviceCaps
+    coopmat::Bool
+    tile::Int
+    subgroup::Int
+    coopmatsubgroup::Int
+    sharedbudget::Int
+    workgrouplimit::Int
+    cores::Int
+    warps::Int
+end
+
+"""
+    DeviceCaps(c; kw...) -> DeviceCaps
+
+`c` with named fields replaced, for asking what a kernel would decide on a device
+that is not this one — a wave64 card, or this card with cooperative matrices
+switched off — without that device being present. It is what makes a tiling
+decision testable on a machine that cannot run it.
+"""
+DeviceCaps(c::DeviceCaps;
+           coopmat = c.coopmat, tile = c.tile, subgroup = c.subgroup,
+           coopmatsubgroup = c.coopmatsubgroup, sharedbudget = c.sharedbudget,
+           workgrouplimit = c.workgrouplimit, cores = c.cores, warps = c.warps) =
+    DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
+               workgrouplimit, cores, warps)
+
+"""
+    caps(device) -> DeviceCaps
+
+What this device can do. A backend implements it; nothing above it needs to know
+which backend answered.
+
+The backend converts rather than aliases: Lava has a struct of its own with the
+same fields, and it stays Lava's. Mantle cannot be a dependency of its own
+backend, so the type has to be defined here and filled in there.
+"""
+function caps end
+
+"""
     Window(width, height; title = "", vsync = false)
 
 Something to render into, and the only reason a frame loop exists.

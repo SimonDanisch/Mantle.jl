@@ -13,16 +13,92 @@ import Mantle: storage, Buffer, Scalar, Surface, Attribute, draw!, dispatch!, re
                run!, npipelines, stride, count
 
 # ── device ────────────────────────────────────────────────────────────────────
+"""
+One allocation per arena, shared by every plan on the device.
+
+A plan used to allocate its own arenas, so two plans in one process cost the
+*sum* of their peaks even though only one of them is ever running. The device
+owns the allocation instead and a plan **reserves** in it: the pool is sized to
+the largest tenant, not to their total. On SAM 2's eight graphs that is the
+difference between the largest peak and eight of them.
+
+Sound because a transient never crosses a plan boundary — a value that outlives
+a graph is a persistent `Buffer`, not a transient — so the only thing two tenants
+share is bytes. The one hazard left is a plan's work still reading memory the
+next plan is about to write, and that is what [`handover!`](@ref) emits.
+
+`extra` and `typebits` accumulate across tenants because the allocation has to
+satisfy all of them at once, and they accumulate in opposite directions: usage
+bits are a **union** (the arena must permit everything any tenant does with it)
+and image memory type bits are an **intersection** (the type has to be one every
+image can bind to). A tenant that narrows the intersection to nothing is an
+error, not a silent pick of a type some image cannot use.
+"""
+mutable struct ArenaPool
+    memory::Any                  # the backing allocation, or nothing before the first reserve
+    bytes::Int                   # what it is sized to
+    extra::UInt32                # union, for a buffer arena
+    typebits::UInt32             # intersection, for an image arena
+    tenants::Vector{WeakRef}     # the LavaPlans holding space here, for re-materialising
+end
+
+ArenaPool() = ArenaPool(nothing, 0, UInt32(0), typemax(UInt32), WeakRef[])
+
 struct LavaDevice <: Mantle.Device
     ctx::Any
     bq::Any
+    # Keyed by the arena marker (`Buffers()` / `Images()`), which is a singleton,
+    # so this is a two-entry dictionary consulted once per compile — never on the
+    # frame path, which is why `Any` here costs nothing.
+    pools::Dict{Any,ArenaPool}
 end
 
-Mantle.Device(::typeof(Lava)) = LavaDevice(Lava.vk_context(), Lava.vk_context().default_bq)
+Mantle.Device(::typeof(Lava)) =
+    LavaDevice(Lava.vk_context(), Lava.vk_context().default_bq, Dict{Any,ArenaPool}())
 Mantle.Device() = Mantle.Device(Lava)
+
+pool!(dev::LavaDevice, a) = get!(ArenaPool, dev.pools, a)
+
+"""
+    capacity(device) -> Int
+
+Bytes a placement may use, which is the driver's answer and not the heap's size.
+
+`VK_EXT_memory_budget` reports what is *available now* — the heap minus what
+every process on the machine has already taken — and that is the number a
+placement has to fit in. Falling back to the raw heap size when the extension is
+missing is the honest degradation: it is an upper bound rather than a budget, so
+the check still catches a plan that could never fit and stops catching one that
+merely will not fit today.
+
+Summed over device-local heaps, because that is where a transient arena lands.
+"""
+function Mantle.capacity(dev::LavaDevice)
+    heaps = Lava.probe_device_memory_budget(dev.ctx)
+    total = 0
+    for h in heaps
+        h.device_local || continue
+        total += h.budget > 0 ? h.budget : h.size
+    end
+    total
+end
 
 """The KernelAbstractions backend, for kernels the graph does not own."""
 Mantle.backend(::LavaDevice) = Lava.LavaBackend()
+
+"""
+What this device can do, as Mantle's portable record rather than Lava's.
+
+A field-by-field copy of two structs that happen to agree today, and deliberately
+not an alias. Lava's `DeviceCaps` is Lava's to change; Mantle's is the one kernels
+are written against, and the day a backend reports something the other does not
+have, this conversion is where that shows up rather than in every kernel.
+"""
+Mantle.caps(dev::LavaDevice) = mantlecaps(Lava.caps(dev.ctx))
+Mantle.caps(b::Lava.LavaBackend) = mantlecaps(Lava.caps(b))
+
+mantlecaps(c) = Mantle.DeviceCaps(c.coopmat, c.tile, c.subgroup, c.coopmatsubgroup,
+                                  c.sharedbudget, c.workgrouplimit, c.cores, c.warps)
 
 # ── window ────────────────────────────────────────────────────────────────────
 """
@@ -691,10 +767,25 @@ end
 Mantle.storage(v::BufferRange) = Mantle.storage(v.parent)
 resourcekind(::BufferRange) = BufferKind()
 
-"""Byte span of a usage, for the barrier that scopes to it."""
-barrierspan(r, st) = (UInt64(st.offset), UInt64(sizeof(eltype(st)) * prod(st.dims)))
+"""
+Byte span of a usage, for the barrier that scopes to it.
+
+`pool_offset + offset`, not `offset`: a `VkBufferMemoryBarrier2`'s range is
+relative to the **VkBuffer**, and Lava suballocates, so a resource's own offset
+is into its `MemoryBlock` rather than into the buffer the barrier names. This is
+the same sum `inplace!` and `rename!` compute for a copy, and for the same
+reason.
+
+Without it every scoped barrier reads `offset = 0` on a buffer whose resources
+begin tens of megabytes in — a memory dependency over a range nothing in the
+pass touches. Nothing broke, because desktop drivers treat the range as advisory
+and flush at the stages given; it is still a barrier that does not describe the
+hazard it was derived for, and sync validation is entitled to say so.
+"""
+barrierspan(r, st) = (UInt64(st.buf[].pool_offset + st.offset),
+                      UInt64(sizeof(eltype(st)) * prod(st.dims)))
 barrierspan(v::BufferRange, st) =
-    (UInt64(st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
+    (UInt64(st.buf[].pool_offset + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
      UInt64(length(v.range) * sizeof(eltype(st))))
 
 function slice(g::LavaGraph, x, range::UnitRange{Int})
@@ -1182,6 +1273,11 @@ mutable struct LavaPlan <: Mantle.Plan
     coalesce::Bool
     policy::Mantle.Policy
     args::ArgMemory                     # laid out at compile, written per frame
+    # The recording `bake!` took, or `nothing` while the plan records per run.
+    # It pins the argument slot it was captured in — `slotbase` is folded into
+    # every address the command buffer holds — so a baked plan stops rotating
+    # slots and `nextslot!` is not called for it.
+    baked::Any
 end
 
 """The backend object behind a resource: what actually gets bound or copied."""
@@ -1199,6 +1295,31 @@ todevice(x::Lava.LavaArray) = Lava.LavaDeviceArray(x)
 todevice(x) = x
 devarg(a::Base.RefValue) = todevice(Mantle.storage(a[]))
 devarg(a) = todevice(Mantle.storage(a))
+
+"""The resource a usage ultimately names: a slice and a vertex binding both
+forward their storage to a parent, so neither has an identity of its own to test."""
+rootresource(x) = x
+rootresource(v::BufferRange) = rootresource(v.parent)
+rootresource(a::Attr) = rootresource(a.resource)
+
+"""
+Whether an `Update` on this resource can move it.
+
+Only the whole-buffer route renames: `write_update!` renames when the ref has no
+range *and* the data is the buffer's whole length, and writes in place otherwise.
+So an `Update(g, buf; range = 1:100)` never moves its target and keeps a scoped
+barrier; a bare `Update(g, buf)` may, and gives it up.
+
+Through a slice as well as directly: `slice(g, buf, 1:100)` is a different object
+from `buf`, so an identity test against the update refs misses it — and a slice of
+a renamed buffer is exactly as stale as the buffer, having no storage of its own.
+
+Asked of the graph rather than of the resource because the resource cannot know:
+a `LavaBuffer` is the same type either way, and whether it is renameable is a
+property of how the graph was declared.
+"""
+renameable(g::LavaGraph, r) =
+    any(u -> u.resource === rootresource(r) && u.range === nothing, g.updates)
 
 """
 The barrier a pass needs, as one memory barrier with stages and access ORed over
@@ -1225,7 +1346,14 @@ function build_pass_barrier(g, ts::Vector{Mantle.Transition})
         dst_stage = Mantle.stages(be, t.to, Dst())
         dst_access = Mantle.access(be, t.to, Dst())
         r = t.resource == 0 ? nothing : get(g.by_id, t.resource, nothing)
-        st = r === nothing ? nothing : Mantle.storage(r)
+        # A resource that can be renamed gets a global barrier instead of one
+        # scoped to its buffer. `st.buf[].buffer` below is baked here, at compile
+        # time, and `rename!` points the resource at a *different* store — so a
+        # scoped barrier would name the store the plan was compiled with and
+        # cover none of the memory that is actually read. Widening loses the span
+        # scoping for these resources and is the only correct answer: a handle
+        # cannot be baked for something that moves.
+        st = (r === nothing || renameable(g, r)) ? nothing : Mantle.storage(r)
         if st === nothing
             push!(mem, Lava.Vulkan._MemoryBarrier2(;
                 src_stage_mask = src_stage, src_access_mask = src_access,
@@ -1273,6 +1401,47 @@ function emit_pass_barrier!(bq, dep)
     batch === nothing && (batch = Lava.ensure_active_batch!(bq))
     Lava.Vulkan._cmd_pipeline_barrier_2(batch.cmd_buf, dep)
     true
+end
+
+"""
+The barrier between two plans that share an arena pool.
+
+Placement makes every tenant of a pool start at offset 0, so two plans on one
+device alias each other by construction. Within a plan the `Aliasing` phase finds
+that hazard and scopes a barrier to it; across plans there is nothing to scope
+to, because the outgoing plan's transients are not this plan's resources and its
+last use is not in this plan's schedule.
+
+So it is one global barrier at the head of the recording, and only when the pool
+actually has more than one live tenant — a single-plan process pays a dictionary
+lookup per run and emits nothing. That is the correct price: the alternative is
+tracking cross-plan lifetimes, and a plan boundary is already a point where the
+graph knows nothing about what ran before it.
+
+Not needed *between* runs of the same plan: that hazard is the plan's own, and
+`nextslot!` plus the derived barriers already cover it.
+"""
+function handover!(pl::LavaPlan, bq)
+    shared = false
+    for sl in pl.slabs
+        p = get(pl.graph.dev.pools, sl.arena, nothing)
+        p === nothing && continue
+        # `Base.count`: this module owns the bare name — a draw's vertex count —
+        # so the predicate form is not reachable through it.
+        if Base.count(wr -> wr.value !== nothing, p.tenants) > 1
+            shared = true
+            break
+        end
+    end
+    shared || return false
+    both = Lava.Vulkan.AccessFlag2(Lava.Vulkan.ACCESS_2_MEMORY_READ_BIT) |
+           Lava.Vulkan.AccessFlag2(Lava.Vulkan.ACCESS_2_MEMORY_WRITE_BIT)
+    dep = Lava.Vulkan._DependencyInfo(
+        [Lava.Vulkan._MemoryBarrier2(;
+            src_stage_mask = Lava.STAGE2_ALL_COMMANDS, src_access_mask = both,
+            dst_stage_mask = Lava.STAGE2_ALL_COMMANDS, dst_access_mask = both)],
+        Lava.Vulkan._BufferMemoryBarrier2[], Lava.Vulkan._ImageMemoryBarrier2[])
+    emit_pass_barrier!(bq, dep)
 end
 
 """Bytes actually reserved for transients: the max cross section, not the sum."""
@@ -1507,26 +1676,119 @@ function Mantle.run!(::Mantle.Liveness, c::Compile)
 end
 
 # ── Place ─────────────────────────────────────────────────────────────────────
-"""One allocation backing an arena, and the transients placed in it."""
-struct Slab
+"""
+A plan's window onto one arena's pool, and the transients placed in it.
+
+Mutable because the pool underneath can be reallocated by a later, larger tenant:
+the offsets stay valid — they are this plan's own placement and nothing about
+them changed — but `memory` becomes the new allocation and every transient is
+materialised into it again. Holding the offsets here rather than only on
+`Compile` is what makes that possible without recompiling the plan.
+"""
+mutable struct Slab
+    arena::Any
     memory::Any
     bytes::Int
-    indices::Vector{Int}
+    indices::Vector{Int}        # into graph.transients
+    offsets::Vector{Int}        # parallel to indices
 end
 
-"""Back an arena. Buffers get a Lava array; images get raw device memory."""
-# The arena is one allocation shared by transients of several element types, so
-# its usage bits are the union of what they ask for.
-allocate(::Buffers, c::Compile, bytes::Int, ts) =
-    Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),);
-                            extra_usage = reduce(|, (extrausage(eltype(t)) for t in ts)))
+"""
+What a set of transients requires of the arena backing them.
 
-function allocate(::Images, c::Compile, bytes::Int, ts)
-    # The memory has to satisfy every image in it at once, so the type bits are
-    # the intersection. `device_memory` errors if that is empty rather than
-    # picking a type some image cannot use.
-    bits = reduce(&, (t.req.type_bits for t in ts))
-    Lava.device_memory(c.graph.dev.ctx, max(bytes, 1), bits)
+The two directions are not symmetrical, and getting them the wrong way round is
+memory that works until the one image whose type was excluded is bound. Usage
+bits union: the arena must permit everything any tenant does with it. Image
+memory type bits intersect: the type has to be one every image can bind to.
+"""
+requirements(::Buffers, ts) =
+    (reduce(|, (extrausage(eltype(t)) for t in ts); init = UInt32(0)), typemax(UInt32))
+requirements(::Images, ts) =
+    (UInt32(0), reduce(&, (UInt32(t.req.type_bits) for t in ts); init = typemax(UInt32)))
+
+"""The one allocation an arena's pool is backed by."""
+backing(::Buffers, dev::LavaDevice, bytes::Int, extra::UInt32, ::UInt32) =
+    Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),); extra_usage = extra)
+backing(::Images, dev::LavaDevice, bytes::Int, ::UInt32, bits::UInt32) =
+    Lava.device_memory(dev.ctx, max(bytes, 1), bits)
+
+"""
+Every tenant materialises into the pool's current allocation again.
+
+Called only when the pool actually reallocated. The plans keep their offsets —
+the placement inside a plan is unaffected by the pool growing under it — so this
+rebinds storage and touches nothing the compiler decided.
+"""
+function remap!(p::ArenaPool, a)
+    live = 0
+    for wr in p.tenants
+        pl = wr.value
+        pl === nothing && continue          # collected: nobody can run it, nothing to remap
+        live += 1
+        p.tenants[live] = wr
+        # A baked plan cannot be remapped: its recording holds the addresses the
+        # old allocation had, and nothing can rewrite a command buffer. Silently
+        # re-materialising underneath it produces a replay that reads freed
+        # storage — deterministic, quiet, and wrong, which is the worst of the
+        # three. So this is where it stops, with the order that would have
+        # avoided it: build every plan on a device, then bake.
+        pl.baked === nothing || throw(ArgumentError(
+            "a plan on this device is baked, and another plan needs arena $a grown — " *
+            "which would move the baked plan's transients and leave its recording " *
+            "pointing at the old allocation. Build every plan that shares a device " *
+            "before baking any of them."))
+        for sl in pl.slabs
+            sl.arena == a || continue
+            sl.memory = p.memory
+            for (i, off) in zip(sl.indices, sl.offsets)
+                materialize!(pl.graph.transients[i], p.memory, off)
+            end
+        end
+    end
+    resize!(p.tenants, live)                # prune here, where the list is already walked
+    p
+end
+
+"""
+Reserve `bytes` in the device's pool for this arena, growing it if needed.
+
+The pool is sized to its largest tenant rather than to their total, which is the
+whole point: two plans in one process commit the max. Growing reallocates and
+remaps, and that is safe here for the same reason `refit!` is — a plan is
+compiled outside the frame loop, with nothing of its own in flight.
+"""
+function reserve!(dev::LavaDevice, a, bytes::Int, ts)
+    p = pool!(dev, a)
+    extra, bits = requirements(a, ts)
+    want_extra = p.extra | extra
+    want_bits = p.typebits & bits
+    want_bits == 0 && throw(ArgumentError(
+        "arena $a has no memory type every image in it can bind to. This plan's " *
+        "images and an earlier plan's on this device intersect to nothing, so one " *
+        "allocation cannot serve both."))
+    want_bytes = max(p.bytes, bytes)
+    if p.memory === nothing || want_bytes > p.bytes ||
+       want_extra != p.extra || want_bits != p.typebits
+        p.memory = backing(a, dev, want_bytes, want_extra, want_bits)
+        p.bytes, p.extra, p.typebits = want_bytes, want_extra, want_bits
+        remap!(p, a)
+    end
+    p
+end
+
+"""
+Register a compiled plan as holding space in the pools it was placed into.
+
+Weakly, so a plan that is dropped does not keep its graph, its pipelines and
+every transient it named alive for the life of the device. A collected tenant is
+one nothing can run, so skipping it in [`remap!`](@ref) loses nothing.
+"""
+function tenant!(dev::LavaDevice, pl)
+    for sl in pl.slabs
+        p = pool!(dev, sl.arena)
+        any(wr -> wr.value === pl, p.tenants) || push!(p.tenants, WeakRef(pl))
+    end
+    pl
 end
 
 """Give a placed transient its storage."""
@@ -1540,6 +1802,32 @@ function materialize!(t::TransientImage{T}, slab, offset) where {T}
     t.view = Lava.image_view(Lava.vk_context(), t.image, t.format, aspect(T))
 end
 
+"""Bytes the device's other arenas have already committed, so one arena's bound
+is what is left rather than the whole device."""
+committed(dev::LavaDevice, except) =
+    sum((p.bytes for (k, p) in dev.pools if k != except); init = 0)
+
+"""
+The largest single allocation this device will make.
+
+A harder limit than the budget and usually a far smaller one — 4 GB against 29 GB
+of budget on the machine this was written on — and the one that actually bounds
+an arena, because an arena is *one* allocation: the offsets a placement produces
+are into a single contiguous range, so it cannot be split across two.
+
+Measured rather than assumed, because the alternative was a reserve fraction
+subtracted from the heap, and every such fraction is either too small to prevent
+the failure or too large to be justifiable. A plan needing 5 GB in one arena
+cannot run on this device however idle the card is, and `checkcapacity` naming
+that is worth more than a percentage that happens to catch it here.
+"""
+function maxalloc(dev::LavaDevice)
+    props = Lava.Vulkan.get_physical_device_properties_2(
+        dev.ctx.physical_device, Lava.Vulkan.PhysicalDeviceMaintenance3Properties)
+    m3 = props.next::Lava.Vulkan.PhysicalDeviceMaintenance3Properties
+    Int(m3.max_memory_allocation_size)
+end
+
 """
 Assign offsets, one placement per arena.
 
@@ -1549,18 +1837,26 @@ would be to report the larger and pretend the other is free.
 function Mantle.run!(::Mantle.Place, c::Compile)
     isempty(c.items) && return c
     ts = c.graph.transients
+    dev = c.graph.dev
     c.offsets = zeros(Int, length(ts))
     c.peak = 0
     c.naive = sum(nbytes, ts)
     for a in unique(map(arena, ts))
         idx = findall(t -> arena(t) == a, ts)
-        pl = Mantle.place(Mantle.Problem(c.items[idx], typemax(Int)))
-        mem = allocate(a, c, pl.height, ts[idx])
-        push!(c.slabs, Slab(mem, pl.height, idx))
+        # Two bounds, and the smaller wins. What this arena may still have — the
+        # other arena is a separate allocation and its bytes are already gone —
+        # and what the device will hand over in one piece, which on an APU with a
+        # 29 GB budget is 4 GB and is therefore usually the binding one.
+        avail = min(maxalloc(dev), Mantle.capacity(dev) - committed(dev, a))
+        prob = Mantle.Problem(c.items[idx], avail)
+        pl = Mantle.checkcapacity(prob, Mantle.place(prob), "arena $a")
+        p = reserve!(dev, a, pl.height, ts[idx])
+        offs = [pl.offsets[string(i)] for i in idx]
+        push!(c.slabs, Slab(a, p.memory, pl.height, idx, offs))
         c.peak += pl.height
-        for i in idx
-            c.offsets[i] = pl.offsets[string(i)]
-            materialize!(ts[i], mem, c.offsets[i])
+        for (i, off) in zip(idx, offs)
+            c.offsets[i] = off
+            materialize!(ts[i], p.memory, off)
         end
     end
     c.slab = isempty(c.slabs) ? nothing : first(c.slabs).memory
@@ -1936,9 +2232,10 @@ dispatchrange(x) = count(x)
 Mantle.Plan(g::LavaGraph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Mantle.Policy = Mantle.Overlap()) =
     let c = Mantle.compile!(Compile(g; alias, coalesce, policy))
-        LavaPlan(g, c.transitions, c.passes, c.pipelines, c.slabs, c.peak, c.naive,
-                 profile ? Profiler(g.dev.ctx, c.passes) : nothing,
-                 alias, coalesce, policy, ArgMemory(g.dev, c.passes))
+        tenant!(g.dev,
+                LavaPlan(g, c.transitions, c.passes, c.pipelines, c.slabs, c.peak, c.naive,
+                         profile ? Profiler(g.dev.ctx, c.passes) : nothing,
+                         alias, coalesce, policy, ArgMemory(g.dev, c.passes), nothing))
     end
 
 """
@@ -1965,6 +2262,10 @@ function refit!(pl::LavaPlan)
     c = Mantle.compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
     pl.slabs, pl.peak, pl.naive = c.slabs, c.peak, c.naive
+    # The recompile placed into the device's pools again and produced fresh
+    # `Slab`s; the plan has to be a tenant of those, or a later grow remaps the
+    # ones it no longer holds and leaves these pointing at the old allocation.
+    tenant!(pl.graph.dev, pl)
     # A recompile can change the draws and therefore the layout, so the argument
     # memory is laid out again with them. The old slots are still being read by
     # frames in flight; `sync_swapchain!` waited for the device before any of
@@ -2073,6 +2374,36 @@ be wrong: a result that is correct under `:both` and wrong under `:derived` says
 the declared set is incomplete, while one that is wrong under both says the
 declarations are right and something is reading the wrong bytes.
 """
+Mantle.baked(pl::LavaPlan) = pl.baked !== nothing
+
+function Mantle.bake!(pl::LavaPlan)
+    pl.baked === nothing || return pl      # idempotent; re-baking would strand the old one
+    g = pl.graph
+    isempty(g.surfaces) || throw(ArgumentError(
+        "bake!: this plan draws to a surface. A swapchain image is a different image " *
+        "every frame and a recording names one, so a windowed plan needs a recording " *
+        "per swapchain image — which is not built yet. Headless plans bake today."))
+    pl.profiler === nothing || throw(ArgumentError(
+        "bake!: profiling and baking do not combine yet. `timings` measures host " *
+        "recording per pass, and a baked plan does not record — the numbers would be " *
+        "the ones from the capture, reported forever. Build the plan without " *
+        "`profile = true`, or do not bake it."))
+    bq = g.dev.bq
+    refit!(pl)
+    checkextents(pl)
+    # The slot this recording names for the rest of its life. Taken once, here,
+    # because `slotbase(am)` is folded into every address the command buffer
+    # holds: rotating afterwards would aim the replay at a slot something else
+    # is free to write.
+    nextslot!(pl.args, bq)
+    pl.baked = Lava.capture(bq) do
+        Lava.concurrent_dispatch_group() do
+            record!(pl, bq; derived = true, suppress = true, updates = false)
+        end
+    end
+    pl
+end
+
 function run!(pl::LavaPlan; barriers::Symbol = :derived)
     barriers in (:derived, :backend, :both) ||
         throw(ArgumentError("barriers must be :derived, :backend or :both, got $barriers"))
@@ -2101,8 +2432,22 @@ function run!(pl::LavaPlan; barriers::Symbol = :derived)
     # whichever of the two got there first, the other reported "no change" and
     # the refit was skipped. A frame where nothing moved costs one size compare
     # per tracking transient.
-    refit!(pl)
+    moved = refit!(pl)
     checkextents(pl)            # and anything with a fixed size has to still fit
+    if pl.baked !== nothing
+        # A refit re-places every transient, so the recording names storage that
+        # no longer exists. Nothing tracking can move in a headless plan today,
+        # which is why this is an assertion rather than a re-bake.
+        moved && throw(ArgumentError(
+            "run!: a transient moved under a baked plan, so its recording names " *
+            "storage that has been replaced. Re-`Plan` and `bake!` again."))
+        # Updates first and fresh — `replay!` closes any batch still recording,
+        # so the copies land ahead of the replay in queue order, which is the
+        # order the derived barriers inside the recording were built for.
+        record_updates!(pl, bq)
+        Lava.replay!(pl.baked)
+        return nothing
+    end
     for s in g.surfaces
         Lava.acquire_next_image!(s.win)
     end
@@ -2156,17 +2501,35 @@ function profiled!(f, pl::LavaPlan, bq, i::Integer)
     r
 end
 
-function record!(pl::LavaPlan, bq; derived::Bool = true, suppress::Bool = derived)
+function record!(pl::LavaPlan, bq; derived::Bool = true, suppress::Bool = derived,
+                 updates::Bool = true)
     g = pl.graph
+    # Before anything this plan records: the pool it is about to write may still
+    # be being read by whichever plan ran last.
+    handover!(pl, bq)
     if pl.profiler !== nothing
         Lava.Vulkan.cmd_reset_query_pool(Lava.ensure_active_batch!(bq).cmd_buf,
                                          pl.profiler.pool, UInt32(0),
                                          UInt32(pl.profiler.nslots))
     end
     for (i, pp) in enumerate(pl.passes)
+        # `bake!` records everything except this, and `run!` records this alone
+        # before each replay. An update writes through a fresh store on the
+        # rename route, so the copy's destination handle is not the one the
+        # recording would hold — see `renameable`.
+        (!updates && pp.pass.kind === :update) && continue
         profiled!(pl, bq, i) do
             record_pass!(g, bq, pp, derived, pl.args; suppress)
         end
+    end
+    nothing
+end
+
+"""The update passes alone, recorded fresh in front of a replay."""
+function record_updates!(pl::LavaPlan, bq)
+    for pp in pl.passes
+        pp.pass.kind === :update || continue
+        record_pass!(pl.graph, bq, pp, true, pl.args; suppress = true)
     end
     nothing
 end

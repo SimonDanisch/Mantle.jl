@@ -32,6 +32,7 @@ export stages, access, layout
 export pixelbytes, vkformat
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
+export DeviceCaps, caps
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update
@@ -43,7 +44,44 @@ export PHASES, compile!
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
 export run!, npipelines, capacity, use, peakbytes, storage, custom!
+export bake!, baked
 export timings, PassTiming, NSAMPLES
+
+"""
+    bake!(plan) -> plan
+
+Record the plan once and re-submit that recording on every later `run!`.
+
+The prize is host time. A plan whose launch sequence is identical every
+invocation pays to rebuild it every invocation, and on SAM 2's encoder that is
+16.3 ms of recording against ~12 ms of GPU work — recording the step costs more
+than running it.
+
+The precondition is that every device address the recording names is the same
+next time. A plan already gives that: placement is fixed, the arena is the
+device's, and a plan holds references to everything it names — which is the
+property raw capture lacks and the reason this lives here rather than on the
+capture. What a plan does *not* fix is an input written by reallocating, so an
+`Update` that renames is recorded fresh per invocation and submitted ahead of the
+replay rather than baked into it.
+
+Opt-in, and it stays opt-in: `run!` on an unbaked plan records as it always did.
+That is what lets the same plan be measured both ways in one process, which
+matters because a placement bug and a stale-recording bug both present as a
+number that moved.
+
+    plan = Plan(g)
+    run!(plan)          # records
+    bake!(plan)
+    run!(plan)          # replays
+
+Not yet for plans with a surface: a swapchain image is a different image every
+frame and the recording names one. Headless plans have no such thing.
+"""
+function bake! end
+
+"""Whether `bake!` has been called on this plan and the recording is in use."""
+function baked end
 
 function update! end
 function use end
