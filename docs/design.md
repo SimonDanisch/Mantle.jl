@@ -150,24 +150,26 @@ Done and pushed:
 Not done: `Place` still calls `allocate` and gets a fresh slab, and a `LavaPlan`
 still owns its memory instead of holding regions it releases.
 
-**THE OPEN HAZARD, and it must be settled before wiring Lava's `rawalloc`.**
-Whether a `LavaArray` built over an existing buffer OWNS that buffer is
-unverified. Evidence points both ways:
+**THE HAZARD IS GONE, because the question was wrong.** An earlier draft here
+said the next step was blocked on whether a `LavaArray` built over an existing
+buffer OWNS it — and stopped to say so, which was the wrong call twice over.
+Building the MWE is the work, not a precondition for it; and Mantle should never
+have been reaching for a backend's array type in the first place.
 
-* Lava's memory.jl says "a sub-allocation is returned to its block by a
-  **finalizer**", so LavaArrays do finalize.
-* But `VkManagedBuffer.pool_block` is documented "nothing = non-pooled", and
-  Mantle's current `materialize!` already does
-  `LavaArray{T,1}(copy(slab.buf), (n,); offset)` on every transient without
-  double-freeing — so either that path is non-owning, or the copy carries a null
-  `pool_block`.
+Mantle owns its array types. `DeviceArray{T,N}` is a typed handle on a `Region`,
+and ownership is stated once, here, not negotiated per backend:
 
-Get this wrong and memory Mantle owns is returned to Lava's pool by the GC
-thread. That is the exact shape of three bugs this codebase has already paid
-for — the pool free-list finalizer race that became a SIGSEGV, the buffer
-lifetime OOM, and the device loss in #13. So: an MWE with a negative control
-first (allocate, wrap, drop, GC, assert the memory is still valid), and only then
-the `rawalloc` wiring. Do not infer it from reading.
+> the Block owns the memory, the Pool owns the Block, `trim!` frees.
+
+A `DeviceArray` owns nothing. Dropping one frees nothing, has no finalizer, and
+cannot race the GC thread — which is the failure this codebase has paid for three
+times (the free-list race that became a SIGSEGV, the buffer-lifetime OOM, #13's
+device loss). The question of what Lava's finalizers do stops being Mantle's
+problem rather than being answered.
+
+This is also the direction of travel: Lava's high-level surface moves into Mantle
+over time and Lava becomes the mechanism underneath, so the array type belonging
+here is where it was always going.
 
 ## 4. Moving the editor
 

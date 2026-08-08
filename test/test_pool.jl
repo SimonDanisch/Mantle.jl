@@ -88,3 +88,33 @@ end
     # `:buf`'s block is now entirely free and goes back; `:img`'s is still held.
     @test M.reserved(p) == 512
 end
+
+# ── DeviceArray: a typed handle that owns nothing ─────────────────────────────
+
+@testset "DeviceArray: typed view on a region, owning nothing" begin
+    d, p = FakeDev(), M.Pool()
+    a = M.allocate(p, d, :buf, Float32, 16, 4; blocksize = 4096)
+    @test eltype(a) == Float32
+    @test size(a) == (16, 4) && length(a) == 64 && sizeof(a) == 256
+    @test M.offset(a) == M.offset(M.region(a))
+
+    # Dropping the handle frees NOTHING. No finalizer, nothing for the GC thread
+    # to race — which is the failure this codebase has paid for three times.
+    a = nothing; GC.gc()
+    @test M.reserved(p) == 4096
+    b = M.allocate(p, d, :buf, Float32, 16, 4; blocksize = 4096)
+    @test M.offset(b) != 0                       # the first region is still held
+
+    # Freeing is explicit, and only through the region.
+    M.release!(M.region(b))
+    c = M.allocate(p, d, :buf, Float32, 16, 4; blocksize = 4096)
+    @test M.offset(c) == M.offset(b)             # reused exactly
+    @test d.allocs == [4096]
+end
+
+@testset "DeviceArray: a region too small is an error, not a silent overrun" begin
+    d, p = FakeDev(), M.Pool()
+    r = M.acquire!(p, d, :buf, nothing, 16; blocksize = 4096)
+    @test_throws ArgumentError M.DeviceArray{Float32}(r, (16,))   # needs 64, has 16
+    @test M.DeviceArray{Float32}(r, (4,)) isa M.DeviceArray{Float32,1}
+end

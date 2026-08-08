@@ -5,6 +5,7 @@ include("memory/model.jl")
 include("memory/bound.jl")
 include("memory/placement.jl")
 include("memory/pool.jl")
+include("memory/array.jl")
 include("memory/csv.jl")
 
 include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
@@ -20,6 +21,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved
+export DeviceArray
 export rawalloc, rawfree, constraintof, compatible
 export readproblem
 
