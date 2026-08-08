@@ -137,102 +137,33 @@ The strategies do still differ by kind:
 Done and pushed:
 
 * `src/memory/pool.jl` — `Pool`/`Block`/`Region`, first-fit with coalescing
-  release, growth that ADDS a block rather than moving one. Four backend
-  primitives, no policy: `rawalloc`, `rawfree`, `constraintof`, `compatible`.
-  15 tests against a fake device that allocates nothing and counts calls — it
-  needs no backend at all, which is the assertion that no policy leaked out.
-* Lava `bind_buffer!` + `unbound_buffer` + `buffer_requirements`, mirroring the
-  image family. Verified on the RTX 4000: two 4096-byte buffers into one
-  8192-byte `device_memory` at offsets 0 and 4096. Before this there was nowhere
-  to bind a suballocated buffer — every `bind_buffer_memory` in Lava passed 0 —
-  which is *why* the buffer arena took the `LavaArray` shortcut.
+  release, growth that ADDS a block rather than moving one. Backend primitives
+  only, no policy. Tests run against a fake device that allocates nothing and
+  counts calls — no backend at all, which is the assertion that no policy leaked.
+* `src/memory/array.jl` — `DeviceArray{T,N}`, a typed handle on a `Region` that
+  owns NOTHING. No finalizer, nothing for the GC thread to race.
+* `src/memory/resources.jl` — `Buffer`/`Scalar` in core over `DeviceArray`.
+  `LavaBuffer`/`LavaScalar` and the Host pair are gone.
+* `Place` suballocates instead of allocating per compile. Measured: ten plans of
+  524_288 B peak went from ten device allocations (5_242_880 B) to ONE block,
+  plans 6-10 reaching the device zero times.
+* Lava's buffer arena takes raw `device_memory` via `bind_buffer!`, so neither
+  arena is carved out of Lava's own pool.
+* `Device(Lava)` and `Device(LavaBackend())` resolve to ONE cached device per
+  `VkContext` — a second would be a second pool over one VkDevice.
+* `DNNKernels.scratchfor`'s slab comes from the pool. That slab is the largest
+  thing a model allocates and it is scratch, so it is exactly what an allocator
+  seeing every workload should reuse.
 
-`Place` now suballocates from the device's pool. Measured on the RTX 4000: ten
-plans of 524_288 bytes peak went from ten device allocations (5_242_880 bytes) to
-ONE 64 MiB block, with plans 6-10 reaching the device zero times.
+The primitive surface a backend supplies, and it is all of it: `rawalloc`,
+`rawfree`, `constraintof`, `compatible`, `upload!`, `download`, `deviceview`,
+`devicecopy!`, `bufferusage`, plus `device`/`pool`/`blocksize` on the context.
 
-Still staged: Lava's BUFFER block is a `LavaArray`, so it is carved out of Lava's
-own pool. Images already take raw `device_memory`. The raw migration is the last
-piece and its plumbing is now verified end to end on the RTX 4000:
-
-    unbound_buffer -> buffer_requirements -> device_memory -> bind_buffer!
-      -> VkManagedBuffer(buf, mem, addr, ...) -> valid device address
-
-i.e. a buffer bound into Mantle-owned memory, wrapped so Lava can use it, with a
-working BDA. **AND THEN THE QUESTION DISSOLVED.** An earlier draft of this paragraph
-concluded "Mantle must never hand a bare `VkManagedBuffer` to `LavaArray`" — a
-rule for a situation that should not arise. Mantle owns its array type; it has no
-business constructing a `LavaArray` at all.
-
-What was missing is that *what a transient IS* and *what a kernel RECEIVES* are
-different things. Lava's kernel-argument type is
-
-    struct LavaDeviceArray{T,N} <: GPUArrays.AbstractDeviceArray{T,N}
-        ptr::Ptr{T}
-        dims::NTuple{N,Int}
-    end
-
-— a plain, non-owning struct. So the chain is:
-
-* a transient's storage is Mantle's `DeviceArray`: region + dims + `T`, owning
-  nothing;
-* at BAKE time the extension converts it to
-  `LavaDeviceArray(Ptr{T}(block.address + offset(region) + transient_offset), dims)`.
-
-No `LavaArray` is constructed anywhere, so there is no finalizer, no `DataRef`,
-no refcount and no rule to remember. The block's device address is the entire
-bridge, and it is already verified: `unbound_buffer` -> `bind_buffer!` ->
-`VkManagedBuffer` gave a working BDA on the RTX 4000.
-
-Which also retracts the §3 nuance from the previous draft: buffers are NOT
-refcount-released. Nothing refcounts them. The Block owns the memory, the Pool
-owns the Block, `trim!` frees — one rule, both kinds, as originally written.
-
-(Kept as a record because the wrong turn is instructive: having established that
-Mantle owns its array types, I spent two commits deriving a careful rule about
-safely borrowing somebody else's. The tell was that the rule needed remembering
-at all.)
-
-## 3b. Backend kernels and libraries, with Mantle owning the array type
-
-Two consumers, two conversions, and only one of them is interesting.
-
-**KA kernels take a plain device struct.** `LavaDeviceArray{T,N}` is `(ptr, dims)`;
-`CuDeviceArray` and `MtlDeviceArray` are the same shape. `DeviceArray` converts by
-pointer arithmetic at BAKE time — free, and no ownership involved because the
-struct owns nothing.
-
-**Libraries take a host-side handle.** cuBLAS/cuDNN want a `CuArray` or a raw
-`CuPtr` plus descriptors; MPS wants an `MTLBuffer` and an offset. That needs the
-owning array type — except non-owning, which every mature package already
-provides, because interop with a foreign allocator is a normal requirement:
-
-    CUDA.unsafe_wrap(CuArray, ptr::CuPtr{T}, dims; own = false)
-    Metal.unsafe_wrap(MtlArray, buf, offset, dims)
-
-So the conversion is that call. Nothing is invented; the hatch exists for exactly
-this.
-
-**The handle shape differs by backend and this is a requirement, not a detail.**
-CUDA gives a flat device pointer. Vulkan and Metal are BUFFER + OFFSET — there is
-no raw pointer to hand a descriptor. A `Region` must therefore express both,
-which it does only because `memoryof(region)` is opaque and the backend
-interprets it. Anything that narrows that field to a pointer breaks Metal and
-Vulkan silently.
-
-Alignment is already per request (`acquire!` takes it), which is what libraries
-with stronger requirements than 256 B need.
-
-**Where the one-allocator claim actually leaks: workspaces.** cuDNN and cuBLAS
-want scratch, and left alone they allocate it themselves — two allocators again,
-with the lower one invisible, which is precisely what was removed from the buffer
-path. They all take an explicit workspace pointer, so it must come from the pool:
-
-    ws = allocate(pool(dev), dev, kind, UInt8, nbytes)
-    cudnnConvolutionForward(..., pointer(ws), sizeof(ws))
-
-A library integration that skips this looks like it works and quietly reintroduces
-the thing this design exists to prevent.
+**One Mantle device per physical device.** A draft let the KA extension accept
+any KA backend, reasoning that a KA workload wants scheduling and allocation
+rather than render passes — true, and beside the point, because it would hand
+DNNKernels a second `Device` with a second `Pool` beside the real one. Fidelity
+is per PASS (`dispatch!` / `render!` / `custom!`) and already exists.
 
 ## 4. Moving the editor
 
