@@ -20,7 +20,7 @@ export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export readproblem
 
-export Backend, Vulkan, Metal, WebGPU
+export Backend, Vulkan, Metal, WebGPU, Host
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Uniform, Sampled, Present, Undefined
