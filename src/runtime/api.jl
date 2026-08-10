@@ -155,8 +155,6 @@ discards(::KeepOp) = false
 discards(::DiscardOp) = true
 discards(::Clear) = true
 
-function Buffer end
-function Scalar end
 function Surface end
 function Attribute end
 """
@@ -244,6 +242,16 @@ function copy! end
 function compute! end
 function run! end
 function npipelines end
+
+"""
+    free!(plan)
+
+Give the plan's pool regions back. Explicit, and never a finalizer: the Block
+owns the memory, the Pool owns the Block, and a plan that is dropped without
+this leaks its regions until the pool is trimmed — a leak rather than a crash,
+and the right way round.
+"""
+function free! end
 
 """
 What one pass cost. `host_ms` is recording it, `gpu_ms` is running it.

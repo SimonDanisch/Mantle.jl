@@ -4,6 +4,8 @@ include("memory/interval.jl")
 include("memory/model.jl")
 include("memory/bound.jl")
 include("memory/placement.jl")
+include("memory/pool.jl")
+include("memory/array.jl")
 include("memory/csv.jl")
 
 include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
@@ -12,15 +14,20 @@ include("sync/transition.jl")
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("phases.jl")
+include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is deliberately not exported: it is a Span predicate nothing outside
 # this package calls, and GeometryBasics exports the same name.
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
+export Pool, Block, Region, acquire!, release!, trim!, reserved
+export DeviceArray, releaseregions!, blocksize
+export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
+export rawalloc, rawfree, constraintof, compatible, maxalloc
 export readproblem
 
-export Backend, Vulkan, Metal, WebGPU
+export Backend, Vulkan, Metal, WebGPU, Host
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Uniform, Sampled, Present, Undefined
@@ -43,7 +50,7 @@ export PHASES, compile!
 # the one a Makie-shaped caller means — `update!(plot; positions = …)` sets an
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
-export run!, npipelines, capacity, use, peakbytes, storage, custom!
+export run!, npipelines, capacity, use, peakbytes, storage, custom!, free!
 export bake!, baked
 export timings, PassTiming, NSAMPLES
 
@@ -86,7 +93,19 @@ function baked end
 function update! end
 function use end
 function peakbytes end
-function storage end
+"""
+    storage(x)
+
+The backend object behind a resource: what actually gets bound, copied or
+launched with. Anything that is already one is itself.
+
+The identity fallback lives HERE and not in an extension. Both extensions had
+their own copy, and with both loaded the second overwrote the first — which is an
+error during precompilation, so SAM2Runner simply failed to build. One
+implementation, in core, is the same rule that moved `Buffer` and the phases; a
+one-line method is not an exception to it.
+"""
+storage(x) = x
 function capacity end
 
 """

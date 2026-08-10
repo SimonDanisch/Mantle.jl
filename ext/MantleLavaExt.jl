@@ -9,8 +9,8 @@ using Mantle: Usage, Storage, ColorAttachment, Depth, Sampled, Present, Undefine
               CopySrc, CopyDst, ReadOnly, WriteOnly, ReadWrite, NoAccess, ImageKind, BufferKind,
               Src, Dst, transitions
 import Lava
-import Mantle: storage, Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!,
-               run!, npipelines, stride, count
+import Mantle: storage, Surface, Attribute, draw!, dispatch!, render!, compute!,
+               run!, npipelines, stride, count, free!
 
 # ── device ────────────────────────────────────────────────────────────────────
 """
@@ -34,30 +34,48 @@ and image memory type bits are an **intersection** (the type has to be one every
 image can bind to). A tenant that narrows the intersection to nothing is an
 error, not a silent pick of a type some image cannot use.
 """
-mutable struct ArenaPool
-    memory::Any                  # the backing allocation, or nothing before the first reserve
-    bytes::Int                   # what it is sized to
-    extra::UInt32                # union, for a buffer arena
-    typebits::UInt32             # intersection, for an image arena
-    tenants::Vector{WeakRef}     # the LavaPlans holding space here, for re-materialising
-end
-
-ArenaPool() = ArenaPool(nothing, 0, UInt32(0), typemax(UInt32), WeakRef[])
 
 struct LavaDevice <: Mantle.Device
     ctx::Any
     bq::Any
-    # Keyed by the arena marker (`Buffers()` / `Images()`), which is a singleton,
-    # so this is a two-entry dictionary consulted once per compile — never on the
-    # frame path, which is why `Any` here costs nothing.
-    pools::Dict{Any,ArenaPool}
+    pool::Mantle.Pool          # the device owns it; nothing about it reaches the caller
+end
+LavaDevice(ctx, bq) = LavaDevice(ctx, bq, Mantle.Pool())
+Mantle.pool(d::LavaDevice) = d.pool
+
+"""
+One `LavaDevice` per `VkContext`, cached.
+
+Not a convenience: the device OWNS the pool, so a second `Device(Lava)` would be
+a second `Pool` over one VkDevice — two allocators again, and every workload that
+asked separately would get its own memory instead of sharing. Caching is what
+makes "the device owns the pools" mean anything.
+
+Measured before the cache: `reserved(pool(Device(Lava)))` came back 0 immediately
+after a 120-frame render that had reserved 64 MiB, because the probe had made a
+different device.
+"""
+const DEVICES = IdDict{Any,LavaDevice}()
+Mantle.Device(::typeof(Lava)) = get!(DEVICES, Lava.vk_context()) do
+    ctx = Lava.vk_context()
+    LavaDevice(ctx, ctx.default_bq)
 end
 
-Mantle.Device(::typeof(Lava)) =
-    LavaDevice(Lava.vk_context(), Lava.vk_context().default_bq, Dict{Any,ArenaPool}())
+"""
+    Device(LavaBackend())
+
+The Mantle device for a KA backend.
+
+The missing link for a KA workload that wants the pool: `DNNKernels` holds a
+`LavaBackend`, not a module, and allocating through `KA.allocate` puts its slab
+somewhere Mantle cannot see. This maps the backend it does have onto the cached
+device — same VkContext, same pool, so a model's scratch and an editor's
+transients land in one allocator.
+"""
+Mantle.Device(::Lava.LavaBackend) = Mantle.Device(Lava)
+
 Mantle.Device() = Mantle.Device(Lava)
 
-pool!(dev::LavaDevice, a) = get!(ArenaPool, dev.pools, a)
 
 """
     capacity(device) -> Int
@@ -127,79 +145,46 @@ quarter turn with no complaint. `permutedims` first if it is going to be looked 
 Mantle.screenshot(w::LavaWindow) = Lava.readback_window(w.win)
 
 # ── persistent resources ──────────────────────────────────────────────────────
-"""
-Length and capacity are separate so a count that changes every frame never
-reallocates. `store` is always at capacity; `len` is what a draw covers.
-"""
-mutable struct LavaBuffer{T} <: Mantle.Resource
-    # Concrete, not `Any`: a rename swaps the store for a fresh one but never for
-    # a different type, and `Any` here made every `storage(buf)` in the per-frame
-    # argument path return a boxed value.
-    store::Lava.LavaArray{T,1}
-    len::Int
-    capacity::Int
-    dev::LavaDevice
-end
+#
+# `LavaBuffer`/`LavaScalar` are gone. `Mantle.Buffer` and `Mantle.Scalar` are core
+# types over pool regions, so this supplies primitives and no type — and their
+# memory now comes from the same pool as every transient, which is the point:
+# one allocator sees both.
 
 """
 Usage bits an element type asks for beyond the ordinary ones, which is one type
 and one bit: a buffer of draw commands is read by the command processor, and a
 buffer without `INDIRECT_BUFFER_BIT` is a validation error at the draw rather
 than where it was allocated.
+
+This is `Mantle.bufferusage`'s answer for this backend — "what memory can host a
+`T`" is Vulkan vocabulary, so the backend owns it.
 """
 extrausage(::Type) = UInt32(0)
 extrausage(::Type{Lava.DrawIndirectCommand}) = UInt32(Lava.Vulkan.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+Mantle.bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
-function Buffer(dev::LavaDevice, data::AbstractVector{T}; capacity = length(data)) where {T}
-    cap = max(capacity, length(data))
-    store = Lava.LavaArray{T,1}(undef, (cap,); extra_usage = extrausage(T))
-    copyto!(store, 1, data, 1, length(data))
-    LavaBuffer{T}(store, length(data), cap, dev)
-end
+Mantle.rawalloc(dev::LavaDevice, ::Mantle.Persistent, bytes::Int, usage) =
+    Mantle.rawalloc(dev, Buffers(), bytes, usage)
+Mantle.constraintof(::LavaDevice, ::Mantle.Persistent, ts) = UInt32(0)
 
-Buffer(dev::LavaDevice, ::Type{T}, n::Integer) where {T} =
-    LavaBuffer{T}(Lava.LavaArray{T,1}(undef, (Int(n),); extra_usage = extrausage(T)),
-                  Int(n), Int(n), dev)
+"""
+A borrowed `LavaArray` over a region.
 
-"""One value shared by every element. A distinct type, not a length-1 buffer:
-"shared by all" is a claim about meaning, not a length that happens to be one."""
-mutable struct LavaScalar{T} <: Mantle.Resource
-    store::Lava.LavaArray{T,1}
-    dev::LavaDevice
-end
+The `DataRef` releaser is a NO-OP, so `copy` bumps a refcount that frees nothing
+and Mantle stays the owner — Lava's shape of `unsafe_wrap(…, own = false)`. What
+a kernel gets is `todevice` of this; what a copy or a library gets is this.
+"""
+Mantle.deviceview(::LavaDevice, a::Mantle.DeviceArray{T}) where {T} =
+    Lava.LavaArray{T,1}(copy(Mantle.memoryof(a).ref), (length(a),); offset = Mantle.offset(a))
 
-Scalar(dev::LavaDevice, x::T) where {T} = LavaScalar{T}(Lava.LavaArray(T[x]), dev)
-
-Base.length(b::LavaBuffer) = b.len
-Base.length(::LavaScalar) = 1
-Mantle.capacity(b::LavaBuffer) = b.capacity
-count(b::LavaBuffer) = b.len
-count(::LavaScalar) = 1
-
-stride(::LavaBuffer) = 1
-stride(::LavaScalar) = 0
-
-Base.eltype(::LavaBuffer{T}) where {T} = T
-Base.eltype(::LavaScalar{T}) where {T} = T
-
-Mantle.update!(b::LavaBuffer, data::AbstractVector) = (Mantle.update!(b, 1:length(data), data); b)
-function Mantle.update!(b::LavaBuffer, r::AbstractUnitRange, data::AbstractVector)
-    length(r) == length(data) || throw(DimensionMismatch("range $r vs $(length(data)) elements"))
-    last(r) <= b.capacity || throw(BoundsError(b, r))
-    copyto!(b.store, first(r), data, 1, length(data))
-    b.len = max(b.len, last(r))
-    b
-end
-Mantle.update!(b::LavaBuffer, i::Integer, x) = Mantle.update!(b, i:i, [x])
-Mantle.update!(s::LavaScalar, x) = (copyto!(s.store, 1, [x], 1, 1); s)
-
-function Base.resize!(b::LavaBuffer, n::Integer)
-    n <= b.capacity || throw(ArgumentError("resize beyond capacity is not implemented yet"))
-    b.len = Int(n)
-    b
-end
-
-Base.Array(b::LavaBuffer) = Array(b.store)[1:b.len]
+Mantle.upload!(d::LavaDevice, a::Mantle.DeviceArray{T}, first::Integer,
+               data::AbstractVector) where {T} =
+    (copyto!(Mantle.deviceview(d, a), Int(first), collect(T, data), 1, length(data)); a)
+Mantle.download(d::LavaDevice, a::Mantle.DeviceArray) = Array(Mantle.deviceview(d, a))
+Mantle.devicecopy!(d::LavaDevice, dst::Mantle.DeviceArray, src::Mantle.DeviceArray,
+                   n::Integer) =
+    (copyto!(Mantle.deviceview(d, dst), 1, Mantle.deviceview(d, src), 1, Int(n)); dst)
 
 # ── the window ────────────────────────────────────────────────────────────────
 """
@@ -303,9 +288,11 @@ mutable struct TransientBuffer{T} <: Transient
     n::Int
     first::Int
     last::Int
-    # Nothing until the placer gives it storage; a two-member union splits, an
-    # `Any` does not.
-    view::Union{Nothing,Lava.LavaArray{T,1}}
+    # Where in the pool this landed. The BLOCK is kept, not just the fused
+    # address, because a Vulkan buffer barrier scopes to (VkBuffer, offset, size)
+    # and an address alone cannot name the buffer.
+    block::Any            # ::BufferBlock once placed
+    offset::Int
 end
 
 Base.length(t::TransientBuffer) = t.n
@@ -402,14 +389,25 @@ function takehost!(r::Recycler, bq, n::Integer)
     Lava.host_buffer(bq, n)
 end
 
-"""Take a buffer of exactly `n` bytes, recycled if one is available."""
+"""
+A region for `n` elements of `T`, recycled if one of that size is idle.
+
+From Mantle's pool, not `LavaArray{T,1}(undef, …)` — a rename is an allocation
+like any other, and one that bypassed the pool would be invisible to it while
+being exactly the kind of churn a pool exists to absorb.
+
+The recycler stays in front of the pool rather than being replaced by it: it
+holds a region until the queue timeline says the GPU is done reading, which is a
+question about submitted work that the allocator has no way to answer.
+"""
 function take!(r::Recycler, dev::LavaDevice, ::Type{T}, n::Integer) where {T}
     bytes = Int(n) * sizeof(T)
-    pool = get(r.free, bytes, nothing)
-    if pool !== nothing && !isempty(pool)
-        return pop!(pool)::Lava.LavaArray{T,1}
+    free = get(r.free, bytes, nothing)
+    if free !== nothing && !isempty(free)
+        return pop!(free)::Mantle.DeviceArray{T,1}
     end
-    Lava.LavaArray{T,1}(undef, (Int(n),))
+    Mantle.allocate(Mantle.pool(dev), dev, Mantle.Persistent(), T, (Int(n),);
+                    align = 256, blocksize = Mantle.blocksize(dev))
 end
 
 """Hand a buffer back, reusable once the queue timeline passes `signal`."""
@@ -462,7 +460,7 @@ Mantle.Graph(dev::LavaDevice) =
               Dict{Tuple{Int,UnitRange{Int}},Any}())
 
 function Mantle.Transient.Buffer(g::LavaGraph, ::Type{T}, n::Integer) where {T}
-    t = TransientBuffer{T}(Int(n), typemax(Int), 0, nothing)
+    t = TransientBuffer{T}(Int(n), typemax(Int), 0, nothing, 0)
     push!(g.transients, t)
     t
 end
@@ -725,7 +723,7 @@ decide it. The element type is what says which, because a buffer of draw command
 is not something anything else would be.
 """
 drawover(p::PassHandle, n) = n
-drawover(p::PassHandle, n::LavaBuffer{Lava.DrawIndirectCommand}) = indirectcount!(p, n)
+drawover(p::PassHandle, n::Mantle.Buffer{Lava.DrawIndirectCommand}) = indirectcount!(p, n)
 drawover(p::PassHandle, n::TransientBuffer{Lava.DrawIndirectCommand}) = indirectcount!(p, n)
 
 function indirectcount!(p::PassHandle, n)
@@ -784,6 +782,14 @@ hazard it was derived for, and sync validation is entitled to say so.
 """
 barrierspan(r, st) = (UInt64(st.buf[].pool_offset + st.offset),
                       UInt64(sizeof(eltype(st)) * prod(st.dims)))
+# A pooled transient's storage is a `LavaDeviceArray` — `(ptr, dims)`, which
+# names no buffer and carries no offset. The transient knows both, and its
+# `offset` is already relative to the block's buffer, so no pool_offset here.
+barrierspan(t::TransientBuffer, st) = (UInt64(t.offset), UInt64(nbytes(t)))
+"""The `VkBuffer` a barrier names. Same split as `barrierspan`."""
+barrierbuffer(r, st) = st.buf[].buffer
+barrierbuffer(t::TransientBuffer, st) = t.block.buffer
+
 barrierspan(v::BufferRange, st) =
     (UInt64(st.buf[].pool_offset + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
      UInt64(length(v.range) * sizeof(eltype(st))))
@@ -909,7 +915,7 @@ Renaming a buffer to change one element would device-copy everything that did
 not change, and writing a whole 2 MB array in place would need the hazard
 handled. Each route is bad at the other's job, which is why both exist.
 """
-write_update!(g::LavaGraph, bq, r::UpdateRef, data::LavaBuffer) =
+write_update!(g::LavaGraph, bq, r::UpdateRef, data::Mantle.Buffer) =
     write_update!(g, bq, r, Mantle.storage(data))
 
 # A scalar attribute is a one-element buffer, so a new value is a one-element
@@ -941,15 +947,16 @@ anything else that never went through the host — needs no staging buffer and n
 the same two routes as above, differing only in where the source is, so it is a
 method rather than a branch.
 """
-function rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::Lava.LavaArray{T,1}) where {T}
+function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::Lava.LavaArray{T,1}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
+    fview = Mantle.deviceview(dst.dev, fresh)
 
-    smb, fmb = data.buf[], fresh.buf[]
+    smb, fmb = data.buf[], fview.buf[]
     Lava.cmd_copy_buffer!(bq, smb, fmb, nbytes;
                           src_off = smb.pool_offset + data.offset,
-                          dst_off = fmb.pool_offset + fresh.offset)
+                          dst_off = fmb.pool_offset + fview.offset)
 
     dst.store = fresh
     retire!(g.recycler, old, dst.capacity * sizeof(T),
@@ -967,9 +974,9 @@ function inplace!(bq, dst, data::Lava.LavaArray{T,1}, from::Integer) where {T}
 end
 
 # A Mantle buffer says the same thing as its store, so it takes the same route.
-rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::LavaBuffer{T}) where {T} =
+rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::Mantle.Buffer{T}) where {T} =
     rename!(g, bq, dst, Mantle.storage(data))
-inplace!(bq, dst, data::LavaBuffer, from::Integer) =
+inplace!(bq, dst, data::Mantle.Buffer, from::Integer) =
     inplace!(bq, dst, Mantle.storage(data), from)
 
 """In-place, inline in the command buffer. Falls back to renaming when the
@@ -1002,7 +1009,7 @@ The staging buffer is recycled by size for the same reason the stores are: it is
 the same size every frame, and a recorded copy reads it later, so it cannot be
 handed out again until the GPU is past this frame.
 """
-function rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::AbstractVector{T}) where {T}
+function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::AbstractVector{T}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
@@ -1011,9 +1018,10 @@ function rename!(g::LavaGraph, bq, dst::LavaBuffer{T}, data::AbstractVector{T}) 
     src = data isa Vector{T} ? data : collect(data)
     GC.@preserve src Base.unsafe_copyto!(host.mapped_ptr, Ptr{UInt8}(pointer(src)), nbytes)
 
-    fmb = fresh.buf[]
+    fview = Mantle.deviceview(dst.dev, fresh)
+    fmb = fview.buf[]
     Lava.cmd_copy_buffer!(bq, host.buffer, fmb, nbytes;
-                          dst_off = fmb.pool_offset + fresh.offset)
+                          dst_off = fmb.pool_offset + fview.offset)
 
     dst.store = fresh
     signal = Lava.ensure_active_batch!(bq).signal_value
@@ -1281,11 +1289,16 @@ mutable struct LavaPlan <: Mantle.Plan
 end
 
 """The backend object behind a resource: what actually gets bound or copied."""
-Mantle.storage(x::LavaBuffer) = x.store
-Mantle.storage(x::LavaScalar) = x.store
 Mantle.storage(a::Attr) = Mantle.storage(a.resource)
-Mantle.storage(t::TransientBuffer) = t.view
-Mantle.storage(x) = x
+# What a kernel receives: `LavaDeviceArray` is `(ptr, dims)` and owns nothing, so
+# there is no ownership question to answer here — which is why Mantle holding the
+# array type removes the problem instead of managing it.
+# A borrowed view, not an owning array: the `DataRef` releaser is a no-op, so
+# `copy` here bumps a refcount that frees nothing and Mantle stays the owner.
+# `todevice` turns this into the `(ptr, dims)` a kernel receives; a host-side
+# caller (copy_framebuffer!, a library) gets the handle it needs.
+Mantle.storage(t::TransientBuffer{T}) where {T} =
+    Lava.LavaArray{T,1}(copy(t.block.ref), (t.n,); offset = t.offset)
 
 # What a draw hands the shader: the device-side array, not the host handle. Doing
 # the conversion here rather than through `Adapt` also drops the per-draw pin —
@@ -1360,7 +1373,7 @@ function build_pass_barrier(g, ts::Vector{Mantle.Transition})
                 dst_stage_mask = dst_stage, dst_access_mask = dst_access))
         else
             off, len = barrierspan(r, st)
-            b = st.buf[].buffer
+            b = barrierbuffer(r, st)
             push!(spans, (buf = b, handle = UInt64(b.vks), off = off, len = len,
                           ss = src_stage, sa = src_access, ds = dst_stage, da = dst_access))
         end
@@ -1459,18 +1472,9 @@ mutable struct Compile
     alias::Bool
     coalesce::Bool
     policy::Mantle.Policy
-    deps::Vector{Vector{Int}}                         # Dag
-    order::Vector{Int}                                # Schedule
-    items::Vector{Mantle.Item}                        # Liveness
-    slabs::Vector{Any}                                # Place
-    slab::Any
-    peak::Int
-    naive::Int
-    offsets::Vector{Int}
-    # Aliasing: pass index => the (new, old) transient pairs whose bytes change
-    # hands there. The old index is kept because the barrier is derived from what
-    # that transient was last doing, not assumed to be everything.
-    alias_begins::Dict{Int,Vector{Tuple{Int,Int}}}
+    # What the backend-independent phases compute. Held rather than spread over
+    # fields here, so those phases can live in core and read one thing.
+    analysis::Mantle.Analysis
     transitions::Vector{Mantle.Transition}            # Barriers
     prepass::IdDict{Pass,Vector{Mantle.Transition}}
     passes::Vector{PassPlan}                          # Pipelines
@@ -1478,12 +1482,25 @@ mutable struct Compile
 end
 
 Compile(g::LavaGraph; alias = true, coalesce = true, policy = Mantle.Overlap()) =
-    Compile(g, alias, coalesce, policy, Vector{Int}[], Int[], Mantle.Item[], Any[], nothing,
-            0, 0, Int[], Dict{Int,Vector{Tuple{Int,Int}}}(), Mantle.Transition[],
+    Compile(g, alias, coalesce, policy, Mantle.Analysis(), Mantle.Transition[],
             IdDict{Pass,Vector{Mantle.Transition}}(), PassPlan[], Set{Any}())
 
-"""Passes in execution order, which is the scheduled order once Schedule has run."""
-ordered(c::Compile) = isempty(c.order) ? c.graph.passes : c.graph.passes[c.order]
+# What core's phases ask of a compilation context. Everything else about
+# `Compile` is this backend's business.
+Mantle.analysis(c::Compile) = c.analysis
+Mantle.passes(c::Compile) = c.graph.passes
+Mantle.usages(p::Pass) = p.usages
+Mantle.overlapping(c::Compile, a::Int, b::Int) = overlapping(c.graph, a, b)
+Mantle.policy(c::Compile) = c.policy
+Mantle.device(c::Compile) = c.graph.dev
+Mantle.pool(c::Compile) = c.graph.dev.pool
+Mantle.alias(c::Compile) = c.alias
+Mantle.transients(c::Compile) = c.graph.transients
+Mantle.transientbyid(c::Compile) = c.graph.transient_by_id
+Mantle.nbytes(t::Transient) = nbytes(t)
+Mantle.alignment(t::Transient) = alignment(t)
+Mantle.arena(t::Transient) = arena(t)
+Mantle.describe(t::Transient) = describe(t)
 
 # ── Dag ───────────────────────────────────────────────────────────────────────
 writes_it(U) = Mantle.writes(U)
@@ -1519,309 +1536,86 @@ An edge from i to j when they share a resource and at least one writes it.
 Read-after-read is deliberately not an edge: two passes that only read the same
 thing may run in either order, which is the freedom the scheduler spends.
 """
-function Mantle.run!(::Mantle.Dag, c::Compile)
-    ps = c.graph.passes
-    g = c.graph
-    c.deps = [Int[] for _ in ps]
-    for j in eachindex(ps), i in 1:(j - 1)
-        shared = false
-        for (idj, Uj) in ps[j].usages, (idi, Ui) in ps[i].usages
-            overlapping(g, idi, idj) || continue
-            (writes_it(Ui) || writes_it(Uj)) || continue
-            shared = true
-            break
-        end
-        shared && push!(c.deps[j], i)
-    end
-    c
-end
-
-# ── Schedule ──────────────────────────────────────────────────────────────────
-# Width of each memory term in the packed score; two of them share the range.
-const SCORE_MAX = 0x1fff
-
-"""
-Greedy list scheduling under a packed priority score.
-
-Objectives live in disjoint bit ranges of one integer and are OR'd, so comparing
-candidates is one integer compare and the policy is chosen by moving a bit range
-rather than by writing a different comparator. That trick is the best single idea
-in RPS (`rps_dag_schedule.hpp:180-208`).
-
-The memory term prefers a candidate that frees more bytes than it allocates,
-counting a transient's first touch as an allocation and its last as a free.
-"""
-function Mantle.run!(::Mantle.Schedule, c::Compile)
-    ps = c.graph.passes
-    n = length(ps)
-    n == 0 && return c
-
-    remaining = [length(d) for d in c.deps]
-    dependents = [Int[] for _ in 1:n]
-    for j in 1:n, i in c.deps[j]
-        push!(dependents[i], j)
-    end
-
-    # How many *passes* touch each transient, so "last use" is known. Counting
-    # usages instead would double-count a pass that binds the same resource
-    # twice, which makes every candidate tie and the schedule collapse to
-    # declaration order.
-    ids(p) = unique(first(u) for u in p.usages)
-    touches = Dict{Int,Int}()
-    for p in ps, id in ids(p)
-        touches[id] = get(touches, id, 0) + 1
-    end
-    seen = Dict{Int,Int}()
-    bytesof = Dict{Int,Int}()
-    for (id, t) in c.graph.transient_by_id
-        bytesof[id] = nbytes(t)
-    end
-
-    maxalloc = max(1, maximum(eachindex(ps); init = 0) do i
-        sum(id -> get(bytesof, id, 0), ids(ps[i]); init = 0)
-    end)
-    mshift = Mantle.memory_shift(c.policy)
-    oshift = Mantle.order_shift(c.policy)
-    order = Int[]
-    ready = [i for i in 1:n if remaining[i] == 0]
-
-    while !isempty(ready)
-        best, bestscore = 0, -1
-        for k in eachindex(ready)
-            i = ready[k]
-            alloc = 0
-            freed = 0
-            for id in ids(ps[i])
-                b = get(bytesof, id, 0)
-                b == 0 && continue
-                get(seen, id, 0) == 0 && (alloc += b)
-                get(seen, id, 0) + 1 == touches[id] && (freed += b)
-            end
-            # Two non-negative terms, not their difference. A difference has to
-            # be clamped at zero to fit the bit range, and that clamp throws away
-            # exactly the distinction being measured: a pass that breaks even and
-            # one that allocates two buffers both come out at zero.
-            #
-            # Scaled by the largest per-pass allocation rather than by a fixed
-            # shift. RPS shifts by 16 (`rps_dag_schedule.hpp:351`) because its
-            # buffers are megabytes; ours can be any size, and a fixed shift sends
-            # every 16 kB buffer to zero and collapses the schedule back to
-            # declaration order.
-            mem = clamp((SCORE_MAX * (maxalloc - alloc)) ÷ maxalloc, 0, SCORE_MAX) +
-                  clamp((SCORE_MAX * freed) ÷ maxalloc, 0, SCORE_MAX)
-            # Clamped because the fields are OR'd, not added: a term that spills
-            # its 16 bits would silently corrupt the one above it.
-            ord = clamp(n - i, 0, 0xffff)                # earlier declaration scores higher
-            score = (mem << mshift) | (ord << oshift)
-            if score > bestscore
-                best, bestscore = k, score
-            end
-        end
-        i = ready[best]
-        deleteat!(ready, best)
-        push!(order, i)
-        for id in ids(ps[i])
-            seen[id] = get(seen, id, 0) + 1
-        end
-        for j in dependents[i]
-            remaining[j] -= 1
-            remaining[j] == 0 && push!(ready, j)
-        end
-    end
-
-    length(order) == n || error("scheduling left $(n - length(order)) passes unreachable: cycle in the DAG")
-    c.order = order
-    c
-end
-
-# ── Liveness ──────────────────────────────────────────────────────────────────
-"""
-Intervals come from which passes touched a resource, recorded by `touch!` as the
-graph was built. Liveness is therefore never a second statement that could
-disagree with use.
-
-With `alias = false` every transient claims the whole timeline, so none can share
-bytes. That is not a tuning knob so much as a bisection tool: it is how the
-aliasing hazard was isolated.
-"""
-function Mantle.run!(::Mantle.Liveness, c::Compile)
-    ts = c.graph.transients
-    isempty(ts) && return c
-    # Recomputed from the scheduled order, not from declaration order: reordering
-    # passes is exactly what changes a transient's interval.
-    for t in ts
-        t.first, t.last = typemax(Int), 0
-    end
-    for (pos, p) in enumerate(ordered(c)), (id, _) in p.usages
-        t = get(c.graph.transient_by_id, id, nothing)
-        t === nothing && continue
-        t.first = min(t.first, pos)
-        t.last = max(t.last, pos)
-    end
-    # A transient nothing touched has no interval, and the placer's `Span` reports
-    # that as an inverted range with `typemax(Int)` in it — a message about the
-    # allocator for a mistake in the graph.
-    for (i, t) in enumerate(ts)
-        t.last == 0 && throw(ArgumentError(
-            "transient $i ($(describe(t))) is never used by any pass. A transient's " *
-            "interval is derived from use, so one that nothing reads or writes has " *
-            "nothing to place. Give it to a pass, or drop the declaration."))
-    end
-    lastpass = maximum(t -> t.last, ts) + 1
-    c.items = [Mantle.Item(string(i),
-                           c.alias ? Mantle.Span(t.first, t.last + 1) : Mantle.Span(0, lastpass),
-                           nbytes(t); alignment = alignment(t))
-               for (i, t) in enumerate(ts)]
-    c
-end
-
 # ── Place ─────────────────────────────────────────────────────────────────────
+"""Back an arena. Buffers get a Lava array; images get raw device memory."""
+# The arena is one allocation shared by transients of several element types, so
+# its usage bits are the union of what they ask for.
 """
-A plan's window onto one arena's pool, and the transients placed in it.
+The buffer arena's block: one raw `vkAllocateMemory` with a `VkBuffer` bound into
+it, and the buffer's device address.
 
-Mutable because the pool underneath can be reallocated by a later, larger tenant:
-the offsets stay valid — they are this plan's own placement and nothing about
-them changed — but `memory` becomes the new allocation and every transient is
-materialised into it again. Holding the offsets here rather than only on
-`Compile` is what makes that possible without recompiling the plan.
+Deliberately NOT a `LavaArray`. That would put Mantle's suballocation on top of
+Lava's pool — two allocators with the lower one invisible — and it would drag in
+a `DataRef` whose finalizer frees memory Mantle owns. Nothing here finalizes and
+nothing refcounts: the Block owns the memory, the Pool owns the Block, `trim!`
+frees.
 """
-mutable struct Slab
-    arena::Any
+struct BufferBlock
+    buffer::Any
     memory::Any
+    address::UInt64
     bytes::Int
-    indices::Vector{Int}        # into graph.transients
-    offsets::Vector{Int}        # parallel to indices
+    # A `DataRef` whose releaser DOES NOTHING. This is Lava's shape of the
+    # `unsafe_wrap(..., own = false)` hatch every GPU array package provides for
+    # foreign memory: a transient's `storage` is a `LavaArray` view over it, so
+    # host-side operations (copies, library calls) work — while the free stays
+    # Mantle's, because the Block owns the memory and `trim!` frees.
+    ref::Any
 end
 
-"""
-What a set of transients requires of the arena backing them.
+function Mantle.rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage)
+    n = max(bytes, 1)
+    # SHADER_DEVICE_ADDRESS is not optional: kernels reach a suballocated
+    # transient by `address + offset`, which is the whole bridge.
+    u = Lava.Vulkan.BufferUsageFlag(usage) |
+        Lava.Vulkan.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        Lava.Vulkan.BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        Lava.Vulkan.BUFFER_USAGE_TRANSFER_SRC_BIT |
+        Lava.Vulkan.BUFFER_USAGE_TRANSFER_DST_BIT
+    buf = Lava.unbound_buffer(dev.ctx, n, u)
+    req = Lava.buffer_requirements(dev.ctx, buf)
+    mem = Lava.device_memory(dev.ctx, req.size, req.type_bits)
+    Lava.bind_buffer!(dev.ctx, buf, mem, 0)
+    addr = Lava.Vulkan.get_buffer_device_address(
+        dev.ctx.device, Lava.Vulkan.BufferDeviceAddressInfo(buf))
+    managed = Lava.VkManagedBuffer(buf, mem, UInt64(addr), Ptr{UInt8}(C_NULL), Int(req.size),
+                                   0, nothing, nothing, Lava.BUF_STATE_ALIVE, 0, false, dev.ctx)
+    ref = Lava.GPUArrays.DataRef(_ -> nothing, managed)
+    return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
+end
 
-The two directions are not symmetrical, and getting them the wrong way round is
-memory that works until the one image whose type was excluded is bound. Usage
-bits union: the arena must permit everything any tenant does with it. Image
-memory type bits intersect: the type has to be one every image can bind to.
-"""
-requirements(::Buffers, ts) =
-    (reduce(|, (extrausage(eltype(t)) for t in ts); init = UInt32(0)), typemax(UInt32))
-requirements(::Images, ts) =
-    (UInt32(0), reduce(&, (UInt32(t.req.type_bits) for t in ts); init = typemax(UInt32)))
-
-"""The one allocation an arena's pool is backed by."""
-backing(::Buffers, dev::LavaDevice, bytes::Int, extra::UInt32, ::UInt32) =
-    Lava.LavaArray{UInt8,1}(undef, (max(bytes, 1),); extra_usage = extra)
-backing(::Images, dev::LavaDevice, bytes::Int, ::UInt32, bits::UInt32) =
+Mantle.rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
     Lava.device_memory(dev.ctx, max(bytes, 1), bits)
 
-"""
-Every tenant materialises into the pool's current allocation again.
+Mantle.rawfree(::LavaDevice, mem) = nothing   # Lava frees its own; see the staging note
 
-Called only when the pool actually reallocated. The plans keep their offsets —
-the placement inside a plan is unaffected by the pool growing under it — so this
-rebinds storage and touches nothing the compiler decided.
-"""
-function remap!(p::ArenaPool, a)
-    live = 0
-    for wr in p.tenants
-        pl = wr.value
-        pl === nothing && continue          # collected: nobody can run it, nothing to remap
-        live += 1
-        p.tenants[live] = wr
-        # A baked plan cannot be remapped: its recording holds the addresses the
-        # old allocation had, and nothing can rewrite a command buffer. Silently
-        # re-materialising underneath it produces a replay that reads freed
-        # storage — deterministic, quiet, and wrong, which is the worst of the
-        # three. So this is where it stops, with the order that would have
-        # avoided it: build every plan on a device, then bake.
-        pl.baked === nothing || throw(ArgumentError(
-            "a plan on this device is baked, and another plan needs arena $a grown — " *
-            "which would move the baked plan's transients and leave its recording " *
-            "pointing at the old allocation. Build every plan that shares a device " *
-            "before baking any of them."))
-        for sl in pl.slabs
-            sl.arena == a || continue
-            sl.memory = p.memory
-            for (i, off) in zip(sl.indices, sl.offsets)
-                materialize!(pl.graph.transients[i], p.memory, off)
-            end
-        end
-    end
-    resize!(p.tenants, live)                # prune here, where the list is already walked
-    p
-end
+# What memory the given transients can legally share. For images that is the
+# INTERSECTION of their type bits — `device_memory` errors on an empty one rather
+# than picking a type some image cannot use.
+Mantle.constraintof(::LavaDevice, ::Images, ts) = reduce(&, (t.req.type_bits for t in ts))
+Mantle.constraintof(::LavaDevice, ::Buffers, ts) =
+    reduce(|, (extrausage(eltype(t)) for t in ts))
 
-"""
-Reserve `bytes` in the device's pool for this arena, growing it if needed.
-
-The pool is sized to its largest tenant rather than to their total, which is the
-whole point: two plans in one process commit the max. Growing reallocates and
-remaps, and that is safe here for the same reason `refit!` is — a plan is
-compiled outside the frame loop, with nothing of its own in flight.
-"""
-function reserve!(dev::LavaDevice, a, bytes::Int, ts)
-    p = pool!(dev, a)
-    extra, bits = requirements(a, ts)
-    want_extra = p.extra | extra
-    want_bits = p.typebits & bits
-    want_bits == 0 && throw(ArgumentError(
-        "arena $a has no memory type every image in it can bind to. This plan's " *
-        "images and an earlier plan's on this device intersect to nothing, so one " *
-        "allocation cannot serve both."))
-    want_bytes = max(p.bytes, bytes)
-    if p.memory === nothing || want_bytes > p.bytes ||
-       want_extra != p.extra || want_bits != p.typebits
-        p.memory = backing(a, dev, want_bytes, want_extra, want_bits)
-        p.bytes, p.extra, p.typebits = want_bytes, want_extra, want_bits
-        remap!(p, a)
-    end
-    p
-end
-
-"""
-Register a compiled plan as holding space in the pools it was placed into.
-
-Weakly, so a plan that is dropped does not keep its graph, its pipelines and
-every transient it named alive for the life of the device. A collected tenant is
-one nothing can run, so skipping it in [`remap!`](@ref) loses nothing.
-"""
-function tenant!(dev::LavaDevice, pl)
-    for sl in pl.slabs
-        p = pool!(dev, sl.arena)
-        any(wr -> wr.value === pl, p.tenants) || push!(p.tenants, WeakRef(pl))
-    end
-    pl
-end
+# A block may host a request when its memory satisfies it: for images the block's
+# type bits must still include a type the request allows; for buffers the block's
+# usage flags must be a superset of what the request needs.
+Mantle.compatible(::LavaDevice, blk::Integer, req::Integer) = (blk & req) == req
+Mantle.compatible(::LavaDevice, blk, req) = blk == req
 
 """Give a placed transient its storage."""
-function materialize!(t::TransientBuffer, slab, offset)
-    t.view = Lava.LavaArray{eltype(t),1}(copy(slab.buf), (t.n,); offset)
+function Mantle.materialize!(t::TransientBuffer, blk::BufferBlock, offset::Int)
+    t.block, t.offset = blk, offset
+    return t
 end
 
-function materialize!(t::TransientImage{T}, slab, offset) where {T}
+function Mantle.materialize!(t::TransientImage{T}, slab, offset) where {T}
     t.memory = slab                       # the image outlives the call; the slab must too
     Lava.bind_image!(Lava.vk_context(), t.image, slab, offset)
     t.view = Lava.image_view(Lava.vk_context(), t.image, t.format, aspect(T))
 end
 
-"""Bytes the device's other arenas have already committed, so one arena's bound
-is what is left rather than the whole device."""
-committed(dev::LavaDevice, except) =
-    sum((p.bytes for (k, p) in dev.pools if k != except); init = 0)
-
-"""
-The largest single allocation this device will make.
-
-A harder limit than the budget and usually a far smaller one — 4 GB against 29 GB
-of budget on the machine this was written on — and the one that actually bounds
-an arena, because an arena is *one* allocation: the offsets a placement produces
-are into a single contiguous range, so it cannot be split across two.
-
-Measured rather than assumed, because the alternative was a reserve fraction
-subtracted from the heap, and every such fraction is either too small to prevent
-the failure or too large to be justifiable. A plan needing 5 GB in one arena
-cannot run on this device however idle the card is, and `checkcapacity` naming
-that is worth more than a percentage that happens to catch it here.
-"""
-function maxalloc(dev::LavaDevice)
+"""`VK_KHR_maintenance3`'s `maxMemoryAllocationSize`. See `Mantle.maxalloc`."""
+function Mantle.maxalloc(dev::LavaDevice)
     props = Lava.Vulkan.get_physical_device_properties_2(
         dev.ctx.physical_device, Lava.Vulkan.PhysicalDeviceMaintenance3Properties)
     m3 = props.next::Lava.Vulkan.PhysicalDeviceMaintenance3Properties
@@ -1834,60 +1628,7 @@ Assign offsets, one placement per arena.
 Peak is summed over arenas because they are separate allocations; the alternative
 would be to report the larger and pretend the other is free.
 """
-function Mantle.run!(::Mantle.Place, c::Compile)
-    isempty(c.items) && return c
-    ts = c.graph.transients
-    dev = c.graph.dev
-    c.offsets = zeros(Int, length(ts))
-    c.peak = 0
-    c.naive = sum(nbytes, ts)
-    for a in unique(map(arena, ts))
-        idx = findall(t -> arena(t) == a, ts)
-        # Two bounds, and the smaller wins. What this arena may still have — the
-        # other arena is a separate allocation and its bytes are already gone —
-        # and what the device will hand over in one piece, which on an APU with a
-        # 29 GB budget is 4 GB and is therefore usually the binding one.
-        avail = min(maxalloc(dev), Mantle.capacity(dev) - committed(dev, a))
-        prob = Mantle.Problem(c.items[idx], avail)
-        pl = Mantle.checkcapacity(prob, Mantle.place(prob), "arena $a")
-        p = reserve!(dev, a, pl.height, ts[idx])
-        offs = [pl.offsets[string(i)] for i in idx]
-        push!(c.slabs, Slab(a, p.memory, pl.height, idx, offs))
-        c.peak += pl.height
-        for (i, off) in zip(idx, offs)
-            c.offsets[i] = off
-            materialize!(ts[i], p.memory, off)
-        end
-    end
-    c.slab = isempty(c.slabs) ? nothing : first(c.slabs).memory
-    c
-end
-
 # ── Aliasing ──────────────────────────────────────────────────────────────────
-"""
-Which passes begin a transient that took over another's bytes.
-
-Aliasing creates a hazard between two resources the usage tracker sees as
-unrelated: Y's first write lands on memory X was still reading. Nothing in the
-per-resource state can know that, so placement has to say so. RPS carries the
-same thing as ResourceAliasingInfo with srcDeactivating / dstActivating.
-
-Found by fuzzing: with aliasing on, derived barriers gave a different answer run
-to run; with aliasing off, every seed was stable.
-"""
-function Mantle.run!(::Mantle.Aliasing, c::Compile)
-    ts = c.graph.transients
-    for (i, y) in enumerate(ts), (j, x) in enumerate(ts)
-        i == j && continue
-        arena(x) == arena(y) || continue   # offsets in different allocations never overlap
-        x.last < y.first || continue
-        c.offsets[i] < c.offsets[j] + nbytes(x) &&
-            c.offsets[j] < c.offsets[i] + nbytes(y) || continue
-        push!(get!(() -> Tuple{Int,Int}[], c.alias_begins, y.first), (i, j))
-    end
-    c
-end
-
 const EMPTY_HANDOVER = Tuple{Int,Int}[]
 
 """
@@ -2037,7 +1778,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
     segments_of(id) = get(segs, id, (id,))
 
     final = Dict{Int,Type}()
-    for p in ordered(c), (id, U) in p.usages, sid in segments_of(id)
+    for p in Mantle.ordered(c), (id, U) in p.usages, sid in segments_of(id)
         final[sid] = U
     end
 
@@ -2049,7 +1790,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
                         Mantle.ResourceState(resourcekind(r), u)
     end
 
-    for (i, p) in enumerate(ordered(c))
+    for (i, p) in enumerate(Mantle.ordered(c))
         pre = Mantle.Transition[]
         for (id, U) in p.usages, sid in segments_of(id)
             transition!(pre, be, sid, state(sid), U)
@@ -2086,7 +1827,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
         # It used to name every stage and both access directions instead. That is
         # correct and says nothing: a barrier that waits for everything cannot be
         # wrong, and cannot be checked either.
-        handovers = get(c.alias_begins, i, EMPTY_HANDOVER)
+        handovers = get(Mantle.analysis(c).alias_begins, i, EMPTY_HANDOVER)
         for newi in unique(first(h) for h in handovers)
             to = usage_of(p, resourceid(g, c.graph.transients[newi]), g)
             to === nothing && continue
@@ -2132,7 +1873,7 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
     # barrier, so the needed transitions split by resource kind: images become an
     # image barrier each, everything else is ORed into the memory barrier.
     isimage(t) = t.resource != 0 && resourcekind(g.by_id[t.resource]) isa ImageKind
-    for p in ordered(c)
+    for p in Mantle.ordered(c)
         need = c.prepass[p]
         imgs = [ImageBarrier(g.by_id[t.resource], t) for t in need if isimage(t)]
         rest = filter(!isimage, need)
@@ -2232,10 +1973,10 @@ dispatchrange(x) = count(x)
 Mantle.Plan(g::LavaGraph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Mantle.Policy = Mantle.Overlap()) =
     let c = Mantle.compile!(Compile(g; alias, coalesce, policy))
-        tenant!(g.dev,
-                LavaPlan(g, c.transitions, c.passes, c.pipelines, c.slabs, c.peak, c.naive,
-                         profile ? Profiler(g.dev.ctx, c.passes) : nothing,
-                         alias, coalesce, policy, ArgMemory(g.dev, c.passes), nothing))
+        LavaPlan(g, c.transitions, c.passes, c.pipelines, Mantle.analysis(c).regions,
+                 Mantle.analysis(c).peak, Mantle.analysis(c).naive,
+                 profile ? Profiler(g.dev.ctx, c.passes) : nothing,
+                 alias, coalesce, policy, ArgMemory(g.dev, c.passes), nothing)
     end
 
 """
@@ -2261,11 +2002,10 @@ function refit!(pl::LavaPlan)
     moved || return false
     c = Mantle.compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
-    pl.slabs, pl.peak, pl.naive = c.slabs, c.peak, c.naive
-    # The recompile placed into the device's pools again and produced fresh
-    # `Slab`s; the plan has to be a tenant of those, or a later grow remaps the
-    # ones it no longer holds and leaves these pointing at the old allocation.
-    tenant!(pl.graph.dev, pl)
+    # No tenancy: the recompile takes fresh regions from the pool, and a region
+    # already carved is never moved by a later grow — `Pool` adds a block instead
+    # of reallocating one, which is the hazard `tenant!`/`remap!` existed for.
+    let a = Mantle.analysis(c); pl.slabs, pl.peak, pl.naive = a.regions, a.peak, a.naive end
     # A recompile can change the draws and therefore the layout, so the argument
     # memory is laid out again with them. The old slots are still being read by
     # frames in flight; `sync_swapchain!` waited for the device before any of
@@ -2699,6 +2439,13 @@ function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::I
                       d.tlas ? Lava.find_tlas_in_args(args) : nothing)
     nothing
 end
+
+"""
+Give this plan's regions back to the pool. The argument memory and the
+pipelines are ordinary Lava objects — the GC reclaims those; the regions are
+the thing only an explicit release can return, because nothing here finalizes.
+"""
+Mantle.free!(pl::LavaPlan) = (foreach(Mantle.release!, pl.slabs); empty!(pl.slabs); nothing)
 
 Base.close(::LavaPlan) = nothing
 Base.isopen(s::LavaSurface) = isopen(s.win)
