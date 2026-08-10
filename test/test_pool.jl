@@ -213,3 +213,48 @@ end
     M.tenant!(p, :buf, Pinned())
     @test_throws ArgumentError M.reserve!(p, d, :buf, nothing, 1 << 20; blocksize = 4096)
 end
+
+# A device whose constraints behave like a real one's: usage bits that must be
+# PERMITTED (so they union), against a fake whose kind was its own constraint.
+struct BitDev
+    allocs::Vector{Int}
+end
+BitDev() = BitDev(Int[])
+M.rawalloc(d::BitDev, kind, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+M.rawfree(::BitDev, mem) = nothing
+M.constraintof(::BitDev, kind, ts) = ts === nothing ? UInt32(0) : UInt32(ts)
+M.compatible(::BitDev, blk::UInt32, req::UInt32) = (blk & req) == req
+M.mergeconstraints(::BitDev, kind, a::UInt32, b::UInt32) = a | b
+
+@testset "an arena reconciles what all its tenants need" begin
+    # reserve!'s fast path used to return the existing region on SIZE alone. An
+    # arena outlives the plan that sized it, so a block created for one plan's
+    # usage bits may not permit what the next plan does with them — memory that
+    # works until the one transient whose bit was missing is used.
+    d, p = BitDev(), M.Pool()
+    r1 = M.reserve!(p, d, :buf, 0b0001, 1024; blocksize = 4096)
+    @test p.arenas[:buf].constraint == 0b0001
+
+    # smaller, but needs a bit the block does not have: must NOT reuse it
+    r2 = M.reserve!(p, d, :buf, 0b0010, 512; blocksize = 4096)
+    @test p.arenas[:buf].constraint == 0b0011        # union, so both are served
+    @test M.offset(r2) != M.offset(r1) || r2.block !== r1.block
+    @test length(d.allocs) == 2                      # a second block was needed
+
+    # smaller AND already permitted: now the fast path is right to reuse
+    before = length(d.allocs)
+    r3 = M.reserve!(p, d, :buf, 0b0001, 256; blocksize = 4096)
+    @test r3 === p.arenas[:buf].region
+    @test length(d.allocs) == before                 # reached no device
+
+    # and a device that cannot reconcile says so, instead of handing back memory
+    # that satisfies only one of them
+    struct PickyDev end
+    M.rawalloc(::PickyDev, kind, bytes, c) = zeros(UInt8, bytes)
+    M.rawfree(::PickyDev, mem) = nothing
+    M.constraintof(::PickyDev, kind, ts) = ts
+    M.compatible(::PickyDev, a, b) = a === b
+    p2 = M.Pool()
+    M.reserve!(p2, PickyDev(), :img, :typeA, 64; blocksize = 4096)
+    @test_throws ArgumentError M.reserve!(p2, PickyDev(), :img, :typeB, 64; blocksize = 4096)
+end
