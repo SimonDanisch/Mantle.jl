@@ -44,7 +44,7 @@ export DeviceCaps, caps
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update
-export UpdateRef, anypending, applyupdates!
+export UpdateRef, anypending, applyupdates!, custombody
 export Phase, Dag, Schedule, Liveness, Place, Aliasing, Barriers, Pipelines
 export Policy, Compact, Overlap
 export PHASES, compile!

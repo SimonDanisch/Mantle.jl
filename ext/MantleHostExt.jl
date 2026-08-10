@@ -183,10 +183,7 @@ function Mantle.custom!(f, g::HostGraph, name::AbstractString)
     p = HostPass(name)
     push!(g.passes, p)
     body = f(PassHandle(g, p))
-    applicable(body) || throw(ArgumentError(
-        "custom!: the block has to return a zero-argument callable — it is what " *
-        "runs at record time. Declare the uses, then return the work."))
-    push!(p.dispatches, body)
+    push!(p.dispatches, Mantle.custombody(body))
     return p
 end
 

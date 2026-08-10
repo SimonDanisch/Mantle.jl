@@ -233,6 +233,23 @@ can see it.
 function Update end
 
 """
+    custombody(body) -> body
+
+Check that a `custom!` block returned the callable it is contracted to.
+
+The contract, not a mechanism: what a backend does with the body differs, that it
+must BE one does not. Both extensions carried this test and its wording verbatim,
+and an error message that exists twice is one that will eventually say two
+different things about one rule.
+"""
+function custombody(body)
+    applicable(body) || throw(ArgumentError(
+        "custom!: the block has to return a zero-argument callable — it is what " *
+        "runs at record time. Declare the uses, then return the work."))
+    return body
+end
+
+"""
 What [`Update`](@ref) hands back.
 
 Calling it stores a reference and nothing else: it runs on whatever task set the
