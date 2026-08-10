@@ -233,6 +233,53 @@ can see it.
 function Update end
 
 """
+What [`Update`](@ref) hands back.
+
+Calling it stores a reference and nothing else: it runs on whatever task set the
+observable, where there is no command buffer open and no guarantee the device is
+done with the resource. `pending` is swapped atomically for that reason — an
+observable can fire while `run!` is reading it.
+
+In core because both backends had this verbatim, down to the `@atomic`, and two
+copies of a lock-free protocol drift in exactly the place nobody looks. A backend
+supplies where the write goes and how, not when it is safe to read the box.
+"""
+mutable struct UpdateRef
+    resource::Any
+    range::Union{Nothing,UnitRange{Int}}
+    @atomic pending::Any
+end
+UpdateRef(resource, range = nothing) = UpdateRef(resource, range, nothing)
+
+(r::UpdateRef)(data) = (@atomic r.pending = data; nothing)
+
+"""Whether any of these refs has data waiting.
+
+What an update pass asks before emitting its barriers: a pass whose refs are all
+clean writes nothing, and ordering against a write that did not happen is cost
+without a hazard."""
+anypending(rs) = any(r -> (@atomic r.pending) !== nothing, rs)
+
+"""
+    applyupdates!(f, refs)
+
+Hand each waiting write to `f(ref, data)` and consume it.
+
+Consumed, so a ref that is not fired again writes nothing next run — the
+difference between "this value changed" and "this value exists". Reading and
+clearing are both here so a backend cannot implement half of it.
+"""
+function applyupdates!(f, rs)
+    for r in rs
+        data = @atomic r.pending
+        data === nothing && continue
+        f(r, data)
+        @atomic r.pending = nothing
+    end
+    return nothing
+end
+
+"""
     copy!(graph, name, dst, src)
 
 A copy as a graph pass, so its layouts and ordering are derived rather than

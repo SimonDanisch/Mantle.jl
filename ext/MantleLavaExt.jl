@@ -862,21 +862,6 @@ function Mantle.custom!(f, g::LavaGraph, name::AbstractString)
     p
 end
 
-"""
-What `Update` hands back. Calling it stores a reference and nothing else: it runs
-on whatever task set the observable, where there is no command buffer to record
-into and no guarantee the GPU is done with the resource.
-
-`pending` is swapped atomically because an observable can fire while `run!` is
-reading it.
-"""
-mutable struct UpdateRef
-    resource::Any
-    range::Union{Nothing,UnitRange{Int}}
-    @atomic pending::Any
-end
-
-(r::UpdateRef)(data) = (@atomic r.pending = data; nothing)
 
 """The single pass every `Update` shares, so one pair of barriers covers them all."""
 function updates_pass!(g::LavaGraph)
@@ -893,7 +878,7 @@ function Mantle.Update(g::LavaGraph, buf; range = nothing)
     touch!(g, buf)
     id = resourceid(g, buf)
     any(u -> u.first == id, p.usages) || push!(p.usages, id => CopyDst)
-    r = UpdateRef(buf, range, nothing)
+    r = Mantle.UpdateRef(buf, range)
     push!(g.updates, r)
     r
 end
@@ -915,7 +900,7 @@ Renaming a buffer to change one element would device-copy everything that did
 not change, and writing a whole 2 MB array in place would need the hazard
 handled. Each route is bad at the other's job, which is why both exist.
 """
-write_update!(g::LavaGraph, bq, r::UpdateRef, data::Mantle.Buffer) =
+write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, data::Mantle.Buffer) =
     write_update!(g, bq, r, Mantle.storage(data))
 
 # A scalar attribute is a one-element buffer, so a new value is a one-element
@@ -923,10 +908,10 @@ write_update!(g::LavaGraph, bq, r::UpdateRef, data::Mantle.Buffer) =
 # along with the frame. Renaming would be absurd for that, and the old
 # `update!(scalar, x)` route flushes the queue to make its write safe, which is a
 # stall per changed colour.
-write_update!(g::LavaGraph, bq, r::UpdateRef, x) =
+write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, x) =
     (inplace!(bq, r.resource, [x], 1); nothing)
 
-function write_update!(g::LavaGraph, bq, r::UpdateRef, data::AbstractVector{T}) where {T}
+function write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, data::AbstractVector{T}) where {T}
     dst = r.resource
     n = length(data) * sizeof(T)
     n == 0 && return
@@ -2299,7 +2284,7 @@ function record_pass!(g::LavaGraph, bq, pp::PassPlan, derived::Bool, am::ArgMemo
     # order against a write that did not happen. Skipping a barrier whose
     # source access never occurred is safe; the compile-time coalescing is
     # what must not assume it fired.
-    if p.kind === :update && !any(r -> (@atomic r.pending) !== nothing, g.updates)
+    if p.kind === :update && !Mantle.anypending(g.updates)
         return nothing
     end
 
@@ -2348,11 +2333,8 @@ function record_pass!(g::LavaGraph, bq, pp::PassPlan, derived::Bool, am::ArgMemo
         # frame's take, and the resource ping-pongs across three buffers
         # instead of two.
         recycle!(g.recycler, bq)
-        for r in g.updates
-            data = @atomic r.pending
-            data === nothing && continue
+        Mantle.applyupdates!(g.updates) do r, data
             write_update!(g, bq, r, data)
-            @atomic r.pending = nothing
         end
         return nothing
     elseif p.kind === :copy

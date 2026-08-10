@@ -191,21 +191,6 @@ function Mantle.custom!(f, g::HostGraph, name::AbstractString)
 end
 
 # ── updates ───────────────────────────────────────────────────────────────────
-"""
-What `Update` hands back here. The same contract as the Lava one: calling it
-stores a reference and touches nothing, and the write happens at the position
-the graph reserved.
-
-`pending` is atomic for the same reason — the caller may be whatever task set an
-observable.
-"""
-mutable struct HostUpdateRef
-    resource::Any
-    range::Union{Nothing,UnitRange{Int}}
-    @atomic pending::Any
-end
-
-(r::HostUpdateRef)(data) = (@atomic r.pending = data; nothing)
 
 """The single pass every `Update` shares, so one position in the schedule covers
 them all. Declared `CopyDst` per resource, which is what orders it against the
@@ -228,15 +213,8 @@ is no staging buffer to recycle and no hazard to schedule around — which also
 means a resource's storage keeps its identity across a write, where the Lava
 route replaces it.
 """
-function writeupdates!(g::HostGraph)
-    for r in g.updates
-        data = @atomic r.pending
-        data === nothing && continue
-        writeupdate!(r.resource, r.range, data)
-        @atomic r.pending = nothing
-    end
-    return nothing
-end
+writeupdates!(g::HostGraph) =
+    Mantle.applyupdates!((r, data) -> writeupdate!(r.resource, r.range, data), g.updates)
 
 writeupdate!(b::Mantle.Buffer, ::Nothing, data::AbstractVector) = Mantle.update!(b, data)
 writeupdate!(b::Mantle.Buffer, r::AbstractUnitRange, data::AbstractVector) =
@@ -247,7 +225,7 @@ function Mantle.Update(g::HostGraph, buf; range = nothing)
     p = updates_pass!(g)
     id = resourceid(g, buf)
     any(u -> u.first == id, p.usages) || push!(p.usages, id => CopyDst)
-    r = HostUpdateRef(buf, range, nothing)
+    r = Mantle.UpdateRef(buf, range)
     push!(g.updates, r)
     return r
 end
