@@ -134,7 +134,7 @@ The strategies do still differ by kind:
 
 ## 3a. Where the pool work actually stands, and the one open hazard
 
-Done and pushed:
+Done, on `sd/mantle-dev` and not yet pushed:
 
 * `src/memory/pool.jl` — `Pool`/`Block`/`Region`, first-fit with coalescing
   release, growth that ADDS a block rather than moving one. Backend primitives
@@ -171,6 +171,18 @@ Done and pushed:
   freed storage. Refcounting is the weak tenant list itself, not a number that
   can disagree with it; `free!` deregisters and the last tenant out gives the
   bytes back.
+* **An arena reconciles what all its tenants need, not just the newest.**
+  `constraintof` is per-plan — buffer usage bits UNION over that plan's
+  transients, image memory-type bits INTERSECT — so an arena sized by one plan
+  could hand the next a block that does not permit what it does. `reserve!`'s
+  fast path therefore checks `compatible` as well as size, the arena carries the
+  merged constraint of everything placed in it, and growth passes that to
+  `acquire!` rather than deriving one from the newest plan alone.
+  `mergeconstraints` is a backend primitive because the two directions are not
+  symmetrical and core cannot guess; its default demands equality, which is the
+  safe reading for a backend that has not said. An empty image intersection is an
+  error naming that no allocation can serve them all, rather than a bigger arena
+  that would not have helped.
 * **What sharing makes possible to get wrong, and what stops it.** Overlapping
   plans is a correctness claim, so each way of breaking it is refused by name
   rather than left to produce a plausible answer:
