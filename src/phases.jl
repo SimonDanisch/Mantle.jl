@@ -124,27 +124,11 @@ function arena end
 function describe end
 
 """
-    allocate(arena, ctx, bytes, transients) -> memory
-
-Back one arena with `bytes` of storage. The only genuinely backend-shaped step in
-placement: the phases decide the offsets, this decides what they are offsets
-into.
-"""
-function allocate end
-
-"""
     materialize!(transient, slab, offset)
 
 Give a placed transient its storage, at `offset` in `slab`.
 """
 function materialize! end
-
-"""One allocation backing an arena, and the transients placed in it."""
-struct Slab
-    memory::Any
-    bytes::Int
-    indices::Vector{Int}
-end
 
 """Passes in execution order — the scheduled order once Schedule has run,
 declaration order before that."""
