@@ -173,3 +173,43 @@ end
     @test M.offset(c) == 0                      # both spans coalesced back
     @test d.allocs == [4096]
 end
+
+@testset "the sharing invariant: transients share, persistents never do" begin
+    # The property that makes a device-owned arena safe to use rather than a
+    # footgun. `reserve!` hands every tenant the SAME bytes because a transient
+    # is scratch scoped to one run; `acquire!` — and so `allocate`, and so every
+    # `Buffer` and `Scalar` — hands out a private slice because a persistent
+    # resource holds data between runs. Which one you get is decided by WHAT you
+    # allocate, never by an argument, so there is no flag to get it wrong with.
+    #
+    # Asserted rather than documented: the failure mode of getting this backwards
+    # is two live buffers silently on the same bytes, which no test of either one
+    # would notice.
+    d, p = FakeDev(), M.Pool()
+
+    a = M.reserve!(p, d, :buf, nothing, 1024; blocksize = 4096)
+    b = M.reserve!(p, d, :buf, nothing, 512; blocksize = 4096)
+    @test M.offset(a) == M.offset(b)            # same arena, same bytes
+    @test p.arenas[:buf].bytes == 1024          # sized to the LARGEST, not the sum
+
+    # …and growing past the first tenant moves the arena, which is why a tenant
+    # that cannot be moved has to say so.
+    c = M.reserve!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    @test p.arenas[:buf].bytes == 4096
+    @test length(c) >= 4096
+
+    x = M.allocate(p, d, :buf, Float32, (64,); blocksize = 4096)
+    y = M.allocate(p, d, :buf, Float32, (64,); blocksize = 4096)
+    xr, yr = M.region(x), M.region(y)
+    @test M.offset(xr) != M.offset(yr)          # private: two buffers, two slices
+    lo1, hi1 = M.offset(xr), M.offset(xr) + length(xr)
+    lo2, hi2 = M.offset(yr), M.offset(yr) + length(yr)
+    @test hi1 <= lo2 || hi2 <= lo1              # …and genuinely disjoint
+
+    # a tenant that refuses to move stops the arena growing, rather than being
+    # re-materialised under a recording that names the old addresses
+    struct Pinned end
+    M.remappable(::Pinned) = false
+    M.tenant!(p, :buf, Pinned())
+    @test_throws ArgumentError M.reserve!(p, d, :buf, nothing, 1 << 20; blocksize = 4096)
+end
