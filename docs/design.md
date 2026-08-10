@@ -171,6 +171,13 @@ Done and pushed:
   freed storage. Refcounting is the weak tenant list itself, not a number that
   can disagree with it; `free!` deregisters and the last tenant out gives the
   bytes back.
+* **Sharing, measured on the models rather than on a synthetic pair.** SAM 2
+  builds three plans and they share ONE 180 MiB arena; the sum of their peaks is
+  196.21 MiB. Warming MatAnyone on top grew the pool by **zero** — 392.23 MiB
+  before and after, arena unchanged — because the second model's transients fit
+  the arena the first had already sized. That is the whole premise of one
+  allocator seeing every workload, and it is the number that says whether it
+  works.
 * **What a second backend costs, measured.** Against `sd/mantle-dev`, the merge
   moved 1126 lines into `src/` (pool, phases, resources, array, sync) and took
   223 out of `ext/MantleLavaExt.jl` — the extension shrank while gaining
