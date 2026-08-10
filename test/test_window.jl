@@ -322,10 +322,29 @@ else
         @test emitted(s.plan) == length(s.plan.passes)
 
         # Both strategies must produce the same answer, or the elision is wrong.
+        # SEEDED before each run, and that is not incidental. Every chain's first
+        # buffer is a transient no pass writes — it is only ever a `src` — and
+        # with aliasing on it shares bytes with four transients that ARE written
+        # (measured: bufs[1][1] at [16384, 32768), four writers on exactly those
+        # bytes). So a run leaves its own output in the next run's input, and two
+        # runs of this plan disagree under ANY barrier strategy: measured
+        # 6.015 -> 12.066 -> 17.137 with the strategy held fixed. Comparing two
+        # unseeded runs therefore tested nothing about barriers, which is what it
+        # was there to do.
+        #
+        # Seeding also keeps the elision under test: stage 1's read of the seed
+        # and the aliased write that later takes those bytes are exactly the
+        # hazard a dropped barrier would let race.
+        seedchains!() = for row in s.bufs
+            copyto!(M.storage(row[1]), zeros(Float32, length(row[1])))
+        end
+
+        seedchains!()
         M.run!(s.plan; barriers = :backend)
         KernelAbstractions.synchronize(M.backend(dev))
         reference = Array(M.storage(s.bufs[1][end]))
 
+        seedchains!()
         M.run!(s.plan; barriers = :derived)
         KernelAbstractions.synchronize(M.backend(dev))
         @test Array(M.storage(s.bufs[1][end])) == reference
