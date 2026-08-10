@@ -250,6 +250,23 @@ function custombody(body)
 end
 
 """
+    registerupdate!(refs, usages, id, buf, range) -> UpdateRef
+
+Reserve `id` as a `CopyDst` of the update pass — once, however many refs name it
+— and hand back the ref that writes it.
+
+The "once" is the part worth sharing: several `Update`s on one resource are one
+hazard, and a usage list that repeats it makes the barrier phase derive the same
+dependency twice. Both extensions had this test spelled the same way.
+"""
+function registerupdate!(refs, usages, id, buf, range)
+    any(u -> u.first == id, usages) || push!(usages, id => CopyDst)
+    r = UpdateRef(buf, range)
+    push!(refs, r)
+    return r
+end
+
+"""
 What [`Update`](@ref) hands back.
 
 Calling it stores a reference and nothing else: it runs on whatever task set the

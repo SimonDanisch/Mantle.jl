@@ -220,11 +220,7 @@ writeupdate!(s::Mantle.Scalar, ::Nothing, x) = Mantle.update!(s, x)
 
 function Mantle.Update(g::HostGraph, buf; range = nothing)
     p = updates_pass!(g)
-    id = resourceid(g, buf)
-    any(u -> u.first == id, p.usages) || push!(p.usages, id => CopyDst)
-    r = Mantle.UpdateRef(buf, range)
-    push!(g.updates, r)
-    return r
+    return Mantle.registerupdate!(g.updates, p.usages, resourceid(g, buf), buf, range)
 end
 
 # ── the compilation context ───────────────────────────────────────────────────

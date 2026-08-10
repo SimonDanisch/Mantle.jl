@@ -873,11 +873,7 @@ end
 function Mantle.Update(g::LavaGraph, buf; range = nothing)
     p = updates_pass!(g)
     touch!(g, buf)
-    id = resourceid(g, buf)
-    any(u -> u.first == id, p.usages) || push!(p.usages, id => CopyDst)
-    r = Mantle.UpdateRef(buf, range)
-    push!(g.updates, r)
-    r
+    return Mantle.registerupdate!(g.updates, p.usages, resourceid(g, buf), buf, range)
 end
 
 """
