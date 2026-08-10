@@ -47,12 +47,15 @@ mutable struct Analysis
     # hands there. The old index is kept because the barrier is derived from what
     # that transient was last doing, not assumed to be everything.
     alias_begins::Dict{Int,Vector{Tuple{Int,Int}}}
-    # Place: one region per arena, suballocated from the device's pool. Held by
-    # the plan; `release!`d when it is torn down, never by a finalizer.
+    # Place: the SHARED region of each arena this plan was placed into, and which
+    # arena that was. Not owned — every tenant of an arena holds the same region —
+    # so teardown deregisters rather than releasing, and the last tenant out is
+    # what actually gives the bytes back.
     regions::Vector{Any}
+    arenas::Vector{Any}
 end
 Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
-                      Dict{Int,Vector{Tuple{Int,Int}}}(), Any[])
+                      Dict{Int,Vector{Tuple{Int,Int}}}(), Any[], Any[])
 
 """The [`Analysis`](@ref) a compilation context carries. One method per backend."""
 function analysis end
@@ -371,13 +374,14 @@ function run!(::Place, c)
         # next.
         prob = Problem(a.items[idx], headroom(pool(c), device(c), ar))
         pl = checkcapacity(prob, place(prob), "arena $ar")
-        # Suballocated from the device's pool, not allocated here. A second
-        # compile of the same graph reaches the device only if the pool has to
-        # grow — which is the whole point, since this used to be one fresh
-        # device allocation per arena per compile.
-        reg = acquire!(pool(c), device(c), ar, ts[idx], pl.height;
+        # `reserve!`, not `acquire!`: every plan placed in an arena gets the SAME
+        # region, so the arena costs the largest of them instead of their total.
+        # A private slice per plan cannot share bytes however well either one is
+        # placed, which is the property a device-owned arena exists to have.
+        reg = reserve!(pool(c), device(c), ar, ts[idx], pl.height;
                        blocksize = blocksize(device(c)))
         push!(a.regions, reg)
+        push!(a.arenas, ar)
         a.peak += pl.height
         for i in idx
             a.offsets[i] = pl.offsets[string(i)]
@@ -391,13 +395,22 @@ function run!(::Place, c)
 end
 
 """
-Give a compilation's regions back to the pool.
+Give up a compilation's claim on the arenas it was placed into.
 
-Explicit, and never a finalizer — see [`trim!`](@ref). A plan that is replaced
-without this leaks its regions until the pool is trimmed, which is a leak rather
-than a crash, and the right way round.
+Explicit, and never a finalizer — see [`trim!`](@ref). Deregistering rather than
+releasing, because the region is SHARED: the bytes go back when the last tenant
+does, and a plan that released them itself would pull them out from under
+whichever other plan is still placed there. A plan dropped without this holds an
+arena at its size until the pool is trimmed — a leak rather than a crash, and the
+right way round.
 """
-releaseregions!(a::Analysis) = (foreach(release!, a.regions); empty!(a.regions); nothing)
+function releaseregions!(a::Analysis, pool, x)
+    for ar in a.arenas
+        untenant!(pool, ar, x)
+    end
+    empty!(a.regions); empty!(a.arenas)
+    return nothing
+end
 
 """
 Which passes begin using memory another transient just finished with.

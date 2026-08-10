@@ -69,6 +69,10 @@ Mantle.backend(d::HostDevice) = d.backend
 # types over pool regions, so a backend supplies four primitives and no type.
 
 Mantle.rawalloc(::HostDevice, ::Mantle.Persistent, bytes::Int, c) = zeros(UInt8, max(bytes, 1))
+
+"""Free physical memory. The honest bound for a host arena — and unlike the
+device case there is swap behind it, so this is advice rather than a wall."""
+Mantle.capacity(::HostDevice) = Int(min(Sys.free_memory(), UInt64(typemax(Int))))
 Mantle.constraintof(::HostDevice, ::Mantle.Persistent, ts) = nothing
 
 "The bytes of `a`, as a `T` view into its block. Host memory is directly addressable,
@@ -349,17 +353,40 @@ struct HostPlan <: Mantle.Plan
     arena::Vector{UInt8}
     peak::Int
     naive::Int
-    regions::Vector{Any}       # held; given back by `free!`, never by a finalizer
+    regions::Vector{Any}       # the SHARED region of each arena — not owned
+    arenas::Vector{Any}
+    offsets::Vector{Int}
 end
 
-"""Give this plan's pool regions back. Explicit — see `Mantle.trim!`."""
-Mantle.free!(pl::HostPlan) = (foreach(Mantle.release!, pl.regions); empty!(pl.regions); nothing)
+"""Give up this plan's claim on the arenas it was placed into. Explicit — see
+`Mantle.trim!`. Deregistering rather than releasing, because the bytes are shared
+with every other plan placed there."""
+function Mantle.free!(pl::HostPlan)
+    for ar in pl.arenas
+        Mantle.untenant!(Mantle.pool(pl.graph.dev), ar, pl)
+    end
+    empty!(pl.regions); empty!(pl.arenas)
+    return nothing
+end
+
+"""Re-materialise this plan's transients of `kind` into the arena's new region."""
+function Mantle.remap!(pl::HostPlan, kind, region)
+    for (i, t) in enumerate(pl.graph.transients)
+        Mantle.arena(t) == kind || continue
+        Mantle.materialize!(t, Mantle.memoryof(region), Mantle.offset(region) + pl.offsets[i])
+    end
+    return pl
+end
 
 function Mantle.Plan(g::HostGraph; alias = true, policy = Mantle.Overlap())
     c = Mantle.compile!(Compile(g; alias, policy))
     a = Mantle.analysis(c)
     arena = isempty(a.regions) ? UInt8[] : Mantle.memoryof(first(a.regions))
-    return HostPlan(g, c.steps, arena, a.peak, a.naive, a.regions)
+    pl = HostPlan(g, c.steps, arena, a.peak, a.naive, a.regions, a.arenas, a.offsets)
+    for ar in a.arenas
+        Mantle.tenant!(Mantle.pool(g.dev), ar, pl)
+    end
+    return pl
 end
 
 Mantle.peakbytes(pl::HostPlan) = pl.peak

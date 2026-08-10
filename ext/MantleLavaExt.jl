@@ -1273,7 +1273,9 @@ mutable struct LavaPlan <: Mantle.Plan
     transitions::Vector{Mantle.Transition}
     passes::Vector{PassPlan}
     pipelines::Set{Any}
-    slabs::Vector{Any}                  # one allocation per arena, kept alive here
+    slabs::Vector{Any}                  # the SHARED region of each arena, not owned
+    arenas::Vector{Any}                 # …and which arena each one is, for remap!/free!
+    offsets::Vector{Int}                # per transient, relative to its region
     peak::Int
     naive::Int
     profiler::Union{Nothing,Profiler}
@@ -1435,18 +1437,7 @@ Not needed *between* runs of the same plan: that hazard is the plan's own, and
 `nextslot!` plus the derived barriers already cover it.
 """
 function handover!(pl::LavaPlan, bq)
-    shared = false
-    for sl in pl.slabs
-        p = get(pl.graph.dev.pools, sl.arena, nothing)
-        p === nothing && continue
-        # `Base.count`: this module owns the bare name — a draw's vertex count —
-        # so the predicate form is not reachable through it.
-        if Base.count(wr -> wr.value !== nothing, p.tenants) > 1
-            shared = true
-            break
-        end
-    end
-    shared || return false
+    any(ar -> Mantle.sharing(Mantle.pool(pl.graph.dev), ar), pl.arenas) || return false
     both = Lava.Vulkan.AccessFlag2(Lava.Vulkan.ACCESS_2_MEMORY_READ_BIT) |
            Lava.Vulkan.AccessFlag2(Lava.Vulkan.ACCESS_2_MEMORY_WRITE_BIT)
     dep = Lava.Vulkan._DependencyInfo(
@@ -1619,7 +1610,11 @@ function Mantle.maxalloc(dev::LavaDevice)
     props = Lava.Vulkan.get_physical_device_properties_2(
         dev.ctx.physical_device, Lava.Vulkan.PhysicalDeviceMaintenance3Properties)
     m3 = props.next::Lava.Vulkan.PhysicalDeviceMaintenance3Properties
-    Int(m3.max_memory_allocation_size)
+    n = m3.max_memory_allocation_size
+    # NVIDIA answers 0xffff_ffff_ffff_ffff — "no limit" — which does not fit an
+    # `Int`, and `Int(n)` threw here on the first device that said it. That is
+    # the same thing core's default means, so say it the same way.
+    return n >= UInt64(typemax(Int)) ? typemax(Int) : Int(n)
 end
 
 """
@@ -1973,10 +1968,19 @@ dispatchrange(x) = count(x)
 Mantle.Plan(g::LavaGraph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Mantle.Policy = Mantle.Overlap()) =
     let c = Mantle.compile!(Compile(g; alias, coalesce, policy))
-        LavaPlan(g, c.transitions, c.passes, c.pipelines, Mantle.analysis(c).regions,
-                 Mantle.analysis(c).peak, Mantle.analysis(c).naive,
-                 profile ? Profiler(g.dev.ctx, c.passes) : nothing,
-                 alias, coalesce, policy, ArgMemory(g.dev, c.passes), nothing)
+        let a = Mantle.analysis(c)
+            pl = LavaPlan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
+                          a.offsets, a.peak, a.naive,
+                          profile ? Profiler(g.dev.ctx, c.passes) : nothing,
+                          alias, coalesce, policy, ArgMemory(g.dev, c.passes), nothing)
+            # After construction, because a plan cannot be a tenant before it is a
+            # plan — and the arena it was just placed into may grow for the NEXT
+            # plan, which is when this registration earns its keep.
+            for ar in a.arenas
+                Mantle.tenant!(Mantle.pool(g.dev), ar, pl)
+            end
+            pl
+        end
     end
 
 """
@@ -2002,10 +2006,15 @@ function refit!(pl::LavaPlan)
     moved || return false
     c = Mantle.compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
-    # No tenancy: the recompile takes fresh regions from the pool, and a region
-    # already carved is never moved by a later grow — `Pool` adds a block instead
-    # of reallocating one, which is the hazard `tenant!`/`remap!` existed for.
-    let a = Mantle.analysis(c); pl.slabs, pl.peak, pl.naive = a.regions, a.peak, a.naive end
+    let a = Mantle.analysis(c)
+        pl.slabs, pl.arenas, pl.offsets = a.regions, a.arenas, a.offsets
+        pl.peak, pl.naive = a.peak, a.naive
+        # Re-registered: the recompile may have been placed into a different set
+        # of arenas, and `tenant!` is idempotent for the ones it was already in.
+        for ar in a.arenas
+            Mantle.tenant!(Mantle.pool(pl.graph.dev), ar, pl)
+        end
+    end
     # A recompile can change the draws and therefore the layout, so the argument
     # memory is laid out again with them. The old slots are still being read by
     # frames in flight; `sync_swapchain!` waited for the device before any of
@@ -2115,6 +2124,10 @@ the declared set is incomplete, while one that is wrong under both says the
 declarations are right and something is reading the wrong bytes.
 """
 Mantle.baked(pl::LavaPlan) = pl.baked !== nothing
+
+"""A baked plan's recording holds the addresses its region has today, so the
+arena it is placed in can no longer grow. See `Mantle.remappable`."""
+Mantle.remappable(pl::LavaPlan) = pl.baked === nothing
 
 function Mantle.bake!(pl::LavaPlan)
     pl.baked === nothing || return pl      # idempotent; re-baking would strand the old one
@@ -2445,7 +2458,24 @@ Give this plan's regions back to the pool. The argument memory and the
 pipelines are ordinary Lava objects — the GC reclaims those; the regions are
 the thing only an explicit release can return, because nothing here finalizes.
 """
-Mantle.free!(pl::LavaPlan) = (foreach(Mantle.release!, pl.slabs); empty!(pl.slabs); nothing)
+function Mantle.free!(pl::LavaPlan)
+    for ar in pl.arenas
+        Mantle.untenant!(Mantle.pool(pl.graph.dev), ar, pl)
+    end
+    empty!(pl.slabs); empty!(pl.arenas)
+    return nothing
+end
+
+"""Re-materialise this plan's transients of `kind` into the arena's new region.
+Its own offsets are unaffected by the arena moving; only the base changed."""
+function Mantle.remap!(pl::LavaPlan, kind, region)
+    ts = pl.graph.transients
+    for (i, t) in enumerate(ts)
+        Mantle.arena(t) == kind || continue
+        Mantle.materialize!(t, Mantle.memoryof(region), Mantle.offset(region) + pl.offsets[i])
+    end
+    return pl
+end
 
 Base.close(::LavaPlan) = nothing
 Base.isopen(s::LavaSurface) = isopen(s.win)

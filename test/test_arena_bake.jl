@@ -77,10 +77,13 @@ const E = Base.get_extension(Mantle, :MantleLavaExt)
     big   = Base.invokelatest(chainplan, dev, 2_000_000, 3)
 
     ps, pb = M.peakbytes(small.plan), M.peakbytes(big.plan)
-    pool = only(values(dev.pools))
-    @test pool.bytes == max(ps, pb)
-    @test pool.bytes < ps + pb
-    @test length(pool.tenants) == 2
+    # The arena lives on the core `Pool` now, not on the backend's device: the
+    # sharing this asserts is a property every backend gets, not Lava's.
+    arena = M.pool(dev).arenas[E.Buffers()]
+    @test arena.bytes == max(ps, pb)
+    @test arena.bytes < ps + pb
+    @test length(M.tenants!(arena)) == 2
+    @test M.sharing(M.pool(dev), E.Buffers())
 
     for _ in 1:3
         M.run!(small.plan)
@@ -94,10 +97,11 @@ end
 
 @testset "over budget fails at compile, with numbers" begin
     dev = M.Device(Lava)
-    # `maxMemoryAllocationSize`, not the heap budget: an arena is one allocation,
-    # and on this machine that limit is 4 GB against ~28 GB of budget, so it is
-    # the binding one. Two of these cannot share bytes, so the arena needs both.
-    n = E.maxalloc(dev) ÷ sizeof(Float32)
+    # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
+    # this was written against and `typemax(Int)` — "no limit" — on NVIDIA, so a
+    # test pinned to it passes on one machine and allocates 8 exabytes on the
+    # other. `headroom` is the number the compiler actually checks against.
+    n = M.headroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32)
     err = try
         Base.invokelatest(fatplan, dev, n)
         nothing
@@ -111,7 +115,8 @@ end
     @test occursin("Largest items", msg)       # and knows which buffer to drop
     # Nothing was allocated on the way to the throw: the check runs on the
     # placement, before `reserve!`.
-    @test !haskey(dev.pools, E.Buffers()) || dev.pools[E.Buffers()].bytes < n * sizeof(Float32)
+    @test !haskey(M.pool(dev).arenas, E.Buffers()) ||
+          M.pool(dev).arenas[E.Buffers()].bytes < n * sizeof(Float32)
 end
 
 @testset "a renameable Update gives up its scoped barrier" begin

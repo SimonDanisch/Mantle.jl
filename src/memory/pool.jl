@@ -53,36 +53,6 @@ merely bounded by `capacity` alone.
 """
 maxalloc(dev) = typemax(Int)
 
-"""
-    largestfree(pool, kind) -> Int
-
-The biggest span any existing block of `kind` could still hand out.
-
-What makes the capacity bound TIGHT rather than merely safe: a request this size
-or smaller reaches no device allocation at all, so bounding it by what the device
-has left would refuse a placement that costs nothing. Compatibility is not
-consulted — this is a bound, and an over-estimate here can only be corrected by
-`acquire!` going on to allocate, which the bound has already been checked against.
-"""
-largestfree(p::Pool, kind) =
-    maximum((length(s) for b in blocksof(p, kind) for s in b.free); init = 0)
-
-"""
-    headroom(pool, dev, kind) -> Int
-
-How large a single request of `kind` can still be satisfied.
-
-Two bounds and the smaller wins: what the device will hand over in one piece, and
-what is left of its budget once everything this pool already holds is subtracted
-— plus whatever an existing block could absorb without allocating at all.
-
-In core rather than in a backend because only the pool knows what it has
-reserved, and the two device facts it needs are already primitives. The Lava
-extension used to compute this itself, against a per-arena allocation it grew by
-reallocating; blocks make the arithmetic simpler as well as the memory safer.
-"""
-headroom(p::Pool, dev, kind) =
-    min(maxalloc(dev), max(capacity(dev) - reserved(p), 0) + largestfree(p, kind))
 
 """
     constraintof(dev, kind, transients) -> constraint
@@ -138,21 +108,125 @@ Base.length(r::Region) = length(r.span)
 memoryof(r::Region) = r.block.memory
 
 """
-Blocks per arena kind, owned by a device.
+One arena's shared bytes, and the plans placed in them.
+
+**Every tenant starts at offset 0**, so two plans on one device alias each other
+by construction and the arena is sized to the LARGEST of them rather than to
+their total. That is the whole reason a device owns its arenas: two plans that
+each acquired their own region could never share, whatever the placer did inside
+either one. Measured on SAM 2 and MatAnyone, whose scratch never coexists.
+
+Two things make the overlap safe, and neither is here. Ordering is one barrier at
+the head of a recording when the arena has more than one live tenant — the
+backend emits it, because only the backend has a command stream. Data lifetime is
+the caller's: a plan's transients are gone the moment another tenant runs, which
+is the same rule that already governs two runs of one plan.
+
+`tenants` is weak. A plan nobody holds is a plan nobody can run, so it neither
+keeps its graph alive nor needs remapping.
+"""
+mutable struct Arena
+    region::Union{Nothing,Region}
+    bytes::Int
+    tenants::Vector{WeakRef}
+end
+Arena() = Arena(nothing, 0, WeakRef[])
+
+"""Live tenants, pruning collected ones on the way past."""
+function tenants!(a::Arena)
+    n = 0
+    for wr in a.tenants
+        wr.value === nothing && continue
+        n += 1
+        a.tenants[n] = wr
+    end
+    resize!(a.tenants, n)
+    return a.tenants
+end
+
+"""
+    remap!(tenant, kind, region)
+
+Re-materialise a tenant's transients of arena `kind` into its new region.
+
+`kind` because a tenant is usually placed in more than one arena — buffers and
+images are separate allocations — and only one of them moved.
+
+Called only when an arena actually grew. A tenant keeps the offsets its own
+placement produced — those are unaffected by the arena moving underneath — so
+this rebinds storage and touches nothing the compiler decided.
+"""
+function remap! end
+
+"""
+    remappable(tenant) -> Bool
+
+Whether this tenant can survive its arena moving. `true` unless it says otherwise.
+
+The one thing a tenant knows that the pool cannot: a plan whose command buffer
+has been recorded once and is replayed (`bake!`) holds the addresses the old
+region had, and nothing can rewrite a command buffer. Re-materialising underneath
+it produces a replay that reads freed storage — deterministic, quiet, and wrong,
+which is the worst of the three.
+
+So growth asks first and refuses, rather than discovering it later. Asked of
+every live tenant, not of the one growing: it is the INCUMBENT that cannot move.
+"""
+remappable(x) = true
+
+"""
+Blocks per arena kind, and the shared arena each kind is placed into.
 
 Growth ADDS a block; it never reallocates an existing one. That is the whole
 reason for a list: a plan holding offsets into a block must not have the ground
-move under it because another plan needed more room.
+move under it because another plan needed more room. An ARENA can still outgrow
+its region — a later, larger tenant — and that is what `remap!` is for; the block
+list is what makes the new region a fresh carve rather than a reallocation of
+memory somebody still points into.
 """
 struct Pool
     blocks::Dict{Any,Vector{Block}}
+    arenas::Dict{Any,Arena}
 end
-Pool() = Pool(Dict{Any,Vector{Block}}())
+Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}())
+
+arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 
 blocksof(p::Pool, kind) = get!(() -> Block[], p.blocks, kind)
 
 """Every byte the pool has taken from the device, across all blocks."""
 reserved(p::Pool) = sum(b -> b.bytes, Iterators.flatten(values(p.blocks)); init = 0)
+
+"""
+    largestfree(pool, kind) -> Int
+
+The biggest span any existing block of `kind` could still hand out.
+
+What makes the capacity bound TIGHT rather than merely safe: a request this size
+or smaller reaches no device allocation at all, so bounding it by what the device
+has left would refuse a placement that costs nothing. Compatibility is not
+consulted — this is a bound, and an over-estimate here can only be corrected by
+`acquire!` going on to allocate, which the bound has already been checked against.
+"""
+largestfree(p::Pool, kind) =
+    maximum((length(s) for b in blocksof(p, kind) for s in b.free); init = 0)
+
+"""
+    headroom(pool, dev, kind) -> Int
+
+How large a single request of `kind` can still be satisfied.
+
+Two bounds and the smaller wins: what the device will hand over in one piece, and
+what is left of its budget once everything this pool already holds is subtracted
+— plus whatever an existing block could absorb without allocating at all.
+
+In core rather than in a backend because only the pool knows what it has
+reserved, and the two device facts it needs are already primitives. The Lava
+extension used to compute this itself, against a per-arena allocation it grew by
+reallocating; blocks make the arithmetic simpler as well as the memory safer.
+"""
+headroom(p::Pool, dev, kind) =
+    min(maxalloc(dev), max(capacity(dev) - reserved(p), 0) + largestfree(p, kind))
 
 """First offset at or after `from` that satisfies `align`."""
 alignup(from::Int, align::Int) = align <= 1 ? from : cld(from, align) * align
@@ -266,3 +340,90 @@ function trim!(pool::Pool, dev)
     end
     return pool
 end
+
+"""
+    reserve!(pool, dev, kind, transients, bytes; align, blocksize) -> Region
+
+The shared region for `kind`, grown to `bytes` if a tenant now needs more.
+
+This is what `acquire!` is under: `acquire!` hands out a private slice, and two
+plans that each take one can never share bytes however well either is placed.
+`reserve!` hands every tenant of an arena the SAME slice, so the arena costs the
+largest of them rather than their total.
+
+Growing carves a fresh region, remaps the live tenants into it, and only then
+releases the old one — in that order, so growth never tramples the bytes it is
+copying tenants out of. Tenants keep their own offsets; nothing recompiles.
+
+The caller registers itself with [`tenant!`](@ref) once it exists, because a plan
+cannot be a tenant before it is a plan.
+"""
+function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
+                  align::Int = 256, blocksize::Int = 64 << 20)
+    a = arenaof(pool, kind)
+    bytes = max(bytes, 1)
+    (a.region !== nothing && bytes <= a.bytes) && return a.region
+    # Ask before allocating anything: a refusal must leave the arena exactly as it
+    # was, not half-grown with a region nobody is placed in.
+    for wr in tenants!(a)
+        remappable(wr.value) || throw(ArgumentError(
+            "a plan placed in arena $kind cannot be moved — it has been baked, and " *
+            "its recording holds the addresses the current region has. Another plan " *
+            "now needs $(humanbytes(bytes)) there, which would grow the arena and " *
+            "leave that recording pointing at freed storage. Build every plan that " *
+            "shares a device before baking any of them."))
+    end
+    fresh = acquire!(pool, dev, kind, transients, bytes; align, blocksize)
+    old = a.region
+    a.region, a.bytes = fresh, bytes
+    for wr in tenants!(a)
+        remap!(wr.value, kind, fresh)
+    end
+    old === nothing || release!(old)
+    return fresh
+end
+
+"""
+    tenant!(pool, kind, x) -> x
+
+Register `x` as holding the arena's shared bytes, so a later grow remaps it.
+
+Idempotent: recompiling a plan re-registers the same object, and a list with it
+twice would remap it twice and count it twice in `sharing`.
+"""
+function tenant!(pool::Pool, kind, x)
+    a = arenaof(pool, kind)
+    any(wr -> wr.value === x, tenants!(a)) || push!(a.tenants, WeakRef(x))
+    return x
+end
+
+"""
+    untenant!(pool, kind, x)
+
+Drop `x` from the arena, releasing the shared region once the last tenant goes.
+
+The counterpart of [`tenant!`](@ref), called by `free!`. Refcounting by tenant
+list rather than by a number: the list already has to be walked for `remap!`, and
+a count that disagrees with it is a leak nobody can find.
+"""
+function untenant!(pool::Pool, kind, x)
+    a = get(pool.arenas, kind, nothing)
+    a === nothing && return nothing
+    filter!(wr -> wr.value !== x && wr.value !== nothing, a.tenants)
+    if isempty(a.tenants) && a.region !== nothing
+        release!(a.region)
+        a.region, a.bytes = nothing, 0
+    end
+    return nothing
+end
+
+"""
+    sharing(pool, kind) -> Bool
+
+Whether more than one live plan is placed in this arena.
+
+What a backend asks before emitting the handover barrier: with one tenant there
+is nothing to hand over from, and the barrier is pure cost.
+"""
+sharing(pool::Pool, kind) =
+    (a = get(pool.arenas, kind, nothing); a === nothing ? false : length(tenants!(a)) > 1)

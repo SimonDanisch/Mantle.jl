@@ -22,6 +22,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved
+export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable
 export DeviceArray, releaseregions!, blocksize
 export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
 export rawalloc, rawfree, constraintof, compatible, maxalloc
@@ -106,7 +107,19 @@ implementation, in core, is the same rule that moved `Buffer` and the phases; a
 one-line method is not an exception to it.
 """
 storage(x) = x
-function capacity end
+
+"""
+    capacity(dev) -> Int
+
+How many bytes of device memory a transient arena may use.
+
+`typemax(Int)` by default, for the same reason [`maxalloc`](@ref) has one: a
+backend that will not say is not blocked, it is merely unbounded. A backend that
+CAN say should — it is what turns "the driver returned VK_ERROR_OUT_OF_
+DEVICE_MEMORY somewhere later" into a message naming the buffers that did not
+fit.
+"""
+capacity(dev) = typemax(Int)
 
 """
     custom!(f, graph, name) -> pass
