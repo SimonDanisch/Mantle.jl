@@ -124,7 +124,7 @@ interning table, which is the circularity the oracle exists to avoid.
 """
 function normalid(g, id::Int)
     ext = Base.get_extension(Mantle, :MantleLavaExt)
-    r = get(g.by_id, id, nothing)
+    r = get(g.ids.by_id, id, nothing)
     # `get`, not `resourceid` — an oracle that registers an id while reading the
     # graph would be changing what the next compile sees in order to check it.
     r isa ext.BufferRange ? (get(g.ids, r.parent, 0), r.range) : (id, nothing)
@@ -164,7 +164,7 @@ function local_hazards(g, plan)
     end
     spansof = Dict{Int,Vector{UnitRange{Int}}}()
     for (pid, rs) in ranges
-        n = length(g.by_id[pid])
+        n = length(g.ids.by_id[pid])
         cuts = sort!(unique!(vcat([1, n + 1], first.(rs), last.(rs) .+ 1)))
         spansof[pid] = filter(!isempty, [cuts[k]:(cuts[k + 1] - 1) for k in 1:(length(cuts) - 1)])
     end
@@ -185,7 +185,7 @@ function local_hazards(g, plan)
             cur[key] = get(final, key, nothing); pend[key] = Type[]
         end
         from = cur[key]
-        if from !== nothing && M.needs_transition(be, ext.resourcekind(g.by_id[id]), from, U)
+        if from !== nothing && M.needs_transition(be, ext.resourcekind(g.ids.by_id[id]), from, U)
             push!(req, (pp.pass.name, key, from, U,
                         Set(M.writes(U) ? unique(vcat(from, pend[key])) : Type[from])))
             cur[key] = U
