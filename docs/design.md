@@ -171,6 +171,20 @@ Done and pushed:
   freed storage. Refcounting is the weak tenant list itself, not a number that
   can disagree with it; `free!` deregisters and the last tenant out gives the
   bytes back.
+* **What sharing makes possible to get wrong, and what stops it.** Overlapping
+  plans is a correctness claim, so each way of breaking it is refused by name
+  rather than left to produce a plausible answer:
+
+  | you might | and instead of | you get |
+  |---|---|---|
+  | acquire a persistent resource from a shared arena | two live buffers on one byte range | no route to — `allocate` acquires, `Place` reserves, decided by what you allocate rather than by an argument |
+  | grow an arena under a baked plan | a replay reading freed storage | `remappable` asked of the incumbents, refused with the ordering that avoids it |
+  | run a plan after `free!` | recording against another plan's bytes | `checklive`, from the state that already exists — transients but no regions |
+  | place more than the device has | `ERROR_OUT_OF_DEVICE_MEMORY` somewhere later | `checkcapacity` at the point that still knows the items, naming the largest |
+
+  What is NOT guarded is data lifetime across a handover: a plan's transients are
+  gone once another tenant runs. That is the same rule two runs of one plan
+  already follow, it is what the sharing buys, and no barrier can make it false.
 * **Sharing, measured on the models rather than on a synthetic pair.** SAM 2
   builds three plans and they share ONE 180 MiB arena; the sum of their peaks is
   196.21 MiB. Warming MatAnyone on top grew the pool by **zero** — 392.23 MiB
