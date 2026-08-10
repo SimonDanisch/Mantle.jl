@@ -196,7 +196,7 @@ device, and the compositor's intermediates alias against the UI's scratch.
 | 0 | Delete the 5 redundant node syncs (#96) | **landed** — suite unchanged |
 | 1 | The clip chain as a Mantle graph | **landed, not behind a flag** — see below |
 | 2 | Parameters as `Ref`s read at record time | **landed** — a keyframed σ costs a store, not a recompile |
-| 3 | Result store + `PlaneOp` (#94, #95) | matte/restore/stabilize are nodes, not special cases; five storage schemes become one |
+| 3 | Result store + `PlaneOp` (#94, #95) | **landed** — see below |
 | 4 | Compositor — `placelayer!`, `layermatrix`, `mattealpha!` | currently outside the graph entirely |
 | 5 | VkMakie | the readback round-trip is gone |
 
@@ -225,6 +225,86 @@ source pass reading `FxState` — not `Update`, because the source object itself
 changes per call), what `cropaway!` becomes while crop is not a node (it stays
 one, applied to the output view after `run!`), and that `gaussianblur!`'s
 separable two-pass form fits `custom!` exactly as claimed.
+
+**What landed for 3.** The distinction the stage turns on is not matte-vs-restore
+but what a per-frame analysis result *is*. A colour gain and a warp matrix are a
+handful of numbers and ride along as kernel arguments; a matte's alpha and a
+restoration's finished picture are whole images, and those are `PlaneOp`s —
+`MatteOp`, `RestoreOp`, one `PlaneNode{O}`, one pass, four methods each
+(`planeeltype`, `planeshape`, `planedata`, `applyplane!`) defined next to the
+kernel that wants them. The two nodes, two kernels-with-their-own-lookup and two
+device caches are one route now.
+
+That route is the graph's: the plane is a pool-backed `Mantle.Buffer` written
+through `Update` and declared `read` by the node's pass, so the copy is ordered
+by the barrier the graph derives. What it replaced was a `KA.allocate` per frame
+behind a module global — outside the pool, never freed, and re-allocating ~6 MB
+every time a restored frame changed.
+
+Three things had to move for that to be possible:
+
+* **The decode left the source pass.** An `Update`'s write position is at the
+  head of the schedule, and the plane is keyed by the frame the source really
+  *served* — which `frameat!` decides while it runs. So `decodesource` is called
+  from `runchain!` before `run!`; the pass converts what it produced. The
+  decode's own submits also stop landing in the middle of the plan's recording.
+* **The plane's SHAPE joined the plan signature.** Values flow through `Ref`s,
+  but a shape sizes a graph resource, so a matte analysed at another resolution
+  gets its own plan rather than a buffer of the wrong size.
+* **Invalidation became a stamp on the result's identity.** `(clip, frame)`
+  cannot see a re-propagation — a new `MatteTrack` under an unchanged clip and
+  frame — which is why eight explicit `freematteplanes!` calls existed. They are
+  gone: the slot remembers *which* track's bytes it holds.
+
+Five storage schemes became two mechanisms and one field. `MATTEPLANES`,
+`RESTOREPLANES`, `CanvasScratch` and `alphalayers` are one `BufferStore` (a
+per-frame plane and a sized scratch differ only in whether an `Update` is bound
+to it); `RESTORECACHES`, a module global keyed by clip id, is a `Clip` field like
+the three tracks beside it — which deletes `sharerestore!` and the bug it
+existed for, since `split!` mints the right half's id fresh and nothing followed.
+The compositor's coverage now comes from the chain's own matte binding rather
+than a third independent lookup, so "is this layer keyed" has one answer.
+
+Verified on the host backend and on Lava: the plane node's shape matches the
+analysis; the graph's picture matches the host-side `applymatte!`/`applyrestore!`
+(exactly on the host, within 1/255 on Lava — 92 of 57_600 pixels, Float32
+rounding on the soft edge, the same parity the WYSIWYG check tolerates at 0.01);
+a strength change reuses the plan; an unchanged frame queues no upload; a new
+track under the same clip and frame does; a frame outside the analysed range
+renders the picture untouched; the compositor shows the track below where the
+matte removed the background; `emptyengine!` returns every slot.
+
+**Measured, and it is not a speed change.** A/B on the composite path (two
+layers, top matted, 120 distinct 1080p frames, matte 480x270), three repeats per
+tree in one session each:
+
+| | old | new |
+|---|---|---|
+| medians | 1.943 / 2.044 / 2.088 ms | 1.949 / 1.923 / 1.958 ms |
+| within-tree spread | 7.5% | 1.8% |
+| host alloc per frame | 274.8 KiB | 271.6 KiB |
+| Mantle pool reserved | 128 MiB | 128 MiB |
+| Lava-tracked device | 76.0 MiB | 12.1 MiB |
+
+The distributions overlap — the old tree's fastest run beats the new tree's
+slowest — so the 4.6% on median-of-medians is smaller than the old tree's own
+spread and is not claimed. The real number is the last row: the per-frame
+`KA.allocate` made Lava's own allocator open a 64 MiB block the pool could
+neither see nor reuse, and the plane now sits in the persistent block the
+compositor scratch had already reserved. That is specific to compositing — in a
+`render`-only workload it is a wash (64 + 76 against 128 + 12.1), because there
+the pool opens its persistent block for the plane alone.
+
+Host allocation did not move, though `planedata` hands over a view where the old
+path built `collect(@view …)`: Lava's `rename!` collects a non-`Vector` anyway,
+so the copy moved rather than went. And `Update`'s recorded copy was expected to
+beat the old stalling `copyto!`; at a 130 KB plane against a 2 ms frame it does
+not show, and is not claimed either.
+
+That last check is also what found a bug the rewrite did not introduce:
+`restore_kernel!` built its `RGB{N0f8}` with the *checked* constructor, whose
+error path allocates a string, so Lava rejected the kernel — the restoration
+could never have run on the GPU tier, and nothing had ever asked it to.
 
 ## 5. Measured vs assumed
 

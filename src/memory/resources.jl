@@ -150,6 +150,20 @@ function Base.resize!(b::Buffer{T}, n::Integer) where {T}
 end
 
 """
+    free!(r::Buffer) / free!(r::Scalar)
+
+Give a persistent resource's region back to the pool. Same contract as
+[`free!(::Plan)`](@ref): explicit, never a finalizer, and a leak rather than a
+crash if it is skipped.
+
+One method for both because they are one thing — a region and a length — and
+because a caller that owns a mix of them should not have to remember which is
+which. Using the resource afterwards reads a region the pool may have handed to
+somebody else, so this is the last thing that happens to it.
+"""
+free!(r::Union{Buffer,Scalar}) = (release!(region(r.store)); nothing)
+
+"""
     devicecopy!(dev, dst::DeviceArray, src::DeviceArray, n)
 
 `n` elements from one region to another, device-side. Used by `resize!`, and the

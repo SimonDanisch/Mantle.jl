@@ -95,6 +95,43 @@ end
     @test ran[] == 1
 end
 
+@testset "Host: an Update writes at the position the graph reserved" begin
+    dev = M.Device(M.Host())
+    g = M.Graph(dev)
+    b = M.Buffer(dev, zeros(Float32, 4))
+    ref = M.Update(g, b)
+    seen = Float32[]
+    M.custom!(g, "read it") do p
+        M.use(p, b; read = true)
+        () -> (append!(seen, copy(M.storage(b))); nothing)
+    end
+    plan = M.Plan(g)
+
+    # Not fired: the update writes nothing, and the reader sees what was there.
+    M.run!(plan)
+    @test seen == zeros(Float32, 4)
+
+    # Fired: the write lands BEFORE the pass that declared the read, which is the
+    # whole claim — `ref(x)` itself only stores a reference.
+    empty!(seen)
+    ref(Float32[1, 2, 3, 4])
+    M.run!(plan)
+    @test seen == Float32[1, 2, 3, 4]
+
+    # …and it is consumed, so the next frame writes nothing again.
+    empty!(seen)
+    M.run!(plan)
+    @test seen == Float32[1, 2, 3, 4]
+
+    # Host memory is directly addressable, so the write is in place and the
+    # resource keeps its storage — where the Lava route renames into a fresh one.
+    store = b.store
+    ref(Float32[9, 9, 9, 9])
+    M.run!(plan)
+    @test b.store === store
+    @test seen[(end - 3):end] == Float32[9, 9, 9, 9]
+end
+
 # ── the thing that used to be silently broken ─────────────────────────────────
 #
 # `MantleLavaExt` defines `Device(::typeof(Lava))`, and `typeof(Lava)` is
