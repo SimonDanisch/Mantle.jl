@@ -366,6 +366,7 @@ One frame: call the baked steps in the order compile settled on.
 No synchronisation, no lookup, no branch. Everything that could be decided was.
 """
 function run!(pl::HostPlan)
+    Mantle.checklive(pl, pl.regions, length(pl.graph.transients))
     for s in pl.steps
         s()
     end

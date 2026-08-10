@@ -250,6 +250,26 @@ function custombody(body)
 end
 
 """
+    checklive(plan, regions, ntransients)
+
+Refuse to run a plan whose regions have been given back.
+
+`free!` deregisters a plan from its arenas, and the bytes go once the last tenant
+does. What is left behind still *looks* runnable — the steps are baked, the
+storage handles are populated — so it would record against memory the pool has
+handed to somebody else, and produce a plausible wrong answer rather than an
+error. A plan that declared transients and holds no regions is exactly that
+state, which is why this needs no flag to track.
+"""
+function checklive(plan, regions, ntransients::Integer)
+    (ntransients > 0 && isempty(regions)) && throw(ArgumentError(
+        "this plan has been freed — `free!` gave its arenas back, and running it " *
+        "now would record against memory the pool may have handed to another " *
+        "plan. Build a new plan from the graph."))
+    return plan
+end
+
+"""
 Stable small integers for the resources a graph's passes name.
 
 Usages are recorded as `id => Usage` pairs, and the phases compare ids rather

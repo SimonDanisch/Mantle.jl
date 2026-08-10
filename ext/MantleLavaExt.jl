@@ -2131,6 +2131,7 @@ function Mantle.bake!(pl::LavaPlan)
 end
 
 function run!(pl::LavaPlan; barriers::Symbol = :derived)
+    Mantle.checklive(pl, pl.slabs, length(pl.graph.transients))
     barriers in (:derived, :backend, :both) ||
         throw(ArgumentError("barriers must be :derived, :backend or :both, got $barriers"))
     g = pl.graph
