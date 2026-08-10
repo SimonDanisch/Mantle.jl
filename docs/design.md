@@ -171,6 +171,13 @@ Done and pushed:
   freed storage. Refcounting is the weak tenant list itself, not a number that
   can disagree with it; `free!` deregisters and the last tenant out gives the
   bytes back.
+* **What a second backend costs, measured.** Against `sd/mantle-dev`, the merge
+  moved 1126 lines into `src/` (pool, phases, resources, array, sync) and took
+  223 out of `ext/MantleLavaExt.jl` — the extension shrank while gaining
+  capability. `MantleHostExt.jl` is 407 lines for a whole second backend, which
+  is the number that says whether the split is real: it implements ten
+  primitives and no policy, and its own barrier method is "nothing to emit".
+  Core:ext went from 2.33 to 1.30.
 * The capacity bound is core's, not a backend's. `headroom` is
   `min(maxalloc, budget − reserved + largestfree)`; the last term keeps it tight,
   since a request an existing block can absorb reaches no device allocation and
