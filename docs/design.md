@@ -147,6 +147,38 @@ Done and pushed:
 * `Place` suballocates instead of allocating per compile. Measured: ten plans of
   524_288 B peak went from ten device allocations (5_242_880 B) to ONE block,
   plans 6-10 reaching the device zero times.
+* **Two allocation verbs, and which one you get is decided by what you are
+  allocating.** `acquire!` hands out a private slice; `reserve!` hands every
+  tenant of an arena the SAME slice, so two plans on one device cost the larger
+  rather than the sum. `Place` reserves, because a transient is scratch scoped to
+  one run. `allocate` — every `Buffer` and `Scalar` — acquires, because a
+  persistent resource holds data between runs and sharing its bytes would be
+  silent corruption. There is deliberately no flag to get that wrong with.
+
+  Sharing is what a device-owned arena is *for*: SAM 2's scratch and MatAnyone's
+  never coexist, and two plans that each acquired a private region could not
+  share however well either was placed. What makes the overlap safe is split by
+  who knows what — ordering is one barrier at the head of a recording when
+  `sharing` says the arena has more than one live tenant, which only a backend
+  can emit; data lifetime is the caller's, and is the same rule that already
+  governs two runs of one plan.
+
+  Growth carves a fresh region, remaps live tenants, then releases the old — in
+  that order, so it never tramples the bytes it is copying out of. `remappable`
+  is asked first, of the INCUMBENTS: a baked plan's recording holds the addresses
+  its region has today, so growth under one is refused with a message naming the
+  order that would have avoided it, rather than producing a replay that reads
+  freed storage. Refcounting is the weak tenant list itself, not a number that
+  can disagree with it; `free!` deregisters and the last tenant out gives the
+  bytes back.
+* The capacity bound is core's, not a backend's. `headroom` is
+  `min(maxalloc, budget − reserved + largestfree)`; the last term keeps it tight,
+  since a request an existing block can absorb reaches no device allocation and
+  must not be refused by a budget it never spends. It is checked at the point
+  that still knows the ITEMS, because "over budget by 40 MB" is answerable by
+  dropping one buffer and unanswerable without knowing which. `maxalloc` is a
+  primitive with a permissive default — NVIDIA answers "no limit", the APU
+  answers 4 GB.
 * Lava's buffer arena takes raw `device_memory` via `bind_buffer!`, so neither
   arena is carved out of Lava's own pool.
 * `Device(Lava)` and `Device(LavaBackend())` resolve to ONE cached device per

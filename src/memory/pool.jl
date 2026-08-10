@@ -351,6 +351,12 @@ plans that each take one can never share bytes however well either is placed.
 `reserve!` hands every tenant of an arena the SAME slice, so the arena costs the
 largest of them rather than their total.
 
+**Which of the two you get is decided by what you are allocating, never by an
+argument.** `Place` reserves, because a transient is scratch scoped to one run;
+`allocate` — and so every `Buffer` and `Scalar` — acquires, because a persistent
+resource holds data between runs and sharing its bytes would be silent
+corruption. There is deliberately no flag here to get that wrong with.
+
 Growing carves a fresh region, remaps the live tenants into it, and only then
 releases the old one — in that order, so growth never tramples the bytes it is
 copying tenants out of. Tenants keep their own offsets; nothing recompiles.
