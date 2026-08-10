@@ -250,6 +250,36 @@ function custombody(body)
 end
 
 """
+Stable small integers for the resources a graph's passes name.
+
+Usages are recorded as `id => Usage` pairs, and the phases compare ids rather
+than resources — so this table is what makes "the same bytes" a question the
+scheduler can answer without knowing what a resource IS. `by_id` is the way back,
+for the barrier that has to ask what it is scoping to.
+
+In core because both backends kept one and neither kept it differently: an
+`IdDict` for identity, a counter that only grows, first-come numbering. The Host
+graph did not keep `by_id` and so could not answer the reverse question at all,
+which is a difference in capability rather than in design.
+"""
+struct IdTable
+    ids::IdDict{Any,Int}
+    by_id::Dict{Int,Any}
+end
+IdTable() = IdTable(IdDict{Any,Int}(), Dict{Int,Any}())
+
+"""The id `r` is known by, assigning one if this is the first time it is named."""
+resourceid(t::IdTable, r) = get!(t.ids, r) do
+    id = length(t.ids) + 1
+    t.by_id[id] = r
+    id
+end
+
+"""What an id names. The inverse of [`resourceid`](@ref)."""
+byid(t::IdTable, id::Integer) = t.by_id[id]
+Base.haskey(t::IdTable, r) = haskey(t.ids, r)
+
+"""
     registerupdate!(refs, usages, id, buf, range) -> UpdateRef
 
 Reserve `id` as a `CopyDst` of the update pass — once, however many refs name it

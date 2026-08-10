@@ -131,18 +131,15 @@ mutable struct HostGraph <: Mantle.Graph
     dev::HostDevice
     passes::Vector{HostPass}
     transients::Vector{HostTransient}
-    ids::IdDict{Any,Int}
+    ids::Mantle.IdTable
     transient_by_id::Dict{Int,HostTransient}
     updates::Vector{Any}
-    next::Int
 end
 Mantle.Graph(dev::HostDevice) =
-    HostGraph(dev, HostPass[], HostTransient[], IdDict{Any,Int}(),
-              Dict{Int,HostTransient}(), Any[], 0)
+    HostGraph(dev, HostPass[], HostTransient[], Mantle.IdTable(),
+              Dict{Int,HostTransient}(), Any[])
 
-resourceid(g::HostGraph, r) = get!(g.ids, r) do
-    g.next += 1
-end
+resourceid(g::HostGraph, r) = Mantle.resourceid(g.ids, r)
 
 function Mantle.Transient.Buffer(g::HostGraph, ::Type{T}, n::Integer) where {T}
     t = HostTransient{T}(Int(n), typemax(Int), 0, nothing)

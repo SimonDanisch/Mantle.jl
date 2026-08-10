@@ -442,8 +442,7 @@ mutable struct LavaGraph <: Mantle.Graph
     surfaces::Vector{LavaSurface}
     transients::Vector{Transient}
     transient_by_id::Dict{Int,Transient}
-    by_id::Dict{Int,Any}
-    ids::IdDict{Any,Int}
+    ids::Mantle.IdTable          # both directions; see `Mantle.IdTable`
     updates::Vector{Any}
     recycler::Recycler
     # Interning for `use(...; range = ...)`. `ids` is an IdDict, so two `use`
@@ -456,7 +455,7 @@ end
 
 Mantle.Graph(dev::LavaDevice) =
     LavaGraph(dev, Pass[], LavaSurface[], Transient[],
-              Dict{Int,Transient}(), Dict{Int,Any}(), IdDict{Any,Int}(), Any[], Recycler(),
+              Dict{Int,Transient}(), Mantle.IdTable(), Any[], Recycler(),
               Dict{Tuple{Int,UnitRange{Int}},Any}())
 
 function Mantle.Transient.Buffer(g::LavaGraph, ::Type{T}, n::Integer) where {T}
@@ -597,11 +596,7 @@ function touch!(g::LavaGraph, t::Transient)
 end
 touch!(g::LavaGraph, x) = (resourceid(g, x); x)
 
-resourceid(g::LavaGraph, r) = get!(g.ids, r) do
-    id = length(g.ids) + 1
-    g.by_id[id] = r
-    id
-end
+resourceid(g::LavaGraph, r) = Mantle.resourceid(g.ids, r)
 
 """
 What kind of resource an id names, so barrier tracking starts in the right state
@@ -1338,7 +1333,7 @@ function build_pass_barrier(g, ts::Vector{Mantle.Transition})
         src_access = reduce(|, (Mantle.access(be, u, Src()) for u in t.waits))
         dst_stage = Mantle.stages(be, t.to, Dst())
         dst_access = Mantle.access(be, t.to, Dst())
-        r = t.resource == 0 ? nothing : get(g.by_id, t.resource, nothing)
+        r = t.resource == 0 ? nothing : get(g.ids.by_id, t.resource, nothing)
         # A resource that can be renamed gets a global barrier instead of one
         # scoped to its buffer. `st.buf[].buffer` below is baked here, at compile
         # time, and `rename!` points the resource at a *different* store — so a
@@ -1483,15 +1478,15 @@ they are unrelated is free to reorder two passes that write the same memory.
 """
 function overlapping(g::LavaGraph, a::Int, b::Int)
     a == b && return true
-    ra, rb = get(g.by_id, a, nothing), get(g.by_id, b, nothing)
+    ra, rb = get(g.ids.by_id, a, nothing), get(g.ids.by_id, b, nothing)
     (ra isa BufferRange || rb isa BufferRange) || return false
     # `get`, not `resourceid`: this answers a question and must not hand out an
     # id doing it. A slice's parent is always registered first — `use` touches it
     # before `slice` is reached — so the fallback is unreachable, but a query that
     # can grow `by_id` while the compiler is indexing by id is not worth leaving
     # to that invariant holding.
-    pa = ra isa BufferRange ? get(g.ids, ra.parent, 0) : a
-    pb = rb isa BufferRange ? get(g.ids, rb.parent, 0) : b
+    pa = ra isa BufferRange ? get(g.ids.ids, ra.parent, 0) : a
+    pb = rb isa BufferRange ? get(g.ids.ids, rb.parent, 0) : b
     (pa == 0 || pb == 0) && return false
     pa == pb || return false
     # A whole-resource usage covers every slice of it.
@@ -1732,7 +1727,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
             push!(get!(byparent, pid, UnitRange{Int}[]), r)
         end
         for (pid, ranges) in byparent
-            parent = g.by_id[pid]
+            parent = g.ids.by_id[pid]
             n = length(parent)
             cuts = sort!(unique!(vcat([1, n + 1], first.(ranges), last.(ranges) .+ 1)))
             spans = [cuts[k]:(cuts[k + 1] - 1) for k in 1:(length(cuts) - 1)]
@@ -1756,7 +1751,7 @@ function Mantle.run!(::Mantle.Barriers, c::Compile)
     end
 
     state(id) = get!(states, id) do
-        r = g.by_id[id]
+        r = g.ids.by_id[id]
         u = get(final, id, nothing)
         u === nothing && (u = initial_state(r))
         u === nothing ? Mantle.ResourceState(resourcekind(r)) :
@@ -1845,10 +1840,10 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
     # A layout change is per-image and cannot be folded into the pass's one memory
     # barrier, so the needed transitions split by resource kind: images become an
     # image barrier each, everything else is ORed into the memory barrier.
-    isimage(t) = t.resource != 0 && resourcekind(g.by_id[t.resource]) isa ImageKind
+    isimage(t) = t.resource != 0 && resourcekind(g.ids.by_id[t.resource]) isa ImageKind
     for p in Mantle.ordered(c)
         need = c.prepass[p]
-        imgs = [ImageBarrier(g.by_id[t.resource], t) for t in need if isimage(t)]
+        imgs = [ImageBarrier(g.ids.by_id[t.resource], t) for t in need if isimage(t)]
         rest = filter(!isimage, need)
         cds = CompiledDraw[]
         # One render area for the pass, so attachments that disagree about their
