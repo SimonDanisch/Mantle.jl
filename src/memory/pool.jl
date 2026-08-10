@@ -67,6 +67,24 @@ satisfy all of them at once.
 function constraintof end
 
 """
+    mergeconstraints(dev, kind, a, b) -> constraint | nothing
+
+One constraint that satisfies both, or `nothing` when none can.
+
+An arena outlives the plan that first sized it, so the block behind it has to
+keep satisfying every tenant placed there — and what "both" means is the
+backend's: buffer usage bits UNION (the block must permit everything any tenant
+does with it) while image memory-type bits INTERSECT (the type has to be one
+every image can bind to). Getting those the wrong way round is memory that works
+until the one image whose type was excluded is bound.
+
+The default demands equality, which is the safe reading for a backend that has
+not said otherwise: two constraints that are not the same are not reconciled by
+core guessing.
+"""
+mergeconstraints(dev, kind, a, b) = a == b ? a : nothing
+
+"""
     compatible(dev, block_constraint, request) -> Bool
 
 May a block created for `block_constraint` host a request needing `request`?
@@ -128,9 +146,10 @@ keeps its graph alive nor needs remapping.
 mutable struct Arena
     region::Union{Nothing,Region}
     bytes::Int
+    constraint::Any        # what every tenant placed here needs, merged
     tenants::Vector{WeakRef}
 end
-Arena() = Arena(nothing, 0, WeakRef[])
+Arena() = Arena(nothing, 0, nothing, WeakRef[])
 
 """Live tenants, pruning collected ones on the way past."""
 function tenants!(a::Arena)
@@ -267,9 +286,12 @@ does not produce a device allocation each. `blocksize` is a kwarg rather than a
 constant because the right value is a device property, not a Mantle opinion.
 """
 function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
-                  align::Int = 256, blocksize::Int = 64 << 20)
+                  align::Int = 256, blocksize::Int = 64 << 20, constraint = nothing)
     bytes = max(bytes, 1)
-    want = constraintof(dev, kind, transients)
+    # `constraint` given means the caller knows more than these transients do —
+    # an arena reconciling what its other tenants also need. Deriving it here
+    # would size the block for this plan alone.
+    want = constraint === nothing ? constraintof(dev, kind, transients) : constraint
     blks = blocksof(pool, kind)
     for blk in blks
         compatible(dev, blk.constraint, want) || continue
@@ -368,7 +390,21 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
                   align::Int = 256, blocksize::Int = 64 << 20)
     a = arenaof(pool, kind)
     bytes = max(bytes, 1)
-    (a.region !== nothing && bytes <= a.bytes) && return a.region
+    req = constraintof(dev, kind, transients)
+    want = a.constraint === nothing ? req : mergeconstraints(dev, kind, a.constraint, req)
+    want === nothing && throw(ArgumentError(
+        "arena $kind cannot host this plan and the ones already placed in it: " *
+        "their memory requirements do not reconcile, so one allocation cannot " *
+        "serve both. This is not a size problem — a bigger arena would not help."))
+    # The fast path has to ask about the CONSTRAINT as well as the size: an
+    # arena outlives the plan that sized it, and a block created for one plan's
+    # usage bits may not permit what the next plan does with them. Skipping this
+    # is memory that works until the one transient whose bit was missing is used.
+    if a.region !== nothing && bytes <= a.bytes &&
+       compatible(dev, a.region.block.constraint, want)
+        a.constraint = want
+        return a.region
+    end
     # Ask before allocating anything: a refusal must leave the arena exactly as it
     # was, not half-grown with a region nobody is placed in.
     for wr in tenants!(a)
@@ -379,9 +415,10 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
             "leave that recording pointing at freed storage. Build every plan that " *
             "shares a device before baking any of them."))
     end
-    fresh = acquire!(pool, dev, kind, transients, bytes; align, blocksize)
+    fresh = acquire!(pool, dev, kind, transients, max(bytes, a.bytes);
+                     align, blocksize, constraint = want)
     old = a.region
-    a.region, a.bytes = fresh, bytes
+    a.region, a.bytes, a.constraint = fresh, max(bytes, a.bytes), want
     for wr in tenants!(a)
         remap!(wr.value, kind, fresh)
     end

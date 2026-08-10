@@ -1564,6 +1564,14 @@ Mantle.constraintof(::LavaDevice, ::Buffers, ts) =
 # type bits must still include a type the request allows; for buffers the block's
 # usage flags must be a superset of what the request needs.
 Mantle.compatible(::LavaDevice, blk::Integer, req::Integer) = (blk & req) == req
+
+# Union for buffers, intersection for images — and the two are not symmetrical,
+# which is why core cannot guess. A buffer arena must PERMIT everything any
+# tenant does with it; an image arena's type has to be one every image can bind
+# to, and an empty intersection means no allocation can serve them all.
+Mantle.mergeconstraints(::LavaDevice, ::Buffers, a::Integer, b::Integer) = a | b
+Mantle.mergeconstraints(::LavaDevice, ::Images, a::Integer, b::Integer) =
+    (m = a & b; m == 0 ? nothing : m)
 Mantle.compatible(::LavaDevice, blk, req) = blk == req
 
 """Give a placed transient its storage."""
