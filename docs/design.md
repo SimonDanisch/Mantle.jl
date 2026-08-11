@@ -204,19 +204,22 @@ Done, on `sd/mantle-dev` and not yet pushed:
   the arena the first had already sized. That is the whole premise of one
   allocator seeing every workload, and it is the number that says whether it
   works.
-* **What is still in both extensions, and why.** Forty names are defined in each.
-  Seventeen are backend primitives and belong there — `rawalloc`, `rawfree`,
-  `upload!`, `download`, `deviceview`, `devicecopy!`, `materialize!`,
-  `constraintof`, `compatible`, `capacity`, `Device`, `backend`, `storage`,
-  `arena`, `alignment`, `nbytes`, `describe`. Most of the rest are one-line
-  accessors answering for a struct that backend owns (`analysis(c) = c.analysis`).
+* **What is still in both extensions, and why.** Of the names defined in each,
+  the backend primitives belong there — `rawalloc`, `rawfree`, `upload!`,
+  `download`, `deviceview`, `devicecopy!`, `materialize!`, `constraintof`,
+  `compatible`, `mergeconstraints`, `capacity`, `maxalloc`, `Device`, `backend`,
+  `storage`, `arena`, `alignment`, `nbytes`, `describe` — as do the four that say
+  what a pass IS: `newpass`, `handle`, `dispatches`, `passes`. Most of the rest
+  are one-line accessors answering for a struct that backend owns
+  (`analysis(c) = c.analysis`).
 
-  The one genuine duplication left is the **graph data model**: `Graph`, `Pass`,
-  `PassHandle`, `use`, `custom!`/`compute!`, `Transient.Buffer` registration and
-  `updates_pass!` exist twice because the types they operate on do. Hoisting them
-  means a core `Graph` holding the shared fields with a backend payload beside
-  them, which is a bigger change than any single lift above and the obvious next
-  one. Everything that could move without it has moved.
+  What is left duplicated is the **graph data model itself**: `Graph`, `Pass`,
+  `PassHandle`, `use`, `Transient.Buffer` registration and `updates_pass!` exist
+  twice because the types they operate on do. Hoisting them means a core `Graph`
+  holding the shared fields with a backend payload beside them, which is a bigger
+  change than any single lift above and the obvious next one. Everything that
+  could move without it has moved — `custom!` and `compute!` came across once the
+  four pass hooks existed, and they were the last things that were identical.
 * **What a second backend costs, measured.** Against `sd/mantle-dev`, the merge
   moved 1126 lines into `src/` (pool, phases, resources, array, sync) and took
   223 out of `ext/MantleLavaExt.jl` — the extension shrank while gaining
