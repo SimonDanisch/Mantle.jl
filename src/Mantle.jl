@@ -22,7 +22,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved
-export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable
+export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable, takeover!
 export DeviceArray, giveup!, blocksize
 export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints

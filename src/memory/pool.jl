@@ -156,8 +156,9 @@ mutable struct Arena
     bytes::Int
     constraint::Any        # what every tenant placed here needs, merged
     tenants::Vector{WeakRef}
+    lastrun::Any           # who wrote these bytes most recently
 end
-Arena() = Arena(nothing, 0, nothing, WeakRef[])
+Arena() = Arena(nothing, 0, nothing, WeakRef[], nothing)
 
 """Live tenants, pruning collected ones on the way past."""
 function tenants!(a::Arena)
@@ -461,9 +462,34 @@ function untenant!(pool::Pool, kind, x)
     filter!(wr -> wr.value !== x && wr.value !== nothing, a.tenants)
     if isempty(a.tenants) && a.region !== nothing
         release!(a.region)
-        a.region, a.bytes, a.constraint = nothing, 0, nothing
+        a.region, a.bytes, a.constraint, a.lastrun = nothing, 0, nothing, nothing
     end
     return nothing
+end
+
+"""
+    takeover!(pool, kind, x) -> Bool
+
+Record `x` as the tenant about to write this arena, and say whether it is taking
+the bytes over from a DIFFERENT one.
+
+What a backend asks before emitting the handover barrier. `sharing` is the wrong
+question on its own: it says the arena has more than one tenant, which is true
+for every run once two plans exist — so a plan run repeatedly, which is the
+common case (playing one clip, replaying a baked model), paid a full memory
+barrier per frame to be ordered against itself. Its own hazards are its
+schedule's business and already handled.
+
+Recording and asking are one call because they must not drift: a backend that
+asked without recording would emit forever, and one that recorded without asking
+would emit never.
+"""
+function takeover!(p::Pool, kind, x)
+    a = get(p.arenas, kind, nothing)
+    a === nothing && return false
+    prev = a.lastrun
+    a.lastrun = x
+    return prev !== nothing && prev !== x
 end
 
 """

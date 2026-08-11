@@ -1401,7 +1401,12 @@ Not needed *between* runs of the same plan: that hazard is the plan's own, and
 `nextslot!` plus the derived barriers already cover it.
 """
 function handover!(pl::LavaPlan, bq)
-    any(ar -> Mantle.sharing(Mantle.pool(pl.graph.dev), ar), pl.arenas) || return false
+    # `foldl`, not `any`: short-circuiting would skip recording this plan as the
+    # runner of the arenas after the first hit, and the next run would then think
+    # it was taking over from someone else.
+    pool = Mantle.pool(pl.graph.dev)
+    took = foldl((acc, ar) -> Mantle.takeover!(pool, ar, pl) | acc, pl.arenas; init = false)
+    took || return false
     both = Lava.Vulkan.AccessFlag2(Lava.Vulkan.ACCESS_2_MEMORY_READ_BIT) |
            Lava.Vulkan.AccessFlag2(Lava.Vulkan.ACCESS_2_MEMORY_WRITE_BIT)
     dep = Lava.Vulkan._DependencyInfo(
