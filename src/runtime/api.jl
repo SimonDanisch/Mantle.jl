@@ -319,6 +319,18 @@ byid(t::IdTable, id::Integer) = t.by_id[id]
 Base.haskey(t::IdTable, r) = haskey(t.ids, r)
 
 """
+The id `r` already has, erroring if it has none.
+
+Distinct from [`resourceid`](@ref), which ASSIGNS one — asking what a resource is
+called and declaring that it is named are different questions, and a test that
+wants the first should not silently get the second and a fresh id for a resource
+no pass ever touched.
+"""
+Base.getindex(t::IdTable, r) = t.ids[r]
+Base.get(t::IdTable, r, default) = get(t.ids, r, default)
+Base.length(t::IdTable) = length(t.ids)
+
+"""
     registerupdate!(refs, usages, id, buf, range) -> UpdateRef
 
 Reserve `id` as a `CopyDst` of the update pass — once, however many refs name it
