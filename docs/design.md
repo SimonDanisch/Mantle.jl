@@ -165,9 +165,19 @@ Done, on `sd/mantle-dev` and not yet pushed:
 
   Not `sharing`: that says the arena has more than one tenant, which is true of
   every run once two plans exist, so a plan run repeatedly — playing one clip,
-  replaying a baked model — paid a full memory barrier per frame to be ordered
-  against itself. `takeover!` records and asks in one call, because asking
-  without recording emits forever and recording without asking emits never.
+  replaying a baked model — paid a memory barrier per frame to be ordered against
+  itself. `takeover!` records and asks in one call, because asking without
+  recording emits forever and recording without asking emits never.
+
+  Both of those are corrections of *meaning*, not measured wins, and the attempt
+  to measure them is worth recording as a warning. A composite benchmark read
+  1.95 ms before the merge and 3.15 ms after, which looked like a 60% regression
+  and sent me scoping the barrier to fix it. It was not one: the SAME benchmark
+  on the SAME build, minutes apart, gives medians of 0.999 ms and 4.948 ms while
+  its MINIMUM moves the other way (0.817 -> 0.614). The median is GPU clock
+  state; only the minimum is stable, and by it nothing moved. Cross-session
+  medians cannot attribute anything here — see the project's measurement notes,
+  which say exactly this and which I did not follow.
 
   Growth carves a fresh region, remaps live tenants, then releases the old — in
   that order, so it never tramples the bytes it is copying out of. `remappable`
