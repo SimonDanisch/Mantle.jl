@@ -45,6 +45,7 @@ export DeviceCaps, caps
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update
 export UpdateRef, anypending, applyupdates!, custombody, registerupdate!
+export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
 export Phase, Dag, Schedule, Liveness, Place, Aliasing, Barriers, Pipelines
 export Policy, Compact, Overlap
@@ -142,6 +143,11 @@ The declaration is a promise. Nothing checks that the body touches only what was
 declared, and memory it reaches without saying so is memory the placer is free to
 alias with something else.
 """
-function custom! end
+function custom!(f, g::Graph, name::AbstractString)
+    p = newpass(g, name, :custom)
+    push!(passes(g), p)
+    push!(dispatches(p), custombody(f(handle(g, p))))
+    return p
+end
 
 end

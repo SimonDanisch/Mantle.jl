@@ -233,6 +233,25 @@ can see it.
 function Update end
 
 """
+    newpass(graph, name, kind) -> pass
+    handle(graph, pass)        -> what a pass block is given
+    dispatches(pass)           -> where its recorded work goes
+    passes(graph)              -> the graph's passes, in declaration order
+
+The four things a backend has to say about passes, so that `custom!` and
+`compute!` do not have to exist twice.
+
+They had become identical: make a pass, push it, hand a block the pass handle,
+keep what it returns. Only the pass TYPE differed — `Pass(name, :custom)` against
+`HostPass(name)` — which is what these hooks are for. A backend that represents
+passes differently still says so in one place instead of reimplementing the
+recording protocol around it.
+"""
+function newpass end
+function handle end
+function dispatches end
+
+"""
     custombody(body) -> body
 
 Check that a `custom!` block returned the callable it is contracted to.
@@ -370,7 +389,19 @@ A copy as a graph pass, so its layouts and ordering are derived rather than
 stated.
 """
 function copy! end
-function compute! end
+"""
+    compute!(f, graph, name) -> pass
+
+A pass whose work is `dispatch!` calls. `f` receives the pass handle and declares
+what it touches.
+"""
+function compute!(f, g::Graph, name::AbstractString)
+    p = newpass(g, name, :compute)
+    push!(passes(g), p)
+    f(handle(g, p))
+    return p
+end
+
 function run! end
 function npipelines end
 

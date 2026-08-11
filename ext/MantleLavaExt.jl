@@ -833,26 +833,17 @@ end
 kernelfor(k, ::Nothing) = k(Lava.LavaBackend())
 kernelfor(k, group) = k(Lava.LavaBackend(), group)
 
-function Mantle.compute!(f, g::LavaGraph, name::AbstractString)
-    p = Pass(name, :compute)
-    push!(g.passes, p)
-    f(PassHandle(g, p))
-    p
-end
-
 dispatch!(p::PassHandle, kernel, args, ndrange; group = nothing) =
     push!(p.pass.dispatches, Dispatch(kernel, args, ndrange, group))
 
 # The body goes in `dispatches` beside the `Dispatch`es rather than in a field of
 # its own: the compile walks that vector and this is one more thing it can find
 # there, so `Pass` does not grow a field only one kind ever sets.
-function Mantle.custom!(f, g::LavaGraph, name::AbstractString)
-    p = Pass(name, :custom)
-    push!(g.passes, p)
-    body = f(PassHandle(g, p))
-    push!(p.dispatches, Mantle.custombody(body))
-    p
-end
+# The four hooks core's `custom!`/`compute!` are written against.
+Mantle.newpass(::LavaGraph, name::AbstractString, kind) = Pass(name, kind)
+Mantle.handle(g::LavaGraph, p::Pass) = PassHandle(g, p)
+Mantle.dispatches(p::Pass) = p.dispatches
+Mantle.passes(g::LavaGraph) = g.passes
 
 
 """The single pass every `Update` shares, so one pair of barriers covers them all."""

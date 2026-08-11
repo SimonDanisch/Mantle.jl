@@ -166,23 +166,15 @@ struct Dispatch
     group::Any
 end
 
-function compute!(f, g::HostGraph, name::AbstractString)
-    p = HostPass(name)
-    push!(g.passes, p)
-    f(PassHandle(g, p))
-    return p
-end
-
 dispatch!(p::PassHandle, kernel, args, ndrange; group = nothing) =
     push!(p.pass.dispatches, Dispatch(kernel, args, ndrange, group))
 
-function Mantle.custom!(f, g::HostGraph, name::AbstractString)
-    p = HostPass(name)
-    push!(g.passes, p)
-    body = f(PassHandle(g, p))
-    push!(p.dispatches, Mantle.custombody(body))
-    return p
-end
+# The four hooks core's `custom!`/`compute!` are written against. A pass here has
+# no kind — there is one kind of work on this backend — so it is discarded.
+Mantle.newpass(::HostGraph, name::AbstractString, kind) = HostPass(name)
+Mantle.handle(g::HostGraph, p::HostPass) = PassHandle(g, p)
+Mantle.dispatches(p::HostPass) = p.dispatches
+Mantle.passes(g::HostGraph) = g.passes
 
 # ── updates ───────────────────────────────────────────────────────────────────
 
