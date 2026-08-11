@@ -245,3 +245,26 @@ end
     profiled = Base.invokelatest(M.Plan, g; profile = true)
     @test_throws ArgumentError M.bake!(profiled)
 end
+
+@testset "a baked replay still claims the arena it writes" begin
+    # `run!` on a baked plan replays and never calls `record!`, which is where
+    # `takeover!` lives. Skipping the claim leaves the arena naming whoever
+    # RECORDED last — so the next tenant sees itself there and emits no barrier,
+    # a handover away from a baked plan with nothing ordering it. A replay writes
+    # those bytes like any other run and has to say so.
+    dev = M.Device(Lava)
+    a = Base.invokelatest(chainplan, dev, 50_000, 2)
+    b = Base.invokelatest(chainplan, dev, 50_000, 2)
+    M.run!(a.plan)
+    KernelAbstractions.synchronize(M.backend(dev))
+    M.bake!(a.plan)
+    M.run!(a.plan)                                  # replay
+    KernelAbstractions.synchronize(M.backend(dev))
+    arena = M.pool(dev).arenas[E.Buffers()]
+    @test arena.lastrun === a.plan                  # the replay claimed it
+    @test all(==(4f0), Array(M.storage(a.out)))     # and still produced its answer
+    @test M.takeover!(M.pool(dev), E.Buffers(), b.plan)  # so b sees a real handover
+    M.run!(b.plan)
+    KernelAbstractions.synchronize(M.backend(dev))
+    @test all(==(4f0), Array(M.storage(b.out)))
+end

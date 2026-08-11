@@ -2208,6 +2208,19 @@ function run!(pl::LavaPlan; barriers::Symbol = :derived)
         # so the copies land ahead of the replay in queue order, which is the
         # order the derived barriers inside the recording were built for.
         record_updates!(pl, bq)
+        # A replay writes this arena's bytes like any other run, so it has to
+        # claim them — even though it cannot emit a barrier of its own, since a
+        # recording is frozen. Skipping the claim leaves the arena naming
+        # whoever RECORDED last, and the next tenant then sees itself there and
+        # emits nothing: a handover away from a baked plan with no barrier at
+        # all. (The baked plan taking over from someone else is still
+        # unbarriered — that is what `bake!`ing into a shared arena costs, and
+        # `remappable` already refuses the growth case.)
+        let pool = Mantle.pool(pl.graph.dev)
+            for ar in pl.arenas
+                Mantle.takeover!(pool, ar, pl)
+            end
+        end
         Lava.replay!(pl.baked)
         return nothing
     end
