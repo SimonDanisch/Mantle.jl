@@ -2434,13 +2434,8 @@ Give this plan's regions back to the pool. The argument memory and the
 pipelines are ordinary Lava objects — the GC reclaims those; the regions are
 the thing only an explicit release can return, because nothing here finalizes.
 """
-function Mantle.free!(pl::LavaPlan)
-    for ar in pl.arenas
-        Mantle.untenant!(Mantle.pool(pl.graph.dev), ar, pl)
-    end
-    empty!(pl.slabs); empty!(pl.arenas)
-    return nothing
-end
+Mantle.free!(pl::LavaPlan) =
+    Mantle.giveup!(Mantle.pool(pl.graph.dev), pl.slabs, pl.arenas, pl)
 
 """Re-materialise this plan's transients of `kind` into the arena's new region.
 Its own offsets are unaffected by the arena moving; only the base changed."""

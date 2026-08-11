@@ -321,13 +321,8 @@ end
 """Give up this plan's claim on the arenas it was placed into. Explicit — see
 `Mantle.trim!`. Deregistering rather than releasing, because the bytes are shared
 with every other plan placed there."""
-function Mantle.free!(pl::HostPlan)
-    for ar in pl.arenas
-        Mantle.untenant!(Mantle.pool(pl.graph.dev), ar, pl)
-    end
-    empty!(pl.regions); empty!(pl.arenas)
-    return nothing
-end
+Mantle.free!(pl::HostPlan) =
+    Mantle.giveup!(Mantle.pool(pl.graph.dev), pl.regions, pl.arenas, pl)
 
 """Re-materialise this plan's transients of `kind` into the arena's new region."""
 function Mantle.remap!(pl::HostPlan, kind, region)

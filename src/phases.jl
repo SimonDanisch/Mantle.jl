@@ -379,7 +379,9 @@ function run!(::Place, c)
 end
 
 """
-Give up a compilation's claim on the arenas it was placed into.
+    giveup!(pool, regions, arenas, x)
+
+Give up `x`'s claim on the arenas it was placed into.
 
 Explicit, and never a finalizer — see [`trim!`](@ref). Deregistering rather than
 releasing, because the region is SHARED: the bytes go back when the last tenant
@@ -387,12 +389,17 @@ does, and a plan that released them itself would pull them out from under
 whichever other plan is still placed there. A plan dropped without this holds an
 arena at its size until the pool is trimmed — a leak rather than a crash, and the
 right way round.
+
+Takes the two vectors rather than an `Analysis`, because a compiled plan keeps
+them and has thrown the analysis away. Both backends' `free!` were this, spelled
+out.
 """
-function releaseregions!(a::Analysis, pool, x)
-    for ar in a.arenas
+function giveup!(pool, regions, arenas, x)
+    for ar in arenas
         untenant!(pool, ar, x)
     end
-    empty!(a.regions); empty!(a.arenas)
+    empty!(regions)
+    empty!(arenas)
     return nothing
 end
 
