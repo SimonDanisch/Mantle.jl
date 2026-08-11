@@ -158,10 +158,16 @@ Done, on `sd/mantle-dev` and not yet pushed:
   Sharing is what a device-owned arena is *for*: SAM 2's scratch and MatAnyone's
   never coexist, and two plans that each acquired a private region could not
   share however well either was placed. What makes the overlap safe is split by
-  who knows what — ordering is one barrier at the head of a recording when
-  `sharing` says the arena has more than one live tenant, which only a backend
-  can emit; data lifetime is the caller's, and is the same rule that already
-  governs two runs of one plan.
+  who knows what — ordering is one barrier at the head of a recording, emitted
+  when `takeover!` says a DIFFERENT tenant wrote these bytes last, which only a
+  backend can do because only it has a command stream; data lifetime is the
+  caller's, and is the same rule that already governs two runs of one plan.
+
+  Not `sharing`: that says the arena has more than one tenant, which is true of
+  every run once two plans exist, so a plan run repeatedly — playing one clip,
+  replaying a baked model — paid a full memory barrier per frame to be ordered
+  against itself. `takeover!` records and asks in one call, because asking
+  without recording emits forever and recording without asking emits never.
 
   Growth carves a fresh region, remaps live tenants, then releases the old — in
   that order, so it never tramples the bytes it is copying out of. `remappable`
