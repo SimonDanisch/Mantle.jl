@@ -81,8 +81,16 @@ until the one image whose type was excluded is bound.
 The default demands equality, which is the safe reading for a backend that has
 not said otherwise: two constraints that are not the same are not reconciled by
 core guessing.
+
+Impossibility is a THROW, not a returned `nothing`. `nothing` is a perfectly good
+constraint — it is the host backend's, whose memory is just memory — so using it
+as the failure signal made every host graph unplaceable. A sentinel that a
+backend can legitimately return is not a sentinel.
 """
-mergeconstraints(dev, kind, a, b) = a == b ? a : nothing
+mergeconstraints(dev, kind, a, b) = a == b ? a : throw(ArgumentError(
+    "arena $kind cannot host this plan and the ones already placed in it: it " *
+    "needs $b where they need $a, and one allocation cannot serve both. This is " *
+    "not a size problem — a bigger arena would not help."))
 
 """
     compatible(dev, block_constraint, request) -> Bool
@@ -391,11 +399,9 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     a = arenaof(pool, kind)
     bytes = max(bytes, 1)
     req = constraintof(dev, kind, transients)
-    want = a.constraint === nothing ? req : mergeconstraints(dev, kind, a.constraint, req)
-    want === nothing && throw(ArgumentError(
-        "arena $kind cannot host this plan and the ones already placed in it: " *
-        "their memory requirements do not reconcile, so one allocation cannot " *
-        "serve both. This is not a size problem — a bigger arena would not help."))
+    # The REGION's absence is what says nothing has been placed here yet — not the
+    # constraint's value, which a backend may legitimately leave as `nothing`.
+    want = a.region === nothing ? req : mergeconstraints(dev, kind, a.constraint, req)
     # The fast path has to ask about the CONSTRAINT as well as the size: an
     # arena outlives the plan that sized it, and a block created for one plan's
     # usage bits may not permit what the next plan does with them. Skipping this
@@ -455,7 +461,7 @@ function untenant!(pool::Pool, kind, x)
     filter!(wr -> wr.value !== x && wr.value !== nothing, a.tenants)
     if isempty(a.tenants) && a.region !== nothing
         release!(a.region)
-        a.region, a.bytes = nothing, 0
+        a.region, a.bytes, a.constraint = nothing, 0, nothing
     end
     return nothing
 end

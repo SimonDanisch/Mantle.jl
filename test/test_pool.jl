@@ -247,6 +247,21 @@ M.mergeconstraints(::BitDev, kind, a::UInt32, b::UInt32) = a | b
     @test r3 === p.arenas[:buf].region
     @test length(d.allocs) == before                 # reached no device
 
+    # `nothing` is a CONSTRAINT, not a failure signal. The host backend's is
+    # exactly that — its memory is just memory — and using `nothing` to mean
+    # "irreconcilable" made every host graph unplaceable. Caught by the editor's
+    # fuzz suite, which is the only thing that runs two host plans in one pool.
+    struct NilDev end
+    M.rawalloc(::NilDev, kind, bytes, c) = zeros(UInt8, bytes)
+    M.rawfree(::NilDev, mem) = nothing
+    M.constraintof(::NilDev, kind, ts) = nothing
+    M.compatible(::NilDev, a, b) = true
+    p3 = M.Pool()
+    r4 = M.reserve!(p3, NilDev(), :any, nothing, 64; blocksize = 4096)
+    r5 = M.reserve!(p3, NilDev(), :any, nothing, 64; blocksize = 4096)
+    @test r4 === r5                                  # shared, and neither threw
+    @test p3.arenas[:any].constraint === nothing
+
     # and a device that cannot reconcile says so, instead of handing back memory
     # that satisfies only one of them
     struct PickyDev end

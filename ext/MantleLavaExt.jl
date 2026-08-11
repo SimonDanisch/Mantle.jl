@@ -1570,8 +1570,14 @@ Mantle.compatible(::LavaDevice, blk::Integer, req::Integer) = (blk & req) == req
 # tenant does with it; an image arena's type has to be one every image can bind
 # to, and an empty intersection means no allocation can serve them all.
 Mantle.mergeconstraints(::LavaDevice, ::Buffers, a::Integer, b::Integer) = a | b
-Mantle.mergeconstraints(::LavaDevice, ::Images, a::Integer, b::Integer) =
-    (m = a & b; m == 0 ? nothing : m)
+function Mantle.mergeconstraints(::LavaDevice, ::Images, a::Integer, b::Integer)
+    m = a & b
+    m == 0 && throw(ArgumentError(
+        "arena Images() has no memory type every image in it can bind to: this " *
+        "plan's images and an earlier plan's on this device intersect to nothing, " *
+        "so one allocation cannot serve both."))
+    return m
+end
 Mantle.compatible(::LavaDevice, blk, req) = blk == req
 
 """Give a placed transient its storage."""
