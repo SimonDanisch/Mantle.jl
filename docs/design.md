@@ -221,12 +221,15 @@ Done, on `sd/mantle-dev` and not yet pushed:
   could move without it has moved — `custom!` and `compute!` came across once the
   four pass hooks existed, and they were the last things that were identical.
 * **What a second backend costs, measured.** Against `sd/mantle-dev`, the merge
-  moved 1126 lines into `src/` (pool, phases, resources, array, sync) and took
-  223 out of `ext/MantleLavaExt.jl` — the extension shrank while gaining
-  capability. `MantleHostExt.jl` is 407 lines for a whole second backend, which
-  is the number that says whether the split is real: it implements ten
-  primitives and no policy, and its own barrier method is "nothing to emit".
-  Core:ext went from 2.33 to 1.30.
+  moved the allocator, placement, the capacity bound, `UpdateRef`, the `custom!`
+  contract, the id table, the pass protocol and plan teardown into `src/`, while
+  `ext/MantleLavaExt.jl` SHRANK — it gained `bake!` and lost more than that to
+  core. `MantleHostExt.jl` is 363 lines for a whole second backend, which is the
+  number that says whether the split is real: it implements primitives and no
+  policy, and its own barrier method is "nothing to emit".
+
+  Core 2593 against ext 3019: the ratio went 2.33 (before any lift) to 2.32
+  (`sd/mantle-dev`) to **1.16**.
 * The capacity bound is core's, not a backend's. `headroom` is
   `min(maxalloc, budget − reserved + largestfree)`; the last term keeps it tight,
   since a request an existing block can absorb reaches no device allocation and
