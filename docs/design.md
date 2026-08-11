@@ -213,13 +213,21 @@ Done, on `sd/mantle-dev` and not yet pushed:
   are one-line accessors answering for a struct that backend owns
   (`analysis(c) = c.analysis`).
 
-  What is left duplicated is the **graph data model itself**: `Graph`, `Pass`,
-  `PassHandle`, `use`, `Transient.Buffer` registration and `updates_pass!` exist
-  twice because the types they operate on do. Hoisting them means a core `Graph`
-  holding the shared fields with a backend payload beside them, which is a bigger
-  change than any single lift above and the obvious next one. Everything that
-  could move without it has moved — `custom!` and `compute!` came across once the
-  four pass hooks existed, and they were the last things that were identical.
+  What is left is the graph data model, and — MEASURED rather than assumed — it
+  is not worth hoisting. The two graphs declare the same five fields, but that is
+  parallel *declaration*, not shared *work*: only 30 references touch them at all
+  (Host 8, Lava 22), so a core `GraphCore` would trade ten declaration lines for
+  thirty indirections. And the two functions that look duplicated are not:
+  `updates_pass!` identifies its pass by name on the host and by kind on Lava
+  (the host's pass has no kind, and it attaches a step where Lava dispatches on
+  kind in `run!`), and `Transient.Buffer` registers into `transient_by_id` on the
+  host where Lava does it in `touch!`.
+
+  So `custom!` and `compute!` were the last things genuinely identical, and they
+  came across once the four pass hooks existed. An earlier draft of this
+  paragraph called the data model "the obvious next lift"; counting the
+  references is what changed the answer, and it is recorded here so the next
+  reader does not do it on that say-so.
 * **What a second backend costs, measured.** Against `sd/mantle-dev`, the merge
   moved the allocator, placement, the capacity bound, `UpdateRef`, the `custom!`
   contract, the id table, the pass protocol and plan teardown into `src/`, while
