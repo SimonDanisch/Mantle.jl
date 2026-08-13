@@ -39,6 +39,14 @@ carries the answer. See `FlashCMPlan.rescale` for the shape that takes.
     workgrouplimit    threads per workgroup
     cores             SMs / CUs; 0 when the device will not say
     warps             max resident subgroups per core; 0 = ditto
+    wggran            workgroup-scope matrix shapes: (invocations, M, N, K) rows
+
+`wggran` is the one field that is a *table* rather than a number, and it is a
+table because the answer depends on the launch: the legal `(M, N, K)` multiples
+for a matrix spanning the whole workgroup differ per workgroup size, and coarsen
+as it grows. Empty means the device has no workgroup-scope matrices, so it is
+also the capability test — a kernel cannot learn "may I?" without learning "at
+what shapes?", which is the pair that must not drift apart.
 """
 struct DeviceCaps
     coopmat::Bool
@@ -49,7 +57,15 @@ struct DeviceCaps
     workgrouplimit::Int
     cores::Int
     warps::Int
+    wggran::Vector{NTuple{4,Int}}
 end
+
+# Eight positional arguments still construct one, meaning "no workgroup-scope
+# matrices" — every caller that predates `wggran` says exactly that.
+DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
+           workgrouplimit, cores, warps) =
+    DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
+               workgrouplimit, cores, warps, NTuple{4,Int}[])
 
 """
     DeviceCaps(c; kw...) -> DeviceCaps
@@ -62,9 +78,10 @@ decision testable on a machine that cannot run it.
 DeviceCaps(c::DeviceCaps;
            coopmat = c.coopmat, tile = c.tile, subgroup = c.subgroup,
            coopmatsubgroup = c.coopmatsubgroup, sharedbudget = c.sharedbudget,
-           workgrouplimit = c.workgrouplimit, cores = c.cores, warps = c.warps) =
+           workgrouplimit = c.workgrouplimit, cores = c.cores, warps = c.warps,
+           wggran = c.wggran) =
     DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-               workgrouplimit, cores, warps)
+               workgrouplimit, cores, warps, wggran)
 
 """
     caps(device) -> DeviceCaps

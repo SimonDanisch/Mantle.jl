@@ -252,8 +252,12 @@ Done, on `sd/mantle-dev` and not yet pushed:
   number that says whether the split is real: it implements primitives and no
   policy, and its own barrier method is "nothing to emit".
 
-  Core 2593 against ext 3019: the ratio went 2.33 (before any lift) to 2.32
-  (`sd/mantle-dev`) to **1.16**.
+  Core 2619 lines against ext 3063. The number to watch is **ext:core** — how
+  much backend code it takes to carry a line of shared code — and it went 2.33
+  (before any lift) to 2.32 (`sd/mantle-dev`) to **1.17**. Stated that way round
+  deliberately: the figure is above 1 because Vulkan is genuinely large (2700 of
+  the 3063 lines), not because core is thin, and reading it upside down turns a
+  halving of backend weight into a claim core is smaller than it is.
 * The capacity bound is core's, not a backend's. `headroom` is
   `min(maxalloc, budget − reserved + largestfree)`; the last term keeps it tight,
   since a request an existing block can absorb reaches no device allocation and
