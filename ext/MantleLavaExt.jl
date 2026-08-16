@@ -117,7 +117,7 @@ Mantle.caps(b::Lava.LavaBackend) = mantlecaps(Lava.caps(b))
 
 mantlecaps(c) = Mantle.DeviceCaps(c.coopmat, c.tile, c.subgroup, c.coopmatsubgroup,
                                   c.sharedbudget, c.workgrouplimit, c.cores, c.warps,
-                                  c.wggran)
+                                  c.wggran, c.shapes)
 
 # ── window ────────────────────────────────────────────────────────────────────
 """

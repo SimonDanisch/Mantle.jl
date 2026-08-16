@@ -1,5 +1,12 @@
 module Mantle
 
+# The matrix vocabulary is shared with Lava, which cannot be a dependency here —
+# Mantle weak-depends on Lava for `MantleLavaExt`, so an edge back would close a
+# cycle. `supports`/`bestshape` are imported by name because `DeviceCaps` methods
+# below extend them rather than defining a second pair.
+using KernelInterfaces
+import KernelInterfaces: supports, bestshape
+
 include("memory/interval.jl")
 include("memory/model.jl")
 include("memory/bound.jl")
@@ -41,6 +48,8 @@ export pixelbytes, vkformat
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
 export DeviceCaps, caps
+export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
+export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update

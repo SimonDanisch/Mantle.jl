@@ -58,14 +58,27 @@ struct DeviceCaps
     cores::Int
     warps::Int
     wggran::Vector{NTuple{4,Int}}
+    # Every subgroup-scope shape the backend reports. `tile` is one entry of it —
+    # the square fp16 -> fp32 instruction — kept as a field because that is what
+    # nearly every caller wants. Ask `bestshape` for anything else rather than
+    # assuming this device's table looks like the one the kernel was written on.
+    #
+    # Appended, not inserted next to `tile`: the Lava extension copies this
+    # struct positionally, and a field in the middle would misalign it silently.
+    shapes::Vector{MatrixShape}
 end
 
 # Eight positional arguments still construct one, meaning "no workgroup-scope
-# matrices" — every caller that predates `wggran` says exactly that.
+# matrices" — every caller that predates `wggran` says exactly that. Those
+# callers also mean "a device with a square `tile` fp16 -> fp32 instruction",
+# which is the shape table they get: leaving it empty would let `tile` and
+# `shapes` describe different devices on a synthetic caps.
 DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-           workgrouplimit, cores, warps) =
+           workgrouplimit, cores, warps, wggran = NTuple{4,Int}[]) =
     DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-               workgrouplimit, cores, warps, NTuple{4,Int}[])
+               workgrouplimit, cores, warps, wggran,
+               coopmat ? [MatrixShape(Float16, Float32, tile, tile, tile, SubgroupScope())] :
+                         MatrixShape[])
 
 """
     DeviceCaps(c; kw...) -> DeviceCaps
@@ -79,9 +92,29 @@ DeviceCaps(c::DeviceCaps;
            coopmat = c.coopmat, tile = c.tile, subgroup = c.subgroup,
            coopmatsubgroup = c.coopmatsubgroup, sharedbudget = c.sharedbudget,
            workgrouplimit = c.workgrouplimit, cores = c.cores, warps = c.warps,
-           wggran = c.wggran) =
+           wggran = c.wggran, shapes = c.shapes) =
     DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-               workgrouplimit, cores, warps, wggran)
+               workgrouplimit, cores, warps, wggran, shapes)
+
+"""
+    supports(c::DeviceCaps, s::MatrixShape) -> Bool
+    bestshape(c::DeviceCaps, ab, acc; scope) -> MatrixShape | nothing
+
+Ask this device's shape table, `coopmat` included. Forwarded to
+`KernelInterfaces` so the search exists once — the workgroup-granularity lookup
+is here for the same reason, after two callers wrote the same loop with different
+argument orders.
+
+**The `coopmat` gate is here rather than in the copy constructor**, which was
+tried first and is wrong: `DeviceCaps(c; coopmat = false)` must change exactly
+the field it names, and letting `tile` and `shapes` follow it means naming one
+field and moving three. Lava's `test_device_caps.jl` asserts that contract by
+name. A caps with `coopmat = false` may therefore still carry a table, and it is
+the accessors that answer as the device it claims to be.
+"""
+supports(c::DeviceCaps, s::MatrixShape) = c.coopmat && supports(c.shapes, s)
+bestshape(c::DeviceCaps, ab, acc; scope::MatrixScope = SubgroupScope()) =
+    c.coopmat ? bestshape(c.shapes, ab, acc; scope) : nothing
 
 """
     caps(device) -> DeviceCaps
