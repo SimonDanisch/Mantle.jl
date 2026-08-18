@@ -474,6 +474,22 @@ catastrophic.
 `DeviceRange(count)` takes a device-resident ELEMENT count and the backend
 converts. See its docstring for the tail contract.
 
+### 1a. A Hikari kernel already runs unchanged inside a graph
+
+Proved before touching Hikari, which is the cheap half of the question:
+`vp_accumulate_to_rgb_kernel!` — static ndrange, one writer, one reader, no
+indirect — dispatched through `Mantle.dispatch!` on Mantle-owned buffers gives
+output BIT-IDENTICAL to the same kernel launched straight through KA. So the
+kernels port as they are; what does not port for free is their memory, which is
+the next finding.
+
+Script: `/sim/tmp/bench/mantle_slice.jl`. One wrinkle worth keeping: the
+accumulators are flat `Float32` of length `3n`, not `RGBSpectrum` of length `n`,
+because the kernel accumulates with Atomix and atomics need a scalar element
+type. A port that "tidies" that into a struct array will fail to compile with a
+method-lookup failure inside `Atomix.modify!`, which reads as a GPU-codegen
+problem and is not one.
+
 ### 2. Memory ownership is one-way, and this decides the sequencing
 
 `Mantle.deviceview` builds a `LavaArray` over a Mantle region with a NO-OP
