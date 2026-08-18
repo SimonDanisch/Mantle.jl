@@ -453,3 +453,52 @@ could never have run on the GPU tier, and nothing had ever asked it to.
 
 **Deliberately not designed for:** the host backend. It is a fallback and a test
 harness. No architectural decision should be justified by a CPU measurement.
+
+---
+
+## Porting Hikari onto Mantle — what the code says, 2026-08-19
+
+Written while adding `DeviceRange`. Four findings, in the order they constrain
+the work.
+
+### 1. Indirect compute dispatch existed nowhere. It does now.
+
+`dispatch!` took a host-side `ndrange`; indirect was a draw-only path
+(`drawover` → `vk_draw_indirect_in_pass!`) plus `Indirect` as a usage for state
+tracking. Hikari is a wavefront tracer: every stage dispatches over "however
+many rays survived", a number that only exists on the device. Reading it back
+per stage per bounce is a flush and a fence each — the cost the design exists to
+avoid — and `ndrange = capacity` is recorded in the project's notes as
+catastrophic.
+
+`DeviceRange(count)` takes a device-resident ELEMENT count and the backend
+converts. See its docstring for the tail contract.
+
+### 2. Memory ownership is one-way, and this decides the sequencing
+
+`Mantle.deviceview` builds a `LavaArray` over a Mantle region with a NO-OP
+releaser — Mantle stays the owner. There is no inverse: nothing adopts an
+existing `LavaArray` into a graph.
+
+So a stage cannot be ported in isolation while its buffers stay Hikari's. Every
+input and output of a ported stage has to be a `Mantle.Buffer` or a
+`Transient`, which means the port proceeds by MEMORY OWNERSHIP, not by kernel:
+take a set of buffers whose whole lifetime is inside one subsystem, move those,
+then move the kernels that touch them. The film accumulators are the obvious
+first set — written by one kernel, read by one, and nothing else in the
+integrator names them.
+
+### 3. The bounce loop does not need a graph-level loop node
+
+A `Plan` is compiled once and `run!` repeatedly, so a plan per bounce, driven by
+the host loop that already exists, is expressible today. What is NOT expressible
+is the early exit, which reads a device counter and breaks — that stays a host
+readback, which is what it already is (`EXIT_CHECK_INTERVAL`, every 8 rounds).
+No new mechanism needed; just do not expect the loop to disappear into the DAG.
+
+### 4. Ray tracing has vocabulary but no dispatch
+
+`AccelKind`, `TraceRead`, `TraceBuild` exist and lower to real stages, so the
+barrier half is there. There is no RT pass, no SBT, no raygen/chit/miss. Hikari
+on hardware RT needs that built; Hikari on the software BVH does not, and the
+software path is where a port should start for exactly this reason.
