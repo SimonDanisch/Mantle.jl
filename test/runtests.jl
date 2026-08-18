@@ -355,4 +355,7 @@ end
 # only kind `bake!` takes — so it runs before the window tests rather than inside
 # their DISPLAY guard.
 include(joinpath(@__DIR__, "test_arena_bake.jl"))
+# Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
+# never reaches the host, so the Host backend cannot pin the half that matters.
+include(joinpath(@__DIR__, "test_devicerange.jl"))
 include(joinpath(@__DIR__, "test_window.jl"))

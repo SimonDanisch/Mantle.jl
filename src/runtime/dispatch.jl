@@ -46,6 +46,26 @@ against a static ndrange; `nothing` means the backend picks its own ceiling.
 
     n = Scalar(g, Int32)                       # written by an earlier pass
     dispatch!(p, compact!, (queue, n), DeviceRange(n))
+
+# The tail
+
+**The kernel must bound itself.** A dispatch covers whole workgroups, so a count
+of 777 with a group of 64 launches 832 invocations, and the 55 past the end are
+real: the kernel was compiled against `max` precisely so its bounds check would
+not clamp to a size known at compile time, which means nothing else clamps
+either. Take the count as an argument and return early:
+
+    @kernel function compact!(dst, @Const(src), n)
+        i = @index(Global)
+        @inbounds if i <= n[1]
+            ...
+        end
+    end
+
+This is not a backend quirk to be papered over. A count that lives on the device
+cannot round to a workgroup boundary on the host, and padding the dispatch down
+would drop elements. Every API that dispatches indirectly has this tail; what
+Mantle removes is the prepare kernel and the barrier, not the guard.
 """
 struct DeviceRange{C}
     count::C
