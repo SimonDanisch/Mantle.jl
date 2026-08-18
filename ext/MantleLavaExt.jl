@@ -10,6 +10,7 @@ using Mantle: Usage, Storage, ColorAttachment, Depth, Sampled, Present, Undefine
               Src, Dst, transitions
 import Lava
 import Mantle: storage, Surface, Attribute, draw!, dispatch!, render!, compute!,
+    Dispatch, DeviceRange, countresource, touch!,
                run!, npipelines, stride, count, free!
 
 # ── device ────────────────────────────────────────────────────────────────────
@@ -588,14 +589,14 @@ The interval recorded here is in declaration order and is provisional: Liveness
 recomputes it from the scheduled order, because reordering passes is exactly what
 changes a transient's lifetime.
 """
-function touch!(g::LavaGraph, t::Transient)
+function Mantle.touch!(g::LavaGraph, t::Transient)
     i = length(g.passes)
     t.first = min(t.first, i)
     t.last = max(t.last, i)
     g.transient_by_id[resourceid(g, t)] = t
     t
 end
-touch!(g::LavaGraph, x) = (resourceid(g, x); x)
+Mantle.touch!(g::LavaGraph, x) = (resourceid(g, x); x)
 
 resourceid(g::LavaGraph, r) = Mantle.resourceid(g.ids, r)
 
@@ -822,20 +823,10 @@ function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false,
     touch!(p.graph, x)
 end
 
-struct Dispatch
-    kernel::Any
-    args::Tuple
-    ndrange::Any
-    group::Any
-end
-
 # Whether a dispatch was given a workgroup size is a type, not a branch: the
 # launch is per pass per frame and this keeps the call site one expression.
 kernelfor(k, ::Nothing) = k(Lava.LavaBackend())
 kernelfor(k, group) = k(Lava.LavaBackend(), group)
-
-dispatch!(p::PassHandle, kernel, args, ndrange; group = nothing) =
-    push!(p.pass.dispatches, Dispatch(kernel, args, ndrange, group))
 
 # The body goes in `dispatches` beside the `Dispatch`es rather than in a field of
 # its own: the compile walks that vector and this is one more thing it can find
@@ -1975,6 +1966,15 @@ dispatchrange(n::Integer) = n
 dispatchrange(t::Tuple) = t
 dispatchrange(x) = count(x)
 
+# A `DeviceRange` is never read here: the count lives on the device and reading
+# it would be the host readback the whole mechanism exists to avoid. The kernel
+# is compiled against a CEILING so `__validindex` lets every thread through, and
+# the real bound is the count the GPU reads at dispatch time — the kernel's own
+# `i <= n` check does the rest. Same contract as `Lava.ka_launch_indirect!`,
+# which is what records it.
+const INDIRECT_CEILING = 1024 * 1024
+dispatchrange(r::DeviceRange) = something(r.max, INDIRECT_CEILING)
+
 Mantle.Plan(g::LavaGraph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Mantle.Policy = Mantle.Overlap()) =
     let c = Mantle.compile!(Compile(g; alias, coalesce, policy))
@@ -2469,9 +2469,30 @@ function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::I
     Lava.pack_args_direct!(bq, am.ptr + off, am.address + off, lp.offsets,
                            lp.arg_buffer_size, lp.byval_sizes,
                            (d.kernel, it.ka_ctx, args...))
-    Lava.vk_dispatch!(bq, lp.pipeline, am.address + off, it.block_dims,
-                      d.tlas ? Lava.find_tlas_in_args(args) : nothing)
+    tlas = d.tlas ? Lava.find_tlas_in_args(args) : nothing
+    recordlaunch!(bq, d.ndrange, lp, am.address + off, it, tlas)
     nothing
+end
+
+"""
+Record the launch itself. A host-side ndrange dispatches directly; a
+[`DeviceRange`](@ref) converts the element count to workgroup counts on the
+device and dispatches indirectly off that.
+
+The conversion is a kernel, so it cannot live in Mantle core — but the CONTRACT
+does: core hands over an element count and knows nothing about workgroups, and
+the graph orders whatever wrote the count before this dispatch because
+`indirectcount!` registered it as an `Indirect` read. That barrier is the one
+Hikari places by hand today, and getting it wrong is what
+`concurrent_indirect_group` had to be taught about the hard way.
+"""
+recordlaunch!(bq, ::Any, lp, argaddr, it, tlas) =
+    Lava.vk_dispatch!(bq, lp.pipeline, argaddr, it.block_dims, tlas)
+
+function recordlaunch!(bq, r::DeviceRange, lp, argaddr, it, tlas)
+    indirect = Lava.get_indirect_buffer(bq)
+    Lava.fast_prepare_indirect!(bq, indirect, storage(r.count), prod(it.ws_3d))
+    Lava.vk_dispatch_indirect!(bq, lp.pipeline, argaddr, indirect, tlas)
 end
 
 """

@@ -148,3 +148,75 @@ if Base.get_extension(Mantle, :MantleLavaExt) !== nothing
         @test M.Device(Lava) isa Base.get_extension(Mantle, :MantleLavaExt).LavaDevice
     end
 end
+
+# ── DeviceRange ───────────────────────────────────────────────────────────────
+#
+# The count lives in device memory and is written by an earlier pass, so the
+# dispatch size is not known when the graph is built. On this backend "device
+# memory" is a Julia array, so the mechanism is visible without a GPU: the
+# ndrange must be read at LAUNCH, and the pass that writes it must be ordered
+# first — which it is because `dispatch!` registers the count as `Indirect`.
+
+@kernel function hostcount!(n, @Const(src), thresh::Float32)
+    i = @index(Global)
+    @inbounds if src[i] > thresh
+        # One thread decides; enough to prove the value reaches the ndrange.
+        n[1] = Int32(i)
+    end
+end
+
+@kernel function hostfill!(dst)
+    i = @index(Global)
+    @inbounds dst[i] = 1.0f0
+end
+
+@testset "Host: DeviceRange reads its count at launch, not at compile" begin
+    dev = M.Device(M.Host())
+    g = M.Graph(dev)
+    src = M.Buffer(dev, Float32[i for i in 1:16])
+    n = M.Buffer(dev, Int32[0])
+    dst = M.Transient.Buffer(g, Float32, 16)
+
+    M.compute!(g, "count") do p
+        M.dispatch!(p, hostcount!, (M.use(p, n; write = true),
+                                    M.use(p, src; read = true), 9.5f0), 16)
+    end
+    M.compute!(g, "fill") do p
+        M.dispatch!(p, hostfill!, (M.use(p, dst; write = true),), M.DeviceRange(n))
+    end
+
+    plan = M.Plan(g)
+    M.run!(plan)
+
+    # `count` writes 16; the fill therefore covers all 16 elements. Had the
+    # ndrange been resolved at compile it would have been the 0 the buffer held
+    # then, and nothing would have been written.
+    @test M.storage(n)[1] == Int32(16)
+    @test all(==(1.0f0), M.storage(dst))
+end
+
+@testset "Host: a DeviceRange count is an Indirect read, so it orders the passes" begin
+    dev = M.Device(M.Host())
+    g = M.Graph(dev)
+    n = M.Buffer(dev, Int32[4])
+    dst = M.Transient.Buffer(g, Float32, 8)
+    M.compute!(g, "fill") do p
+        M.dispatch!(p, hostfill!, (M.use(p, dst; write = true),), M.DeviceRange(n))
+    end
+    # The usage the graph recorded for the count is `Indirect` — not a storage
+    # read, because the stage and access it implies are different and a backend
+    # emitting a storage barrier for it would order the wrong thing.
+    usages = only(g.passes).usages
+    @test any(u -> last(u) === M.Indirect, usages)
+end
+
+@testset "DeviceRange is core, not a backend's" begin
+    # The record and the verb live in Mantle itself: both backends had
+    # byte-identical copies of `Dispatch`/`dispatch!` before, which is one copy
+    # per backend for the usage registration above to go missing from.
+    @test isdefined(M, :Dispatch)
+    @test isdefined(M, :DeviceRange)
+    @test M.countresource(M.DeviceRange(1:3)) == 1:3
+    @test M.countresource(1024) === nothing
+    @test parentmodule(which(M.dispatch!, Tuple{Any,Any,Tuple,Any})) === M
+end

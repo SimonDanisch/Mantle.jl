@@ -26,6 +26,7 @@ using Mantle
 using Mantle: Storage, BufferKind, Access
 import KernelAbstractions as KA
 import Mantle: storage, dispatch!, compute!, run!, free!
+using Mantle: Dispatch, DeviceRange, countresource
 
 # ── device ────────────────────────────────────────────────────────────────────
 struct HostDevice <: Mantle.Device
@@ -159,15 +160,6 @@ function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false)
     return x
 end
 
-struct Dispatch
-    kernel::Any
-    args::Tuple
-    ndrange::Any
-    group::Any
-end
-
-dispatch!(p::PassHandle, kernel, args, ndrange; group = nothing) =
-    push!(p.pass.dispatches, Dispatch(kernel, args, ndrange, group))
 
 # The four hooks core's `custom!`/`compute!` are written against. A pass here has
 # no kind — there is one kind of work on this backend — so it is discarded.
@@ -294,7 +286,7 @@ struct Launch{K,A<:Tuple,N}
     args::A
     ndrange::N
 end
-(l::Launch)() = l.kernel(l.args...; ndrange = l.ndrange)
+(l::Launch)() = l.kernel(l.args...; ndrange = ndrangeof(l.ndrange))
 
 kernelfor(k, ::Nothing, backend) = k(backend)
 kernelfor(k, group, backend) = k(backend, group)
@@ -303,7 +295,27 @@ kernelfor(k, group, backend) = k(backend, group)
 # call in `(l::Launch)()` specialise.
 step(c::Compile, d::Dispatch) =
     Launch(kernelfor(d.kernel, d.group, Mantle.backend(c.graph.dev)),
-           map(a -> resolve(c, a), d.args), d.ndrange)
+           map(a -> resolve(c, a), d.args), hostrange(c, d.ndrange))
+
+"""
+A `DeviceRange` on the host backend is a read, not an indirect dispatch: "device
+memory" here is a Julia array, so the count is available at launch. Deferred
+rather than resolved at compile, because the point of a device-computed count is
+that an earlier pass writes it — reading it at compile would capture the value
+from before that pass ran.
+"""
+hostrange(::Compile, n) = n
+hostrange(c::Compile, r::DeviceRange) = let store = resolve(c, r.count)
+    DeferredRange(store)
+end
+
+struct DeferredRange{S}
+    store::S
+end
+
+# Read at launch, not at compile: an earlier pass in this same run writes it.
+ndrangeof(n) = n
+ndrangeof(r::DeferredRange) = Int(first(r.store))
 step(::Compile, body) = body        # a custom! body already IS the callable
 
 # ── plan ──────────────────────────────────────────────────────────────────────

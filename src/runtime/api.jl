@@ -237,25 +237,6 @@ from that.
 """
 function draw! end
 
-"""
-    dispatch!(pass, kernel, args, ndrange; group = nothing)
-
-Launch a kernel as part of a pass, so what it reads and writes is what orders it
-against everything else.
-
-`group` is the workgroup size, and it is worth giving one whenever `ndrange` is
-two-dimensional. The default partitions an ndrange along its first axis, which
-for anything image-shaped means a workgroup is one long row: a pass that reads a
-row-major g-buffer and writes a column-major target then has one of the two
-uncoalesced, and it costs about nine times the square arrangement — 1.06 ms
-against 0.12 ms at 1280x800 on the machine this was measured on.
-
-    dispatch!(p, shade!, args, (w, h); group = (16, 16))
-
-`nothing` means the backend picks, which is right for a one-dimensional ndrange
-and is what everything that does not say otherwise gets.
-"""
-function dispatch! end
 function render! end
 
 """
