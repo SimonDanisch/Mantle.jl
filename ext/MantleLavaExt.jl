@@ -2547,6 +2547,10 @@ function packdispatch!(bq, d::CompiledDispatch, am::ArgMemory, base::Int, it)
     return d.tlas ? Lava.find_tlas_in_args(raw) : nothing
 end
 
+"""A plan with a `custom!` pass cannot be rebound: the body packs its own
+arguments as it runs, and a baked plan never runs it again."""
+Mantle.rebindable(pl::LavaPlan) = !any(pp -> pp.pass.kind === :custom, pl.passes)
+
 """
     rebind!(plan) -> plan
 
@@ -2572,6 +2576,12 @@ already synchronises once per sample has such a point.
 """
 function Mantle.rebind!(pl::LavaPlan)
     pl.baked === nothing && return pl
+    Mantle.rebindable(pl) || throw(ArgumentError(
+        "rebind!: this plan has a `custom!` pass, whose body packs its own " *
+        "arguments while it runs — and a baked plan never runs it again, so the " *
+        "values it replays are the ones captured at `bake!`. Returning quietly " *
+        "would leave them stale and produce a plausible wrong result. Ask " *
+        "`rebindable(plan)` before baking anything whose arguments move."))
     bq = pl.graph.dev.bq
     am = pl.args
     base = slotbase(am)
@@ -2631,8 +2641,17 @@ Give this plan's regions back to the pool. The argument memory and the
 pipelines are ordinary Lava objects — the GC reclaims those; the regions are
 the thing only an explicit release can return, because nothing here finalizes.
 """
-Mantle.free!(pl::LavaPlan) =
+function Mantle.free!(pl::LavaPlan)
+    # The capture too, and before the regions: it holds the argument memory its
+    # recording points at, plus a reference to every resource the recording
+    # names. Dropping the plan alone would leave both to the GC, which does not
+    # know it is holding device memory.
+    if pl.baked !== nothing
+        Lava.release!(pl.baked)
+        pl.baked = nothing
+    end
     Mantle.giveup!(Mantle.pool(pl.graph.dev), pl.slabs, pl.arenas, pl)
+end
 
 """Re-materialise this plan's transients of `kind` into the arena's new region.
 Its own offsets are unaffected by the arena moving; only the base changed."""

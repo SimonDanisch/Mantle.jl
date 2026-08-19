@@ -67,7 +67,7 @@ export PHASES, compile!
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
 export run!, npipelines, capacity, use, peakbytes, storage, custom!, free!
-export bake!, baked, rebind!
+export bake!, baked, rebind!, rebindable
 export timings, PassTiming, NSAMPLES
 
 """
@@ -142,6 +142,25 @@ The ordering is the caller's: see the Lava method for what a baked plan's single
 argument slot means for a rebind that overlaps a replay.
 """
 rebind!(plan) = plan
+
+"""
+    rebindable(plan) -> Bool
+
+Whether [`rebind!`](@ref) can deliver its contract for this plan.
+
+It cannot when the plan has a `custom!` pass. Such a pass declares what it
+touches but not how, and its body packs its own arguments while it runs — so a
+baked plan, which never runs the body again, replays whatever the body packed at
+capture, and nothing outside the body knows where those bytes are to rewrite
+them. `rebind!` would return having quietly done nothing for that pass.
+
+Ask this before baking anything whose arguments move. The answer is a property of
+the graph, not of the values, so it is stable for the life of the plan.
+
+True by default: a backend that resolves arguments at launch rebinds by
+construction.
+"""
+rebindable(plan) = true
 
 function update! end
 function use end
