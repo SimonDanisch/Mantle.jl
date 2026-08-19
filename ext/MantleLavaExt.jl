@@ -13,6 +13,12 @@ import Mantle: storage, Surface, Attribute, draw!, dispatch!, render!, compute!,
     Dispatch, DeviceRange, countresource, touch!,
                run!, npipelines, stride, count, free!
 
+# Through Lava rather than as a dependency of Mantle: the argument conversion
+# these rules describe is the backend's, and the rules themselves are Lava's
+# (`adapt_storage(::LavaAdaptor, ::LavaArray)` and the wrapper cases beside it).
+# Mantle core never adapts anything.
+const Adapt = Lava.Adapt
+
 # ── device ────────────────────────────────────────────────────────────────────
 """
 One allocation per arena, shared by every plan on the device.
@@ -1179,7 +1185,15 @@ struct PassPlan
     images::Vector{ImageBarrier}        # layout changes, one barrier each
     pre::Vector{Mantle.Transition}      # what this pass needs before it runs
     barrier::Any                        # one memory barrier covering the rest
+    # Whether any of this pass's dispatches sizes itself on the device. Decided
+    # at compile because it decides how the pass is recorded, and asking a
+    # `Vector{CompiledDispatch}` per frame is a dynamic call per element.
+    indirect::Bool
 end
+
+PassPlan(pass, draws, dispatches, images, pre, barrier) =
+    PassPlan(pass, draws, dispatches, images, pre, barrier,
+             any(d -> d.ndrange isa DeviceRange, dispatches))
 
 """
 Two timestamps per pass and a ring of samples, or nothing at all.
@@ -1258,14 +1272,34 @@ Mantle.storage(a::Attr) = Mantle.storage(a.resource)
 Mantle.storage(t::TransientBuffer{T}) where {T} =
     Lava.LavaArray{T,1}(copy(t.block.ref), (t.n,); offset = t.offset)
 
-# What a draw hands the shader: the device-side array, not the host handle. Doing
-# the conversion here rather than through `Adapt` also drops the per-draw pin —
-# a plan holds every resource its draws name for as long as it lives, so pinning
-# them into each frame's batch was bookkeeping for a lifetime already guaranteed.
-todevice(x::Lava.LavaArray) = Lava.LavaDeviceArray(x)
-todevice(x) = x
-devarg(a::Base.RefValue) = todevice(Mantle.storage(a[]))
-devarg(a) = todevice(Mantle.storage(a))
+# What a draw or a dispatch hands the shader: the device-side form, not the host
+# handle.
+#
+# `Adapt` rather than a method per leaf type, because an argument is not always a
+# buffer. A wavefront tracer hands a kernel a work queue — a struct of a payload
+# array and an atomic counter — and a scene: a BVH, a light set, a material set,
+# each a struct of arrays several levels deep. Only the backend knows what a
+# shader receives, Lava already states that as `Adapt` rules, and restating the
+# leaf case here would mean two answers to one question the day one of them grows
+# a case.
+#
+# The batch the adaptor carries is not used by the conversion — `adapt_storage`
+# is a pure strip, and the pin it used to do is a separate pass now. Lifetime is
+# the plan's: it holds every argument it names for as long as it lives, which is
+# what a per-frame pin would have been bookkeeping for.
+adaptor(bq) = Lava.LavaAdaptor(Lava.ensure_active_batch!(bq))
+
+# In two steps, and the order matters for one thing: an acceleration structure.
+# `rawargs` is what the caller gave, with `Ref`s read and Mantle's own resources
+# resolved to their storage; `devargs` is that after Lava's conversion. A ray
+# query needs the `HWTLAS` bound as a descriptor, and adapting an
+# `HWAdaptedAccel` deliberately strips it — the device side of a ray query is a
+# variable, not a pointer the kernel carries. So the TLAS is looked for in the
+# RAW arguments, which is where it still exists. Asking the adapted ones finds
+# nothing, and a shading kernel then compiles with ray query disabled and fails
+# in the emitter rather than at the call site.
+rawargs(args::Tuple) = map(Mantle.argvalue, args)
+devargs(ad, raw::Tuple) = map(a -> Adapt.adapt(ad, a), raw)
 
 """The resource a usage ultimately names: a slice and a vertex binding both
 forward their storage to a parent, so neither has an identity of its own to test."""
@@ -1886,10 +1920,11 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
                                         "$(target_extent(t)); every attachment shares one render area"))
             end
         end
+        ad = adaptor(g.dev.bq)
         for d in p.draws
-            args = map(devarg, d.args)
+            args = devargs(ad, rawargs(d.args))
             vtt = typeof(Lava.convert_args(args))
-            ftt = typeof(Lava.convert_args(map(devarg, d.frag_args)))
+            ftt = typeof(Lava.convert_args(devargs(ad, rawargs(d.frag_args))))
             vfn, vtt, ffn, ftt = Lava.resolve_shader_pair(d.shader, vtt, ftt)
             # The pass says whether there is a depth attachment, and with dynamic
             # rendering the pipeline has to declare the same thing: a pipeline
@@ -1946,14 +1981,15 @@ function compile_dispatch(dev::LavaDevice, d::Dispatch, argoff::Int)
                             "A plan resolves its arguments once, so a captured device array " *
                             "would be the one it had when the plan was built — pass it as a " *
                             "dispatch argument instead, where a rename is followed."))
-    args = map(devarg, d.args)
+    raw = rawargs(d.args)
+    args = devargs(adaptor(dev.bq), raw)
     nd = dispatchrange(d.ndrange)
     # `nothing` for the workgroup size, not `d.group`: a group given to
     # `dispatch!` is baked into the kernel's type by `kernelfor`, and KA reads it
     # from there. Passing it here as well made a second, differently keyed
     # iteration plan for the same launch.
     iter = Lava.get_or_build_iter_plan(obj, nd, nothing, dev.ctx)
-    tlas = Lava.find_tlas_in_args(args)
+    tlas = Lava.find_tlas_in_args(raw)
     all_args = (obj.f, iter.ka_ctx, args...)
     launch = Lava.launch_plan(dev.bq, obj.f, all_args, iter.ws_3d, tlas !== nothing)
     CompiledDispatch(launch, iter, nd, obj, obj.f, d.args, d.ndrange,
@@ -2338,8 +2374,30 @@ function record_pass!(g::LavaGraph, bq, pp::PassPlan, derived::Bool, am::ArgMemo
 
     if p.kind === :compute
         base = slotbase(am)
-        for d in pp.dispatches
-            record_dispatch!(bq, d, am, base)
+        # A dispatch sized on the device costs a prepare kernel and a barrier the
+        # command processor's read of the count depends on, and that barrier is
+        # forced — it is the one hazard a graph cannot derive away, since the
+        # prepare is the backend's own machinery rather than a pass. Left per
+        # dispatch it serialises a pass's dispatches whatever the schedule said
+        # they could do: twelve per-material shading kernels become twelve
+        # barriers.
+        #
+        # So the pass's prepares are fused into one and the dispatches share the
+        # single barrier behind it. The prepares are still ordered after this
+        # pass's derived barrier, which is what puts them after whoever wrote the
+        # counts; within a pass the dispatches are independent by construction,
+        # which is the same assumption that already lets them run without
+        # barriers between them.
+        if pp.indirect
+            Lava.concurrent_indirect_group(bq) do
+                for d in pp.dispatches
+                    record_dispatch!(bq, d, am, base)
+                end
+            end
+        else
+            for d in pp.dispatches
+                record_dispatch!(bq, d, am, base)
+            end
         end
         return nothing
     elseif p.kind === :custom
@@ -2420,7 +2478,7 @@ One draw: write its arguments into the plan's slot and record it.
 
 Its own function because a pass's draws are differently parameterised, so the
 loop dispatches once per draw and everything inside is concrete — including
-`map(devarg, d.args)`, which allocated a boxed tuple per draw per frame while it
+`devargs(ad, rawargs(d.args))`, which allocated a boxed tuple per draw per frame while it
 was inlined into the loop.
 
 Nothing is allocated and nothing is pinned: the memory belongs to the plan, and
@@ -2432,7 +2490,7 @@ function record_draw!(bq, d::CompiledDraw, am::ArgMemory, base::Int)
     info = d.shader.push_info
     Lava.pack_args_direct!(bq, am.ptr + off, am.address + off, info.arg_offsets,
                            info.arg_buffer_size, info.byval_llvm_sizes,
-                           map(devarg, d.args))
+                           devargs(adaptor(bq), rawargs(d.args)))
     # No viewport, no scissor, no pin: the pass set the first two once, and the
     # plan holds the pipeline for longer than any frame.
     emit_draw!(bq, d.compiled, d.count, am.address + off)
@@ -2464,12 +2522,12 @@ function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::I
     it.nblocks == 0 && return nothing
     off = base + d.argoff
     lp = d.launch
-    args = map(devarg, d.args)
-    Lava.ensure_active_batch!(bq)
+    raw = rawargs(d.args)
+    args = devargs(adaptor(bq), raw)
     Lava.pack_args_direct!(bq, am.ptr + off, am.address + off, lp.offsets,
                            lp.arg_buffer_size, lp.byval_sizes,
                            (d.kernel, it.ka_ctx, args...))
-    tlas = d.tlas ? Lava.find_tlas_in_args(args) : nothing
+    tlas = d.tlas ? Lava.find_tlas_in_args(raw) : nothing
     recordlaunch!(bq, d.ndrange, lp, am.address + off, it, tlas)
     nothing
 end
@@ -2491,8 +2549,19 @@ recordlaunch!(bq, ::Any, lp, argaddr, it, tlas) =
 
 function recordlaunch!(bq, r::DeviceRange, lp, argaddr, it, tlas)
     indirect = Lava.get_indirect_buffer(bq)
-    Lava.fast_prepare_indirect!(bq, indirect, storage(r.count), prod(it.ws_3d))
-    Lava.vk_dispatch_indirect!(bq, lp.pipeline, argaddr, indirect, tlas)
+    deferred = bq.deferred_indirect
+    if deferred === nothing
+        Lava.fast_prepare_indirect!(bq, indirect, storage(r.count), prod(it.ws_3d))
+        Lava.vk_dispatch_indirect!(bq, lp.pipeline, argaddr, indirect, tlas)
+    else
+        # Inside the pass's group: hand over the slot and the count, and let the
+        # flush emit one prepare for all of them. Same protocol Lava's own
+        # `ka_launch_indirect!` uses, so there is one deferral format rather than
+        # two that have to agree.
+        push!(deferred, (bq, lp.pipeline, argaddr, indirect, tlas,
+                         storage(r.count), prod(it.ws_3d)))
+    end
+    nothing
 end
 
 """

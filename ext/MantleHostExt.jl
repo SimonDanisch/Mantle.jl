@@ -275,18 +275,35 @@ function Mantle.run!(::Mantle.Pipelines, c::Compile)
     return c
 end
 
+# A `Ref` is resolved per run rather than here — see `Mantle.argvalue`. Keeping
+# it in `args` and reading it at launch is what makes it mean anything: resolved
+# at compile it would be the value the plan was built with, for ever.
+resolve(::Compile, x::Base.RefValue) = x
 resolve(::Compile, x) = storage(x)
 
 """
-One launch, fully resolved. `K`, `A` and `N` are concrete, so the call inside is
-direct: no lookup, no splat over an abstract tuple, no `resolve`.
+One launch, resolved as far as a launch can be. `K`, `A` and `N` are concrete,
+so the call inside is direct: no lookup and no splat over an abstract tuple. The
+two things left for run time are the ones that mean nothing otherwise — a `Ref`'s
+current value and a device-computed count.
 """
 struct Launch{K,A<:Tuple,N}
     kernel::K
     args::A
     ndrange::N
 end
-(l::Launch)() = l.kernel(l.args...; ndrange = ndrangeof(l.ndrange))
+
+# A count of zero launches nothing, which is what it means and what the GPU
+# backend does with it — an indirect dispatch of zero workgroups is a no-op
+# there, and `record_dispatch!` returns before recording one at all. Without
+# this the host backend would hand KernelAbstractions an empty ndrange, and a
+# wavefront round whose queue emptied is the ordinary case rather than an edge.
+function (l::Launch)()
+    nd = ndrangeof(l.ndrange)
+    nd == 0 && return nothing
+    l.kernel(map(Mantle.argvalue, l.args)...; ndrange = nd)
+    return nothing
+end
 
 kernelfor(k, ::Nothing, backend) = k(backend)
 kernelfor(k, group, backend) = k(backend, group)

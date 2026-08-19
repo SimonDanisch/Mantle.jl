@@ -79,6 +79,29 @@ countresource(r::DeviceRange) = r.count
 countresource(::Any) = nothing
 
 """
+    argvalue(x)
+
+What a dispatch argument IS, at the moment the work is recorded.
+
+For everything else that is `storage(x)`. The case worth stating is the `Ref`: it
+is read **here**, per run, rather than when the plan was compiled. A plan
+resolves its arguments once and is then run many times, so a value that changes
+between runs — a sample index, a camera, a scene re-adapted every frame — has
+nowhere else to live. Giving it as a `Ref` is how a caller says "read this again
+each time"; giving it by value is how they say the opposite.
+
+In core because it is a promise about the API rather than a conversion: what a
+backend hands the shader afterwards is its own business, and both of them make
+that promise or neither can be relied on.
+
+The type behind the `Ref` has to stay put, because the argument layout was
+computed from it. That is the caller's to guarantee — a `Ref{Any}` would pack
+whatever it happened to hold against a layout built for something else.
+"""
+argvalue(x) = storage(x)
+argvalue(r::Base.RefValue) = storage(r[])
+
+"""
     passof(handle) -> pass
     graphof(handle) -> graph
 

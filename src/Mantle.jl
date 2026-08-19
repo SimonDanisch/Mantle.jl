@@ -54,7 +54,8 @@ export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update
-export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
+export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!,
+       argvalue
 export UpdateRef, anypending, applyupdates!, custombody, registerupdate!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
