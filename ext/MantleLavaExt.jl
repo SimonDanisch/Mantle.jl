@@ -2520,6 +2520,23 @@ function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::I
     it = nd == d.nd0 ? d.iter :
          Lava.get_or_build_iter_plan(d.obj, nd, nothing, bq.ctx::Lava.VkContext)::I
     it.nblocks == 0 && return nothing
+    tlas = packdispatch!(bq, d, am, base, it)
+    recordlaunch!(bq, d.ndrange, lp_of(d), am.address + base + d.argoff, it, tlas)
+    nothing
+end
+
+lp_of(d::CompiledDispatch) = d.launch
+
+"""
+Write one dispatch's arguments into the plan's slot, and answer with the
+acceleration structure they name.
+
+Separate from recording because a **baked** plan has to do exactly this and
+nothing else: its command buffer holds the ADDRESS of the slot, so a value that
+moved is a write to host-mapped memory rather than a new recording. See
+[`Mantle.rebind!`](@ref).
+"""
+function packdispatch!(bq, d::CompiledDispatch, am::ArgMemory, base::Int, it)
     off = base + d.argoff
     lp = d.launch
     raw = rawargs(d.args)
@@ -2527,9 +2544,54 @@ function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::I
     Lava.pack_args_direct!(bq, am.ptr + off, am.address + off, lp.offsets,
                            lp.arg_buffer_size, lp.byval_sizes,
                            (d.kernel, it.ka_ctx, args...))
-    tlas = d.tlas ? Lava.find_tlas_in_args(raw) : nothing
-    recordlaunch!(bq, d.ndrange, lp, am.address + off, it, tlas)
-    nothing
+    return d.tlas ? Lava.find_tlas_in_args(raw) : nothing
+end
+
+"""
+    rebind!(plan) -> plan
+
+Re-read the arguments a **baked** plan's work was given and write the current
+values into the recording's argument memory.
+
+A baked plan does not record, so the values packed at `bake!` are the ones it
+replays — for ever, and silently. A frozen sample index renders the same sample
+every time and converges to a picture that looks plausible and is wrong, which is
+the failure this exists to prevent. Anything given as a `Ref` moves; this is what
+makes it move again once the plan is baked.
+
+It writes bytes and records nothing: the command buffer holds the address of the
+slot, and the slot is host-mapped, so this is a pack per dispatch and no command
+buffer is touched. On an unbaked plan it is a no-op, because every `run!` packs
+already.
+
+**The ordering is the caller's.** A baked plan names one argument slot for its
+whole life, so rewriting it while an earlier replay is still reading it is a
+race — this cannot wait on your behalf without turning every rebind into a device
+drain. Call it where the device is known to be past that replay; a renderer that
+already synchronises once per sample has such a point.
+"""
+function Mantle.rebind!(pl::LavaPlan)
+    pl.baked === nothing && return pl
+    bq = pl.graph.dev.bq
+    am = pl.args
+    base = slotbase(am)
+    for pp in pl.passes
+        for d in pp.dispatches
+            nd = dispatchrange(d.ndrange)
+            it = nd == d.nd0 ? d.iter :
+                 Lava.get_or_build_iter_plan(d.obj, nd, nothing, bq.ctx::Lava.VkContext)
+            it.nblocks == 0 && continue
+            packdispatch!(bq, d, am, base, it)
+        end
+        for dr in pp.draws
+            off = base + dr.argoff
+            info = dr.shader.push_info
+            Lava.pack_args_direct!(bq, am.ptr + off, am.address + off, info.arg_offsets,
+                                   info.arg_buffer_size, info.byval_llvm_sizes,
+                                   devargs(adaptor(bq), rawargs(dr.args)))
+        end
+    end
+    return pl
 end
 
 """

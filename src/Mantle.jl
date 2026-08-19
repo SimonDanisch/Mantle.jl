@@ -67,7 +67,7 @@ export PHASES, compile!
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
 export run!, npipelines, capacity, use, peakbytes, storage, custom!, free!
-export bake!, baked
+export bake!, baked, rebind!
 export timings, PassTiming, NSAMPLES
 
 """
@@ -98,13 +98,50 @@ number that moved.
     bake!(plan)
     run!(plan)          # replays
 
+**This RUNS the plan, once.** The recording is taken by recording, and the
+commands reach the queue on the way past — so `bake!` is `run!` plus a capture,
+not a capture instead of a run. For a plan that computes a value from its inputs
+that is invisible; for one that ACCUMULATES it is a whole extra contribution, and
+it lands on whichever invocation happened to build the plan. That shows up as a
+first frame that is wrong and every later frame exact, which reads like a bug in
+the work rather than in when it was baked. Bake such a plan where an extra run
+does not count, or leave it unbaked — a plan of one dispatch has nothing to gain
+here anyway.
+
+An argument that moves needs [`rebind!`](@ref): a baked plan does not record, so
+the values it packed at `bake!` are the ones it replays until told otherwise.
+
 Not yet for plans with a surface: a swapchain image is a different image every
 frame and the recording names one. Headless plans have no such thing.
-"""
-function bake! end
 
-"""Whether `bake!` has been called on this plan and the recording is in use."""
-function baked end
+A backend that does not record per run has nothing to capture, and gets the
+default: baking is the plan, unchanged. That is a no-op rather than an error
+because `bake!` asks for an outcome — "stop paying to rebuild this" — that such a
+backend already has, and making the caller ask which backend it is on is the
+branch this library exists to remove.
+"""
+bake!(plan) = plan
+
+"""Whether `bake!` has been called on this plan and the recording is in use.
+False by default, which is the honest answer for a backend that never records
+one."""
+baked(plan) = false
+
+"""
+    rebind!(plan) -> plan
+
+Re-read the arguments a baked plan's work was given, so a value that moved is
+replayed as it is now rather than as it was when the recording was captured.
+
+A backend that records nothing per run has to offer this or `bake!` is only safe
+for plans whose every argument is constant — and unsafe SILENTLY, since a stale
+value produces a plausible result rather than an error. A backend that resolves
+arguments at launch (the host one does) needs nothing, and gets the default.
+
+The ordering is the caller's: see the Lava method for what a baked plan's single
+argument slot means for a rebind that overlaps a replay.
+"""
+rebind!(plan) = plan
 
 function update! end
 function use end
