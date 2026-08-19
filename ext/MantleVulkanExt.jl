@@ -12,7 +12,8 @@ using Mantle: Vulkan as MantleVulkan
 using Mantle: Usage, Storage, ColorAttachment, Depth, Vertices, Indices, Indirect, Uniform,
               Sampled, Present, Undefined, CopySrc, CopyDst, TraceRead, TraceBuild,
               Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst,
-              BufferKind, ImageKind, AccelKind, reads, writes, kindof, inner
+              BufferKind, ImageKind, AccelKind, reads, writes, kindof, inner,
+              Unordered
 import Vulkan as VK
 using ColorTypes: RGBA, BGRA
 using ColorTypes.FixedPointNumbers: N0f8
@@ -119,6 +120,21 @@ function access(::MantleVulkan, ::Type{Storage{K,A}}, _) where {K,A}
     writes(A) && (a |= acc(VK.ACCESS_2_SHADER_STORAGE_WRITE_BIT))
     a
 end
+
+# ── unordered ─────────────────────────────────────────────────────────────────
+# `Unordered` says two accesses may overlap, which `needs_transition` answers by
+# emitting no transition BETWEEN them. It says nothing about what a barrier
+# looks like when one is emitted anyway — against an ordinary access, which is
+# every clear before the accumulation and every read after it. That barrier is
+# the inner usage's: an atomic add is a storage read-modify-write in the compute
+# stage whether or not its neighbours had to wait for it.
+#
+# Without these the vocabulary existed in core and no backend could lower it, so
+# the first graph to declare an unordered access died in `build_pass_barrier`
+# with a MethodError rather than running faster.
+stages(be::MantleVulkan, ::Type{Unordered{U}}, d) where {U} = stages(be, U, d)
+access(be::MantleVulkan, ::Type{Unordered{U}}, d) where {U} = access(be, U, d)
+layout(be::MantleVulkan, ::Type{Unordered{U}}, d) where {U} = layout(be, U, d)
 
 # A discarding load op means nothing is read back, so the read bit is dropped.
 # RPS derives the same from DISCARD_DATA_BEFORE (rps_vk_runtime_backend.cpp:143);

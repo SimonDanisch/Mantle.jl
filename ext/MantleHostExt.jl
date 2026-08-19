@@ -23,7 +23,7 @@ order IS the synchronisation. A barrier between every pass would make `Dag`,
 module MantleHostExt
 
 using Mantle
-using Mantle: Storage, BufferKind, Access
+using Mantle: Storage, BufferKind, Access, Unordered
 import KernelAbstractions as KA
 import Mantle: storage, dispatch!, compute!, run!, free!
 using Mantle: Dispatch, DeviceRange, countresource
@@ -154,9 +154,11 @@ struct PassHandle
     pass::HostPass
 end
 
-function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false)
+function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false,
+                    unordered::Bool = false)
     read || write || throw(ArgumentError("use() needs read, write, or both"))
-    push!(p.pass.usages, resourceid(p.graph, x) => Storage{BufferKind,Access{read,write}})
+    S = Storage{BufferKind,Access{read,write}}
+    push!(p.pass.usages, resourceid(p.graph, x) => (unordered ? Unordered{S} : S))
     return x
 end
 

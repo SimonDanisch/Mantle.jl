@@ -7,7 +7,7 @@ module MantleLavaExt
 using Mantle
 using Mantle: Usage, Storage, ColorAttachment, Depth, Sampled, Present, Undefined, Vertices,
               CopySrc, CopyDst, ReadOnly, WriteOnly, ReadWrite, NoAccess, ImageKind, BufferKind,
-              Src, Dst, transitions
+              Src, Dst, transitions, Unordered
 import Lava
 import Mantle: storage, Surface, Attribute, draw!, dispatch!, render!, compute!,
     Dispatch, DeviceRange, countresource, touch!,
@@ -810,7 +810,7 @@ function slice(g::LavaGraph, x, range::UnitRange{Int})
 end
 
 """
-    use(pass, x; read, write, range = nothing)
+    use(pass, x; read, write, range = nothing, unordered = false)
 
 The ordinary case: this pass reads or writes this resource. Named usages survive
 only where the role can be picked wrongly.
@@ -818,11 +818,21 @@ only where the role can be picked wrongly.
 `range` narrows the claim to a slice, in elements. Two passes that name disjoint
 slices of one buffer get no barrier between them, and one that does name a slice
 gets a barrier scoped to exactly those bytes.
+
+`unordered` says the order of this access against another unordered one does not
+change the result — commutative atomics, or writes to disjoint elements. Two
+passes that BOTH say it get no barrier between them however much they overlap;
+anything else still does, so forgetting it anywhere gives the barrier back rather
+than producing a race. A wavefront tracer's per-pixel radiance is the case it
+exists for: half a dozen stages do nothing to it but `atomic +=`, and ordering
+them against each other serialises passes whose queues are disjoint.
 """
 function Mantle.use(p::PassHandle, x; read::Bool = false, write::Bool = false,
-                    range::Union{Nothing,UnitRange{Int}} = nothing)
+                    range::Union{Nothing,UnitRange{Int}} = nothing,
+                    unordered::Bool = false)
     read || write || throw(ArgumentError("use() needs read, write, or both"))
-    U = Storage{BufferKind, Access{read, write}}
+    S = Storage{BufferKind, Access{read, write}}
+    U = unordered ? Unordered{S} : S
     r = range === nothing ? x : slice(p.graph, x, range)
     push!(p.pass.usages, resourceid(p.graph, r) => U)
     # The parent is what the kernel gets, and what liveness has to see touched.
