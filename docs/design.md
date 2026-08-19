@@ -609,6 +609,52 @@ which is where the derived independence and the fused prepares have something to
 work with. Everything else is a wash, which is the right result: the point was
 to stop asserting the ordering by hand, not to make the GPU do less.
 
+### After the port: three things the graph could not say
+
+Each was found by the port needing it, and each was a gap in Mantle rather than
+in the renderer.
+
+**`Mantle.argvalue`** — a `Ref` argument is read per run, on every backend. That
+rule lived only in the Lava extension, so the host backend handed the `Ref`
+itself to the kernel and every CPU render failed on the first dispatch. It is a
+promise about the API, not a conversion, so it belongs in core.
+
+**`rebind!` and `rebindable`** — `bake!` was only half an API. A baked plan does
+not record, so the values it packed at capture are the ones it replays, silently
+and for ever; `rebind!` writes new ones. And it cannot do that for a `custom!`
+pass, whose body packs its own arguments as it runs — so `rebindable` says
+whether it can, and `rebind!` throws rather than returning quietly. Baking
+Hikari's hardware RT trace, which is exactly such a pass, made every sample after
+the first replay the first one's paths while the parity test still passed.
+
+**Lowering `Unordered`** — the type and `needs_transition`'s answer for it were
+already here; no backend could lower one, so a graph that declared an unordered
+access died in `build_pass_barrier`. Three forwarding methods. On Hikari's
+per-pixel radiance, which six stages do nothing to but `atomic +=`, it takes a
+chunk of eight rounds from 1788 buffer barriers to 412 — and does not move the
+render time, on four scenes, paired and interleaved. That frame is not barrier
+bound, the same answer the stage-mask note above reached.
+
+### Recording the whole thing once: measured, and not taken
+
+`bake!` replays a capture instead of re-recording, and the host saving is real —
+a round records in 0.101 ms and replays in 0.0058 ms. `Lava.replay!` waits on a
+semaphore for the previous replay, so replays serialise, and an ordering that
+one recording expresses with an intra-submission barrier becomes a GPU
+round-trip between submissions. Free for what capture was built for, one plan
+replayed once per inference step; not free for a renderer replaying a chunk four
+times a sample.
+
+Paired and interleaved, unbaked against baked: at a chunk of 8 rounds baking
+costs +5.2 % on `medium_null`, and at a chunk of 64 — the whole sample, hence ONE
+replay — it wins 14.5 %. The whole-sample plan is not the way out, because it
+gives up the early exit. So the bounce plans are not baked, and the reason is a
+property of replay rather than of the renderer.
+
+It did surface a real leak on the way: `Lava.capture` reserved its argument
+slabs against the shared pool for ever. Fixed in Lava — a capture owns its slabs
+now — and the fix stands whatever this renderer does with baking.
+
 ### What is still Hikari's
 
 Memory. Every queue, accumulator and table is still a `KA.allocate`, and the
