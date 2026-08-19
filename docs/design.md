@@ -496,13 +496,26 @@ problem and is not one.
 releaser — Mantle stays the owner. There is no inverse: nothing adopts an
 existing `LavaArray` into a graph.
 
-So a stage cannot be ported in isolation while its buffers stay Hikari's. Every
-input and output of a ported stage has to be a `Mantle.Buffer` or a
-`Transient`, which means the port proceeds by MEMORY OWNERSHIP, not by kernel:
-take a set of buffers whose whole lifetime is inside one subsystem, move those,
-then move the kernels that touch them. The film accumulators are the obvious
-first set — written by one kernel, read by one, and nothing else in the
-integrator names them.
+What that does NOT mean, and an earlier draft of this section got it wrong: a
+pass can still READ and WRITE a buffer Mantle does not own. `M.use(p, x)` takes
+any resource, `resourceid` assigns it an id, and a plain KA-allocated
+`LavaArray` passes through to the kernel unchanged — measured, not assumed
+(`/sim/tmp/bench/mixed_ownership.jl`).
+
+So the constraint is narrower than "move the memory first". What Mantle cannot
+do is ADOPT a foreign buffer into its arena, which is what aliasing and liveness
+need; what it can do is order passes around one. That makes the port
+INCREMENTAL: move a kernel into a graph with its inputs still Hikari's, gain the
+derived barriers immediately, and move ownership later only where aliasing is
+worth having.
+
+Which also reprioritises the first slice. The film accumulate is a poor one — two
+passes, run at different frequencies (accumulate per sample, finalize once), so
+there is barely an edge to derive. The bounce loop is the real target and is now
+reachable without moving any memory: its ~20 dispatches per round have real
+dependencies and are ordered today by hand-placed
+`concurrent_dispatch_group`/`concurrent_indirect_group` calls, which is the
+thing worth deleting.
 
 ### 3. The bounce loop does not need a graph-level loop node
 
