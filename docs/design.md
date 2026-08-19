@@ -531,3 +531,88 @@ No new mechanism needed; just do not expect the loop to disappear into the DAG.
 barrier half is there. There is no RT pass, no SBT, no raygen/chit/miss. Hikari
 on hardware RT needs that built; Hikari on the software BVH does not, and the
 software path is where a port should start for exactly this reason.
+
+---
+
+## The port, done — 2026-08-19
+
+The bounce loop is a graph. Three of the four findings above held; the fourth
+was wrong in a way worth keeping, and what it cost was three gaps in core rather
+than anything in Hikari.
+
+### What it took
+
+**Three graphs, not one.** `setup` (clear the film, reset the queue, generate
+camera rays), `round` (one bounce), `accumulate`, plus `finalize` as its own
+plan because a batched caller runs it once at the end rather than per sample.
+`round` is built TWICE, one per direction of the ray-queue ping-pong: a plan
+resolves its arguments once, and the two directions are different arguments.
+
+**Everything per-sample rides a `Ref`.** The sample index, the camera, the scene
+re-adapted every call. That rule existed only in the Lava extension —
+`devarg(::RefValue)` — so the host backend handed the `Ref` itself to the kernel
+and every CPU render failed on the first dispatch. It is `Mantle.argvalue` in
+core now, because it is a promise about the API rather than a conversion.
+
+**A struct of device arrays is an ordinary argument.** `todevice` handled a
+top-level buffer and passed everything else through, so a work queue — a payload
+array plus an atomic counter — reached the kernel as the host struct. It goes
+through Lava's own `Adapt` rules now. Which surfaced the ordering that matters:
+a ray query needs the `HWTLAS` bound as a descriptor and adapting an
+`HWAdaptedAccel` deliberately strips it, so the TLAS is looked for in the RAW
+arguments. Asking the adapted ones finds nothing and the shading kernel compiles
+with ray query disabled — which fails in the SPIR-V emitter, a long way from the
+cause.
+
+**N device-sized dispatches in one pass share one prepare and one barrier.** The
+barrier before an indirect dispatch is forced (the command processor's read of
+the count depends on the prepare that wrote it), so per dispatch it serialised a
+pass whatever the schedule said. Twelve per-material shading kernels were twelve
+barriers. This is the one hazard a graph cannot derive away, and the answer is
+to make the pass the unit: the prepares are fused, the dispatches share the
+barrier behind them.
+
+### Finding 4 was wrong, and `custom!` is why
+
+"Hikari on hardware RT needs an RT pass built" — it does not. The hardware trace
+is `vkCmdTraceRaysIndirect` with an SBT, which is not a dispatch, so there is no
+kernel and no ndrange for the graph to record. `custom!` is exactly that case:
+the body records through the backend and the graph still orders it, because what
+it touches is declared the same way either way. The compute and hardware forms
+of the trace stage differ in the pass KIND and in nothing else — same
+`trace_uses!`, same position in the round.
+
+That does not make an RT pass pointless — an SBT the graph knows about could
+carry `TraceRead`/`TraceBuild` properly — but it is no longer on the critical
+path for a wavefront tracer.
+
+### What it bought, measured
+
+Correctness first, because a renderer that got faster and darker is not a port:
+the 96x96 Cornell scene with media, four material types, an area light and a
+point light is **bit-identical** to the pre-port tree on the software BVH, and
+four progressive samples equal one four-sample render to the last digit. The
+pbrt reference suite is **450/450 SW and 450/450 HW at 256 spp**.
+
+Speed, minimum of five renders at 32 spp (the median on this machine is GPU
+clock state — see the measurement notes above):
+
+| scene | old SW | new SW | old HW | new HW |
+|---|---|---|---|---|
+| shadow_bumpgold_dome_over_velvet | 0.788 | **0.762** | 0.875 | **0.861** |
+| mat_mix_light_point | 0.095 | **0.086** | 0.108 | **0.097** |
+| medium_cloud_point | **0.352** | 0.355 | **0.362** | 0.365 |
+| medium_null_interface_homog | 0.159 | **0.157** | **0.179** | 0.183 |
+
+The one number outside noise is the multi-material scene, ~9 % SW and ~10 % HW,
+which is where the derived independence and the fused prepares have something to
+work with. Everything else is a wash, which is the right result: the point was
+to stop asserting the ordering by hand, not to make the GPU do less.
+
+### What is still Hikari's
+
+Memory. Every queue, accumulator and table is still a `KA.allocate`, and the
+passes read them as foreign buffers — which finding 2 says is fine and is what
+made the port incremental. Moving ownership is what would buy aliasing between,
+say, the medium queues and the surface queues (they are live in disjoint halves
+of a round), and it is the next thing worth doing rather than a loose end.
