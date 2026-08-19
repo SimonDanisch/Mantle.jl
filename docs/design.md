@@ -655,10 +655,28 @@ It did surface a real leak on the way: `Lava.capture` reserved its argument
 slabs against the shared pool for ever. Fixed in Lava — a capture owns its slabs
 now — and the fix stands whatever this renderer does with baking.
 
-### What is still Hikari's
+### What is still Hikari's, and why it stays there
 
 Memory. Every queue, accumulator and table is still a `KA.allocate`, and the
 passes read them as foreign buffers — which finding 2 says is fine and is what
-made the port incremental. Moving ownership is what would buy aliasing between,
-say, the medium queues and the surface queues (they are live in disjoint halves
-of a round), and it is the next thing worth doing rather than a loose end.
+made the port incremental.
+
+An earlier version of this paragraph said moving ownership was "the next thing
+worth doing", on the reasoning that the medium queues and the surface queues are
+live in disjoint halves of a round. **Measured, that is wrong**, and the placer
+was the thing to ask: `Hikari/benchmarks/queue_aliasing/aliasing.jl` models the
+bounce structure with every intermediate queue a transient of its real footprint,
+at 1280x1080 —
+
+  rounds=1   peak 1392.2 MiB   naive 1566.2 MiB   saved 174.0 MiB
+  rounds=2   peak 1566.2 MiB   naive 1566.2 MiB   saved     0.0 MiB
+
+One round has exactly one disjoint pair, and the 174 MiB is the shadow queue
+entire. At two rounds it is gone, because every queue is refilled every round and
+so is live from the first to the last. The shipped plan is a chunk of eight.
+
+So ownership buys pool ACCOUNTING — one allocator seeing every workload, which is
+this document's first claim — and no bytes. That is a reason to do it eventually
+and not a reason to do it next. What would change the arithmetic is a bounce loop
+where a queue is filled once and drained once rather than reused every round,
+which is a different algorithm.
