@@ -76,10 +76,46 @@ device case there is swap behind it, so this is advice rather than a wall."""
 Mantle.capacity(::HostDevice) = Int(min(Sys.free_memory(), UInt64(typemax(Int))))
 Mantle.constraintof(::HostDevice, ::Mantle.Persistent, ts) = nothing
 
-"The bytes of `a`, as a `T` view into its block. Host memory is directly addressable,
-so this is a reinterpret rather than a mapping."
+# Nothing is ever in flight here: `run!` is a loop over callables and has
+# returned by the time anyone could ask. So a fence carries no information, and
+# `reclaim!` releases in the same call that stamps — the boundary it waits for on
+# a device backend has already happened by construction.
+Mantle.fence(::HostDevice) = nothing
+Mantle.passed(::HostDevice, _) = true
+# Already true, so there is never anything to wait for.
+Mantle.waitfor(::HostDevice, _) = true
+
+"""
+`dims` elements of `T` at `offset` in `slab`, as an array sharing those bytes.
+
+`unsafe_wrap` and NOT `reinterpret(T, view(slab, ...))`, which is what this was.
+A `ReinterpretArray` over `UInt8` refuses `setindex!` for any `T` that has
+padding — `LightBVHNode`, and most work-item structs — so a buffer allocated
+here could be read but never written, on a backend whose whole job is to be the
+one every other backend is checked against. The wrapper is an ordinary `Array`
+and has neither restriction, including for `N > 1`.
+
+It still aliases the slab, which is the property that matters: two transients the
+placer put at overlapping offsets corrupt each other here, loudly and
+deterministically, rather than each quietly getting private storage.
+
+`own = false` — the `Block` owns the memory, as everywhere else in Mantle. The
+slab is reachable from whatever handed us this offset (a `DeviceArray` holds its
+region, which holds the block) and from the pool, so it outlives any wrapper a
+live handle can make; using a region after its pool released it was already
+undefined.
+"""
+function wrapbytes(::Type{T}, slab::Vector{UInt8}, offset::Int, dims::Dims) where {T}
+    need = prod(dims) * sizeof(T)
+    offset + need <= length(slab) ||
+        throw(ArgumentError("$(join(dims, "x")) $T at offset $offset needs $need bytes, slab has $(length(slab))"))
+    return unsafe_wrap(Array, Ptr{T}(pointer(slab, offset + 1)), dims; own = false)
+end
+
+"The bytes of `a`, as a `T` array over its block. Host memory is directly
+addressable, so this is a wrapper rather than a mapping."
 hostview(a::Mantle.DeviceArray{T}) where {T} =
-    reinterpret(T, view(Mantle.memoryof(a), (Mantle.offset(a) + 1):(Mantle.offset(a) + sizeof(a))))
+    wrapbytes(T, Mantle.memoryof(a), Mantle.offset(a), size(a))
 
 Mantle.deviceview(::HostDevice, a::Mantle.DeviceArray) = hostview(a)
 Mantle.upload!(::HostDevice, a::Mantle.DeviceArray, first::Integer, data::AbstractVector) =
@@ -99,13 +135,13 @@ mutable struct HostTransient{T} <: Mantle.Resource
     n::Int
     first::Int
     last::Int
-    # `Any`, and NOT `Union{Nothing,Vector{T}}`. `materialize!` assigns a
-    # `ReinterpretArray` over a view of the arena; that is not a `Vector`, so a
-    # declared field type makes the assignment `convert` — which COPIES, and
-    # every transient silently gets private storage. The arena then stays
-    # untouched while every value still reads back correctly, so nothing fails
-    # except the one property this backend exists to have.
-    view::Any
+    # Declared, now that `materialize!` assigns a real `Vector{T}` over the
+    # arena. It used to assign a `ReinterpretArray`, which is not a `Vector`, so
+    # this field had to be `Any` — a declared type would have made the
+    # assignment `convert`, which COPIES, and every transient would silently get
+    # private storage while still reading back correctly. Declaring it is what
+    # makes that trap impossible to walk back into.
+    view::Union{Nothing,Vector{T}}
 end
 storage(t::HostTransient) = t.view
 Mantle.nbytes(t::HostTransient{T}) where {T} = t.n * sizeof(T)
@@ -245,14 +281,11 @@ Mantle.compatible(::HostDevice, a, b) = true
 """
 Give a transient its slice of the arena.
 
-`reinterpret` over a `view`, so the bytes really are shared: two transients the
-placer put at overlapping offsets will corrupt each other here, loudly and
-deterministically. That is the property a separate `Array` per transient would
-throw away.
+A wrapper over the arena's bytes and not a copy of them, so the bytes really are
+shared — see [`wrapbytes`](@ref) for why it is a wrapper and not a reinterpret.
 """
 function Mantle.materialize!(t::HostTransient{T}, slab::Vector{UInt8}, offset::Int) where {T}
-    n = t.n * sizeof(T)
-    t.view = reinterpret(T, view(slab, (offset + 1):(offset + n)))
+    t.view = wrapbytes(T, slab, offset, (t.n,))
     return t
 end
 
@@ -385,6 +418,7 @@ No synchronisation, no lookup, no branch. Everything that could be decided was.
 """
 function run!(pl::HostPlan)
     Mantle.checklive(pl, pl.regions, length(pl.graph.transients))
+    Mantle.reclaim!(Mantle.pool(pl.graph.dev), pl.graph.dev)
     for s in pl.steps
         s()
     end

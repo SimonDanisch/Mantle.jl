@@ -215,8 +215,14 @@ memory somebody still points into.
 struct Pool
     blocks::Dict{Any,Vector{Block}}
     arenas::Dict{Any,Arena}
+    # Regions handed back from a context that must not touch a free list, and
+    # the same regions once stamped with a fence. See `retire!` / `reclaim!`.
+    pending::Vector{Region}
+    retiring::Vector{Tuple{Region,Any}}
+    lock::ReentrantLock
 end
-Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}())
+Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
+              Region[], Tuple{Region,Any}[], ReentrantLock())
 
 arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 
@@ -285,6 +291,16 @@ end
 searchsortedfirst_lower(v::Vector{Span}, x::Int) =
     searchsortedfirst(v, x; by = s -> s isa Span ? s.lower : s)
 
+"""The first block of `kind` that can host `bytes`, or `nothing` if none can."""
+function carveany!(pool::Pool, dev, kind, bytes::Int, align::Int, want)
+    for blk in blocksof(pool, kind)
+        compatible(dev, blk.constraint, want) || continue
+        r = carve!(blk, bytes, align)
+        r === nothing || return r
+    end
+    return nothing
+end
+
 """
     acquire!(pool, dev, kind, transients, bytes; align) -> Region
 
@@ -301,12 +317,28 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
     # an arena reconciling what its other tenants also need. Deriving it here
     # would size the block for this plan alone.
     want = constraint === nothing ? constraintof(dev, kind, transients) : constraint
-    blks = blocksof(pool, kind)
-    for blk in blks
-        compatible(dev, blk.constraint, want) || continue
-        r = carve!(blk, bytes, align)
+    # Three attempts before the device is asked for anything, and the last two
+    # are why `free!` can be deferred without a rebuild doubling peak memory.
+    # Bytes a caller just gave back are RETIRED, not free: they are waiting on
+    # work the device may already have finished. Growing while they sit there is
+    # exactly the growth a pool exists to prevent — so try, take back what the
+    # device is done with, try again, wait for what it has already been given,
+    # try once more.
+    #
+    # `wait = true` cannot block for ever: `waitfor` declines a fence whose work
+    # has not been submitted, so the worst case is this falls through and grows,
+    # which is what it would have done anyway.
+    r = carveany!(pool, dev, kind, bytes, align, want)
+    r === nothing || return r
+    if reclaim!(pool, dev) > 0
+        r = carveany!(pool, dev, kind, bytes, align, want)
         r === nothing || return r
     end
+    if reclaim!(pool, dev; wait = true) > 0
+        r = carveany!(pool, dev, kind, bytes, align, want)
+        r === nothing || return r
+    end
+    blks = blocksof(pool, kind)
     n = max(bytes, blocksize)
     blk = Block(rawalloc(dev, kind, n, want), n, kind, want)
     push!(blks, blk)
@@ -347,6 +379,111 @@ function release!(r::Region)
         deleteat!(blk.free, i + 1)
     end
     return nothing
+end
+
+"""
+    fence(dev) -> f
+
+An opaque stand-in for "everything submitted to `dev` up to now".
+
+Opaque because what it is differs per backend and core has no use for the value
+beyond handing it back to [`passed`](@ref) — a timeline-semaphore counter on
+Vulkan, nothing at all on a backend whose work is synchronous.
+"""
+function fence end
+
+"""
+    passed(dev, f) -> Bool
+
+Has `dev` finished everything that [`fence`](@ref) stood for?
+
+The one question that decides whether a retired region can go back on a free
+list, and the reason [`reclaim!`](@ref) is two-phase.
+"""
+function passed end
+
+"""
+    waitfor(dev, f) -> Bool
+
+Block until [`passed`](@ref)`(dev, f)`, and say whether that happened.
+
+**Returns `false` rather than waiting when `f` names work that has not been
+submitted yet**, which is the whole subtlety. A fence taken while a command
+buffer was open stands for a value only that buffer's submission will signal, and
+nothing here can make that happen — an allocator that forced a submit to collect
+its own memory would cut a recording in half to do it. So it declines, and the
+caller grows the pool instead. Rare, because `run!` reclaims at its head, by
+which point the previous frame is submitted.
+
+The counterpart of that rule: this NEVER submits, flushes, or otherwise advances
+the device. It only waits for what is already on its way.
+"""
+function waitfor end
+
+"""
+    retire!(pool, r::Region)
+
+Give a region back from a context that must not touch a free list — a finalizer,
+which runs on whatever thread the GC picks.
+
+Appends under a lock and does nothing else. [`release!`](@ref) inserts into a
+block's free list and coalesces its neighbours; a GC thread doing that while
+another `acquire!`s is the bug [`trim!`](@ref) describes below, which Lava has
+already paid for once with a `ConcurrencyViolationError` and then a SIGSEGV.
+
+The release itself is [`reclaim!`](@ref), from the owning thread. So this is not
+"free from a finalizer" — the finalizer never frees, it only says what is no
+longer wanted, and something on the owning thread decides when that is safe.
+"""
+retire!(p::Pool, r::Region) = (lock(() -> push!(p.pending, r), p.lock); nothing)
+
+"""
+    reclaim!(pool, dev) -> Int
+
+Release every retired region the device has finished with, and return how many.
+
+**Two phases, and the delay between them is the point.** A resource nobody holds
+cannot be named by work recorded AFTER it was dropped, but work recorded BEFORE
+it may still be in flight — and a finalizer is in no position to ask a queue
+about that. So the first call that sees a region only stamps it with
+[`fence`](@ref), taken here on the owning thread; a later call releases it once
+[`passed`](@ref) says the device is through. One full submission boundary between
+the drop and the release, with the GC thread never asking the device anything.
+
+Cheap and idempotent, so a renderer can call it every frame; it is a no-op when
+nothing has been dropped.
+
+`wait = true` additionally blocks on whatever the device has already been given,
+via [`waitfor`](@ref). That is what [`acquire!`](@ref) does before it grows the
+pool, and it is the only place in Mantle that waits for the device at all —
+which is the point: a caller never has to know what is in flight, because the
+one piece of code that needs the bytes does.
+"""
+function reclaim!(p::Pool, dev; wait::Bool = false)
+    fresh = lock(p.lock) do
+        isempty(p.pending) && return Region[]
+        out = copy(p.pending)
+        empty!(p.pending)
+        return out
+    end
+    if !isempty(fresh)
+        f = fence(dev)
+        for r in fresh
+            push!(p.retiring, (r, f))
+        end
+    end
+    freed = keep = 0
+    for (r, f) in p.retiring
+        if passed(dev, f) || (wait && waitfor(dev, f))
+            release!(r)
+            freed += 1
+        else
+            keep += 1
+            p.retiring[keep] = (r, f)
+        end
+    end
+    resize!(p.retiring, keep)
+    return freed
 end
 
 """
@@ -429,7 +566,9 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     for wr in tenants!(a)
         remap!(wr.value, kind, fresh)
     end
-    old === nothing || release!(old)
+    # Retired, not released: the tenants were just copied OUT of these bytes by
+    # a device copy, which has been recorded rather than run.
+    old === nothing || retire!(pool, old)
     return fresh
 end
 
@@ -461,7 +600,11 @@ function untenant!(pool::Pool, kind, x)
     a === nothing && return nothing
     filter!(wr -> wr.value !== x && wr.value !== nothing, a.tenants)
     if isempty(a.tenants) && a.region !== nothing
-        release!(a.region)
+        # Retired, not released. The last tenant leaving says nothing about
+        # whether the device has finished running it — a plan freed right after
+        # its final `run!` is the ordinary case, and its recording is still in
+        # flight. This is why `free!(::Plan)` needs no precondition either.
+        retire!(pool, a.region)
         a.region, a.bytes, a.constraint, a.lastrun = nothing, 0, nothing, nothing
     end
     return nothing

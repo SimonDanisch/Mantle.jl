@@ -268,3 +268,66 @@ end
     KernelAbstractions.synchronize(M.backend(dev))
     @test all(==(4f0), Array(M.storage(b.out)))
 end
+
+@testset "an N-dimensional buffer reaches the GPU with its shape" begin
+    # The Lava half of `Buffer(dev, T, dims)`: `deviceview` used to hard-code
+    # `LavaArray{T,1}(…, (length(a),))`, so a 2-D region arrived at a kernel
+    # flattened and every index had to be recomputed from a width the kernel had
+    # to be told separately.
+    dev = M.Device(Lava)
+    want = reshape(collect(1f0:12f0), 3, 4)
+    b = M.Buffer(dev, want)
+    @test size(b) == (3, 4)
+    @test M.storage(b) isa Lava.LavaArray{Float32,2}
+    @test size(M.storage(b)) == (3, 4)
+    @test Array(b) == want
+    M.free!(b)
+end
+
+@testset "a retired region waits for the device, then comes back" begin
+    # The Lava half of `reclaim!`. Unlike the host, a fence here carries real
+    # information: a region dropped while a batch is open may be named by a
+    # command already recorded into it, so releasing on the spot would hand
+    # those bytes to the next caller while the GPU is still reading them.
+    #
+    # So the first `reclaim!` only stamps, and the release waits for the
+    # timeline. That ordering is the whole safety argument, and asserting the
+    # count alone would pass just as well if it released immediately.
+    dev = M.Device(Lava)
+    pool = M.pool(dev)
+    b = M.Buffer(dev, fill(1f0, 4096))
+    reserved = M.reserved(pool)
+    # Anything this file retired earlier goes back first, so the counts below
+    # are about `b` and `b3` rather than about the order of the testsets.
+    while M.reclaim!(pool, dev; wait = true) > 0 end
+
+    # Retire with a batch OPEN, which is the case that must wait: a command
+    # already recorded into it can name these bytes.
+    scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
+    KernelAbstractions.fill!(scratch, 1f0)          # opens a batch
+    @test Lava.has_active_recording(dev.bq)
+    M.free!(b)
+    @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
+
+    # Submit it and wait, so the fence it was stamped with has passed.
+    Lava.vk_flush!(dev.ctx)
+    KernelAbstractions.synchronize(M.backend(dev))
+    @test M.reclaim!(pool, dev) == 1        # now
+    @test M.reclaim!(pool, dev) == 0
+
+    b2 = M.Buffer(dev, fill(2f0, 4096))
+    @test M.reserved(pool) == reserved      # reused, not reallocated
+    @test Array(b2) == fill(2f0, 4096)
+    M.free!(b2)
+
+    # And the idle case, which is the one that must NOT wait. `fence` used to
+    # return `next_timeline + 1` unconditionally, so a region dropped by an
+    # application that then submits nothing more waited for a signal nobody
+    # would ever raise — the same leak this path removes, wearing a hat.
+    KernelAbstractions.synchronize(M.backend(dev))
+    @test !Lava.has_active_recording(dev.bq)
+    b3 = M.Buffer(dev, fill(3f0, 4096))
+    while M.reclaim!(pool, dev; wait = true) > 0 end
+    M.free!(b3)
+    @test M.reclaim!(pool, dev) == 1        # nothing is in flight, so: now
+end

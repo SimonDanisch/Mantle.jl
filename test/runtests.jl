@@ -7,6 +7,23 @@ using Mantle, Test
 # machine that has only one of them.
 const BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks"))
 
+# The corpus is an EXTERNAL checkout, and its absence used to take the whole
+# suite down with it: the four testsets below erred, the enclosing
+# `@testset "Mantle"` threw at its `end`, and the exception propagated out of
+# this file — so the `sync` testset and all six GPU test files never ran. That
+# reads as "the suite failed", not as "six files were skipped", which is the
+# worse of the two failure modes by a distance.
+#
+# Guarded rather than deleted: with the corpus present these are the only thing
+# pinning how GOOD the packing is, as opposed to merely legal (see
+# `docs/design.md`). Clone it beside this checkout to get them back:
+#     git clone https://github.com/google/minimalloc ../../minimalloc
+const HAVE_BENCH = isdir(BENCH)
+HAVE_BENCH || @warn """
+    minimalloc benchmarks not found at $BENCH — the packing-QUALITY ratchet is \
+    NOT running. Everything else in this suite still is. Clone google/minimalloc \
+    as a sibling of this checkout to enable it."""
+
 @testset "Mantle" begin
 
 @testset "spans are half-open" begin
@@ -46,7 +63,7 @@ end
     @test segments(j) == [(Span(0, 4), 4), (Span(4, 6), 1), (Span(6, 10), 4)]
 end
 
-@testset "the README instance is solved optimally" begin
+HAVE_BENCH && @testset "the README instance is solved optimally" begin
     p = readproblem(joinpath(BENCH, "examples", "input.12.csv"), 12)
     pl = place(p)
     @test [pl.offsets[i.id] for i in p.items] == [8, 8, 4, 4, 0]
@@ -66,7 +83,7 @@ function valid(p::Problem, pl::Placement)
     true
 end
 
-@testset "placement is valid on every benchmark" begin
+HAVE_BENCH && @testset "placement is valid on every benchmark" begin
     for f in readdir(joinpath(BENCH, "challenging"); join = true)
         p = readproblem(f)
         for strategy in (LowestFit(), BestFit())
@@ -82,7 +99,7 @@ end
    known to be solvable at, which is the only external number in the corpus."""
 capacity(f) = parse(Int, split(basename(f), ".")[2])
 
-@testset "the gap to minimalloc's capacity does not grow" begin
+HAVE_BENCH && @testset "the gap to minimalloc's capacity does not grow" begin
     # `valid` and `height >= maxload` say the packing is legal and not below the
     # lower bound. Neither says anything about how *good* it is, so packing could
     # get arbitrarily worse and every placement test would still pass.
@@ -103,7 +120,7 @@ capacity(f) = parse(Int, split(basename(f), ".")[2])
     @test worst > 1.0        # if this ever fails we are matching an exact solver
 end
 
-@testset "lowest fit is not worse than best fit" begin
+HAVE_BENCH && @testset "lowest fit is not worse than best fit" begin
     ratios = map(readdir(joinpath(BENCH, "challenging"); join = true)) do f
         p = readproblem(f)
         (place(p, LowestFit()).height / maxload(p),
@@ -351,10 +368,23 @@ import Vulkan
         @test Mantle.reads(ColorAttachment{false})
     end
 end
+# CPU-only, so they go first and fail fast. These sat next to this file without
+# being included by it, which meant every regression they pin was unguarded —
+# the host backend could not write a struct with padding for as long as it has
+# existed, and `test_host.jl` is the file that would have said so.
+include(joinpath(@__DIR__, "test_pool.jl"))
+include(joinpath(@__DIR__, "test_host.jl"))
 # Needs a GPU but no display — every graph in it is headless, which is also the
 # only kind `bake!` takes — so it runs before the window tests rather than inside
 # their DISPLAY guard.
+#
+# FIRST among the files that build a plan on `Device(Lava)`, and that is a
+# constraint rather than a preference: it counts the tenants of that device's
+# shared arena, and `Device(Lava)` is cached per context, so any earlier file
+# that compiled a plan is still a tenant until a GC reaps it. Adding an include
+# above this line that touches the Lava device breaks it.
 include(joinpath(@__DIR__, "test_arena_bake.jl"))
+include(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
 include(joinpath(@__DIR__, "test_devicerange.jl"))

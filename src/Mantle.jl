@@ -29,7 +29,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 # this package calls, and GeometryBasics exports the same name.
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
-export Pool, Block, Region, acquire!, release!, trim!, reserved
+export Pool, Block, Region, acquire!, release!, trim!, reserved, retire!, reclaim!, fence, passed, waitfor
 export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable, takeover!
 export DeviceArray, giveup!, blocksize
 export upload!, download, deviceview, bufferusage, devicecopy!, Persistent

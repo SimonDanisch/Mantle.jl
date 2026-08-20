@@ -220,3 +220,132 @@ end
     @test M.countresource(1024) === nothing
     @test parentmodule(which(M.dispatch!, Tuple{Any,Any,Tuple,Any})) === M
 end
+
+# A struct whose fields do not fill its size: `b` is one byte, but `a` forces
+# 8-byte alignment, so seven bytes of every sixteen are padding. Shaped after the
+# real cases — `LightBVHNode`, and most GPU work-item structs, which pack a few
+# floats next to a `UInt32` flag.
+struct HostPadded
+    a::Int64
+    b::Int8
+end
+
+@kernel function hostwritepadded!(dst)
+    i = @index(Global)
+    @inbounds dst[i] = HostPadded(Int64(i), Int8(i % 100))
+end
+
+@kernel function hostcopypadded!(dst, @Const(src))
+    i = @index(Global)
+    @inbounds dst[i] = src[i]
+end
+
+@testset "Host: a padded struct can be WRITTEN, not only read" begin
+    # A `reinterpret(T, ::Vector{UInt8})` refuses `setindex!` for any `T` with
+    # padding — "Padding of type … is not compatible with type UInt8" — because
+    # the padding bytes have no defined value to write. Host storage used to be
+    # exactly that, so a buffer of any padded type could be read and never
+    # written: `upload!` threw, and so did every kernel that filled a work
+    # queue. The whole point of this backend is to be the one the others are
+    # checked against, and it could not hold most of their data.
+    dev = M.Device(M.Host())
+    n = 64
+    @test sizeof(HostPadded) > sizeof(Int64) + sizeof(Int8)   # it really is padded
+
+    want = [HostPadded(Int64(i), Int8(0)) for i in 1:n]
+    b = M.Buffer(dev, want)                       # the upload! path
+    @test Array(b) == want
+
+    g = M.Graph(dev)
+    t = M.Transient.Buffer(g, HostPadded, n)      # and the materialize! path
+    M.compute!(g, "write") do p
+        M.dispatch!(p, hostwritepadded!, (M.use(p, t; write = true),), n)
+    end
+    M.compute!(g, "copy") do p
+        M.dispatch!(p, hostcopypadded!, (M.use(p, b; write = true),
+                                         M.use(p, t; read = true)), n)
+    end
+    plan = M.Plan(g)
+    M.run!(plan)
+    @test Array(b) == [HostPadded(Int64(i), Int8(i % 100)) for i in 1:n]
+
+    M.free!(plan)
+    M.free!(b)
+end
+
+@testset "Host: storage aliases the block rather than copying it" begin
+    # The property the fix above had to keep. Storage that copied would pass
+    # every read-back assertion in this file while making the arena inert —
+    # two transients the placer overlapped would quietly stop corrupting each
+    # other, which is the one thing this backend exists to prove.
+    dev = M.Device(M.Host())
+    b = M.Buffer(dev, Float32[1, 2, 3, 4])
+    M.storage(b)[2] = 99f0
+    @test Array(b) == Float32[1, 99, 3, 4]
+    M.free!(b)
+end
+
+@testset "Host: a Buffer keeps its shape" begin
+    # A renderer's own buffers are not all vectors — a framebuffer, an albedo
+    # layer, a depth layer — and `Buffer` was a device VECTOR, so anything with
+    # two dimensions had to be allocated outside the pool and freed by hand.
+    dev = M.Device(M.Host())
+    want = reshape(collect(1f0:12f0), 3, 4)
+    b = M.Buffer(dev, want)
+    @test size(b) == (3, 4)
+    @test ndims(b) == 2
+    @test length(b) == 12
+    @test size(M.storage(b)) == (3, 4)
+    @test Array(b) == want                      # comes back shaped, not flattened
+
+    M.storage(b)[2, 3] = 99f0                   # and it is the same bytes
+    @test Array(b)[2, 3] == 99f0
+    M.free!(b)
+
+    # The vector form is untouched: `len` is still a prefix a draw covers, and
+    # `Array` still trims to it.
+    v = M.Buffer(dev, Float32[1, 2, 3]; capacity = 8)
+    @test size(v) == (8,)                       # the region
+    @test length(v) == 3                        # what a draw covers
+    @test Array(v) == Float32[1, 2, 3]
+    @test M.capacity(v) == 8
+    M.free!(v)
+end
+
+"""
+Release everything already retired, so a `reclaim!` count afterwards is about the
+one region a test just gave back rather than whatever the file left lying around.
+"""
+drain!(pool, dev) = (while M.reclaim!(pool, dev; wait = true) > 0 end; nothing)
+
+@testset "Host: free! defers, and reclaim! is what releases" begin
+    # `free!` has no precondition: it RETIRES the region, and `reclaim!` puts it
+    # back on a free list once the device is done. That is what lets a caller
+    # drop a resource mid-frame without knowing what is in flight, and what
+    # lets the same call be a finalizer — it appends under a lock and never
+    # touches a free list, which is the bug `trim!`'s docstring describes.
+    dev = M.Device(M.Host())
+    pool = M.pool(dev)
+
+    b = M.Buffer(dev, fill(1f0, 4096))
+    reserved = M.reserved(pool)
+    drain!(pool, dev)                             # so a count below is about `b`
+    M.free!(b)                                    # retires; releases nothing yet
+    @test M.reclaim!(pool, dev) == 1              # released here, not there
+    @test M.reclaim!(pool, dev) == 0              # and idempotent
+
+    # Really back on the free list: an identical request reuses it rather than
+    # making the pool ask the device for more.
+    b2 = M.Buffer(dev, fill(2f0, 4096))
+    @test M.reserved(pool) == reserved
+    @test Array(b2) == fill(2f0, 4096)
+    M.free!(b2)
+
+    # A second `free!` of the same resource must not double-release: `release!`
+    # errors on an overlapping span, so this would throw rather than corrupt.
+    b3 = M.Buffer(dev, fill(3f0, 128))
+    drain!(pool, dev)
+    M.free!(b3)
+    @test M.reclaim!(pool, dev) == 1
+    @test M.reclaim!(pool, dev) == 0
+end

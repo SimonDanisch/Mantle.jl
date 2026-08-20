@@ -66,8 +66,9 @@ Base.show(io::IO, a::DeviceArray{T,N}) where {T,N} =
 Suballocate `dims` elements of `T` out of the pool.
 
 The counterpart to [`acquire!`](@ref) for callers that want a typed handle rather
-than raw bytes. Freeing is `release!(region(a))` — explicit, like everything else
-here, and never a finalizer.
+than raw bytes. Handing it back is `retire!(pool, region(a))` — explicit, like
+everything else here, and released by `reclaim!` once the device is done rather
+than on the spot, so no caller has to know what is in flight.
 """
 function allocate(pool::Pool, dev, kind, ::Type{T}, dims::NTuple{N,Int};
                   align::Int = 256, blocksize::Int = 64 << 20) where {T,N}

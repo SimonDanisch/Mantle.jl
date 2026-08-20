@@ -176,6 +176,38 @@ Mantle.rawalloc(dev::LavaDevice, ::Mantle.Persistent, bytes::Int, usage) =
     Mantle.rawalloc(dev, Buffers(), bytes, usage)
 Mantle.constraintof(::LavaDevice, ::Mantle.Persistent, ts) = UInt32(0)
 
+# What has to complete before a region retired NOW can go back.
+#
+# With a batch open, that is the value it will signal — `next_timeline + 1` —
+# because a command already recorded into it may name those bytes. With no batch
+# open, everything ever recorded has been submitted and `next_timeline` is the
+# last of it, so waiting for one more would wait for a submission that an idle
+# application never makes. A retired region would then be pinned for ever, which
+# is the leak this whole path exists to remove, wearing a different hat.
+#
+# Read, never forced. `ensure_active_batch!` would assert the owning thread and
+# allocate a command buffer, which is not something a reclaim should do.
+Mantle.fence(d::LavaDevice) =
+    d.bq.next_timeline + (Lava.has_active_recording(d.bq) ? UInt64(1) : UInt64(0))
+Mantle.passed(d::LavaDevice, f) = Lava.query_timeline(d.bq) >= f
+
+"""
+Wait for the timeline to reach `f`, unless nothing has been submitted that will
+signal it.
+
+`f > next_timeline` means the value belongs to a batch still being recorded.
+`vkWaitSemaphores` on it would block until something else submitted — and the
+one caller here is an allocation, which must not go and flush a half-recorded
+command buffer to collect its own memory. So it declines and the pool grows,
+which costs a block and never a deadlock.
+"""
+function Mantle.waitfor(d::LavaDevice, f)
+    Mantle.passed(d, f) && return true
+    f > d.bq.next_timeline && return false        # not submitted; nothing to wait on
+    Lava.wait_semaphores!(d.bq, Lava.Vulkan.SemaphoreWaitInfo([d.bq.timeline_sem], [UInt64(f)]))
+    return true
+end
+
 """
 A borrowed `LavaArray` over a region.
 
@@ -183,8 +215,8 @@ The `DataRef` releaser is a NO-OP, so `copy` bumps a refcount that frees nothing
 and Mantle stays the owner — Lava's shape of `unsafe_wrap(…, own = false)`. What
 a kernel gets is `todevice` of this; what a copy or a library gets is this.
 """
-Mantle.deviceview(::LavaDevice, a::Mantle.DeviceArray{T}) where {T} =
-    Lava.LavaArray{T,1}(copy(Mantle.memoryof(a).ref), (length(a),); offset = Mantle.offset(a))
+Mantle.deviceview(::LavaDevice, a::Mantle.DeviceArray{T,N}) where {T,N} =
+    Lava.LavaArray{T,N}(copy(Mantle.memoryof(a).ref), size(a); offset = Mantle.offset(a))
 
 Mantle.upload!(d::LavaDevice, a::Mantle.DeviceArray{T}, first::Integer,
                data::AbstractVector) where {T} =
@@ -919,7 +951,7 @@ anything else that never went through the host — needs no staging buffer and n
 the same two routes as above, differing only in where the source is, so it is a
 method rather than a branch.
 """
-function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::Lava.LavaArray{T,1}) where {T}
+function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T,1}, data::Lava.LavaArray{T,1}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
@@ -946,7 +978,7 @@ function inplace!(bq, dst, data::Lava.LavaArray{T,1}, from::Integer) where {T}
 end
 
 # A Mantle buffer says the same thing as its store, so it takes the same route.
-rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::Mantle.Buffer{T}) where {T} =
+rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T,1}, data::Mantle.Buffer{T,1}) where {T} =
     rename!(g, bq, dst, Mantle.storage(data))
 inplace!(bq, dst, data::Mantle.Buffer, from::Integer) =
     inplace!(bq, dst, Mantle.storage(data), from)
@@ -981,7 +1013,7 @@ The staging buffer is recycled by size for the same reason the stores are: it is
 the same size every frame, and a recorded copy reads it later, so it cannot be
 handed out again until the GPU is past this frame.
 """
-function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T}, data::AbstractVector{T}) where {T}
+function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T,1}, data::AbstractVector{T}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
@@ -2215,6 +2247,12 @@ end
 
 function run!(pl::LavaPlan; barriers::Symbol = :derived)
     Mantle.checklive(pl, pl.slabs, length(pl.graph.transients))
+    # Anything dropped without a `free!` goes back here, one submission boundary
+    # after it was dropped. Cheap and a no-op when nothing was — see
+    # `Mantle.reclaim!`. Here rather than in a user's frame loop because a
+    # renderer that has to remember to call it is one that stops reclaiming the
+    # day someone forgets, which is the failure this exists to remove.
+    Mantle.reclaim!(Mantle.pool(pl.graph.dev), pl.graph.dev)
     barriers in (:derived, :backend, :both) ||
         throw(ArgumentError("barriers must be :derived, :backend or :both, got $barriers"))
     g = pl.graph
@@ -2649,7 +2687,10 @@ end
 """
 Give this plan's regions back to the pool. The argument memory and the
 pipelines are ordinary Lava objects — the GC reclaims those; the regions are
-the thing only an explicit release can return, because nothing here finalizes.
+the thing only an explicit call can return, because nothing here finalizes.
+
+No precondition: the regions are retired, so a plan freed immediately after its
+last `run!` — the ordinary case, with its recording still in flight — is fine.
 """
 function Mantle.free!(pl::LavaPlan)
     # The capture too, and before the regions: it holds the argument memory its
