@@ -179,7 +179,7 @@ end
 import Vulkan
 
 @testset "sync" begin
-    be = Mantle.Vulkan()
+    be = Mantle.VulkanAPI()
     img, buf = ImageKind(), BufferKind()
     A2(x) = Vulkan.AccessFlag2(x)
     S2(x) = Vulkan.PipelineStageFlag2(x)
@@ -350,7 +350,7 @@ import Vulkan
     end
 
     @testset "WebGPU has no barriers" begin
-        @test isempty(transitions(Mantle.WebGPU(), img, [ColorAttachment{true}, Sampled, CopySrc]))
+        @test isempty(transitions(Mantle.WebGPUAPI(), img, [ColorAttachment{true}, Sampled, CopySrc]))
     end
 
     @testset "a load op says whether the target's contents survive" begin
@@ -378,9 +378,9 @@ include(joinpath(@__DIR__, "test_host.jl"))
 # only kind `bake!` takes — so it runs before the window tests rather than inside
 # their DISPLAY guard.
 #
-# FIRST among the files that build a plan on `Device(Lava)`, and that is a
+# FIRST among the files that build a plan on `Device(VulkanAPI())`, and that is a
 # constraint rather than a preference: it counts the tenants of that device's
-# shared arena, and `Device(Lava)` is cached per context, so any earlier file
+# shared arena, and `Device(VulkanAPI())` is cached per context, so any earlier file
 # that compiled a plan is still a tenant until a GC reaps it. Adding an include
 # above this line that touches the Lava device breaks it.
 include(joinpath(@__DIR__, "test_arena_bake.jl"))
@@ -389,3 +389,629 @@ include(joinpath(@__DIR__, "test_compile_golden.jl"))
 # never reaches the host, so the Host backend cannot pin the half that matters.
 include(joinpath(@__DIR__, "test_devicerange.jl"))
 include(joinpath(@__DIR__, "test_window.jl"))
+
+# ── the Vulkan backend ────────────────────────────────────────────────────────
+#
+# 128 files that were Lava's test suite until 2026-08-27, when the runtime moved
+# into `src/vulkan/`. Every one of them needs a device, a queue, a pool or a
+# `LavaArray` — which is exactly the rule that decided what moved. What stayed
+# with Lava runs on a machine with no Vulkan driver at all.
+#
+# The `mwe_*.jl` files beside them are standalone reproducers and are not driven
+# from here, the same as before: each one is run on its own while a bug is being
+# chased.
+const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
+
+@testset "Vulkan backend" begin
+
+        # ── Tier 3a3: tensor addressing actually loads (GPU) ──
+        # Compiling and validating is not enough here: the instruction validated
+        # twice while still wrong. This runs it and checks the values and the
+        # orientation.
+        @testset "Tier 3a3: coopmat2 tensor load" begin
+            include(joinpath(VULKAN_TESTS, "test_tensor_load.jl"))
+            # What the load substitutes OUT of range, which is a value the caller
+            # chooses and not always zero — `attn_flash_cm2!` gets a whole row
+            # reduction deleted by asking for one.
+            include(joinpath(VULKAN_TESTS, "test_tensor_clampvalue.jl"))
+            # And what a PRODUCT of two tensor-loaded operands computes, which the
+            # load test cannot say: the load returns the transpose of its block, so
+            # the product is `P' * Q'`. A GEMM cannot be routed through this until
+            # that is pinned, and all four candidate orientations look sane.
+            include(joinpath(VULKAN_TESTS, "test_tensor_gemm.jl"))
+            # And the claim the port rests on: a clamping layout bounds-checks the
+            # load, so an extent that divides nothing is legal and out-of-range reads
+            # come back as exact zeros. That is what retires `gemm_padn`,
+            # `GEMM_BLOCK`, `padtile`/`crsextent` and `gemm_divides`.
+            include(joinpath(VULKAN_TESTS, "test_tensor_clamp.jl"))
+            # And that a shape the device does NOT report is usable at all: every
+            # KHR shape here has M == 16, so 64x16 exercises coopmat2's flexible
+            # dimensions. A hard-coded shape list in `KNOWN_INTRINSICS` used to
+            # reject it before the emitter — which handles it correctly — ever saw
+            # it, so this guards a gate, not an instruction.
+            include(joinpath(VULKAN_TESTS, "test_coopmat_flexible_dims.jl"))
+            # The clamp test above covers READS. This is the other half: a clamping
+            # layout must bounds-check the STORE too, or a tensor GEMM can consume
+            # unpadded operands and still not write an unpadded result. Asserts
+            # two-sided — in-range elements land, and nothing outside the extent
+            # moves — because a store that trampled its neighbours would pass a
+            # one-sided "the right values are there" check.
+            include(joinpath(VULKAN_TESTS, "test_tensor_store.jl"))
+            # Workgroup scope, and the two kernels built on it. The GEMM is not
+            # routed to yet — `coopmat_gemm!` still runs the staged kernel — so this
+            # is the only thing keeping it honest while it waits to be measured.
+            include(joinpath(VULKAN_TESTS, "test_workgroup_scope.jl"))
+            include(joinpath(VULKAN_TESTS, "test_gemm_cm2.jl"))
+        end
+
+
+        # ── Tier 3a: Workgroup barrier-skip fix (GPU; catches lavapipe deadlock) ──
+        @testset "Tier 3a: Barrier skip fix" begin
+            include(joinpath(VULKAN_TESTS, "test_barrier_skip.jl"))
+        end
+
+
+        # ── Tier 3a2: norm FTZ rescaling regression (GPU; Float64/ComplexF64) ──
+        @testset "Tier 3a2: norm FTZ rescaling" begin
+            include(joinpath(VULKAN_TESTS, "test_norm_overflow.jl"))
+        end
+
+
+        # ── Tier 3a3: workgroup (shared) memory stress (GPU) ──
+        @testset "Tier 3a3: shared-memory stress" begin
+            include(joinpath(VULKAN_TESTS, "test_shared_memory_stress.jl"))
+        end
+
+
+        # ── Tier 3a4: OpSelect-of-Workgroup-pointers type-dedup regression (GPU) ──
+        @testset "Tier 3a4: OpSelect Workgroup pointer dedup" begin
+            include(joinpath(VULKAN_TESTS, "test_select_width_mismatch.jl"))
+        end
+
+
+        # ── Tier 3a5: constant lookup table indexed at runtime (GPU) ──
+        @testset "Tier 3a5: constant table storage class" begin
+            include(joinpath(VULKAN_TESTS, "test_const_table_index.jl"))
+        end
+
+
+        # ── Tier 3: GPU Execution ──
+        @testset "Tier 3: GPU Execution" begin
+            include(joinpath(VULKAN_TESTS, "test_handwritten_spirv.jl"))
+            include(joinpath(VULKAN_TESTS, "test_handwritten_rt.jl"))
+            # After test_handwritten_rt.jl: it reuses those shaders to prove a refit
+            # moved the acceleration structure, not merely the vertex buffer.
+            include(joinpath(VULKAN_TESTS, "test_blas_refit.jl"))
+            include(joinpath(VULKAN_TESTS, "test_rayquery_vs_cpu.jl"))
+            include(joinpath(VULKAN_TESTS, "test_aabb_blas_overlap.jl"))
+            include(joinpath(VULKAN_TESTS, "test_instance_masks.jl"))
+        end
+
+            @testset "Tier 3b: Struct Broadcast" begin
+                include(joinpath(VULKAN_TESTS, "test_struct_broadcast.jl"))
+            end
+
+            @testset "Narrow phase (CPU)" begin
+                include(joinpath(VULKAN_TESTS, "test_convex_shape.jl"))
+                include(joinpath(VULKAN_TESTS, "test_gjk.jl"))
+                include(joinpath(VULKAN_TESTS, "test_epa.jl"))
+                include(joinpath(VULKAN_TESTS, "test_narrow_phase_kernel.jl"))
+                include(joinpath(VULKAN_TESTS, "test_contact_record.jl"))
+                include(joinpath(VULKAN_TESTS, "test_narrow_phase_contacts.jl"))
+            end
+
+
+        # ── Tier 3c: Atomics & Batched Dispatch ──
+        @testset "Tier 3c: Atomics & Dispatch" begin
+            include(joinpath(VULKAN_TESTS, "test_atomics_and_dispatch.jl"))
+        end
+
+
+        # ── Tier 3c2: On-kernel printf (DebugPrintf SPIR-V emission) ──
+        # Only the spirv-val emission test runs here; the live-output test resets the
+        # device and is opt-in via LAVA_PRINTF_LIVE=1.
+        @testset "Tier 3c2: @lava_printf" begin
+            include(joinpath(VULKAN_TESTS, "test_lava_printf.jl"))
+        end
+
+
+        # ── Tier 3v: hardware H.264 video decode (skips without a video-decode queue) ──
+        @testset "Tier 3v: H.264 hardware decode" begin
+            include(joinpath(VULKAN_TESTS, "test_video_decode.jl"))
+        end
+
+
+        @testset "video decode layout" begin
+            include(joinpath(VULKAN_TESTS, "test_video_decode_layout.jl"))
+        end
+
+
+        @testset "double-indirect MVector access" begin
+            include(joinpath(VULKAN_TESTS, "test_double_indirect.jl"))
+        end
+
+
+        @testset "Int32 CartesianIndex into Broadcasted" begin
+            include(joinpath(VULKAN_TESTS, "test_int32_cartesian_miscompile.jl"))
+        end
+
+
+        @testset "workgroup size limit" begin
+            include(joinpath(VULKAN_TESTS, "test_workgroup_limit.jl"))
+        end
+
+
+        @testset "fastdiv index decomposition" begin
+            include(joinpath(VULKAN_TESTS, "test_fastdiv.jl"))
+        end
+
+
+        @testset "cooperative-matrix epilogue" begin
+            include(joinpath(VULKAN_TESTS, "test_coopmat_epilogue.jl"))
+        end
+
+
+        @testset "shared stores through a divided index" begin
+            include(joinpath(VULKAN_TESTS, "test_shared_index_division.jl"))
+        end
+
+
+        @testset "staged GEMM" begin
+            include(joinpath(VULKAN_TESTS, "test_gemm_staged.jl"))
+        end
+
+
+        @testset "scalar GEMM accumulator width" begin
+            include(joinpath(VULKAN_TESTS, "test_gemm_fp16_accum.jl"))
+        end
+
+
+        # The scalar half of the same port: `mul!`'s fp32 path, which had no tiling
+        # at all and ran at 0.448 TFLOP/s where this reaches 4.301.
+        @testset "staged scalar GEMM" begin
+            include(joinpath(VULKAN_TESTS, "test_gemm_staged_scalar.jl"))
+        end
+
+
+        @testset "whole-struct copy alignment" begin
+            include(joinpath(VULKAN_TESTS, "test_struct_copy_alignment.jl"))
+        end
+
+
+        @testset "systematic struct alignment" begin
+            include(joinpath(VULKAN_TESTS, "test_struct_alignment_systematic.jl"))
+        end
+
+
+        @testset "pipeline cache avoids driver compilation" begin
+            include(joinpath(VULKAN_TESTS, "test_pipeline_cache_no_compile.jl"))
+        end
+
+
+        # Straight after the reset above, and before `test_static_workgroup.jl` —
+        # which is where this crashed, because that file calls `GC.gc()` explicitly
+        # and so ran whichever finalizer the reset had stranded.
+        @testset "a buffer may outlive a device reset" begin
+            include(joinpath(VULKAN_TESTS, "test_device_reset_finalizer.jl"))
+        end
+
+
+        @testset "static workgroup indexing" begin
+            include(joinpath(VULKAN_TESTS, "test_static_workgroup.jl"))
+        end
+
+
+        # The one field the multi-device work rests on. Needs no second GPU: what it
+        # pins is that "this device" and "whichever is current" stay distinguishable.
+        @testset "a backend knows its device" begin
+            include(joinpath(VULKAN_TESTS, "test_backend_context.jl"))
+        end
+
+
+        # Two live devices in one process — the real GPU and lavapipe, which the
+        # loader enumerates together, so this needs no second card. Asserts both
+        # compute correctly AND that one kernel compiles twice: a shared pipeline
+        # can still give the right answer by luck. See the file for the five
+        # separate pieces of module-scope device state it found.
+        @testset "two devices in one process" begin
+            include(joinpath(VULKAN_TESTS, "twodevice_probe.jl"))
+            probe()
+        end
+
+
+        # Catches an invalid module that the driver accepts and runs correctly, so it
+        # is invisible to every other test unless the device carries
+        # `DebugConfig(validation = true)`.
+        @testset "no OpBitcast on a logical pointer" begin
+            include(joinpath(VULKAN_TESTS, "test_logical_pointer_bitcast.jl"))
+        end
+
+
+        # Only meaningful on a device whose subgroup width is not fixed — on wave32
+        # hardware "requested" and "default" are the same number and nothing is proved.
+        @testset "pinned subgroup width" begin
+            include(joinpath(VULKAN_TESTS, "test_subgroup_size_pinning.jl"))
+        end
+
+
+        # Both halves of the coopmat 32-lane pin: that it is not needed here, and
+        # that the refusal fires when it would be. The second half is unreachable on
+        # any device present, so it drives the capability cache instead.
+        @testset "coopmat 32-lane pin" begin
+            include(joinpath(VULKAN_TESTS, "test_coopmat_subgroup_pin.jl"))
+        end
+
+
+        # A handled allocation failure must absorb its own validation messages, or it
+        # aborts whatever unrelated code calls check_validation_errors! next.
+        @testset "tolerated alloc failure" begin
+            include(joinpath(VULKAN_TESTS, "test_tolerated_alloc_failure.jl"))
+        end
+
+
+        # The frozen path is the one the runners ship, and the profiler could not see
+        # it: 0 kernels reported against 45 live dispatches.
+        @testset "frozen kernels are visible to the profiler" begin
+            include(joinpath(VULKAN_TESTS, "test_frozen_kernels_visible.jl"))
+        end
+
+
+        # `vk_context` had methods for three of AnyLavaArray's six wrappers.
+        @testset "vk_context through array wrappers" begin
+            include(joinpath(VULKAN_TESTS, "test_vk_context_wrappers.jl"))
+        end
+
+
+        # The buffer-lifetime case behind the intermittent flush hang. Asserted on
+        # the state machine, not by provoking the hang — see the file.
+        @testset "free during recording" begin
+            include(joinpath(VULKAN_TESTS, "test_free_during_recording.jl"))
+        end
+
+
+        # ── Previously unregistered test files ──
+        #
+        # These existed in test/ but were never included here. That is not neutral:
+        # of the files found unregistered, three characterised bugs that had since been
+        # FIXED without anyone noticing, one exercised an API deleted three months
+        # earlier, one never waited on its own spawned task, and two had gone stale
+        # against a refactor. Registered so they cannot rot again.
+        #
+        # Still deliberately out: the heavy stress/CI entry points.
+        # (test_struct_alignment_systematic.jl was excluded here while the
+        # whole-struct-copy bug was open; that is fixed, and it is registered above.)
+        @testset "barrier elision" begin
+            include(joinpath(VULKAN_TESTS, "test_barrier_elision.jl"))
+        end
+
+        @testset "broadcast paths" begin
+            include(joinpath(VULKAN_TESTS, "test_broadcast_paths.jl"))
+        end
+
+        @testset "closest_hit via ray query" begin
+            include(joinpath(VULKAN_TESTS, "test_closesthit_via_rayquery.jl"))
+        end
+
+        @testset "coopmat shared memory" begin
+            include(joinpath(VULKAN_TESTS, "test_coopmat_shared.jl"))
+        end
+
+        @testset "batched coopmat GEMM" begin
+            include(joinpath(VULKAN_TESTS, "test_gemm_batched.jl"))
+        end
+
+        @testset "HWAdaptedAccel via ray query" begin
+            include(joinpath(VULKAN_TESTS, "test_hwadapted_via_rayquery.jl"))
+        end
+
+        @testset "hwtlas batch delete" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_batch_delete.jl"))
+        end
+
+        @testset "hwtlas batch triangles" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_batch_triangles.jl"))
+        end
+
+        @testset "hwtlas instance buffer" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_instance_buffer.jl"))
+        end
+
+        @testset "hwtlas push instances" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_push_instances.jl"))
+        end
+
+        @testset "hwtlas refit" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_refit.jl"))
+        end
+
+        @testset "hwtlas sync batch" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_sync_batch.jl"))
+        end
+
+        @testset "instance record" begin
+            include(joinpath(VULKAN_TESTS, "test_instance_record.jl"))
+        end
+
+        @testset "permutedims" begin
+            include(joinpath(VULKAN_TESTS, "test_permutedims.jl"))
+        end
+
+        @testset "phase 1 — pin/sync_access" begin
+            include(joinpath(VULKAN_TESTS, "test_phase1_pin.jl"))
+        end
+
+        @testset "phase 2 — error surfacing" begin
+            include(joinpath(VULKAN_TESTS, "test_phase2_errors.jl"))
+        end
+
+        @testset "phase 3 — lifecycle" begin
+            include(joinpath(VULKAN_TESTS, "test_phase3_lifecycle.jl"))
+        end
+
+        @testset "phase 4 — single writer" begin
+            include(joinpath(VULKAN_TESTS, "test_phase4_singlethread.jl"))
+        end
+
+        @testset "phase 5 — transfer path" begin
+            include(joinpath(VULKAN_TESTS, "test_phase5_copy.jl"))
+        end
+
+        @testset "phase 6 — graphics dispatch" begin
+            include(joinpath(VULKAN_TESTS, "test_phase6_graphics.jl"))
+        end
+
+        @testset "pool size classes" begin
+            include(joinpath(VULKAN_TESTS, "test_pool_sizeclass.jl"))
+        end
+
+        @testset "source mapping" begin
+            include(joinpath(VULKAN_TESTS, "test_source_mapping.jl"))
+        end
+
+        @testset "tlas allow_update" begin
+            include(joinpath(VULKAN_TESTS, "test_tlas_allow_update.jl"))
+        end
+
+        @testset "tlas refit" begin
+            include(joinpath(VULKAN_TESTS, "test_tlas_refit.jl"))
+        end
+
+        @testset "tlas refit integration" begin
+            include(joinpath(VULKAN_TESTS, "test_tlas_refit_integration.jl"))
+        end
+
+        @testset "trace cull mask" begin
+            include(joinpath(VULKAN_TESTS, "test_trace_cull_mask.jl"))
+        end
+
+        @testset "typepun trunc/bitcast" begin
+            include(joinpath(VULKAN_TESTS, "test_typepun_trunc_bitcast.jl"))
+        end
+
+            @testset "Tier 3d: SPIR-V Pattern Correctness & Stress" begin
+                include(joinpath(VULKAN_TESTS, "test_spirv_pattern_correctness.jl"))
+                include(joinpath(VULKAN_TESTS, "test_loop_unswitch_miscompile.jl"))
+                include(joinpath(VULKAN_TESTS, "test_psb_chain_fold.jl"))
+                include(joinpath(VULKAN_TESTS, "test_repeat_inner_3d.jl"))
+                include(joinpath(VULKAN_TESTS, "test_multiindex_getindex.jl"))
+            end
+
+            @testset "Tier 3e: GPU Memory Safety" begin
+                include(joinpath(VULKAN_TESTS, "test_gpu_memory_safety.jl"))
+            end
+
+            @testset "Tier 3e2: BAR Memcpy Sync" begin
+                include(joinpath(VULKAN_TESTS, "test_bar_memcpy_sync.jl"))
+            end
+
+            @testset "Tier 3e3: MultiTypeSet Surgical" begin
+                include(joinpath(VULKAN_TESTS, "test_multitypeset_surgical.jl"))
+            end
+
+            @testset "Tier 3f: Caching & Allocations" begin
+                include(joinpath(VULKAN_TESTS, "test_caching_and_allocations.jl"))
+            end
+
+
+        # ── Tier 3h: Disk Cache & Two-Tier Caching ──
+        @testset "Tier 3h: Kernel Cache" begin
+            include(joinpath(VULKAN_TESTS, "test_disk_cache.jl"))
+            # Fixed per-kernel compile overhead (ungated IR dump, subprocess poll
+            # quantisation). Lives here because it is about what a compile costs
+            # when the cache does NOT save you.
+            include(joinpath(VULKAN_TESTS, "test_compile_overhead.jl"))
+        end
+
+
+        # ── Tier 3g: Graphics Pipeline ──
+        @testset "Tier 3g: Graphics Pipeline" begin
+            include(joinpath(VULKAN_TESTS, "test_graphics_pipeline.jl"))
+        end
+
+            @testset "Tier 4: GPUArrays TestSuite" begin
+                include(joinpath(VULKAN_TESTS, "test_gpuarrays.jl"))
+            end
+
+            @testset "HW TLAS — stress + correctness" begin
+                include(joinpath(VULKAN_TESTS, "test_hwtlas_stress.jl"))
+            end
+
+
+            @testset "HW TLAS — mesh update" begin
+                include(joinpath(VULKAN_TESTS, "test_hwtlas_mesh_update.jl"))
+            end
+
+
+            @testset "HW TLAS — UAF safety" begin
+                include(joinpath(VULKAN_TESTS, "test_hwtlas_uaf_safety.jl"))
+            end
+
+
+            @testset "pinned buffer lifetime" begin
+                include(joinpath(VULKAN_TESTS, "test_pinned_buffer_lifetime.jl"))
+            end
+
+
+            @testset "workgroup zero-init" begin
+                include(joinpath(VULKAN_TESTS, "test_workgroup_zero_init.jl"))
+            end
+
+
+            @testset "pool trim" begin
+                include(joinpath(VULKAN_TESTS, "test_pool_trim.jl"))
+            end
+
+
+            # Was never included, and had been throwing `UndefVarError` on the first
+            # line of every testset since the deferred-free list went per-BatchQueue.
+            @testset "rapid alloc/free" begin
+                include(joinpath(VULKAN_TESTS, "test_rapid_alloc_free.jl"))
+            end
+
+
+            @testset "Diagonal mul! disambiguation" begin
+                include(joinpath(VULKAN_TESTS, "test_diagonal_mul.jl"))
+            end
+
+
+            @testset "device capabilities" begin
+                include(joinpath(VULKAN_TESTS, "test_device_caps.jl"))
+            end
+
+
+            @testset "debug configuration" begin
+                include(joinpath(VULKAN_TESTS, "test_debug_config.jl"))
+                include(joinpath(VULKAN_TESTS, "test_dispatch_allocation.jl"))
+            end
+
+
+            @testset "batched 1D FFT" begin
+                include(joinpath(VULKAN_TESTS, "test_fft.jl"))
+            end
+
+
+            @testset "batch-1 GEMV" begin
+                include(joinpath(VULKAN_TESTS, "test_gemv.jl"))
+            end
+
+
+            @testset "coopmat shape query" begin
+                include(joinpath(VULKAN_TESTS, "test_coopmat_shape.jl"))
+            end
+
+
+            @testset "coopmat GEMM subgroup guard" begin
+                include(joinpath(VULKAN_TESTS, "test_coopmat_gemm_subgroup.jl"))
+            end
+
+
+            @testset "subgroup shuffle family" begin
+                include(joinpath(VULKAN_TESTS, "test_subgroup_shuffle.jl"))
+            end
+
+
+            @testset "coopmat per-element and component-wise ops" begin
+                include(joinpath(VULKAN_TESTS, "test_coopmat_perelement.jl"))
+            end
+
+
+            @testset "coopmat component-wise add" begin
+                include(joinpath(VULKAN_TESTS, "test_coopmat_add.jl"))
+            end
+
+
+            @testset "coopmat reductions (NV)" begin
+                include(joinpath(VULKAN_TESTS, "test_coopmat_reduce.jl"))
+            end
+
+
+            # test_frozen_cache.jl shipped unregistered, so the compute-side frozen
+            # cache had no coverage in CI. It restores FROZEN_VERSION by plain
+            # assignment, so a throw part-way through would leave the cache ENABLED
+            # for every later testset here — silently, since a frozen hit looks like
+            # a normal launch. Restore it from a finally block instead.
+            @testset "frozen kernel cache (compute)" begin
+                _fv, _fr = Lava.FROZEN_VERSION[], Lava.FROZEN_RECORDING[]
+                try
+                    include(joinpath(VULKAN_TESTS, "test_frozen_cache.jl"))
+                finally
+                    Lava.FROZEN_VERSION[]   = _fv
+                    Lava.FROZEN_RECORDING[] = _fr
+                end
+
+
+            @testset "HW TLAS — nonblocking sync!" begin
+                include(joinpath(VULKAN_TESTS, "test_hwtlas_nonblocking_sync.jl"))
+            end
+
+            @testset "arg-slab mid-recording sweep" begin
+                include(joinpath(VULKAN_TESTS, "test_argslab_midrecording_sweep.jl"))
+            end
+
+            @testset "indirect in concurrent group" begin
+                include(joinpath(VULKAN_TESTS, "test_indirect_in_concurrent_group.jl"))
+            end
+
+            @testset "indirect in concurrent group" begin
+                include(joinpath(VULKAN_TESTS, "test_indirect_in_concurrent_group.jl"))
+            end
+            include(joinpath(VULKAN_TESTS, "test_crossqueue_sync.jl"))
+            # A recorded copy has to outlive the value that was copied FROM, even
+            # when nothing holds it. Its own file because no render test reaches it:
+            # only device→device from a temporary is affected.
+            @testset "copyto! from a dropped source" begin
+                include(joinpath(VULKAN_TESTS, "test_copyto_dropped_source.jl"))
+            end
+
+            # Who owns a queue from `allocate_batch_queue!`. A dropped one used to
+            # let its timeline semaphore be finalized while buffers still named it,
+            # and the buffer finalizer's `vkGetSemaphoreCounterValue` then segfaulted
+            # inside the driver.
+            @testset "batch queue lifetime" begin
+                include(joinpath(VULKAN_TESTS, "test_batch_queue_lifetime.jl"))
+            end
+
+            # A `transpose(::LavaArray)` destination is not a `LavaArray` and used to
+            # miss every `mapreducedim!` method here. Its own file because the
+            # assertions have to read the destination's parent storage, which is the
+            # only place `adjoint`'s conjugation is visible.
+            @testset "mapreducedim! into transposed destinations" begin
+                include(joinpath(VULKAN_TESTS, "test_mapreduce_transposed.jl"))
+            end
+
+            # Lava's GEMM kernels need a numeric element type; anything else belongs
+            # to `GPUArrays.generic_matmatmul!`. Its own file because it defines a
+            # struct at top level to be the non-numeric element type.
+            @testset "mul! with a non-numeric element type" begin
+                include(joinpath(VULKAN_TESTS, "test_mul_nonnumeric_eltype.jl"))
+            end
+
+            @testset "compute" begin
+                include(joinpath(VULKAN_TESTS, "mwe_alloc_dispatch_free_loop.jl"))
+            end
+
+            @testset "RT direct" begin
+                include(joinpath(VULKAN_TESTS, "mwe_rt_alloc_dispatch_free_loop.jl"))
+            end
+
+            @testset "RT indirect + busy" begin
+                include(joinpath(VULKAN_TESTS, "mwe_indirect_rt_busy_loop.jl"))
+            end
+
+            @testset "12 distinct kernels" begin
+                include(joinpath(VULKAN_TESTS, "mwe_distinct_kernels_per_iter.jl"))
+            end
+
+            @testset "SoA workqueue" begin
+                include(joinpath(VULKAN_TESTS, "mwe_soa_workqueue_per_iter.jl"))
+            end
+
+            @testset "VolPath shape" begin
+                include(joinpath(VULKAN_TESTS, "mwe_volpath_shape_per_iter.jl"))
+            end
+
+            @testset "GPU-AV clean" begin
+                include(joinpath(VULKAN_TESTS, "test_gpuav_clean.jl"))
+            end
+end
+

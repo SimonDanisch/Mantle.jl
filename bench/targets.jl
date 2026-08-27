@@ -63,13 +63,13 @@ end
 
 """Bytes an arena holds, per arena, so the image saving is visible on its own."""
 function arenas(plan)
-    E = Base.get_extension(Mantle, :MantleLavaExt)
+    E = Mantle
     Dict(string(nameof(typeof(E.arena(plan.graph.transients[first(s.indices)])))) => s.bytes
          for s in plan.slabs)
 end
 
 function measure_targets(frames = 300; n = 200_000)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "mantle: transient targets", vsync = false)
     s = build_targets(dev, n)
     loose = build_targets(dev, n; alias = false)
@@ -79,14 +79,14 @@ function measure_targets(frames = 300; n = 200_000)
     t0 = time()
     for _ in 1:frames
         isopen(win) || break
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         tf = time()
         s.mvp[] = camera(0.4f0 * Float32(time() - t0))
         acquire_next_image!(win)
         M.run!(s.plan)
         blit!(bq, WindowTarget(win), M.storage(s.out))
         present_frame!(bq, win)
-        Lava.flush!(bq, dev.ctx.device)
+        Mantle.flush!(bq, dev.ctx.device)
         push!(times, time() - tf)
     end
     img = readback_window(win)

@@ -31,7 +31,7 @@
 #     declared read-write by every pass that takes any, which is what the
 #     collision is.
 #   * launches *within* one op — `record_pass!` lifts the concurrent group around
-#     a custom body for exactly this reason; see `Lava.exclusive_dispatch_group`.
+#     a custom body for exactly this reason; see `Mantle.exclusive_dispatch_group`.
 #
 # ── measured, SAM 2.1 large, RADV STRIX_HALO ─────────────────────────────────
 #
@@ -168,7 +168,7 @@ function benchgraph(model, args...; iters::Int = 20, name::AbstractString = "sam
     m = model.model                        # the DNNKernels `Model` behind the SAM2
     graph = m.graphs[name]
     dims = model.dims
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     backend = m.backend
     # The decoder's attentions are 23 tokens and want the padded cooperative-matrix
     # path; the encoder has six that would go along at 50% waste. `sam2.jl` measures

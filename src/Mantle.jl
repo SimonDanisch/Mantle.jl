@@ -1,11 +1,55 @@
 module Mantle
 
-# The matrix vocabulary is shared with Lava, which cannot be a dependency here —
-# Mantle weak-depends on Lava for `MantleLavaExt`, so an edge back would close a
-# cycle. `supports`/`bestshape` are imported by name because `DeviceCaps` methods
-# below extend them rather than defining a second pair.
-using KernelInterfaces
-import KernelInterfaces: supports, bestshape
+# The device vocabulary, shared with Lava. It lives in `KernelInterface`, which
+# exports nothing on purpose, so the names are listed.
+#
+# It went there while Lava could NOT be a dependency here — Mantle weak-depended
+# on it, so an edge back would have closed a cycle. That is no longer why: since
+# 2026-08-27 Mantle depends on Lava outright. It stays in KI because a Metal
+# backend has to name `MatrixShape` and `DeviceCaps` too, and making it import a
+# SPIR-V compiler for them would be absurd.
+#
+# `DeviceCaps` and the matrix types were each written twice, here and in Lava,
+# and bridged by a positional copy in `MantleLavaExt`. Both copies are deleted:
+# there is one type, and `caps` fills it in.
+using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
+    MatrixScope, SubgroupScope, WorkgroupScope, MatrixShape, DeviceCaps
+# `import`, not `using … :` — these get `Mantle.Device` methods below, and
+# `caps` in particular becomes one function with a `Device` method here and a
+# `KI.Backend` method in each backend.
+import KernelInterface: supports, bestshape, caps, matrix_shapes, wggranularity
+
+# What the Vulkan backend below needs. These arrived with the runtime that moved
+# here from Lava, and they are hard dependencies rather than an extension's
+# because the backend is part of this package now — the same reason `caps` and
+# `DeviceCaps` stopped being two things.
+import Serialization
+import PrecompileTools
+# BOTH, and both are needed. `using` binds the ~60 names the moved runtime calls
+# unqualified — `unwrap`, `cmd_dispatch`, `DeviceMemory`, the `FORMAT_*` and
+# `ERROR_*` constants — exactly as it did when that code lived in Lava. `as VK`
+# gives the qualified spelling the same code uses for the rest.
+#
+# This is only possible because the backend markers are `VulkanAPI`/`MetalAPI`
+# and not `Vulkan`/`Metal`: a marker named after its package shadows it here.
+using Vulkan
+import Vulkan as VK
+using GPUCompiler
+using LLVM
+using LLVM: API
+using GPUArrays
+using GPUArraysCore
+using KernelAbstractions
+using Adapt
+using Atomix
+using UnsafeAtomics
+using AcceleratedKernels
+using SPIRV_Tools_jll
+using LinearAlgebra
+using StaticArrays
+using GeometryBasics
+using Raycore: Ray
+import GLFW
 
 include("memory/interval.jl")
 include("memory/model.jl")
@@ -24,6 +68,12 @@ include("runtime/dispatch.jl")
 include("phases.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
+# ── the Vulkan backend ────────────────────────────────────────────────────────
+# Lava's runtime, moved here 2026-08-27. See `vulkan/vulkan.jl` for what had to
+# be untangled first and why these are included into `Mantle` rather than a
+# submodule. Last, because every method in it is a method on something above.
+include("vulkan/vulkan.jl")
+
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is deliberately not exported: it is a Span predicate nothing outside
 # this package calls, and GeometryBasics exports the same name.
@@ -36,7 +86,7 @@ export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints
 export readproblem
 
-export Backend, Vulkan, Metal, WebGPU, Host
+export Backend, VulkanAPI, MetalAPI, WebGPUAPI, HostAPI
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Uniform, Sampled, Present, Undefined
@@ -66,7 +116,7 @@ export PHASES, compile!
 # the one a Makie-shaped caller means — `update!(plot; positions = …)` sets an
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
-export run!, npipelines, capacity, use, peakbytes, storage, custom!, free!
+export run!, npipelines, capacity, use, peakbytes, naivebytes, storage, custom!, free!
 export bake!, baked, rebind!, rebindable
 export timings, PassTiming, NSAMPLES
 
@@ -164,7 +214,21 @@ rebindable(plan) = true
 
 function update! end
 function use end
-function peakbytes end
+
+"""
+    peakbytes(plan) -> Int
+    naivebytes(plan) -> Int
+
+Bytes a plan actually reserved for transients — the maximum cross section — and
+what allocating every transient separately would have cost. The pair is the whole
+report on whether aliasing bought anything.
+
+Both read a field, and both did so identically in every backend, so the method is
+here and a `Plan` supplies the fields. `Plan` is the right place for it rather
+than a per-backend accessor: the numbers come out of `Analysis`, which is core's.
+"""
+peakbytes(pl::Plan) = pl.peak
+@doc (@doc peakbytes) naivebytes(pl::Plan) = pl.naive
 """
     storage(x)
 
@@ -216,6 +280,33 @@ function custom!(f, g::Graph, name::AbstractString)
     push!(passes(g), p)
     push!(dispatches(p), custombody(f(handle(g, p))))
     return p
+end
+
+"""
+Everything that needs a live device, at load.
+
+Lava had this and kept the compiler half of it; these two are the device half and
+came here with `runtime/device.jl` on 2026-08-27. Leaving them behind was not
+theoretical: without the `atexit` hook, a `LavaArray` finalizer running during
+Julia's shutdown sweep calls `query_timeline` on a semaphore whose device is
+already gone, and the process takes a SIGSEGV inside the driver — reproduced
+immediately after the move, which is how the omission was found.
+"""
+function __init__()
+    # The pipeline builder thread. Pipelines are created off the main thread so a
+    # first launch does not block on the driver's compiler.
+    init_pipeline_thread!()
+
+    # Mark the device lost during shutdown so GC finalizers do not call into the
+    # Vulkan driver after it has been torn down. `atexit` runs BEFORE Julia's
+    # global finalizer sweep, which is the whole point — a finalizer that reaches
+    # a dead device segfaults inside the driver, where no Julia `try` can catch
+    # it and no stack trace names the buffer that did it.
+    atexit() do
+        ctx = VK_CONTEXT_REF[]
+        ctx === nothing || mark_device_lost!(ctx)
+        bind_context!(nothing)
+    end
 end
 
 end

@@ -36,7 +36,7 @@ end
 HostDevice(backend) = HostDevice(backend, Mantle.Pool())
 Mantle.pool(d::HostDevice) = d.pool
 """
-    Device(Host())              # KA.CPU()
+    Device(HostAPI())              # KA.CPU()
     Device(KA.CPU())
     Device(LavaBackend())       # or CUDABackend, MetalBackend, …
 
@@ -55,12 +55,14 @@ a KA launch, `render!` is a render pass, `custom!` is anything else. A model use
 `dispatch!` and never touches `render!` — same graph, same device, same pool as
 an editor's chain. There is nothing for a second backend to add.
 
-Dispatched on the backend TAG, never on the module: `MantleLavaExt` defines
-`Device(::typeof(Lava))` and `typeof(Lava)` is `Module`, so a
-`Device(::typeof(KernelAbstractions))` here would be the SAME signature and
-whichever extension loaded second would silently replace the other.
+Dispatched on the backend TAG, never on the module. The Vulkan backend used to
+define `Device(::typeof(Lava))`, and `typeof(Lava)` is `Module` — so a
+`Device(::typeof(KernelAbstractions))` here would have been the SAME signature,
+and whichever loaded second would silently replace the other. Both are markers
+now, `HostAPI()` and `VulkanAPI()`, which makes them different methods by
+construction.
 """
-Mantle.Device(::Mantle.Host) = HostDevice(KA.CPU())
+Mantle.Device(::Mantle.HostAPI) = HostDevice(KA.CPU())
 Mantle.Device(b::KA.CPU) = HostDevice(b)
 Mantle.backend(d::HostDevice) = d.backend
 
@@ -176,7 +178,10 @@ Mantle.Graph(dev::HostDevice) =
     HostGraph(dev, HostPass[], HostTransient[], Mantle.IdTable(),
               Dict{Int,HostTransient}(), Any[])
 
-resourceid(g::HostGraph, r) = Mantle.resourceid(g.ids, r)
+# `resourceid(g::HostGraph, r)` is NOT defined here. `Mantle.resourceid(g::Graph, r)`
+# (runtime/dispatch.jl) is the same line, `HostGraph <: Mantle.Graph`, and Mantle
+# exports it — so this was a SECOND function of the same name in this module,
+# agreeing with core's by coincidence rather than by construction.
 
 function Mantle.Transient.Buffer(g::HostGraph, ::Type{T}, n::Integer) where {T}
     t = HostTransient{T}(Int(n), typemax(Int), 0, nothing)
@@ -243,7 +248,7 @@ function Mantle.Update(g::HostGraph, buf; range = nothing)
 end
 
 # ── the compilation context ───────────────────────────────────────────────────
-mutable struct Compile
+mutable struct Compile <: Mantle.Compilation
     graph::HostGraph
     alias::Bool
     policy::Mantle.Policy
@@ -253,18 +258,14 @@ end
 Compile(g::HostGraph; alias = true, policy = Mantle.Overlap()) =
     Compile(g, alias, policy, Mantle.Analysis(), Any[])
 
-# The thirteen methods core's phases ask of a context. That this list is short
-# and dull is the point of the lift.
-Mantle.analysis(c::Compile) = c.analysis
-Mantle.passes(c::Compile) = c.graph.passes
-Mantle.policy(c::Compile) = c.policy
-Mantle.alias(c::Compile) = c.alias
-Mantle.transients(c::Compile) = c.graph.transients
-Mantle.transientbyid(c::Compile) = c.graph.transient_by_id
+# What core's phases ask of a context, and it is now only what DIFFERS. The
+# seven field accessors — `analysis`, `passes`, `policy`, `alias`, `transients`,
+# `transientbyid`, `device` — were the same line here and in the Lava extension,
+# so they come from `Mantle.Compilation` and neither backend writes them.
+#
 # No slices on this backend, so two ids name the same bytes exactly when they are
 # the same id — which the `overlapping` docstring says is the floor.
 Mantle.overlapping(::Compile, a::Int, b::Int) = a == b
-Mantle.device(c::Compile) = c.graph.dev
 Mantle.pool(c::Compile) = Mantle.pool(c.graph.dev)
 
 # The four primitives core asks of a backend. No policy here: which block, what
@@ -290,7 +291,7 @@ function Mantle.materialize!(t::HostTransient{T}, slab::Vector{UInt8}, offset::I
 end
 
 # ── barriers and pipelines: nothing to do, said explicitly ────────────────────
-"""Nothing to emit. See `needs_transition(::Host, …)` — the scheduled order is
+"""Nothing to emit. See `needs_transition(::HostAPI, …)` — the scheduled order is
 the synchronisation on this backend."""
 Mantle.run!(::Mantle.Barriers, c::Compile) = c
 
@@ -408,8 +409,8 @@ function Mantle.Plan(g::HostGraph; alias = true, policy = Mantle.Overlap())
     return pl
 end
 
-Mantle.peakbytes(pl::HostPlan) = pl.peak
-naivebytes(pl::HostPlan) = pl.naive
+# `peakbytes`/`naivebytes` are NOT defined here. `HostPlan <: Mantle.Plan` and
+# both read a field the same way in every backend, so core owns them.
 
 """
 One frame: call the baked steps in the order compile settled on.

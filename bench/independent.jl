@@ -56,17 +56,17 @@ end
 nbarriers(plan) = count(pp -> !isempty(pp.pre), plan.passes)
 
 function run_bench(; n = 1 << 20, chains = 4, stages = 6, iters = 200)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     s = build_interleaved(dev, n, chains, stages)
     npasses = chains * stages
 
     function time_it(mode)
-        M.run!(s.plan; barriers = mode); Lava.flush!(dev.bq, dev.ctx.device)
+        M.run!(s.plan; barriers = mode); Mantle.flush!(dev.bq, dev.ctx.device)
         ts = Float64[]
         for _ in 1:iters
             t = time()
             M.run!(s.plan; barriers = mode)
-            Lava.flush!(dev.bq, dev.ctx.device)
+            Mantle.flush!(dev.bq, dev.ctx.device)
             push!(ts, time() - t)
         end
         q = sort(ts)
@@ -77,7 +77,7 @@ function run_bench(; n = 1 << 20, chains = 4, stages = 6, iters = 200)
      barriers_derived = nbarriers(s.plan),
      barriers_backend = npasses - 1,
      peak_mb = round(M.peakbytes(s.plan) / 2^20, digits = 2),
-     naive_mb = round(Base.get_extension(Mantle, :MantleLavaExt).naivebytes(s.plan) / 2^20, digits = 2),
+     naive_mb = round(Mantle.naivebytes(s.plan) / 2^20, digits = 2),
      derived_ms = time_it(:derived),
      backend_ms = time_it(:backend))
 end

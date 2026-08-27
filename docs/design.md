@@ -247,7 +247,7 @@ Done, on `sd/mantle-dev` and not yet pushed:
 * **What a second backend costs, measured.** Against `sd/mantle-dev`, the merge
   moved the allocator, placement, the capacity bound, `UpdateRef`, the `custom!`
   contract, the id table, the pass protocol and plan teardown into `src/`, while
-  `ext/MantleLavaExt.jl` SHRANK — it gained `bake!` and lost more than that to
+  the Vulkan backend (then `ext/MantleLavaExt.jl`) SHRANK — it gained `bake!` and lost more than that to
   core. `MantleHostExt.jl` is 363 lines for a whole second backend, which is the
   number that says whether the split is real: it implements primitives and no
   policy, and its own barrier method is "nothing to emit".

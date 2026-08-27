@@ -630,7 +630,7 @@ for i in 1:NLIGHT                          # the sources ride along as instances
     push!(boxpar, Vec4f(0, 1, 0, 0))
 end
 
-dev = M.Device(Lava)
+dev = M.Device(M.VulkanAPI())
 win = M.Window(W, H; title = "mantle: crystal field", vsync = false)
 
 pp = M.Buffer(dev, protopos)

@@ -97,7 +97,7 @@ function check(dev, seed; n = 4096, passes = 12, policy = M.Overlap())
     function once(mode)
         M.update!(s.seed, fill(1.0f0, n))
         M.run!(s.plan; barriers = mode)
-        Lava.flush!(dev.bq, dev.ctx.device)
+        Mantle.flush!(dev.bq, dev.ctx.device)
         Array(M.storage(s.out))
     end
     reference = once(:backend)
@@ -119,10 +119,10 @@ end
 
 """Sweep seeds. With validation on, `messages` is the number that matters."""
 function fuzz(seeds = 1:25; n = 4096, passes = 12, validate = false, policy = M.Overlap())
-    dev = M.Device(Lava)
-    validate && Lava.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
+    validate && Mantle.clear_validation_messages!()
     results = [check(dev, s; n, passes, policy) for s in seeds]
-    msgs = validate ? Lava.get_validation_messages() : []
+    msgs = validate ? Mantle.get_validation_messages() : []
     (cases = length(results),
      wrong = count(r -> !r.correct, results),
      disagreements = count(r -> !r.agree, results),

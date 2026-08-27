@@ -57,11 +57,42 @@ end
 Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
                       Dict{Int,Vector{Tuple{Int,Int}}}(), Any[], Any[])
 
-"""The [`Analysis`](@ref) a compilation context carries. One method per backend."""
+"""
+    Compilation
+
+The state a compilation carries between phases, as far as the phases are
+concerned. A backend subtypes this for its own context.
+
+**Six of the accessors below then come for free**, because they were the same
+line in every backend. Both extensions had written, verbatim:
+
+    analysis(c)      = c.analysis
+    passes(c)        = c.graph.passes
+    policy(c)        = c.policy
+    alias(c)         = c.alias
+    transients(c)    = c.graph.transients
+    transientbyid(c) = c.graph.transient_by_id
+    device(c)        = c.graph.dev
+
+Field access rather than a method per backend, and that is a real contract rather
+than a convenience: a `Compilation` **must** have `analysis`, `alias` and
+`policy` fields and a `graph` field whose value has `passes`, `transients`,
+`transient_by_id` and `dev`. A backend whose context is shaped differently
+overrides the accessor, which is ordinary dispatch and costs it nothing.
+
+What stays per backend is what actually differs: `pool` (where the memory comes
+from), `overlapping` (whether this backend has slices), and `usages` (how a pass
+records them).
+"""
+abstract type Compilation end
+
+"""The [`Analysis`](@ref) a compilation context carries."""
 function analysis end
+analysis(c::Compilation) = c.analysis
 
 """The passes a context is compiling, in DECLARATION order."""
 function passes end
+passes(c::Compilation) = c.graph.passes
 
 """A pass's declared resource usages, as `id => Usage` pairs."""
 function usages end
@@ -80,9 +111,11 @@ function overlapping end
 
 """The scheduling [`Policy`](@ref) a context was built with."""
 function policy end
+policy(c::Compilation) = c.policy
 
 """The device a context compiles for. Where its [`Pool`](@ref) lives."""
 function device end
+device(c::Compilation) = c.graph.dev
 
 """
 The device's [`Pool`](@ref) — one per memory kind, owned by the device and never
@@ -104,12 +137,15 @@ blocksize(dev) = 64 << 20
 timeline, which is a bisection tool rather than a tuning knob — it is how the
 aliasing hazard was isolated."""
 function alias end
+alias(c::Compilation) = c.alias
 
 """Every transient the graph declared, in declaration order."""
 function transients end
+transients(c::Compilation) = c.graph.transients
 
 """`id => transient` for the ids passes name them by."""
 function transientbyid end
+transientbyid(c::Compilation) = c.graph.transient_by_id
 
 # Transient accessors. A backend answers these for whatever it uses to represent
 # one; the phases never look inside.

@@ -40,13 +40,13 @@ function run(frames = 600)
 
     gpos = LavaArray(pts); gcol = LavaArray(cols); gsiz = LavaArray(Float32[2.0f0])
     win = RenderWindow(W, H; title = "baseline", vsync = false)
-    bq = Lava.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
 
     times = Float64[]
     t0 = time()
     for k in 1:frames
         isopen(win) || break
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         tf = time()
         acquire_next_image!(win)
         draw!(bq, POINTS, WindowTarget(win), N;

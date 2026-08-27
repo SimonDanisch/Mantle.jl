@@ -37,7 +37,7 @@ built without the layer produces no messages, which reads the same as a device
 that produced none.
 """
 function requiresync()
-    ctx = Lava.vk_context()
+    ctx = Mantle.vk_context()
     ctx.debug.sync_val || error(
         "this device has no synchronization validation. It is fixed at device " *
         "creation, so call `syncdevice!()` first — and note that invalidates " *
@@ -47,22 +47,22 @@ end
 
 function validate(frames = 60; na = 20_000, nb = 10_000)
     requiresync()
-    Lava.clear_validation_messages!()
-    dev = M.Device(Lava)
+    Mantle.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "validate", vsync = false)
     s = build(dev, win, na, nb)
 
     for k in 1:frames
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         s.mvp[] = camera(0.01f0 * k)
         M.run!(s.plan)
     end
-    Lava.flush!(dev.bq, dev.ctx.device)
-    during = copy(Lava.get_validation_messages())
+    Mantle.flush!(dev.bq, dev.ctx.device)
+    during = copy(Mantle.get_validation_messages())
 
     img = readback_window(win)
     close(win)
-    after = Lava.get_validation_messages()
+    after = Mantle.get_validation_messages()
 
     bg = img[1, 1]
     (frames = frames,
@@ -82,20 +82,20 @@ cannot see that the two are the same memory.
 """
 function validate_targets(frames = 20; n = 50_000)
     requiresync()
-    Lava.clear_validation_messages!()
-    dev = M.Device(Lava)
+    Mantle.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "validate targets", vsync = false)
     s = build_targets(dev, n)
     for k in 1:frames
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         s.mvp[] = camera(0.01f0 * k)
         acquire_next_image!(win)
         M.run!(s.plan)
         blit!(dev.bq, WindowTarget(win), M.storage(s.out))
         present_frame!(dev.bq, win)
-        Lava.flush!(dev.bq, dev.ctx.device)
+        Mantle.flush!(dev.bq, dev.ctx.device)
     end
-    msgs = Lava.get_validation_messages()
+    msgs = Mantle.get_validation_messages()
     close(win)
     (frames = frames,
      image_arena = only(b.bytes for b in s.plan.slabs if b.bytes < 8_000_000),
@@ -115,8 +115,8 @@ the read is a storage load in the vertex shader and `Vertices` lowers to that.
 """
 function validate_updates(frames = 20; n = 20_000)
     requiresync()
-    Lava.clear_validation_messages!()
-    dev = M.Device(Lava)
+    Mantle.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "validate updates", vsync = false)
 
     pts = cloud(n)
@@ -134,7 +134,7 @@ function validate_updates(frames = 20; n = 20_000)
     tinted = [Vec4f(0.1, 0.02, 0.02, 1) for _ in 1:100]
     ondevice = M.Buffer(dev, cloud(n))                   # a device-side source
     for k in 1:frames
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         mvp[] = camera(0.01f0 * k)
         # All three routes: whole-buffer from the host, partial from the host,
         # and whole-buffer from a device array, which copies device to device and
@@ -144,9 +144,9 @@ function validate_updates(frames = 20; n = 20_000)
         r == 2 ? part(tinted) :
                  whole(M.storage(ondevice))
         M.run!(plan)
-        Lava.flush!(dev.bq, dev.ctx.device)
+        Mantle.flush!(dev.bq, dev.ctx.device)
     end
-    msgs = Lava.get_validation_messages()
+    msgs = Mantle.get_validation_messages()
     close(win)
     (frames = frames, messages = length(msgs), detail = unique(msgs))
 end
@@ -162,8 +162,8 @@ RADV renders a wrong-but-tolerated barrier exactly like a right one.
 """
 function validate_depth(frames = 20; n = 20_000)
     requiresync()
-    Lava.clear_validation_messages!()
-    dev = M.Device(Lava)
+    Mantle.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "validate depth", vsync = false)
 
     depth_frag(inputs) = inputs.color
@@ -184,12 +184,12 @@ function validate_depth(frames = 20; n = 20_000)
     plan = M.Plan(g)
 
     for k in 1:frames
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         mvp[] = camera(0.01f0 * k)
         M.run!(plan)
-        Lava.flush!(dev.bq, dev.ctx.device)
+        Mantle.flush!(dev.bq, dev.ctx.device)
     end
-    msgs = Lava.get_validation_messages()
+    msgs = Mantle.get_validation_messages()
     close(win)
     (frames = frames, messages = length(msgs), detail = unique(msgs))
 end
@@ -204,8 +204,8 @@ right on screen.
 """
 function validate_mrt(frames = 20; n = 20_000)
     requiresync()
-    Lava.clear_validation_messages!()
-    dev = M.Device(Lava)
+    Mantle.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "validate mrt", vsync = false)
 
     two_frag(inputs) = (inputs.color, Vec4f(0, 1, 0, 1))
@@ -229,28 +229,28 @@ function validate_mrt(frames = 20; n = 20_000)
     plan = M.Plan(g)
 
     for k in 1:frames
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         mvp[] = camera(0.01f0 * k)
         M.run!(plan)
-        Lava.flush!(dev.bq, dev.ctx.device)
+        Mantle.flush!(dev.bq, dev.ctx.device)
     end
-    msgs = Lava.get_validation_messages()
+    msgs = Mantle.get_validation_messages()
     close(win)
     (frames = frames, messages = length(msgs), detail = unique(msgs))
 end
 
 """The detector has to be known to fire, or a clean run means nothing."""
 function selftest()
-    Lava.clear_validation_messages!()
-    dev = M.Device(Lava)
+    Mantle.clear_validation_messages!()
+    dev = M.Device(M.VulkanAPI())
     try
-        Lava.Vulkan.Buffer(dev.ctx.device, 0, Lava.Vulkan.BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                           Lava.Vulkan.SHARING_MODE_EXCLUSIVE, UInt32[])
+        Mantle.VK.Buffer(dev.ctx.device, 0, Mantle.VK.BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                           Mantle.VK.SHARING_MODE_EXCLUSIVE, UInt32[])
     catch e
-        e isa Lava.Vulkan.VulkanError || rethrow()
+        e isa Mantle.VK.VulkanError || rethrow()
     end
     sleep(0.2)
-    n = length(Lava.get_validation_messages())
+    n = length(Mantle.get_validation_messages())
     n > 0 || error("validation layer is not reporting; a clean result would be meaningless")
     n
 end
@@ -272,8 +272,8 @@ be UNDEFINED or the image's actual current layout, not whatever we claim.
 """
 function validate_matrix()
     requiresync()
-    be = M.Vulkan()
-    dev = M.Device(Lava)
+    be = M.VulkanAPI()
+    dev = M.Device(M.VulkanAPI())
     bq = dev.bq
     acc = (M.ReadOnly, M.WriteOnly, M.ReadWrite)
     all_usages = Type[M.Vertices, M.Indices, M.Indirect, M.Uniform, M.Sampled, M.Present,
@@ -283,42 +283,42 @@ function validate_matrix()
                       (M.Depth{D,S,X} for D in acc for S in (acc..., M.NoAccess)
                                       for X in (true, false))...]
 
-    Lava.clear_validation_messages!()
-    b = Lava.ensure_active_batch!(bq)
+    Mantle.clear_validation_messages!()
+    b = Mantle.ensure_active_batch!(bq)
     nmem = 0
     for from in all_usages, to in all_usages
-        Lava.Vulkan._cmd_pipeline_barrier_2(b.cmd_buf,
-            Lava.Vulkan._DependencyInfo([Lava.Vulkan._MemoryBarrier2(;
+        Mantle.VK._cmd_pipeline_barrier_2(b.cmd_buf,
+            Mantle.VK._DependencyInfo([Mantle.VK._MemoryBarrier2(;
                 src_stage_mask = M.stages(be, from, M.Src()),
                 src_access_mask = M.access(be, from, M.Src()),
                 dst_stage_mask = M.stages(be, to, M.Dst()),
                 dst_access_mask = M.access(be, to, M.Dst()))], [], []))
         nmem += 1
     end
-    Lava.flush!(bq, dev.ctx.device)
+    Mantle.flush!(bq, dev.ctx.device)
     nimg = sweep_images(dev, bq, be)
-    Lava.flush!(bq, dev.ctx.device)
+    Mantle.flush!(bq, dev.ctx.device)
     (memory_barriers = nmem, image_barriers = nimg,
-     messages = length(Lava.get_validation_messages()),
-     detail = unique(Lava.get_validation_messages()))
+     messages = length(Mantle.get_validation_messages()),
+     detail = unique(Mantle.get_validation_messages()))
 end
 
 """An image with every usage flag the layouts in question require."""
 function scratch_image(dev, fmt, usage)
     d = dev.ctx.device
-    img = Lava.Vulkan.Image(d, Lava.Vulkan.IMAGE_TYPE_2D, fmt,
-        Lava.Vulkan.Extent3D(64, 64, 1), UInt32(1), UInt32(1),
-        Lava.Vulkan.SAMPLE_COUNT_1_BIT, Lava.Vulkan.IMAGE_TILING_OPTIMAL, usage,
-        Lava.Vulkan.SHARING_MODE_EXCLUSIVE, UInt32[], Lava.Vulkan.IMAGE_LAYOUT_UNDEFINED)
-    req = Lava.Vulkan.get_image_memory_requirements(d, img)
-    mp = Lava.Vulkan.get_physical_device_memory_properties(dev.ctx.physical_device)
+    img = Mantle.VK.Image(d, Mantle.VK.IMAGE_TYPE_2D, fmt,
+        Mantle.VK.Extent3D(64, 64, 1), UInt32(1), UInt32(1),
+        Mantle.VK.SAMPLE_COUNT_1_BIT, Mantle.VK.IMAGE_TILING_OPTIMAL, usage,
+        Mantle.VK.SHARING_MODE_EXCLUSIVE, UInt32[], Mantle.VK.IMAGE_LAYOUT_UNDEFINED)
+    req = Mantle.VK.get_image_memory_requirements(d, img)
+    mp = Mantle.VK.get_physical_device_memory_properties(dev.ctx.physical_device)
     idx = findfirst(eachindex(mp.memory_types)) do i
         (req.memory_type_bits >> (i - 1)) & 1 == 1 &&
-        (mp.memory_types[i].property_flags & Lava.Vulkan.MEMORY_PROPERTY_DEVICE_LOCAL_BIT) !=
-            Lava.Vulkan.MemoryPropertyFlag(0)
+        (mp.memory_types[i].property_flags & Mantle.VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT) !=
+            Mantle.VK.MemoryPropertyFlag(0)
     end
-    mem = Lava.Vulkan.DeviceMemory(d, req.size, UInt32(idx - 1))
-    Lava.Vulkan.bind_image_memory(d, img, mem, 0)
+    mem = Mantle.VK.DeviceMemory(d, req.size, UInt32(idx - 1))
+    Mantle.VK.bind_image_memory(d, img, mem, 0)
     (img, mem)
 end
 
@@ -337,38 +337,38 @@ function sweep_images(dev, bq, be)
     depthu = Type[(M.Depth{D,S,X} for D in acc for S in (acc..., M.NoAccess)
                                   for X in (true, false))...]
 
-    color, _ = scratch_image(dev, Lava.Vulkan.FORMAT_R8G8B8A8_UNORM,
-        Lava.Vulkan.IMAGE_USAGE_COLOR_ATTACHMENT_BIT | Lava.Vulkan.IMAGE_USAGE_SAMPLED_BIT |
-        Lava.Vulkan.IMAGE_USAGE_STORAGE_BIT | Lava.Vulkan.IMAGE_USAGE_TRANSFER_SRC_BIT |
-        Lava.Vulkan.IMAGE_USAGE_TRANSFER_DST_BIT)
-    depth, _ = scratch_image(dev, Lava.Vulkan.FORMAT_D32_SFLOAT_S8_UINT,
-        Lava.Vulkan.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | Lava.Vulkan.IMAGE_USAGE_SAMPLED_BIT |
-        Lava.Vulkan.IMAGE_USAGE_TRANSFER_SRC_BIT | Lava.Vulkan.IMAGE_USAGE_TRANSFER_DST_BIT)
+    color, _ = scratch_image(dev, Mantle.VK.FORMAT_R8G8B8A8_UNORM,
+        Mantle.VK.IMAGE_USAGE_COLOR_ATTACHMENT_BIT | Mantle.VK.IMAGE_USAGE_SAMPLED_BIT |
+        Mantle.VK.IMAGE_USAGE_STORAGE_BIT | Mantle.VK.IMAGE_USAGE_TRANSFER_SRC_BIT |
+        Mantle.VK.IMAGE_USAGE_TRANSFER_DST_BIT)
+    depth, _ = scratch_image(dev, Mantle.VK.FORMAT_D32_SFLOAT_S8_UINT,
+        Mantle.VK.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | Mantle.VK.IMAGE_USAGE_SAMPLED_BIT |
+        Mantle.VK.IMAGE_USAGE_TRANSFER_SRC_BIT | Mantle.VK.IMAGE_USAGE_TRANSFER_DST_BIT)
 
     n = 0
-    for (img, usages, aspect) in ((color, coloru, Lava.Vulkan.IMAGE_ASPECT_COLOR_BIT),
-                                  (depth, depthu, Lava.Vulkan.IMAGE_ASPECT_DEPTH_BIT |
-                                                  Lava.Vulkan.IMAGE_ASPECT_STENCIL_BIT))
-        b = Lava.ensure_active_batch!(bq)
-        rng = Lava.Vulkan._ImageSubresourceRange(aspect, UInt32(0), UInt32(1), UInt32(0), UInt32(1))
-        anystage = Lava.Vulkan.PipelineStageFlag2(Lava.Vulkan.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-        noaccess = Lava.Vulkan.AccessFlag2(0)
+    for (img, usages, aspect) in ((color, coloru, Mantle.VK.IMAGE_ASPECT_COLOR_BIT),
+                                  (depth, depthu, Mantle.VK.IMAGE_ASPECT_DEPTH_BIT |
+                                                  Mantle.VK.IMAGE_ASPECT_STENCIL_BIT))
+        b = Mantle.ensure_active_batch!(bq)
+        rng = Mantle.VK._ImageSubresourceRange(aspect, UInt32(0), UInt32(1), UInt32(0), UInt32(1))
+        anystage = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+        noaccess = Mantle.VK.AccessFlag2(0)
         for from in usages, to in usages
             oldl = M.layout(be, from, M.Src())
             newl = M.layout(be, to, M.Dst())
-            newl == Lava.Vulkan.IMAGE_LAYOUT_UNDEFINED && continue
-            if oldl != Lava.Vulkan.IMAGE_LAYOUT_UNDEFINED
-                Lava.Vulkan._cmd_pipeline_barrier_2(b.cmd_buf,
-                    Lava.Vulkan._DependencyInfo([], [], [Lava.Vulkan._ImageMemoryBarrier2(
-                        Lava.Vulkan.IMAGE_LAYOUT_UNDEFINED, oldl,
-                        Lava.Vulkan.QUEUE_FAMILY_IGNORED, Lava.Vulkan.QUEUE_FAMILY_IGNORED,
+            newl == Mantle.VK.IMAGE_LAYOUT_UNDEFINED && continue
+            if oldl != Mantle.VK.IMAGE_LAYOUT_UNDEFINED
+                Mantle.VK._cmd_pipeline_barrier_2(b.cmd_buf,
+                    Mantle.VK._DependencyInfo([], [], [Mantle.VK._ImageMemoryBarrier2(
+                        Mantle.VK.IMAGE_LAYOUT_UNDEFINED, oldl,
+                        Mantle.VK.QUEUE_FAMILY_IGNORED, Mantle.VK.QUEUE_FAMILY_IGNORED,
                         img, rng; src_stage_mask = anystage, src_access_mask = noaccess,
                         dst_stage_mask = anystage, dst_access_mask = noaccess)]))
             end
-            Lava.Vulkan._cmd_pipeline_barrier_2(b.cmd_buf,
-                Lava.Vulkan._DependencyInfo([], [], [Lava.Vulkan._ImageMemoryBarrier2(
-                    oldl, newl, Lava.Vulkan.QUEUE_FAMILY_IGNORED,
-                    Lava.Vulkan.QUEUE_FAMILY_IGNORED, img, rng;
+            Mantle.VK._cmd_pipeline_barrier_2(b.cmd_buf,
+                Mantle.VK._DependencyInfo([], [], [Mantle.VK._ImageMemoryBarrier2(
+                    oldl, newl, Mantle.VK.QUEUE_FAMILY_IGNORED,
+                    Mantle.VK.QUEUE_FAMILY_IGNORED, img, rng;
                     src_stage_mask = M.stages(be, from, M.Src()),
                     src_access_mask = M.access(be, from, M.Src()),
                     dst_stage_mask = M.stages(be, to, M.Dst()),

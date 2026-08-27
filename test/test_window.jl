@@ -96,8 +96,8 @@ else
         v = pp.barrier.vks
         v.memoryBarrierCount == 0 && return nothing
         m = unsafe_load(v.pMemoryBarriers, 1)
-        (Lava.Vulkan.PipelineStageFlag2(m.srcStageMask),
-         Lava.Vulkan.PipelineStageFlag2(m.dstStageMask))
+        (Mantle.VK.PipelineStageFlag2(m.srcStageMask),
+         Mantle.VK.PipelineStageFlag2(m.dstStageMask))
     end
 
     # A quad at a given depth, and a fragment that writes no attachment, which is
@@ -117,7 +117,7 @@ else
                            blend = Opaque(), cull = NoCull(), depth = DepthLess())
 
     @testset "two scatters share one pipeline" begin
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "mantle test")
         s = build(dev, win, 50_000, 20_000)
         a, b = s.a, s.b
@@ -142,7 +142,7 @@ else
         # The camera orbiting is not the simulation running. An earlier version of
         # this demo had no compute pass at all: the cloud rotated, looked alive,
         # and every position was the one it was uploaded with.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "advect")
         s = Base.invokelatest(build, dev, win, 20_000, 10_000)
 
@@ -197,8 +197,8 @@ else
         # `vkWaitSemaphores` is a foreign call, so that wait cannot be
         # interrupted, profiled, or garbage collected: the process is simply
         # gone. Found by running a compute-only graph 30 times.
-        ext = Base.get_extension(Mantle, :MantleLavaExt)
-        dev = M.Device(Lava)
+        ext = Mantle
+        dev = M.Device(M.VulkanAPI())
         s = Base.invokelatest(advect_plan, dev, 20_000)
         before = copy(Array(M.storage(s.pos)))
         for _ in 1:(3 * ext.ARG_SLOTS)
@@ -229,7 +229,7 @@ else
         # The assertion is on yielding rather than on time: a compile that took
         # no measurable time would still be a compile inside a frame, and a
         # machine under load would still not yield here.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         s = Base.invokelatest(advect_plan, dev, 4_096)
         M.run!(s.plan)                       # the frame that may compile
         KernelAbstractions.synchronize(M.backend(dev))
@@ -261,7 +261,7 @@ else
         # transients are ever live together, so every other one can share bytes.
         # This is the allocator from the headless tests, driving real memory.
         include(joinpath(@__DIR__, "..", "bench", "chain.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         # A Lava window, not a Mantle one: this test drives acquire/blit/present
         # by hand because the chain ends in a compute pass and Mantle has no blit.
         # Anything that renders through a plan uses `M.Window`.
@@ -269,7 +269,7 @@ else
         s = Base.invokelatest(build_chain, dev, win, 20_000)
 
         peak = M.peakbytes(s.plan)
-        naive = Base.get_extension(Mantle, :MantleLavaExt).naivebytes(s.plan)
+        naive = Mantle.naivebytes(s.plan)
         @test peak < naive                       # aliasing happened at all
         @test peak <= naive ÷ 2 + 2^20           # about two buffers, not five
 
@@ -303,7 +303,7 @@ else
         # the handover was derived from what the old tenant actually did, the
         # margin went to zero and the real figure came out: a third.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         emitted(pl) = count(pp -> !isempty(pp.pre), pl.passes)
         tight = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6; alias = false)
         loose = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6;
@@ -376,7 +376,7 @@ else
         # every few thousand; `tally` is monotonic on purpose, because the counter
         # itself cannot detect this. A skipped frame leaves a cleared-then-refilled
         # counter at exactly its previous correct value.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         dev.bq.cb_split_threshold = 3          # every frame, several times over
         win = M.Window(64, 64; title = "split", vsync = false)
         g = M.Graph(dev)
@@ -395,7 +395,7 @@ else
         frames = 40
         for _ in 1:frames
             M.run!(plan)
-            Lava.flush!(dev.bq, dev.ctx.device)
+            Mantle.flush!(dev.bq, dev.ctx.device)
         end
         @test Int(Array(tally)[1]) == frames        # every frame ran its first pass
         @test Int(Array(cnt)[1]) == 512             # and the counter restarted each time
@@ -419,7 +419,7 @@ else
         # The count is not the test — each pass still has a real loop-carried WAW
         # against the previous frame, so both spellings emit two transitions. What
         # differs is *whose*: one resource means the second waits on the first.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         n = 256
         build(ranged) = begin
             g = M.Graph(dev)
@@ -605,7 +605,7 @@ else
         # emitting nothing fails the first, one unconditional barrier per pass
         # fails the second.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         SR = M.Storage{M.BufferKind,M.ReadOnly}
         SW = M.Storage{M.BufferKind,M.WriteOnly}
         chains, stages = 2, 3
@@ -654,7 +654,7 @@ else
         # barrier at all. A handover names two resources and no single buffer, so
         # it stays global — hence aliasing off here, and its own test elsewhere.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         s = Base.invokelatest(build_interleaved, dev, 1 << 10, 2, 3; alias = false)
         nbuf = nmem = ntrans = 0
         for pp in s.plan.passes
@@ -679,7 +679,7 @@ else
         # hazard between two resources that never mention each other, so it comes
         # from the placer and not from any usage sequence. It has its own test.
         include(joinpath(@__DIR__, "..", "bench", "stress.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         nbufs, npasses, seeds = 5, 12, 1:20
 
         # Swept over how often a usage names a range, because slicing is the case
@@ -766,7 +766,7 @@ else
         #   RPS_SCHEDULE_PREFER_MEMORY_SAVING_BIT
         #                           PushExpectedRange(i, i+7, 6)  -> (0,6) (1,7) ...
         # — which is `Overlap` and `Compact`, and Mantle produces both.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         n = 256
         mk(pol) = begin
             g = M.Graph(dev)
@@ -854,7 +854,7 @@ else
         # Six independent chains declared interleaved. Declaration order keeps
         # every chain's buffers alive at once; the memory-saving policy discovers
         # chain-major order by itself and the peak drops accordingly.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         mk(pol) = begin
             g = M.Graph(dev)
             bufs = [[M.Transient.Buffer(g, Float32, 1 << 12) for _ in 1:5] for _ in 1:6]
@@ -878,7 +878,7 @@ else
         # comparing the two: agreement alone would also be satisfied by both being
         # wrong the same way.
         include(joinpath(@__DIR__, "..", "bench", "fuzz.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         for pol in (M.Overlap(), M.Compact())
             r = Base.invokelatest(fuzz, 1:12; passes = 12, policy = pol)
             @test r.wrong == 0
@@ -890,7 +890,7 @@ else
         # RPS ships DEFAULT_MEMORY and DEFAULT_PERFORMANCE because sharing bytes
         # forces ordering between the passes that use them. Our design document
         # claims both wins at once; this is the measurement that says otherwise.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         mk(al) = begin
             g = M.Graph(dev)
             bufs = [M.Transient.Buffer(g, Float32, 1 << 12) for _ in 1:12]
@@ -913,7 +913,7 @@ else
         # fresh draw! per item transitions from UNDEFINED each time and discards
         # everything before it, which shows up as `both` being darker than either.
         lit(which) = begin
-            dev = M.Device(Lava)
+            dev = M.Device(M.VulkanAPI())
             win = M.Window(W, H; title = "t")
             sa, sb = cloud(50_000), cloud(20_000)
             a = Scatter(M.Buffer(dev, sa), M.Buffer(dev, tint.(sa)), M.Scalar(dev, 2.0f0))
@@ -928,7 +928,7 @@ else
                 end
             end
             plan = M.Plan(g)
-            for _ in 1:20; Lava.GLFW.PollEvents(); M.run!(plan); end
+            for _ in 1:20; Mantle.GLFW.PollEvents(); M.run!(plan); end
             KernelAbstractions.synchronize(M.backend(dev))
             img = M.screenshot(win); close(win)
             sum(Float64(p[1]) + p[2] + p[3] for p in img)
@@ -943,14 +943,14 @@ else
         # give the second the first's bytes, and the result must not change:
         # target A is copied out before B is rendered, so sharing is legal.
         include(joinpath(@__DIR__, "..", "bench", "targets.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         # The same points for both: `cloud` is random, so two graphs built from
         # separate calls differ for a reason that has nothing to do with aliasing.
         pts = Base.invokelatest(cloud, 20_000)
         tight = Base.invokelatest(build_targets, dev, 20_000; points = pts)
         loose = Base.invokelatest(build_targets, dev, 20_000; points = pts, alias = false)
 
-        E = Base.get_extension(Mantle, :MantleLavaExt)
+        E = Mantle
         imgbytes(p) = only(length(s) for s in p.slabs
                            if any(t -> t isa E.TransientImage && t.memory === M.memoryof(s),
                                   p.graph.transients))
@@ -1003,7 +1003,7 @@ else
         # so it looks blurry and reads back at the wrong resolution. What notices
         # is comparing the framebuffer size against what the swapchain was built
         # for, every frame.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "resize")
         s = Base.invokelatest(build, dev, win, 20_000, 10_000)
         for _ in 1:10; M.run!(s.plan); end
@@ -1030,7 +1030,7 @@ else
         zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
                            varyings = (color = Vec4f,), topology = PointList(),
                            blend = Opaque(), cull = NoCull(), depth = DepthLess())
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(800, 600; title = "tracking depth")
         g = M.Graph(dev)
         screen = M.Surface(g, win)
@@ -1074,7 +1074,7 @@ else
         zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
                            varyings = (color = Vec4f,), topology = PointList(),
                            blend = Opaque(), cull = NoCull(), depth = DepthLess())
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(800, 600; title = "resize mismatch")
         g = M.Graph(dev)
         screen = M.Surface(g, win)
@@ -1141,12 +1141,12 @@ else
         # The refused acquires changed nothing, so the frame that owns the image
         # can still finish, and the window is usable afterwards.
         bq = win.ctx.default_bq
-        Lava.ensure_active_batch!(bq)
+        Mantle.ensure_active_batch!(bq)
         present_frame!(bq, win)
         @test !win.acquired
         @test win.acquirer === nothing
         acquire_next_image!(win)
-        Lava.ensure_active_batch!(bq)
+        Mantle.ensure_active_batch!(bq)
         present_frame!(bq, win)
         @test !win.acquired
         close(win)
@@ -1178,16 +1178,16 @@ else
         # Discard is the point of the exercise: inferring the op from whether a
         # clear colour was given can only ever pick CLEAR or LOAD, so a pass that
         # covers every pixel used to pay for a load it discards.
-        E = Base.get_extension(Mantle, :MantleLavaExt)
-        @test E.loadop(M.Keep) == Lava.Vulkan.ATTACHMENT_LOAD_OP_LOAD
-        @test E.loadop(M.Discard) == Lava.Vulkan.ATTACHMENT_LOAD_OP_DONT_CARE
-        @test E.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == Lava.Vulkan.ATTACHMENT_LOAD_OP_CLEAR
+        E = Mantle
+        @test E.loadop(M.Keep) == Mantle.VK.ATTACHMENT_LOAD_OP_LOAD
+        @test E.loadop(M.Discard) == Mantle.VK.ATTACHMENT_LOAD_OP_DONT_CARE
+        @test E.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == Mantle.VK.ATTACHMENT_LOAD_OP_CLEAR
         @test E.clearvalue(M.Keep) === nothing
         @test E.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
 
         # And all three actually render. The target is a transient, so its state
         # before the pass is Undefined and the barrier into it comes from there.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         pts = cloud(20_000)
         for (op, want) in ((M.Clear((0f0, 0f0, 0f0, 1f0)), M.ColorAttachment{true}),
                            (M.Discard, M.ColorAttachment{true}),
@@ -1225,7 +1225,7 @@ else
                           blend = Opaque(), cull = NoCull(), depth = DepthOff())
 
         N = 64
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         ident = Mat4f(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
         mvp = Ref(ident)
         # z is NDC depth here, so 0.3 is nearer than 0.7.
@@ -1259,11 +1259,11 @@ else
         probe = shot((near, far), ZPIPE)
         @test any(last(u) === M.Depth{M.ReadWrite,M.NoAccess,true}
                   for u in probe.plan.graph.passes[1].usages)
-        E = Base.get_extension(Mantle, :MantleLavaExt)
+        E = Mantle
         zt = only(t for t in probe.plan.graph.transients
                   if t isa E.TransientImage && eltype(t) === Float32)
-        @test zt.format == Lava.Vulkan.FORMAT_D32_SFLOAT
-        @test E.aspect(zt) == Lava.Vulkan.IMAGE_ASPECT_DEPTH_BIT
+        @test zt.format == Mantle.VK.FORMAT_D32_SFLOAT
+        @test E.aspect(zt) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT
 
         for order in ((near, far), (far, near))
             got = shot(order, ZPIPE)
@@ -1308,7 +1308,7 @@ else
                          blend = Opaque(), cull = NoCull(), depth = DepthOff())
 
         N = 64
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         mvp = Ref(Mat4f(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
         blue = Scatter(M.Buffer(dev, [Vec3f(0, 0, 0.5)]),
                        M.Scalar(dev, Vec4f(0, 0, 1, 1)), M.Scalar(dev, 40f0))
@@ -1345,7 +1345,7 @@ else
         copies = [pp for pp in plan.passes if pp.pass.kind === :copy]
         @test length(copies) == 2
         for pp in copies
-            @test any(b -> b.new == Lava.Vulkan.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
+            @test any(b -> b.new == Mantle.VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
         end
 
         M.run!(plan)
@@ -1413,7 +1413,7 @@ else
         # A compute pass in the graph, a device array produced outside it, and a
         # host array. The three differ only in where the bytes come from, and the
         # same handover takes whichever route the data calls for.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "three updates")
         s = Base.invokelatest(three_plots, dev, win, 5_000)
         @test M.npipelines(s.plan) == 1          # three plots, one shader
@@ -1450,7 +1450,7 @@ else
     @testset "a profiled plan times every pass" begin
         # `profile = true` is the whole of it, and asking an unprofiled plan is an
         # error rather than a table of zeros.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "profiled")
 
         plain = Base.invokelatest(three_plots, dev, win, 5_000)
@@ -1490,7 +1490,7 @@ else
         zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
                            varyings = (color = Vec4f,), topology = PointList(),
                            blend = Opaque(), cull = NoCull(), depth = DepthLess())
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         g = M.Graph(dev)
         T = BGRA{ColorTypes.FixedPointNumbers.N0f8}
         img = M.Transient.Image(g, T, (64, 64))
@@ -1503,14 +1503,14 @@ else
         end
         plan = M.Plan(g)
 
-        E = Base.get_extension(Mantle, :MantleLavaExt)
+        E = Mantle
         depth = only(b for b in plan.passes[1].images
-                     if E.aspect(b.resource) == Lava.Vulkan.IMAGE_ASPECT_DEPTH_BIT)
+                     if E.aspect(b.resource) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT)
         # The layout still comes from UNDEFINED — the clear discards — but the
         # barrier has to wait for the previous frame's depth write all the same.
-        @test depth.old == Lava.Vulkan.IMAGE_LAYOUT_UNDEFINED
-        @test depth.src_access != Lava.Vulkan.AccessFlag2(0)
-        @test depth.src_stage != Lava.Vulkan.PipelineStageFlag2(0)
+        @test depth.old == Mantle.VK.IMAGE_LAYOUT_UNDEFINED
+        @test depth.src_access != Mantle.VK.AccessFlag2(0)
+        @test depth.src_stage != Mantle.VK.PipelineStageFlag2(0)
     end
 
     @testset "a scalar attribute is written in place" begin
@@ -1519,7 +1519,7 @@ else
         # Renaming would be absurd for that, and it must not happen — a scalar and
         # a per-element attribute are one pipeline precisely because the binding
         # is the same shape, and swapping the store would be a needless allocation.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "scalar update")
         pts = cloud(1_000)
         sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 2f0))
@@ -1549,7 +1549,7 @@ else
         # The call decides the route, not a flag: a whole-buffer replacement
         # renames (nothing reads the fresh store, so there is no hazard), and a
         # partial write goes in place inline in the command buffer.
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "update")
 
         function scene(n; range = nothing)
@@ -1618,7 +1618,7 @@ else
         # inverted span. That reported the allocator's internals for a mistake in
         # the graph, and named neither the transient nor what to do about it.
         include(joinpath(@__DIR__, "..", "bench", "chain.jl"))
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         g = M.Graph(dev)
         used = M.Transient.Buffer(g, Float32, 1 << 10)
         M.Transient.Buffer(g, Float32, 1 << 9)          # declared, never used
@@ -1637,7 +1637,7 @@ else
         # splitting it into a pass per launch would declare a resource sequence
         # the caller does not have. `custom!` is the declaration without the how.
         n = 1 << 12
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         g = M.Graph(dev)
         src = M.Buffer(dev, fill(1f0, n))
         mid = M.Transient.Buffer(g, Float32, n)
@@ -1647,8 +1647,8 @@ else
             b = M.use(p, src; read = true)
             c = M.use(p, out; write = true)
             return function ()
-                bump!(Lava.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
-                bump!(Lava.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
+                bump!(Mantle.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
+                bump!(Mantle.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
             end
         end
         plan = M.Plan(g)
@@ -1681,7 +1681,7 @@ else
         # inside a `concurrent_dispatch_group`: 1<<14 fails 10/10 and mostly
         # everywhere, 1<<16 fails 3/10, 1<<18 and up 0/10.
         n = 1 << 14
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         g = M.Graph(dev)
         src = M.Buffer(dev, fill(1f0, n))
         mid = M.Transient.Buffer(g, Float32, n)
@@ -1692,9 +1692,9 @@ else
             b = M.use(p, src; read = true)
             c = M.use(p, out; write = true)
             return function ()
-                push!(active, Lava.CONCURRENT_GROUP_ACTIVE[])
-                bump!(Lava.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
-                bump!(Lava.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
+                push!(active, Mantle.CONCURRENT_GROUP_ACTIVE[])
+                bump!(Mantle.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
+                bump!(Mantle.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
             end
         end
         plan = M.Plan(g)
@@ -1714,7 +1714,7 @@ else
         # does. The assertion is on the result rather than the time, because how
         # much it is worth is the driver's business and that it is correct is not.
         w, h = 256, 128
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         src = rand(Float32, w * h)
         transposed(group) = begin
             g = M.Graph(dev)
@@ -1740,7 +1740,7 @@ else
         # stage reads the g-buffer. Without it the lighting has to go image ->
         # buffer -> compute -> blit, which is three full-screen copies a frame.
         N = 64
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         g = M.Graph(dev)
         # A horizontal ramp, so a transposed read or an off-by-one shows up as a
         # gradient in the wrong direction rather than as "something was drawn".
@@ -1787,10 +1787,10 @@ else
         # INDIRECT_BUFFER_BIT — without it the draw is a validation error a long
         # way from the allocation.
         N, NB = 64, 8
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         kref = Ref(UInt32(3))
         g = M.Graph(dev)
-        cmds = M.Buffer(dev, Lava.DrawIndirectCommand, 1)
+        cmds = M.Buffer(dev, Mantle.DrawIndirectCommand, 1)
         img = M.Transient.Image(g, RGBA{N0f8}, (N, N))
         out = M.Transient.Buffer(g, UInt32, N * N)
         M.compute!(g, "count") do p
@@ -1804,7 +1804,7 @@ else
 
         # The draw declares `Indirect` on it, so the compute write is ordered
         # against DRAW_INDIRECT and not against the vertex stage.
-        E = Base.get_extension(Mantle, :MantleLavaExt)
+        E = Mantle
         bands = only(p for p in plan.graph.passes if p.name == "bands")
         @test any(u -> last(u) === Mantle.Indirect, bands.usages)
 
@@ -1833,9 +1833,9 @@ else
         # tenant. Two graphs, identical except for what last touched the memory:
         # if the barrier is derived they differ, and if it is assumed they cannot.
         N = 256
-        dev = M.Device(Lava)
-        every = Lava.Vulkan.PipelineStageFlag2(Lava.Vulkan.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-        copybit = Lava.Vulkan.PipelineStageFlag2(Lava.Vulkan.PIPELINE_STAGE_2_COPY_BIT)
+        dev = M.Device(M.VulkanAPI())
+        every = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+        copybit = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_COPY_BIT)
 
         # (a) the vacating transient was last *read by a shader*
         function shaderlast(dev)
@@ -1883,13 +1883,13 @@ else
             (; plan = M.Plan(g), out)
         end
 
-        E = Base.get_extension(Mantle, :MantleLavaExt)
+        E = Mantle
         handover(plan) = first(passmasks(pp) for pp in plan.passes if pp.pass.name == "fill")
 
         a = Base.invokelatest(shaderlast, dev)
         b = Base.invokelatest(copylast, dev)
-        @test M.peakbytes(a.plan) < E.naivebytes(a.plan)   # they really do share bytes
-        @test M.peakbytes(b.plan) < E.naivebytes(b.plan)
+        @test M.peakbytes(a.plan) < M.naivebytes(a.plan)   # they really do share bytes
+        @test M.peakbytes(b.plan) < M.naivebytes(b.plan)
 
         # The barrier tracks the old tenant: a copy in one, not in the other.
         @test (first(handover(b.plan)) & copybit) != zero(copybit)
@@ -1923,7 +1923,7 @@ else
         # flight — the pool is reset at the head of each frame's recording, and a
         # read that races it can take one word from each frame with both
         # availability bits set.
-        E = Base.get_extension(Mantle, :MantleLavaExt)
+        E = Mantle
         @test E.elapsed(UInt64(100), UInt64(350), 1.0) == 250.0
         @test E.elapsed(UInt64(100), UInt64(100), 2.0) == 0.0
         @test E.elapsed(UInt64(350), UInt64(100), 1.0) === nothing
@@ -1936,7 +1936,7 @@ else
         # come from the depth attachment, because there is nothing else to take it
         # from, and the fragment shader has to be allowed to write no attachment.
         N = 64
-        dev = M.Device(Lava)
+        dev = M.Device(M.VulkanAPI())
         g = M.Graph(dev)
         z = M.Transient.Image(g, Float32, (N, N))
         out = M.Transient.Buffer(g, Float32, N * N)

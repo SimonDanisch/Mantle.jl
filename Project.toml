@@ -2,41 +2,87 @@ name = "Mantle"
 uuid = "8f4c1f2e-6a3d-4b71-9c05-2e7d8a1b6f34"
 version = "0.1.0"
 
+# Lava's runtime moved into `src/vulkan/` on 2026-08-27, so what were weak
+# dependencies behind `MantleLavaExt` are hard ones: the backend is part of this
+# package now. `MantleLavaExt` is gone with them — an extension exists so a
+# package can depend on something optionally, and this no longer does.
+#
+# `MantleHostExt` stays an extension. It is the CPU backend and is genuinely
+# optional, which is what makes it the shape a future Metal backend should take
+# rather than this one.
 [deps]
+AcceleratedKernels = "6a4ca0a5-0e36-4168-a932-d9be78d558f1"
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
-KernelInterfaces = "ce25d451-9bb5-4870-a156-ce22182641de"
+GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
+GPUArrays = "0c68f7d7-f131-5f86-a1c3-88cf8149b2d7"
+GPUArraysCore = "46192b85-c4d5-4398-a991-12ede77f4527"
+GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
+GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+KernelInterface = "4ee993da-d684-4d17-a7dd-4e58e78d92bf"
+LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
+Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+Raycore = "afc56b53-c9a9-482a-a956-d1d800e05559"
+SPIRV_Tools_jll = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
+Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 
+# `KernelAbstractions` is now BOTH a hard dependency (the moved runtime
+# implements its backend) and an extension trigger. That is legal and it is what
+# the host backend needs: `MantleHostExt` is the CPU implementation, and it is
+# loaded when KA is, which it always is here.
 [weakdeps]
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
-Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
-Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 
 [extensions]
 MantleHostExt = "KernelAbstractions"
-MantleLavaExt = "Lava"
-MantleVulkanExt = "Vulkan"
+
+[sources]
+Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}
 
 [compat]
+# The matrix vocabulary and `DeviceCaps`, which Mantle and Lava share, used to be
+# a package of its own — `KernelInterfaces`, plural, UUID ce25d451, kept here
+# under `lib/`. It was separate because Lava needed the same names and could not
+# depend on Mantle while Mantle weak-depended on Lava.
+#
+# `KernelInterface` (singular) is where every backend already meets, so both
+# moved there and the package was deleted. Metal and CUDA get the names without
+# depending on either of us, which is the whole point.
+#
+# It is NOT registered yet: it lives in `KernelAbstractions/lib/KernelInterface`,
+# and the matrix half is on a branch pending upstream. There is deliberately no
+# `[sources]` entry for it — a URL pointing at KA's `main` would resolve to a
+# `KernelInterface` without `MatrixShape` and fail at load with an
+# `UndefVarError` instead of failing here, where the message is legible. Until it
+# is upstreamed, `dev` the local checkout. Lava is unregistered for the same
+# reason and takes the same treatment.
+GPUCompiler = "1, 2"
+KernelInterface = "0.1"
+SPIRV_LLVM_Backend_jll = "21.1.4, 22"
+StaticArrays = "1.9.17"
 julia = "1.12"
 
-# KernelInterfaces lives in this repository, under `lib/`, but is a SEPARATE
-# package rather than a module of Mantle. It has to be: Lava depends on it too,
-# and Lava cannot depend on Mantle — Mantle weak-depends on Lava for
-# `MantleLavaExt`, so an edge back would close a cycle. Sharing a repo is a
-# packaging choice; sharing a package would not work.
-[sources]
-KernelInterfaces = {path = "lib/KernelInterfaces"}
-
 [extras]
-ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
-GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
-GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
-KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
-LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+# What the 128 test files that arrived from Lava on 2026-08-27 need beyond the
+# package's own dependencies. Everything else they use — GLFW, GeometryBasics,
+# KernelAbstractions, Lava, Vulkan, ColorTypes, StaticArrays, LinearAlgebra — is
+# a hard dependency now, which is what moving the runtime here means.
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
-Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
+SPIRV_LLVM_Backend_jll = "4376b9bf-cff8-51b6-bb48-39421dff0d0c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 
 [targets]
-test = ["Test", "Vulkan", "Lava", "ColorTypes", "GLFW", "GeometryBasics", "LinearAlgebra", "KernelAbstractions", "Random"]
+test = ["JLD2", "Logging", "Random", "SPIRV_LLVM_Backend_jll", "SparseArrays",
+        "Statistics", "StructArrays", "Test"]

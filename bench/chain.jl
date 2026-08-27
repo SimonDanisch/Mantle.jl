@@ -77,7 +77,7 @@ function build_chain(dev, win, n)
 end
 
 function measure_chain(frames = 300; n = 200_000)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     win = RenderWindow(W, H; title = "mantle: transient chain", vsync = false)
     s = build_chain(dev, win, n)
     bq = dev.bq
@@ -86,7 +86,7 @@ function measure_chain(frames = 300; n = 200_000)
     t0 = time()
     for _ in 1:frames
         isopen(win) || break
-        Lava.GLFW.PollEvents()
+        Mantle.GLFW.PollEvents()
         tf = time()
         s.mvp[] = camera(0.4f0 * Float32(time() - t0))
         acquire_next_image!(win)
@@ -94,7 +94,7 @@ function measure_chain(frames = 300; n = 200_000)
         copy_framebuffer!(M.storage(s.raw), s.fb)     # ColorAttachment -> CopySrc
         blit!(bq, WindowTarget(win), M.storage(s.out))
         present_frame!(bq, win)
-        Lava.flush!(bq, dev.ctx.device)
+        Mantle.flush!(bq, dev.ctx.device)
         push!(times, time() - tf)
     end
     img = readback_window(win)
@@ -104,10 +104,9 @@ function measure_chain(frames = 300; n = 200_000)
     q = sort(steady); m = length(q)
     (frames = length(times),
      peak_mb = round(M.peakbytes(s.plan) / 2^20, digits = 2),
-     naive_mb = round(MantleLavaExtNaive(s.plan) / 2^20, digits = 2),
+     naive_mb = round(Mantle.naivebytes(s.plan) / 2^20, digits = 2),
      median_ms = round(1000 * q[m ÷ 2], digits = 3),
      fps = round(m / sum(steady), digits = 0),
      img = img)
 end
 
-MantleLavaExtNaive(plan) = Base.get_extension(Mantle, :MantleLavaExt).naivebytes(plan)

@@ -123,7 +123,7 @@ Without this the comparison would only work because both sides call the same
 interning table, which is the circularity the oracle exists to avoid.
 """
 function normalid(g, id::Int)
-    ext = Base.get_extension(Mantle, :MantleLavaExt)
+    ext = Mantle
     r = get(g.ids.by_id, id, nothing)
     # `get`, not `resourceid` — an oracle that registers an id while reading the
     # graph would be changing what the next compile sees in order to check it.
@@ -149,8 +149,8 @@ corpus is what says the walk is right; equality with what is actually *emitted*
 is what says coalescing has not removed a barrier that only globality justified.
 """
 function local_hazards(g, plan)
-    be = M.Vulkan()
-    ext = Base.get_extension(Mantle, :MantleLavaExt)
+    be = M.VulkanAPI()
+    ext = Mantle
 
     # The partition, derived here rather than read off the compiler: every range
     # declared anywhere cuts its buffer, and a usage stands for the pieces its
@@ -227,7 +227,7 @@ hazard the dropped ones are.
 """
 function stress(seeds = 1:200; kind = :usage, npasses = 12, nbufs = 5,
                 alias = true, policy = M.Overlap(), n = 256)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     rs = [case(dev, s; kind, npasses, nbufs, n, alias, policy) for s in seeds]
     miss = sum(r -> length(r.missing), rs)
     spur = sum(r -> length(r.spurious), rs)

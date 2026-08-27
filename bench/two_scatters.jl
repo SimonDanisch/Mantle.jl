@@ -117,7 +117,7 @@ one graph, one compiled plan, one pipeline between them.
 `measure` is the same frame loop with a frame count and a stopwatch.
 """
 function demo(; na = 200_000, nb = 100_000)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     win = M.Window(W, H; title = "mantle: two scatters")
     s = build(dev, win, na, nb)
     @assert M.npipelines(s.plan) == 1 "a scalar and a vector attribute must not fork the shader"
@@ -139,7 +139,7 @@ function demo(; na = 200_000, nb = 100_000)
 end
 
 function measure(frames = 600; na = 200_000, nb = 100_000, sync = true)
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     win = M.Window(W, H; title = "mantle: two scatters")
     s = build(dev, win, na, nb)
 

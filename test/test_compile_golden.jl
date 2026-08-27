@@ -1,7 +1,7 @@
 # The compile output, pinned.
 #
 # This exists for ONE job: the five backend-independent phases (Dag, Schedule,
-# Liveness, Place, Aliasing) currently live in `ext/MantleLavaExt.jl` and are
+# Liveness, Place, Aliasing) live in `src/vulkan/graph.jl` and are
 # about to be lifted into core so a second backend does not have to copy them.
 # A refactor that changes what they compute must fail here, loudly, rather than
 # show up later as a wrong offset on one machine.
@@ -66,7 +66,7 @@ compileresult(g, plan) = (
 )
 
 @testset "compile output is pinned" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     n = 1 << 16
     g = buildprobe(dev, n)
     r = compileresult(g, M.Plan(g))
@@ -150,10 +150,10 @@ The backend's compilation context, so a phase can be run and read on its own.
 `Plan` exposes only what a frame needs. Asserting a phase's OUTPUT means reaching
 the context it writes into, which is what `compile!(ctx, prefix)` was built for.
 """
-compilectx(g; kw...) = Base.get_extension(Mantle, :MantleLavaExt).Compile(g; kw...)
+compilectx(g; kw...) = Mantle.Compile(g; kw...)
 
 @testset "Dag: the edges themselves" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     c = M.compile!(compilectx(buildtemptation(dev, 1 << 18, 1 << 4)), (M.Dag(),))
     # "drain" reads what "fill" wrote. One edge, and it points backwards.
     @test M.analysis(c).deps == [Int[], [1]]
@@ -181,7 +181,7 @@ end
 # schedule is guarding nothing.
 
 @testset "Schedule: the order itself, and that the policy decides it" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     prefix = (M.Dag(), M.Schedule())
     order(g; kw...) = M.analysis(M.compile!(compilectx(g; kw...), prefix)).order
 
@@ -198,7 +198,7 @@ end
 end
 
 @testset "alias = false gives every transient the whole timeline" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     g = buildprobe(dev, 1 << 16)
     plan = M.Plan(g; alias = false)
     # Nothing may share bytes, so the peak IS the naive sum — 5 x 65536 Float32.

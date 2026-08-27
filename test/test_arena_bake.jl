@@ -61,7 +61,7 @@ end
     @inbounds d[i] = x[i] + y[i]
 end
 
-const E = Base.get_extension(Mantle, :MantleLavaExt)
+const E = Mantle
 
 @testset "two plans in one process commit the max, not the sum" begin
     # The gate for the device-owned arena. It can only pass if the `Device` owns
@@ -72,7 +72,7 @@ const E = Base.get_extension(Mantle, :MantleLavaExt)
     # remap it. A correct answer from `small` afterwards is `remap!` having
     # re-materialised its transients into the new allocation — which is the half
     # of this that a test built in the other order would not reach.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     small = Base.invokelatest(chainplan, dev, 250_000, 3)
     big   = Base.invokelatest(chainplan, dev, 2_000_000, 3)
 
@@ -96,7 +96,7 @@ const E = Base.get_extension(Mantle, :MantleLavaExt)
 end
 
 @testset "over budget fails at compile, with numbers" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
     # this was written against and `typemax(Int)` — "no limit" — on NVIDIA, so a
     # test pinned to it passes on one machine and allocates 8 exabytes on the
@@ -124,7 +124,7 @@ end
     # points the resource at a different store — so a resource an `Update` can
     # move must get a global memory barrier instead. A *ranged* update writes in
     # place and keeps its scope, which is the discrimination being asserted.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     g = M.Graph(dev)
     a   = M.Buffer(dev, zeros(Float32, 1024))
     b   = M.Buffer(dev, zeros(Float32, 1024))
@@ -159,7 +159,7 @@ end
 end
 
 @testset "a baked plan replays bit-exact, and records almost nothing" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes
     M.run!(s.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -190,7 +190,7 @@ end
     # to every resource its recording names, so a full collection between two
     # replays cannot free storage the command buffer points at. `test_capture_gc.jl`
     # in Lava owns this for a raw capture; this is where it is owned for a plan.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     p = Base.invokelatest(chainplan, dev, 50_000, 8)
     M.run!(p.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -214,7 +214,7 @@ end
     # had. Silently re-materialising underneath it gives a replay that reads
     # freed storage, deterministically and quietly. It has to be an error, and
     # the error has to name the order that avoids it.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     small = Base.invokelatest(chainplan, dev, 100_000, 3)
     M.run!(small.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -232,7 +232,7 @@ end
 end
 
 @testset "bake! refuses what it cannot record" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     # Profiling measures host recording per pass, and a baked plan does not
     # record — the numbers would be the capture's, reported forever.
     g = M.Graph(dev)
@@ -252,7 +252,7 @@ end
     # RECORDED last — so the next tenant sees itself there and emits no barrier,
     # a handover away from a baked plan with nothing ordering it. A replay writes
     # those bytes like any other run and has to say so.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     a = Base.invokelatest(chainplan, dev, 50_000, 2)
     b = Base.invokelatest(chainplan, dev, 50_000, 2)
     M.run!(a.plan)
@@ -274,11 +274,11 @@ end
     # `LavaArray{T,1}(…, (length(a),))`, so a 2-D region arrived at a kernel
     # flattened and every index had to be recomputed from a width the kernel had
     # to be told separately.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     want = reshape(collect(1f0:12f0), 3, 4)
     b = M.Buffer(dev, want)
     @test size(b) == (3, 4)
-    @test M.storage(b) isa Lava.LavaArray{Float32,2}
+    @test M.storage(b) isa Mantle.LavaArray{Float32,2}
     @test size(M.storage(b)) == (3, 4)
     @test Array(b) == want
     M.free!(b)
@@ -293,7 +293,7 @@ end
     # So the first `reclaim!` only stamps, and the release waits for the
     # timeline. That ordering is the whole safety argument, and asserting the
     # count alone would pass just as well if it released immediately.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     pool = M.pool(dev)
     b = M.Buffer(dev, fill(1f0, 4096))
     reserved = M.reserved(pool)
@@ -305,12 +305,12 @@ end
     # already recorded into it can name these bytes.
     scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
     KernelAbstractions.fill!(scratch, 1f0)          # opens a batch
-    @test Lava.has_active_recording(dev.bq)
+    @test Mantle.has_active_recording(dev.bq)
     M.free!(b)
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 
     # Submit it and wait, so the fence it was stamped with has passed.
-    Lava.vk_flush!(dev.ctx)
+    Mantle.vk_flush!(dev.ctx)
     KernelAbstractions.synchronize(M.backend(dev))
     @test M.reclaim!(pool, dev) == 1        # now
     @test M.reclaim!(pool, dev) == 0
@@ -325,7 +325,7 @@ end
     # application that then submits nothing more waited for a signal nobody
     # would ever raise — the same leak this path removes, wearing a hat.
     KernelAbstractions.synchronize(M.backend(dev))
-    @test !Lava.has_active_recording(dev.bq)
+    @test !Mantle.has_active_recording(dev.bq)
     b3 = M.Buffer(dev, fill(3f0, 4096))
     while M.reclaim!(pool, dev; wait = true) > 0 end
     M.free!(b3)

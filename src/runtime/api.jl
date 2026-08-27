@@ -9,124 +9,27 @@ abstract type Resource end
 abstract type Graph end
 abstract type Plan end
 
-"""
-    DeviceCaps
+# `DeviceCaps` used to be defined here, together with `supports`/`bestshape` over
+# it, and its docstring argued that it belonged wherever every backend could name
+# it. It was written a second time in Lava, field for field, and `MantleLavaExt`
+# copied one into the other POSITIONALLY — which is why both copies carried a
+# comment warning that a field inserted in the middle would misalign silently.
+#
+# It lives in `KernelInterface` now. Neither package depends on the other, both
+# already implement KI, and the positional copy is gone with the second type.
+# `caps(device)` below is still the query; what left is the definition.
 
-What a kernel has to know about the GPU it will run on, in terms every GPU has.
-
-Nothing here is Vulkan's. The vocabulary is — "subgroup" is SPIR-V's word, Metal
-says simdgroup and CUDA says warp; "workgroup" is SPIR-V's, Metal says threadgroup
-— but every field is a fact about the hardware that each of them reports under
-some name. Kept in that vocabulary rather than renamed, because a kernel library
-already speaks it and a rename buys nothing a comment cannot.
-
-Why it lives here and not in the backend: a kernel that picks its tiling from
-these numbers is portable exactly to the extent that these numbers are, and the
-whole point of the `tile` field is that Metal's `simdgroup_matrix` is 8x8 where
-RDNA 3.5 is 16x16 — a different *number*, not a different kernel.
-
-`coopmat` is a floor, not a promise about every operation: cooperative matrices
-that exist everywhere are load, store and multiply-add. Anything narrower —
-per-element application, in-tile reduction — is `VK_NV_cooperative_matrix2` and
-not portable even across Vulkan, so a kernel that wants it asks separately and
-carries the answer. See `FlashCMPlan.rescale` for the shape that takes.
-
-    coopmat           cooperative-matrix multiply-add is usable at all
-    tile              its tile extent: 16 on RDNA 3.5, 8 for Metal's simdgroup
-    subgroup          lanes per subgroup — 32 on NVIDIA, 32 or 64 on RDNA3
-    coopmatsubgroup   …and the width a cooperative-matrix kernel actually gets
-    sharedbudget      bytes of workgroup-shared memory
-    workgrouplimit    threads per workgroup
-    cores             SMs / CUs; 0 when the device will not say
-    warps             max resident subgroups per core; 0 = ditto
-    wggran            workgroup-scope matrix shapes: (invocations, M, N, K) rows
-
-`wggran` is the one field that is a *table* rather than a number, and it is a
-table because the answer depends on the launch: the legal `(M, N, K)` multiples
-for a matrix spanning the whole workgroup differ per workgroup size, and coarsen
-as it grows. Empty means the device has no workgroup-scope matrices, so it is
-also the capability test — a kernel cannot learn "may I?" without learning "at
-what shapes?", which is the pair that must not drift apart.
-"""
-struct DeviceCaps
-    coopmat::Bool
-    tile::Int
-    subgroup::Int
-    coopmatsubgroup::Int
-    sharedbudget::Int
-    workgrouplimit::Int
-    cores::Int
-    warps::Int
-    wggran::Vector{NTuple{4,Int}}
-    # Every subgroup-scope shape the backend reports. `tile` is one entry of it —
-    # the square fp16 -> fp32 instruction — kept as a field because that is what
-    # nearly every caller wants. Ask `bestshape` for anything else rather than
-    # assuming this device's table looks like the one the kernel was written on.
-    #
-    # Appended, not inserted next to `tile`: the Lava extension copies this
-    # struct positionally, and a field in the middle would misalign it silently.
-    shapes::Vector{MatrixShape}
-end
-
-# Eight positional arguments still construct one, meaning "no workgroup-scope
-# matrices" — every caller that predates `wggran` says exactly that. Those
-# callers also mean "a device with a square `tile` fp16 -> fp32 instruction",
-# which is the shape table they get: leaving it empty would let `tile` and
-# `shapes` describe different devices on a synthetic caps.
-DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-           workgrouplimit, cores, warps, wggran = NTuple{4,Int}[]) =
-    DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-               workgrouplimit, cores, warps, wggran,
-               coopmat ? [MatrixShape(Float16, Float32, tile, tile, tile, SubgroupScope())] :
-                         MatrixShape[])
-
-"""
-    DeviceCaps(c; kw...) -> DeviceCaps
-
-`c` with named fields replaced, for asking what a kernel would decide on a device
-that is not this one — a wave64 card, or this card with cooperative matrices
-switched off — without that device being present. It is what makes a tiling
-decision testable on a machine that cannot run it.
-"""
-DeviceCaps(c::DeviceCaps;
-           coopmat = c.coopmat, tile = c.tile, subgroup = c.subgroup,
-           coopmatsubgroup = c.coopmatsubgroup, sharedbudget = c.sharedbudget,
-           workgrouplimit = c.workgrouplimit, cores = c.cores, warps = c.warps,
-           wggran = c.wggran, shapes = c.shapes) =
-    DeviceCaps(coopmat, tile, subgroup, coopmatsubgroup, sharedbudget,
-               workgrouplimit, cores, warps, wggran, shapes)
-
-"""
-    supports(c::DeviceCaps, s::MatrixShape) -> Bool
-    bestshape(c::DeviceCaps, ab, acc; scope) -> MatrixShape | nothing
-
-Ask this device's shape table, `coopmat` included. Forwarded to
-`KernelInterfaces` so the search exists once — the workgroup-granularity lookup
-is here for the same reason, after two callers wrote the same loop with different
-argument orders.
-
-**The `coopmat` gate is here rather than in the copy constructor**, which was
-tried first and is wrong: `DeviceCaps(c; coopmat = false)` must change exactly
-the field it names, and letting `tile` and `shapes` follow it means naming one
-field and moving three. Lava's `test_device_caps.jl` asserts that contract by
-name. A caps with `coopmat = false` may therefore still carry a table, and it is
-the accessors that answer as the device it claims to be.
-"""
-supports(c::DeviceCaps, s::MatrixShape) = c.coopmat && supports(c.shapes, s)
-bestshape(c::DeviceCaps, ab, acc; scope::MatrixScope = SubgroupScope()) =
-    c.coopmat ? bestshape(c.shapes, ab, acc; scope) : nothing
-
-"""
-    caps(device) -> DeviceCaps
-
-What this device can do. A backend implements it; nothing above it needs to know
-which backend answered.
-
-The backend converts rather than aliases: Lava has a struct of its own with the
-same fields, and it stays Lava's. Mantle cannot be a dependency of its own
-backend, so the type has to be defined here and filled in there.
-"""
-function caps end
+# `caps(device) -> DeviceCaps` — what this device can do. A backend implements
+# it; nothing above it needs to know which backend answered.
+#
+# NOT declared here. `caps` is `KernelInterface.caps`, imported at the top of
+# `Mantle.jl`, so `caps(::Mantle.Device)` and `caps(::KI.Backend)` are methods of
+# ONE function: a device and the backend under it are two handles on the same
+# hardware and must not be able to answer differently. Which one a caller has
+# depends on whether it arrived through the graph or through a kernel launch.
+#
+# It used to be a Mantle function over a Mantle type, with the backend converting
+# its own identical struct into it field by field. Both are gone.
 
 """
     Window(width, height; title = "", vsync = false)

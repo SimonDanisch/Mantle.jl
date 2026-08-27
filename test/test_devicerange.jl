@@ -50,7 +50,7 @@ end
 end
 
 @testset "DeviceRange dispatches over a count the host never sees" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     cap = 4096
     for want in (1, 777, 4096)
         g = M.Graph(dev)
@@ -86,7 +86,7 @@ end
 end
 
 @testset "the count is ordered before the dispatch that reads it" begin
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     g = M.Graph(dev)
     src = M.Buffer(dev, fill(1.0f0, 64))
     n = M.Buffer(dev, Int32[0])
@@ -117,7 +117,7 @@ end
     # 777 elements with a group of 64 launches 832 invocations. Unguarded, all
     # 832 write — which is why `DeviceRange`'s docstring says the kernel must
     # bound itself, and why every wavefront kernel in Hikari already does.
-    dev = M.Device(Lava)
+    dev = M.Device(M.VulkanAPI())
     cap, want, group = 4096, 777, 64
     g = M.Graph(dev)
     src = M.Buffer(dev, Float32[k <= want ? 1.0f0 : 0.0f0 for k in 1:cap])

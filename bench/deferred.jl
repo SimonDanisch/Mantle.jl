@@ -264,7 +264,7 @@ Random.seed!(7)
 cubes, normals = cube_geometry()
 boxc, boxs, boxcol = city(NBOX)
 
-dev = M.Device(Lava)
+dev = M.Device(M.VulkanAPI())
 win = M.Window(W, H; title = "mantle: deferred + gpu culling", vsync = false)
 
 cubepos = M.Buffer(dev, cubes)

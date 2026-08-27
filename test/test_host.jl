@@ -1,6 +1,6 @@
 # The host backend: the same graph, the same five analyses, no GPU.
 #
-# This file is the reason the phases were lifted out of `MantleLavaExt`. Nothing
+# This file is the reason the phases were lifted out of the Vulkan backend. Nothing
 # here copies a scheduler; `MantleHostExt` supplies thirteen mostly one-line
 # methods and two near-empty phases, and core does the rest.
 
@@ -35,7 +35,7 @@ end
 
 @testset "Host: the graph runs, in order, with no GPU present" begin
     n = 1024
-    g, t = buildhostchain(M.Device(M.Host()), n)
+    g, t = buildhostchain(M.Device(M.HostAPI()), n)
     plan = M.Plan(g)
     M.run!(plan)
 
@@ -46,7 +46,7 @@ end
 end
 
 @testset "Host: compile bakes, run! decides nothing" begin
-    g, _ = buildhostchain(M.Device(M.Host()), 512)
+    g, _ = buildhostchain(M.Device(M.HostAPI()), 512)
     plan = M.Plan(g)
     @test length(plan.steps) == 3
     # Every step is a concrete `Launch{K,A,N}`: the kernel is specialised, the
@@ -58,14 +58,14 @@ end
 
 @testset "Host: transients really share the arena" begin
     n = 1024
-    g, t = buildhostchain(M.Device(M.Host()), n)
+    g, t = buildhostchain(M.Device(M.HostAPI()), n)
     plan = M.Plan(g)
-    @test HOSTEXT.naivebytes(plan) == 3 * n * sizeof(Float32)
+    @test M.naivebytes(plan) == 3 * n * sizeof(Float32)
     # Only adjacent links are ever live together, so the placer must overlap the
     # other pair. If this ever equals `naive`, the transients stopped sharing
     # bytes and the backend has quietly lost the ability to catch a placement
     # bug — which is the only reason it uses one arena instead of three arrays.
-    @test M.peakbytes(plan) < HOSTEXT.naivebytes(plan)
+    @test M.peakbytes(plan) < M.naivebytes(plan)
 
     # …and the arena is genuinely one allocation the views point into. It is now
     # a POOL BLOCK, so it is at least the peak rather than exactly it — the plan
@@ -78,13 +78,13 @@ end
 
 @testset "Host: alias = false is the bisection tool it claims to be" begin
     n = 1024
-    g, _ = buildhostchain(M.Device(M.Host()), n)
+    g, _ = buildhostchain(M.Device(M.HostAPI()), n)
     @test M.peakbytes(M.Plan(g; alias = false)) == 3 * n * sizeof(Float32)
 end
 
 @testset "Host: custom! bodies are steps too" begin
     ran = Ref(0)
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     g = M.Graph(dev)
     b = M.Buffer(dev, fill(1.0f0, 8))
     M.custom!(g, "by hand") do p
@@ -96,7 +96,7 @@ end
 end
 
 @testset "Host: an Update writes at the position the graph reserved" begin
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     g = M.Graph(dev)
     b = M.Buffer(dev, zeros(Float32, 4))
     ref = M.Update(g, b)
@@ -134,18 +134,18 @@ end
 
 # ── the thing that used to be silently broken ─────────────────────────────────
 #
-# `MantleLavaExt` defines `Device(::typeof(Lava))`, and `typeof(Lava)` is
-# `Module` — so a `Device(::typeof(KernelAbstractions))` here would have been the
-# SAME signature, and whichever extension loaded second would have replaced the
-# other with no warning. Both load in any session with a GPU and a host graph,
-# which is every session this work is aimed at.
+# The Vulkan backend used to define `Device(::typeof(Lava))`, selecting on the
+# MODULE — and `typeof(Lava)` is `Module`, so a `Device(::typeof(KernelAbstractions))`
+# here would have been the SAME signature, and whichever extension loaded second
+# would have replaced the other with no warning.
 #
-# Dispatching on the backend tag instead makes them different methods. Asserted
-# rather than reasoned about, because the failure mode is silent.
-if Base.get_extension(Mantle, :MantleLavaExt) !== nothing
-    @testset "Host and Lava devices coexist" begin
-        @test M.Device(M.Host()) isa HOSTEXT.HostDevice
-        @test M.Device(Lava) isa Base.get_extension(Mantle, :MantleLavaExt).LavaDevice
+# Both dispatch on a backend MARKER now — `VulkanAPI()` and `HostAPI()` — so they
+# are different methods by construction rather than by luck. Asserted rather than
+# reasoned about, because the failure mode was silent.
+begin
+    @testset "Host and Vulkan devices coexist" begin
+        @test M.Device(M.HostAPI()) isa HOSTEXT.HostDevice
+        @test M.Device(M.VulkanAPI()) isa Mantle.LavaDevice
     end
 end
 
@@ -171,7 +171,7 @@ end
 end
 
 @testset "Host: DeviceRange reads its count at launch, not at compile" begin
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     g = M.Graph(dev)
     src = M.Buffer(dev, Float32[i for i in 1:16])
     n = M.Buffer(dev, Int32[0])
@@ -196,7 +196,7 @@ end
 end
 
 @testset "Host: a DeviceRange count is an Indirect read, so it orders the passes" begin
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     g = M.Graph(dev)
     n = M.Buffer(dev, Int32[4])
     dst = M.Transient.Buffer(g, Float32, 8)
@@ -248,7 +248,7 @@ end
     # written: `upload!` threw, and so did every kernel that filled a work
     # queue. The whole point of this backend is to be the one the others are
     # checked against, and it could not hold most of their data.
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     n = 64
     @test sizeof(HostPadded) > sizeof(Int64) + sizeof(Int8)   # it really is padded
 
@@ -278,7 +278,7 @@ end
     # every read-back assertion in this file while making the arena inert —
     # two transients the placer overlapped would quietly stop corrupting each
     # other, which is the one thing this backend exists to prove.
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     b = M.Buffer(dev, Float32[1, 2, 3, 4])
     M.storage(b)[2] = 99f0
     @test Array(b) == Float32[1, 99, 3, 4]
@@ -289,7 +289,7 @@ end
     # A renderer's own buffers are not all vectors — a framebuffer, an albedo
     # layer, a depth layer — and `Buffer` was a device VECTOR, so anything with
     # two dimensions had to be allocated outside the pool and freed by hand.
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     want = reshape(collect(1f0:12f0), 3, 4)
     b = M.Buffer(dev, want)
     @test size(b) == (3, 4)
@@ -324,7 +324,7 @@ drain!(pool, dev) = (while M.reclaim!(pool, dev; wait = true) > 0 end; nothing)
     # drop a resource mid-frame without knowing what is in flight, and what
     # lets the same call be a finalizer — it appends under a lock and never
     # touches a free list, which is the bug `trim!`'s docstring describes.
-    dev = M.Device(M.Host())
+    dev = M.Device(M.HostAPI())
     pool = M.pool(dev)
 
     b = M.Buffer(dev, fill(1f0, 4096))
