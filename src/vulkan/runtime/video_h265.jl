@@ -471,7 +471,7 @@ function H265Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool = false
         image = GC.@preserve PIN Vk.Image(dev, Vk.IMAGE_TYPE_2D, fmt_hl, Vk.Extent3D(CW, CH, 1),
             1, 1, Vk.SAMPLE_COUNT_1_BIT, Vk.IMAGE_TILING_OPTIMAL, dpbusage,
             Vk.SHARING_MODE_EXCLUSIVE, UInt32[], Vk.IMAGE_LAYOUT_UNDEFINED; next = Ptr{Cvoid}(rp(pl)))
-        mem = alloc_image_memory(ctx, image)
+        mem = MANTLE.alloc_image_memory(ctx, image)
         view = Vk.ImageView(dev, image, Vk.IMAGE_VIEW_TYPE_2D, fmt_hl,
             Vk.ComponentMapping(Vk.COMPONENT_SWIZZLE_IDENTITY, Vk.COMPONENT_SWIZZLE_IDENTITY, Vk.COMPONENT_SWIZZLE_IDENTITY, Vk.COMPONENT_SWIZZLE_IDENTITY),
             Vk.ImageSubresourceRange(Vk.IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1))
@@ -618,10 +618,10 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
         ccall(dfp(w, "vkCmdDecodeVideoKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(decinfo))
         ccall(dfp(w, "vkCmdEndVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(endinfo))
         emit(CB, barrier(outimg, DPBLAYOUT, TSRC)); outlay[] = TSRC
-        record_luma_copy!(cbh, outvimg, dstbuf.buffer, dstbuf.pool_offset + dst.offset)
+        record_luma_copy!(cbh, outvimg, dstbuf.buffer, pool_offset(dstbuf) + dst.offset)
         if chroma
             uvbuf = duv.buf[]
-            record_chroma_copy!(cbh, outvimg, uvbuf.buffer, uvbuf.pool_offset + duv.offset)
+            record_chroma_copy!(cbh, outvimg, uvbuf.buffer, pool_offset(uvbuf) + duv.offset)
         end
     end
     push!(dec.pending, (dec.gop, poc, dst, duv))

@@ -1,5 +1,5 @@
 using Test, Lava, Raycore
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 @testset "push!(hwtlas, blas, instance_buf) -- registration" begin
@@ -21,3 +21,4 @@ using GeometryBasics: Point3f
     @test tlas.instance_batches[1].instance_buf === instance_buf
     @test tlas.dirty == true
 end
+

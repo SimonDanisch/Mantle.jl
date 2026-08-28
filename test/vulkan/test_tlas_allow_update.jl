@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-using Lava: LavaInstanceRecord, build_tlas, as_build, build_blas_aabb, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, build_tlas, as_build, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 @testset "build_tlas(LavaArray{LavaInstanceRecord}, n; allow_update=true)" begin
@@ -33,3 +33,4 @@ using GeometryBasics: Point3f
     @test tlas.update_scratch_size > 0
     @test tlas.instance_buf === instance_buf
 end
+

@@ -4,6 +4,14 @@
 
 import GPUArraysCore: AbstractGPUArray, AbstractGPUVector, AbstractGPUMatrix
 
+# Exported, as `LavaBackend` is. It was Lava's export until the runtime moved
+# here, and the move left it defined but unexported — so 43 test files that say
+# `LavaArray` unqualified stopped resolving, each with an `UndefVarError` at
+# whatever line first names it rather than at load. The host array type of a
+# backend is part of its surface; the alternative is qualifying it in every one
+# of those files to say the same thing.
+export LavaArray
+
 """
     LavaArray{T,N} <: AbstractGPUArray{T,N}
 
@@ -267,6 +275,10 @@ Base._parentsmatch(A::LavaArray, B::LavaArray) = A.buf === B.buf && A.offset == 
 # only the host handle knows its own buffer address.
 
 """Convert a host `LavaArray` to the form a kernel receives."""
-function LavaDeviceArray(a::LavaArray{T,N}) where {T,N}
+# Qualified. `using Lava: LavaDeviceArray` makes the name visible but does not
+# make this an extension of Lava's constructor — 1.12 assumes it is one and
+# deprecates the assumption, so it is said outright. `import`ing the name
+# instead would work equally well and read as though Mantle owned the type.
+function Lava.LavaDeviceArray(a::LavaArray{T,N}) where {T,N}
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 end

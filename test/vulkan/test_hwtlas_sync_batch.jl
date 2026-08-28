@@ -1,6 +1,6 @@
 using Test, Lava, Raycore
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
-            write_grain_instances_kernel
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
+              write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "HWTLAS sync! with instance batch" begin
@@ -61,3 +61,4 @@ end
     Raycore.sync!(tlas)
     @test tlas.dirty == false   # refit does not toggle dirty
 end
+

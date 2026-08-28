@@ -27,7 +27,10 @@ using Raycore, Lava
 # ===============================================================================
 
 @testset "Mantle.HWTLAS — sync! contains no KA.synchronize" begin
-    path = joinpath(dirname(pathof(Lava)), "raytracing", "hwtlas.jl")
+    # `pathof(Mantle)`: `hwtlas.jl` came here with the runtime and sits under
+    # `src/vulkan/`. Read from source on purpose — the assertion is about what
+    # `sync!` does NOT call, which no runtime observation can show.
+    path = joinpath(dirname(pathof(Mantle)), "vulkan", "raytracing", "hwtlas.jl")
     src  = read(path, String)
     # Extract the body of `sync!` so comments in other functions don't fool us.
     m = match(r"function Raycore\.sync!\(hwtlas::HWTLAS\)(.*?)\nend"s, src)

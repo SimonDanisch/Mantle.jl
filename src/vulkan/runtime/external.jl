@@ -103,7 +103,7 @@ function Base.copyto!(img::ExternalImage, a::LavaArray)
     KA.synchronize(LavaBackend(ctx))  # pending kernel writes must land first
 
     managed = a.buf[]
-    src_offset = UInt64(managed.pool_offset + a.offset)
+    src_offset = UInt64(pool_offset(managed) + a.offset)
     # VK.jl handles are refcounted and destroy themselves via finalizers —
     # no manual destroy (a second vkDestroy* on the same handle segfaults).
     pool = @vk_checked "external_copy_pool" VK.create_command_pool(ctx.device, ctx.queue_family_index)

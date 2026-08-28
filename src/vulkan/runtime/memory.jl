@@ -66,7 +66,7 @@ const BUF_STATE_DEAD     = UInt8(2)
 # arg buffer slots for `== 0`.
 const BDA_POISON = UInt64(0)
 
-# No reset callback: every counter above is a `DevicePool` field, and the pool
+# No reset callback: every counter above is a `MemoryPolicy` field, and the pool
 # is a `VkContext` field, so all of it dies with the context `vk_reset_device!`
 # retires. Staging, indirect and arg slabs are per-`BatchQueue` and go the same
 # way. `reset_memory_stats!` is the one piece left, and `vk_reset_device!` calls
@@ -89,10 +89,16 @@ const BDA_POISON = UInt64(0)
 #   * EWMA on `last_gc_time` so a single slow GC doesn't permanently inhibit
 #     future GCs.
 #
-# `pool.live_bytes` is incremented by `try_vk_alloc` (real Vulkan allocations,
-# including pool blocks) and decremented by `destroy_buffer!`.  Sub-pool chunks
-# don't move this counter — the pool block they live in already accounts for
-# the VRAM.
+# What this device holds is `gpu_live_bytes(ctx)`, and every gate here reads
+# that rather than `mempolicy(ctx).live_bytes[]`. The two used to be the same
+# number; they are not any more. `live_bytes` counts only buffers that own their
+# memory — staging, mapped, unusual usage flags — while the suballocated bytes
+# are `Mantle.reserved(spans(ctx))`, and the total is the sum.
+#
+# Reading the counter alone is a live bug, not a nuance: it makes every threshold
+# here compare device pressure against a few megabytes of staging and conclude
+# there is nothing to do. `maybe_trim_pool!` did exactly that and declined to
+# trim a pool holding 1.3 GB.
 
 mutable struct MemoryStats
     # Estimated maximum bytes available to us on the device-local heap.
@@ -216,9 +222,9 @@ Whether the *automatic* trim could return anything without flushing.
 
 Two things make a block empty. It may already be, or the release may be sitting
 on a `deferred_frees` list: a sub-allocation's finalizer moves the buffer
-ALIVE → DEFERRED, and the `live_count` it holds is not given back until
+ALIVE → DEFERRED, and the `live` entry it holds is not given back until
 `drain_deferred_frees!` runs inside `quiesce_before_reclaim!` — after the gate.
-So `any(b -> b.live_count == 0, blocks)` on its own is a precondition the trim
+So `any(b -> isempty(b.live), blocks)` on its own is a precondition the trim
 establishes, and gating on it alone means declining to look.
 
 **This deliberately does not see the third case**, which is a buffer pinned by a
@@ -230,8 +236,8 @@ path flush whenever a batch is open, which for a render loop is a stall every
 pays for it explicitly.
 """
 function reclaimable(ctx::VkContext)
-    p = pool(ctx)
-    any(b -> b.live_count == 0, p.blocks) && return true
+    p = mempolicy(ctx)
+    any(b -> isempty(b.live), poolblocks(ctx)) && return true
     bq = ctx.default_bq
     return lock(bq.deferred_frees_lock) do
         !isempty(bq.deferred_frees) || !isempty(bq.deferred_as_frees)
@@ -239,8 +245,8 @@ function reclaimable(ctx::VkContext)
 end
 
 function maybe_trim_pool!(ctx::VkContext)
-    p = pool(ctx)
-    p.live_bytes[] < p.trim_threshold && return
+    p = mempolicy(ctx)
+    gpu_live_bytes(ctx) < p.trim_threshold && return
     now = time()
     now - p.last_trim < p.trim_min_interval && return
     p.last_trim = now
@@ -265,7 +271,7 @@ end
 
 Hand every empty pool block back to the driver, now.
 
-The automatic path (`pool(ctx).trim_threshold`) is rate-limited and only runs
+The automatic path (`mempolicy(ctx).trim_threshold`) is rate-limited and only runs
 while something is allocating, so it is the wrong tool for "I have finished a
 batch of work and want the memory back" — and for measuring, where dead pool
 capacity otherwise counts as live and makes a VRAM figure depend on GC timing
@@ -273,9 +279,9 @@ rather than on demand.
 
 Runs a full collection and then `quiesce_before_reclaim!` — a flush, a wait and a
 drain — **unconditionally**, because that is the request. It used to return early
-unless some block already read `live_count == 0`, and that gate is a precondition
+unless some block already had nothing live in it, and that gate is a precondition
 the flush and the drain establish: a buffer pinned by a recording batch, or one
-already moved onto a `deferred_frees` list, holds its count until then, and
+already moved onto a `deferred_frees` list, holds its entry until then, and
 between them that is everything a graph evaluator allocates.
 
 The measurement, on a plain KA workload of 60 dispatches never synchronised:
@@ -291,7 +297,7 @@ the explicit "I have finished and want the memory back", so it pays the stall.
 """
 function trim_gpu_pool!(ctx::VkContext = vk_context())
     GC.gc(true)
-    isempty(pool(ctx).blocks) && return (0, 0)
+    isempty(poolblocks(ctx)) && return (0, 0)
     bq = ctx.default_bq
     quiesce_before_reclaim!(bq)
     return reclaim_empty_pool_blocks!(bq)
@@ -319,7 +325,7 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
     size = (@atomic stats.size)
     size > 0 || return  # haven't probed yet
 
-    live = pool(ctx).live_bytes[]
+    live = gpu_live_bytes(ctx)
     pressure = live / size
     min_pressure = blocking ? 0.5 : 0.75
     pressure < min_pressure && return
@@ -340,7 +346,7 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
 
     pre_gc_live = live
     gc_time = Base.@elapsed GC.gc(false)
-    post_gc_live = pool(ctx).live_bytes[]
+    post_gc_live = gpu_live_bytes(ctx)
 
     # The GC just returned sub-allocations to their pool blocks, but a block is
     # only handed back to the driver on an OOM retry.  `pool.live_bytes` tracks
@@ -353,12 +359,12 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
     # Reclaim here, where a collection is already being paid for.  The scan for
     # empty blocks is cheap; only pay `quiesce_before_reclaim!` (which waits for
     # in-flight batches) when a block would actually be returned.
-    if any(b -> b.live_count == 0, pool(ctx).blocks)
+    if any(b -> isempty(b.live), poolblocks(ctx))
         bq = ctx.default_bq
         quiesce_before_reclaim!(bq)
         n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
         n_blocks > 0 && @debug "Lava: reclaimed empty pool blocks after GC" blocks=n_blocks MiB=(bytes_freed >> 20)
-        post_gc_live = pool(ctx).live_bytes[]
+        post_gc_live = gpu_live_bytes(ctx)
     end
 
     @atomic stats.last_freed = pre_gc_live - post_gc_live
@@ -382,9 +388,9 @@ function format_oom_error(ctx::VkContext, fail::AllocFailure)
     io = IOBuffer()
     println(io, "Out of GPU memory.")
     req_mb = fail.nbytes ÷ (1024 * 1024)
-    live_mb = pool(ctx).live_bytes[] ÷ (1024 * 1024)
+    live_mb = gpu_live_bytes(ctx) ÷ (1024 * 1024)
     println(io, "  Vulkan returned $(fail.code) from $(fail.op) for $(fail.nbytes) bytes ($(req_mb) MiB).")
-    println(io, "  Lava tracked state: $(live_mb) MiB live across $(length(pool(ctx).live_buffers)) buffers.")
+    println(io, "  Lava tracked state: $(live_mb) MiB live across $(length(mempolicy(ctx).live_buffers)) buffers.")
     if fail.mem_type_idx >= 0
         mem_props = ctx.memory_properties
         mt = mem_props.memory_types[fail.mem_type_idx + 1]
@@ -437,7 +443,7 @@ function vk_alloc(bq::BatchQueue, nbytes::Integer;
         "vk_alloc",
         "Vulkan device is lost — cannot allocate new buffers",
         "Call vk_reset_device!() to reinitialize, or restart Julia."))
-    if pool(bq.ctx::VkContext).track_allocs
+    if mempolicy(bq.ctx::VkContext).track_allocs
         record_alloc_site!(bq.ctx::VkContext, Int(nbytes))
     end
     # Phase 7 P2: reclaim retired in-flight batches on THIS queue before
@@ -492,7 +498,7 @@ allocations.
 """
 
 function quiesce_before_reclaim!(bq::BatchQueue)
-    p = pool(bq.ctx::VkContext)
+    p = mempolicy(bq.ctx::VkContext)
     if !p.reclaiming[] && !device_lost(bq.ctx::VkContext)
         p.reclaiming[] = true
         try
@@ -597,8 +603,8 @@ function try_vk_alloc(bq::BatchQueue, nbytes::Integer;
     addr_info = VK.BufferDeviceAddressInfo(buf)
     address = VK.get_buffer_device_address(dev, addr_info)
 
-    result = VkManagedBuffer(buf, memory, address, mapped_ptr, Int(nbytes), 0, nothing, nothing, BUF_STATE_ALIVE, 0, false, ctx)
-    let p = pool(ctx)
+    result = VkManagedBuffer(buf, memory, address, mapped_ptr, Int(nbytes), nothing, nothing, BUF_STATE_ALIVE, 0, false, ctx)
+    let p = mempolicy(ctx)
         push!(p.live_buffers, result)
         Threads.atomic_add!(p.live_bytes, nbytes)
     end
@@ -672,14 +678,14 @@ function vk_free!(buf::VkManagedBuffer)
     _, ok = @atomicreplace buf.state BUF_STATE_ALIVE => BUF_STATE_DEFERRED
     ok || return  # already DEFERRED or DEAD — nothing to do
 
-    delete!(pool(buf.ctx::VkContext).live_buffers, buf)
+    delete!(mempolicy(buf.ctx::VkContext).live_buffers, buf)
 
     if (buf.ctx::VkContext).diag.free_debug
         bqd = buf.ctx.default_bq
         active_dbg = (bqd.active_batch !== nothing) && bqd.active_batch.recording
         push!(buf.ctx.diag.free_log,
               (addr=buf.address, size=buf.size,
-               pool=buf.pool_block !== nothing,
+               pool=buf.region !== nothing,
                lw=@atomic(:acquire, buf.last_write),
                active=active_dbg))
     end
@@ -773,22 +779,27 @@ function vk_free!(buf::VkManagedBuffer)
     end
 
     # One more reason to defer, independent of what the GPU is doing: THREAD.
-    # `destroy_buffer!` on a pooled chunk calls `return_to_pool!`, which does a
-    # plain `push!` onto the pool's free list — a Vector that `pool_alloc` pops
-    # from on whichever thread is allocating. `vk_free!` runs from finalizers, so
-    # that is a genuine data race, and Julia 1.12 catches it:
+    #
+    # This was load-bearing against a data race in the allocator itself.
+    # `destroy_buffer!` on a pooled chunk called `return_to_pool!`, which did a
+    # plain `push!` onto a free-list Vector that `pool_alloc` popped from on
+    # whichever thread was allocating, and `vk_free!` runs from finalizers.
+    # Julia 1.12 catches it:
     #
     #   error in running finalizer: ConcurrencyViolationError("Vector has invalid
     #   state. Don't modify internal fields incorrectly, or resize without
     #   correct locks")  _growend! → push! → return_to_pool!
     #
-    # after which the process segfaults. The in-flight branch above already hands
-    # buffers to the owning thread under `deferred_frees_lock`; it just never
-    # covered this case, and it cannot — a buffer with `last_write === nothing`
-    # (allocated, never written, dropped) does not enter that branch at all.
-    # Route every off-thread free the same way and `return_to_pool!` stays
-    # single-threaded. State is already DEFERRED here, which is exactly what
-    # `drain_deferred_frees!` expects.
+    # after which the process segfaults.
+    #
+    # **That reason is gone** — `Mantle.release!` takes the block's lock, so the
+    # free structure is safe from any thread. The deferral stays anyway, because
+    # it was never only about the list: a buffer freed here is destroyed here,
+    # and `destroy_buffer!` calls Vulkan destructors on a dedicated buffer. Doing
+    # that from an arbitrary GC thread is its own hazard, and the in-flight
+    # branch above already hands buffers to the owning thread the same way.
+    # State is already DEFERRED here, which is what `drain_deferred_frees!`
+    # expects.
     # `ctx` is typed `Any` and can be unset on a buffer that never belonged to a
     # context; such a buffer is not pooled either, so destroying it inline is
     # safe and the `isa` guard keeps this from throwing inside a finalizer.
@@ -821,10 +832,32 @@ function destroy_buffer!(buf::VkManagedBuffer)
     end
     ok || return  # was already DEAD; idempotent
 
-    # Pooled chunk: return to pool, don't destroy the shared VkBuffer
-    if buf.pool_block !== nothing
-        return_to_pool!(buf)
-        return
+    # Suballocated: give the span back, and never touch the block's VkBuffer —
+    # it belongs to `Mantle.Block` and is shared with every other chunk in it.
+    #
+    # `release!` outright, not `retire!`. Retiring is for a caller who cannot
+    # know what the device is still doing with the bytes; everything above this
+    # point in `vk_free!` exists to establish exactly that, from the buffer's own
+    # `last_write` and its queue's timeline — which is finer than the device-wide
+    # fence `reclaim!` would take, and already paid for. Retiring here would hold
+    # the span for one more submission boundary on top of a wait that has
+    # already happened.
+    #
+    # The thread hazard that used to make this the wrong place is closed at the
+    # allocator now: `release!` takes the block's lock, so a free-list corruption
+    # like the `ConcurrencyViolationError` described in `vk_free!` cannot recur
+    # through this path. The off-thread deferral above stays regardless — it is
+    # about the DEVICE still reading the bytes, not about the list.
+    let r = buf.region
+        if r !== nothing
+            buf.region = nothing
+            buf.address = BDA_POISON
+            buf.mapped_ptr = Ptr{UInt8}(0)
+            buf.size = 0
+            @atomic :release buf.last_write = nothing
+            release!(r::Region)
+            return
+        end
     end
 
     # Check if the Vulkan device/context is still valid.
@@ -835,7 +868,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
         # Device is gone — just poison the handle, don't call Vulkan APIs
         buf.mapped_ptr = Ptr{UInt8}(0)
         buf.address = BDA_POISON
-        Threads.atomic_sub!(pool(ctx).live_bytes, buf.size)
+        Threads.atomic_sub!(mempolicy(ctx).live_bytes, buf.size)
         buf.size = 0
         return
     end
@@ -857,7 +890,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
                      sprint(showerror, ex) * "\n")
     end
     buf.address = BDA_POISON
-    Threads.atomic_sub!(pool(ctx).live_bytes, buf.size)
+    Threads.atomic_sub!(mempolicy(ctx).live_bytes, buf.size)
     buf.size = 0
 end
 
@@ -915,12 +948,13 @@ Call this RIGHT BEFORE submit to catch problems before they reach the GPU.
 function scan_slabs_for_unknown_bdas(bq)
     bq === nothing && return NamedTuple[]
     live = Set{UInt64}()
-    for buf in pool(bq.ctx::VkContext).live_buffers
+    for buf in mempolicy(bq.ctx::VkContext).live_buffers
         push!(live, buf.address)
     end
     pool_ranges = Tuple{UInt64,UInt64}[]
-    for blk in pool(bq.ctx::VkContext).blocks
-        push!(pool_ranges, (blk.base_address, blk.base_address + UInt64(blk.capacity)))
+    for blk in poolblocks(bq.ctx::VkContext)
+        bb = blk.memory::BufferBlock
+        push!(pool_ranges, (bb.address, bb.address + UInt64(bb.bytes)))
     end
     # Slabs themselves are valid arenas — the arg slab packs nested structs
     # by writing pointers to within the slab itself (a "byval-inline" arg's
@@ -1009,169 +1043,184 @@ function drain_deferred_frees!(bq::BatchQueue)
     return nothing
 end
 
-"""Process deferred buffer frees after GPU is idle. Called from vk_flush!()."""
-# ── Memory Pool: sub-allocate from large VkBuffer blocks ──
-# Eliminates per-array VkBuffer create/destroy overhead (~30μs each).
-# All sub-allocations share the parent block's VkBuffer handle.
-# Free = return to free list (zero Vulkan API calls).
+# ── Sub-allocation: one pool, and it is Mantle's ──
+#
+# What was here: 64 MiB blocks carved by a bump pointer, 153 size classes, a free
+# list per class holding recycled `VkManagedBuffer` objects, and a block-reclaim
+# scan. About seven hundred lines, and a complete second allocator sitting beside
+# `Mantle.Pool` with no knowledge of it.
+#
+# Two allocators over one `VkDevice` is not a tidiness problem. Neither could
+# reuse the other's bytes, so an idle 64 MiB arena could not serve an array
+# allocation that was about to grow the pool, and the footprint either reported
+# was about its own bookkeeping rather than about the device. `Mantle.Pool`'s own
+# header says this outright: a backend that routes `rawalloc` through its own
+# pool defeats the point.
+#
+# So the size classes are gone and this file allocates the same way `Place` does.
+# What each piece became:
+#
+#     pool_alloc                  ->  acquire!
+#     return_to_pool!             ->  release!
+#     alloc_pool_block            ->  Pool's own growth, in acquire!
+#     reclaim_empty_pool_blocks!  ->  trim!
+#     PoolBlock                   ->  Mantle.Block
+#     (pool_offset, pool_block)   ->  Mantle.Region
+#     size_class / POOL_SUBDIV    ->  nothing; carving is exact
+#
+# Two things are lost with the size classes and both were measured, so they are
+# stated rather than discovered later:
+#
+#   * **Rounding waste is gone**, which was the size classes' whole cost. Eight
+#     subclasses per octave bounded it at 1/8 of a request — SAM 2's encoder went
+#     from 59.3% efficient to ~94% when they were introduced. `carve!` splits at
+#     exactly the requested length, so it is 100%, and `pool_accounting` is
+#     deleted because it existed to measure a number that is now always 1.0.
+#   * **Object recycling is gone.** A free list held the `VkManagedBuffer` itself,
+#     so reuse cost a `pop!` and four field writes. A fresh one is now built per
+#     allocation: one mutable struct and one finalizer, against a suballocator
+#     call that costs roughly 300 ns where the size-class `pop!` cost about 50.
+#     That is the price of one allocator instead of two.
+#
+# The LIFETIME layer above this is untouched, and deliberately. `vk_free!` still
+# decides when a buffer's bytes are safe to reuse from that buffer's own
+# `last_write` and its queue's deferred list, which is finer-grained than the
+# device-wide fence `Mantle.retire!`/`reclaim!` use. By the time `destroy_buffer!`
+# reaches a pooled chunk the wait is already done and the thread is the owning
+# one, so it can `release!` outright rather than retiring for another submission
+# boundary. `retire!` remains what the graph arenas use, where no per-resource
+# `last_write` exists to be more precise with.
 
-const POOL_BLOCK_SIZE = 64 * 1024 * 1024  # 64 MiB per block
-const POOL_LARGE_THRESHOLD = POOL_BLOCK_SIZE  # Allocs above this bypass the pool
-const POOL_MIN_SIZE = 16  # Minimum allocation size (Vulkan requires non-zero)
 """
-Subclasses per octave above [`POOL_SUBDIV_MIN`]: a size class is
-`2^p * (1 + s/8)` rather than just `2^p`, so rounding wastes at most 1/8 of a
-request instead of at most half of it.
+How large a block the pool cuts when it has to grow.
 
-Measured on SAM 2's encoder, which is the workload that made this worth doing.
-One encode asks the pool for 1 649 MiB across 787 allocations; with plain
-powers of two it was handed **2 781 MiB — 59.3% efficient**, and the missing
-1 132 MiB is most of the gap between this allocator's footprint and PyTorch's.
-Eight subclasses put that at ~94% for 5x more free lists, which are empty
-vectors and cost nothing.
-
-Below `POOL_SUBDIV_MIN` the subdivision is skipped: an octave there is a few
-kilobytes, the absolute waste is irrelevant, and the step would fall under the
-16-byte alignment every chunk relies on (`block.bump` advances by the class
-size, so the class size *is* the alignment guarantee).
+64 MiB, unchanged: it is the size the old allocator used, the size `Place`
+already asks for, and `Mantle.blocksize` reports.
 """
-const POOL_SUBDIV = 8
-const POOL_SUBDIV_MIN = 4096          # 2^12; step at that octave is 512 B
-const POOL_SUBDIV_MINEXP = 12
-const POOL_POW2_CLASSES = 9           # 16 B => 1 … 4096 B => 9
-# Up to 2^27 with 8 subclasses each, plus the plain power-of-two head.
-const POOL_NUM_SIZE_CLASSES = POOL_POW2_CLASSES + 16 * POOL_SUBDIV
+const POOL_BLOCK_SIZE = 64 * 1024 * 1024
 
-# Debug-only: force every LavaArray onto its own VkBuffer (one vkGetBufferDeviceAddress
-# per array). GPU-AV's BDA OOB validation tracks ranges per VkBuffer, so with the pool
-# on it cannot see sub-pool overruns; with this flag on, each LavaArray's bounds are
-# checked individually. Slow — leave off in production.
+"""
+The smallest allocation. Vulkan rejects a zero-length buffer, and 16 bytes keeps
+every chunk's start usable for any scalar type without a second alignment rule.
+"""
+const POOL_MIN_SIZE = 16
 
-# Defaults live here, next to the pool they configure, rather than in eleven
+"""
+Alignment every sub-allocation gets.
+
+256 is `Mantle.acquire!`'s own default and covers every
+`minStorageBufferOffsetAlignment` this runs on. A buffer needing more — an
+acceleration-structure scratch region — asks through `bda_alignment_for` and
+takes the dedicated path, where the alignment is applied to a whole allocation.
+"""
+const POOL_ALIGN = 256
+
+# Defaults live here, next to the policy they configure, rather than in eleven
 # module-level `Ref`s. `2 GiB` soft cap, trim above 1 GiB and no more than every
 # 5 s, a full GC no more than every 30 s.
-DevicePool() = DevicePool(PoolBlock[],
-                          [VkManagedBuffer[] for _ in 1:POOL_NUM_SIZE_CLASSES],
-                          false, false, 2 * 1024^3, 1024 * 1024 * 1024,
-                          5.0, 30.0, 0.02, 0.5, false,
-                          0.0, 0.0, 0.0, 0.0, 0.0,
-                          Threads.Atomic{Int}(0), Set{VkManagedBuffer}(),
-                          Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
-                          Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
-                          Threads.Atomic{Bool}(false))
+MemoryPolicy() = MemoryPolicy(false, 2 * 1024^3, 1024 * 1024 * 1024,
+                              5.0, 30.0, 0.02, 0.5, false,
+                              0.0, 0.0, 0.0, 0.0, 0.0,
+                              Threads.Atomic{Int}(0), Set{VkManagedBuffer}(),
+                              Threads.Atomic{Int}(0),
+                              Threads.Atomic{Bool}(false))
 
 """
-    pool(ctx) -> DevicePool
+    lavadevice(ctx) -> LavaDevice
 
-This device's memory, created on first allocation.
+This context's device handle, and so its `Mantle.Pool`.
 
-Never call this from a finalizer: it can insert. The free path reaches its pool
-through `buf.pool_block.pool` instead, which cannot allocate and cannot miss.
+Taken from `ctx`, never from `vk_context()`. The pool has to be the one that owns
+this context's blocks: `MemoryPolicy`'s docstring records what happened the last
+time an allocation could reach another device's memory, and reading the global
+here would be exactly that path reopened.
 """
-@inline pool(ctx::VkContext) = ctx.caches.pool
-
-"""
-    destroy_pool!(ctx)
-
-Destroy this device's pool blocks. Called by `vk_reset_device!` on the context it
-is retiring — which is where the old context is actually in scope.
-
-It used to be a `RESET_CALLBACKS` entry walking a global `POOLS` dict, because
-the pool did not belong to anything. Destructor failures are expected and
-logged, not thrown: by the time this runs the device is marked lost or already
-torn down, so the driver may have released the handles itself.
-"""
-function destroy_pool!(ctx::VkContext)
-    for block in ctx.caches.pool.blocks
-        try
-            block.buffer.destructor()
-            block.memory.destructor()
-        catch ex
-            # A destructor may not throw, but it can name the fault: this printed
-            # fixed text, so a driver error and a bug in this file read alike.
-            safe_fin_log("Lava pool reset: destructor failed (ok during vk_reset_device!): " *
-                         sprint(showerror, ex) * "\n")
-        end
-    end
-    empty!(ctx.caches.pool.blocks)
-    foreach(empty!, ctx.caches.pool.free_lists)
-    return nothing
+lavadevice(ctx::VkContext) = get!(DEVICES, ctx) do
+    LavaDevice(ctx, ctx.default_bq)
 end
 
-"""
-    size_class(nbytes) -> (idx, bytes)
-
-The free list a request of `nbytes` belongs to, and the size actually handed
-out. See [`POOL_SUBDIV`] for why this is not simply the next power of two.
-
-The two results must stay consistent in both directions: `pool_alloc` looks the
-class up from the *request*, `return_to_pool!` looks it up again from the size
-that was handed out, and a chunk that came back to the wrong list would be
-handed to a caller who asked for more than it holds. So
-`size_class(size_class(n).bytes) == size_class(n)` for every `n`, which
-`test_pool_sizeclass.jl` checks exhaustively over the octave boundaries.
-"""
-@inline function size_class(nbytes::Int)
-    n = max(nbytes, POOL_MIN_SIZE)
-    if n <= POOL_SUBDIV_MIN
-        r = nextpow(2, n)
-        return (trailing_zeros(r) - 3, r)   # 16=2^4 → 1, 32=2^5 → 2, …
-    end
-    p = 8 * sizeof(Int) - 1 - leading_zeros(n)   # floor(log2 n); ≥ 12 here
-    base = 1 << p
-    step = base >> 3                            # 2^p / POOL_SUBDIV
-    sub = cld(n - base, step)                   # 1…8 (n > base in this branch)
-    if sub == POOL_SUBDIV                       # the top subclass IS the next octave
-        p += 1; sub = 0; base = 1 << p
-        r = base
-    else
-        r = base + sub * step
-    end
-    idx = POOL_POW2_CLASSES + (p - POOL_SUBDIV_MINEXP) * POOL_SUBDIV + sub + 1
-    return (idx, r)
-end
-
-"""Size class index for a given byte size."""
-@inline size_class_idx(nbytes::Int) = size_class(nbytes)[1]
-
-"""Rounded-up allocation size for a given byte count."""
-@inline size_class_bytes(nbytes::Int) = size_class(nbytes)[2]
+"""The pool this context suballocates from."""
+@inline spans(ctx::VkContext) = pool(lavadevice(ctx))
 
 """
-    pool(ctx).accounting :: Bool
+    mempolicy(ctx) -> MemoryPolicy
 
-Record what the pool is asked for against what it hands out. Off by default;
-the counters below are only meaningful while it is on.
+When this device grows, trims and collects — not where its memory comes from,
+which is [`spans`](@ref).
 
-Power-of-two size classes waste up to 2x per chunk, and the pool is the reason
-SAM 2 holds far more VRAM than its live tensors. Whether that rounding is the
-cause or a red herring is a measurement, not a guess — hence these.
+Never call this from a finalizer expecting to allocate: it is a field read, but
+the policy it returns is not the free path. A buffer's own `region` is what
+`release!` needs, and that has been on the buffer since it was carved.
 """
+@inline mempolicy(ctx::VkContext) = ctx.caches.pool
 
-"""Requested / handed-out bytes since `reset_pool_accounting!`, and the ratio."""
-function pool_accounting(ctx::VkContext = vk_context())
-    p = pool(ctx)
-    req = p.requested[]; rnd = p.rounded[]
-    return (; nalloc = p.nalloc[], requested = req, rounded = rnd,
-            efficiency = rnd == 0 ? 1.0 : req / rnd)
-end
+"""
+    pool_offset(buf) -> Int
 
-function reset_pool_accounting!(ctx::VkContext = vk_context())
-    p = pool(ctx)
-    p.requested[] = 0; p.rounded[] = 0; p.nalloc[] = 0
-    return
-end
+Where this buffer starts inside the block it was carved from, or 0 when it owns
+its memory outright.
+
+A field before, kept in step with `pool_block` by hand. Derived now, so the two
+cannot disagree — every copy, barrier and image transfer that adds it to a view's
+own offset reads the same number the allocator recorded.
+"""
+@inline pool_offset(buf::VkManagedBuffer) =
+    buf.region === nothing ? 0 : offset(buf.region::Region)
+
+"""Every block this device has, across the arenas they were cut for."""
+poolblocks(ctx::VkContext) =
+    collect(Iterators.flatten(values(spans(ctx).blocks)))
 
 """
     gpu_live_bytes(ctx = vk_context()) -> Int
     live_buffer_count(ctx = vk_context()) -> Int
 
-What this device currently holds: bytes the driver has handed Lava, and how many
-buffers they are spread over. Both read `ctx`'s own pool — they were module-level
-and so answered for every device at once.
+What this device currently holds: bytes the driver has handed over, and how many
+dedicated buffers they are spread across.
+
+`reserved` is the pool's own total, which is the honest figure — a suballocated
+chunk costs nothing beyond the block it sits in, and counting chunks as well
+would double every byte. `live_bytes` carries only the buffers that own their
+memory: staging, mapped, and anything whose usage flags the pool cannot host.
 """
-gpu_live_bytes(ctx::VkContext = vk_context()) = pool(ctx).live_bytes[]
-live_buffer_count(ctx::VkContext = vk_context()) = length(pool(ctx).live_buffers)
+gpu_live_bytes(ctx::VkContext = vk_context()) =
+    reserved(spans(ctx)) + mempolicy(ctx).live_bytes[]
+live_buffer_count(ctx::VkContext = vk_context()) = length(mempolicy(ctx).live_buffers)
+
+"""
+    destroy_pool!(ctx)
+
+Destroy this device's blocks. Called by `vk_reset_device!` on the context it is
+retiring — which is where the old context is actually in scope.
+
+Unconditional, unlike [`trim_gpu_pool!`](@ref): the device is going away, so a
+block with live regions still has to be released, and whatever holds those
+regions is about to be pointing at a dead device either way. That is the one
+place the `live` ledger is deliberately ignored.
+"""
+function destroy_pool!(ctx::VkContext)
+    p = spans(ctx)
+    dev = lavadevice(ctx)
+    for (_, blks) in p.blocks, blk in blks
+        rawfree(dev, blk.memory)
+    end
+    empty!(p.blocks)
+    empty!(p.arenas)
+    empty!(p.pending)
+    empty!(p.retiring)
+    delete!(DEVICES, ctx)
+    return nothing
+end
+
+"""Collections run by the soft cap, and the seconds they cost."""
+pool_gc_stats(ctx::VkContext = vk_context()) =
+    (; count = mempolicy(ctx).gc_count[], seconds = mempolicy(ctx).gc_seconds)
+
+function reset_pool_gc_stats!(ctx::VkContext = vk_context())
+    p = mempolicy(ctx)
+    p.gc_count[] = 0; p.gc_seconds = 0.0
+    return
+end
 
 # A block-count watermark used to live here, reclaiming on the allocation path
 # once the pool passed 48 blocks. It is gone: [`maybe_trim_pool!`] does the same
@@ -1184,23 +1233,23 @@ live_buffer_count(ctx::VkContext = vk_context()) = length(pool(ctx).live_buffers
 # Two mechanisms, two jobs, and they are not interchangeable:
 #
 #   * `soft_cap` stops the pool GROWING. On the allocation path, cheap,
-#     no queue drain — the memory comes back as free-list chunks the caller
-#     takes immediately.
+#     no queue drain — the memory comes back as free spans the caller takes
+#     immediately.
 #   * `trim_threshold` RELEASES capacity that is already dead, back to
 #     the driver. Periodic, expensive, and the only thing that helps when the
 #     pressure is on memory the rest of the machine needs.
 
 """
-    pool(ctx).soft_cap
+    mempolicy(ctx).soft_cap
 
-Pool footprint in bytes past which `pool_alloc` collects *before* committing
+Pool footprint in bytes past which an allocation collects *before* committing
 another block. `0` disables it.
 
 This is the cheap half of keeping the pool small, and it is deliberately not
 the same mechanism as [`maybe_trim_pool!`]:
 
   * here we run a **GC and reuse** — no queue drain, no Vulkan call, and the
-    memory comes back as free-list chunks the caller immediately takes, so this
+    memory comes back as free spans the caller immediately takes, so this
     can afford to run on the allocation path;
   * there we **destroy blocks** and hand the VkDeviceMemory back, which needs
     `quiesce_before_reclaim!` and therefore stalls the GPU — so it is limited by
@@ -1229,34 +1278,18 @@ The graph's own live set is 26 blocks, so a cap below ~30 leaves nothing to
 collect and every allocation past it pays for a collection and grows anyway.
 """
 
-# Rate limits. The incremental collection is cheap enough to run between graph
-# steps; the full one is not, and only it sweeps the old generation that
-# long-lived activations reach.
-
-"""Collections run by the soft cap, and the seconds they cost."""
-pool_gc_stats(ctx::VkContext = vk_context()) =
-    (; count = pool(ctx).gc_count[], seconds = pool(ctx).gc_seconds)
-
-# `ctx` was missing from this signature while the counter was global, so the body
-# referenced an undefined name and the function could only ever have thrown.
-function reset_pool_gc_stats!(ctx::VkContext = vk_context())
-    p = pool(ctx)
-    p.gc_count[] = 0; p.gc_seconds = 0.0
-    return
-end
-
 """
     collect_for_pool!(bq) -> Bool
 
-Try to turn dead LavaArrays back into free-list chunks. Returns whether a
-collection actually ran, so the caller knows whether retrying is worthwhile.
+Try to turn dead LavaArrays back into free spans. Returns whether a collection
+actually ran, so the caller knows whether retrying is worthwhile.
 
 `drain_deferred_frees!` after each collection is what makes this work at all: a
 buffer freed while the GPU still referenced it went to the deferred list rather
-than the pool, and until it is drained the memory is dead to everyone.
+than back to the pool, and until it is drained the memory is dead to everyone.
 """
 function collect_for_pool!(bq::BatchQueue)
-    p = pool(bq.ctx::VkContext)
+    p = mempolicy(bq.ctx::VkContext)
     now = time()
     now - p.gc_last < p.gc_mingap && return false
     t0 = time_ns()
@@ -1273,44 +1306,9 @@ function collect_for_pool!(bq::BatchQueue)
     return true
 end
 
-"""Allocate a new pool block (one large VkBuffer)."""
-function alloc_pool_block(bq::BatchQueue)
-    buf_result = try_vk_alloc(bq, POOL_BLOCK_SIZE)
-    if buf_result isa AllocFailure
-        quiesce_before_reclaim!(bq)
-        # Same fallback as vk_alloc: reclaim any pool blocks the GC just
-        # emptied before deciding the OOM is real.
-        n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
-        if n_blocks > 0
-            @info "Lava: reclaimed empty pool blocks on pool-block OOM retry" blocks=n_blocks MiB=(bytes_freed >> 20)
-        end
-        buf_result = try_vk_alloc(bq, POOL_BLOCK_SIZE)
-        if buf_result isa AllocFailure
-            throw(LavaError("pool block allocation",
-                "Cannot allocate $(POOL_BLOCK_SIZE ÷ 1024 ÷ 1024) MiB pool block.\n" *
-                format_oom_error(bq.ctx::VkContext, buf_result),
-                "Free unused LavaArrays, reduce problem size, or check for memory leaks with gpu_memory_usage()."))
-        end
-    end
-    # Extract Vulkan handles from the VkManagedBuffer, then remove it from `live_buffers`
-    # (the pool block manages its own lifetime, not the per-chunk tracking)
-    p = pool(bq.ctx::VkContext)
-    block = PoolBlock(buf_result.buffer, buf_result.memory, buf_result.address,
-                      POOL_BLOCK_SIZE, 0, 0, p)
-    delete!(p.live_buffers, buf_result)
-    # Don't subtract from `live_bytes` — the block IS live memory. Individual
-    # chunks don't add to it since the block already accounts for them.
-    push!(p.blocks, block)
-    if (bq.ctx::VkContext).diag.alloc_debug
-        push!((bq.ctx::VkContext).diag.alloc_log, (kind=:pool_block, addr=buf_result.address,
-                                size=POOL_BLOCK_SIZE, pool=true))
-    end
-    return block
-end
-
 # Diagnostic: track allocation call sites during recording.
-# Set `pool(ctx).track_allocs = true` to record stack traces of every allocation while the
-# active batch is recording. Used to find per-frame allocations leaking into the
+# Set `mempolicy(ctx).track_allocs = true` to record stack traces of every allocation while
+# the active batch is recording. Used to find per-frame allocations leaking into the
 # render loop. Reads are merged into `ctx.diag.alloc_trace`; query via `dump_alloc_trace()`.
 # site => (count, bytes). Bytes as well as counts because the two rank call
 # sites completely differently — a hot site allocating 4 KiB matters far less
@@ -1365,194 +1363,127 @@ end
 """
     pool_alloc(bq::BatchQueue, nbytes; extra_usage=UInt32(0)) -> VkManagedBuffer
 
-Allocate GPU memory on `bq`.  Small device-local allocations come from the
-sub-allocation pool (zero Vulkan API calls); large allocations or those
-with non-default usage flags bypass the pool via `vk_alloc`.
+Allocate GPU memory on `bq` out of this device's `Mantle.Pool`.
+
+`extra_usage` is passed through as the region's CONSTRAINT rather than used to
+bypass the pool, which is the one behavioural change of the merge. The old
+allocator gave every non-default usage its own `VkBuffer`, because a size class
+carries no notion of what a block may be used for; `compatible` does, so an
+index buffer can now sit in a block whose usage bits already permit it and only
+falls out to a dedicated allocation when none does.
 """
 function pool_alloc(bq::BatchQueue, nbytes::Integer; extra_usage::UInt32=UInt32(0))
     ctx = bq.ctx::VkContext
-    # Even pure free-list reuse must refuse a dead device — the pool blocks
-    # belong to the old (broken) ctx and would hand back garbage BDAs.
+    # Even pure free-span reuse must refuse a dead device — the blocks belong to
+    # the old (broken) ctx and would hand back garbage BDAs.
     device_lost(ctx) && throw(LavaError(
         "pool_alloc",
         "Vulkan device is lost — cannot allocate new buffers",
         "Call vk_reset_device!() to reinitialize, or restart Julia."))
+    p = mempolicy(ctx)
     nbytes = max(Int(nbytes), POOL_MIN_SIZE)
-    p = pool(ctx)
-    if p.track_allocs
-        record_alloc_site!(bq.ctx::VkContext, nbytes)
-    end
+    p.track_allocs && record_alloc_site!(ctx, nbytes)
     sweep_retired_batches!(bq)
     drain_deferred_frees!(bq)
-    # Pressure-driven GC, identical hook to `vk_alloc`.  Without this the pool
-    # fast path silently grows VRAM until the bump pointers exhaust every block,
-    # then forces a `GC.gc` from inside the alloc — exactly the 2-5 ms spike the
-    # AK benchmarks regressed on.
+    # Pressure-driven GC, identical hook to `vk_alloc`. Without this the pool
+    # fast path silently grows VRAM until every block is full, then forces a
+    # `GC.gc` from inside the alloc — exactly the 2-5 ms spike the AK benchmarks
+    # regressed on.
     maybe_collect(ctx)
 
-    if p.disabled || nbytes > POOL_LARGE_THRESHOLD || extra_usage != UInt32(0)
-        return vk_alloc(bq, nbytes; extra_usage)
+    p.disabled && return vk_alloc(bq, nbytes; extra_usage)
+
+    dev = lavadevice(ctx)
+    sp = pool(dev)
+    # Past the soft cap, ask the GC before committing another block: at that
+    # point the memory this request needs is far more likely to be dead and
+    # uncollected than genuinely in use. Under the cap this is not paid at all,
+    # and above it a collection runs at most every `gc_mingap` seconds.
+    if p.soft_cap > 0 && reserved(sp) >= p.soft_cap
+        collect_for_pool!(bq)
     end
 
-    # No clamp: every class up to `POOL_LARGE_THRESHOLD` has a list, and larger
-    # requests took the `vk_alloc` branch above. Clamping would put a chunk in a
-    # list whose other members are a different size, and the next caller would be
-    # handed a buffer smaller than it asked for — a BoundsError is the better
-    # failure.
-    idx, alloc_size = size_class(nbytes)
-    if p.accounting
-        Threads.atomic_add!(p.requested, nbytes)
-        Threads.atomic_add!(p.rounded, alloc_size)
-        Threads.atomic_add!(p.nalloc, 1)
-    end
-
-    # Try the free list first. If empty, run GC (which drains LavaArray
-    # finalizers → `return_to_pool!`) and re-check, so we reuse whatever
-    # just got freed before burning a new 64-MiB pool block. Without this
-    # retry the pool grows monotonically on heavy sim workloads — GC fires
-    # sporadically, finalizers enqueue async, and each allocation that
-    # races past GC cuts a new block even when thousands of matching
-    # buffers are about to return to the free list.
-    @inline function try_reuse_or_bump()
-        fl = pool(ctx).free_lists[idx]
-        if !isempty(fl)
-            buf = pop!(fl)
-            block = buf.pool_block::PoolBlock
-            block.live_count += 1
-            buf.address = block.base_address + UInt64(buf.pool_offset)
-            buf.size = alloc_size
-            buf.ctx = ctx
-            @atomic :release buf.state = BUF_STATE_ALIVE
-            return buf
-        end
-        for block in pool(ctx).blocks
-            if block.bump + alloc_size <= block.capacity
-                byte_offset = block.bump
-                block.bump += alloc_size
-                block.live_count += 1
-                return VkManagedBuffer(
-                    block.buffer, block.memory,
-                    block.base_address + UInt64(byte_offset),
-                    Ptr{UInt8}(0),
-                    alloc_size,
-                    byte_offset, block, nothing, BUF_STATE_ALIVE, 0, false, ctx)
-            end
-        end
-        return nothing
-    end
-
-    buf = try_reuse_or_bump()
-    buf === nothing || return buf
-    # Free list empty + every block full → cut a new 64-MiB block, unless the
-    # pool is already past its soft cap, in which case ask the GC first: past
-    # that point the memory this request needs is far more likely to be dead and
-    # uncollected than genuinely in use.
-    #
-    # An unconditional `GC.gc(false)` + `GC.gc(true)` chain used to live here and
-    # was removed for showing up as 2-5 ms spikes in tight loops (AK benchmarks).
-    # Both rate limits and the cap are there so this is not that: under the cap
-    # this path is exactly as it was, and above it a collection runs at most
-    # every `POOL_GC_MINGAP` seconds.
-    if p.soft_cap > 0 && length(p.blocks) * POOL_BLOCK_SIZE >= p.soft_cap &&
-       collect_for_pool!(bq)
-        buf = try_reuse_or_bump()
-        buf === nothing || return buf
-    end
-    block = alloc_pool_block(bq)
-    byte_offset = block.bump
-    block.bump += alloc_size
-    block.live_count += 1
+    region = acquire_or_reclaim!(bq, sp, dev, nbytes, extra_usage)
+    blk = region.block.memory::BufferBlock
     return VkManagedBuffer(
-        block.buffer, block.memory,
-        block.base_address + UInt64(byte_offset),
+        blk.buffer, blk.memory,
+        blk.address + UInt64(offset(region)),
         Ptr{UInt8}(0),
-        alloc_size,
-        byte_offset, block, nothing, BUF_STATE_ALIVE, 0, false, ctx)
+        length(region),
+        region, nothing, BUF_STATE_ALIVE, 0, false, ctx)
+end
+
+"""
+Acquire a region, and treat an out-of-memory from the driver as a request to
+collect rather than as the answer.
+
+`Mantle.acquire!` already reclaims its own retired regions twice before it grows,
+so what is left for this to handle is the case where growth itself fails: the
+device is genuinely full, and the memory the caller needs is held by
+`LavaArray`s that are dead but uncollected, or by blocks that are empty but not
+yet handed back.
+
+`VulkanError` by name, not a bare `catch`. An OOM is the one failure that is
+worth retrying and it is the only one retried here; anything else — a lost
+device, a bad usage flag — propagates with its own message intact.
+"""
+# `dev` is untyped for the same reason `bq.ctx` is: `LavaDevice` is declared in
+# `graph.jl`, which this file is included before. A signature annotation is
+# evaluated at load; the body is not.
+function acquire_or_reclaim!(bq::BatchQueue, sp::Pool, dev,
+                             nbytes::Int, extra_usage::UInt32)
+    try
+        return acquire!(sp, dev, Buffers(), nothing, nbytes;
+                        align = POOL_ALIGN, blocksize = POOL_BLOCK_SIZE,
+                        constraint = extra_usage)
+    catch err
+        err isa VK.VulkanError || rethrow()
+        oom = err.code == VK.ERROR_OUT_OF_DEVICE_MEMORY ||
+              err.code == VK.ERROR_OUT_OF_HOST_MEMORY
+        oom || rethrow()
+    end
+    # One escalation, in the order that costs least first: collect, drain, and
+    # only then stall the queue to get pinned and in-flight buffers back.
+    GC.gc(true)
+    drain_deferred_frees!(bq)
+    quiesce_before_reclaim!(bq)
+    nblocks, freed = reclaim_empty_pool_blocks!(bq)
+    nblocks > 0 &&
+        @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=nblocks MiB=(freed >> 20)
+    try
+        return acquire!(sp, dev, Buffers(), nothing, nbytes;
+                        align = POOL_ALIGN, blocksize = POOL_BLOCK_SIZE,
+                        constraint = extra_usage)
+    catch err
+        err isa VK.VulkanError || rethrow()
+        throw(LavaError("pool_alloc",
+            "Cannot allocate $(nbytes) bytes: the device is out of memory with " *
+            "$(humanbytes(reserved(sp))) already reserved by this pool, and a full " *
+            "collection plus a queue drain freed nothing that helps.",
+            "Free unused LavaArrays, reduce problem size, or check for leaks with " *
+            "gpu_memory_usage()."))
+    end
 end
 
 """
     reclaim_empty_pool_blocks!(bq::BatchQueue) -> (n_blocks::Int, bytes::Int)
 
-Free every pool block whose `live_count` is 0: drop the block's chunks from
-this device's free lists, destroy its `VkBuffer` + `VkDeviceMemory`, and remove
-it from this device's block list.  Returns `(n_blocks_reclaimed, bytes_reclaimed)`.
+Hand every block with nothing live in it back to the driver, and say how much
+that was.
 
-Called from `vk_alloc` / `alloc_pool_block` only on the OOM retry path, so
-steady-state allocations don't pay the scan cost.  Not finalizer-safe —
-runs only on the main allocator path.
+`Mantle.trim!` does the deciding — a block is returnable when its `live` ledger
+is empty — so what is left here is measuring, which the caller reports.
 
-Callers must have run `quiesce_before_reclaim!` first — see there for why.
+Callers must have run `quiesce_before_reclaim!` first; see there for why. Not
+finalizer-safe, and never was.
 """
 function reclaim_empty_pool_blocks!(bq::BatchQueue)
-    p = pool(bq.ctx::VkContext)
-    isempty(p.blocks) && return (0, 0)
     ctx = bq.ctx::VkContext
-    empty_blocks = Set{PoolBlock}()
-    kept = PoolBlock[]
-    bytes_reclaimed = 0
-    for block in p.blocks
-        if block.live_count == 0
-            push!(empty_blocks, block)
-            bytes_reclaimed += block.capacity
-        else
-            push!(kept, block)
-        end
-    end
-    isempty(empty_blocks) && return (0, 0)
-    # Drop free-list chunks that belong to any reclaimed block.  Each chunk
-    # is a VkManagedBuffer whose `pool_block` field identifies its host.
-    for fl in p.free_lists
-        filter!(buf -> begin
-            pb = buf.pool_block
-            pb === nothing || !(pb in empty_blocks)
-        end, fl)
-    end
-    # Swap kept list into the pool so `pool_alloc` no longer sees the
-    # reclaimed blocks (must precede destructor calls — a concurrent bump
-    # against a freed handle would corrupt the driver).
-    empty!(p.blocks)
-    append!(p.blocks, kept)
-    if !device_lost(ctx)
-        for block in empty_blocks
-            try
-                block.buffer.destructor()
-                block.memory.destructor()
-            catch ex
-                # Match destroy_buffer!: don't propagate from destructors,
-                # but log loudly AND name the fault.
-                safe_fin_log("Lava reclaim_empty_pool_blocks!: Vulkan destructor failed: " *
-                             sprint(showerror, ex) * "\n")
-            end
-        end
-    end
-    # Pool blocks ARE counted in `live_bytes` (see alloc_pool_block —
-    # we intentionally don't subtract per-chunk because the block is the
-    # real live memory).  Subtract the reclaimed capacity here.
-    Threads.atomic_sub!(pool(bq.ctx::VkContext).live_bytes, bytes_reclaimed)
-    return (length(empty_blocks), bytes_reclaimed)
-end
-
-"""Return a pooled chunk to the free list. Keeps VkManagedBuffer object for reuse."""
-function return_to_pool!(buf::VkManagedBuffer)
-    block = buf.pool_block
-    block === nothing && return
-    alloc_size = buf.size
-    alloc_size == 0 && return
-    # `size_class` is idempotent on its own output, so this lands in exactly the
-    # list `pool_alloc` took the chunk from — see there about not clamping.
-    idx = size_class_idx(alloc_size)
-    block.live_count -= 1
-    # Poison address to detect use-after-free, but keep pool_block + pool_offset
-    # so pool_alloc can restore the address from block.base_address + pool_offset
-    buf.address = BDA_POISON
-    buf.mapped_ptr = Ptr{UInt8}(0)
-    buf.size = 0
-    @atomic :release buf.last_write = nothing  # clear scheduling state so a re-use starts fresh
-    # Keep buf.pool_block and buf.pool_offset intact for reuse
-    # `block.pool`, not `pool(buf.ctx)`: this runs from a finalizer, where a
-    # `get!` could allocate and a missing key would throw. The block has carried
-    # its pool since it was created, so this cannot fail.
-    push!((block.pool::DevicePool).free_lists[idx], buf)
+    sp = spans(ctx)
+    before = reserved(sp)
+    nbefore = length(poolblocks(ctx))
+    trim!(sp, lavadevice(ctx))
+    return (nbefore - length(poolblocks(ctx)), before - reserved(sp))
 end
 
 # ── Staging buffer for CPU↔GPU transfers ──
@@ -1623,8 +1554,8 @@ function host_buffer(bq::BatchQueue, nbytes::Integer)
 
     managed = VkManagedBuffer(vkbuf, memory, UInt64(0),   # no BDA needed for staging
                               mapped_ptr, Int(alloc_size),
-                              0, nothing, nothing, BUF_STATE_ALIVE, 0, false, ctx)
-    let p = pool(ctx)
+                              nothing, nothing, BUF_STATE_ALIVE, 0, false, ctx)
+    let p = mempolicy(ctx)
         push!(p.live_buffers, managed)
         Threads.atomic_add!(p.live_bytes, managed.size)
     end
@@ -1653,7 +1584,7 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
                      host_ptr::Ptr{UInt8}, nbytes::Integer; offset::Integer=0)
     nbytes == 0 && return
     @assert direction === :upload || direction === :download  "direction must be :upload or :download"
-    buf_offset = managed.pool_offset + Int(offset)
+    buf_offset = pool_offset(managed) + Int(offset)
 
     # BAR fast-path: host-visible mapped memory — direct memcpy, no staging.
     if managed.mapped_ptr != Ptr{UInt8}(0)

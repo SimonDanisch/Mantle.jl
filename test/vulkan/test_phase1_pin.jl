@@ -27,8 +27,8 @@ end
     @test !hasmethod(Mantle.vk_flush!, Tuple{})
 
     # New API must be present
-    @test isdefined(Lava, :pin!)
-    @test isdefined(Lava, :sync_access!)
+    @test isdefined(Mantle, :pin!)
+    @test isdefined(Mantle, :sync_access!)
 
     # Struct must match
     @test !hasfield(Mantle.CommandBatch, :data_refs)

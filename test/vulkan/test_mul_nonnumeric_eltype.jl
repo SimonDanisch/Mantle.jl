@@ -48,7 +48,7 @@ Base.:(*)(x::Number, y::Pair2) = Pair2(x * y.a, x * y.b)
         numeric = Base.which(LinearAlgebra.mul!,
                              Tuple{LavaArray{Float32,2}, LavaArray{Float32,2},
                                    LavaArray{Float32,2}, Bool, Bool})
-        @test parentmodule(numeric) === Lava
+        @test parentmodule(numeric) === Mantle
 
         generic = Base.which(LinearAlgebra.mul!,
                              Tuple{LavaArray{Pair2{Float32},2}, LavaArray{Pair2{Float32},2},

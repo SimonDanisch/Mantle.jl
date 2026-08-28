@@ -629,8 +629,8 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
     # Direct GPU→GPU copy via vkCmdCopyBuffer (no CPU staging roundtrip).
-    src_offset = src.buf[].pool_offset + src.offset + (Int(soffs) - 1) * sizeof(T)
-    dst_offset = dest.buf[].pool_offset + dest.offset + (Int(doffs) - 1) * sizeof(T)
+    src_offset = pool_offset(src.buf[]) + src.offset + (Int(soffs) - 1) * sizeof(T)
+    dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)
     nbytes = n * sizeof(T)
     bq = (dest.buf[].ctx::VkContext).default_bq
     # Pin the ARRAYS, not the `VkManagedBuffer`s that `cmd_copy_buffer!` sees.
@@ -727,9 +727,9 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
     new_buf = pool_alloc(bq, max(new_len * sizeof(T), 16))
     if old_len > 0 && new_len > 0
         copy_len = min(old_len, new_len) * sizeof(T)
-        src_off = buf.pool_offset + a.offset
+        src_off = pool_offset(buf) + a.offset
         cmd_copy_buffer!(bq, buf, new_buf, copy_len;
-                         src_off=src_off, dst_off=new_buf.pool_offset)
+                         src_off=src_off, dst_off=pool_offset(new_buf))
         # The copy pinned `buf` into the currently-recording batch. `vk_free!`
         # decides whether to defer destruction by inspecting `buf.last_write`,
         # but `last_write` is only populated by `sync_access!` at submit time

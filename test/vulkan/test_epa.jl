@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-using Lava: UnitCube, gjk, GJKResult, epa, EPAResult
+using Mantle: UnitCube, gjk, GJKResult, epa, EPAResult
 using GeometryBasics: Vec3f
 using LinearAlgebra: norm
 
@@ -203,3 +203,4 @@ end
     # Contact on A's +X face (x = -0.5 + 1 = +0.5 in world).
     @test isapprox(r.contact[1], 0.5f0; atol=1f-2)
 end
+

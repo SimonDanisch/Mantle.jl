@@ -1,6 +1,6 @@
 using Test, Lava, Raycore, Printf
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
-            write_grain_instances_kernel
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
+              write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 using KernelAbstractions
 
@@ -76,3 +76,4 @@ end
     @info "Average refit time" avg_refit_ms
     @test avg_refit_ms < 50.0   # Sanity: refit should beat 50ms at 1M instances.
 end
+

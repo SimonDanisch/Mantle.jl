@@ -74,7 +74,7 @@ below was visible until everything above it was fixed.
    is silent data corruption rather than a bad handle, and no amount of cache
    keying reaches it.
 
-   Now `DevicePool` per device, with each `PoolBlock` carrying a back-reference
+   Now `MemoryPolicy` per device, with each `PoolBlock` carrying a back-reference
    to its pool so `return_to_pool!` — which runs from a **finalizer**, where a
    lookup must not allocate and must not be able to miss — is a field hop.
 

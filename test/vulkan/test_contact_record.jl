@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-using Lava: ContactRecord
+using Mantle: ContactRecord
 using GeometryBasics: Vec3f
 
 @testset "ContactRecord layout" begin
@@ -34,3 +34,4 @@ using GeometryBasics: Vec3f
         @test c.depth == 0.1f0
     end
 end
+

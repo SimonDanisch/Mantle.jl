@@ -90,7 +90,7 @@ using Test, Lava, Mantle
             @test !isdefined(Lava, name)
         end
         # …and `pool_disabled` is a field of the config rather than a second step
-        # (`pool(ctx).disabled = true`) that a caller has to remember.
+        # (`mempolicy(ctx).disabled = true`) that a caller has to remember.
         @test Mantle.DebugConfig(pool_disabled = true).pool_disabled
     end
 

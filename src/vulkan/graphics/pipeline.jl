@@ -793,7 +793,7 @@ function vk_draw_indirect_in_pass!(bq::BatchQueue,
     end
 
     managed = commands.buf[]
-    offset = managed.pool_offset + commands.offset +
+    offset = pool_offset(managed) + commands.offset +
              (first - 1) * sizeof(DrawIndirectCommand)
     VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
                              UInt32(count), UInt32(sizeof(DrawIndirectCommand)))

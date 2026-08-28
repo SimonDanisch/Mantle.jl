@@ -19,7 +19,7 @@ const KA = KernelAbstractions
     ctx = Mantle.vk_context()
 
     # Grow the pool past the trim threshold, then drop every reference.
-    target = Mantle.pool(Mantle.vk_context()).trim_threshold + 256 * 1024 * 1024
+    target = Mantle.mempolicy(Mantle.vk_context()).trim_threshold + 256 * 1024 * 1024
     let arrays = Mantle.LavaArray[]
         while Mantle.gpu_live_bytes() < target
             a = KA.allocate(be, Float32, 4_000_000)   # 16 MB each
@@ -31,15 +31,15 @@ const KA = KernelAbstractions
     end
 
     grown = Mantle.gpu_live_bytes()
-    @test grown >= Mantle.pool(Mantle.vk_context()).trim_threshold
+    @test grown >= Mantle.mempolicy(Mantle.vk_context()).trim_threshold
 
     # Defeat the rate limiter so the test doesn't depend on wall-clock timing.
-    Mantle.pool(Mantle.vk_context()).last_trim = 0.0
+    Mantle.mempolicy(Mantle.vk_context()).last_trim = 0.0
     Mantle.maybe_trim_pool!(ctx)
 
     trimmed = Mantle.gpu_live_bytes()
     @test trimmed < grown                     # capacity actually came back
-    @test trimmed < Mantle.pool(Mantle.vk_context()).trim_threshold
+    @test trimmed < Mantle.mempolicy(Mantle.vk_context()).trim_threshold
 
     # And the allocator still works afterwards — blocks were returned, not corrupted.
     b = KA.allocate(be, Float32, 1024)
@@ -59,7 +59,7 @@ end
 # in-flight work takes a third branch onto `deferred_frees`, released by the
 # drain in the same call.)
 #
-# `trim_gpu_pool!` used to gate on `any(b -> b.live_count == 0, blocks)` *before*
+# `trim_gpu_pool!` used to gate on `any(b -> isempty(b.live), blocks)` *before*
 # that call — a precondition it establishes itself — so it returned `(0, 0)` and
 # kept everything. A graph evaluator is nothing but this shape, dispatches
 # recorded and not flushed until the output is read: TRELLIS.2's 30-block torso
@@ -99,7 +99,7 @@ end
     @test grown > 256 * 1024 * 1024
     # The state the old gate mishandled — every block still counted as live even
     # though every reference to its contents is gone.
-    @test !any(b -> b.live_count == 0, Mantle.pool(ctx).blocks)
+    @test !any(b -> isempty(b.live), Mantle.poolblocks(ctx))
 
     blocks, bytes = Mantle.trim_gpu_pool!(ctx)
     @test blocks > 0
@@ -115,7 +115,7 @@ end
 
 @testset "trim is rate-limited" begin
     ctx = Mantle.vk_context()
-    Mantle.pool(Mantle.vk_context()).last_trim = time()            # just trimmed
+    Mantle.mempolicy(Mantle.vk_context()).last_trim = time()            # just trimmed
     before = Mantle.gpu_live_bytes()
     Mantle.maybe_trim_pool!(ctx)                # must be a no-op, not a stall
     @test Mantle.gpu_live_bytes() == before

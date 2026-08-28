@@ -1,5 +1,5 @@
 using Test, Lava, KernelAbstractions
-using Lava: UnitCube, ContactRecord, narrow_phase_contacts_kernel
+using Mantle: UnitCube, ContactRecord, narrow_phase_contacts_kernel
 using GeometryBasics: Vec3f
 using KernelAbstractions: CPU
 
@@ -166,7 +166,7 @@ end
 # slot lists" testset to confirm GPU compaction matches CPU.
 # ---------------------------------------------------------------------------
 @testset "narrow_phase_contacts_kernel — Lava backend (GPU smoke)" begin
-    using Lava: LavaArray, LavaBackend, ContactRecord, narrow_phase_contacts_kernel
+    using Mantle: LavaArray, LavaBackend, ContactRecord, narrow_phase_contacts_kernel
     using GeometryBasics: Vec3f
     max_contacts = Int32(4)
     n_grains     = 2
@@ -207,3 +207,4 @@ end
         @test rs[k].i == typemax(UInt32)
     end
 end
+

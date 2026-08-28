@@ -1,5 +1,5 @@
 using Test, Lava, Raycore
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 @testset "instance_buffer returns the buffer behind a batch handle" begin
@@ -24,3 +24,4 @@ end
     fake_handle = Raycore.TLASHandle(UInt32(99))
     @test_throws ErrorException Raycore.instance_buffer(tlas, fake_handle)
 end
+

@@ -1,5 +1,5 @@
 using Test, Lava, Raycore
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 # P3-fu2: Base.delete!(::HWTLAS, ::TLASHandle) for batch handles.
@@ -48,3 +48,4 @@ end
     @test length(tlas.instance_batches) == 1
     @test tlas.instance_batches[1].handle === handle_b
 end
+

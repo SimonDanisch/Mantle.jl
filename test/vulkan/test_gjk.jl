@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-using Lava: UnitCube, gjk, GJKResult, transform_point, support_AB
+using Mantle: UnitCube, gjk, GJKResult, transform_point, support_AB
 using GeometryBasics: Vec3f
 
 # Shared narrow-phase helpers: translation_transform, rotation_z_transform,
@@ -172,7 +172,7 @@ end
 # ---------------------------------------------------------------------------
 
 @testset "GJK internals -- transform helpers" begin
-    using Lava: transform_point, transform_dir, inv_transform_dir
+    using Mantle: transform_point, transform_dir, inv_transform_dir
 
     T = translation_transform(1, 2, 3)
 
@@ -210,3 +210,4 @@ end
     s2 = Mantle.support_AB(cube, cube, ID, ID, Vec3f(-1, 0, 0))
     @test s2 ≈ Vec3f(-2, 0, 0)
 end
+

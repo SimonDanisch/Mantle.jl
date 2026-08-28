@@ -2,6 +2,9 @@
 # Runs all test groups in-process with error isolation and device health monitoring.
 
 using Lava, Mantle
+# `LavaArray` by name: it was Lava's export and is Mantle's type now, and Mantle
+# exports only `LavaBackend` — everything downstream says `Mantle.LavaArray`.
+using Mantle: LavaArray, LavaBackend
 import GPUArrays
 using Test
 

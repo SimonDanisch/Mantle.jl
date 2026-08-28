@@ -4,7 +4,7 @@ using Test, Lava, Mantle
 @testset "query_timeline exists and returns current counter on healthy device" begin
     ctx = Mantle.vk_context()
     bq = ctx.default_bq
-    @test isdefined(Lava, :query_timeline)
+    @test isdefined(Mantle, :query_timeline)
 
     # Healthy-device query path: must return a UInt64 without throwing.
     current = Mantle.query_timeline(bq)
@@ -12,8 +12,10 @@ using Test, Lava, Mantle
 end
 
 @testset "safe_fin_log and @vk_checked exist" begin
-    @test isdefined(Lava, :safe_fin_log)
-    @test isdefined(Lava, Symbol("@vk_checked"))
+    @test isdefined(Mantle, :safe_fin_log)
+    # `Symbol("@vk_checked")` — a macro, so the plain `isdefined(Lava, :name)`
+    # sweep that moved the rest of these to Mantle did not match it.
+    @test isdefined(Mantle, Symbol("@vk_checked"))
 
     # safe_fin_log should not throw on a normal string.
     @test Mantle.safe_fin_log("test: safe_fin_log smoke\n") === nothing
@@ -23,9 +25,12 @@ end
     # Static: iterate Lava src files; assert no `catch` is followed directly
     # by a `typemax(UInt64)` return-sentinel.  This is the invariant Phase 2
     # enforces.
-    srcdir = dirname(dirname(pathof(Lava))) * "/src"
+    # BOTH packages. The invariant is about error handling, which came to Mantle
+    # with the runtime — scanning only Lava after the move meant scanning the
+    # half that never had the sentinel.
+    srcdirs = [joinpath(dirname(dirname(pathof(m))), "src") for m in (Lava, Mantle)]
     bad = String[]
-    for (root, _, files) in walkdir(srcdir), f in files
+    for srcdir in srcdirs, (root, _, files) in walkdir(srcdir), f in files
         endswith(f, ".jl") || continue
         path = joinpath(root, f)
         lines = readlines(path)

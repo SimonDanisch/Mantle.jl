@@ -216,7 +216,7 @@ using KernelAbstractions
     end
 
     # ── 9. Broadcast allocation stability ──
-    # The live-buffer set is `pool(ctx).live_buffers` now. The old
+    # The live-buffer set is `mempolicy(ctx).live_buffers` now. The old
     # `flush_deferred_frees!` wrapper was replaced by per-BQ
     # `drain_deferred_frees!` / `drain_deferred_as_frees!`.
     @testset "broadcast allocation stability" begin

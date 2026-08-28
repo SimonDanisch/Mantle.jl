@@ -1713,10 +1713,10 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
     # sent the first device's command buffers through the second device's driver.
     ctx.cmd_pipeline_barrier_fptr = cmd_barrier_fptr
     # The pool belongs to this context, so its debug setting is applied here
-    # rather than by the caller. It used to be a separate `pool(ctx).disabled =`
+    # rather than by the caller. It used to be a separate `mempolicy(ctx).disabled =`
     # line every caller had to remember after the reset — and forgetting it left
     # GPU-AV blind to exactly the sub-pool overruns it was turned on to find.
-    pool(ctx).disabled = debug.pool_disabled
+    mempolicy(ctx).disabled = debug.pool_disabled
     return ctx
 end
 

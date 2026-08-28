@@ -404,6 +404,20 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
 
 @testset "Vulkan backend" begin
 
+        # Source-and-bindings only, no device. First, so it is reported before
+        # anything that can take a device down with it — and because what it
+        # catches is a name that would otherwise throw far away from its cause.
+        @testset "Lava import completeness" begin
+            include(joinpath(VULKAN_TESTS, "test_lava_import_completeness.jl"))
+            # The same boundary from the other side: what each package EXPORTS
+            # has to match what it defines. Both directions went wrong in the
+            # move and neither failed at load.
+            include(joinpath(VULKAN_TESTS, "test_no_stale_exports.jl"))
+            # And how much of the array algorithms is still Vulkan's — a ratchet
+            # on step 5, which asks where they should live.
+            include(joinpath(VULKAN_TESTS, "test_array_algorithm_portability.jl"))
+        end
+
         # ── Tier 3a3: tensor addressing actually loads (GPU) ──
         # Compiling and validating is not enough here: the instruction validated
         # twice while still wrong. This runs it and checks the values and the
@@ -760,9 +774,16 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
             include(joinpath(VULKAN_TESTS, "test_phase6_graphics.jl"))
         end
 
-        @testset "pool size classes" begin
-            include(joinpath(VULKAN_TESTS, "test_pool_sizeclass.jl"))
-        end
+        # `test_pool_sizeclass.jl` was here, and it is deleted with the thing it
+        # tested. It checked that `size_class` was idempotent on its own output —
+        # `pool_alloc` looked a class up from the REQUEST and `return_to_pool!`
+        # looked it up again from the size handed out, so a chunk returning to the
+        # wrong list would be given to a caller who asked for more than it holds.
+        # `Mantle.carve!` splits at exactly the requested length and `release!`
+        # checks the block's own `live` ledger, so neither the rounding nor the
+        # round-trip it had to be consistent about exists any more. The property
+        # that replaced it — every live region disjoint, in range and aligned — is
+        # in `test/test_pool.jl`, and runs with no device at all.
 
         @testset "source mapping" begin
             include(joinpath(VULKAN_TESTS, "test_source_mapping.jl"))
@@ -859,6 +880,10 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
 
             @testset "pool trim" begin
                 include(joinpath(VULKAN_TESTS, "test_pool_trim.jl"))
+                # The other end of the same allocator: what happens when the
+                # device says no. Only reachable by asking for more VRAM than
+                # exists, so nothing else covers it.
+                include(joinpath(VULKAN_TESTS, "test_pool_alloc_oom.jl"))
             end
 
 

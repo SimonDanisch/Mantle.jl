@@ -98,7 +98,7 @@
 # exposed to the same silent wrong answer.
 
 using Test, Lava, KernelAbstractions
-using Lava: FastDiv32, cart32
+using Mantle: FastDiv32, cart32
 const KA = KernelAbstractions
 
 # Four decompositions of the same linear index into the same `Broadcasted`. The
@@ -179,3 +179,4 @@ end
     A3 = KA.allocate(be, Float32, 5, 5, 3); copyto!(A3, h3)
     @test_broken narrow(A3, h3, (5, 5, 3))       # rank 3 + Extruded: the bug
 end
+

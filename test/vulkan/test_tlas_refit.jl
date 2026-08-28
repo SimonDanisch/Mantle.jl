@@ -1,6 +1,6 @@
 using Test, Lava, Mantle
-using Lava: LavaInstanceRecord, build_tlas, refit_tlas!,
-            as_build, build_blas_aabb, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, build_tlas, refit_tlas!,
+              as_build, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 function translation_transform(x, y, z)
@@ -56,3 +56,4 @@ end
         refit_tlas!(ctx, tlas, instance_buf, 1)
     end
 end
+

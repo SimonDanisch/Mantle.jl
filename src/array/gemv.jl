@@ -1,3 +1,22 @@
+# GEMV, and it is not the Vulkan backend's.
+#
+# This file lived in `src/vulkan/array/` and named nothing Vulkan has: the
+# kernels are `KernelAbstractions`, the tilings are arithmetic, and the two
+# device facts it needs — the workgroup limit for `gemv_config`, and which
+# backend to launch on — come from `workgrouplimit` and
+# `KernelAbstractions.get_backend`. Both take the array, not a `VkContext`.
+#
+# So it moved to core, where a second backend inherits it rather than
+# reimplementing it. That is step 5 of the split, for the part of step 5 that
+# does not need a second backend to exist yet.
+#
+# The dispatch widened with it, from `::LavaArray` to `::AbstractGPUArray`, and
+# that is safe **here** in a way it is not everywhere: `gemv`/`gemv!` are
+# Mantle's own functions, so widening them claims nothing from anybody.
+# `gemm.jl`'s entry point is `LinearAlgebra.mul!`, which is Base's — widening
+# THAT would have Mantle answering for every GPU array package in the session,
+# which is why its kernels move and its `mul!` does not.
+
 # Matrix-vector multiply. Two kernels, because there are two layouts.
 #
 # ## The layout decides the kernel, and it is not a detail
@@ -361,7 +380,7 @@ than a branch inside `mul!` — a caller that knows it is decoding asks for it.
 
 `nrows`/`block` override the plan, for the sweep.
 """
-function gemv!(C::LavaArray{Float32}, A::LavaArray{Float32}, B::LavaArray{Float32,2};
+function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::AbstractGPUArray{Float32,2};
                nrows::Union{Nothing,Int} = nothing, block::Union{Nothing,Int} = nothing)
     K, N = size(B, 1), size(B, 2)
     length(A) == K || throw(DimensionMismatch(
@@ -369,7 +388,7 @@ function gemv!(C::LavaArray{Float32}, A::LavaArray{Float32}, B::LavaArray{Float3
     length(C) == N || throw(DimensionMismatch(
         "gemv!: C has $(length(C)) elements, expected N = $N"))
     backend = get_backend(B)
-    pn, pb = gemv_config(K, N, workgroup_limit(vk_context(B)))
+    pn, pb = gemv_config(K, N, workgrouplimit(B))
     nr = nrows === nothing ? pn : nrows
     bl = block === nothing ? pb : block
     kern = gemv_kcontig_kernel(nr, bl)
@@ -393,7 +412,7 @@ written for a `(K, N)` matrix reading that one would stride the reduction axis b
 `C` and `x` may be any shape whose linear order is right — `(M, 1)` and `(K, 1)`
 are what a graph hands over, and reshaping them to vectors first would allocate.
 """
-function gemv!(C, x, Wt::Transpose{Float32,<:LavaArray{Float32,2}};
+function gemv!(C, x, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}};
                bias = nothing, epilogue = identity,
                tm::Union{Nothing,Int} = nothing, block::Union{Nothing,Int} = nothing,
                unroll::Union{Nothing,Int} = nothing)
@@ -406,7 +425,7 @@ function gemv!(C, x, Wt::Transpose{Float32,<:LavaArray{Float32,2}};
     bias === nothing || length(bias) == M || throw(DimensionMismatch(
         "gemv!: bias has $(length(bias)) elements, expected M = $M"))
     backend = get_backend(W)
-    ptm, pbl, pun = gemv_ncontig_config(M, K, workgroup_limit(vk_context(W)))
+    ptm, pbl, pun = gemv_ncontig_config(M, K, workgrouplimit(W))
     t = tm === nothing ? ptm : tm
     bl = block === nothing ? pbl : block
     un = unroll === nothing ? pun : unroll
@@ -418,14 +437,14 @@ function gemv!(C, x, Wt::Transpose{Float32,<:LavaArray{Float32,2}};
 end
 
 """
-    gemv(A, B) -> LavaArray
+    gemv(A, B) -> AbstractGPUArray
 
 Allocating [`gemv!`](@ref).
 """
-gemv(A::LavaArray{Float32}, B::LavaArray{Float32,2}) =
+gemv(A::AbstractGPUArray{Float32}, B::AbstractGPUArray{Float32,2}) =
     gemv!(similar(A, Float32, size(B, 2)), A, B)
 
-gemv(x::LavaArray{Float32}, Wt::Transpose{Float32,<:LavaArray{Float32,2}}; kw...) =
+gemv(x::AbstractGPUArray{Float32}, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}}; kw...) =
     gemv!(similar(x, Float32, size(Wt, 1)), x, Wt; kw...)
 
 """

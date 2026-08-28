@@ -1,5 +1,5 @@
 using Test, Lava, Raycore
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 # Triangle type used by the default HWTLAS.
@@ -59,3 +59,4 @@ end
     @test length(tlas.off_gpu) == n   # still N entries, all zero
     @test all(==(UInt32(0)), Array(tlas.off_gpu))
 end
+

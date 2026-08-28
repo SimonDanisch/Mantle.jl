@@ -9,7 +9,7 @@ using Test, Lava, Mantle
 end
 
 @testset "cmd_copy_buffer! is the single entry point" begin
-    @test isdefined(Lava, :cmd_copy_buffer!)
+    @test isdefined(Mantle, :cmd_copy_buffer!)
 end
 
 @testset "upload/download roundtrip via new path" begin

@@ -1,6 +1,6 @@
 using Test, Lava, Mantle
-using Lava: LavaInstanceRecord, write_grain_instances_kernel, build_blas_aabb,
-            build_tlas, refit_tlas!, as_build, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, write_grain_instances_kernel, build_blas_aabb,
+              build_tlas, refit_tlas!, as_build, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 # Validates the full P1 flow: GPU kernel writes instances, allow_update build,
@@ -66,3 +66,4 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
         @test instances_cpu[2i - 1].transform[12] == 0f0
     end
 end
+

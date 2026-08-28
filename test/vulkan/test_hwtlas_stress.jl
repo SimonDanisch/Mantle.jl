@@ -192,7 +192,7 @@ end
 function snapshot_state()
     gpu_bytes  = Mantle.gpu_live_bytes()
     n_buffers  = Mantle.live_buffer_count()
-    n_pool     = length(Mantle.pool(Mantle.vk_context()).blocks)
+    n_pool     = length(Mantle.poolblocks(Mantle.vk_context()))
     (gpu_bytes=gpu_bytes, live_bufs=n_buffers, pool_blocks=n_pool)
 end
 

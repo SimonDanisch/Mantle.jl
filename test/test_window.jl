@@ -1,5 +1,31 @@
 # Needs a display and a GPU. Skipped when the worker has no session, which is the
 # default for bt_julia_eval: see docs, DISPLAY/XAUTHORITY are not inherited.
+#
+# ── This file BLOCKS on some X setups, and the guard below cannot see it ──
+#
+# Measured 2026-08-27 on DISPLAY=:1 with a live X server: `GLFW.Init()` succeeds,
+# the guard therefore passes, and the process then sits at 100% CPU indefinitely
+# inside window creation. `timeout -s TERM` after 600 s gives:
+#
+#     _glfwCreateWindowX11   libglfw.so
+#     glfwCreateWindow       libglfw.so
+#     CreateWindow           GLFW/src/glfw3.jl:600
+#     RenderWindow           Mantle/src/vulkan/graphics/window.jl:78
+#     Window                 Mantle/src/vulkan/graph.jl:140
+#
+# Nothing above that frame is Mantle's, and no test output is produced before it,
+# so a suite that reaches this file never finishes. `DISPLAY` being set is not
+# the same question as "a window can be created here" — an X server with no
+# window manager answers the first and hangs the second — and there is no way to
+# ask the second without risking the hang.
+#
+# Deliberately NOT auto-skipped. A skip that hides a hang is how a test file rots
+# unnoticed, and this one had already spent the runtime move unable to run at all
+# (it names `Rasterizer`, whose export was left behind in `Lava.jl`, so it
+# errored on its first pipeline). Run it directly, on a session with a window
+# manager, and give it a timeout:
+#
+#     timeout 900 julia --project -e 'using Mantle, Test; include("test/test_window.jl")'
 using Mantle, Test
 # Here rather than in the branch below, which is one top-level expression: the
 # `@kernel` in it is expanded before any of it runs, so a `using` inside cannot

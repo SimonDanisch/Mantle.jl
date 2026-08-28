@@ -1,5 +1,6 @@
 using Test, Lava, KernelAbstractions
-using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator, coopmat_gemm_available
+using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator
+using Mantle: coopmat_gemm_available
 
 # Can a cooperative matrix be loaded out of `@localmem`?
 #
@@ -274,3 +275,4 @@ end
         @test reshape(Array(out), 16, 16) == permutedims(h)
     end
 end
+

@@ -19,7 +19,11 @@ using Lava, Mantle
 using KernelAbstractions
 using GPUArrays
 
-include(joinpath(@__DIR__, "spirv_test_utils.jl"))
+# `spirv_test_utils.jl` is Lava's: it disassembles and pattern-matches SPIR-V,
+# which is compiler territory, and it moved to `Lava/test/` with the rest of the
+# emission suite. Reached through `pkgdir(Lava)` rather than a path relative to
+# this file, so it does not have to be re-derived if either tree moves again.
+include(joinpath(pkgdir(Lava), "test", "spirv_test_utils.jl"))
 import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count,
     check_regex, normalize_spirv, compare_golden, compile_and_disasm,
     spirv_opt_roundtrip, check_vendor_safety, compile_with_llc
@@ -34,7 +38,12 @@ end
     # ── Tier 1: SPIR-V Emission (CPU only) ──────────────────────────────
     # These are fast (~5s total) and catch compiler bugs without GPU.
     @testset "SPIR-V Emission" begin
-        spirv_dir = joinpath(@__DIR__, "spirv")
+        # `test/spirv/` went to Lava with the emitter, for the same reason its
+        # helpers did: these compile a kernel and check the disassembly, and
+        # need no device at all. They are `Lava/test/runtests.jl`'s Tier 1 now,
+        # and this suite keeps running them because "fast CI" wants the compiler
+        # checks and the GPU smoke tests in ONE invocation.
+        spirv_dir = joinpath(pkgdir(Lava), "test", "spirv")
         for f in sort(readdir(spirv_dir; join=true))
             endswith(f, ".jl") || continue
             @info "Running $(basename(f))..."

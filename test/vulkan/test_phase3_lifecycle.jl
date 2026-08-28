@@ -2,9 +2,9 @@ using Test, Lava, Mantle
 @testset "Phase 3 — lifecycle state + finalizer/main-thread separation" begin
 
 @testset "buffer state machine" begin
-    @test isdefined(Lava, :BUF_STATE_ALIVE)
-    @test isdefined(Lava, :BUF_STATE_DEFERRED)
-    @test isdefined(Lava, :BUF_STATE_DEAD)
+    @test isdefined(Mantle, :BUF_STATE_ALIVE)
+    @test isdefined(Mantle, :BUF_STATE_DEFERRED)
+    @test isdefined(Mantle, :BUF_STATE_DEAD)
     @test hasfield(Mantle.VkManagedBuffer, :state)
 
     a = LavaArray{Float32,1}(undef, (4,))

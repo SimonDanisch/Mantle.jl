@@ -824,7 +824,7 @@ pass touches. Nothing broke, because desktop drivers treat the range as advisory
 and flush at the stages given; it is still a barrier that does not describe the
 hazard it was derived for, and sync validation is entitled to say so.
 """
-barrierspan(r, st) = (UInt64(st.buf[].pool_offset + st.offset),
+barrierspan(r, st) = (UInt64(pool_offset(st.buf[]) + st.offset),
                       UInt64(sizeof(eltype(st)) * prod(st.dims)))
 # A pooled transient's storage is a `LavaDeviceArray` — `(ptr, dims)`, which
 # names no buffer and carries no offset. The transient knows both, and its
@@ -835,7 +835,7 @@ barrierbuffer(r, st) = st.buf[].buffer
 barrierbuffer(t::TransientBuffer, st) = t.block.buffer
 
 barrierspan(v::BufferRange, st) =
-    (UInt64(st.buf[].pool_offset + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
+    (UInt64(pool_offset(st.buf[]) + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
      UInt64(length(v.range) * sizeof(eltype(st))))
 
 function slice(g::LavaGraph, x, range::UnitRange{Int})
@@ -968,8 +968,8 @@ function rename!(g::LavaGraph, bq, dst::Buffer{T,1}, data::LavaArray{T,1}) where
 
     smb, fmb = data.buf[], fview.buf[]
     cmd_copy_buffer!(bq, smb, fmb, nbytes;
-                          src_off = smb.pool_offset + data.offset,
-                          dst_off = fmb.pool_offset + fview.offset)
+                          src_off = pool_offset(smb) + data.offset,
+                          dst_off = pool_offset(fmb) + fview.offset)
 
     dst.store = fresh
     retire!(g.recycler, old, dst.capacity * sizeof(T),
@@ -981,8 +981,8 @@ function inplace!(bq, dst, data::LavaArray{T,1}, from::Integer) where {T}
     store = storage(dst)
     dmb, smb = store.buf[], data.buf[]
     cmd_copy_buffer!(bq, smb, dmb, length(data) * sizeof(T);
-                          src_off = smb.pool_offset + data.offset,
-                          dst_off = dmb.pool_offset + store.offset + (Int(from) - 1) * sizeof(T))
+                          src_off = pool_offset(smb) + data.offset,
+                          dst_off = pool_offset(dmb) + store.offset + (Int(from) - 1) * sizeof(T))
     nothing
 end
 
@@ -997,7 +997,7 @@ update is too big for `cmd_update_buffer` to carry."""
 function inplace!(bq, dst, data::AbstractVector{T}, from::Integer) where {T}
     store = storage(dst)
     mb = store.buf[]
-    off = mb.pool_offset + store.offset + (Int(from) - 1) * sizeof(T)
+    off = pool_offset(mb) + store.offset + (Int(from) - 1) * sizeof(T)
     n = length(data) * sizeof(T)
     if n <= 65536 && n % 4 == 0 && off % 4 == 0
         src = data isa Vector{T} ? data : collect(data)
@@ -1034,7 +1034,7 @@ function rename!(g::LavaGraph, bq, dst::Buffer{T,1}, data::AbstractVector{T}) wh
     fview = deviceview(dst.dev, fresh)
     fmb = fview.buf[]
     cmd_copy_buffer!(bq, host.buffer, fmb, nbytes;
-                          dst_off = fmb.pool_offset + fview.offset)
+                          dst_off = pool_offset(fmb) + fview.offset)
 
     dst.store = fresh
     signal = ensure_active_batch!(bq).signal_value
@@ -1478,15 +1478,23 @@ Not needed *between* runs of the same plan: that hazard is the plan's own, and
 `nextslot!` plus the derived barriers already cover it.
 """
 function handover!(pl::LavaPlan, bq)
-    # `foldl`, not `any`: short-circuiting would skip recording this plan as the
-    # runner of the arenas after the first hit, and the next run would then think
-    # it was taking over from someone else.
-    pool = pool(pl.graph.dev)
+    # `p`, not `pool`. Written `pool = pool(pl.graph.dev)`, which makes `pool` a
+    # local for the whole body — so the call on the right resolved to the local
+    # that had not been assigned yet, and this threw
+    #
+    #     UndefVarError: `pool` not defined in local scope
+    #
+    # on every call. Not intermittently: Julia decides scope statically, so the
+    # handover barrier has never been emitted, and two plans sharing an arena
+    # have been relying on whatever ordering they happened to get. Found by
+    # `test_arena_bake.jl` and `test_devicerange.jl` erroring together, which is
+    # how a bug in a shared path presents.
+    p = pool(pl.graph.dev)
     # `foldl`, not `any`: short-circuiting would skip recording this plan as the
     # runner of the arenas after the first hit, and the next run would then think
     # it was taking over from itself.
     handed = foldl(pl.arenas; init = Any[]) do acc, ar
-        takeover!(pool, ar, pl) && push!(acc, ar)
+        takeover!(p, ar, pl) && push!(acc, ar)
         acc
     end
     isempty(handed) && return false
@@ -1502,7 +1510,7 @@ function handover!(pl::LavaPlan, bq)
     bufs = VK._BufferMemoryBarrier2[]
     mems = VK._MemoryBarrier2[]
     for ar in handed
-        reg = arenaof(pool, ar).region
+        reg = arenaof(p, ar).region
         blk = reg === nothing ? nothing : memoryof(reg)
         if blk isa BufferBlock
             push!(bufs, VK._BufferMemoryBarrier2(
@@ -1639,7 +1647,7 @@ function rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage)
     addr = VK.get_buffer_device_address(
         dev.ctx.device, VK.BufferDeviceAddressInfo(buf))
     managed = VkManagedBuffer(buf, mem, UInt64(addr), Ptr{UInt8}(C_NULL), Int(req.size),
-                                   0, nothing, nothing, BUF_STATE_ALIVE, 0, false, dev.ctx)
+                              nothing, nothing, BUF_STATE_ALIVE, 0, false, dev.ctx)
     ref = GPUArrays.DataRef(_ -> nothing, managed)
     return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
 end
@@ -1647,7 +1655,34 @@ end
 rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
     device_memory(dev.ctx, max(bytes, 1), bits)
 
-rawfree(::LavaDevice, mem) = nothing   # Lava frees its own; see the staging note
+"""
+Destroy a block's Vulkan objects.
+
+This used to be a no-op — "Lava frees its own" — which was true while the only
+blocks were graph arenas whose `VkBuffer` and `VkDeviceMemory` wrappers carried
+Julia finalizers and got collected eventually. "Eventually" stopped being good
+enough when this pool took over device allocation: `trim_gpu_pool!` exists so a
+caller can say "I have finished and want the VRAM back NOW", and a figure that
+depends on when the GC next runs is not an answer to that.
+
+Destructor failures are logged rather than thrown. The two callers are `trim!`
+and `destroy_pool!`, and the second runs while a device is being torn down or is
+already lost, where the driver may have released the handles itself.
+"""
+function rawfree(::LavaDevice, blk::BufferBlock)
+    try
+        blk.buffer.destructor()
+        blk.memory.destructor()
+    catch ex
+        safe_fin_log("Mantle rawfree: Vulkan destructor failed " *
+                     "(expected while a device is being reset): " *
+                     sprint(showerror, ex) * "\n")
+    end
+    return nothing
+end
+
+# Image arenas hand back raw `VkDeviceMemory` from `rawalloc(dev, Images(), …)`.
+rawfree(::LavaDevice, mem::VK.DeviceMemory) = (mem.destructor(); nothing)
 
 # What memory the given transients can legally share. For images that is the
 # INTERSECTION of their type bits — `device_memory` errors on an empty one rather

@@ -30,7 +30,17 @@ measured 8.5x. Asserted on the disassembly, since it costs time rather than
 correctness and would otherwise go unnoticed.
 """
 
-using Test, Lava, KernelAbstractions
+using Test, Lava, Mantle, KernelAbstractions
+
+# `compile_and_disasm` comes from Lava's SPIR-V test helpers, which moved to
+# `Lava/test/` with the emission suite. This file used to get it from whatever
+# had already been included by the time `runtests.jl` reached it — so it passed
+# in the full run and errored when run on its own. Included by name, with the
+# same `@isdefined` guard the other users have.
+if !@isdefined(SPIRVTestUtils)
+    include(joinpath(pkgdir(Lava), "test", "spirv_test_utils.jl"))
+end
+import .SPIRVTestUtils: compile_and_disasm, check, check_not, check_count
 
 const KA = KernelAbstractions
 const AMpe = Lava.AcceleratedMatrix

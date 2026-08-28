@@ -68,6 +68,16 @@ include("runtime/dispatch.jl")
 include("phases.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
+# ── Portable array algorithms ─────────────────────────────────────────────────
+#
+# Written against KernelAbstractions and `KernelInterface.caps`, so any backend
+# gets them. They were in `src/vulkan/array/` and the only thing keeping them
+# there was a capability query routed through a `VkContext`; see
+# `test/vulkan/test_array_algorithm_portability.jl` for what is left to move and
+# what is deliberately staying.
+include("array/gemv.jl")
+include("array/fft.jl")
+
 # ── the Vulkan backend ────────────────────────────────────────────────────────
 # Lava's runtime, moved here 2026-08-27. See `vulkan/vulkan.jl` for what had to
 # be untangled first and why these are included into `Mantle` rather than a

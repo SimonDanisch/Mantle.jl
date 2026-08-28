@@ -10,8 +10,8 @@
 # `write_grain_instances_kernel` is still the live API and is what remains here.
 
 using Test, Lava, Mantle
-using Lava: LavaInstanceRecord, write_grain_instances_kernel,
-            build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: LavaInstanceRecord, write_grain_instances_kernel,
+              build_blas_aabb, as_build, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "write_grain_instances_kernel -- 4 grains, identity rotations" begin
@@ -50,8 +50,16 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
         expected_t = (radius, 0f0, 0f0, Float32(i),
                        0f0, radius, 0f0, 0f0,
                        0f0, 0f0, radius, 0f0)
-        @test rec_phys.transform == expected_t
-        @test rec_rend.transform == expected_t
+        # `Tuple(...)`: `transform` is a `Mat3x4f` — `SMatrix{4,3,Float32,12}` —
+        # and `expected_t` is the twelve floats in the order Vulkan's
+        # `VkTransformMatrixKHR` wants them, which is the SMatrix's own storage
+        # order. Comparing the two directly is a type mismatch, not a value one:
+        # the numbers here were always right. The assertion predates `transform`
+        # becoming a matrix, and did not fail in the meantime because this file
+        # imported `LavaInstanceRecord` from Lava and so errored at its first
+        # line from the runtime move until now.
+        @test Tuple(rec_phys.transform) == expected_t
+        @test Tuple(rec_rend.transform) == expected_t
         # custom_index = i-1 in low 24 bits.
         @test (rec_phys.custom_index_and_mask & 0x00FFFFFF) == UInt32(i - 1)
         @test (rec_rend.custom_index_and_mask & 0x00FFFFFF) == UInt32(i - 1)
@@ -63,3 +71,4 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
         @test rec_rend.blas_address == tri_blas.address
     end
 end
+

@@ -281,7 +281,7 @@ function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::LavaFramebuffer)
 
     managed = dst.buf[]
     region = VK.BufferImageCopy(
-        UInt64(managed.pool_offset + dst.offset), UInt32(0), UInt32(0),
+        UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
         VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
             UInt32(0), UInt32(0), UInt32(1)),
         VK.Offset3D(0, 0, 0),
@@ -321,7 +321,7 @@ function copy_image_to_buffer!(bq, dst::LavaArray{T, 1}, image::VK.Image,
     batch = ensure_active_batch!(bq)
     managed = dst.buf[]
     region = VK.BufferImageCopy(
-        UInt64(managed.pool_offset + dst.offset), UInt32(0), UInt32(0),
+        UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
         VK.ImageSubresourceLayers(aspect,
             UInt32(0), UInt32(0), UInt32(1)),
         VK.Offset3D(0, 0, 0),

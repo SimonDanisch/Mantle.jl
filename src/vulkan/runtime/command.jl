@@ -1567,7 +1567,7 @@ The `VkManagedBuffer` specialization:
     # Any buffer reaching sync_access! must be ALIVE at submit time — if a
     # dead buffer's state transitioned to DEFERRED/DEAD before we got here,
     # the GPU is about to read freed memory.  Trip loudly.
-    @assert (@atomic :acquire buf.state) == BUF_STATE_ALIVE  "sync_access!: buffer is not ALIVE (state=$(@atomic :acquire buf.state)) — use-after-free; size=$(buf.size) pool_offset=$(buf.pool_offset) pooled=$(buf.pool_block !== nothing)"
+    @assert (@atomic :acquire buf.state) == BUF_STATE_ALIVE  "sync_access!: buffer is not ALIVE (state=$(@atomic :acquire buf.state)) — use-after-free; size=$(buf.size) pool_offset=$(pool_offset(buf)) pooled=$(buf.region !== nothing)"
     bq = batch.bq::BatchQueue
     lw = @atomic :acquire buf.last_write
     if lw !== nothing

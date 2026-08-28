@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-using Lava: UnitCube, support
+using Mantle: UnitCube, support
 using GeometryBasics: Vec3f
 
 @testset "UnitCube support function -- 6 axis-aligned directions" begin
@@ -52,3 +52,4 @@ end
     # (Smoke check the dispatch table.)
     @test length(methods(support, (UnitCube, Vec3f))) >= 1
 end
+

@@ -17,10 +17,13 @@ Only the definitions moved. Every constructor, method and comment about
 methods — Julia resolves a call at the first invocation, long after every file
 is loaded.
 
-Two `Any` fields survive, and both predate this: `PoolBlock.pool` (a `DevicePool`
-holds a `Vector{PoolBlock}`, so one direction must be untyped) and
-`VkManagedBuffer.ctx`/`last_write` (a `VkContext` is what owns the pool that owns
-the buffer). Those are genuine cycles; the rest were only ordering.
+One `Any` field survives, and it predates this: `VkManagedBuffer.ctx` /
+`last_write`, because a `VkContext` is what owns the queue that owns the buffer.
+That is a genuine cycle; the rest were only ordering.
+
+`PoolBlock` used to be the second, and it is gone — with the size-class
+allocator it belonged to. A suballocation is a `Mantle.Region` now, which is the
+one Mantle already hands to every graph arena.
 """
 
 """
@@ -43,32 +46,11 @@ struct SubgroupSizeControl
     compute::Bool   # COMPUTE present in requiredSubgroupSizeStages
 end
 
-"""
-    PoolBlock
-
-One 64 MiB slab carved by bump pointer, and the count of live sub-allocations in
-it. A block with `live_count == 0` is reusable.
-
-(The docstring here described `VkManagedBuffer` — it had been attached to this
-struct rather than that one since before the hoist, so it is corrected rather
-than carried across.)
-"""
-mutable struct PoolBlock
-    buffer::VK.Buffer
-    memory::VK.DeviceMemory
-    base_address::UInt64       # BDA of the start of this block
-    capacity::Int              # Total bytes in this block
-    bump::Int                  # Next free byte offset (bump pointer for initial carving)
-    live_count::Int            # Number of live sub-allocations
-    # The `DevicePool` this block belongs to. `Any` because `DevicePool` holds a
-    # `Vector{PoolBlock}` and Julia has no forward declaration; every use site
-    # asserts `::DevicePool`, the same shape as `bq.ctx::VkContext`.
-    #
-    # A back-reference rather than a lookup because `return_to_pool!` runs from a
-    # FINALIZER. A finalizer must not allocate and must not be able to fail on a
-    # missing key, so the free path is a field hop and nothing else.
-    pool::Any
-end
+# `PoolBlock` was here: one 64 MiB slab carved by a bump pointer, with a count of
+# its live sub-allocations and a back-reference to the pool that owned it. It is
+# `Mantle.Block` now, and the count is `Block.live` — the same fact kept as the
+# ledger of what was handed out rather than as a number that has to be kept in
+# step with it.
 
 mutable struct VkManagedBuffer
     buffer::VK.Buffer
@@ -76,8 +58,18 @@ mutable struct VkManagedBuffer
     address::UInt64     # BDA for PhysicalStorageBuffer access
     mapped_ptr::Ptr{UInt8}  # Non-null for unified/BAR memory
     size::Int
-    pool_offset::Int    # Byte offset within pool block (0 for non-pooled)
-    pool_block::Union{Nothing, PoolBlock}  # Back-reference for pool free (nothing = non-pooled)
+    # Where this buffer's bytes came from, when they came from the suballocator.
+    #
+    # Two fields before — `pool_offset::Int` and `pool_block::Union{Nothing,
+    # PoolBlock}` — which together are what `Mantle.Region` already is: a block
+    # and a span inside it. They were the last piece of a SECOND allocator
+    # living beside `Mantle.Pool`, with its own blocks, its own free lists and
+    # its own idea of what a suballocation is.
+    #
+    # `nothing` means the buffer owns a `VkDeviceMemory` of its own rather than
+    # a slice of one, which is still how a mapped, unified or unusually-flagged
+    # buffer is served. That case is what `pool_offset` returning 0 says.
+    region::Union{Nothing, Region}
     # Cross-queue synchronization: records which BatchQueue last wrote to
     # this buffer, at which timeline value. Consumed by sync_access! to
     # auto-insert semaphore waits when a dispatch on a different queue
@@ -109,35 +101,40 @@ mutable struct VkManagedBuffer
 end
 
 """
-One device's memory: its 64 MiB blocks and its per-size-class free lists.
+When one device grows, trims and collects, and what it currently holds.
 
-**This was two module-level globals**, `POOL_BLOCKS` and `POOL_FREE_LISTS`, and
-`PoolBlock` carried no device. So an allocation on a second device was served out
-of the first device's block — measured directly: allocate on the GPU (one block
-created), then allocate on lavapipe, and `length(POOL_BLOCKS)` was *still 1*.
+**Not where the memory comes from.** That is `Mantle.Pool`, reached through this
+context's `LavaDevice` — the same pool every graph arena is placed in, with one
+free list and one set of blocks for the whole device.
 
-The buffer's `ctx` was right and the memory under it belonged to the other
-device, which is the worst shape a bug can have: `fill!` on the second context
-read back **0.0** because it wrote into memory that device does not own, and the
-same sequence in a different order segfaulted instead.
+This type used to be that pool as well: `blocks::Vector{PoolBlock}` and
+`free_lists`, a bump allocator with 153 size classes, sitting beside
+`Mantle.Pool` and invisible to it. Two allocators over one `VkDevice` meant the
+peak either could report was about its own bookkeeping, and an arena and an array
+could not reuse each other's bytes however idle one of them was.
 
-Worth separating from `GUARDRAILS.md` §8, which lists four caches holding
-pipeline *handles*. This hands out *memory*. A stale handle is undefined
-behaviour the driver usually catches; memory from the wrong device is silent
-corruption, and no amount of cache keying reaches it. Every one of those four
-caches was keyed per device before this, and two devices still did not work.
+What is left is policy, and it stays per device for the reason the split of these
+fields out of eleven module-level `Ref`s was made in the first place: a second
+device would otherwise be trimmed, capped and garbage-collected according to the
+first one's numbers, and the pressure ratio would divide the SUM of two heaps by
+the capacity of one.
+
+**Keep this per device, whatever else changes.** `PoolBlock` once carried no
+device, and an allocation on a second device was served out of the first
+device's block — measured: allocate on the GPU (one block created), then
+allocate on lavapipe, and the block count was *still 1*. The buffer's `ctx` was
+right and the memory under it belonged to the other device, which is the worst
+shape a bug can have: `fill!` on the second context read back **0.0**, and the
+same sequence in another order segfaulted instead. `Mantle.Pool` inherits that
+requirement — one pool per `LavaDevice`, one `LavaDevice` per `VkContext`, which
+is what `DEVICES` is for.
 """
-mutable struct DevicePool
-    blocks::Vector{PoolBlock}
-    # index i holds reusable VkManagedBuffer objects of size class i
-    free_lists::Vector{Vector{VkManagedBuffer}}
-
+mutable struct MemoryPolicy
     # ── Policy. These were eleven module-level `Ref`s, which is the same mistake
     # as the caches one level up: a second device would have been trimmed,
     # capped and garbage-collected according to the first one's numbers. They are
     # defaults, so they stay mutable — but they are this pool's defaults.
     disabled::Bool
-    accounting::Bool
     soft_cap::Int
     trim_threshold::Int
     trim_min_interval::Float64
@@ -155,19 +152,24 @@ mutable struct DevicePool
     gc_full_last::Float64
     gc_seconds::Float64
 
-    # ── Accounting. `live_bytes` is the numerator `gpu_memory_pressure` divides
-    # by the heap size, and `live_buffers` is every buffer this device handed
-    # out. Module-level, these were one number for two heaps: with a second
-    # device the pressure ratio, the trim threshold and the OOM retry all read
-    # the SUM of both devices against ONE device's capacity — so a busy discrete
-    # GPU would drive collection on an idle integrated one, and neither would
-    # report its own footprint. Atomics because `destroy_buffer!` is a finalizer.
+    # ── Accounting for buffers that own their memory: staging, mapped, and
+    # anything whose usage flags the pool cannot host. The SUBALLOCATED bytes are
+    # `Mantle.reserved(spans(ctx))`, and `gpu_live_bytes` is the two added — a
+    # chunk costs nothing beyond the block it sits in, so counting both would
+    # double every byte.
+    #
+    # Per device, as everything here is: module-level, these were one number for
+    # two heaps, so the pressure ratio, the trim threshold and the OOM retry all
+    # read the SUM of both devices against ONE device's capacity, and a busy
+    # discrete GPU drove collection on an idle integrated one. Atomics because
+    # `destroy_buffer!` is reachable from a finalizer.
     live_bytes::Threads.Atomic{Int}
     live_buffers::Set{VkManagedBuffer}
-    # Allocation counters, zeroed by `reset_pool_accounting!`.
-    requested::Threads.Atomic{Int}
-    rounded::Threads.Atomic{Int}
-    nalloc::Threads.Atomic{Int}
+    # `requested` / `rounded` / `nalloc` and the `accounting` flag that gated
+    # them are gone with the size classes. They existed to measure rounding
+    # waste — how much bigger a size class was than the request — and
+    # `Mantle.carve!` splits at exactly the requested length, so the ratio they
+    # reported is now 1.0 by construction. `pool_gc_stats` is what is left.
     gc_count::Threads.Atomic{Int}
     # Guards re-entry into reclamation through `flush!`'s own allocation path.
     # Per pool: one device quiescing must not make another's reclaim a no-op.
@@ -417,7 +419,7 @@ every array its own `VkBuffer`.
 
 Debug-only: allocation is much slower and the path is less exercised than the
 pooled one (the host-upload and flush-after-error paths may misbehave). It lives
-on this struct rather than as a separate `pool(ctx).disabled = true` step because
+on this struct rather than as a separate `mempolicy(ctx).disabled = true` step because
 a second step is a second way to get it wrong, and it applies to the device being
 built.
 """
@@ -659,7 +661,7 @@ mutable struct DeviceCaches
     # which is free. See `launch_plan`.
     launchplans::IdDict{DataType,Vector{Any}}
     prepare_indirect::Union{Nothing,PrepareIndirect}
-    pool::DevicePool
+    pool::MemoryPolicy
     # 0 means "not yet queried" — the device never reports 0.
     subgroup_size::Int
     subgroup_control::Union{Nothing,SubgroupSizeControl}
@@ -710,11 +712,11 @@ mutable struct DeviceCaches
     gemm_split_retired::Vector{Any}
 end
 
-# `DevicePool()` resolves at call time, long after `memory.jl` is loaded.
+# `MemoryPolicy()` resolves at call time, long after `memory.jl` is loaded.
 DeviceCaches() = DeviceCaches(
     Dict{UInt64,LavaComputePipeline}(), UInt64[],
     Dict{Any,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
-    nothing, DevicePool(), 0, nothing, nothing, false,
+    nothing, MemoryPolicy(), 0, nothing, nothing, false,
     Dict{UInt64,CompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
     nothing, nothing, 0, 1.0, Any[],
     Dict{Tuple{DataType,DataType,Any},Any}(), nothing,

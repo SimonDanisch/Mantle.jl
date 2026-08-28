@@ -101,7 +101,7 @@ function Base.copyto!(dst::LavaArray{UInt8}, img::VideoImage)
         VK.CommandBufferAllocateInfo(pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)))
     @vk_checked "video_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
     transition_transfer_src!(cb, img)
-    record_luma_copy!(cb, img, mbuf.buffer, mbuf.pool_offset + dst.offset)
+    record_luma_copy!(cb, img, mbuf.buffer, pool_offset(mbuf) + dst.offset)
     @vk_checked "video_copy_end" VK.end_command_buffer(cb)
     @vk_checked "video_copy_submit" VK.queue_submit(ctx.video_decode_queue, [VK.SubmitInfo([], [], [cb], [])])
     @vk_checked "video_copy_wait" VK.queue_wait_idle(ctx.video_decode_queue)
@@ -129,6 +129,26 @@ module VideoDecode
 import Vulkan as VK
 const Vk = VK
 const C = Vk.VkCore
+
+# What this module borrows from its parent. A submodule does NOT fall back to the
+# enclosing module for unqualified names, so every one of these has to be said —
+# and none of them were. `mkimage` threw `UndefVarError: alloc_image_memory not
+# defined in Mantle.VideoDecode` on the first DPB image, which means
+# `decode_h264_gpu` could not have worked at all; it went unnoticed because the
+# only callers are the two tests that had themselves stopped running.
+#
+# `..` is `Mantle`. These are all defined before this point in the include
+# order, so they can be imported outright.
+import ..VideoImage, ..LavaArray, ..pool_offset,
+       ..record_luma_copy!, ..record_chroma_copy!,
+       ..ensure_active_batch!, ..flush!
+
+# `alloc_image_memory` cannot be, and the reason is include order rather than
+# anything about the name: it lives in `graphics/framebuffer.jl`, which comes
+# AFTER `runtime/video.jl`, so at the moment this module body runs the binding
+# does not exist yet and `import` warns and takes nothing. Reached through the
+# parent at CALL time instead, which is when it does exist.
+const MANTLE = parentmodule(@__MODULE__)
 
 """
     vkchk(result, what) -> result
@@ -550,10 +570,10 @@ function drain_copies!(dec::VideoDecoder)
     cb = ensure_active_batch!(ctx).cmd_buf
     for (vimg, y, uv) in dec.copyq
         yb = y.buf[]
-        record_luma_copy!(cb, vimg, yb.buffer, yb.pool_offset + y.offset)
+        record_luma_copy!(cb, vimg, yb.buffer, pool_offset(yb) + y.offset)
         if uv !== nothing
             ub = uv.buf[]
-            record_chroma_copy!(cb, vimg, ub.buffer, ub.pool_offset + uv.offset)
+            record_chroma_copy!(cb, vimg, ub.buffer, pool_offset(ub) + uv.offset)
         end
     end
     empty!(dec.copyq)
@@ -698,7 +718,7 @@ function H264Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool=false)
             1, 1, Vk.SAMPLE_COUNT_1_BIT, Vk.IMAGE_TILING_OPTIMAL, usage,
             isempty(families) ? Vk.SHARING_MODE_EXCLUSIVE : Vk.SHARING_MODE_CONCURRENT,
             families, Vk.IMAGE_LAYOUT_UNDEFINED; next=Ptr{Cvoid}(rp(pl)))
-        mem=alloc_image_memory(ctx, image)
+        mem=MANTLE.alloc_image_memory(ctx, image)
         view=Vk.ImageView(dev, image, Vk.IMAGE_VIEW_TYPE_2D, fmt_hl,
             Vk.ComponentMapping(Vk.COMPONENT_SWIZZLE_IDENTITY,Vk.COMPONENT_SWIZZLE_IDENTITY,Vk.COMPONENT_SWIZZLE_IDENTITY,Vk.COMPONENT_SWIZZLE_IDENTITY),
             Vk.ImageSubresourceRange(Vk.IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1))
@@ -899,10 +919,10 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
                 # the decode queue is idle.
                 push!(dec.copyq, (dstvimg, dst, duv))
             else
-                record_luma_copy!(cbh, dstvimg, dstbuf.buffer, dstbuf.pool_offset + dst.offset)
+                record_luma_copy!(cbh, dstvimg, dstbuf.buffer, pool_offset(dstbuf) + dst.offset)
                 if chroma
                     uvbuf = duv.buf[]
-                    record_chroma_copy!(cbh, dstvimg, uvbuf.buffer, uvbuf.pool_offset + duv.offset)
+                    record_chroma_copy!(cbh, dstvimg, uvbuf.buffer, pool_offset(uvbuf) + duv.offset)
                 end
             end
         end

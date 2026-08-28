@@ -35,7 +35,7 @@ end
 end
 
 @testset "live_bytes is atomic" begin
-    @test Mantle.pool(Mantle.vk_context()).live_bytes isa Threads.Atomic{Int}
+    @test Mantle.mempolicy(Mantle.vk_context()).live_bytes isa Threads.Atomic{Int}
 end
 
 @testset "VkContext has no public nothing-default_bq path" begin

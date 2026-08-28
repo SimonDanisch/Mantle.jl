@@ -6,8 +6,11 @@ using Test, Lava, Mantle
     # `MemoryBarrier(...) + cmd_pipeline_barrier(...)` pattern that handled
     # prior-dispatch → graphics sync.  Image-layout transitions (depth
     # attachment, transition_image! helper) are still allowed.
-    src = read(joinpath(dirname(dirname(pathof(Lava))),
-                        "src/graphics/pipeline.jl"), String)
+    # `graphics/pipeline.jl` came to Mantle with the runtime, under `src/vulkan/`.
+    # Read from source because the assertion is about what `vk_draw!` does NOT
+    # contain, which no runtime observation can show.
+    src = read(joinpath(dirname(pathof(Mantle)),
+                        "vulkan", "graphics", "pipeline.jl"), String)
 
     # Extract the vk_draw! body (from the function header to its matching end)
     m = match(r"function vk_draw!\(bq::BatchQueue,(.*?)(?=\nfunction )"s, src)

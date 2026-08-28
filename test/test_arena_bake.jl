@@ -153,7 +153,7 @@ end
     # And a scoped barrier names the resource's range inside the pool buffer, not
     # offset 0 — `barrierspan` adds `pool_offset`, the same sum a copy computes.
     arr = unsafe_wrap(Array, v.pBufferMemoryBarriers, Int(v.bufferMemoryBarrierCount))
-    want = UInt64(M.storage(b).buf[].pool_offset + M.storage(b).offset)
+    want = UInt64(M.pool_offset(M.storage(b).buf[]) + M.storage(b).offset)
     @test any(bb -> UInt64(bb.offset) == want, arr)
     @test all(bb -> UInt64(bb.offset) != 0, arr)
 end

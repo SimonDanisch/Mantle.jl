@@ -20,6 +20,11 @@ using Lava: LavaDeviceArray, lava_compile, CompilationResult,
 # with GPUCompiler (functions defined in Main can't access Lava internals)
 # ═══════════════════════════════════════════════════════════════════════
 
+# The kernels below are defined INTO Lava by `Lava.eval`, so they are
+# `Lava._srcmap_*` and nothing else. They were being reached as
+# `Lava._srcmap_*` — a `Lava.` -> `Mantle.` rename during the runtime move that
+# went one identifier too far, and it took the whole file down at its first
+# compile with `UndefVarError: _srcmap_add! not defined in Mantle`.
 Lava.eval(quote
     # Simple kernel: load, compute, store
     function _srcmap_add!(A::LavaDeviceArray{Float32,1}, val::Float32)
@@ -216,7 +221,7 @@ end)
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: simple kernel has mapped instructions" begin
-    r = lava_compile(Mantle._srcmap_add!,
+    r = lava_compile(Lava._srcmap_add!,
         Tuple{LavaDeviceArray{Float32,1}, Float32})
 
     @test r isa CompilationResult
@@ -231,7 +236,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: points to user code (inlined_at chain)" begin
-    r = lava_compile(Mantle._srcmap_add!,
+    r = lava_compile(Lava._srcmap_add!,
         Tuple{LavaDeviceArray{Float32,1}, Float32})
 
     # Collect all unique source files
@@ -260,7 +265,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: complex kernel maps to multiple source lines" begin
-    r = lava_compile(Mantle._srcmap_complex!,
+    r = lava_compile(Lava._srcmap_complex!,
         Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Float32,1}, Float32, Float32})
 
     # Group by line number
@@ -281,8 +286,8 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: struct kernel" begin
-    r = lava_compile(Mantle._srcmap_struct!,
-        Tuple{LavaDeviceArray{Mantle._SrcMapVec3,1}, LavaDeviceArray{Mantle._SrcMapVec3,1}, Float32})
+    r = lava_compile(Lava._srcmap_struct!,
+        Tuple{LavaDeviceArray{Lava._SrcMapVec3,1}, LavaDeviceArray{Lava._SrcMapVec3,1}, Float32})
 
     @test length(r.source_map) >= 15
 
@@ -298,7 +303,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: integer kernel" begin
-    r = lava_compile(Mantle._srcmap_int!,
+    r = lava_compile(Lava._srcmap_int!,
         Tuple{LavaDeviceArray{Int32,1}, Int32})
 
     @test length(r.source_map) >= 5
@@ -309,7 +314,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: multi-array kernel" begin
-    r = lava_compile(Mantle._srcmap_multi!,
+    r = lava_compile(Lava._srcmap_multi!,
         Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Float32,1}, LavaDeviceArray{Float32,1}})
 
     @test length(r.source_map) >= 10
@@ -375,7 +380,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: SPIR-V disassembly annotations" begin
-    r = lava_compile(Mantle._srcmap_add!,
+    r = lava_compile(Lava._srcmap_add!,
         Tuple{LavaDeviceArray{Float32,1}, Float32})
 
     # Parse SPIR-V disassembly for IDs and check they can be annotated
@@ -409,7 +414,7 @@ end
 
 @testset "Compilation error: heap allocation" begin
     err = try
-        lava_compile(Mantle._srcmap_bad_alloc!, Tuple{LavaDeviceArray{Float32,1}})
+        lava_compile(Lava._srcmap_bad_alloc!, Tuple{LavaDeviceArray{Float32,1}})
         nothing
     catch e
         e
@@ -430,7 +435,7 @@ end
 
 @testset "Compilation error: type instability" begin
     err = try
-        lava_compile(Mantle._srcmap_bad_unstable!, Tuple{LavaDeviceArray{Any,1}})
+        lava_compile(Lava._srcmap_bad_unstable!, Tuple{LavaDeviceArray{Any,1}})
         nothing
     catch e
         e
@@ -450,7 +455,7 @@ end
 
 @testset "Compilation error: global variable access" begin
     err = try
-        lava_compile(Mantle._srcmap_bad_global!, Tuple{LavaDeviceArray{Float32,1}})
+        lava_compile(Lava._srcmap_bad_global!, Tuple{LavaDeviceArray{Float32,1}})
         nothing
     catch e
         e
@@ -473,7 +478,7 @@ end
 
 @testset "LavaCompilationError: showerror formatting" begin
     err = try
-        lava_compile(Mantle._srcmap_bad_alloc!, Tuple{LavaDeviceArray{Float32,1}})
+        lava_compile(Lava._srcmap_bad_alloc!, Tuple{LavaDeviceArray{Float32,1}})
         nothing
     catch e
         e
@@ -519,8 +524,8 @@ end
 
 @testset "Deep chain: string interpolation in collision check" begin
     err = try
-        lava_compile(Mantle._srcmap_deep_physics!,
-            Tuple{LavaDeviceArray{Mantle._TestParticle,1}, Float32})
+        lava_compile(Lava._srcmap_deep_physics!,
+            Tuple{LavaDeviceArray{Lava._TestParticle,1}, Float32})
         nothing
     catch e
         e
@@ -553,8 +558,8 @@ end
 
 @testset "Deep chain: abstract field in scene renderer" begin
     err = try
-        lava_compile(Mantle._srcmap_deep_scene!,
-            Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Mantle._SceneObject,1}})
+        lava_compile(Lava._srcmap_deep_scene!,
+            Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Lava._SceneObject,1}})
         nothing
     catch e
         e
@@ -581,7 +586,7 @@ end
 
 @testset "Deep chain: error() in validation helper" begin
     err = try
-        lava_compile(Mantle._srcmap_deep_error!,
+        lava_compile(Lava._srcmap_deep_error!,
             Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Float32,1}, Float32})
         nothing
     catch e
@@ -607,7 +612,7 @@ end
 
 @testset "Deep chain: @info logging in helper" begin
     err = try
-        lava_compile(Mantle._srcmap_deep_logging!,
+        lava_compile(Lava._srcmap_deep_logging!,
             Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{NTuple{3,Float32},1}})
         nothing
     catch e
@@ -632,8 +637,8 @@ end
 @testset "Deep chain: deduplication reduces noise" begin
     # The physics kernel triggers ~16 GPUCompiler reasons but only ~2 unique user chains
     err = try
-        lava_compile(Mantle._srcmap_deep_physics!,
-            Tuple{LavaDeviceArray{Mantle._TestParticle,1}, Float32})
+        lava_compile(Lava._srcmap_deep_physics!,
+            Tuple{LavaDeviceArray{Lava._TestParticle,1}, Float32})
         nothing
     catch e
         e
@@ -660,8 +665,8 @@ end
 
 @testset "Deep chain: showerror shows call chains before raw error" begin
     err = try
-        lava_compile(Mantle._srcmap_deep_scene!,
-            Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Mantle._SceneObject,1}})
+        lava_compile(Lava._srcmap_deep_scene!,
+            Tuple{LavaDeviceArray{Float32,1}, LavaDeviceArray{Lava._SceneObject,1}})
         nothing
     catch e
         e
@@ -702,7 +707,7 @@ end
     @test isempty(Mantle.vk_context().validation.messages)
 
     # Next compilation should succeed without stale validation errors
-    r = lava_compile(Mantle._srcmap_add!,
+    r = lava_compile(Lava._srcmap_add!,
         Tuple{LavaDeviceArray{Float32,1}, Float32})
     @test length(r.spirv_bytes) > 0
     @test length(r.source_map) > 0
@@ -713,7 +718,7 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Source map: IDs are valid SPIR-V result IDs" begin
-    r = lava_compile(Mantle._srcmap_add!,
+    r = lava_compile(Lava._srcmap_add!,
         Tuple{LavaDeviceArray{Float32,1}, Float32})
 
     # Parse all result IDs from SPIR-V disassembly

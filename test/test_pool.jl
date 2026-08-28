@@ -4,7 +4,7 @@
 # `Pool` ever needs a real device to be tested, some policy has leaked into a
 # backend and a second backend will have to copy it.
 
-using Test
+using Test, Random
 import Mantle
 const M = Mantle
 
@@ -164,7 +164,7 @@ end
     a = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
     b = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
     M.release!(a)
-    # Without the guard this inserts a's span twice, and the NEXT two acquires
+    # Without the guard this puts a's span back twice, and the NEXT two acquires
     # hand out the same bytes — corruption with no error anywhere near it.
     @test_throws ErrorException M.release!(a)
     # …and a legitimate release of a different region still works.
@@ -172,6 +172,139 @@ end
     c = M.acquire!(p, d, :buf, nothing, 128; blocksize = 4096)
     @test M.offset(c) == 0                      # both spans coalesced back
     @test d.allocs == [4096]
+end
+
+@testset "release! catches a double release the free list cannot see" begin
+    # The case the old neighbour check could not reach and the reason the block
+    # keeps a `live` ledger. Release `a`, then release its neighbour `b`: `b`
+    # coalesces with `a`, so no free span starts where `b` did any more. A second
+    # release of `b` finds nothing that looks like itself, and on the free list
+    # alone it reads as a fresh region being given back.
+    d, p = FakeDev(), M.Pool()
+    a = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    b = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    c = M.acquire!(p, d, :buf, nothing, 64; blocksize = 4096)
+    M.release!(a)
+    M.release!(b)
+    @test_throws ErrorException M.release!(b)
+    M.release!(c)
+end
+
+# ── The rewrite, checked against its own invariants ───────────────────────────
+#
+# `Block`'s free list stopped being a sorted `Vector{Span}` and became size-class
+# bins plus two adjacency dictionaries, so that carving and releasing are O(1)
+# rather than O(number of live regions in the block). The tests above pin the
+# behaviours that were already understood; this one exists because a suballocator
+# is exactly the kind of code whose bugs are silent — two live regions on the
+# same bytes produces no error anywhere, only wrong data somewhere else later.
+#
+# So it is a randomised sequence checked against the properties that must hold no
+# matter what the internals do, rather than against a second implementation:
+# every live region disjoint, in range and aligned; every byte accounted for; and
+# a pool that has given everything back holding exactly one free span per block.
+
+"""Every free span in `blk`, recovered from the bins, sorted."""
+freespans(blk) = sort([M.Span(lo, hi) for (lo, hi) in blk.free.bylower]; by = s -> s.lower)
+
+"""
+Are `blk`'s live regions and free spans a partition of it?
+
+The single strongest statement about an allocator: disjoint, in range, and
+covering every byte. Overlap is the corruption, and a gap is a leak.
+"""
+function partitions(blk)
+    pieces = vcat(freespans(blk),
+                  [M.Span(lo, hi) for (lo, hi) in blk.live])
+    sort!(pieces; by = s -> s.lower)
+    at = 0
+    for s in pieces
+        s.lower == at || return false          # a gap, or an overlap
+        at = s.upper
+    end
+    return at == blk.bytes
+end
+
+@testset "Pool: randomised acquire/release keeps the block partitioned" begin
+    for seed in 1:40
+        rng = Random.Xoshiro(seed)
+        d, p = FakeDev(), M.Pool()
+        live = Any[]
+        for _ in 1:400
+            if !isempty(live) && rand(rng) < 0.45
+                M.release!(popat!(live, rand(rng, 1:length(live))))
+            else
+                n = rand(rng, 1:3000)
+                a = rand(rng, (1, 8, 64, 256, 1024))
+                push!(live, M.acquire!(p, d, :buf, nothing, n; align = a, blocksize = 1 << 16))
+            end
+        end
+
+        blocks = M.blocksof(p, :buf)
+        @test all(partitions, blocks)
+
+        # Alignment and length are what the caller was promised, and they have to
+        # survive every split and merge the sequence above performed.
+        @test all(r -> M.offset(r) + length(r) <= r.block.bytes, live)
+        @test all(r -> r.block.live[M.offset(r)] == M.offset(r) + length(r), live)
+
+        # Regions are pairwise disjoint WITHIN a block — implied by the partition
+        # above, but asserted directly so a failure says which property broke.
+        byblock = Dict{Any, Vector{Any}}()
+        for r in live
+            push!(get!(Vector{Any}, byblock, r.block), r)
+        end
+        for (_, rs) in byblock
+            sort!(rs; by = M.offset)
+            @test all(i -> M.offset(rs[i]) + length(rs[i]) <= M.offset(rs[i + 1]),
+                      1:(length(rs) - 1))
+        end
+
+        # Give everything back: each block collapses to one free span, and every
+        # block is then trimmable. A leaked byte shows up here as a block that
+        # will not go.
+        foreach(M.release!, live)
+        @test all(b -> freespans(b) == [M.Span(0, b.bytes)], blocks)
+        @test all(b -> isempty(b.live), blocks)
+        M.trim!(p, d)
+        @test M.reserved(p) == 0
+    end
+end
+
+@testset "Pool: alignment is honoured under fragmentation" begin
+    # The bounded per-bin scan can decline a span it could have used, which costs
+    # a block and never a wrong offset. This is the assertion that separates the
+    # two: whatever it hands back is aligned.
+    rng = Random.Xoshiro(7)
+    d, p = FakeDev(), M.Pool()
+    live = Any[]
+    for _ in 1:600
+        if !isempty(live) && rand(rng) < 0.4
+            M.release!(popat!(live, rand(rng, 1:length(live))))
+        else
+            a = rand(rng, (256, 512, 4096))
+            r = M.acquire!(p, d, :buf, nothing, rand(rng, 1:5000); align = a,
+                           blocksize = 1 << 16)
+            @test M.offset(r) % a == 0
+            push!(live, r)
+        end
+    end
+end
+
+@testset "Pool: bins" begin
+    # `binof` is the bin a length lands in; `binceil` is the first bin every one
+    # of whose members is long enough. `carve!` takes an entry unseen from
+    # `binceil` upward, so the two disagreeing by one is a span handed out that
+    # is too short — silent, and the worst failure this file can have.
+    @test M.binof(1) == 1 && M.binof(2) == 2 && M.binof(3) == 2 && M.binof(4) == 3
+    for n in 1:2048
+        k = M.binceil(n)
+        @test k == 1 || (1 << (k - 2)) < n          # not needlessly high
+        @test (1 << (k - 1)) >= n                   # every span in bin k fits n
+        @test M.binof(n) <= k
+        # and the bin a length reports really does contain it
+        @test (1 << (M.binof(n) - 1)) <= n < (1 << M.binof(n))
+    end
 end
 
 @testset "the sharing invariant: transients share, persistents never do" begin

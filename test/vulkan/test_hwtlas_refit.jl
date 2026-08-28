@@ -1,6 +1,6 @@
 using Test, Lava, Raycore
-using Lava: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
-            write_grain_instances_kernel
+using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
+              write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "Raycore.sync!(HWTLAS) refit cycles" begin
@@ -39,3 +39,4 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     # Refit reuses the same hw_tlas object (no rebuild allocation).
     @test tlas.hw_tlas === pinned_hw_tlas
 end
+

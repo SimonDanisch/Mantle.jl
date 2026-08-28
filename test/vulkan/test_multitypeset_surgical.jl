@@ -100,10 +100,19 @@ end
         push!(mts, TinyMat(Float32(i), 0f0))
     end
     @test length(mts.static.data[1]) == 258
-    # After growth the backing VkBuffer is a new allocation (address changed),
-    # but the wrapping LavaArray Julia object is the same.
+    # After growth the backing storage is a new allocation, but the wrapping
+    # LavaArray Julia object is the same.
     @test mts.static.data[1] === arr
-    @test arr.buf[].address != initial_buf_address
+
+    # SIZE, not address. This asserted `address != initial_buf_address`, which
+    # was a reliable proxy for "reallocated" only while the allocator used size
+    # classes: a bigger request came from a different class and so from different
+    # bytes. `Mantle.Pool` carves exactly and coalesces on release, so the freed
+    # 16-byte span merges with the free tail and the larger carve can begin at
+    # the very same offset — same address, genuinely new allocation. It passed or
+    # failed depending on what else had run first, which is what a proxy does
+    # once it stops being one.
+    @test arr.buf[].size > initial_capacity
 
     # The surgical setindex in push! actually wrote the new elements — readback
     # confirms values (not uninitialised memory).

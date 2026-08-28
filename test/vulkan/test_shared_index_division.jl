@@ -149,7 +149,8 @@ sitting as a documented "unexplained" blocker.
 """
 
 using Test, Lava, KernelAbstractions
-using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator, splitidx
+using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator
+using Mantle: splitidx
 const KA = KernelAbstractions
 
 const SID_BM, SID_LDA, SID_BK, SID_WG = 96, 104, 32, 256
@@ -274,3 +275,4 @@ end
         end
     end
 end
+

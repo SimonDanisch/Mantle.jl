@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-using Lava: LavaInstanceRecord, identity_transform
+using Mantle: LavaInstanceRecord, identity_transform
 
 @testset "LavaInstanceRecord — size & isbits" begin
     @test sizeof(LavaInstanceRecord) == 64
@@ -45,3 +45,4 @@ end
 
     @test rec_bytes == expected
 end
+

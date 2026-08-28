@@ -1943,7 +1943,7 @@ function LinearAlgebra.mul!(C::LavaArray{T,2}, A::AbstractVecOrMat,
     if T === Float32 && eltype(A) === Float16 && eltype(B) === Float16 &&
        isone(α) && iszero(β) && A isa LavaArray && B isa LavaArray &&
        K % GEMM_TILE == 0 && M % GEMM_TILE == 0 && N % GEMM_TILE == 0 &&
-       coopmat_gemm_available(vk_context(C))
+       coopmatgemm(C)
         return coopmat_gemm!(C, A, B, M, N, K)
     end
 

@@ -77,3 +77,59 @@ function allocate(pool::Pool, dev, kind, ::Type{T}, dims::NTuple{N,Int};
 end
 allocate(pool::Pool, dev, kind, ::Type{T}, dims::Integer...; kw...) where {T} =
     allocate(pool, dev, kind, T, Int.(dims); kw...)
+
+# ── Backend-generic device queries ────────────────────────────────────────────
+
+"""
+    workgrouplimit(x) -> Int
+
+The largest workgroup the backend behind `x` will launch, where `x` is a device
+array or anything `KernelAbstractions.get_backend` accepts.
+
+Here rather than in the Vulkan backend because the ALGORITHMS that need it are
+portable and their coupling to Vulkan was this query and nothing else. `gemv.jl`
+and `fft.jl` reached it as `workgroup_limit(vk_context(A))` — array to context to
+caps — and a context is the one step in that chain a second backend does not
+have. Array to backend to `KernelInterface.caps` is the same three fields with
+no Vulkan in the middle, and it is already what `caps(::LavaBackend)` answers.
+
+This is the shape the rest of `src/vulkan/array/` has to take before it can move
+out of the backend: `gemm.jl`, `fft.jl`, `gemv.jl` and `gemm_cm2.jl` are ~4000
+lines of KernelAbstractions with a single-digit number of Vulkan references each,
+and every one of them is a capability query like this. What is NOT ready is the
+dispatch: they are written on `::LavaArray`, and widening that to
+`::AbstractGPUArray` today would make Mantle pirate `LinearAlgebra.mul!` for
+every GPU array package in the session. That widening wants a second backend to
+be designed against, which is what step 5's "prove a vendor override works" is
+for.
+"""
+workgrouplimit(x) = caps(KernelAbstractions.get_backend(x)).workgrouplimit
+
+"""
+    sharedbudget(x) -> Int
+
+Workgroup-memory bytes a kernel on `x`'s backend may declare.
+
+The companion of [`workgrouplimit`](@ref) and the other half of what a tiled
+kernel needs to size itself: `fft.jl`'s `fftgroup` takes both, and between them
+they were that file's ENTIRE dependency on Vulkan. It has none now.
+"""
+sharedbudget(x) = caps(KernelAbstractions.get_backend(x)).sharedbudget
+
+"""
+    coopmatgemm(x) -> Bool
+
+Whether a cooperative-matrix GEMM is usable on `x`'s backend.
+
+`DeviceCaps.coopmat` is exactly this — the Vulkan backend fills that field from
+`coopmat_gemm_available(ctx)`, which probes the shape table and the subgroup
+width — so reading the field is the portable way to ask, and it is cached where
+the probe is not.
+
+The PROBE stays in the backend and should: "does this device implement a 16x16x16
+Float16 cooperative matrix, at a subgroup width the kernel was tuned for" is
+answered out of Vulkan's shape table and `VK_EXT_subgroup_size_control`. What is
+portable is the question, not the way it is answered.
+"""
+coopmatgemm(x) = caps(KernelAbstractions.get_backend(x)).coopmat
+

@@ -70,7 +70,7 @@ end
         drain!()
         baseline_bytes    = Mantle.gpu_live_bytes()
         baseline_buffers  = Mantle.live_buffer_count()
-        baseline_pool     = length(Mantle.pool(Mantle.vk_context()).blocks)
+        baseline_pool     = length(Mantle.poolblocks(Mantle.vk_context()))
 
         for _ in 1:500
             a = Mantle.LavaArray(Float32.(ones(4096)))
@@ -82,7 +82,7 @@ end
         @test Mantle.live_buffer_count()  == baseline_buffers
         # Pool blocks can grow once or twice under transient pressure but must
         # not keep growing — anything looser stops being a real leak test.
-        @test length(Mantle.pool(Mantle.vk_context()).blocks)   <= baseline_pool + 2
+        @test length(Mantle.poolblocks(Mantle.vk_context()))   <= baseline_pool + 2
     end
 
     # ── 3b. Dispatch-then-free stress (the actual WaterLily pattern) ──
@@ -190,7 +190,7 @@ end
     # pool_alloc should now bound this. Stress it.
     @testset "pool blocks bounded under bursty alloc" begin
         drain!()
-        baseline_pool = length(Mantle.pool(Mantle.vk_context()).blocks)
+        baseline_pool = length(Mantle.poolblocks(Mantle.vk_context()))
         # Allocate + free 8 MiB arrays repeatedly. Each alloc hits the pool
         # (< 64 MiB pool block size), and frees go to deferred_frees.
         for _ in 1:50
@@ -198,7 +198,7 @@ end
             Mantle.unsafe_free!(a)
         end
         drain!()
-        @test length(Mantle.pool(Mantle.vk_context()).blocks) <= baseline_pool + 1
+        @test length(Mantle.poolblocks(Mantle.vk_context())) <= baseline_pool + 1
     end
 
     # ── 8. Deferred-free lists drain on submit ──

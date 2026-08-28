@@ -1,3 +1,17 @@
+# FFT, and it is not the Vulkan backend's — see `array/gemv.jl` for why this
+# file and that one moved out of it together.
+#
+# It named two device facts, both through a `VkContext`: the workgroup limit that
+# bounds the radix, and the shared-memory budget `fftgroup` packs batches into.
+# They are `workgrouplimit(src)` and `sharedbudget(src)` now, which any backend
+# answers, and everything else here was already `KernelAbstractions` and
+# arithmetic. Allocation is `similar` and `KernelAbstractions.allocate`
+# throughout, never a backend array type by name.
+#
+# `fft!`, `rfft!`, `stft` and `hannwindow` are Mantle's own functions, so widening
+# their dispatch from `::LavaArray` to `::AbstractGPUArray` claims nothing that
+# belongs to anyone else.
+
 # Batched 1D FFT, ported from VkFFT (`dev/VkFFT`, MIT, Dmitrii Tolmachev).
 #
 # What was taken from it is the ARRANGEMENT, which is not the obvious one. The
@@ -349,7 +363,7 @@ The inverse is **unnormalised**, matching `AbstractFFTs.bfft`: `ifft` is this
 divided by `N`, and leaving the scale out keeps it off the critical path for
 callers who fold it into a later op.
 """
-function fft!(dst::LavaArray{ComplexF32}, src::LavaArray{ComplexF32};
+function fft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
               inverse::Bool = false, skew::Bool = FFT_SKEW,
               group::Union{Nothing,Int} = nothing)
     size(dst) == size(src) || throw(DimensionMismatch(
@@ -358,13 +372,12 @@ function fft!(dst::LavaArray{ComplexF32}, src::LavaArray{ComplexF32};
     nbatch = length(src) ÷ N
     T, lead = fftplan(N)
     backend = get_backend(src)
-    ctx = vk_context(src)
-    lim = workgroup_limit(ctx)
+    lim = workgrouplimit(src)
     T <= lim || throw(ArgumentError(
         "fft!: N=$N needs $T threads, above this device's limit of $lim. " *
         "A larger radix, or a multi-pass decomposition, is what VkFFT reaches " *
         "for here (`numAxisUploads > 1`); neither is implemented yet."))
-    nb = group === nothing ? fftgroup(N, T, nbatch, lim, max_shared_memory(ctx)) : group
+    nb = group === nothing ? fftgroup(N, T, nbatch, lim, sharedbudget(src)) : group
     kern = fft_kernel!(backend)
     kern(dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1), Val(skew), Val(nb);
          ndrange = T * nb * (nbatch ÷ nb), workgroupsize = T * nb)
@@ -372,11 +385,11 @@ function fft!(dst::LavaArray{ComplexF32}, src::LavaArray{ComplexF32};
 end
 
 """
-    fft(src; inverse = false) -> LavaArray
+    fft(src; inverse = false) -> AbstractGPUArray
 
 Allocating [`fft!`](@ref).
 """
-fft(src::LavaArray{ComplexF32}; inverse::Bool = false, skew::Bool = FFT_SKEW) =
+fft(src::AbstractGPUArray{ComplexF32}; inverse::Bool = false, skew::Bool = FFT_SKEW) =
     fft!(similar(src), src; inverse, skew)
 
 
@@ -440,7 +453,7 @@ half, the same convention as `AbstractFFTs.rfft` and `torch.fft.rfft`.
 Costs one `N ÷ 2` complex transform plus a linear pass, so roughly half of
 `fft!` on the same `N`.
 """
-function rfft!(dst::LavaArray{ComplexF32}, src::LavaArray{Float32};
+function rfft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Float32};
                skew::Bool = FFT_SKEW)
     N = size(src, 1)
     iseven(N) || throw(ArgumentError("rfft!: length $N must be even"))
@@ -461,11 +474,11 @@ function rfft!(dst::LavaArray{ComplexF32}, src::LavaArray{Float32};
 end
 
 """
-    rfft(src) -> LavaArray{ComplexF32}
+    rfft(src) -> AbstractGPUArray{ComplexF32}
 
 Allocating [`rfft!`](@ref).
 """
-function rfft(src::LavaArray{Float32}; skew::Bool = FFT_SKEW)
+function rfft(src::AbstractGPUArray{Float32}; skew::Bool = FFT_SKEW)
     N = size(src, 1)
     nbatch = length(src) ÷ N
     dst = similar(src, ComplexF32, (N ÷ 2 + 1, Base.tail(size(src))...))
@@ -706,7 +719,7 @@ butterfly for radix 3 and 5. It exists because Whisper's mel (400) and
 DeepFilterNet3 (960) cannot be computed at all without it, and tuning it before
 either is wired up would be tuning against a guess.
 """
-function fftmixed!(dst::LavaArray{ComplexF32}, src::LavaArray{ComplexF32},
+function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32},
                    RS::Tuple; inverse::Bool = false)
     N = size(src, 1)
     prod(RS) == N || throw(ArgumentError(
@@ -716,7 +729,7 @@ function fftmixed!(dst::LavaArray{ComplexF32}, src::LavaArray{ComplexF32},
     nbatch = length(src) ÷ N
     T = N ÷ maximum(RS)
     backend = get_backend(src)
-    lim = workgroup_limit(vk_context(src))
+    lim = workgrouplimit(src)
     T <= lim || throw(ArgumentError(
         "fftmixed!: N=$N needs $T threads, above this device's limit of $lim"))
     # BOTH calls need `invokelatest`, not just the launch. `fftmixed_kernel`
@@ -739,7 +752,7 @@ general mixed-radix one otherwise. This is what a caller who does not control
 `N` should use — `fft!` stays the fast path with a hard requirement, so nothing
 silently falls off it.
 """
-function fftany!(dst::LavaArray{ComplexF32}, src::LavaArray{ComplexF32};
+function fftany!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
                  inverse::Bool = false)
     N = size(src, 1)
     if count_ones(N) == 1 && N >= 8
@@ -833,7 +846,7 @@ front end and it would be read exactly once.
 end
 
 """
-    stft(x, nfft, hop, window; center = true) -> LavaArray{ComplexF32}
+    stft(x, nfft, hop, window; center = true) -> AbstractGPUArray{ComplexF32}
 
 Short-time Fourier transform of a real signal, `(nfft ÷ 2 + 1, frames)`.
 
@@ -850,8 +863,8 @@ looped, which is fine for Whisper (mono by definition) and not for Demucs
 `rfft!` underneath is already batched over its trailing dimensions — but it is
 not written, and doing it blind would be guessing at the layout the caller wants.
 """
-function stft(x::LavaArray{Float32}, nfft::Int, hop::Int,
-              window::LavaArray{Float32}; center::Bool = true)
+function stft(x::AbstractGPUArray{Float32}, nfft::Int, hop::Int,
+              window::AbstractGPUArray{Float32}; center::Bool = true)
     length(window) == nfft || throw(DimensionMismatch(
         "stft: window has $(length(window)) samples, expected nfft = $nfft"))
     len = length(x)
@@ -865,7 +878,7 @@ function stft(x::LavaArray{Float32}, nfft::Int, hop::Int,
 end
 
 """
-    hannwindow(backend, n; periodic = true) -> LavaArray{Float32}
+    hannwindow(backend, n; periodic = true) -> AbstractGPUArray{Float32}
 
 The Hann window `torch.hann_window` produces: periodic by default, which is what
 every STFT in this repo wants (a symmetric window is for filter design, and using

@@ -1,5 +1,5 @@
 using Test, Lava, KernelAbstractions
-using Lava: UnitCube, EPAResult, narrow_phase_kernel, NO_CONTACT, gjk, epa
+using Mantle: UnitCube, EPAResult, narrow_phase_kernel, NO_CONTACT, gjk, epa
 using GeometryBasics: Vec3f
 using KernelAbstractions: CPU
 
@@ -157,7 +157,7 @@ end
 # logical addressing) Function-pointer OpBitcasts.
 # ---------------------------------------------------------------------------
 @testset "narrow_phase_kernel — Lava backend (GPU smoke)" begin
-    using Lava: LavaArray, LavaBackend, EPAResult
+    using Mantle: LavaArray, LavaBackend, EPAResult
     using GeometryBasics: Vec3f
     tx_(x, y, z) = (1f0, 0f0, 0f0, Float32(x),
                     0f0, 1f0, 0f0, Float32(y),
@@ -179,3 +179,4 @@ end
     @test isapprox(r.depth,     0.1f0; atol=1f-3)
     @test isapprox(r.contact[1], 1f0;  atol=1f-2)
 end
+

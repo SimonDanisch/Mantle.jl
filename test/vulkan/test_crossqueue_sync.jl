@@ -20,7 +20,6 @@ command buffer.
 """
 
 using Test, Lava, KernelAbstractions
-import Lava: Vulkan
 const KA = KernelAbstractions
 
 @kernel function xqfill!(a, v)
@@ -36,9 +35,13 @@ Mantle.sync_access!(::Mantle.CommandBatch, ::ThrowsOnSync) = error("sync_access!
 @testset "cross-queue sync" begin
     @testset "the stage flag is sync2-typed" begin
         # The bug in one line: right value, wrong wrapper type.
-        @test Mantle.STAGE2_ALL_COMMANDS isa Vulkan.PipelineStageFlag2
+        # `Mantle.VK`. This file said `import Lava: Vulkan`, which resolved
+        # while Lava depended on Vulkan.jl and afterwards bound the name to
+        # nothing — Julia reports it as "defined but not assigned a value", so
+        # the two assertions below errored rather than failing.
+        @test Mantle.STAGE2_ALL_COMMANDS isa Mantle.VK.PipelineStageFlag2
         @test UInt64(Mantle.STAGE2_ALL_COMMANDS.val) ==
-              UInt64(Vulkan.PIPELINE_STAGE_2_ALL_COMMANDS_BIT.val)
+              UInt64(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT.val)
     end
 
     @testset "a buffer crossing queues submits" begin
