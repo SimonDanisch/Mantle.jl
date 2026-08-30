@@ -1,6 +1,6 @@
 # MWE-2: HW RT version of MWE-1.
 #
-# Adds RT dispatch (HWTLAS + trace_closest_hits!) to the per-iter loop.
+# Adds RT dispatch (VulkanTLAS + trace_closest_hits!) to the per-iter loop.
 # Same alloc/free pattern as MWE-1, but with RT in the mix.
 #
 # If this crashes — the cascade is RT-specific (H3: vkCmdTraceRays
@@ -13,8 +13,8 @@ const KA = KernelAbstractions
 backend = LavaBackend()
 ctx = Mantle.vk_context()
 
-# One persistent HWTLAS shared across iters.
-hwtlas = Mantle.HWTLAS(backend)
+# One persistent VulkanTLAS shared across iters.
+hwtlas = Mantle.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))

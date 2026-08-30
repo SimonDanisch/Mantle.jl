@@ -1,6 +1,6 @@
 # test_hwadapted_via_rayquery.jl
 #
-# Step 2: verify the refactored `HWAdaptedAccel` (now carrying triangles/
+# Step 2: verify the refactored `AdaptedAccel` (now carrying triangles/
 # offsets/empty alongside the hwtlas reference) works as a polymorphic accel
 # argument with `Raycore.closest_hit` / `Raycore.any_hit` lowered via
 # inline ray queries.
@@ -17,7 +17,7 @@ using StaticArrays: SVector, SMatrix
 
 const Mat4f = SMatrix{4, 4, Float32, 16}
 
-@testset "HWAdaptedAccel: closest_hit + any_hit via inline ray query" begin
+@testset "AdaptedAccel: closest_hit + any_hit via inline ray query" begin
     ctx = Mantle.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
@@ -30,23 +30,23 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 
     # Two triangles at z=2 and z=5 (same xy footprint).  Same scene as the
     # any_hit test in test_closesthit_via_rayquery.jl, but exercising the
-    # production HWAdaptedAccel directly rather than the surrogate struct.
+    # production AdaptedAccel directly rather than the surrogate struct.
     near_v = [Point3f(-1, -1, 2), Point3f(1, -1, 2), Point3f(0, 1, 2)]
     far_v  = [Point3f(-1, -1, 5), Point3f(1, -1, 5), Point3f(0, 1, 5)]
     faces  = [GLTriangleFace(1, 2, 3)]
     near_mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(near_v, faces))
     far_mesh  = GeometryBasics.normal_mesh(GeometryBasics.Mesh(far_v,  faces))
 
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, near_mesh, Mat4f(I))
     push!(hwtlas, far_mesh,  Mat4f(I))
     Raycore.sync!(hwtlas)
 
-    # Adapt(backend, hwtlas) returns the CPU-form HWAdaptedAccel — keeps the
-    # live HWTLAS reference so Hikari's CPU dispatch code can find descriptor /
+    # Adapt(backend, hwtlas) returns the CPU-form AdaptedAccel — keeps the
+    # live VulkanTLAS reference so Hikari's CPU dispatch code can find descriptor /
     # sync state.  Stripping happens at kernel-arg time via LavaAdaptor.
     accel = Adapt.adapt(backend, hwtlas)
-    @test accel isa Mantle.HWAdaptedAccel
+    @test accel isa Mantle.AdaptedAccel
     @test accel.hwtlas === hwtlas
     @test accel.triangles === hwtlas.tri_gpu
     @test accel.offsets   === hwtlas.off_gpu
@@ -70,7 +70,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     @test n_hit > 0
     @test n_hit < n
 
-    # Polymorphic kernel — accel can be HWAdaptedAccel (HW) or StaticTLAS (SW).
+    # Polymorphic kernel — accel can be AdaptedAccel (HW) or StaticTLAS (SW).
     function unified_kernel(t_out::Lava.LavaDeviceArray{Float32, 1},
                             any_t_out::Lava.LavaDeviceArray{Float32, 1},
                             origins::Lava.LavaDeviceArray{Point3f, 1},
@@ -124,12 +124,12 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
                        any_near[i] < 0f0,
               1:n)
 
-    println("HWAdaptedAccel: $n_hit hits — closest_hit & any_hit verified at tmax=10 and tmax=3")
+    println("AdaptedAccel: $n_hit hits — closest_hit & any_hit verified at tmax=10 and tmax=3")
 end
 
-# Polymorphism repeated against the production HWAdaptedAccel:
-# same kernel, swap accel between SW StaticTLAS and HW HWAdaptedAccel.
-@testset "HWAdaptedAccel polymorphism — SW BVH vs HW ray query" begin
+# Polymorphism repeated against the production AdaptedAccel:
+# same kernel, swap accel between SW StaticTLAS and HW AdaptedAccel.
+@testset "AdaptedAccel polymorphism — SW BVH vs HW ray query" begin
     ctx = Mantle.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
@@ -147,7 +147,7 @@ end
     faces = [GLTriangleFace(1, 2, 3), GLTriangleFace(4, 5, 6)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     accel_hw = Adapt.adapt(backend, hwtlas)
@@ -191,5 +191,5 @@ end
 
     @test count(i -> h_hw_a[i] == h_sw_a[i], 1:n) == n
     @test count(i -> isapprox(t_hw_a[i], t_sw_a[i]; atol=1f-3), 1:n) == n
-    println("HWAdaptedAccel polymorphism: HW and SW agree on all $n rays")
+    println("AdaptedAccel polymorphism: HW and SW agree on all $n rays")
 end

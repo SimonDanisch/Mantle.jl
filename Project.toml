@@ -23,7 +23,6 @@ GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 KernelInterface = "4ee993da-d684-4d17-a7dd-4e58e78d92bf"
 LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
-Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 Raycore = "afc56b53-c9a9-482a-a956-d1d800e05559"
@@ -31,17 +30,26 @@ SPIRV_Tools_jll = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
+
+# `KernelAbstractions` was in BOTH `[deps]` and `[weakdeps]`, to make the CPU
+# backend an extension. It is not legal in practice: Pkg records such a package
+# as weak-only in the manifest, so `using KernelAbstractions` inside Mantle
+# raised "Package Mantle does not have KernelAbstractions in its dependencies"
+# — and core needs it unconditionally, since `gemv.jl`, `fft.jl` and
+# `narrow_phase.jl` all write `@kernel`. KA is a plain dependency now and the
+# host backend is `src/host/host.jl`, included like any other file.
+[weakdeps]
+Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 
-# `KernelAbstractions` is now BOTH a hard dependency (the moved runtime
-# implements its backend) and an extension trigger. That is legal and it is what
-# the host backend needs: `MantleHostExt` is the CPU implementation, and it is
-# loaded when KA is, which it always is here.
-[weakdeps]
-KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
-
 [extensions]
-MantleHostExt = "KernelAbstractions"
+# Both, not either: Vulkan is the driver and Lava is the Julia→SPIR-V
+# compiler that feeds it. The backend is not loadable without the pair.
+MantleVulkanExt = ["Lava", "Vulkan"]
+# Metal alone: unlike the Vulkan backend this one needs no separate compiler,
+# because Metal.jl brings its own.
+MantleMetalExt = "Metal"
 
 [sources]
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}

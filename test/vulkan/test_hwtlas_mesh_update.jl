@@ -1,9 +1,9 @@
 # ==============================================================================
-# HW TLAS mesh-update tests (Lava backend)
+# HW HWTLAS mesh-update tests (Lava backend)
 # ==============================================================================
 #
 # These tests were split off from Raycore's test_mesh_update.jl in Phase F of
-# the HWTLAS release cleanup. They exercise Mantle.HWTLAS specifically:
+# the VulkanTLAS release cleanup. They exercise Mantle.VulkanTLAS specifically:
 # correctness under size-oscillating mesh swaps, the static_tlas ownership
 # contract, transform propagation via sync!, rt_pipeline identity preservation,
 # and a GPU-resource leak bound.
@@ -32,7 +32,7 @@ end
 `offset_z`, the closest hit is at t = 4 - offset_z."""
 expected_t(offset_z::Real) = Float32(5) - Float32(offset_z) - Float32(1)
 
-# Shared HW-TLAS helpers — see test/hwtlas_helpers.jl (provides `translation`).
+# Shared HW-HWTLAS helpers — see test/hwtlas_helpers.jl (provides `translation`).
 isdefined(@__MODULE__, :translation) ||
     include(joinpath(@__DIR__, "hwtlas_helpers.jl"))
 
@@ -62,8 +62,8 @@ end
 
 # ------------------------------------------------------------------------------
 
-@testset "HW TLAS — mesh update correctness under size oscillation" begin
-    hwtlas = Mantle.HWTLAS(HW_BACKEND)
+@testset "HW HWTLAS — mesh update correctness under size oscillation" begin
+    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -83,17 +83,17 @@ end
     end
 end
 
-@testset "HW TLAS — adapt-once-then-mutate via hwtlas.static_tlas" begin
+@testset "HW HWTLAS — adapt-once-then-mutate via hwtlas.static_tlas" begin
     # Invariant: sync!(hwtlas) is the single owner of hwtlas.static_tlas. A
-    # consumer that holds hwtlas.static_tlas (a thin HWAdaptedAccel wrapper around
-    # the mutable HWTLAS) sees any mutation that went through push!/delete! + sync!
+    # consumer that holds hwtlas.static_tlas (a thin AdaptedAccel wrapper around
+    # the mutable VulkanTLAS) sees any mutation that went through push!/delete! + sync!
     # because the wrapper always references the live mutable struct.
     #
-    # Note: unlike StaticTLAS (which is a value-snapshot), HWAdaptedAccel is a
-    # thin immutable wrapper holding a mutable HWTLAS reference. Two wrappers around
-    # the same HWTLAS are always ===. The identity-change contract doesn't apply here
+    # Note: unlike StaticTLAS (which is a value-snapshot), AdaptedAccel is a
+    # thin immutable wrapper holding a mutable VulkanTLAS reference. Two wrappers around
+    # the same VulkanTLAS are always ===. The identity-change contract doesn't apply here
     # — instead we verify that trace results reflect the mutation.
-    hwtlas = Mantle.HWTLAS(HW_BACKEND)
+    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
 
     st_before = Adapt.adapt(HW_BACKEND, hwtlas)
@@ -108,7 +108,7 @@ end
     handle = push!(hwtlas, sphere_mesh(48), translation(0, 0, 2f0))
     Raycore.sync!(hwtlas)
 
-    # HWAdaptedAccel wraps the live mutable HWTLAS — the wrapper identity is
+    # AdaptedAccel wraps the live mutable VulkanTLAS — the wrapper identity is
     # stable (=== holds) but the underlying geometry has changed.
     st_after = hwtlas.static_tlas
     @test st_after === st_before    # same thin wrapper, updated internals
@@ -118,8 +118,8 @@ end
     @test isapprox(r_after.t, expected_t(2); atol=0.1f0)
 end
 
-@testset "HW TLAS — transform update via sync!(hwtlas)" begin
-    hwtlas = Mantle.HWTLAS(HW_BACKEND)
+@testset "HW HWTLAS — transform update via sync!(hwtlas)" begin
+    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -136,10 +136,10 @@ end
     @test isapprox(r2.t, expected_t(1.5); atol=0.1f0)
 end
 
-@testset "HW TLAS — hw_accel + rt_pipeline reused across sync! rebuilds" begin
+@testset "HW HWTLAS — hw_accel + rt_pipeline reused across sync! rebuilds" begin
     # The HardwareAccel (and thus the RT pipeline compiled into the SBT) must
-    # survive mesh swaps — one RT pipeline per HWTLAS, not per rebuild.
-    hwtlas = Mantle.HWTLAS(HW_BACKEND)
+    # survive mesh swaps — one RT pipeline per VulkanTLAS, not per rebuild.
+    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -154,8 +154,8 @@ end
     @test accel_after.rt_pipeline === pipeline_before   # same compiled RT pipeline
 end
 
-@testset "HW TLAS — mesh update leak bound (GPU resources)" begin
-    hwtlas = Mantle.HWTLAS(HW_BACKEND)
+@testset "HW HWTLAS — mesh update leak bound (GPU resources)" begin
+    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -166,7 +166,7 @@ end
     end
     GC.gc(true); GC.gc(true)
     baseline = snapshot_state_hw()
-    @info "HW TLAS leak test baseline" baseline
+    @info "HW HWTLAS leak test baseline" baseline
 
     n_iters = 100
     for iter in 1:n_iters
@@ -179,7 +179,7 @@ end
     end
     GC.gc(true); GC.gc(true)
     final = snapshot_state_hw()
-    @info "HW TLAS leak test after $n_iters iters" final
+    @info "HW HWTLAS leak test after $n_iters iters" final
 
     @testset "no unbounded GPU memory growth" begin
         @test final.gpu_bytes   <= baseline.gpu_bytes + 256 * 1024^2    # +256 MiB
@@ -188,4 +188,4 @@ end
     end
 end
 
-println("\nAll HW TLAS mesh-update tests passed.")
+println("\nAll HW HWTLAS mesh-update tests passed.")

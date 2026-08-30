@@ -1,6 +1,6 @@
 # A buffer pinned by a live batch must never be freed underneath it.
 #
-# HW-accel BLAS/TLAS teardown (`destroy_now!` -> `unsafe_free!(as.storage)` and
+# HW-accel BLAS/HWTLAS teardown (`destroy_now!` -> `unsafe_free!(as.storage)` and
 # its `preserves`) frees arrays that a still-open batch has already pinned.
 # Before the pin accounting that path broke submit in two different ways:
 #

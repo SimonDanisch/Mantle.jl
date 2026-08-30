@@ -1,21 +1,21 @@
 using Test, Lava, Mantle
-using Mantle: LavaInstanceRecord, write_grain_instances_kernel, build_blas_aabb,
-              build_tlas, refit_tlas!, as_build, AS_INPUT_USAGE
+using Mantle: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb,
+              build_tlas, refit_tlas!, build_accel!, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 # Validates the full P1 flow: GPU kernel writes instances, allow_update build,
 # refit moves geometry, ray queries observe the change.
 
-@testset "TLAS refit cycle -- kernel-written instances, then refit" begin
+@testset "HWTLAS refit cycle -- kernel-written instances, then refit" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0
     quats_cpu = [Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:n]
     quats_gpu = Mantle.LavaArray(quats_cpu)
-    instances_gpu = Mantle.LavaArray{LavaInstanceRecord}(undef, 2 * n;
+    instances_gpu = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
                                                         extra_usage=AS_INPUT_USAGE)
     backend = Mantle.LavaBackend()
     bq = Mantle.vk_context().default_bq
@@ -29,7 +29,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            ndrange = n)
     Mantle.vk_flush!(bq)
 
-    tlas = as_build() do ctx
+    tlas = build_accel!() do ctx
         build_tlas(ctx, instances_gpu, 2 * n; allow_update=true)
     end
 
@@ -45,7 +45,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            ndrange = n)
     Mantle.vk_flush!(bq)
 
-    as_build() do ctx
+    build_accel!() do ctx
         refit_tlas!(ctx, tlas, instances_gpu, 2 * n)
     end
 

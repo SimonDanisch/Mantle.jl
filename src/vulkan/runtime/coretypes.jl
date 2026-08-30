@@ -70,11 +70,11 @@ mutable struct VkManagedBuffer
     # a slice of one, which is still how a mapped, unified or unusually-flagged
     # buffer is served. That case is what `pool_offset` returning 0 says.
     region::Union{Nothing, Region}
-    # Cross-queue synchronization: records which BatchQueue last wrote to
+    # Cross-queue synchronization: records which VulkanBatchQueue last wrote to
     # this buffer, at which timeline value. Consumed by sync_access! to
     # auto-insert semaphore waits when a dispatch on a different queue
     # takes this buffer as an argument. Nothing = never written.
-    # Typed as Any so BatchQueue (defined later) doesn't force a cyclic include.
+    # Typed as Any so VulkanBatchQueue (defined later) doesn't force a cyclic include.
     # @atomic so the finalizer thread (vk_free!) and main thread (record /
     # sync_access!) can read/write it safely.
     @atomic last_write::Union{Nothing, Tuple{Any, UInt64}}
@@ -231,11 +231,11 @@ struct PrepareIndirect
 end
 
 """
-    CompiledGraphicsPipeline
+    VulkanCompiledGraphicsPipeline
 
 A compiled graphics pipeline ready for draw commands.
 """
-struct CompiledGraphicsPipeline
+struct VulkanCompiledGraphicsPipeline <: CompiledGraphicsPipeline
     pipeline::VK.Pipeline
     pipeline_layout::VK.PipelineLayout
     modules::Vector{VK.ShaderModule}
@@ -355,7 +355,7 @@ const MAX_PRINTF_MESSAGES     = 4096
 
 Every validation and instrumentation setting, chosen **at device construction**.
 
-    vk_reset_device!(debug = DebugConfig(gpu_av = true))   # replace the default device
+    reset_device!(debug = DebugConfig(gpu_av = true))   # replace the default device
     ctx = VkContext(debug = DebugConfig(gpu_av = true))         # or build a separate one
 
 **That is the whole API.** There is no `enable_gpu_av()`, no environment
@@ -670,8 +670,21 @@ mutable struct DeviceCaches
     caps::Union{Nothing,DeviceCaps}
     # One warning per device about a subgroup width that cannot be pinned.
     coopmat_warned::Bool
-    gfx_pipelines::Dict{UInt64,CompiledGraphicsPipeline}
+    gfx_pipelines::Dict{UInt64,VulkanCompiledGraphicsPipeline}
     gfx_shaders::Dict{UInt64,LavaGfxShader}
+    # Ray-tracing pipelines, here for the same reason the graphics ones are: a
+    # compiled pipeline is a device object, so it belongs to the device.
+    #
+    # It used to be a `PIPELINE_CACHE` field on the user's `RayTracingPipeline`,
+    # which is the one place it could not correctly live — two identical
+    # pipelines compiled twice, and a pipeline outliving a `reset_device!` held
+    # handles from a dead device. The no-op `invalidate_stale_rt_cache!` beside
+    # it already said so: "cache is tied to the current VkContext's lifetime".
+    #
+    # Keyed like `gfx_pipelines`: the shader identities plus the argument types.
+    # The per-object dict got away with keying on argument types alone because
+    # the object WAS the rest of the key.
+    rt_pipelines::Dict{UInt64,Tuple{LavaRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
     blit::Any
     timestamp_pool::Union{Nothing,VK.QueryPool}
     timestamp_next_slot::Int
@@ -717,7 +730,8 @@ DeviceCaches() = DeviceCaches(
     Dict{UInt64,LavaComputePipeline}(), UInt64[],
     Dict{Any,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
     nothing, MemoryPolicy(), 0, nothing, nothing, false,
-    Dict{UInt64,CompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
+    Dict{UInt64,VulkanCompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
+    Dict{UInt64,Tuple{LavaRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     nothing, nothing, 0, 1.0, Any[],
     Dict{Tuple{DataType,DataType,Any},Any}(), nothing,
     IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[])

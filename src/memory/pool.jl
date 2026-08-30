@@ -691,6 +691,17 @@ function trim!(pool::Pool, dev)
 end
 
 """
+What a region is aligned to unless a tenant needs more.
+
+Named because two places need the same number: this is `reserve!`'s default,
+and the `Place` phase raises it to whatever its tenants ask for. Passing a
+tenant's alignment straight through would LOWER it — a Metal storage buffer
+wants 16 — and a region that used to start on a 256-byte boundary suddenly did
+not, which cost 19% on the ray-tracing benchmark before it was caught.
+"""
+const REGION_ALIGN = 256
+
+"""
     reserve!(pool, dev, kind, transients, bytes; align, blocksize) -> Region
 
 The shared region for `kind`, grown to `bytes` if a tenant now needs more.
@@ -714,7 +725,7 @@ The caller registers itself with [`tenant!`](@ref) once it exists, because a pla
 cannot be a tenant before it is a plan.
 """
 function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
-                  align::Int = 256, blocksize::Int = 64 << 20)
+                  align::Int = REGION_ALIGN, blocksize::Int = 64 << 20)
     lock(pool.lock) do
     a = arenaof(pool, kind)
     bytes = max(bytes, 1)
@@ -726,7 +737,13 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     # arena outlives the plan that sized it, and a block created for one plan's
     # usage bits may not permit what the next plan does with them. Skipping this
     # is memory that works until the one transient whose bit was missing is used.
-    if a.region !== nothing && bytes <= a.bytes &&
+    # `align` belongs in the fast path too, not just in `acquire!`. An arena
+    # outlives the plan that sized it, and the region it kept was aligned to
+    # whatever THAT plan asked for; handing it to a caller that needs more is a
+    # region every one of whose tenant offsets is off its boundary. The
+    # constraint check right below exists for the same reason and had the same
+    # hole.
+    if a.region !== nothing && bytes <= a.bytes && offset(a.region) % align == 0 &&
        compatible(dev, a.region.block.constraint, want)
         a.constraint = want
         return a.region

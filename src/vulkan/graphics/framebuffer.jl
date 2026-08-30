@@ -4,12 +4,12 @@
 # Just images + views as render targets.
 
 """
-    LavaFramebuffer
+    VulkanFramebuffer
 
 Offscreen render target with color and optional depth images.
 Used for render-to-texture or offscreen rendering.
 """
-mutable struct LavaFramebuffer
+mutable struct VulkanFramebuffer <: Framebuffer
     width::Int
     height::Int
     # Color attachment
@@ -62,14 +62,25 @@ image_view(ctx::VkContext, image::VK.Image, format::VK.Format,
     )
 
 """
-    LavaFramebuffer(width, height; depth=true, color_format=VK.FORMAT_B8G8R8A8_SRGB)
+    VulkanFramebuffer(width, height; depth=true, color_format=VK.FORMAT_B8G8R8A8_SRGB)
 
 Create an offscreen framebuffer with color and optional depth attachments.
 """
-function LavaFramebuffer(width::Integer, height::Integer;
+# `color_format` is also accepted as a Julia element type — `BGRA{N0f8}`,
+# `RGBA{Float32}` — which is Mantle's portable spelling for a pixel format and
+# the only one a caller outside this backend can write. `vkformat` is the same
+# lowering the graph uses for transient images, so the two cannot disagree.
+function VulkanFramebuffer(width::Integer, height::Integer;
                           ctx::VkContext=vk_context(),
                           depth::Bool=true,
-                          color_format::VK.Format=VK.FORMAT_B8G8R8A8_SRGB)
+                          color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
+                          srgb::Bool=false)
+    color_format isa Type && (color_format = vkformat(VulkanAPI(), color_format; srgb))
+    return _vulkan_framebuffer(width, height, ctx, depth, color_format)
+end
+
+function _vulkan_framebuffer(width::Integer, height::Integer, ctx::VkContext,
+                             depth::Bool, color_format::VK.Format)
     dev = ctx.device
 
     color_image = image_2d(ctx, width, height, color_format, COLOR_USAGE)
@@ -88,7 +99,7 @@ function LavaFramebuffer(width::Integer, height::Integer;
         depth_vw = image_view(ctx, depth_img, depth_format, VK.IMAGE_ASPECT_DEPTH_BIT)
     end
 
-    LavaFramebuffer(Int(width), Int(height),
+    VulkanFramebuffer(Int(width), Int(height),
         color_image, color_memory, color_view, color_format,
         depth_img, depth_mem, depth_vw, depth_format,
         ctx)
@@ -174,7 +185,7 @@ function alloc_image_memory(ctx::VkContext, image::VK.Image)
     return mem
 end
 
-Base.size(fb::LavaFramebuffer) = (fb.width, fb.height)
+Base.size(fb::VulkanFramebuffer) = (fb.width, fb.height)
 
 """Bytes per pixel for a Vulkan format."""
 function format_pixel_size(fmt::VK.Format)
@@ -202,7 +213,7 @@ function format_element_type(fmt::VK.Format)
 end
 
 """
-    readback_framebuffer(fb::LavaFramebuffer) -> Matrix
+    readback_framebuffer(fb::VulkanFramebuffer) -> Matrix
 
 Read back the color attachment pixels to CPU memory.
 Returns a width x height matrix with element type matching the framebuffer format:
@@ -210,7 +221,7 @@ Returns a width x height matrix with element type matching the framebuffer forma
 - `FORMAT_R32G32B32A32_SFLOAT`: `NTuple{4, Float32}` (RGBA float)
 - `FORMAT_R16G16B16A16_SFLOAT`: `NTuple{4, Float16}` (RGBA half)
 """
-function readback_framebuffer(fb::LavaFramebuffer)
+function readback_framebuffer(fb::VulkanFramebuffer)
     ctx = fb.ctx
     bq = ctx.default_bq
     dev = ctx.device
@@ -249,7 +260,7 @@ function readback_framebuffer(fb::LavaFramebuffer)
 end
 
 """
-    copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::LavaFramebuffer) -> dst
+    copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer) -> dst
 
 Copy `fb`'s colour attachment into a DEVICE-LOCAL buffer — the same image copy
 [`readback_framebuffer`](@ref) does, without the host round trip.
@@ -264,7 +275,7 @@ download and upload per frame. This writes straight into a buffer a kernel (or
 pixels land tightly packed in row order, so element `(x, y)` of a
 `(width, height)` view is at linear index `(y - 1) * width + x`.
 """
-function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::LavaFramebuffer)
+function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
     ctx = fb.ctx
     bq = ctx.default_bq
     nbytes = fb.width * fb.height * format_pixel_size(fb.color_format)
@@ -334,13 +345,13 @@ function copy_image_to_buffer!(bq, dst::LavaArray{T, 1}, image::VK.Image,
 end
 
 """
-    readback_window(win::RenderWindow) -> Matrix{NTuple{4, UInt8}}
+    readback_window(win::VulkanWindow) -> Matrix{NTuple{4, UInt8}}
 
 Read back the current swapchain image to CPU memory.
 Must be called after rendering but BEFORE present_frame!.
 Returns a width x height matrix of BGRA byte tuples.
 """
-function readback_window(win::RenderWindow)
+function readback_window(win::VulkanWindow)
     checkopen(win)
     ctx = win.ctx
     bq = ctx.default_bq
@@ -437,12 +448,6 @@ end
 
 # ── Render Target Subtypes ──
 
-"""Render to a swapchain window image."""
-struct WindowTarget <: RenderTarget
-    window::RenderWindow
-end
-
-"""Render to an offscreen framebuffer."""
-struct OffscreenTarget <: RenderTarget
-    fb::LavaFramebuffer
-end
+# `WindowTarget` and `OffscreenTarget` are Mantle's for the same reason
+# `SampledTexture` is: they wrap a `Window` and a `Framebuffer`, and both of
+# those are the API's abstract types now.

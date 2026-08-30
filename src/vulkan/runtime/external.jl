@@ -1,13 +1,13 @@
 # External-memory interop: share Lava-produced images with other APIs.
 #
-# An `ExternalImage` owns a dedicated, exportable Vulkan image allocation on
+# An `VulkanExternalImage` owns a dedicated, exportable Vulkan image allocation on
 # Lava's device. Its memory can be handed to another API as an opaque fd
 # (`memoryfd`) — e.g. imported into OpenGL via GL_EXT_memory_object_fd — so
 # a frame computed in a Lava kernel reaches the other API with **zero
 # copies across PCIe** (one device-local blit, no host roundtrip).
 #
 # Everything here is additive and opt-in: nothing runs unless an
-# ExternalImage is created. The allocation is deliberately dedicated and
+# VulkanExternalImage is created. The allocation is deliberately dedicated and
 # outside the pooled allocator — external memory must not be sub-allocated
 # (importers see the whole allocation), and NVIDIA requires dedicated
 # allocations for exported images anyway.
@@ -16,7 +16,7 @@
 # the GL import side.
 
 """
-    ExternalImage(width, height; format = VK.FORMAT_R8G8B8A8_UNORM)
+    VulkanExternalImage(width, height; format = VK.FORMAT_R8G8B8A8_UNORM)
 
 A GPU image whose memory can be exported to other APIs (see [`memoryfd`](@ref)).
 OPTIMAL tiling, `TRANSFER_DST | SAMPLED` usage. Fill it from a `LavaArray`
@@ -24,7 +24,7 @@ with `copyto!(img, array)`. Requires `VK_KHR_external_memory_fd` (enabled
 automatically at device creation when the driver offers it; check
 `vk_context().external_memory_available`).
 """
-mutable struct ExternalImage
+mutable struct VulkanExternalImage <: ExternalImage
     image::VK.Image
     memory::VK.DeviceMemory
     width::Int
@@ -33,7 +33,7 @@ mutable struct ExternalImage
     layout_initialized::Bool
 end
 
-function ExternalImage(width::Integer, height::Integer;
+function VulkanExternalImage(width::Integer, height::Integer;
                        format::VK.Format = VK.FORMAT_R8G8B8A8_UNORM)
     ctx = vk_context()
     ctx.external_memory_available ||
@@ -57,11 +57,11 @@ function ExternalImage(width::Integer, height::Integer;
             next = VK.MemoryDedicatedAllocateInfo(; image),
             handle_types))
     @vk_checked "external_image_bind" VK.bind_image_memory(ctx.device, image, memory, 0)
-    return ExternalImage(image, memory, Int(width), Int(height), Int(req.size), false)
+    return VulkanExternalImage(image, memory, Int(width), Int(height), Int(req.size), false)
 end
 
 """
-    memoryfd(img::ExternalImage) -> Int
+    memoryfd(img::VulkanExternalImage) -> Int
 
 Export the image's memory as an opaque file descriptor
 (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`). Each call duplicates a
@@ -69,7 +69,7 @@ new fd; the importer takes ownership (e.g. `glImportMemoryFdEXT` consumes
 it). Importers must import exactly `img.allocation_size` bytes and, for
 GL, mark the memory object dedicated and the texture OPTIMAL-tiled.
 """
-function memoryfd(img::ExternalImage)
+function memoryfd(img::VulkanExternalImage)
     ctx = vk_context()
     # VK.jl's high-level get_memory_fd_khr passes a Ref{Int64} where the
     # C signature wants int*, so call the low-level entry point directly.
@@ -83,7 +83,7 @@ function memoryfd(img::ExternalImage)
 end
 
 """
-    copyto!(img::ExternalImage, a::LavaArray) -> img
+    copyto!(img::VulkanExternalImage, a::LavaArray) -> img
 
 Blit the array's bytes into the external image (device-local copy — the
 data never leaves the GPU). The array must hold at least
@@ -92,9 +92,9 @@ the image format. Waits for pending Lava kernels writing `a`, then blocks
 until the copy has landed, so the importer may sample immediately.
 
 Runs as a one-shot submission on the context's secondary compute queue —
-it never interleaves with the BatchQueue's batched submissions.
+it never interleaves with the VulkanBatchQueue's batched submissions.
 """
-function Base.copyto!(img::ExternalImage, a::LavaArray)
+function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     nbytes = length(a) * sizeof(eltype(a))
     needed = 4 * img.width * img.height
     nbytes >= needed ||

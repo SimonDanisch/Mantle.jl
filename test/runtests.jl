@@ -1,5 +1,7 @@
 using Mantle, Test
 
+include(joinpath(@__DIR__, "backend_probe.jl"))
+
 
 # Relative to this checkout, not to the tree it was first written in: `dev/Mantle`
 # and `dev/minimalloc` are siblings wherever the project is checked out, and an
@@ -172,6 +174,15 @@ end
 end
 
 end
+
+# ── everything below that needs a Vulkan driver ───────────────────────────────
+#
+# `Vulkan` is a weakdep of Mantle now, so this file is reached on a machine that
+# has no loader at all. See `backend_probe.jl` for why that used to be fatal.
+const _VULKAN_OK = backend_loadable("Vulkan") !== nothing
+_VULKAN_OK || @info "Mantle tests: no Vulkan driver; skipping the Vulkan backend and the sync lowering"
+
+if _VULKAN_OK
 
 # `import`, not `using`: Mantle exports `Vulkan` as the name of its backend, and
 # the package is also called Vulkan, so `using Vulkan` alongside `using Mantle`
@@ -368,12 +379,19 @@ import Vulkan
         @test Mantle.reads(ColorAttachment{false})
     end
 end
+
+end  # if _VULKAN_OK — the sync lowering names Vulkan enums in every assertion
+
 # CPU-only, so they go first and fail fast. These sat next to this file without
 # being included by it, which meant every regression they pin was unguarded —
 # the host backend could not write a struct with padding for as long as it has
 # existed, and `test_host.jl` is the file that would have said so.
+#
+# Outside the driver gate on purpose: that they need no GPU is the assertion.
 include(joinpath(@__DIR__, "test_pool.jl"))
 include(joinpath(@__DIR__, "test_host.jl"))
+
+if _VULKAN_OK
 # Needs a GPU but no display — every graph in it is headless, which is also the
 # only kind `bake!` takes — so it runs before the window tests rather than inside
 # their DISPLAY guard.
@@ -389,6 +407,47 @@ include(joinpath(@__DIR__, "test_compile_golden.jl"))
 # never reaches the host, so the Host backend cannot pin the half that matters.
 include(joinpath(@__DIR__, "test_devicerange.jl"))
 include(joinpath(@__DIR__, "test_window.jl"))
+end  # if _VULKAN_OK
+
+# ── the Metal backend ─────────────────────────────────────────────────────────
+#
+# Gated on Metal being loadable AND functional, not on the OS: a Mac without a
+# usable GPU (a CI container, a VM) must skip rather than error, and `Metal` is
+# resolvable on any platform while `Metal.functional()` is the honest question.
+#
+# These sat in `test/metal/` without being included by anything, which meant
+# every regression they pin was unguarded — the same way `test_host.jl` was
+# before the note above. Two of them were failing when they were finally run.
+const METAL_TESTS = joinpath(@__DIR__, "metal")
+
+const _METAL_OK = let
+    M = backend_loadable("Metal")
+    # `functional()` on top of loadability, because Metal.jl imports fine on a
+    # machine with no usable device — which Vulkan does not, so only this side
+    # needs the second question.
+    #
+    # `invokelatest`, because `Base.require` defines `functional` in a world
+    # NEWER than this top-level statement, which was fixed when it began. A
+    # direct call is a `MethodError: the applicable method may be too new` on
+    # the very machine the gate exists to serve.
+    M === nothing ? false : Base.invokelatest(M.functional)::Bool
+end
+
+if _METAL_OK
+    @testset "Metal backend" begin
+        for f in ("test_pool_metal.jl", "test_kernelinterface_metal.jl",
+                  "test_graph_metal.jl", "test_raytracing_metal.jl",
+                  "test_trace_metal.jl", "test_hwtlas_metal.jl",
+                  "test_residency_metal.jl", "test_graphics_metal.jl",
+                  "test_render_graph_metal.jl")
+            @testset "$f" begin
+                include(joinpath(METAL_TESTS, f))
+            end
+        end
+    end
+else
+    @info "Mantle tests: no usable Metal device; skipping the Metal backend"
+end
 
 # ── the Vulkan backend ────────────────────────────────────────────────────────
 #
@@ -402,6 +461,7 @@ include(joinpath(@__DIR__, "test_window.jl"))
 # chased.
 const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
 
+if _VULKAN_OK
 @testset "Vulkan backend" begin
 
         # Source-and-bindings only, no device. First, so it is reported before
@@ -714,7 +774,7 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
             include(joinpath(VULKAN_TESTS, "test_gemm_batched.jl"))
         end
 
-        @testset "HWAdaptedAccel via ray query" begin
+        @testset "AdaptedAccel via ray query" begin
             include(joinpath(VULKAN_TESTS, "test_hwadapted_via_rayquery.jl"))
         end
 
@@ -853,17 +913,17 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
                 include(joinpath(VULKAN_TESTS, "test_gpuarrays.jl"))
             end
 
-            @testset "HW TLAS — stress + correctness" begin
+            @testset "HW HWTLAS — stress + correctness" begin
                 include(joinpath(VULKAN_TESTS, "test_hwtlas_stress.jl"))
             end
 
 
-            @testset "HW TLAS — mesh update" begin
+            @testset "HW HWTLAS — mesh update" begin
                 include(joinpath(VULKAN_TESTS, "test_hwtlas_mesh_update.jl"))
             end
 
 
-            @testset "HW TLAS — UAF safety" begin
+            @testset "HW HWTLAS — UAF safety" begin
                 include(joinpath(VULKAN_TESTS, "test_hwtlas_uaf_safety.jl"))
             end
 
@@ -888,7 +948,7 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
 
 
             # Was never included, and had been throwing `UndefVarError` on the first
-            # line of every testset since the deferred-free list went per-BatchQueue.
+            # line of every testset since the deferred-free list went per-VulkanBatchQueue.
             @testset "rapid alloc/free" begin
                 include(joinpath(VULKAN_TESTS, "test_rapid_alloc_free.jl"))
             end
@@ -963,9 +1023,10 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
                     Lava.FROZEN_VERSION[]   = _fv
                     Lava.FROZEN_RECORDING[] = _fr
                 end
+            end
 
 
-            @testset "HW TLAS — nonblocking sync!" begin
+            @testset "HW HWTLAS — nonblocking sync!" begin
                 include(joinpath(VULKAN_TESTS, "test_hwtlas_nonblocking_sync.jl"))
             end
 
@@ -1040,3 +1101,4 @@ const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
             end
 end
 
+end  # if _VULKAN_OK

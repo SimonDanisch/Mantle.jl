@@ -3,7 +3,7 @@ using Raycore, Lava
 
 # ===============================================================================
 # Phase-C contract: `sync!(hwtlas)` removes the two unconditional
-# `KA.synchronize(hwtlas.backend)` calls that the old Raycore.HWTLAS had.
+# `KA.synchronize(hwtlas.backend)` calls that the old Raycore.TLAS had.
 # What it does NOT remove is the fence wait inside `Mantle.as_build` — the
 # Vulkan AS-build step necessarily waits for its own build command to
 # complete (reads vertex/index data).  Queue-FIFO semantics mean that
@@ -26,14 +26,14 @@ using Raycore, Lava
 #      unexpected blocking primitive was introduced.
 # ===============================================================================
 
-@testset "Mantle.HWTLAS — sync! contains no KA.synchronize" begin
+@testset "Mantle.VulkanTLAS — sync! contains no KA.synchronize" begin
     # `pathof(Mantle)`: `hwtlas.jl` came here with the runtime and sits under
     # `src/vulkan/`. Read from source on purpose — the assertion is about what
     # `sync!` does NOT call, which no runtime observation can show.
     path = joinpath(dirname(pathof(Mantle)), "vulkan", "raytracing", "hwtlas.jl")
     src  = read(path, String)
     # Extract the body of `sync!` so comments in other functions don't fool us.
-    m = match(r"function Raycore\.sync!\(hwtlas::HWTLAS\)(.*?)\nend"s, src)
+    m = match(r"function Raycore\.sync!\(hwtlas::VulkanTLAS\)(.*?)\nend"s, src)
     @test m !== nothing
     sync_body = m === nothing ? "" : m.captures[1]
     # Strip line comments so a future "# we used to call KA.synchronize here"
@@ -43,9 +43,9 @@ using Raycore, Lava
     @test !occursin("wait_on_timeline", sync_body_code)
 end
 
-@testset "Mantle.HWTLAS — sync! CPU time is bounded on idle queue" begin
+@testset "Mantle.VulkanTLAS — sync! CPU time is bounded on idle queue" begin
     backend = Mantle.LavaBackend()
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     mesh = GeometryBasics.normal_mesh(Tessellation(Sphere(Point3f(0), 1f0), 128))
     h = push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
     Raycore.sync!(hwtlas)

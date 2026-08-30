@@ -76,7 +76,7 @@ the GPU compile.
 
 Element types:
 - `transforms`:  `AbstractVector{NTuple{12, Float32}}` (matches
-  `LavaInstanceRecord.transform` layout).
+  `VulkanInstanceRecord.transform` layout).
 - `pairs`:       `AbstractVector{NTuple{2, Int32}}` (4-byte ints; halves
   the buffer footprint vs `Int64`).
 - `shape`:       `ConvexShape` subtype, e.g. `UnitCube()`.

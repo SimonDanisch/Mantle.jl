@@ -83,7 +83,7 @@ below was visible until everything above it was fixed.
    `coopmat_gemm!`, broadcast `_copyto!` and the identity-matrix constructor all
    dispatched on whichever context was global rather than on the array's own.
    The array read back as zeros and Lava's `sync_access!` guard caught it much
-   later as *"buffer was last written on a BatchQueue from a DIFFERENT
+   later as *"buffer was last written on a VulkanBatchQueue from a DIFFERENT
    VkContext"* — a good error a long way from its cause. All six now derive the
    backend from the data with `KA.get_backend`.
 
@@ -228,7 +228,7 @@ function probe()
 
     # Retire the context this probe built. Nothing else can: `VkContext(;
     # select)` deliberately does NOT install it as the global, so it is the
-    # caller's, and `vk_reset_device!` — which retires the context it replaces —
+    # caller's, and `reset_device!` — which retires the context it replaces —
     # never sees it.
     #
     # Without this the arrays above outlive the probe, and their finalizers run

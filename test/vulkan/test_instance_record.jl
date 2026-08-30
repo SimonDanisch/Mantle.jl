@@ -1,13 +1,13 @@
 using Test, Lava, Mantle
-using Mantle: LavaInstanceRecord, identity_transform
+using Mantle: VulkanInstanceRecord, identity_transform
 
-@testset "LavaInstanceRecord — size & isbits" begin
-    @test sizeof(LavaInstanceRecord) == 64
-    @test isbitstype(LavaInstanceRecord)
+@testset "VulkanInstanceRecord — size & isbits" begin
+    @test sizeof(VulkanInstanceRecord) == 64
+    @test isbitstype(VulkanInstanceRecord)
 end
 
-@testset "LavaInstanceRecord — constructor packs custom_index + mask" begin
-    rec = LavaInstanceRecord(identity_transform(), UInt64(0xDEADBEEFCAFEBABE);
+@testset "VulkanInstanceRecord — constructor packs custom_index + mask" begin
+    rec = VulkanInstanceRecord(identity_transform(), UInt64(0xDEADBEEFCAFEBABE);
                               custom_index = UInt32(0x123456),
                               mask = UInt8(0x02))
     @test rec.blas_address == UInt64(0xDEADBEEFCAFEBABE)
@@ -16,7 +16,7 @@ end
     @test (rec.custom_index_and_mask >> 24) == UInt32(0x02)
 end
 
-@testset "LavaInstanceRecord — byte layout matches pack_as_instance!" begin
+@testset "VulkanInstanceRecord — byte layout matches pack_as_instance!" begin
     # Build the same instance via the existing CPU packer and via the new struct,
     # and compare byte-for-byte. This locks the layout to Vulkan's expectations.
     transform = (2f0, 0f0, 0f0, 1f0,
@@ -29,7 +29,7 @@ end
     flags_v = UInt8(0x01)
 
     # Packed via the struct
-    rec = LavaInstanceRecord(transform, blas_addr;
+    rec = VulkanInstanceRecord(transform, blas_addr;
                               custom_index=custom_idx, mask=mask_v,
                               sbt_offset=sbt, flags=flags_v)
     rec_bytes = reinterpret(UInt8, [rec])

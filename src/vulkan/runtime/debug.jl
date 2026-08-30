@@ -2,9 +2,9 @@
 #
 # There is exactly one way to switch validation on, and it is not in this file:
 #
-#     vk_reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
+#     reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
 #
-# See `DebugConfig` and `vk_reset_device!`. This file used to hold five preset
+# See `DebugConfig` and `reset_device!`. This file used to hold five preset
 # functions — `enable_gpu_av`, `disable_gpu_av`, `enable_debug_printf!`,
 # `disable_debug_printf!`, `activate_all_debugging` — over seven `LAVA_*`
 # environment variables. All twelve are deleted. Each preset encoded a slightly
@@ -30,7 +30,7 @@ reports it via its debug-utils callback. Returns `true` on success; throws
 you the instrument is live, and skipping it is how a clean run gets mistaken for
 "no fault found":
 
-    vk_reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
+    reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
     verify_gpu_av()
 
 **It can take the process with it, and that is also an answer.** GPU-AV can
@@ -55,7 +55,7 @@ Implementation: the flush after a GPU-AV-caught dispatch can hang in cleanup
 on some drivers (observed on AMDVLK Windows), so the flush is spawned on a
 worker task and the main task polls `ctx.validation.messages` until either the
 expected message appears or the timeout expires. On success, the function
-calls `vk_reset_device!` to clear the half-flushed batch state.
+calls `reset_device!` to clear the half-flushed batch state.
 """
 function verify_gpu_av(; timeout::Float64=30.0)
     ctx = vk_context()
@@ -63,7 +63,7 @@ function verify_gpu_av(; timeout::Float64=30.0)
         throw(LavaError("verify_gpu_av",
             "GPU-AV is not enabled (gpu_assisted=false)",
             "Build the device with it on first: " *
-            "`vk_reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))`"))
+            "`reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))`"))
     end
     bq  = ctx.default_bq
     dev = ctx.device
@@ -110,7 +110,7 @@ function verify_gpu_av(; timeout::Float64=30.0)
     end
     if isempty(caught_msg)
         n = length(ctx.validation.messages)
-        vk_reset_device!()   # clear the half-flushed faulting batch
+        reset_device!()   # clear the half-flushed faulting batch
         throw(LavaError("verify_gpu_av",
             "GPU-AV did not report a known out-of-bounds write within $(timeout)s " *
             "($(n) validation messages captured, none matching 'Out of bounds access').",
@@ -122,6 +122,6 @@ function verify_gpu_av(; timeout::Float64=30.0)
     @info "Lava: GPU-AV verified working" sample=first(caught_msg, 240)
     # The OOB left the batch queue in an errored state; reset so subsequent
     # code starts clean.
-    vk_reset_device!()
+    reset_device!()
     return true
 end

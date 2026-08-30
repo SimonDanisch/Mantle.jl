@@ -2,10 +2,8 @@
 #
 # VkImage + VkSampler + descriptor set management for texture sampling in shaders.
 
-abstract type AbstractLavaTexture{T, N} end
-
 """2D texture backed by VkImage."""
-struct LavaTexture2D{T} <: AbstractLavaTexture{T, 2}
+struct VulkanTexture2D{T} <: Texture2D{T}
     image::VK.Image
     memory::VK.DeviceMemory
     view::VK.ImageView
@@ -16,7 +14,7 @@ struct LavaTexture2D{T} <: AbstractLavaTexture{T, 2}
 end
 
 """1D texture backed by VkImage."""
-struct LavaTexture1D{T} <: AbstractLavaTexture{T, 1}
+struct VulkanTexture1D{T} <: Texture1D{T}
     image::VK.Image
     memory::VK.DeviceMemory
     view::VK.ImageView
@@ -26,7 +24,7 @@ struct LavaTexture1D{T} <: AbstractLavaTexture{T, 1}
 end
 
 """Reusable sampler configuration."""
-struct LavaSampler
+struct VulkanSampler <: Sampler
     handle::VK.Sampler
     filter::Symbol
     wrap::Symbol
@@ -34,15 +32,13 @@ struct LavaSampler
     ctx::VkContext
 end
 
-"""Combined texture + sampler, ready for binding."""
-struct SampledTexture{T, N}
-    texture::AbstractLavaTexture{T, N}
-    sampler::LavaSampler
-end
+# `SampledTexture` is Mantle's: it pairs a `Texture` with a `Sampler`, both of
+# which are now the API's abstract types, so there is nothing backend-specific
+# left in the pairing itself.
 
 # ── Sampler Construction ──
 
-function LavaSampler(; ctx::VkContext=vk_context(), filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
+function VulkanSampler(; ctx::VkContext=vk_context(), filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
     dev = ctx.device
 
     vk_filter = filter == :nearest ? VK.FILTER_NEAREST :
@@ -68,13 +64,13 @@ function LavaSampler(; ctx::VkContext=vk_context(), filter::Symbol=:linear, wrap
         false,
     )
 
-    LavaSampler(sampler, filter, wrap, Float32(anisotropy), ctx)
+    VulkanSampler(sampler, filter, wrap, Float32(anisotropy), ctx)
 end
 
 # ── Texture Construction ──
 
 """Create a 2D texture from a matrix of data."""
-function LavaTexture2D(data::Matrix{T}; ctx::VkContext=vk_context(), filter=:linear, wrap=:repeat) where T
+function VulkanTexture2D(data::Matrix{T}; ctx::VkContext=vk_context(), filter=:linear, wrap=:repeat) where T
     dev = ctx.device
 
     h, w = size(data)
@@ -100,7 +96,7 @@ function LavaTexture2D(data::Matrix{T}; ctx::VkContext=vk_context(), filter=:lin
         VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT,
             UInt32(0), UInt32(1), UInt32(0), UInt32(1)))
 
-    tex = LavaTexture2D{T}(image, memory, view, w, h, format, ctx)
+    tex = VulkanTexture2D{T}(image, memory, view, w, h, format, ctx)
 
     # Upload data
     upload_texture_data!(tex, data)
@@ -109,7 +105,7 @@ function LavaTexture2D(data::Matrix{T}; ctx::VkContext=vk_context(), filter=:lin
 end
 
 """Upload pixel data to a texture via staging buffer."""
-function upload_texture_data!(tex::LavaTexture2D{T}, data::Matrix{T}) where T
+function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
     ctx = tex.ctx
     bq = ctx.default_bq
     dev = ctx.device
@@ -166,7 +162,7 @@ end
 
 # ── Descriptor Set for Textures ──
 
-struct TextureBindings
+struct VulkanTextureBindings <: TextureBindings
     layout::VK.DescriptorSetLayout
     pool::VK.DescriptorPool
     set::VK.DescriptorSet
@@ -215,9 +211,9 @@ function bind_textures(textures::Vector{<:SampledTexture})
     end
     VK.update_descriptor_sets(dev, writes, [])
 
-    TextureBindings(layout, pool, dset, Any[textures...])
+    VulkanTextureBindings(layout, pool, dset, Any[textures...])
 end
 
 # Convenience
-Base.:*(tex::AbstractLavaTexture, sam::LavaSampler) = SampledTexture(tex, sam)
-LavaTexture(data::Matrix{T}; kw...) where T = LavaTexture2D(data; kw...)
+Base.:*(tex::Texture, sam::VulkanSampler) = SampledTexture(tex, sam)
+LavaTexture(data::Matrix{T}; kw...) where T = VulkanTexture2D(data; kw...)

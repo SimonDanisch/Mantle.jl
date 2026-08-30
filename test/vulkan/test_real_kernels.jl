@@ -310,7 +310,7 @@ using StaticArrays
             Lava.LavaDeviceArray{Float32, 1},
             Lava.LavaDeviceArray{Float32, 5},
             Lava.LavaDeviceArray{Float32, 1}}
-        T_accel = Mantle.HWAdaptedAccel{Nothing,
+        T_accel = Mantle.AdaptedAccel{Nothing,
                                        Lava.LavaDeviceArray{Raycore.Triangle{Hikari.TriangleMeta}, 1},
                                        Lava.LavaDeviceArray{UInt32, 1},
                                        Raycore.Triangle{Hikari.TriangleMeta}}

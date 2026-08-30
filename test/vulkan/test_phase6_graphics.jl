@@ -13,7 +13,7 @@ using Test, Lava, Mantle
                         "vulkan", "graphics", "pipeline.jl"), String)
 
     # Extract the vk_draw! body (from the function header to its matching end)
-    m = match(r"function vk_draw!\(bq::BatchQueue,(.*?)(?=\nfunction )"s, src)
+    m = match(r"function vk_draw!\(bq::VulkanBatchQueue,(.*?)(?=\nfunction )"s, src)
     @test m !== nothing
     vk_draw_body = m.captures[1]
 

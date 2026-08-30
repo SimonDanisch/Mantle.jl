@@ -1,9 +1,9 @@
 using Test, Lava, Mantle
 @testset "Phase 4 — single-writer enforcement + GC counter fix" begin
 
-@testset "BatchQueue has owning_thread set to construction thread" begin
+@testset "VulkanBatchQueue has owning_thread set to construction thread" begin
     bq = Mantle.vk_context().default_bq
-    @test hasfield(Mantle.BatchQueue, :owning_thread)
+    @test hasfield(Mantle.VulkanBatchQueue, :owning_thread)
     @test bq.owning_thread == Threads.threadid()
 end
 
@@ -44,12 +44,12 @@ end
     # the constructor returns.
     #
     # `<:`, not `===`. The assertion is that the field admits no `nothing` — it
-    # was written as identity against the bare `BatchQueue`, which also pinned
-    # the field to the UnionAll and broke when `BatchQueue` gained its `{C}`
-    # parameter. `BatchQueue{VkContext}` satisfies the intent MORE strongly (it
+    # was written as identity against the bare `VulkanBatchQueue`, which also pinned
+    # the field to the UnionAll and broke when `VulkanBatchQueue` gained its `{C}`
+    # parameter. `VulkanBatchQueue{VkContext}` satisfies the intent MORE strongly (it
     # is concrete), so test the property, not one spelling of it.
     T = fieldtype(Mantle.VkContext, :default_bq)
-    @test T <: Mantle.BatchQueue
+    @test T <: Mantle.VulkanBatchQueue
     @test !(Nothing <: T)
 end
 

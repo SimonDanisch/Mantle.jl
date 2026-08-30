@@ -1,3 +1,12 @@
+# `RayTracingPipeline` is Mantle's, in `src/raytracing/pipeline.jl`. It is a
+# pure description now — the compiled pipelines it used to cache in a field live
+# in `DeviceCaches.rt_pipelines`, beside the graphics ones, because a compiled
+# pipeline is a device object.
+
+# No-op: cache is tied to the current VkContext's lifetime.  On reset_device!,
+# the whole module should re-initialize its pipelines anyway.
+
+
 # High-level Ray Tracing Pipeline API for Lava.jl
 #
 # Provides a Julia-function-based API:
@@ -7,78 +16,20 @@
 # Compilation is lazy — shaders are compiled on first use and cached.
 
 
+
 """
-    RayTracingPipeline
+Cache key for a compiled RT pipeline: what it is, plus what it is called with.
 
-A ray tracing pipeline defined by Julia functions for each shader stage.
-Shaders are compiled lazily on first `trace_rays!` call and cached.
-
-# Constructor
-    RayTracingPipeline(; raygen, closest_hit, miss, payload_type=:f32)
-
-# Example
-```julia
-function my_raygen(output::LavaDeviceArray{Float32,1})
-    lid = lava_rt_launch_id_x()
-    Lava.lava_rt_payload_store_f32(-1f0)
-    Lava.lava_rt_trace_ray(...)
-    t = Lava.lava_rt_payload_load_f32()
-    output[lid + 1] = t
-end
-function my_chit()
-    Lava.lava_rt_payload_store_f32(lava_rt_ray_tmax())
-end
-function my_miss()
-    Lava.lava_rt_payload_store_f32(-1f0)
-end
-
-rt = RayTracingPipeline(raygen=my_raygen, closest_hit=my_chit, miss=my_miss)
-trace_rays!(rt, tlas, output_buf; width=1920, height=1080)
-```
+The per-object cache keyed on argument types alone, because the object it hung
+off supplied the rest of the identity. Now that the cache is the device's — as
+the graphics one always was — the description has to be in the key.
 """
-mutable struct RayTracingPipeline
-    # User-provided Julia functions
-    raygen_func::Any
-    # Tuple of one-or-more closest-hit functions.  When the tuple has length
-    # N > 1 the SBT is built with N hit groups; each TLAS instance picks a
-    # group via `instanceShaderBindingTableRecordOffset`.  Per-material chit
-    # shaders + SER live on this path.
-    closesthit_funcs::Tuple
-    miss_func::Any
-    anyhit_func::Any          # nothing = no any-hit shader
-    payload_type::Symbol
-    # When true, the closest-hit and miss shaders are compiled with the same
-    # BDA argument signature as the raygen — they receive the raygen's args
-    # as function parameters and can read every buffer/queue the raygen sees.
-    # Required for the pbrt-v4 OptiX pattern (shading happens in closesthit,
-    # raygen just calls traceRay).  Default `false` keeps the legacy contract
-    # where chit/miss take no args (the `hw_closesthit` / `hw_miss` pattern
-    # used by `trace_closest_hits!`).
-    chit_miss_take_args::Bool
-    # Compiled state (lazy)
-    _compiled::Union{Nothing, NamedTuple}
-    PIPELINE_CACHE::Dict{UInt64, Tuple{LavaRTPipeline, LavaRTShader, Vector{Int}, Vector{Int}}}
-end
+rt_cache_key(p::RayTracingPipeline, tt_key) =
+    hash((p.raygen_func, p.closesthit_funcs, p.miss_func, p.anyhit_func,
+          p.payload_type, p.chit_miss_take_args, tt_key))
 
-# Normalise `closest_hit` to a Tuple: accept a single function or a
-# tuple/vector of functions.  Stored internally as a Tuple so each chit's
-# identity participates in dispatch caches and pin walks.
-_normalise_chit(f) = (f,)
-_normalise_chit(t::Tuple) = t
-_normalise_chit(v::AbstractVector) = tuple(v...)
+# `_normalise_chit` moved to core with the pipeline it normalises for.
 
-function RayTracingPipeline(; raygen, closest_hit, miss, any_hit=nothing,
-                              payload_type::Symbol=:f32,
-                              chit_miss_take_args::Bool=false)
-    chits = _normalise_chit(closest_hit)
-    isempty(chits) && throw(ArgumentError("RayTracingPipeline: at least one closest_hit shader is required"))
-    RayTracingPipeline(raygen, chits, miss, any_hit, payload_type,
-                        chit_miss_take_args, nothing,
-                        Dict{UInt64, Tuple{LavaRTPipeline, LavaRTShader, Vector{Int}, Vector{Int}}}())
-end
-
-# No-op: cache is tied to the current VkContext's lifetime.  On vk_reset_device!,
-# the whole module should re-initialize its pipelines anyway.
 invalidate_stale_rt_cache!(::RayTracingPipeline) = nothing
 
 """
@@ -91,7 +42,7 @@ via the BDA argument buffer (same as compute kernel arguments).
 - `args`: Arguments passed to the raygen function (buffers, scalars, structs)
 - `width`, `height`, `depth`: Dispatch dimensions (number of rays per dimension)
 """
-function trace_rays!(bq::BatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLAS,
+function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLAS,
                      args...;
                      width::Integer, height::Integer, depth::Integer=1)
     # Resolve or compile the RT pipeline FIRST.  A cold compile builds the
@@ -100,8 +51,8 @@ function trace_rays!(bq::BatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLA
     # On warm calls this is a Dict lookup and does not flush.
     invalidate_stale_rt_cache!(pipeline)
     tt_key = Tuple{map(arg_sigtype, args)...}   # pre-adapt types (same as post-adapt for non-LavaArray)
-    cache_key = hash((tt_key,))
-    cached = get(pipeline.PIPELINE_CACHE, cache_key, nothing)
+    cache_key = rt_cache_key(pipeline, tt_key)
+    cached = get((bq.ctx::VkContext).caches.rt_pipelines, cache_key, nothing)
     if cached === nothing
         # Compile with post-adapt signature: LavaArray args are seen as
         # LavaDeviceArray in the kernel, matching what pack_args_direct!
@@ -111,7 +62,7 @@ function trace_rays!(bq::BatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLA
         dummy_batch = ensure_active_batch!(bq)
         tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(dummy_batch), a)), args)...}
         cached = compile_rt_pipeline(bq.ctx::VkContext, pipeline, tt)
-        pipeline.PIPELINE_CACHE[cache_key] = cached
+        (bq.ctx::VkContext).caches.rt_pipelines[cache_key] = cached
     end
     vk_pipeline, raygen_compiled, offsets, byval_sizes = cached
 
@@ -136,7 +87,7 @@ function trace_rays!(bq::BatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLA
 
     pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
-    # TLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
+    # HWTLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
     pin!(batch, tlas.accel)
     pin!(batch, tlas.storage)
     for blas in tlas.blases
@@ -154,20 +105,20 @@ Dispatch a ray tracing pipeline with the ray count read from a GPU buffer.
 No CPU readback — a prepare kernel writes the indirect command, then
 `cmd_trace_rays_indirect_khr` reads it from GPU memory.
 """
-function trace_rays_indirect!(bq::BatchQueue, pipeline::RayTracingPipeline,
+function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline,
                               tlas::LavaTLAS, args...;
                               n_rays::LavaArray{Int32})
     # See comment in trace_rays!: a cold compile's SBT upload flushes the
     # active batch, so compile FIRST, then open the real batch below.
     invalidate_stale_rt_cache!(pipeline)
     tt_key = Tuple{map(arg_sigtype, args)...}
-    cache_key = hash((tt_key,))
-    cached = get(pipeline.PIPELINE_CACHE, cache_key, nothing)
+    cache_key = rt_cache_key(pipeline, tt_key)
+    cached = get((bq.ctx::VkContext).caches.rt_pipelines, cache_key, nothing)
     if cached === nothing
         dummy_batch = ensure_active_batch!(bq)
         tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(dummy_batch), a)), args)...}
         cached = compile_rt_pipeline(bq.ctx::VkContext, pipeline, tt)
-        pipeline.PIPELINE_CACHE[cache_key] = cached
+        (bq.ctx::VkContext).caches.rt_pipelines[cache_key] = cached
     end
     vk_pipeline, raygen_compiled, offsets, byval_sizes = cached
 
@@ -209,7 +160,7 @@ end
 
 
 """Prepare indirect RT dispatch buffer: writes (n_rays, 1, 1) from a GPU-resident count."""
-function prepare_indirect_rt_dispatch!(bq::BatchQueue,
+function prepare_indirect_rt_dispatch!(bq::VulkanBatchQueue,
                                        indirect::LavaArray{UInt32,1},
                                        n_rays::LavaArray{Int32})
     lava_launch!(bq, prepare_indirect_rt_kernel, indirect, n_rays;

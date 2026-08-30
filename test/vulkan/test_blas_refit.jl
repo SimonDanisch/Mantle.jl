@@ -59,7 +59,7 @@ isdefined(@__MODULE__, :build_raygen_shader) ||
             Mantle.refit_blas!(c, blas, at_z(5.0f0))
         end
         Mantle.VK.device_wait_idle(ctx.device)
-        # The TLAS references the BLAS by address, which the in-place refit
+        # The HWTLAS references the BLAS by address, which the in-place refit
         # preserves, so it does not need rebuilding for the geometry to move.
 
         t_after = trace_center()

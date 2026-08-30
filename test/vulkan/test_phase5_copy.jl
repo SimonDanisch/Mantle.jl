@@ -4,8 +4,8 @@ using Test, Lava, Mantle
 @testset "legacy transfer symbols are gone" begin
     @test !isdefined(Lava, :one_shot_copy)
     @test !isdefined(Lava, :append_copy_and_flush!)
-    @test !hasfield(Mantle.BatchQueue, :xfer_cmd_buf)
-    @test !hasfield(Mantle.BatchQueue, :xfer_fence)
+    @test !hasfield(Mantle.VulkanBatchQueue, :xfer_cmd_buf)
+    @test !hasfield(Mantle.VulkanBatchQueue, :xfer_fence)
 end
 
 @testset "cmd_copy_buffer! is the single entry point" begin

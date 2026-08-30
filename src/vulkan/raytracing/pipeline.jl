@@ -43,7 +43,7 @@ Layout:
   - Group 1:                miss (GENERAL)
   - Group 2 .. 1+N:         closest-hit hit groups (TRIANGLES_HIT_GROUP)
   - Optional any-hit:       shared across every hit group when supplied
-  - Descriptor set 0/0:     AccelerationStructure (TLAS)
+  - Descriptor set 0/0:     AccelerationStructure (HWTLAS)
   - Push constant:          BDA pointer (8 bytes by default)
 """
 function create_rt_pipeline(ctx::VkContext,
@@ -142,7 +142,7 @@ function create_rt_pipeline(ctx::VkContext,
         ))
     end
 
-    # Descriptor set layout: binding 0 = TLAS
+    # Descriptor set layout: binding 0 = HWTLAS
     ds_layout = VK.DescriptorSetLayout(dev, [
         VK.DescriptorSetLayoutBinding(
             UInt32(0),
@@ -214,7 +214,7 @@ LavaTLAS exactly: `destroy_now!(tlas)` destroys the pool, releasing the set.
 The previous implementation used a global cache keyed by `objectid(tlas)`,
 which broke after a freed LavaTLAS was GC'd and a new LavaTLAS reused that
 objectid: the cache returned a descriptor set bound to the destroyed
-VkAccelerationStructureKHR.  Per-TLAS storage eliminates that hazard
+VkAccelerationStructureKHR.  Per-HWTLAS storage eliminates that hazard
 entirely — no global cache, no objectid keying, no eviction policy.
 """
 function get_rt_descriptor_set(pipeline::LavaRTPipeline, tlas::LavaTLAS)
@@ -255,7 +255,7 @@ end
 Record an RT trace dispatch into the batched command buffer.
 `push_bda` is the BDA address of the argument buffer.
 """
-function rt_dispatch!(bq::BatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
+function rt_dispatch!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
                       push_bda::UInt64, width::Integer, height::Integer;
                       depth::Integer=1)
     bq.last_dispatch_info = "rt_trace w=$width h=$height"
@@ -298,7 +298,7 @@ end
 Record an indirect RT trace dispatch. The `indirect_buf` must contain a
 VkTraceRaysIndirectCommandKHR (3×UInt32), written by a previous GPU kernel.
 """
-function rt_dispatch_indirect!(bq::BatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
+function rt_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
                                push_bda::UInt64, indirect::LavaArray{UInt32,1})
     bq.last_dispatch_info = "rt_indirect"
 

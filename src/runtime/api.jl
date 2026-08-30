@@ -6,8 +6,10 @@
 
 abstract type Device end
 abstract type Resource end
-abstract type Graph end
-abstract type Plan end
+# `Graph` is a concrete struct in `graph/types.jl`. It was abstract here with
+# one subtype per backend, which is exactly the duplication that made a second
+# backend mean a second scheduler.
+# `Plan` likewise — concrete, in `graph/types.jl`.
 
 # `DeviceCaps` used to be defined here, together with `supports`/`bestshape` over
 # it, and its docstring argued that it belonged wherever every backend could name
@@ -53,6 +55,10 @@ a wait for the GPU to go idle would only stop the CPU from working ahead. A
 readback synchronises itself, because it must.
 """
 abstract type Window end
+
+# `Window(backend, width, height; title, vsync, color_format)` is the portable
+# constructor, answered by whichever backend is loaded — see `Framebuffer` in
+# `graphics/resources.jl` for why the backend is the first argument.
 
 """
     backend(device)
@@ -335,18 +341,7 @@ A copy as a graph pass, so its layouts and ordering are derived rather than
 stated.
 """
 function copy! end
-"""
-    compute!(f, graph, name) -> pass
-
-A pass whose work is `dispatch!` calls. `f` receives the pass handle and declares
-what it touches.
-"""
-function compute!(f, g::Graph, name::AbstractString)
-    p = newpass(g, name, :compute)
-    push!(passes(g), p)
-    f(handle(g, p))
-    return p
-end
+# `compute!` is a graph verb and lives with the graph, in `graph/build.jl`.
 
 function run! end
 function npipelines end

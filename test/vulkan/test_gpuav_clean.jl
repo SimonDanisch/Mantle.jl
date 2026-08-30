@@ -76,7 +76,7 @@ else
         # If this fails, the SPIR-V emitter has regressed on alignment-tracking
         # for byte-offset GEPs — re-investigate via:
         #   ENV["LAVA_SPIRV_DUMP_DIR"] = "/tmp/lava_spv_debug"
-        #   Mantle.vk_reset_device!(debug = Mantle.DebugConfig(gpu_av = true))
+        #   Mantle.reset_device!(debug = Mantle.DebugConfig(gpu_av = true))
         # then disassemble + scan via the script at the bottom of
         # docs/specs/2026-04-25-unaligned-bda-investigation.md.
         @test isempty(real_messages)
@@ -98,7 +98,7 @@ else
     # report it within a bounded time; if the callback regresses to allocating
     # or logging, this hangs (caught by a CI watchdog) or never surfaces the OOB.
     @testset "GPU-AV fault readback does not hang" begin
-        Mantle.vk_reset_device!(debug = Mantle.DebugConfig(gpu_av = true, pool_disabled = true))
+        Mantle.reset_device!(debug = Mantle.DebugConfig(gpu_av = true, pool_disabled = true))
         ctx = Mantle.vk_context()
         if !ctx.gpu_assisted
             @info "GPU-AV did not attach on this driver — skipping fault-readback test"
@@ -108,10 +108,10 @@ else
             # used to hang forever).
             @test Mantle.verify_gpu_av(timeout=30.0) == true
             # And we must be able to KEEP GOING: a second probe proves the
-            # post-fault `vk_reset_device!` left a usable, still-instrumented
+            # post-fault `reset_device!` left a usable, still-instrumented
             # device rather than a wedged one.
             @test Mantle.verify_gpu_av(timeout=30.0) == true
         end
-        Mantle.vk_reset_device!(debug = Mantle.DebugConfig())
+        Mantle.reset_device!(debug = Mantle.DebugConfig())
     end
 end

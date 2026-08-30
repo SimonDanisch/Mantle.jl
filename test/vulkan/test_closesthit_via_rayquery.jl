@@ -9,7 +9,7 @@
 #        VK_KHR_ray_query intrinsics (lava_ray_query_init/proceed/get_*).
 # This file builds the second method on a minimal new accel struct and
 # verifies a single-triangle scene — the precursor to migrating
-# `HWAdaptedAccel` itself.
+# `AdaptedAccel` itself.
 
 using Test, Lava, Raycore
 using GeometryBasics: Point3f, Vec3f, Point2f, GLTriangleFace
@@ -105,7 +105,7 @@ end
     faces = [GLTriangleFace(1, 2, 3)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     @assert hwtlas.tri_gpu !== nothing && hwtlas.off_gpu !== nothing
@@ -219,7 +219,7 @@ end
     near_mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(near_v, faces))
     far_mesh  = GeometryBasics.normal_mesh(GeometryBasics.Mesh(far_v,  faces))
 
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, near_mesh, Mat4f(I))
     push!(hwtlas, far_mesh,  Mat4f(I))
     Raycore.sync!(hwtlas)
@@ -302,7 +302,7 @@ end
 # This is the design contract we want to lock down — any kernel that uses
 # `Raycore.closest_hit(accel, ray)` should produce identical results
 # regardless of accel backend.  When this passes, Hikari can swap
-# `vp_trace_rays!(::HWAdaptedAccel, …)` for the unified SW kernel.
+# `vp_trace_rays!(::AdaptedAccel, …)` for the unified SW kernel.
 # ============================================================================
 @testset "closest_hit polymorphism — SW BVH vs HW ray query" begin
     ctx = Mantle.vk_context()
@@ -324,13 +324,13 @@ end
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
     # HW path
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     Tri_hw = eltype(eltype(hwtlas.blas_triangles))
     accel_hw = RayQueryAccel(hwtlas.tri_gpu, hwtlas.off_gpu, Raycore.empty_triangle(Tri_hw))
 
-    # SW path: build a Raycore TLAS over the same mesh on the same backend.
+    # SW path: build a Raycore HWTLAS over the same mesh on the same backend.
     sw_tlas = Raycore.TLAS(backend)
     push!(sw_tlas, mesh, Mat4f(I))
     Raycore.sync!(sw_tlas)
@@ -362,7 +362,7 @@ end
     Mantle.vk_flush!(bq)
     t_hw_arr = Array(t_hw); h_hw_arr = Array(h_hw)
 
-    # Run on SW (no tlas kwarg; SW kernel doesn't need a TLAS descriptor).
+    # Run on SW (no tlas kwarg; SW kernel doesn't need a HWTLAS descriptor).
     t_sw = Mantle.LavaArray(fill(-2f0, n))
     h_sw = Mantle.LavaArray(fill(UInt32(99), n))
     Mantle.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;

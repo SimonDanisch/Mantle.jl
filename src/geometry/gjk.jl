@@ -5,7 +5,7 @@
 # CPU reference to be ported to GPU in P4.4; no SIMD / bitwise cleverness.
 #
 # Transform convention: NTuple{12, Float32} row-major 3x4, identical to
-# LavaInstanceRecord.transform / Vulkan VkTransformMatrixKHR layout:
+# VulkanInstanceRecord.transform / Vulkan VkTransformMatrixKHR layout:
 #
 #   [ T[1]  T[2]  T[3]  T[4]  ]   row 0  (x row + tx)
 #   [ T[5]  T[6]  T[7]  T[8]  ]   row 1  (y row + ty)
@@ -306,7 +306,7 @@ end
         max_iters::Int=32, eps::Float32=1f-6) -> GJKResult
 
 Run GJK between two transformed convex shapes.  Each transform is a row-major
-3x4 instance transform (same layout as `LavaInstanceRecord.transform`).
+3x4 instance transform (same layout as `VulkanInstanceRecord.transform`).
 `A` and `B` are defined in their own instance-local frames; the algorithm
 transforms support directions / points into / out of those frames internally.
 

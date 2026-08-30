@@ -1,17 +1,17 @@
 using Test, Lava, Raycore
-using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
+using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE,
               write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
-@testset "HWTLAS sync! with instance batch" begin
+@testset "VulkanTLAS sync! with instance batch" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
     radius = 1f0
     quats = Mantle.LavaArray([Vec4f(0,0,0,1) for _ in 1:n])
     positions = Mantle.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
-    instance_buf = Mantle.LavaArray{LavaInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
+    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
 
     backend = Mantle.LavaBackend()
     bq = Mantle.vk_context().default_bq
@@ -22,7 +22,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
         ndrange = n)
     Mantle.vk_flush!(bq)
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n=2*n, instance_mask=UInt8(0x02))
     Raycore.sync!(tlas)
 
@@ -32,18 +32,18 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     @test tlas.hw_tlas.update_scratch_size > 0
 end
 
-@testset "HWTLAS sync! supports multiple batches (P3-fu4)" begin
+@testset "VulkanTLAS sync! supports multiple batches (P3-fu4)" begin
     # P3-fu4 lifted the single-batch guard.  Multiple batches concatenate into
-    # a combined instance buffer and the TLAS spans them all.
+    # a combined instance buffer and the HWTLAS spans them all.
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n_a = 4; n_b = 6
-    instance_buf1 = Mantle.LavaArray{LavaInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)
-    instance_buf2 = Mantle.LavaArray{LavaInstanceRecord}(undef, n_b; extra_usage=AS_INPUT_USAGE)
+    instance_buf1 = Mantle.LavaArray{VulkanInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)
+    instance_buf2 = Mantle.LavaArray{VulkanInstanceRecord}(undef, n_b; extra_usage=AS_INPUT_USAGE)
 
     backend = Mantle.LavaBackend()
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     h1 = push!(tlas, blas, instance_buf1; n=n_a, instance_mask=UInt8(0x02))
     h2 = push!(tlas, blas, instance_buf2; n=n_b, instance_mask=UInt8(0x04))
 
@@ -56,7 +56,7 @@ end
     @test tlas.combined_instance_buf !== nothing
     @test length(tlas.combined_instance_buf) >= n_a + n_b
 
-    # Refit on the multi-batch HWTLAS works too.
+    # Refit on the multi-batch VulkanTLAS works too.
     tlas.transforms_dirty = true
     Raycore.sync!(tlas)
     @test tlas.dirty == false   # refit does not toggle dirty

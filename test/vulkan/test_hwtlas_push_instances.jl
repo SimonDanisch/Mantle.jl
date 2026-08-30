@@ -1,16 +1,16 @@
 using Test, Lava, Raycore
-using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 @testset "push!(hwtlas, blas, instance_buf) -- registration" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 100
-    instance_buf = Mantle.LavaArray{LavaInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
+    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
 
     backend = Mantle.LavaBackend()
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
 
     handle = push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x02))
     @test handle isa Raycore.TLASHandle

@@ -55,15 +55,11 @@ Julia warm but the kernels cold, it pays the SPIR-V compile instead.
 `@setup_workload` is PrecompileTools', re-exported — this only adds the kernel
 half, and there is no reason to have a second name for the setup block.
 """
-macro compile_workload(version, ex)
-    return esc(quote
-        $PrecompileTools.@compile_workload begin
-            $with_frozen_recording($version) do
-                $ex
-            end
-        end
-    end)
-end
+# `@compile_workload` is Mantle's — a macro cannot be overridden from an
+# extension, so the macro is shared and what varies is the function it calls.
+# This backend's answer is below: record the SPIR-V it compiles into the frozen
+# cache under `version`.
+Mantle.with_kernel_recording(f, version) = with_frozen_recording(f, version)
 
 """
     with_frozen_recording(f, version)

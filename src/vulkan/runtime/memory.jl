@@ -11,7 +11,7 @@
 
 # Per-allocation trace
 
-# When enabled, vk_free! scans every live BatchQueue's arg/indirect slabs for
+# When enabled, vk_free! scans every live VulkanBatchQueue's arg/indirect slabs for
 # any UInt64 == buf.address.  Hits are logged + zeroed so the GPU faults on a
 # clean null reference instead of corrupting random memory.  Optionally
 # throws a LavaError instead of just logging (`ctx.diag.destroy_freed_bdas_throws`).
@@ -31,13 +31,13 @@
 """
     scan_arg_slabs_for_bda!(buf) -> Int
 
-Scan every live BatchQueue's `arg_slabs` (and `indirect_slabs`) for any
+Scan every live VulkanBatchQueue's `arg_slabs` (and `indirect_slabs`) for any
 UInt64 word matching `buf.address`.  For each hit, append a record to
 `diag.freed_bda_scan_log` and overwrite the slot with 0 so the GPU faults
 cleanly on a null reference instead of touching the freed memory.
 Returns the number of hits found.
 
-Defined AFTER VkManagedBuffer + BatchQueue (forward-call from vk_free!).
+Defined AFTER VkManagedBuffer + VulkanBatchQueue (forward-call from vk_free!).
 Cost is ~`(slab_size_bytes / 8)` UInt64 reads per live slab — for 4 MiB
 slabs that's ~512 K reads, fast enough for debug.
 """
@@ -67,9 +67,9 @@ const BUF_STATE_DEAD     = UInt8(2)
 const BDA_POISON = UInt64(0)
 
 # No reset callback: every counter above is a `MemoryPolicy` field, and the pool
-# is a `VkContext` field, so all of it dies with the context `vk_reset_device!`
-# retires. Staging, indirect and arg slabs are per-`BatchQueue` and go the same
-# way. `reset_memory_stats!` is the one piece left, and `vk_reset_device!` calls
+# is a `VkContext` field, so all of it dies with the context `reset_device!`
+# retires. Staging, indirect and arg slabs are per-`VulkanBatchQueue` and go the same
+# way. `reset_memory_stats!` is the one piece left, and `reset_device!` calls
 # it directly.
 
 # ── GPU memory pressure tracking (ported from AMDGPU.jl) ──
@@ -419,7 +419,7 @@ function format_oom_error(ctx::VkContext, fail::AllocFailure)
 end
 
 """
-    vk_alloc(bq::BatchQueue, nbytes; extra_usage=UInt32(0), unified=false) -> VkManagedBuffer
+    vk_alloc(bq::VulkanBatchQueue, nbytes; extra_usage=UInt32(0), unified=false) -> VkManagedBuffer
 
 Allocate a GPU buffer with BDA support.  Takes the queue the allocation is
 recorded against — `sweep_retired_batches!` and `drain_deferred_frees!` run
@@ -435,14 +435,14 @@ only on that queue's timeline, ready for the multi-queue refactor.
 AS-scratch alignment is the caller's responsibility — see
 `bda_alignment_for(ctx, scratch::Bool)`, used in `LavaArray(...; scratch=true)`.
 """
-function vk_alloc(bq::BatchQueue, nbytes::Integer;
+function vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
                   extra_usage::UInt32=UInt32(0), unified::Bool=false)
     # Refuse allocation on a lost device — Vulkan calls would either error or
     # (worse) succeed against a torn-down driver state and produce garbage BDAs.
     device_lost(bq.ctx::VkContext) && throw(LavaError(
         "vk_alloc",
         "Vulkan device is lost — cannot allocate new buffers",
-        "Call vk_reset_device!() to reinitialize, or restart Julia."))
+        "Call reset_device!() to reinitialize, or restart Julia."))
     if mempolicy(bq.ctx::VkContext).track_allocs
         record_alloc_site!(bq.ctx::VkContext, Int(nbytes))
     end
@@ -497,7 +497,7 @@ steady state. `pool.reclaiming` guards the re-entry through `flush!`'s own
 allocations.
 """
 
-function quiesce_before_reclaim!(bq::BatchQueue)
+function quiesce_before_reclaim!(bq::VulkanBatchQueue)
     p = mempolicy(bq.ctx::VkContext)
     if !p.reclaiming[] && !device_lost(bq.ctx::VkContext)
         p.reclaiming[] = true
@@ -514,7 +514,7 @@ function quiesce_before_reclaim!(bq::BatchQueue)
 end
 
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
-function try_vk_alloc(bq::BatchQueue, nbytes::Integer;
+function try_vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
                       extra_usage::UInt32=UInt32(0), unified::Bool=false)
     ctx = bq.ctx::VkContext
     dev = ctx.device
@@ -733,7 +733,7 @@ function vk_free!(buf::VkManagedBuffer)
 
     lw = @atomic :acquire buf.last_write
     if lw !== nothing
-        bq = lw[1]::BatchQueue
+        bq = lw[1]::VulkanBatchQueue
         val = lw[2]::UInt64
         if !device_lost(bq.ctx::VkContext) && !queue_released(bq)
             # query_timeline rethrows on healthy-device failure.  We are
@@ -894,7 +894,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
     buf.size = 0
 end
 
-# Scanner method — reachable now that VkManagedBuffer + BatchQueue are defined.
+# Scanner method — reachable now that VkManagedBuffer + VulkanBatchQueue are defined.
 function scan_arg_slabs_for_bda!(buf::VkManagedBuffer)
     target = buf.address
     target == UInt64(0) && return 0
@@ -1004,14 +1004,14 @@ function scan_slabs_for_unknown_bdas(bq)
 end
 
 """
-    drain_deferred_frees!(bq::BatchQueue)
+    drain_deferred_frees!(bq::VulkanBatchQueue)
 
 Destroy any buffers in `bq.deferred_frees` whose `last_write` timeline value
 has been reached. Safe to call at any time; it only destroys buffers the
 GPU is definitely done with. Called at natural sync points: after a flush
 completes, and from `sweep_retired!`.
 """
-function drain_deferred_frees!(bq::BatchQueue)
+function drain_deferred_frees!(bq::VulkanBatchQueue)
     isempty(bq.deferred_frees) && return
     ctx = bq.ctx::VkContext
     # Device-lost shortcut: empty under the lock so no finalizer-thread push
@@ -1032,7 +1032,7 @@ function drain_deferred_frees!(bq::BatchQueue)
         while i <= length(bq.deferred_frees)
             buf = bq.deferred_frees[i]::VkManagedBuffer
             lw = @atomic :acquire buf.last_write
-            if lw === nothing || (lw[1]::BatchQueue === bq && lw[2]::UInt64 <= current)
+            if lw === nothing || (lw[1]::VulkanBatchQueue === bq && lw[2]::UInt64 <= current)
                 destroy_buffer!(buf)
                 deleteat!(bq.deferred_frees, i)
             else
@@ -1190,7 +1190,7 @@ live_buffer_count(ctx::VkContext = vk_context()) = length(mempolicy(ctx).live_bu
 """
     destroy_pool!(ctx)
 
-Destroy this device's blocks. Called by `vk_reset_device!` on the context it is
+Destroy this device's blocks. Called by `reset_device!` on the context it is
 retiring — which is where the old context is actually in scope.
 
 Unconditional, unlike [`trim_gpu_pool!`](@ref): the device is going away, so a
@@ -1288,7 +1288,7 @@ actually ran, so the caller knows whether retrying is worthwhile.
 buffer freed while the GPU still referenced it went to the deferred list rather
 than back to the pool, and until it is drained the memory is dead to everyone.
 """
-function collect_for_pool!(bq::BatchQueue)
+function collect_for_pool!(bq::VulkanBatchQueue)
     p = mempolicy(bq.ctx::VkContext)
     now = time()
     now - p.gc_last < p.gc_mingap && return false
@@ -1361,7 +1361,7 @@ function clear_alloc_trace!(ctx::VkContext = vk_context())
 end
 
 """
-    pool_alloc(bq::BatchQueue, nbytes; extra_usage=UInt32(0)) -> VkManagedBuffer
+    pool_alloc(bq::VulkanBatchQueue, nbytes; extra_usage=UInt32(0)) -> VkManagedBuffer
 
 Allocate GPU memory on `bq` out of this device's `Mantle.Pool`.
 
@@ -1372,14 +1372,14 @@ carries no notion of what a block may be used for; `compatible` does, so an
 index buffer can now sit in a block whose usage bits already permit it and only
 falls out to a dedicated allocation when none does.
 """
-function pool_alloc(bq::BatchQueue, nbytes::Integer; extra_usage::UInt32=UInt32(0))
+function pool_alloc(bq::VulkanBatchQueue, nbytes::Integer; extra_usage::UInt32=UInt32(0))
     ctx = bq.ctx::VkContext
     # Even pure free-span reuse must refuse a dead device — the blocks belong to
     # the old (broken) ctx and would hand back garbage BDAs.
     device_lost(ctx) && throw(LavaError(
         "pool_alloc",
         "Vulkan device is lost — cannot allocate new buffers",
-        "Call vk_reset_device!() to reinitialize, or restart Julia."))
+        "Call reset_device!() to reinitialize, or restart Julia."))
     p = mempolicy(ctx)
     nbytes = max(Int(nbytes), POOL_MIN_SIZE)
     p.track_allocs && record_alloc_site!(ctx, nbytes)
@@ -1430,7 +1430,7 @@ device, a bad usage flag — propagates with its own message intact.
 # `dev` is untyped for the same reason `bq.ctx` is: `LavaDevice` is declared in
 # `graph.jl`, which this file is included before. A signature annotation is
 # evaluated at load; the body is not.
-function acquire_or_reclaim!(bq::BatchQueue, sp::Pool, dev,
+function acquire_or_reclaim!(bq::VulkanBatchQueue, sp::Pool, dev,
                              nbytes::Int, extra_usage::UInt32)
     try
         return acquire!(sp, dev, Buffers(), nothing, nbytes;
@@ -1466,7 +1466,7 @@ function acquire_or_reclaim!(bq::BatchQueue, sp::Pool, dev,
 end
 
 """
-    reclaim_empty_pool_blocks!(bq::BatchQueue) -> (n_blocks::Int, bytes::Int)
+    reclaim_empty_pool_blocks!(bq::VulkanBatchQueue) -> (n_blocks::Int, bytes::Int)
 
 Hand every block with nothing live in it back to the driver, and say how much
 that was.
@@ -1477,7 +1477,7 @@ is empty — so what is left here is measuring, which the caller reports.
 Callers must have run `quiesce_before_reclaim!` first; see there for why. Not
 finalizer-safe, and never was.
 """
-function reclaim_empty_pool_blocks!(bq::BatchQueue)
+function reclaim_empty_pool_blocks!(bq::VulkanBatchQueue)
     ctx = bq.ctx::VkContext
     sp = spans(ctx)
     before = reserved(sp)
@@ -1489,14 +1489,14 @@ end
 # ── Staging buffer for CPU↔GPU transfers ──
 
 """
-    get_staging(bq::BatchQueue, nbytes::Integer)
+    get_staging(bq::VulkanBatchQueue, nbytes::Integer)
         -> (buf::VK.Buffer, memory::VK.DeviceMemory, mapped_ptr::Ptr, size::Int)
 
 Return `bq`'s staging buffer, growing it to at least `nbytes` if needed.
 Backed by a `VkManagedBuffer` whose lifetime follows the normal
 timeline-gated free path when re-allocated.
 """
-function get_staging(bq::BatchQueue, nbytes::Integer)
+function get_staging(bq::VulkanBatchQueue, nbytes::Integer)
     existing = bq.staging
     if existing !== nothing && (existing::VkManagedBuffer).size >= nbytes
         buf = existing::VkManagedBuffer
@@ -1524,7 +1524,7 @@ The GPU cannot read a Julia `Vector`, so every host-to-device transfer starts
 with a memcpy into one of these. Who owns it, how it is sliced and when a slice
 may be reused are all questions for the caller; this only allocates one.
 """
-function host_buffer(bq::BatchQueue, nbytes::Integer)
+function host_buffer(bq::VulkanBatchQueue, nbytes::Integer)
     ctx = bq.ctx::VkContext
     dev = bq.device
     alloc_size = max(65536, nextpow(2, nbytes))
@@ -1609,12 +1609,12 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
 
     # Device-local: route through staging + batched copy.  Pinning `managed`
     # triggers sync_access!'s cross-queue semaphore wait whenever the buffer
-    # was last written on a different BatchQueue.
+    # was last written on a different VulkanBatchQueue.
     bq = if direction === :upload
         (managed.ctx::VkContext).default_bq
     else
         lw = @atomic :acquire managed.last_write
-        lw !== nothing ? (lw[1]::BatchQueue) : (managed.ctx::VkContext).default_bq
+        lw !== nothing ? (lw[1]::VulkanBatchQueue) : (managed.ctx::VkContext).default_bq
     end
     staging_buf, _, mapped_ptr, _ = get_staging(bq, nbytes)
     if direction === :upload

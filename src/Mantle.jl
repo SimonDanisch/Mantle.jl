@@ -14,26 +14,49 @@ module Mantle
 # there is one type, and `caps` fills it in.
 using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
     MatrixScope, SubgroupScope, WorkgroupScope, MatrixShape, DeviceCaps
+# The one device intrinsic core reaches for. `gemv.jl`'s inner loop reduces
+# across the subgroup, and it used to call Lava's `subgroup_add` — the single
+# thing keeping a compiler dependency in code that is otherwise portable. KI
+# owns the generic now and each backend maps it to its own instruction.
+using KernelInterface: sub_group_reduce_add
+# The cooperative-matrix type and the nine operations a backend lowers. These
+# were Lava's, and naming a SPIR-V compiler's type was the one thing blocking
+# GEMM's coopmat half from living in core — see
+# `test/vulkan/test_array_algorithm_portability.jl`.
+using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
+    matrixuse, matrixscope, coopmat_load, coopmat_store, coopmat_muladd,
+    coopmat_zero, coopmat_undef, coopmat_convert, coopmat_length,
+    coopmat_getcomp, coopmat_setcomp
+# Primitive topology: KI's, because a compiler emits execution modes from it and
+# every backend creates a pipeline from it. Re-exported below, same as `caps`.
+using KernelInterface: Topology, TriangleList, TriangleStrip, LineList,
+    LineStrip, PointList, PatchList, LineListAdjacency, LineStripAdjacency
 # `import`, not `using … :` — these get `Mantle.Device` methods below, and
 # `caps` in particular becomes one function with a `Device` method here and a
 # `KI.Backend` method in each backend.
 import KernelInterface: supports, bestshape, caps, matrix_shapes, wggranularity
 
-# What the Vulkan backend below needs. These arrived with the runtime that moved
-# here from Lava, and they are hard dependencies rather than an extension's
-# because the backend is part of this package now — the same reason `caps` and
-# `DeviceCaps` stopped being two things.
+# Vulkan and Lava are NOT here. They are `[weakdeps]`, and `src/vulkan/` is
+# loaded by `ext/MantleVulkanExt.jl` when both are present — which is what lets
+# `using Mantle` work on a machine with no Vulkan loader, since `VulkanCore`'s
+# `__init__` calls `error()` rather than degrading when it cannot `dlopen` one.
+#
+# The backend markers are `VulkanAPI`/`MetalAPI` rather than `Vulkan`/`Metal` for
+# a related reason: a marker named after its package would shadow the package in
+# whichever module loads both.
+#
+# What is left below is what CORE needs. Several are thinner than they look —
+# the backend is the only caller of some — but they load anywhere, so they are
+# not what stood between this package and a driverless machine.
 import Serialization
 import PrecompileTools
-# BOTH, and both are needed. `using` binds the ~60 names the moved runtime calls
-# unqualified — `unwrap`, `cmd_dispatch`, `DeviceMemory`, the `FORMAT_*` and
-# `ERROR_*` constants — exactly as it did when that code lived in Lava. `as VK`
-# gives the qualified spelling the same code uses for the rest.
-#
-# This is only possible because the backend markers are `VulkanAPI`/`MetalAPI`
-# and not `Vulkan`/`Metal`: a marker named after its package shadows it here.
-using Vulkan
-import Vulkan as VK
+# `@setup_workload` is PrecompileTools', re-exported. It used to reach callers
+# through the Vulkan backend's export list, which an extension cannot have —
+# and Hikari says `Mantle.@setup_workload`, so it belongs on the parent. The
+# device-taking `@compile_workload` is a different macro and stays with the
+# backend that needs a device to freeze kernels for.
+using PrecompileTools: @setup_workload
+export @setup_workload, @compile_workload
 using GPUCompiler
 using LLVM
 using LLVM: API
@@ -49,7 +72,10 @@ using LinearAlgebra
 using StaticArrays
 using GeometryBasics
 using Raycore: Ray
-import GLFW
+# …and the module itself, which `using Raycore: Ray` does NOT bind. `HWTLAS` and
+# `AdaptedAccel` name `Raycore.AbstractAccel` / `Raycore.AbstractAdaptedAccel`
+# as supertypes, so a qualified path has to resolve.
+import Raycore
 
 include("memory/interval.jl")
 include("memory/model.jl")
@@ -62,10 +88,14 @@ include("memory/csv.jl")
 include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
 include("sync/backend.jl")
 include("sync/transition.jl")
+include("runtime/backends.jl")
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("runtime/dispatch.jl")
 include("phases.jl")
+# The graph itself: one set of data structures, shared by every backend.
+include("graph/types.jl")
+include("graph/queue.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
 # ── Portable array algorithms ─────────────────────────────────────────────────
@@ -78,11 +108,62 @@ include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases
 include("array/gemv.jl")
 include("array/fft.jl")
 
-# ── the Vulkan backend ────────────────────────────────────────────────────────
-# Lava's runtime, moved here 2026-08-27. See `vulkan/vulkan.jl` for what had to
-# be untangled first and why these are included into `Mantle` rather than a
-# submodule. Last, because every method in it is a method on something above.
-include("vulkan/vulkan.jl")
+# ── Geometry: shapes, transforms and the collision pipeline ───────────────────
+#
+# These were under `src/vulkan/`, and nothing about them was Vulkan's: GJK and
+# EPA are arithmetic over a support function, the geometry types are
+# descriptions of what to build an acceleration structure FROM, and the
+# narrow-phase kernels are KernelAbstractions. Checked rather than assumed —
+# none of these files names a Vulkan or a Lava binding in code, only in prose.
+#
+# What stayed behind is the part that genuinely is one API's: the instance
+# RECORD, whose bytes are `VkAccelerationStructureInstanceKHR`, as against the
+# transform it carries, which every backend lays out the same way.
+# Fixed-function pipeline state, taken over from Lava — see the file for which
+# pieces came here, which went to KernelInterface, and why.
+include("graphics/state.jl")
+include("graphics/resources.jl")   # needs RenderTarget (state.jl) and Window (runtime/api.jl)
+include("graphics/pipeline.jl")    # needs the state vocabulary above
+include("graphics/commands.jl")
+include("graphics/builtins.jl")
+
+include("geometry/transform.jl")
+include("geometry/types.jl")
+include("geometry/convex_shape.jl")   # ConvexShape and `support`, which GJK/EPA are written against
+include("geometry/gjk.jl")
+include("geometry/epa.jl")            # needs GJK's simplex helpers
+include("geometry/narrow_phase.jl")   # needs both
+
+# ── The graph's backend interface ─────────────────────────────────────────────
+#
+# Mantle owns the graph; this is the whole of what a backend answers for it.
+include("graph/backend.jl")
+
+# ── Ray tracing ───────────────────────────────────────────────────────────────
+include("raytracing/pipeline.jl")
+include("raytracing/accel.jl")
+include("raytracing/api.jl")
+
+# Building and running the graph. Last of the core includes: it names `Buffer`
+# (memory/resources.jl), `DrawIndirectCommand` (graphics/pipeline.jl) and the
+# hooks in `graph/backend.jl`, so everything it touches has to exist first.
+include("graph/build.jl")
+# Running a compiled graph on a KernelAbstractions backend — shared by the host
+# and Metal backends; Vulkan records commands instead and overrides it.
+include("graph/kalaunch.jl")
+
+# ── backends ──────────────────────────────────────────────────────────────────
+#
+# Everything above this line is what a backend implements against, and it must
+# load with no driver and no compiler present — `test_pool.jl` drives the whole
+# allocator with neither.
+#
+# `src/vulkan/` is loaded by `ext/MantleVulkanExt.jl` when both Lava and Vulkan
+# are, and `src/metal/` will be loaded the same way by `ext/MantleMetalExt.jl`.
+# The host backend needs no weak dependency, so it is not an extension: KA is a
+# hard dependency of core, and an extension triggered on a hard dependency
+# always fires. It is included at the BOTTOM of this file, after every
+# declaration it adds a method to.
 
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is deliberately not exported: it is a Span predicate nothing outside
@@ -105,11 +186,72 @@ export reads, writes, discards, kindof, aliasable, evictable, unordered, inner
 export Transition, ResourceState, transition!, transitions, needs_transition
 export stages, access, layout
 
+# Fixed-function pipeline state and primitive topology. These were Lava's — a
+# SPIR-V compiler exporting `AlphaBlend` and `CullBack` — and nothing in it
+# dispatched on them. `Topology` is re-exported from KernelInterface rather than
+# defined, since the compiler needs the same names.
+export BlendMode, Opaque, AlphaBlend, Additive, Premultiplied
+export CullFace, NoCull, CullBack, CullFront
+export DepthMode, DepthLess, DepthLessEq, DepthGreater, DepthAlways, DepthOff
+export RenderTarget
+
+# The resources a pipeline is built from. Abstract here, concrete in whichever
+# backend is loaded — see `graphics/resources.jl` for why each is one or the
+# other, and which three turned out portable outright.
+export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
+export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
+export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
+export allocate_batch_queue!, release_batch_queue!, ensure_active_batch!, waitidle
+export supports_graphics, supports_batch_queue, use_bindings!, supports_rt_pipeline
+export defaultbackend, availablebackends, register_backend!
+export devicearray
+export bind_textures
+
+# Rasterization commands. These were `begin_pass!` and friends.
+export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
+       draw_indirect_in_pass!, set_viewport!, reset_device!
+
+# The graph's backend interface. `isdepth` is a definition, not a hook — see
+# `graph/backend.jl` for why it and `aspect` swapped places.
+export isdepth, target_extent, checkextents, refit!, record!, record_pass!,
+       rename!, inplace!, nextslot!, collect!
+export blit!, present_frame!, acquire_next_image!, transition_image!
+export readback_framebuffer, readback_window, readback_target
+
+# Pipeline descriptions and the indirect draw record.
+export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
+# The shader builtins. Exported because a shader is written against them and
+# nothing else; see `graphics/builtins.jl` for why they are overridden rather
+# than defined.
+export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
+       frag_coord_z, frag_coord_w, frag_coord_xy, clip_y
+export DrawIndirectCommand
+export RayTracingPipeline, AdaptedAccel
+
+# Hardware ray tracing.
+export build_accel!, refit_tlas!, set_anyhit_pipeline!
+export trace_rays!, trace_rays_indirect!
+export trace_closest_hits!, trace_closest_hits_indirect!
+export trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
+export Topology, TriangleList, TriangleStrip, LineList, LineStrip, PointList,
+       PatchList, LineListAdjacency, LineStripAdjacency
+
+# Geometry, from `src/geometry/`. These were exported by the Vulkan backend
+# because that is where the files happened to sit; none of them names anything a
+# driver owns, and `support` in particular is the single most-used name Hikari
+# and RayMakie take from this package.
+export Mat3x4f, identity_transform, quat_to_rot3x3, build_4x3, build_4x3_pervec
+export AABB, AABBsGeometry, TrianglesGeometry, GeometryType
+export ConvexShape, UnitCube, support
+export GJKResult, gjk, EPAResult, epa
+export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_kernel
+
 export pixelbytes, vkformat
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
 export DeviceCaps, caps
 export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
+export CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope
 export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
@@ -292,31 +434,16 @@ function custom!(f, g::Graph, name::AbstractString)
     return p
 end
 
-"""
-Everything that needs a live device, at load.
+# `__init__` is `MantleVulkanExt`'s: both halves of it — the pipeline builder
+# thread and the `atexit` device-lost hook — reach into the Vulkan context, and
+# there is nothing for them to do in a session with no backend loaded.
 
-Lava had this and kept the compiler half of it; these two are the device half and
-came here with `runtime/device.jl` on 2026-08-27. Leaving them behind was not
-theoretical: without the `atexit` hook, a `LavaArray` finalizer running during
-Julia's shutdown sweep calls `query_timeline` on a semaphore whose device is
-already gone, and the process takes a SIGSEGV inside the driver — reproduced
-immediately after the move, which is how the omission was found.
-"""
-function __init__()
-    # The pipeline builder thread. Pipelines are created off the main thread so a
-    # first launch does not block on the driver's compiler.
-    init_pipeline_thread!()
 
-    # Mark the device lost during shutdown so GC finalizers do not call into the
-    # Vulkan driver after it has been torn down. `atexit` runs BEFORE Julia's
-    # global finalizer sweep, which is the whole point — a finalizer that reaches
-    # a dead device segfaults inside the driver, where no Julia `try` can catch
-    # it and no stack trace names the buffer that did it.
-    atexit() do
-        ctx = VK_CONTEXT_REF[]
-        ctx === nothing || mark_device_lost!(ctx)
-        bind_context!(nothing)
-    end
-end
+# The host backend, last: every method in it is a method on something declared
+# above, and it says so — the file qualifies all 83 of them as `Mantle.x`,
+# because it was `ext/MantleHostExt.jl` until the KernelAbstractions weakdep
+# turned out to be unworkable. Left qualified rather than rewritten: it reads as
+# the backend-facing surface it is, and it stays trivially re-extractable.
+include("host/host.jl")
 
 end

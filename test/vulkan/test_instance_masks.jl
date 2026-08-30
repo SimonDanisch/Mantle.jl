@@ -1,6 +1,6 @@
 # test_instance_masks.jl
 #
-# Tier 3 GPU integration test: per-instance cullMask filtering on HWTLAS.
+# Tier 3 GPU integration test: per-instance cullMask filtering on VulkanTLAS.
 #
 # Two triangle BLASes at different z-depths, each tagged with a distinct mask.
 # Three rayQuery calls use mask=0x01, mask=0x02, mask=0xFF and must hit the
@@ -33,7 +33,7 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
         GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
     end
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     # Instance 1: mask 0x01, z=5
     push!(tlas, tri_mesh(5f0),  Mat4f_IM(I); instance_id=UInt32(1), instance_mask=UInt8(0x01))
     # Instance 2: mask 0x02, z=10

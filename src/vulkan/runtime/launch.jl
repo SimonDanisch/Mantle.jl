@@ -111,10 +111,10 @@ Example:
     lava_launch!(bq, my_kernel, a, b, Int32(n); ndrange=n, workgroup_size=(256,1,1))
     # kernel signature: my_kernel(a::LavaDeviceArray{Float32,1}, ...)
 """
-function lava_launch!(bq::BatchQueue, @nospecialize(f), args...;
+function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
-                       tlas=nothing)  # Union{Nothing, HWTLAS} — declared later in raytracing/hwtlas.jl
+                       tlas=nothing)  # Union{Nothing, VulkanTLAS} — declared later in raytracing/hwtlas.jl
     validate_launch_args(bq.ctx::VkContext, args)
     if ndrange isa Integer
         ndrange_3d = (Int(ndrange), 1, 1)
@@ -146,10 +146,10 @@ function lava_launch!(bq::BatchQueue, @nospecialize(f), args...;
         get_compiled_kernel_and_pipeline(bq.ctx::VkContext, converted_f, tt, workgroup_size;
                                          enable_ray_query)
 
-    # Loud error: kernel needs TLAS but none was provided at launch.
+    # Loud error: kernel needs HWTLAS but none was provided at launch.
     if pipeline.needs_tlas_descriptor && tlas === nothing
         error("kernel was compiled with enable_ray_query=true but launch_kernel was " *
-              "called without a tlas keyword. Pass tlas=<HWTLAS> to bind the " *
+              "called without a tlas keyword. Pass tlas=<VulkanTLAS> to bind the " *
               "acceleration structure to descriptor set 0, binding 0.")
     end
 
@@ -270,7 +270,7 @@ Write kernel arguments directly into mapped GPU memory via per-type
 `bq.active_batch` must already exist (callers call `ensure_active_batch!`
 before us).
 """
-@generated function pack_args_direct!(bq::BatchQueue,
+@generated function pack_args_direct!(bq::VulkanBatchQueue,
                                         mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                                         offsets::Vector{Int}, base_size::Int,
                                         byval_sizes::Vector{Int},
@@ -404,7 +404,7 @@ each kernel recompiles from Julia source.
 Use this after editing a Julia kernel under Revise — Revise invalidates the
 Julia method, but Lava's hash-keyed kernel cache stays populated with the old
 SPIR-V because `hash(f, tt, workgroup_size)` doesn't change when the method
-body changes. Unlike `vk_reset_device!()`, this keeps all existing
+body changes. Unlike `reset_device!()`, this keeps all existing
 `LavaArray`s and the Vulkan context alive.
 
 **Both** caches have to go. `caches.launchplans` holds its own `VkPipeline`
@@ -593,7 +593,7 @@ end
 
 """Lazy-grow `bq.arg_slabs` so `bq.arg_slab_idx` indexes a live slab big
 enough for `min_size`.  Advances `arg_slab_idx` if the current slab is full."""
-function ensure_arg_slab!(bq::BatchQueue, min_size::Int)
+function ensure_arg_slab!(bq::VulkanBatchQueue, min_size::Int)
     while length(bq.arg_slabs) < bq.arg_slab_idx
         push!(bq.arg_slabs,
               LavaArray{UInt8,1}(undef, (max(ARG_SLAB_SIZE, min_size),);
@@ -611,8 +611,8 @@ function ensure_arg_slab!(bq::BatchQueue, min_size::Int)
     end
 end
 
-function get_arg_buffer(bq::BatchQueue, nbytes::Integer)
-    @assert Threads.threadid() == bq.owning_thread  "BatchQueue is single-writer; cross-thread arg-buf alloc forbidden"
+function get_arg_buffer(bq::VulkanBatchQueue, nbytes::Integer)
+    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread arg-buf alloc forbidden"
     aligned_size = (max(Int(nbytes), 16) + ARG_SLAB_ALIGN - 1) & ~(ARG_SLAB_ALIGN - 1)
     # A capture allocates from its OWN slabs. The address is baked into the
     # command buffer as a push constant, so a replay reads whatever those bytes
@@ -642,7 +642,7 @@ end
 """Bump-allocate `aligned_size` bytes from a capture's own slabs, growing them
 as needed. No reclaim and no frontier: a capture's slabs are never rewound,
 which is the whole point of them being its own."""
-function capture_arg_buffer!(cap, bq::BatchQueue, aligned_size::Int)
+function capture_arg_buffer!(cap, bq::VulkanBatchQueue, aligned_size::Int)
     while length(cap.slabs) < cap.slab_idx
         push!(cap.slabs, LavaArray{UInt8,1}(undef, (max(ARG_SLAB_SIZE, aligned_size),);
                                             bq = bq, unified = true))
@@ -684,7 +684,7 @@ Rewinding at end-of-frame did exactly that: geometry corruption over a static
 scene, intermittent, hidden by any full sync, and invisible to validation —
 overwriting your own host-mapped memory is perfectly legal.
 """
-function arg_pool_in_use!(bq::BatchQueue, signal_value::Integer)
+function arg_pool_in_use!(bq::VulkanBatchQueue, signal_value::Integer)
     bq.arg_pool_frontier = UInt64(signal_value)
     # Everything handed out so far now belongs to a submitted batch, and the
     # frontier covers it. The recording that starts next holds nothing yet, which
@@ -710,7 +710,7 @@ in flight for the timeline to move during it, which is why it appeared the day t
 per-frame flush went away and only with a hundred plots. `arg_alloc_count` is the
 count since the last submit, so it is exactly "this recording holds handouts".
 """
-function reclaim_arg_buffer_pool!(bq::BatchQueue)
+function reclaim_arg_buffer_pool!(bq::VulkanBatchQueue)
     bq.arg_pool_frontier == UInt64(0) && return false
     bq.arg_alloc_count == 0 || return false
     query_timeline(bq) >= bq.arg_pool_frontier || return false
@@ -723,7 +723,7 @@ end
 
 All the way to the first slab: nothing is reserved here any more, because a
 capture allocates its arguments from slabs it owns rather than from this pool."""
-function reset_arg_buffer_pool!(bq::BatchQueue)
+function reset_arg_buffer_pool!(bq::VulkanBatchQueue)
     bq.arg_slab_idx = 1
     bq.arg_slab_offset = 0
     bq.arg_alloc_count = 0
@@ -734,7 +734,7 @@ end
 host-mapped BAR memory + INDIRECT_BUFFER usage.  Same sub-allocation shape
 as arg slabs; every sub-allocation is a LavaArray view over the slab so
 callers never see a raw Vulkan buffer."""
-function ensure_indirect_slab!(bq::BatchQueue)
+function ensure_indirect_slab!(bq::VulkanBatchQueue)
     while length(bq.indirect_slabs) < bq.indirect_slab_idx
         push!(bq.indirect_slabs,
               LavaArray{UInt32,1}(undef, (INDIRECT_SLAB_ELEMS,);
@@ -750,8 +750,8 @@ Sub-allocate a 3-element LavaArray view from `bq`'s indirect-dispatch slab
 (enough for one `VkDispatchIndirectCommand`).  The view shares the slab's
 DataRef, so the slab stays alive while any view is pinned.
 """
-function get_indirect_buffer(bq::BatchQueue)
-    @assert Threads.threadid() == bq.owning_thread  "BatchQueue is single-writer; cross-thread indirect-buf alloc forbidden"
+function get_indirect_buffer(bq::VulkanBatchQueue)
+    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread indirect-buf alloc forbidden"
     alloc_bytes = INDIRECT_SLAB_ALIGN
     ensure_indirect_slab!(bq)
     slab = bq.indirect_slabs[bq.indirect_slab_idx]::LavaArray{UInt32,1}
@@ -767,7 +767,7 @@ function get_indirect_buffer(bq::BatchQueue)
     return LavaArray{UInt32,1}(ref, (3,); offset=byte_offset)
 end
 
-function reset_indirect_buffer_pool!(bq::BatchQueue)
+function reset_indirect_buffer_pool!(bq::VulkanBatchQueue)
     bq.indirect_slab_idx = 1
     bq.indirect_slab_offset = 0
 end

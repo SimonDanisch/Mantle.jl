@@ -16,7 +16,7 @@
 # deleted along with the env vars, because "which preset do I call" was itself a
 # way to end up instrumented for something other than what you were hunting.
 #
-# The device-building half is deliberately NOT tested here — `vk_reset_device!`
+# The device-building half is deliberately NOT tested here — `reset_device!`
 # invalidates every live `LavaArray`, so a suite that ran it mid-file would break
 # whatever came after. `test_gpuav_clean.jl` covers that, gated on
 # `LAVA_TEST_GPU_AV=1`.
@@ -76,10 +76,10 @@ using Test, Lava, Mantle
     end
 
     @testset "there is one way in, and the presets are gone" begin
-        # `vk_reset_device!` takes it; `VkContext` takes it. Nothing else does.
+        # `reset_device!` takes it; `VkContext` takes it. Nothing else does.
         # `any` over the method table, not `first`: `VkContext`'s first method is
         # the inner positional constructor, whose `kwarg_decl` is empty.
-        for f in (Mantle.vk_reset_device!, Mantle.VkContext)
+        for f in (Mantle.reset_device!, Mantle.VkContext)
             @test any(m -> :debug in Base.kwarg_decl(m), methods(f))
         end
         # The five presets must not come back — each was a different default

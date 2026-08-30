@@ -13,7 +13,7 @@
 #   8. Deferred-free lists actually drain
 #   9. Derived arrays (views/reshape) keep parent alive via DataRef refcount
 #  10. Arg-validation at launch catches freed/poisoned buffers
-#  11. `BatchQueue` state (pinned set, deferred lists, slabs) stays bounded
+#  11. `VulkanBatchQueue` state (pinned set, deferred lists, slabs) stays bounded
 
 using Test
 using Lava, Mantle
@@ -251,8 +251,8 @@ end
         @test Mantle.vk_context().diag.launch_arg_validation == true
     end
 
-    # ── 11. BatchQueue state stays bounded across a long session ──
-    @testset "BatchQueue state bounded" begin
+    # ── 11. VulkanBatchQueue state stays bounded across a long session ──
+    @testset "VulkanBatchQueue state bounded" begin
         @kernel function cheap_k!(a)
             i = @index(Global, Linear)
             @inbounds a[i] += 1.0f0

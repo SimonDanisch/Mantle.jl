@@ -1,14 +1,14 @@
 # ==============================================================================
-# HW TLAS stress + correctness test (Lava backend)
+# HW HWTLAS stress + correctness test (Lava backend)
 # ==============================================================================
 #
 # Lava is a hard test dep for Raycore, so this runs as part of the normal suite
 # (a real Vulkan device must be available). Exercises two failure modes the
-# HWTLAS + RaycoreLavaExt path is especially prone to:
+# VulkanTLAS + RaycoreLavaExt path is especially prone to:
 #
 # 1. **Correctness** — every `push!` / `delete!` / `update_transform!` /
 #    `update_transforms!` followed by `sync!(hwtlas)` must reflect in
-#    subsequent `trace_closest_hits!` results. If the Vulkan TLAS / BLAS
+#    subsequent `trace_closest_hits!` results. If the Vulkan HWTLAS / BLAS
 #    / per-instance offset buffers retain stale BDA captures from before
 #    the mutation, rays will hit the OLD geometry → wrong `t` / wrong
 #    primitive id. We compare each batch of hits against an analytic CPU
@@ -20,7 +20,7 @@
 #    `sync!`. The extension's `release_hw_accel_state!` + Lava's
 #    finalizer + pool-reuse path must drop the old ones; otherwise
 #    `GPU_LIVE_BYTES`, the pool-block count, and the `LIVE_BUFFERS` set
-#    grow without bound. We hammer the TLAS with ≥500 rebuild cycles and
+#    grow without bound. We hammer the HWTLAS with ≥500 rebuild cycles and
 #    assert every counter stays under a tight ceiling relative to
 #    baseline. If any GPU buffer that was freed mid-cycle was still
 #    referenced by a pending dispatch, a hit result would come back with
@@ -53,7 +53,7 @@ end
 box_mesh(origin::Vec3f, extent::Vec3f) =
     GeometryBasics.normal_mesh(Rect3f(origin, extent))
 
-# Shared HW-TLAS helpers — see test/hwtlas_helpers.jl (provides `translation`).
+# Shared HW-HWTLAS helpers — see test/hwtlas_helpers.jl (provides `translation`).
 isdefined(@__MODULE__, :translation) ||
     include(joinpath(@__DIR__, "hwtlas_helpers.jl"))
 
@@ -73,11 +73,11 @@ end
 # Shared setup
 # ------------------------------------------------------------------------------
 
-"""Build an HWTLAS on Lava with `N` instances of the unit triangle, each
+"""Build an VulkanTLAS on Lava with `N` instances of the unit triangle, each
 placed at a distinct translation so a single vertical ray per instance
 hits each one exactly once."""
 function build_scene(N::Int)
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
     handles = Raycore.TLASHandle[]
     offsets = NTuple{3,Float32}[]
@@ -103,7 +103,7 @@ end
 """Upload rays + run HW trace and return the hit result vector (on CPU).
 Uses the `HardwareAccel` already built by `Raycore.sync!(hwtlas)` — calling
 `Mantle.HardwareAccel(hwtlas)` would rebuild the same thing from scratch via
-the generic CPU-TLAS path and fails because `hwtlas.instances` is a
+the generic CPU-HWTLAS path and fails because `hwtlas.instances` is a
 lightweight length-only shim, not a real instance vector."""
 function trace_rays_cpu(hwtlas, offsets)
     rays   = make_rays(offsets)
@@ -145,7 +145,7 @@ function assert_hits_match(hits::Vector{Raycore.RTHitResult},
     return all_good
 end
 
-@testset "HW TLAS — correctness under mutation" begin
+@testset "HW HWTLAS — correctness under mutation" begin
     N = 8
     hwtlas, handles, offsets = build_scene(N)
 
@@ -196,7 +196,7 @@ function snapshot_state()
     (gpu_bytes=gpu_bytes, live_bufs=n_buffers, pool_blocks=n_pool)
 end
 
-@testset "HW TLAS — stress / leak bounds" begin
+@testset "HW HWTLAS — stress / leak bounds" begin
     N = 16
     hwtlas, handles, offsets = build_scene(N)
 
@@ -217,7 +217,7 @@ end
 
     # Hammer the rebuild cycle. Every iteration:
     #   * shuffle per-instance transforms (push fresh NTuple{12,Float32})
-    #   * call sync! — rebuilds TLAS (and maybe BLAS offsets) on Lava
+    #   * call sync! — rebuilds HWTLAS (and maybe BLAS offsets) on Lava
     #   * trace + verify — catches use-after-free and UAF-masked noise
     n_iters   = 500
     max_hits  = 0  # debugging aid — peak samples during the loop
@@ -251,7 +251,7 @@ end
 # update_transforms! — bulk transform update via GPU kernel
 # ------------------------------------------------------------------------------
 
-@testset "HW TLAS — update_transforms! (CPU input) refits without rebuild" begin
+@testset "HW HWTLAS — update_transforms! (CPU input) refits without rebuild" begin
     N = 8
     hwtlas, handles, offsets = build_scene(N)
 
@@ -283,10 +283,10 @@ end
     @test assert_hits_match(trace_rays_cpu(hwtlas, final_offsets), final_offsets)
 end
 
-@testset "HW TLAS — update_transforms! accepts LavaArray input" begin
+@testset "HW HWTLAS — update_transforms! accepts LavaArray input" begin
     N = 4
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     h = push!(hwtlas, unit_triangle_mesh(), init_xfs; instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
@@ -301,10 +301,10 @@ end
     @test assert_hits_match(trace_rays_cpu(hwtlas, final_offsets), final_offsets)
 end
 
-@testset "HW TLAS — update_transforms! then delete!(handle) is safe" begin
+@testset "HW HWTLAS — update_transforms! then delete!(handle) is safe" begin
     N = 4
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     h_a = push!(hwtlas, unit_triangle_mesh(), init_xfs; instance_mask=UInt8(0xff))
     h_b = push!(hwtlas, unit_triangle_mesh(), translation(20f0, 0f0, 0f0))
     Raycore.sync!(hwtlas)
@@ -329,9 +329,9 @@ end
 # timeline ordering bugs, refit-vs-rebuild misclassification at high count.
 # ------------------------------------------------------------------------------
 
-@testset "HW TLAS — interleaved update_transforms! + trace tight loop (1000 inst, refit)" begin
+@testset "HW HWTLAS — interleaved update_transforms! + trace tight loop (1000 inst, refit)" begin
     N = 1000
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
     h = push!(hwtlas, mesh, init_xfs; instance_mask=UInt8(0xff))
@@ -424,8 +424,8 @@ function hw_grow_shrink_tess(iter::Int)
     end
 end
 
-@testset "HW TLAS — 500-iter mesh grow/shrink + HW trace per iter" begin
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+@testset "HW HWTLAS — 500-iter mesh grow/shrink + HW trace per iter" begin
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     h = push!(hwtlas, sphere_mesh_n(8), translation(0, 0, 0); instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
@@ -445,7 +445,7 @@ end
         @test length(hwtlas.instance_batches) == 1
 
         # HW trace through the freshly-built BVH.  If the previous iter's
-        # trace dispatch hadn't completed before sync! freed the old TLAS
+        # trace dispatch hadn't completed before sync! freed the old HWTLAS
         # backing (instance_buf, hw_tlas, tri_gpu, off_gpu), this trace
         # would either fault or return wrong values — we'd see the t
         # mismatch immediately and not 500 iters from now.
@@ -458,9 +458,9 @@ end
     @test saw_max >= 90
 end
 
-@testset "HW TLAS — interleaved delete+push+sync+trace tight loop (500 inst, rebuild)" begin
+@testset "HW HWTLAS — interleaved delete+push+sync+trace tight loop (500 inst, rebuild)" begin
     N = 500
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
     h = push!(hwtlas, mesh, init_xfs; instance_mask=UInt8(0xff))
@@ -492,9 +492,9 @@ end
     end
 end
 
-@testset "HW TLAS — n_instances matches live batch count under churn" begin
+@testset "HW HWTLAS — n_instances matches live batch count under churn" begin
     rng = Random.MersenneTwister(0xCAFEBABE)
-    hwtlas = Mantle.HWTLAS(LavaBackend())
+    hwtlas = Mantle.VulkanTLAS(LavaBackend())
     handles = Raycore.TLASHandle[]
     expected = 0
     for iter in 1:50
@@ -522,4 +522,4 @@ end
     end
 end
 
-println("\nAll HW TLAS tests passed.")
+println("\nAll HW HWTLAS tests passed.")

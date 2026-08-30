@@ -1,4 +1,4 @@
-# Helpers shared between HW-TLAS test files (test_hwtlas_stress.jl,
+# Helpers shared between HW-HWTLAS test files (test_hwtlas_stress.jl,
 # test_hwtlas_mesh_update.jl, …).  Each test includes this with an
 # `isdefined` guard so re-includes in the same `Main` are no-ops; the
 # files still work standalone.

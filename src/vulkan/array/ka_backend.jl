@@ -44,8 +44,8 @@ Lava's GPU compute backend. Carries the Vulkan context and batch queues explicit
 
 `LavaBackend()` with no arguments resolves `dispatch_bq` / `upload_bq`
 lazily via `vk_context().default_bq` at every property access.  Pinning
-would break after `vk_reset_device!()`: a `const BACKEND = LavaBackend()`
-created at module-load would keep a stale `BatchQueue` tied to the old
+would break after `reset_device!()`: a `const BACKEND = LavaBackend()`
+created at module-load would keep a stale `VulkanBatchQueue` tied to the old
 `VkDevice`, and every subsequent buffer created via that backend would end
 up allocated on the dead device — later triggering
 `VUID-vkCmdCopyBuffer-commonparent` and a page-aligned GPUVM fault.
@@ -56,13 +56,13 @@ upload queue).
 struct LavaBackend <: KA.GPU
     # nothing = "use vk_context().default_bq at each access" (survives resets)
     # non-nothing = caller pinned this specific queue
-    dispatch_bq::Union{BatchQueue, Nothing}
-    upload_bq::Union{BatchQueue, Nothing}
+    dispatch_bq::Union{VulkanBatchQueue, Nothing}
+    upload_bq::Union{VulkanBatchQueue, Nothing}
 end
 
 LavaBackend() = LavaBackend(nothing, nothing)
 LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
-LavaBackend(bq::BatchQueue) = LavaBackend(bq, bq)
+LavaBackend(bq::VulkanBatchQueue) = LavaBackend(bq, bq)
 
 """
     vk_context(backend) -> VkContext
@@ -76,10 +76,10 @@ the single-device case; what has to stop is code *depending* on it, because a
 global cannot answer "which device" once there are two.
 
 **No new state.** Both are derived from what these objects already carried:
-`BatchQueue.ctx` for a backend and `Buffer.ctx` for an array. That is worth
+`VulkanBatchQueue.ctx` for a backend and `Buffer.ctx` for an array. That is worth
 saying because it was briefly got wrong in the other direction — a `ctx` field
 was added to `LavaBackend` on the belief that no path existed, which came from
-reading the first half of `BatchQueue`'s field list, where `ctx::Any` sits
+reading the first half of `VulkanBatchQueue`'s field list, where `ctx::Any` sits
 sixty-odd lines down. A second copy of a fact the queue already holds can only
 ever disagree with it, so this derives instead.
 
@@ -117,7 +117,7 @@ vk_context(a::LinearAlgebra.Adjoint) = vk_context(parent(a))
 
 # Property access resolves a `nothing`-pinned queue through the live
 # `vk_context()` so a module-level `const BACKEND = LavaBackend()` keeps
-# working across `vk_reset_device!()`. `:bq` stays a back-compat alias for
+# working across `reset_device!()`. `:bq` stays a back-compat alias for
 # `:dispatch_bq`.
 function Base.getproperty(b::LavaBackend, s::Symbol)
     if s === :dispatch_bq
@@ -340,21 +340,21 @@ KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
 # ── Kernel call (main entry point) ──
 #
 # `find_tlas_in_args` scans the kernel's pre-adapt arg tuple for any value
-# that holds a live HWTLAS reference, so callers can write
+# that holds a live VulkanTLAS reference, so callers can write
 #   `kernel(accel, args...; ndrange=...)`
-# with `accel::HWAdaptedAccel` (or any value carrying one) and have
-# `enable_ray_query=true` + the TLAS descriptor binding wired automatically
+# with `accel::AdaptedAccel` (or any value carrying one) and have
+# `enable_ray_query=true` + the HWTLAS descriptor binding wired automatically
 # at compile + dispatch.  This keeps the SW/HW swap a single-arg change at
 # the call site — Hikari's `Raycore.closest_hit(accel, ray)` polymorphism
 # falls through unchanged.
 #
-# Whether an argument *can* carry a TLAS is a property of its type, so the scan
+# Whether an argument *can* carry a HWTLAS is a property of its type, so the scan
 # is resolved at compile time: a compute kernel — every kernel in a DNN or
 # broadcast workload — gets `nothing` and no code at all. The recursive
 # `Base.tail` walk it replaces did not fold away on the long argument tuples KA
 # produces (kernel args plus a `CompilerMetadata` plus a `Val` per static
 # parameter), and showed up as the second-largest host cost in the MatAnyone
-# inference loop, on kernels that have no TLAS and never could.
+# inference loop, on kernels that have no HWTLAS and never could.
 #
 # Later arguments win, matching the accumulate-forward order of the walk.
 @generated function find_tlas_in_args(args::Tuple)
@@ -371,7 +371,7 @@ KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
 end
 @inline _find_tlas(::Tuple{}, acc) = acc
 @inline _find_tlas(args::Tuple, acc) = _find_tlas(Base.tail(args), _maybe_tlas(first(args), acc))
-# `HWAdaptedAccel` is declared in raytracing/hwtlas.jl (loaded after this file);
+# `AdaptedAccel` is declared in raytracing/hwtlas.jl (loaded after this file);
 # loose-typed dispatch + a runtime field check keeps the include order intact.
 @inline function _maybe_tlas(x, acc)
     if hasfield(typeof(x), :hwtlas)
@@ -448,7 +448,7 @@ for free. On the MatAnyone step barriers are 3.35 ms of an 11.07 ms replay.
 # barrier it needed.
 
 """Reset the elision state — call whenever the queue is known to be drained."""
-@inline reset_barrier_elision!(bq::BatchQueue) = (empty!(bq.touched_ranges); nothing)
+@inline reset_barrier_elision!(bq::VulkanBatchQueue) = (empty!(bq.touched_ranges); nothing)
 
 """
     poison_barrier_elision!(bq)
@@ -467,7 +467,7 @@ plausible error a race gives you.
 Modelled as one range covering the whole address space: every subsequent
 dispatch overlaps it, takes its barrier, and clears it — no special cases.
 """
-@inline function poison_barrier_elision!(bq::BatchQueue)
+@inline function poison_barrier_elision!(bq::VulkanBatchQueue)
     touched = bq.touched_ranges
     empty!(touched)
     push!(touched, UInt64(0))
@@ -480,7 +480,7 @@ True when `new` overlaps anything in `bq.touched_ranges`. On overlap the caller
 emits a barrier and the set restarts from `new`; otherwise `new` is merged in and
 the barrier is skipped.
 """
-function barrier_needed!(bq::BatchQueue, new::Vector{UInt64})
+function barrier_needed!(bq::VulkanBatchQueue, new::Vector{UInt64})
     touched = bq.touched_ranges
     hit = false
     @inbounds for i in 1:2:length(new)
@@ -594,7 +594,7 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
     end
     bq = obj.backend.bq
 
-    # Auto-discover TLAS for ray-query kernels — extract BEFORE Adapt strips
+    # Auto-discover HWTLAS for ray-query kernels — extract BEFORE Adapt strips
     # hwtlas (kernel form has hwtlas=nothing).
     tlas = find_tlas_in_args(args)
 
@@ -663,7 +663,7 @@ holder, e.g. `struct MyOp{KK}; kern::KK; end`.
 struct LavaKernel{K,P,Q}
     inner::K
     plan::P
-    # The queue, RESOLVED. `LavaBackend` stores `dispatch_bq::Union{BatchQueue,
+    # The queue, RESOLVED. `LavaBackend` stores `dispatch_bq::Union{VulkanBatchQueue,
     # Nothing}` and has no `bq` field, so `backend.bq` goes through an accessor
     # that does not infer concretely — and leaving it abstract made this whole
     # idea BACKFIRE: the call below stayed dynamic, and a dynamic call has to box
@@ -687,7 +687,7 @@ function (lk::LavaKernel)(args...)
     return launch_planned!(lk.bq, lk.inner, args, lk.plan, tlas)
 end
 
-@noinline function launch_planned!(bq::BatchQueue, obj::KA.Kernel{LavaBackend},
+@noinline function launch_planned!(bq::VulkanBatchQueue, obj::KA.Kernel{LavaBackend},
                                    args::Tuple, plan::IterPlan, tlas)
     plan.nblocks == 0 && return nothing
     ka_ctx     = plan.ka_ctx
@@ -813,11 +813,11 @@ Internal launch function for KA kernels. Compiles and dispatches the GPU functio
 
 @inline launch_plan_cache(ctx) = ctx.caches.launchplans
 
-@inline function launch_plan(bq::BatchQueue, @nospecialize(f), all_args::Tuple,
+@inline function launch_plan(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
                              wg::NTuple{3,Int}, ray_query::Bool)
     key = typeof(all_args)
     world = Base.get_world_counter()
-    # `bq.ctx::VkContext`, and the assert is the whole point: `BatchQueue.ctx` is
+    # `bq.ctx::VkContext`, and the assert is the whole point: `VulkanBatchQueue.ctx` is
     # declared `::Any` (it must be — `VkContext` owns the queue, so one direction
     # of the cycle is untyped). Without the assert `ctx.caches.launchplans` infers
     # as `Any`, which makes the `get` below a dynamic dispatch and the loop over
@@ -858,7 +858,7 @@ end
 # This is CUDA.jl's shape (`cudacall` keeps the argument-dependent part to a thin
 # shell over a type-erased worker). The split point is `tt`: everything above it
 # is per-kernel and tiny, everything below is per-kernel-invariant and large.
-@noinline function build_launch_plan!(bq::BatchQueue, @nospecialize(f), all_args::Tuple,
+@noinline function build_launch_plan!(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
                                       wg::NTuple{3,Int}, ray_query::Bool,
                                       key::DataType, world::UInt64)
     # Excludes f — GPUCompiler prepends typeof(f). all_args are already
@@ -892,7 +892,7 @@ The cost is that `f` and `tt` come out as `Any` and every call below here is a
 dynamic dispatch. That is the right trade on this path and only on this path:
 `launch_plan` reaches it solely on a cache miss, i.e. once per kernel per world,
 and what follows is a SPIR-V compile. On the hit path nothing here runs."""
-@noinline function build_launch_plan_tt!(bq::BatchQueue, fbox::Base.RefValue{Any},
+@noinline function build_launch_plan_tt!(bq::VulkanBatchQueue, fbox::Base.RefValue{Any},
                                          ttbox::Base.RefValue{Any},
                                          keybox::Base.RefValue{Any},
                                          wg::NTuple{3,Int}, ray_query::Bool,
@@ -912,11 +912,11 @@ and what follows is a SPIR-V compile. On the hit path nothing here runs."""
     p
 end
 
-function ka_launch!(bq::BatchQueue, @nospecialize(f), all_args::Tuple,
+function ka_launch!(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
                     block_dims::NTuple{3,Int}, workgroup_size::NTuple{3,Int},
                     tlas=nothing)  # positional, Nothing default — hot path
-    # When `tlas` was auto-discovered from kernel args (e.g. an HWAdaptedAccel
-    # was passed), enable ray_query so the SPIR-V emitter binds the TLAS
+    # When `tlas` was auto-discovered from kernel args (e.g. an AdaptedAccel
+    # was passed), enable ray_query so the SPIR-V emitter binds the HWTLAS
     # descriptor and accepts OpRayQueryInitializeKHR / Proceed / Get*KHR.
     plan = launch_plan(bq, f, all_args, workgroup_size, tlas !== nothing)
 
@@ -965,7 +965,7 @@ end
 # (hash lookups, validation, auto-flush, keep_alive, etc.).
 
 
-# Register cleanup callback for vk_reset_device!
+# Register cleanup callback for reset_device!
 
 function init_prepare_indirect_pipeline!(ctx::VkContext)
     ctx.caches.prepare_indirect === nothing || return
@@ -986,7 +986,7 @@ Fast path for prepare-indirect dispatch.  Bypasses lava_launch!'s validation/
 logging overhead: manually adapts the two LavaArrays (pin + strip) and
 packs directly.
 """
-function fast_prepare_indirect!(bq::BatchQueue,
+function fast_prepare_indirect!(bq::VulkanBatchQueue,
                                 indirect::LavaArray{UInt32,1},
                                 ndrange_buf::LavaArray{<:Integer},
                                 workgroup_size::Integer)
@@ -1010,7 +1010,7 @@ function fast_prepare_indirect!(bq::BatchQueue,
     vk_dispatch_base!(bq, pipeline, arg_buf.address, 0, 0, 0, 1, 1, 1)
 end
 
-function prepare_indirect_dispatch!(bq::BatchQueue,
+function prepare_indirect_dispatch!(bq::VulkanBatchQueue,
                                     indirect::LavaArray{UInt32,1},
                                     ndrange_buf::LavaArray{<:Integer},
                                     workgroup_size::Integer)
@@ -1028,7 +1028,7 @@ group counts to an indirect buffer, then vk_dispatch_indirect! dispatches the ma
 """
 function ka_launch_indirect!(obj, args, ndrange_buf::LavaArray, workgroupsize, original_args,
                              adaptor::LavaAdaptor,
-                             bq::BatchQueue=obj.backend.bq,
+                             bq::VulkanBatchQueue=obj.backend.bq,
                              tlas=nothing)  # positional — same NamedTuple-avoidance as ka_launch!
     # Respect static workgroup size from @kernel definition
     ws = if workgroupsize !== nothing

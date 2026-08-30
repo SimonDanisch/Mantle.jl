@@ -47,7 +47,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     end
 
     # -------------------------------------------------------------------------
-    # Build AABB BLAS and wrap in HWTLAS.
+    # Build AABB BLAS and wrap in VulkanTLAS.
     # -------------------------------------------------------------------------
     blas = Mantle.as_build() do ctx_build
         Mantle.build_blas_aabb(ctx_build, aabbs)
@@ -55,7 +55,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 
     @test blas.address != UInt64(0)
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, Mat4f(I); instance_id=UInt32(0))
     Raycore.sync!(tlas)
 

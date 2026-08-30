@@ -9,7 +9,7 @@ using Raycore: RTRay, RTHitResult
 """
     HardwareAccel{TriVec <: AbstractVector}
 
-Hardware-accelerated ray tracing context. Built from a Raycore-compatible TLAS.
+Hardware-accelerated ray tracing context. Built from a Raycore-compatible HWTLAS.
 Parametrised on the concrete triangle-vector type (e.g.
 `Vector{Raycore.Triangle{UInt32}}`) so field accesses stay type-stable.
 
@@ -39,24 +39,24 @@ mutable struct HardwareAccel{TriVec <: AbstractVector}
     rt_pipeline::RayTracingPipeline
     # Optional any-hit pipeline (lazy — created on first use via set_anyhit_pipeline!)
     anyhit_pipeline::Union{Nothing, RayTracingPipeline}
-    # BatchQueue this accel's RT dispatches run on.  Stored explicitly so
+    # VulkanBatchQueue this accel's RT dispatches run on.  Stored explicitly so
     # callers don't reach for an implicit `vk_context().default_bq`.
-    bq::BatchQueue
+    bq::VulkanBatchQueue
 end
 
 """
     HardwareAccel(tlas; bq=<derived from tlas storage>) -> HardwareAccel
 
-Build a HardwareAccel from a Raycore-compatible TLAS.
-The TLAS must have `.blas_array` and `.instances` fields.
+Build a HardwareAccel from a Raycore-compatible HWTLAS.
+The HWTLAS must have `.blas_array` and `.instances` fields.
 
-`bq` defaults to the BatchQueue whose ctx built the TLAS (the CPU-side TLAS
+`bq` defaults to the VulkanBatchQueue whose ctx built the HWTLAS (the CPU-side HWTLAS
 object is used to find the ctx via the HW build path), so ray tracing runs
 on the same device the AS was allocated against.
 """
 function HardwareAccel(tlas;
                        ctx::VkContext=vk_context(),
-                       bq::BatchQueue=ctx.default_bq)
+                       bq::VulkanBatchQueue=ctx.default_bq)
     hw_tlas, tri_data, offsets, per_inst_offsets = build_hw_accel_from_tlas(tlas; ctx)
     HardwareAccel(hw_tlas, tri_data, offsets, per_inst_offsets; bq)
 end
@@ -65,7 +65,7 @@ end
     HardwareAccel(hw_tlas::LavaTLAS, triangle_data, blas_offsets, per_instance_tri_offsets;
                   bq=<derived from hw_tlas>) -> HardwareAccel
 
-Build a HardwareAccel from a pre-built Vulkan TLAS + triangle data + offsets.
+Build a HardwareAccel from a pre-built Vulkan HWTLAS + triangle data + offsets.
 Default `bq` is taken from `hw_tlas.storage.buf[].ctx.default_bq` so we never
 mismatch the AS against a queue on a different device.
 
@@ -76,11 +76,11 @@ rebuilds should reuse the previous HardwareAccel via the Raycore-side
 geometry-dependent fields (`tlas`, `triangle_data`, `blas_offsets`,
 `per_instance_tri_offsets`) in place and keeps the pipeline alive. In the
 Raycore/RayMakie flow this happens automatically on every `sync!(hwtlas)` —
-one pipeline per HWTLAS, lifetime tied to the HWTLAS.
+one pipeline per VulkanTLAS, lifetime tied to the VulkanTLAS.
 """
 function HardwareAccel(hw_tlas::LavaTLAS, triangle_data::TriVec, blas_offsets,
                        per_instance_tri_offsets::AbstractVector{UInt32};
-                       bq::BatchQueue=(hw_tlas.storage.buf[].ctx::VkContext).default_bq
+                       bq::VulkanBatchQueue=(hw_tlas.storage.buf[].ctx::VkContext).default_bq
                        ) where {TriVec <: AbstractVector}
     pipeline = RayTracingPipeline(
         raygen=hw_raygen,
@@ -119,7 +119,7 @@ Results are written to `results` buffer (one RTHitResult per ray).
 `results` and `rays` can be `LavaArray{RTHitResult}`/`LavaArray{RTRay}`,
 or any type accepted by `trace_rays!`.
 
-`cull_mask` is ANDed against each instance's instance_mask in the TLAS.
+`cull_mask` is ANDed against each instance's instance_mask in the HWTLAS.
 An instance is visible to a ray only when `(cull_mask & instance_mask) != 0`.
 Default `0xFF` matches all instances (backward-compatible).
 """
@@ -135,7 +135,7 @@ end
 
 Indirect RT trace -- reads ray count from GPU buffer. No CPU readback.
 
-`cull_mask` is ANDed against each instance's instance_mask in the TLAS.
+`cull_mask` is ANDed against each instance's instance_mask in the HWTLAS.
 Default `0xFF` matches all instances (backward-compatible).
 """
 function trace_closest_hits_indirect!(results, rays, accel::HardwareAccel, n_rays::LavaArray{Int32};

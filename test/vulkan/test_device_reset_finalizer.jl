@@ -2,9 +2,9 @@
 A buffer that outlives a device reset must not call into the device it outlived.
 
     d = KA.allocate(LavaBackend(), Float32, 1000); fill!(d, 1f0)
-    Mantle.vk_reset_device!(); d = nothing; GC.gc()      # <- SIGSEGV
+    Mantle.reset_device!(); d = nothing; GC.gc()      # <- SIGSEGV
 
-Ten lines, and it took down the whole suite. `vk_reset_device!` drops
+Ten lines, and it took down the whole suite. `reset_device!` drops
 `VK_CONTEXT_REF`, which makes the old context garbage — and its buffers garbage
 in the **same collection**, where Julia does not order finalizers. Run the
 context's first and `Vulkan.Device`'s own finalizer destroys the device; the
@@ -14,7 +14,7 @@ fault inside `vkGetSemaphoreCounterValue`.
 `vk_free!` does gate on `device_lost`, and the reset's comment cited that gate as
 the reason this was safe. The gate was simply never true here: a reset *caused by*
 `ERROR_DEVICE_LOST` finds the flag already set, and a voluntary
-`vk_reset_device!()` — which is what the suite does — left it false. So the fix is
+`reset_device!()` — which is what the suite does — left it false. So the fix is
 to set it, and what this test pins is that a retired context stays retired.
 
 It reproduces at `046b1ed`, before any of the per-device work, and the AMD
@@ -40,7 +40,7 @@ const KA = KernelAbstractions
     KA.synchronize(b)
     @test Array(d) == fill(1.0f0, 1000)
 
-    Mantle.vk_reset_device!()
+    Mantle.reset_device!()
 
     # The reset installs a NEW context, and retires the old one. Both halves
     # matter: a fresh id is what every per-device cache keys on, and the flag is

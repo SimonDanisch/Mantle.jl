@@ -30,7 +30,7 @@
 #     reduction axis. Ported from llama.cpp's Vulkan backend
 #     (`dev/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec.comp`,
 #     MIT). Threads split `K`, the read coalesces along `K`, and the partial sums
-#     come back through `subgroup_add` plus a shared-memory tail.
+#     come back through `sub_group_reduce_add` plus a shared-memory tail.
 #
 #   * **`gemv_ncontig_kernel`** — matrix `(M, K)`, contiguous along the *output*
 #     axis, reached as `gemv!(C, x, transpose(W))`. Here consecutive **outputs**
@@ -97,7 +97,7 @@
 # non-quantised types). Wide enough for the loads to coalesce, narrow enough that
 # `NROWS` accumulators still fit in registers.
 #
-# **Reduce with `subgroup_add`, then across subgroups through shared memory** —
+# **Reduce with `sub_group_reduce_add`, then across subgroups through shared memory** —
 # `reduce_result` in `mul_mat_vec_base.glsl`. The comment there is worth keeping:
 # the subgroup path wins *particularly when the workgroup has more than one
 # subgroup*, because it collapses a log2(BLOCK) shared-memory tree into one
@@ -186,7 +186,7 @@ function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int)
                 end
 
                 # subgroup first, then across subgroups through shared memory
-                Base.Cartesian.@nexprs $NROWS r -> red_r = subgroup_add(acc_r)
+                Base.Cartesian.@nexprs $NROWS r -> red_r = sub_group_reduce_add(acc_r)
                 @inbounds if lane == 0
                     Base.Cartesian.@nexprs $NROWS r -> begin
                         parts[sub * $NROWS + r] = red_r

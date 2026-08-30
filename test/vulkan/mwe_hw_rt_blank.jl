@@ -86,7 +86,7 @@ function run_once(label::String)
     verts = [tri_v0, tri_v1, tri_v2]
     faces = [GLTriangleFace(1, 2, 3)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     Tri = eltype(eltype(hwtlas.blas_triangles))
@@ -148,7 +148,7 @@ empty!(Mantle.vk_context().caches.linked)
 default_ok = try_run("default (multi-OpFunction)")
 
 # Reset between runs in case of crash
-try Mantle.vk_reset_device!() catch e; @warn "reset failed: $(first(sprint(showerror,e),100))" end
+try Mantle.reset_device!() catch e; @warn "reset failed: $(first(sprint(showerror,e),100))" end
 
 # ── Run 2: force_inline_all=true via the debug hook ──────────────────────
 empty!(Lava.FORCE_INLINE_KERNEL_PATTERNS)

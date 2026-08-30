@@ -10,7 +10,11 @@ const M = Mantle
 const KA = KernelAbstractions
 using KernelAbstractions: @kernel, @index, @Const
 
-const HOSTEXT = Base.get_extension(Mantle, :MantleHostExt)
+# The host backend was `ext/MantleHostExt.jl` until the KernelAbstractions
+# weakdep turned out to be unworkable; it lives in `src/host/host.jl` now, so
+# `HostDevice` is a plain `Mantle` name. `get_extension` returned `nothing` here
+# and every use of it threw — unnoticed, because `import Vulkan` in runtests.jl
+# aborted the run before this file was reached on a driverless machine.
 
 @kernel function hostscale!(dst, @Const(src), a::Float32)
     i = @index(Global)
@@ -48,12 +52,16 @@ end
 @testset "Host: compile bakes, run! decides nothing" begin
     g, _ = buildhostchain(M.Device(M.HostAPI()), 512)
     plan = M.Plan(g)
-    @test length(plan.steps) == 3
-    # Every step is a concrete `Launch{K,A,N}`: the kernel is specialised, the
+    # A `Plan` holds its baked work per pass now, not in one flat `plan.steps`
+    # list — the Place/Barriers phases need to know which pass a dispatch
+    # belongs to. `run!` walks it in exactly this order.
+    steps = collect(Iterators.flatten(pp.dispatches for pp in plan.passes))
+    @test length(steps) == 3
+    # Every step is a concrete `Launch{K,A,N,D}`: the kernel is specialised, the
     # arguments are bound and the ndrange fixed at compile. A closure that still
     # had to look something up would show up here as something else.
-    @test all(s -> s isa HOSTEXT.Launch, plan.steps)
-    @test isconcretetype(typeof(first(plan.steps)))
+    @test all(s -> s isa M.Launch, steps)
+    @test isconcretetype(typeof(first(steps)))
 end
 
 @testset "Host: transients really share the arena" begin
@@ -70,10 +78,19 @@ end
     # …and the arena is genuinely one allocation the views point into. It is now
     # a POOL BLOCK, so it is at least the peak rather than exactly it — the plan
     # holds a region inside it, and that region is what matches the peak.
-    @test length(plan.arena) >= M.peakbytes(plan)
-    @test length(only(plan.regions)) == M.peakbytes(plan)
+    #
+    # `plan.arena`/`plan.regions` until the graph moved into core: a plan is
+    # placed in one arena PER KIND now, so it carries a slab (the shared region)
+    # and the arena kind side by side. The block behind the slab is the single
+    # allocation the old `arena` field named.
+    slab = only(plan.slabs)
+    @test slab.block.bytes >= M.peakbytes(plan)
+    @test length(slab) == M.peakbytes(plan)
     M.run!(plan)
-    @test !all(iszero, plan.arena)
+    # A `Region` is an offset into a block, not an array — `memoryof` is the
+    # allocation and `offset` says where this plan's bytes start in it.
+    bytes = view(M.memoryof(slab), M.offset(slab) .+ (1:length(slab)))
+    @test !all(iszero, bytes)
 end
 
 @testset "Host: alias = false is the bisection tool it claims to be" begin
@@ -142,10 +159,18 @@ end
 # Both dispatch on a backend MARKER now — `VulkanAPI()` and `HostAPI()` — so they
 # are different methods by construction rather than by luck. Asserted rather than
 # reasoned about, because the failure mode was silent.
-begin
-    @testset "Host and Vulkan devices coexist" begin
-        @test M.Device(M.HostAPI()) isa HOSTEXT.HostDevice
+include(joinpath(@__DIR__, "backend_probe.jl"))
+
+@testset "Host and Vulkan devices coexist" begin
+    @test M.Device(M.HostAPI()) isa M.HostDevice
+    # Only this line needs a driver. What is being asserted — that two backend
+    # MARKERS give two distinct methods rather than one silently replacing the
+    # other — is worth checking on a machine with no Vulkan loader too, so the
+    # Host half stays unconditional and the file keeps running there.
+    if backend_loadable("Vulkan") !== nothing
         @test M.Device(M.VulkanAPI()) isa Mantle.LavaDevice
+    else
+        @info "no Vulkan loader; the Vulkan half of the coexistence test is skipped"
     end
 end
 
@@ -208,6 +233,56 @@ end
     # emitting a storage barrier for it would order the wrong thing.
     usages = only(g.passes).usages
     @test any(u -> last(u) === M.Indirect, usages)
+end
+
+# ── the ceiling, and why it is not a host readback ────────────────────────────
+#
+# `DeviceRange(count; max = capacity)` says two things: where the real count
+# lives, and how large it can possibly get. A RECORDING backend uses the first
+# (an indirect dispatch reads it on the device) and compiles against the second.
+# A KernelAbstractions backend has no indirect dispatch, and it used to resolve
+# the range by reading the count ON THE HOST — which means synchronising the
+# device first, before every such dispatch.
+#
+# That is what `bakedrange` no longer does when a ceiling exists. Measured on an
+# M5, killeroo-gold at 684x513/8spp: 320 of those synchronises per frame,
+# 0.585 s of a 0.602 s frame. Dispatching the ceiling instead is defined to be
+# equivalent, because the same contract the recording path relies on already
+# requires the kernel to bound itself — see `dispatchrange`.
+@testset "a DeviceRange with a ceiling bakes to the ceiling, not a readback" begin
+    dev = M.Device(M.HostAPI())
+
+    function chainplan(; ceiling)
+        g = M.Graph(dev)
+        src = M.Buffer(dev, Float32[i for i in 1:16])
+        n = M.Buffer(dev, Int32[0])
+        dst = M.Transient.Buffer(g, Float32, 16)
+        M.compute!(g, "count") do p
+            M.dispatch!(p, hostcount!, (M.use(p, n; write = true),
+                                        M.use(p, src; read = true), 9.5f0), 16)
+        end
+        M.compute!(g, "fill") do p
+            M.dispatch!(p, hostfill!, (M.use(p, dst; write = true),),
+                        M.DeviceRange(n; max = ceiling))
+        end
+        (M.Plan(g), dst)
+    end
+
+    fillrange(plan) = only(last(plan.passes).dispatches).ndrange
+
+    # With a ceiling: a plain Int, decided at compile. Nothing reads the count
+    # on the host, so nothing has to wait for the device to catch up.
+    withmax, dst = chainplan(ceiling = 16)
+    @test fillrange(withmax) == 16
+    @test fillrange(withmax) isa Integer
+    M.run!(withmax)
+    @test all(==(1.0f0), M.storage(dst))
+
+    # Without one there is nothing to dispatch instead, so the readback stays —
+    # `INDIRECT_CEILING` threads over a queue that might hold four is not a
+    # trade worth making.
+    nomax, _ = chainplan(ceiling = nothing)
+    @test fillrange(nomax) isa M.DeferredRange
 end
 
 @testset "DeviceRange is core, not a backend's" begin

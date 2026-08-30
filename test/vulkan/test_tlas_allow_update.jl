@@ -1,11 +1,11 @@
 using Test, Lava, Mantle
-using Mantle: LavaInstanceRecord, build_tlas, as_build, build_blas_aabb, AS_INPUT_USAGE
+using Mantle: VulkanInstanceRecord, build_tlas, build_accel!, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
-@testset "build_tlas(LavaArray{LavaInstanceRecord}, n; allow_update=true)" begin
+@testset "build_tlas(LavaArray{VulkanInstanceRecord}, n; allow_update=true)" begin
     # Build a 1-AABB BLAS (unit cube) once.
     aabb = Mantle.AABB(GeometryBasics.Point3f(-1f0, -1f0, -1f0), GeometryBasics.Point3f(1f0, 1f0, 1f0))
-    blas = as_build() do ctx
+    blas = build_accel!() do ctx
         build_blas_aabb(ctx, [aabb])
     end
 
@@ -16,16 +16,16 @@ using GeometryBasics: Point3f
          0f0, 1f0, 0f0, y,
          0f0, 0f0, 1f0, z)
     end
-    inst_a = LavaInstanceRecord(translation_transform(0f0, 0f0, 0f0), blas.address;
+    inst_a = VulkanInstanceRecord(translation_transform(0f0, 0f0, 0f0), blas.address;
                                  custom_index=UInt32(0), mask=UInt8(0xff))
-    inst_b = LavaInstanceRecord(translation_transform(5f0, 0f0, 0f0), blas.address;
+    inst_b = VulkanInstanceRecord(translation_transform(5f0, 0f0, 0f0), blas.address;
                                  custom_index=UInt32(1), mask=UInt8(0xff))
 
     # Instance buffer must have AS_INPUT_USAGE so the driver can read it during build.
     instance_buf = LavaArray([inst_a, inst_b]; extra_usage=AS_INPUT_USAGE)
 
     # Build with allow_update=true.
-    tlas = as_build() do ctx
+    tlas = build_accel!() do ctx
         build_tlas(ctx, instance_buf, 2; allow_update=true)
     end
 

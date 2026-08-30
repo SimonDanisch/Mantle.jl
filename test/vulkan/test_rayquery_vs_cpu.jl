@@ -1,7 +1,7 @@
 # test_rayquery_vs_cpu.jl
 #
 # Tier 3 GPU integration test: fire lava_ray_query_* intrinsics from a compute
-# kernel against a single-triangle TLAS, compare per-ray t results to a CPU
+# kernel against a single-triangle HWTLAS, compare per-ray t results to a CPU
 # Moller-Trumbore reference.
 #
 # Triangle: (-1,-1,5), (1,-1,5), (0,1,5) -- in the +z half-space at z=5.
@@ -29,7 +29,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     bq = backend.bq
 
     # ----------------------------------------------------------------
-    # Build a single-triangle TLAS. The triangle is at z=5 so rays fired
+    # Build a single-triangle HWTLAS. The triangle is at z=5 so rays fired
     # along +z from z=0 hit at t=5 when they land inside the triangle.
     # ----------------------------------------------------------------
     tri_v0 = Point3f(-1f0, -1f0, 5f0)
@@ -40,7 +40,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     faces = [GLTriangleFace(1, 2, 3)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, mesh, Mat4f(I))
     Raycore.sync!(tlas)
 

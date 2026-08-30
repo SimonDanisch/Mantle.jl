@@ -7,7 +7,7 @@
 #
 # **This file called `Mantle.flush_deferred_frees!()` and read a global
 # `Mantle.DEFERRED_FREES` until 2026-08-23.** Neither has existed since the
-# deferred-free list became per-BatchQueue, so every testset below threw
+# deferred-free list became per-VulkanBatchQueue, so every testset below threw
 # `UndefVarError` on its first line — and `runtests.jl` did not include the file,
 # so nothing said so. It is included now. A test nothing runs is not a test.
 #

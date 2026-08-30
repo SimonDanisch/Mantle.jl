@@ -43,7 +43,7 @@ mutable struct CommandBatch
     pinned::Base.IdSet{Any}
     # Retained `GPUArrays.DataRef`s for every pinned LavaArray, taken via
     # `copy(a.buf)` at `pin!` time.  `pinned` alone is not enough: it keeps the
-    # *wrapper* alive, but an explicit `unsafe_free!(a)` (HW-accel BLAS/TLAS
+    # *wrapper* alive, but an explicit `unsafe_free!(a)` (HW-accel BLAS/HWTLAS
     # teardown does exactly this) sets `a.buf.freed = true` on that DataRef, and
     # `DataRef` throws on `freed` regardless of refcount — so `submit!` would
     # later trip "Attempt to use a freed reference" dereferencing `a.buf`.
@@ -65,168 +65,21 @@ mutable struct CommandBatch
     signal_value::UInt64
     # Cross-queue dependencies, built up by `sync_access!(::VkManagedBuffer)` at submit.
     wait_semaphores::Vector{Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}}
-    # Back-reference to the owning BatchQueue.  Set post-construction (chicken/
-    # egg: init_batch runs inside BatchQueue's constructor).  Always non-nothing
-    # after the BatchQueue is fully built; checked via `batch.bq`.
-    # Loose type because BatchQueue is declared above but the reverse dep still
-    # makes `CommandBatch.bq::BatchQueue` fragile in the struct body.
+    # Back-reference to the owning VulkanBatchQueue.  Set post-construction (chicken/
+    # egg: init_batch runs inside VulkanBatchQueue's constructor).  Always non-nothing
+    # after the VulkanBatchQueue is fully built; checked via `batch.bq`.
+    # Loose type because VulkanBatchQueue is declared above but the reverse dep still
+    # makes `CommandBatch.bq::VulkanBatchQueue` fragile in the struct body.
     bq::Any
 end
 
-"""
-    BatchQueue
+# `BatchQueue` is Mantle's — see `src/graph/queue.jl`. This alias pins the ten
+# driver parameters to Vulkan's types so every existing `VulkanBatchQueue{VkContext}`
+# still names exactly what it did.
+const VulkanBatchQueue{C} = BatchQueue{VK.Device, VK.Queue, VK.CommandPool,
+                                       CommandBatch, VK.CommandBuffer, VK.Fence,
+                                       VK.Semaphore, C}
 
-An independent command submission channel owning a Vulkan queue, command pool,
-and batch state. Multiple `BatchQueue`s can record and submit independently
-(e.g., primary queue for graphics/present, compute queue for async RT).
-
-Create with `BatchQueue(device, queue, queue_family_index)`.
-"""
-mutable struct BatchQueue{C}
-    device::VK.Device
-    queue::VK.Queue
-    family_index::UInt32
-    cmd_pool::VK.CommandPool
-    active_batch::Union{Nothing, CommandBatch}
-    in_flight::Vector{CommandBatch}
-    free_batches::Vector{CommandBatch}
-    free_cmd_bufs::Vector{VK.CommandBuffer}
-    # Dedicated AS-build command buffer + fence — allocated from this BQ's
-    # own cmd_pool and submitted on this BQ's queue.  Keeping them on the
-    # BQ (not the VkContext) means AS build, submit and queue are locked
-    # together by construction.
-    as_cmd_buf::VK.CommandBuffer
-    as_fence::VK.Fence
-
-    # ── Explicit-queue refactor additions ────────────────────────────────
-    # One timeline semaphore per queue.  Each submit signals next_timeline+1.
-    timeline_sem::VK.Semaphore
-    next_timeline::UInt64
-    # Buffers queued for destruction once their last_write timeline value
-    # is reached. Drained by drain_deferred_frees! at natural sync points.
-    # Loose type (VkManagedBuffer is declared later in memory.jl).
-    #
-    # Cross-thread: finalizer threads push into this list via `vk_free!`;
-    # the main thread iterates + drains via `drain_deferred_frees!`.  The
-    # `deferred_frees_lock` below guards both operations on `deferred_frees`
-    # AND `deferred_as_frees`.  SpinLock because contention is near-zero
-    # (finalizer pushes at GC pauses, drain happens at sync points).
-    deferred_frees::Vector{Any}
-    # LavaBLAS / LavaTLAS queued for destruction once their `last_use`
-    # timeline value is reached. Drained by `drain_deferred_as_frees!`.
-    # Loose type — Lava AS types are declared later in raytracing/acceleration.jl.
-    deferred_as_frees::Vector{Any}
-    # Guards `deferred_frees` AND `deferred_as_frees`.  Acquired on every
-    # push from finalizer threads and on every drain from the main thread.
-    deferred_frees_lock::Base.Threads.SpinLock
-    # Per-BQ argument-buffer slab pool.  Each submit bump-allocates from
-    # the current slab; `reset_arg_buffer_pool!(bq)` (called from
-    # reclaim_batch! once in_flight is empty) rewinds the bump pointer.
-    # Element type is `LavaArray{UInt8,1}` (unified/BAR memory); kept loose
-    # because LavaArray is declared later in array/lavaarray.jl.
-    arg_slabs::Vector{Any}
-    arg_slab_idx::Int
-    arg_slab_offset::Int
-    arg_alloc_count::Int
-    # Timeline value the GPU must reach before the pool may be rewound: the
-    # newest batch that allocated from it. 0 = nothing outstanding. Rewinding
-    # earlier hands the next caller bytes an in-flight shader is still reading,
-    # since a dispatch's arg address is baked into its command buffer as a push
-    # constant (see `arg_pool_in_use!`).
-    arg_pool_frontier::UInt64
-    # Per-BQ indirect-dispatch buffer slab pool.  Element type is
-    # `LavaArray{UInt32,1}` (unified + INDIRECT_BUFFER_BIT).  Reset by
-    # `reset_indirect_buffer_pool!(bq)`.
-    indirect_slabs::Vector{Any}
-    indirect_slab_idx::Int
-    indirect_slab_offset::Int
-    # Per-BQ staging buffer for CPU↔GPU transfers. A single VkManagedBuffer
-    # that grows as needed via get_staging!. Reused across transfers.
-    # Loose type — VkManagedBuffer is declared later in memory.jl.
-    staging::Union{Nothing, Any}
-    # Back-reference to owning VkContext.
-    #
-    # `::C`, a TYPE PARAMETER, not `::Any`. `VkContext` is declared ~280 lines
-    # below this struct, so the field cannot name it directly — that ordering is
-    # the only reason it was ever untyped. A parameter closes the cycle without
-    # needing the name: `VkContext` holds a `BatchQueue{VkContext}`, exactly the
-    # shape `struct Node; next::Vector{Node}; end` already uses.
-    #
-    # Untyped, `bq.ctx.caches.<anything>` inferred as `Any`, which made the
-    # launch-plan lookup a dynamic dispatch and its loop a dynamic ITERATION:
-    # **464 bytes of allocation on every dispatch**, on a warm cache that builds
-    # nothing. The workaround was `bq.ctx::VkContext` written at eight separate
-    # call sites, and the ninth (the plan lookup) simply forgot it. A parameter
-    # makes it structural — there is no site left that can forget.
-    #
-    # The previous comment claimed this could be `nothing` "during the brief
-    # window of default_bq construction". It cannot: `VkContext`'s inner
-    # constructor is two-phase via `new()` precisely so a live `ctx` exists
-    # before `BatchQueue(...)` is called, and every call site passes one.
-    ctx::C
-    # Single-writer invariant: only this thread may record into or submit
-    # from this BatchQueue.  Captured at construction from `Threads.threadid()`.
-    # Every dispatch-recording / sweep / slab-alloc entry point asserts that
-    # it is running on this thread — an accidental cross-thread call trips
-    # the assert immediately instead of silently corrupting state.
-    owning_thread::Int
-
-    # ── Recording policy. These were six module-level `Ref`s, which made them
-    # process-wide settings for something that is per queue: two BatchQueues on
-    # one device already disagree about how much work to batch before submitting,
-    # and a second device made it worse. They are still mutable defaults — that
-    # is what they are for — but they are now this queue's.
-    #
-    # `auto_submit_threshold` at 64 rather than 0 is the +44% measured in
-    # `perf-plan.md`: at 0, recording and execution never overlapped.
-    auto_submit_threshold::Int
-    cb_split_threshold::Int
-    flush_timeout_ns::UInt64
-    barrier_mode::Symbol
-    barrier_elision::Bool
-    # One-shot, consumed by exactly the next dispatch on THIS queue.
-    next_skip_barrier::Bool
-    # Set by the KA launch path for the dispatch it is about to record: "this
-    # dispatch enumerated its buffers, so the elision tracker saw everything it
-    # touches". Same one-shot shape as `next_skip_barrier`, and it was a global
-    # for the same reason — the hand-off is launch → `record_dispatch!` and both
-    # already have the queue.
-    ranges_declared::Bool
-    # The elision tracker itself. `touched_ranges` accumulates what recent
-    # dispatches in the current batch wrote; `dispatch_ranges` is scratch for the
-    # dispatch being recorded. Reused, never reallocated — and per queue, because
-    # two queues recording concurrently into their own command buffers were
-    # sharing one tracker, so a range written on one could elide a barrier on the
-    # other.
-    touched_ranges::Vector{UInt64}
-    dispatch_ranges::Vector{UInt64}
-    # Non-`nothing` inside `concurrent_indirect_group`: dispatches append here
-    # instead of recording, and the group's flush fuses them.
-    deferred_indirect::Union{Nothing,Vector{Any}}
-    # The `CapturedSequence` being recorded on THIS queue, or `nothing`. It was a
-    # module-level `Ref`, so every site that used it had to re-check `cap.bq ===
-    # bq` to find out whether the capture was even this queue's — and
-    # `cb_begin_flags` had no queue to check with, so a capture running on one
-    # queue silently made every OTHER queue's command buffers reusable.
-    # `Any` because `CapturedSequence` is declared in `command.jl`; use sites
-    # assert it, the same shape as `ctx`.
-    capturing::Any
-    # Highest timeline value signalled by a replay on this queue. `flush!` has to
-    # wait on it: a replay puts no `CommandBatch` in `in_flight`, so the in-flight
-    # scan alone would return before the GPU had run any of it. Was an
-    # `IdDict{BatchQueue,UInt64}` — a per-queue value in a process-wide dict keyed
-    # by the queue, which is the surrogate a field replaces.
-    replay_watermark::UInt64
-    # What the last dispatch on this queue was, for the dispatch log and for
-    # DEVICE_LOST diagnostics. Process-wide, these attributed one queue's crash
-    # to another queue's kernel.
-    last_dispatch_info::String
-    prev_dispatch_info::String
-    # Which hardware queue of `family_index` this one drives, so
-    # `release_batch_queue!` can hand the slot back. -1 for the primary queue and
-    # for any queue that had to share it because the family ran out.
-    queue_index::Int
-end
 
 function init_batch(cb::VK.CommandBuffer)
     pinned = Base.IdSet{Any}()
@@ -237,11 +90,11 @@ function init_batch(cb::VK.CommandBuffer)
         VK.CommandBuffer[],
         UInt64(0),                       # signal_value (assigned at record time)
         waits,
-        nothing,                         # bq (set after BatchQueue is fully built)
+        nothing,                         # bq (set after VulkanBatchQueue is fully built)
     )
 end
 
-function BatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
+function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
                     n_initial_batches::Int=2, queue_index::Int=-1)
     cmd_pool = VK.CommandPool(device, qf_idx;
         flags=VK.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
@@ -259,7 +112,7 @@ function BatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
     type_info = VK.SemaphoreTypeCreateInfo(VK.SEMAPHORE_TYPE_TIMELINE, UInt64(0))
     timeline_sem = unwrap(VK.create_semaphore(device,
         VK.SemaphoreCreateInfo(; next=type_info)))
-    bq = BatchQueue(device, queue, qf_idx, cmd_pool, nothing,
+    bq = VulkanBatchQueue(device, queue, qf_idx, cmd_pool, nothing,
                     CommandBatch[], batches, VK.CommandBuffer[],
                     as_cmd_buf, as_fence,
                     timeline_sem, UInt64(0),
@@ -375,7 +228,7 @@ end
     VkContext
 
 Persistent Vulkan context. Batch-based command recording goes through
-`default_bq::BatchQueue` (the primary queue). Use `BatchQueue(...)` to
+`default_bq::VulkanBatchQueue` (the primary queue). Use `VulkanBatchQueue(...)` to
 create additional independent queues (e.g., for async compute/RT).
 """
 mutable struct VkContext
@@ -385,12 +238,12 @@ mutable struct VkContext
     queue_family_index::UInt32
     device_name::String
     # Primary batch queue — all global API functions delegate here.  Always
-    # non-nothing after the inner constructor returns (BatchQueue is built
+    # non-nothing after the inner constructor returns (VulkanBatchQueue is built
     # using `new()`-based two-phase init to break the chicken-and-egg with
-    # BatchQueue.ctx).
-    # `BatchQueue{VkContext}`, not the UnionAll — otherwise `ctx.default_bq` is
+    # VulkanBatchQueue.ctx).
+    # `VulkanBatchQueue{VkContext}`, not the UnionAll — otherwise `ctx.default_bq` is
     # abstract and the parameter above buys nothing at this end of the cycle.
-    default_bq::BatchQueue{VkContext}
+    default_bq::VulkanBatchQueue{VkContext}
     # Secondary compute queue (async RT) — same family, separate queue object
     compute_queue::VK.Queue
     # Ray tracing (nothing if not available)
@@ -415,7 +268,7 @@ mutable struct VkContext
     # driver. Holding the queue here means it outlives every buffer allocated on
     # it, the same argument `caches` makes further down: a field dies with its
     # context, so nothing outlives the handles it describes.
-    extra_queues::Vector{BatchQueue{VkContext}}
+    extra_queues::Vector{VulkanBatchQueue{VkContext}}
     # Hardware queue slots handed back by `release_batch_queue!`, reused before
     # `next_queue_index` advances.
     free_queue_indices::Vector{Int}
@@ -472,7 +325,7 @@ mutable struct VkContext
     # VkPhysicalDeviceMemoryBudgetPropertiesEXT.
     memory_budget_available::Bool
     # Whether VK_KHR_external_memory(_fd) is enabled. When true,
-    # `ExternalImage` can export allocations as opaque fds for zero-copy
+    # `VulkanExternalImage` can export allocations as opaque fds for zero-copy
     # sharing with other APIs (OpenGL via GL_EXT_memory_object_fd).
     external_memory_available::Bool
     # Whether VK_KHR_video_decode_queue + h264 are enabled (hardware decode into
@@ -487,13 +340,13 @@ mutable struct VkContext
     # `verify_gpu_av` exists because even `true` here is not proof it fires.
     gpu_assisted::Bool
     # What this device was ASKED for at construction. Kept so a caller can see
-    # the configuration without reconstructing it, and so `vk_reset_device!` can
+    # the configuration without reconstructing it, and so `reset_device!` can
     # carry it across a recovery reset instead of silently disarming it.
     debug::DebugConfig
     # Driver version (used to key the on-disk VkPipelineCache file).
     driver_version::String
     # Persistent VkPipelineCache. Seeded from disk on init, passed to every
-    # vkCreate*Pipelines call, snapshotted back on vk_reset_device! + atexit.
+    # vkCreate*Pipelines call, snapshotted back on reset_device! + atexit.
     pipeline_cache::VK.PipelineCache
     # `vkCmdPipelineBarrier`, resolved for THIS device.
     #
@@ -521,7 +374,7 @@ mutable struct VkContext
     # A counter rather than `objectid(ctx)`: object ids are reused after the
     # collector reclaims, and a *reused* id is exactly the failure this exists to
     # prevent — a fresh device silently inheriting a dead one's pipelines. It
-    # also survives `vk_reset_device!`, which builds a new context, so entries
+    # also survives `reset_device!`, which builds a new context, so entries
     # from before a reset can never be handed to after it.
     #
     # It survives as an identity — for logging, and for the probe's assertion
@@ -537,7 +390,7 @@ mutable struct VkContext
     # Per-device state, owned by the device. See `DeviceCaches` for what was
     # global before and why keying it by `id` was not the same thing: a field
     # dies with its context, so nothing outlives the handles it describes and
-    # `vk_reset_device!` has nothing to clear.
+    # `reset_device!` has nothing to clear.
     caches::DeviceCaches
 
     # Every debugging and instrumentation toggle, owned by the device it
@@ -545,7 +398,7 @@ mutable struct VkContext
     diag::Diagnostics
 
     # Inner constructor: two-phase init via `new()` so we can hand a live
-    # `ctx` reference to `BatchQueue(...)` while finishing the ctx's own
+    # `ctx` reference to `VulkanBatchQueue(...)` while finishing the ctx's own
     # field assignments.  There is no public ctor that can leave `default_bq`
     # unset.  `primary_queue` is the raw `VK.Queue` for the default bq;
     # everything else maps directly to a field.
@@ -596,7 +449,7 @@ mutable struct VkContext
         ctx.validation = validation
         ctx.next_queue_index = next_queue_index
         ctx.max_queue_count = max_queue_count
-        ctx.extra_queues = BatchQueue{VkContext}[]
+        ctx.extra_queues = VulkanBatchQueue{VkContext}[]
         ctx.free_queue_indices = Int[]
         ctx.async_queue_family_index = async_queue_family_index
         ctx.async_queue_count = async_queue_count
@@ -635,9 +488,9 @@ mutable struct VkContext
         ctx.pipeline_cache = create_lava_pipeline_cache(
             device, lava_pipeline_cache_path(device_name, driver_version), physical_device)
         _register_pipeline_cache_atexit!()
-        # Now build the default BatchQueue with the live ctx.  Sets the
+        # Now build the default VulkanBatchQueue with the live ctx.  Sets the
         # remaining field; no nullable slot, no post-hoc mutation.
-        ctx.default_bq = BatchQueue(device, primary_queue, queue_family_index, ctx)
+        ctx.default_bq = VulkanBatchQueue(device, primary_queue, queue_family_index, ctx)
         return ctx
     end
 end
@@ -833,7 +686,7 @@ Two things reach this state, and only the first is a fault:
  1. `ERROR_DEVICE_LOST` from any Vulkan call — see `mark_if_device_lost!`.
  2. **Retirement**: a context nobody will call into again, whose buffers are
     still alive in Julia and whose finalizers must therefore not touch it.
-    `vk_reset_device!` retires the context it replaces; anything that builds a
+    `reset_device!` retires the context it replaces; anything that builds a
     context of its own with `VkContext(; select)` owns retiring it.
 
 The flag means the same thing to every consumer either way — *do not call into
@@ -856,7 +709,7 @@ share an id" assertion, and this counter with it.
 const VK_CONTEXT_COUNTER = Ref{UInt64}(0)
 
 # `RESET_CALLBACKS` was here: a list every later-included file pushed onto so
-# `vk_reset_device!` could empty its module-level caches. Deleted rather than
+# `reset_device!` could empty its module-level caches. Deleted rather than
 # emptied — its entries were the symptom this refactor was diagnosing. State
 # that outlives the device it describes has to be told to go away; state a
 # `VkContext` owns simply does not. The last four went with the pool accounting,
@@ -873,7 +726,7 @@ function vk_context()
     # Double-checked under a lock. Unlocked, two threads both saw `nothing` and
     # both ran the constructor, leaving two live VkDevices: the loser's context is
     # still reachable from every buffer it allocated (`buf.last_write` retains
-    # its BatchQueue), so the next cross-queue wait passed a semaphore from one
+    # its VulkanBatchQueue), so the next cross-queue wait passed a semaphore from one
     # device to the other and the driver segfaulted with no Julia frame to show.
     lock(VK_CONTEXT_LOCK)
     try
@@ -899,7 +752,7 @@ end
 vk_device() = vk_context().device
 
 """
-    vk_reset_device!(; select = pick_physical_device,
+    reset_device!(; select = pick_physical_device,
                        debug = <the outgoing device's config>)
 
 Replace the process-default Vulkan device. Destroys the old context and creates a
@@ -908,16 +761,16 @@ fresh one; clears all caches (pipelines, kernels, arg buffers).
 Two reasons to call it.
 
 1. **Recovery**, after `ERROR_DEVICE_LOST` or another unrecoverable error:
-   `vk_reset_device!()`. The debugging configuration carries across, so a reset in
+   `reset_device!()`. The debugging configuration carries across, so a reset in
    the middle of a session does not silently turn the instruments off.
 
 2. **Switching validation on or off** — and this is the *only* way, because those
    settings are fixed at `vkCreateInstance` and cannot be applied to a device
    that already exists:
 
-       vk_reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
+       reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
        verify_gpu_av()                     # prove the layer actually fires
-       vk_reset_device!(debug = DebugConfig())   # …and back to the fast path
+       reset_device!(debug = DebugConfig())   # …and back to the fast path
 
    See [`DebugConfig`](@ref). There is nothing else: no `enable_gpu_av`, no
    environment variable, no post-hoc toggle. If you want a device *without*
@@ -927,7 +780,7 @@ Two reasons to call it.
 **WARNING**: All existing `LavaArray`s become INVALID after reset — their backing
 GPU buffers no longer exist. You must reallocate all GPU data.
 """
-function vk_reset_device!(; select = pick_physical_device,
+function reset_device!(; select = pick_physical_device,
                             debug::Union{Nothing,DebugConfig} = nothing)
     cfg = debug !== nothing ? debug :
           let old = VK_CONTEXT_REF[]
@@ -944,7 +797,7 @@ function vk_reset_device!(; select = pick_physical_device,
     #
     # It used to be assumed rather than set, and the assumption only held on the
     # path that *caused* it: a reset after `ERROR_DEVICE_LOST` finds the flag
-    # already true, while a voluntary `vk_reset_device!()` left it false. Then
+    # already true, while a voluntary `reset_device!()` left it false. Then
     # dropping the ref below made the old context garbage — and its buffers
     # garbage in the SAME collection, where Julia does not order finalizers. Run
     # the context's first and `VK.Device`'s own finalizer destroys the
@@ -952,7 +805,7 @@ function vk_reset_device!(; select = pick_physical_device,
     # driver takes a SIGSEGV inside `vkGetSemaphoreCounterValue`.
     #
     #     d = KA.allocate(LavaBackend(), Float32, 1000); fill!(d, 1f0)
-    #     vk_reset_device!(); d = nothing; GC.gc()   # <- segfault
+    #     reset_device!(); d = nothing; GC.gc()   # <- segfault
     #
     # A retired context is one nothing may call into: every array that predates
     # the reset holds memory belonging to a device that is gone, so there is no
@@ -990,13 +843,13 @@ function vk_reset_device!(; select = pick_physical_device,
 end
 
 """
-    has_active_recording(bq::BatchQueue) -> Bool
+    has_active_recording(bq::VulkanBatchQueue) -> Bool
 
 Whether `bq` has an open/recording CommandBatch.  Used by transfer paths
 to decide "should I flush `bq` before doing my own submit/CPU write?"
 Always takes the queue explicitly — no implicit default_bq lookup.
 """
-has_active_recording(bq::BatchQueue) = bq.active_batch !== nothing
+has_active_recording(bq::VulkanBatchQueue) = bq.active_batch !== nothing
 
 """
     VkContext(; select = pick_physical_device, debug = DebugConfig()) -> VkContext
@@ -1335,7 +1188,7 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
         push!(extensions, "VK_KHR_shader_subgroup_rotate")
     end
     # External-memory export (opaque fds for GL/other-API interop). Enabling
-    # the extension has no effect until an ExternalImage is created.
+    # the extension has no effect until an VulkanExternalImage is created.
     has_external_memory = has_extension(phys_dev, "VK_KHR_external_memory_fd")
     if has_external_memory
         push!(extensions, "VK_KHR_external_memory")
@@ -1662,7 +1515,7 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
 
     # VkContext's inner constructor builds its own default_bq via `new()`-
     # based two-phase init.  Pass the raw primary queue and all other ctx
-    # fields; the ctor wires BatchQueue(device, queue, qfi, ctx) internally.
+    # fields; the ctor wires VulkanBatchQueue(device, queue, qfi, ctx) internally.
     # The hardware implements a fixed set of (M, N, K, dtype) tiles; a kernel
     # must choose one of these, it cannot pick an arbitrary tile size.
     CMShape = eltype(fieldtype(VkContext, :coopmat_shapes))
@@ -1721,9 +1574,9 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
 end
 
 """
-    allocate_batch_queue!() -> BatchQueue
+    allocate_batch_queue!() -> VulkanBatchQueue
 
-Create a new independent BatchQueue on a separate Vulkan queue (if available).
+Create a new independent VulkanBatchQueue on a separate Vulkan queue (if available).
 Falls back to a separate command pool on the primary queue if all queues are taken.
 Used by Screen for isolated graphics rendering.
 
@@ -1731,6 +1584,11 @@ The context holds the returned queue until [`release_batch_queue!`](@ref) gives
 it back. Call that when done — a caller that just drops the reference keeps the
 command pool, semaphore and slabs alive for the life of the device.
 """
+# This backend has one; see `supports_batch_queue` in `graph/queue.jl` for why
+# that is a separate question from whether it can rasterise.
+supports_batch_queue(::VulkanAPI) = true
+supports_batch_queue(::LavaBackend) = true
+
 function allocate_batch_queue!()
     ctx = vk_context()
     allocate_batch_queue!(ctx)
@@ -1746,13 +1604,13 @@ function allocate_batch_queue!(ctx::VkContext)
         queue = ctx.default_bq.queue
         idx = -1
     end
-    bq = BatchQueue(ctx.device, queue, ctx.queue_family_index, ctx; queue_index = idx)
+    bq = VulkanBatchQueue(ctx.device, queue, ctx.queue_family_index, ctx; queue_index = idx)
     push!(ctx.extra_queues, bq)
     return bq
 end
 
 """
-    release_batch_queue!(bq::BatchQueue)
+    release_batch_queue!(bq::VulkanBatchQueue)
 
 Give a queue from [`allocate_batch_queue!`](@ref) back: drain it, destroy what it
 still holds, and make its hardware slot available again.
@@ -1766,7 +1624,7 @@ context keeps it alive (see `extra_queues`), so an unreleased queue is a leak of
 a command pool, a semaphore and its argument slabs rather than a dangling
 handle.
 """
-function release_batch_queue!(bq::BatchQueue)
+function release_batch_queue!(bq::VulkanBatchQueue)
     ctx = bq.ctx::VkContext
     bq === ctx.default_bq &&
         throw(LavaError("release_batch_queue!", "the context's primary queue cannot be released",
@@ -1788,7 +1646,7 @@ function release_batch_queue!(bq::BatchQueue)
 end
 
 """
-    queue_released(bq::BatchQueue) -> Bool
+    queue_released(bq::VulkanBatchQueue) -> Bool
 
 Whether `bq` has been handed back by [`release_batch_queue!`](@ref).
 
@@ -1807,7 +1665,7 @@ buffer still naming it can be destroyed immediately instead of waited on.
 Membership in `ctx.extra_queues` is already the liveness record, so this needs no
 flag — `release_batch_queue!` removing the entry IS the transition.
 """
-function queue_released(bq::BatchQueue)
+function queue_released(bq::VulkanBatchQueue)
     ctx = bq.ctx::VkContext
     bq === ctx.default_bq && return false      # the primary queue is never released
     return findfirst(q -> q === bq, ctx.extra_queues) === nothing
@@ -2155,4 +2013,43 @@ function check_validation_errors!(context::String,
         "Vulkan validation error(s):\n$detail",
         "Fix the validation errors above before proceeding."
     ))
+end
+
+# Mantle's device-idle wait, in Vulkan's terms. Declared in
+# `src/graph/queue.jl`; this is the method. Both spellings, because a caller
+# holding the KA backend should not have to reach for the context to get at the
+# handle underneath it.
+waitidle(ctx::VkContext) = VK.device_wait_idle(ctx.device)
+waitidle(b::LavaBackend) = waitidle(vk_context(b))
+waitidle(d::VK.Device) = VK.device_wait_idle(d)
+
+# Vulkan rasterizes. See `supports_graphics` in `src/graphics/commands.jl`.
+supports_graphics(::LavaBackend) = true
+supports_graphics(::VkContext) = true
+
+"""
+    vulkan_available() -> Bool
+
+Whether this machine can actually give us a Vulkan device.
+
+`MantleVulkanExt` only loads when `using Vulkan` succeeded, and VulkanCore's own
+`__init__` raises when it cannot `dlopen` a loader — so reaching this function
+means a loader exists. What is still open is whether it exposes a device, and
+the only honest way to find out is to build the context, which `vk_context`
+caches, so the cost is paid once either way.
+
+The `catch` converts exactly two expected failures — no ICD, no suitable device
+— into "not available", which is the question being asked. Anything else is a
+real bug and is rethrown rather than reported as a missing GPU.
+"""
+function vulkan_available()
+    VK_CONTEXT_REF[] === nothing || return true
+    try
+        vk_context()
+        return true
+    catch e
+        e isa LavaError || e isa VK.VulkanError || rethrow()
+        @debug "Mantle: a Vulkan loader is present but no usable device was found" exception = e
+        return false
+    end
 end

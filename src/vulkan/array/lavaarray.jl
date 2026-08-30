@@ -46,7 +46,7 @@ mutable struct LavaArray{T,N} <: AbstractGPUArray{T,N}
 end
 
 function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
-                        bq::BatchQueue=vk_context().default_bq,
+                        bq::VulkanBatchQueue=vk_context().default_bq,
                         extra_usage::UInt32=UInt32(0),
                         scratch::Bool=false,
                         unified::Bool=false) where {T,N}

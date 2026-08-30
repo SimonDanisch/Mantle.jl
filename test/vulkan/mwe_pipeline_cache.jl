@@ -9,7 +9,7 @@
 #   3. save_pipeline_cache! to disk. Verify the file exists, has plausible
 #      header (Vulkan VkPipelineCacheHeaderVersion = 1, vendorID, deviceID,
 #      driverVersion).
-#   4. vk_reset_device! — tears down the device, save fires, then a fresh
+#   4. reset_device! — tears down the device, save fires, then a fresh
 #      device gets created which loads from the on-disk blob.
 #   5. Compile + dispatch the same kernel against the fresh device. If
 #      anything in the load/save path is unsafe (GC lifetime, double-free,
@@ -88,8 +88,8 @@ let bytes = read(path)
 end
 
 # ── Step 4: reset device → loads from disk ────────────────────────────────
-println("\n[step 4] vk_reset_device! — should save again then re-load from disk")
-Mantle.vk_reset_device!()
+println("\n[step 4] reset_device! — should save again then re-load from disk")
+Mantle.reset_device!()
 ctx = Mantle.vk_context()
 @assert isfile(path) "reset deleted the cache file"
 sz2 = filesize(path)
@@ -108,7 +108,7 @@ println("         kernel still produces correct values ✓")
 # ── Step 6: loop ──────────────────────────────────────────────────────────
 println("\n[step 6] reset+dispatch loop (5 iterations) — exercise restart path")
 for iter in 1:5
-    Mantle.vk_reset_device!()
+    Mantle.reset_device!()
     ctx = Mantle.vk_context()
     buf_i = Mantle.LavaArray(zeros(Float32, N))
     bq_i = Mantle.LavaBackend().bq

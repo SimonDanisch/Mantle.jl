@@ -58,7 +58,7 @@ end
 
 if get(ENV, "LAVA_PRINTF_LIVE", "0") == "1"
     @testset "@lava_printf live output (resets device)" begin
-        Mantle.vk_reset_device!(debug = Mantle.DebugConfig(printf = true))
+        Mantle.reset_device!(debug = Mantle.DebugConfig(printf = true))
         try
             backend = Mantle.LavaBackend()
             bq = Mantle.vk_context().default_bq
@@ -77,7 +77,7 @@ if get(ENV, "LAVA_PRINTF_LIVE", "0") == "1"
             @test any(m -> occursin("tid=1 val=10.000000", m), msgs)
             @test Array(out) == Float32[1, 2, 3, 4]   # kernel still computes correctly
         finally
-            Mantle.vk_reset_device!(debug = Mantle.DebugConfig())
+            Mantle.reset_device!(debug = Mantle.DebugConfig())
         end
     end
 end

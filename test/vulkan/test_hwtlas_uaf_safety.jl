@@ -1,9 +1,9 @@
 using Test, GeometryBasics, StaticArrays, LinearAlgebra
 using Raycore, Lava, Adapt
 
-@testset "Mantle.HWTLAS — UAF safety without CPU fence" begin
+@testset "Mantle.VulkanTLAS — UAF safety without CPU fence" begin
     backend = Mantle.LavaBackend()
-    hwtlas = Mantle.HWTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
 
     mesh1 = GeometryBasics.normal_mesh(Sphere(Point3f(0,0,0), 1f0))
     h1 = push!(hwtlas, mesh1, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))

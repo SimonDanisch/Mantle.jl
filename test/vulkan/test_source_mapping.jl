@@ -698,7 +698,7 @@ end
     #
     # `_try_vk_alloc(nbytes)` was renamed to `try_vk_alloc(bq, nbytes)` in
     # 0d8ae85 ("refactor for stability", 2026-04-06): the underscore was dropped
-    # and it now takes the BatchQueue it allocates against. This test kept calling
+    # and it now takes the VulkanBatchQueue it allocates against. This test kept calling
     # the old name and threw UndefVarError; nobody saw it because the file was not
     # registered in runtests.jl.
     Mantle.try_vk_alloc(Mantle.vk_context().default_bq, 40_000_000_000)  # 40GB, will fail

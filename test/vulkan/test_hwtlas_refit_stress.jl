@@ -1,5 +1,5 @@
 using Test, Lava, Raycore, Printf
-using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
+using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE,
               write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 using KernelAbstractions
@@ -16,10 +16,10 @@ using KernelAbstractions
     @inbounds positions[i] = Point3f(p[1] + dx, p[2], p[3])
 end
 
-@testset "HWTLAS 1M instance refit stress" begin
+@testset "VulkanTLAS 1M instance refit stress" begin
     aabb = Mantle.AABB(Point3f(-0.005f0, -0.005f0, -0.005f0),
                      Point3f( 0.005f0,  0.005f0,  0.005f0))
-    blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     N = 1_000_000
     radius = 0.005f0
@@ -28,7 +28,7 @@ end
     positions = Mantle.LavaArray([Point3f(Float32(0.01 * (i % 1000)),
                                         Float32(0.01 * ((i ÷ 1000) % 1000)),
                                         0f0) for i in 1:N])
-    instance_buf = Mantle.LavaArray{LavaInstanceRecord}(undef, 2 * N;
+    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * N;
                                                        extra_usage=AS_INPUT_USAGE)
 
     backend = Mantle.LavaBackend()
@@ -40,7 +40,7 @@ end
         ndrange = N)
     Mantle.vk_flush!(bq)
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n = 2 * N,
           instance_mask = UInt8(0x02))
     Raycore.sync!(tlas)

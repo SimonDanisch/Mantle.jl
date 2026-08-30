@@ -1,5 +1,5 @@
 """
-A buffer written on one `BatchQueue` and then used on another makes `sync_access!`
+A buffer written on one `VulkanBatchQueue` and then used on another makes `sync_access!`
 push a timeline wait onto `batch.wait_semaphores`. That vector is sync2-typed
 (`Vulkan.PipelineStageFlag2`), but `Vulkan.PIPELINE_STAGE_2_ALL_COMMANDS_BIT` is
 — despite the `_2_` in its name — a *sync1* `PipelineStageFlag`, so the push threw

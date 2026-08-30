@@ -1,4 +1,4 @@
-# Instance-record writer kernels for HW TLAS.
+# Instance-record writer kernels for HW HWTLAS.
 #
 # The `write_meshscatter_instances_kernel` testset that used to live here was
 # removed: commit 9e0ec1d ("instance transform cleanup", 2026-05-06) deleted that
@@ -10,22 +10,22 @@
 # `write_grain_instances_kernel` is still the live API and is what remains here.
 
 using Test, Lava, Mantle
-using Mantle: LavaInstanceRecord, write_grain_instances_kernel,
-              build_blas_aabb, as_build, AS_INPUT_USAGE
+using Mantle: VulkanInstanceRecord, write_grain_instances_kernel,
+              build_blas_aabb, build_accel!, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "write_grain_instances_kernel -- 4 grains, identity rotations" begin
     # Build two trivial BLASes so we have non-zero device addresses.
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     positions_cpu = [Point3f(Float32(i), 0f0, 0f0) for i in 1:n]
     quats_cpu     = [Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:n]   # identity quaternions
     positions_gpu = Mantle.LavaArray(positions_cpu)
     quats_gpu     = Mantle.LavaArray(quats_cpu)
-    instances_gpu = Mantle.LavaArray{LavaInstanceRecord}(undef, 2 * n;
+    instances_gpu = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
                                                         extra_usage=AS_INPUT_USAGE)
 
     radius = 0.5f0
@@ -56,7 +56,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
         # order. Comparing the two directly is a type mismatch, not a value one:
         # the numbers here were always right. The assertion predates `transform`
         # becoming a matrix, and did not fail in the meantime because this file
-        # imported `LavaInstanceRecord` from Lava and so errored at its first
+        # imported `VulkanInstanceRecord` from Lava and so errored at its first
         # line from the runtime move until now.
         @test Tuple(rec_phys.transform) == expected_t
         @test Tuple(rec_rend.transform) == expected_t

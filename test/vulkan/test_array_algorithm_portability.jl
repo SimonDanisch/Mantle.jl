@@ -46,24 +46,34 @@ const KA = KernelAbstractions
 # one is solvable: the entry points stay in the backend and the kernels move,
 # which is the shape a Metal backend would repeat.
 #
-# The real blocker is `AcceleratedMatrix`. The cooperative-matrix half of GEMM is
-# written against it, and it is **Lava's type**, not `KernelInterface`'s — the
-# coopmat merge (step 2) took the vocabulary (`MatrixA`, `Accumulator`,
-# `MatrixShape`, `DeviceCaps`) and left the matrix type itself behind. So core
-# would have to name a Lava type to hold these kernels, which is the dependency
-# the whole split exists to remove. Attempted on 2026-08-28 and reverted at
-# exactly that point: `UndefVarError: AcceleratedMatrix not defined in Mantle`,
-# from `src/array/gemm.jl`.
+# The real blocker WAS `AcceleratedMatrix`, and it is gone as of 2026-08-28.
 #
-# Moving `AcceleratedMatrix` into KI is therefore a prerequisite for GEMM, and it
-# is a real piece of work rather than a rename: the type carries compiler
-# intrinsics behind it (`coopmat_load`, `coopmat_muladd`, `coopmat_store`), and
-# Metal's equivalent is `simdgroup_matrix` with a different tile. That is the
-# next thing to do here, and it belongs with step 2 rather than step 5.
+# The cooperative-matrix half of GEMM is written against it, and it used to be
+# **Lava's type**: the coopmat merge (step 2) took the vocabulary (`MatrixA`,
+# `Accumulator`, `MatrixShape`, `DeviceCaps`) and left the matrix type itself
+# behind, so core would have had to name a Lava type to hold these kernels —
+# the dependency the whole split exists to remove. A first attempt died exactly
+# there: `UndefVarError: AcceleratedMatrix not defined in Mantle`.
+#
+# `CoopMatrix{T,M,N,Use,Scope}` and its `AcceleratedMatrix`/`WorkgroupMatrix`
+# aliases are `KernelInterface`'s now, beside the vocabulary that went ahead of
+# them. The type was always portable — one `Int32` SSA anchor, no element
+# storage — and what stayed in Lava is the 766 lines of `llvmcall` that lower
+# KI's nine `coopmat_*` operations to `OpCooperativeMatrix*`. `Mantle` names the
+# type through `using KernelInterface` and no longer needs Lava for it.
+#
+# So the prerequisite is met and what remains for GEMM is the OTHER blocker, the
+# one this file already called solvable: `LinearAlgebra.mul!` is Base's, so the
+# entry points stay in the backend and the kernels move. That split is the shape
+# a Metal backend repeats, and it is now the only thing in the way.
+#
+# `coopmat_gemm_available` is NOT in the way and should not move: it is the
+# Vulkan probe that fills `DeviceCaps.coopmat`, and `coopmatgemm(x)` in
+# `src/memory/array.jl` is already the portable question consumers ask.
 
 """How many lines of `f` name something only the Vulkan backend has."""
 function vulkan_lines(path::AbstractString)
-    pat = r"\bVK\.|VkContext|BatchQueue|vk_context|\bvk_[a-z_]+"
+    pat = r"\bVK\.|VkContext|VulkanBatchQueue|vk_context|\bvk_[a-z_]+"
     count(l -> occursin(pat, l), readlines(path))
 end
 

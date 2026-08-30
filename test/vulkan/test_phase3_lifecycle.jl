@@ -34,9 +34,9 @@ end
     @test a isa LavaArray
 end
 
-@testset "BatchQueue has deferred_frees_lock" begin
+@testset "VulkanBatchQueue has deferred_frees_lock" begin
     bq = Mantle.vk_context().default_bq
-    @test hasfield(Mantle.BatchQueue, :deferred_frees_lock)
+    @test hasfield(Mantle.VulkanBatchQueue, :deferred_frees_lock)
     @test bq.deferred_frees_lock isa Base.Threads.SpinLock
 end
 

@@ -19,7 +19,7 @@ using Test
 """Build a raygen shader that traces rays and writes hit_t to an output buffer.
 
 Layout:
-  - Descriptor set 0, binding 0: AccelerationStructure (TLAS)
+  - Descriptor set 0, binding 0: AccelerationStructure (HWTLAS)
   - Push constant: u64 BDA pointer to output buffer (float32 array)
   - LaunchIdKHR.xy determines ray origin
   - LaunchSizeKHR.xy determines grid size

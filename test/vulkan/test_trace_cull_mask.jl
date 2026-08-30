@@ -43,7 +43,7 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
         GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
     end
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     # Instance A: mask 0x01 at z=5
     push!(tlas, tri_mesh(5f0),  Mat4f_CM(I);
           instance_id=UInt32(1), instance_mask=UInt8(0x01))
@@ -53,7 +53,7 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
     Raycore.sync!(tlas)
 
     accel = tlas.hw_accel
-    accel === nothing && error("HWTLAS did not build a HardwareAccel")
+    accel === nothing && error("VulkanTLAS did not build a HardwareAccel")
 
     # One ray along +z from origin, aimed through the centroid of both triangles.
     ray = Raycore.RTRay(0f0, 0f0, 0f0,   # origin

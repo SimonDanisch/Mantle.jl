@@ -91,7 +91,7 @@ using KernelAbstractions
     end
 
     # ── 3. Command batch data_refs lifecycle ──
-    # Post-refactor: `active_batch` lives on the BatchQueue, not VkContext.
+    # Post-refactor: `active_batch` lives on the VulkanBatchQueue, not VkContext.
     @testset "command batch data_refs" begin
         @testset "data_refs cleared after flush" begin
             a = Mantle.LavaArray(Float32[1, 2, 3])
@@ -166,7 +166,7 @@ using KernelAbstractions
 
     # Note: the original `staging buffer lifecycle` and `indirect slabs reset`
     # testsets checked `STAGING_BUF` / `INDIRECT_SLAB_{OFFSET,IDX}`, global
-    # trackers that were fully removed in the BatchQueue-ownership refactor —
+    # trackers that were fully removed in the VulkanBatchQueue-ownership refactor —
     # there is no current equivalent to assert against, and dispatch
     # correctness is already covered by the "correctness across many dispatch
     # cycles" testset below.

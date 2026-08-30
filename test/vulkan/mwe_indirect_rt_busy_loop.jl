@@ -15,7 +15,7 @@ const KA = KernelAbstractions
 backend = LavaBackend()
 ctx = Mantle.vk_context()
 
-hwtlas = Mantle.HWTLAS(backend)
+hwtlas = Mantle.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))

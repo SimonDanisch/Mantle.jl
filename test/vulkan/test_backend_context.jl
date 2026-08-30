@@ -2,7 +2,7 @@
 A backend knows which device it runs on, and it always did.
 
 `vk_context(backend)` and `vk_context(array)` name a path that already existed:
-`BatchQueue.ctx` and `Buffer.ctx`. The value here is the name, not new state —
+`VulkanBatchQueue.ctx` and `Buffer.ctx`. The value here is the name, not new state —
 the four module-scope caches that hold device-owned handles (`PIPELINE_CACHE`,
 `LINKED_KERNEL_CACHE`, `LAUNCH_PLAN_CACHE`, `GFX_PIPELINE_CACHE`) need a device
 to key by, and every call site reaching for `b.dispatch_bq.ctx` by hand is a
@@ -10,7 +10,7 @@ place that can quietly reach for `vk_context()` instead.
 
 **A correction is recorded here rather than in a commit message, because the
 wrong version briefly shipped.** A `ctx` field was added to `LavaBackend` on the
-belief that no path existed — read out of the first half of `BatchQueue`'s field
+belief that no path existed — read out of the first half of `VulkanBatchQueue`'s field
 list, where `ctx::Any` sits sixty-odd lines down past the command-buffer pools.
 Both project briefs said the carrier existed and both were right. The field was
 removed: a second copy of a fact the queue already holds can only disagree with
@@ -33,7 +33,7 @@ const KA = KernelAbstractions
 
     # ── Including the unpinned one, which stores no queue at all and resolves
     #    through `vk_context()` at access — the property that lets a
-    #    module-level `const BACKEND = LavaBackend()` survive `vk_reset_device!`.
+    #    module-level `const BACKEND = LavaBackend()` survive `reset_device!`.
     unpinned = LavaBackend()
     pinned   = LavaBackend(ctx)
     @test getfield(unpinned, :dispatch_bq) === nothing

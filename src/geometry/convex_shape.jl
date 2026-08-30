@@ -3,7 +3,7 @@
 # `support(shape::ConvexShape, dir::Vec3f) -> Vec3f` is the GJK building block:
 # given a direction `dir`, returns the vertex of `shape` farthest along `dir`.
 # Shapes live in instance-local space (centered at origin, "unit" extents);
-# per-instance scale + rotation live in the TLAS instance transform.  The
+# per-instance scale + rotation live in the HWTLAS instance transform.  The
 # narrow-phase kernel transforms `dir` into local space, calls support, then
 # transforms the result back.  Keeping `support` shape-local makes it pure
 # geometry: easy to test on the CPU, easy to verify, GPU-callable without
@@ -29,7 +29,7 @@ abstract type ConvexShape end
     UnitCube
 
 A cube centered at the origin with half-extents 1 along each axis (so corners
-at (+-1, +-1, +-1)).  Per-instance size lives in the TLAS instance transform's
+at (+-1, +-1, +-1)).  Per-instance size lives in the HWTLAS instance transform's
 scale -- a grain with radius 0.005 has its UnitCube transformed by a uniform
 scale of 0.005, so the world-space cube spans (+-0.005)^3.
 """

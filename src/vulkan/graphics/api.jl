@@ -4,48 +4,6 @@
 # graphics shaders. Supports lazy compilation, caching, and multiple
 # draw dispatch via RenderTarget types.
 
-"""
-    GraphicsPipeline
-
-High-level graphics pipeline wrapping Julia shader functions.
-Compiles lazily on first use and caches the result.
-
-# Fields
-- `vertex`, `fragment`: Required Julia shader functions
-- `geometry`: Optional (func, GeometryConfig) tuple
-- `tess_control`, `tess_eval`: Optional tessellation stages
-- `blend`, `cull`, `topology`, `depth`: Pipeline state types
-"""
-struct GraphicsPipeline{V, F, G, TC, TE, B<:BlendMode, C<:CullFace, T<:Topology, D<:DepthMode, VY}
-    vertex::V
-    fragment::F
-    geometry::G       # Nothing or (func, GeometryConfig)
-    tess_control::TC  # Nothing or (func, TessConfig)
-    tess_eval::TE     # Nothing or func
-    blend::B
-    cull::C
-    topology::T
-    depth::D
-    varyings::VY      # Nothing or NamedTuple of types, e.g. (normal=Vec3f, uv=Vec2f)
-end
-
-const Rasterizer = GraphicsPipeline
-
-function GraphicsPipeline(;
-        vertex, fragment,
-        geometry=nothing, tess_control=nothing, tess_eval=nothing,
-        blend::BlendMode=Opaque(), cull::CullFace=CullBack(),
-        topology::Topology=TriangleList(), depth::DepthMode=DepthLess(),
-        varyings=nothing)
-    GraphicsPipeline(
-        vertex, fragment, geometry, tess_control, tess_eval,
-        blend, cull, topology, depth,
-        varyings,
-    )
-end
-
-TrianglePipeline(; vertex, fragment, kw...) = GraphicsPipeline(; vertex, fragment, kw...)
-LinePipeline(; vertex, fragment, kw...) = GraphicsPipeline(; vertex, fragment, topology=LineList(), kw...)
 
 # ── Lazy Compilation ──
 
@@ -63,7 +21,7 @@ compiled first won, and the second draw silently rendered with the wrong state.
 """
 pipeline_state_key(p::GraphicsPipeline) = (typeof(p), p.varyings, p.geometry, p.tess_control)
 
-"""Return (vert_shader::LavaGfxShader, compiled::CompiledGraphicsPipeline)."""
+"""Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
                               vert_fn, frag_fn, tt_vertex, tt_fragment;
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
@@ -85,7 +43,7 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     cache_key = hash((vert_fn, frag_fn, tt_vertex, tt_fragment, color_format, depth_format,
                        pipeline_state_key(pipeline), descriptor_set_layout !== nothing))
     cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
-    cached !== nothing && return cached::CompiledGraphicsPipeline
+    cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
 
     # Compile vertex shader
     vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
@@ -183,7 +141,7 @@ end
 Draw using the given graphics pipeline to the render target.
 Device-side type tuples are inferred automatically from args.
 """
-function draw!(bq::BatchQueue, pipeline::GraphicsPipeline, target::WindowTarget, vertex_count::Integer;
+function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::WindowTarget, vertex_count::Integer;
                args=(), frag_args=(), instances::Integer=1,
                clear_color::Union{Nothing, NTuple{4, Float32}}=(0.0f0, 0.0f0, 0.0f0, 1.0f0))
     win = target.window
@@ -209,7 +167,7 @@ function draw!(bq::BatchQueue, pipeline::GraphicsPipeline, target::WindowTarget,
         push_data, instances, clear_color)
 end
 
-function draw!(bq::BatchQueue, pipeline::GraphicsPipeline, target::OffscreenTarget, vertex_count::Integer;
+function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::OffscreenTarget, vertex_count::Integer;
                args=(), frag_args=(), instances::Integer=1,
                clear_color::Union{Nothing, NTuple{4, Float32}}=(0.0f0, 0.0f0, 0.0f0, 1.0f0),
                depth_clear::Union{Nothing, Float32}=1.0f0,
@@ -253,7 +211,7 @@ allocated 48 bytes of header plus the payload *per draw per frame*, which at a
 hundred plots is most of a frame's garbage. `pack_gfx_args` still returns the
 vector for callers written against it.
 """
-function pack_gfx_args_bda(bq::BatchQueue, args, push_info::PushConstantInfo)
+function pack_gfx_args_bda(bq::VulkanBatchQueue, args, push_info::PushConstantInfo)
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
     batch = ensure_active_batch!(bq)
     adaptor = LavaAdaptor(batch)
@@ -266,7 +224,7 @@ function pack_gfx_args_bda(bq::BatchQueue, args, push_info::PushConstantInfo)
     return arg_buf.address
 end
 
-function pack_gfx_args(bq::BatchQueue, args, push_info::PushConstantInfo)
+function pack_gfx_args(bq::VulkanBatchQueue, args, push_info::PushConstantInfo)
     push_info.push_size == 0 && return UInt8[]
     isempty(args) && return UInt8[]
 
@@ -300,7 +258,7 @@ function pack_gfx_args(bq::BatchQueue, args, push_info::PushConstantInfo)
 end
 
 # Empty-args variant
-function pack_gfx_args(::BatchQueue, args, ::Nothing=nothing)
+function pack_gfx_args(::VulkanBatchQueue, args, ::Nothing=nothing)
     isempty(args) && return UInt8[]
     error("pack_gfx_args requires push_info for non-empty args.")
 end
@@ -382,7 +340,7 @@ Display a GPU array on screen using a fullscreen blit.
 The source array should contain RGBA Float32 pixels (or any 4-component type).
 Its layout is `(height, width)` — see `checkblitsize`.
 """
-function blit!(bq::BatchQueue, target::RenderTarget, source::LavaArray;
+function blit!(bq::VulkanBatchQueue, target::RenderTarget, source::LavaArray;
                clear::Bool=true)
     if target isa WindowTarget
         win = target.window
@@ -439,11 +397,11 @@ function blit!(bq::BatchQueue, target::RenderTarget, source::LavaArray;
 end
 
 """
-    present_frame!(bq::BatchQueue, win::RenderWindow)
+    present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
 
 Submit recorded draw commands and present to screen.
 """
-function present_frame!(bq::BatchQueue, win::RenderWindow)
+function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
     batch = bq.active_batch
     batch === nothing && error("present_frame! called without an active recording batch")
     cmd = batch.cmd_buf
@@ -525,3 +483,19 @@ function present_frame!(bq::BatchQueue, win::RenderWindow)
     # Present
     present!(win)
 end
+
+# ── Mantle's shader builtins, on this backend ────────────────────────────────
+#
+# The counterpart to the Metal backend's block, and the reason both exist: a
+# shader names `Mantle.vertex_index()` and the compiler that is running decides
+# what that means. `@lava_device_override` is Lava's wrapper around the same
+# method-table overlay `@device_override` is on the other side.
+#
+# Generated from `Mantle.SHADER_BUILTINS`, so a builtin added to that list and
+# forgotten here is a `MethodError` naming it rather than a shader that reads
+# the wrong thing.
+for f in Mantle.SHADER_BUILTINS
+    f === :frag_coord && continue
+    @eval @lava_device_override Mantle.$f() = $f()
+end
+@lava_device_override Mantle.frag_coord(dim::Integer = 1) = frag_coord(dim)

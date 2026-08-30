@@ -119,7 +119,8 @@ The id `graph` knows `r` by, assigning one if it has not seen it. Every graph
 carries an [`IdTable`](@ref); a backend whose graph does not spell it `ids`
 overrides this.
 """
-resourceid(g::Graph, r) = resourceid(g.ids, r)
+# `resourceid(::Graph, r)` is in `graph/build.jl`: it names the concrete
+# `Graph`, which is defined after this file.
 
 """
     touch!(graph, x) -> x

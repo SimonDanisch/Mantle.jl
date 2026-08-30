@@ -683,7 +683,7 @@ function Base.fill!(a::LavaArray{T}, val) where T
     # second device was dispatching on whichever context was global: the write
     # landed on the wrong queue, the array read back as zeros, and Lava's own
     # `sync_access!` guard caught it later as "buffer was last written on a
-    # BatchQueue from a DIFFERENT VkContext" — a long way from the cause.
+    # VulkanBatchQueue from a DIFFERENT VkContext" — a long way from the cause.
     k = fill_kernel!(KernelAbstractions.get_backend(a))
     k(a, v; ndrange=length(a))
     return a

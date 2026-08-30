@@ -1,17 +1,17 @@
 using Test, Lava, Raycore
-using Mantle: LavaInstanceRecord, build_blas_aabb, as_build, AS_INPUT_USAGE,
+using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE,
               write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
-@testset "Raycore.sync!(HWTLAS) refit cycles" begin
+@testset "Raycore.sync!(VulkanTLAS) refit cycles" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = as_build() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0
     quats = Mantle.LavaArray([Vec4f(0,0,0,1) for _ in 1:n])
     positions = Mantle.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
-    instance_buf = Mantle.LavaArray{LavaInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
+    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
     backend = Mantle.LavaBackend()
     bq = Mantle.vk_context().default_bq
 
@@ -20,7 +20,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
         ndrange = n)
     Mantle.vk_flush!(bq)
 
-    tlas = Mantle.HWTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n=2*n, instance_mask=UInt8(0x02))
     Raycore.sync!(tlas)
     pinned_hw_tlas = tlas.hw_tlas

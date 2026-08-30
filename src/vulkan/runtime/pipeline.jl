@@ -73,7 +73,7 @@ function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
         # after a Pkg.test Tier 4 broadcast Complex{Int32}). The crash kills
         # the whole process. To avoid that, we TerminateThread on timeout —
         # leaks the AMDVLK internal allocations but keeps Julia alive so
-        # the test/user can recover gracefully (or call vk_reset_device!).
+        # the test/user can recover gracefully (or call reset_device!).
         wait_result = ccall((:WaitForSingleObject, "kernel32"), UInt32,
             (Ptr{Cvoid}, UInt32), handle, UInt32(600_000))
         if wait_result == 0x00000102  # WAIT_TIMEOUT
@@ -88,7 +88,7 @@ function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
             ctx === nothing || mark_device_lost!(ctx)
             error("vkCreateComputePipelines timed out after 600s — AMD Windows " *
                   "driver shader compiler hung. Device marked DEVICE_LOST; " *
-                  "call vk_reset_device!() to recover.")
+                  "call reset_device!() to recover.")
         end
         ccall((:CloseHandle, "kernel32"), Cint, (Ptr{Cvoid},), handle)
         wait_result != 0 && error("WaitForSingleObject failed: $wait_result")
@@ -276,7 +276,7 @@ function spirv_local_size(spirv::Vector{UInt8})
 end
 
 # No reset callback here any more. Every one of those five lived on `VkContext`
-# by the time this ran, and `vk_reset_device!` builds a new context — so a fresh
+# by the time this ran, and `reset_device!` builds a new context — so a fresh
 # `DeviceCaches` is the reset. Clearing a global was the compensation for state
 # that outlived its device; owning it removes both.
 
@@ -332,7 +332,7 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
         VK.PushConstantRange[]
     end
 
-    # Descriptor set layout: binding 0 = TLAS (only when needs_tlas_descriptor)
+    # Descriptor set layout: binding 0 = HWTLAS (only when needs_tlas_descriptor)
     ds_layout = nothing
     ds_layouts = VK.DescriptorSetLayout[]
     if needs_tlas_descriptor
@@ -504,7 +504,7 @@ the pool's destructor frees it.
 We deliberately do NOT cache here. A previous version keyed a cache by
 `(ds_layout, objectid(LavaTLAS))`, but `Raycore.sync!` produces a new
 LavaTLAS each rebuild → cache misses → unbounded growth → eviction with
-WeakRef-based TLAS-GC detection that lags Julia GC → pools destroyed
+WeakRef-based HWTLAS-GC detection that lags Julia GC → pools destroyed
 while their descriptor sets were still in flight on the GPU. Per-dispatch
 allocation is microseconds and removes the entire class of bug.
 
@@ -518,7 +518,7 @@ function alloc_compute_tlas_descriptor_set(dev::VK.Device,
         VK.DescriptorPoolSize(
             VK.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, UInt32(1)),
     ])
-    desc_sets = @vk_checked "vkAllocateDescriptorSets (compute TLAS)" VK.allocate_descriptor_sets(dev,
+    desc_sets = @vk_checked "vkAllocateDescriptorSets (compute HWTLAS)" VK.allocate_descriptor_sets(dev,
         VK.DescriptorSetAllocateInfo(desc_pool, [ds_layout]))
     desc_set = desc_sets[1]
 

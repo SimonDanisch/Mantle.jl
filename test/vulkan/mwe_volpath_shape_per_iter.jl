@@ -1,7 +1,7 @@
 # MWE-6: mirror Hikari VolPath's full per-render dispatch shape, per-iter alloc/free.
 #
 # Goal: get as close to Hikari's actual `render!` shape as possible while staying
-# self-contained (no Hikari dep, no Raycore beyond HWTLAS).  Captures:
+# self-contained (no Hikari dep, no Raycore beyond VulkanTLAS).  Captures:
 #   - 8 SoA "work queues" (StructArray of LavaArrays + Int32 size counter)
 #   - per-bounce SoA pre-computed sample buffer
 #   - pixel_L spectral accumulator + pixel_rgb + pixel_weight_sum
@@ -23,8 +23,8 @@ const KA = KernelAbstractions
 backend = LavaBackend()
 ctx = Mantle.vk_context()
 
-# Persistent HWTLAS shared across iters (mirrors Hikari: scene built once).
-hwtlas = Mantle.HWTLAS(backend)
+# Persistent VulkanTLAS shared across iters (mirrors Hikari: scene built once).
+hwtlas = Mantle.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))

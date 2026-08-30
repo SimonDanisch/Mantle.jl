@@ -115,7 +115,7 @@ end
     @test isfile(path)
     @test filesize(path) > Mantle.PIPELINE_CACHE_HEADER_BYTES
 
-    Mantle.vk_reset_device!()
+    Mantle.reset_device!()
 
     Mantle.PIPELINE_COMPILES_REFUSED[] = 0
     a3 = Mantle.LavaArray(zeros(Float32, 64))

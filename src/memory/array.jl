@@ -133,3 +133,21 @@ portable is the question, not the way it is answered.
 """
 coopmatgemm(x) = caps(KernelAbstractions.get_backend(x)).coopmat
 
+
+
+"""
+    devicearray(backend, data) -> AbstractGPUArray
+
+A mutable device array holding a copy of `data`.
+
+The portable spelling of what used to be written `LavaArray(data)` at call
+sites that had no business naming one backend's array type. A backend that has
+something better than "allocate and copy" — pooled storage, a capacity-aware
+`resize!` — provides its own method; this fallback is correct for any KA
+backend and is what a new one gets before it bothers.
+"""
+function devicearray(backend, data::AbstractArray)
+    a = KernelAbstractions.allocate(backend, eltype(data), size(data))
+    copyto!(a, data)
+    return a
+end

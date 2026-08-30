@@ -6,12 +6,12 @@
 import GLFW
 
 """
-    RenderWindow
+    VulkanWindow
 
 A window with Vulkan surface and swapchain for presenting rendered frames.
 Uses GLFW for cross-platform window management.
 """
-mutable struct RenderWindow
+mutable struct VulkanWindow <: Window
     handle::GLFW.Window
     surface::VK.SurfaceKHR
     swapchain::Union{Nothing, VK.SwapchainKHR}
@@ -54,7 +54,7 @@ mutable struct RenderWindow
 end
 
 """
-    RenderWindow(width, height; title="Lava", vsync=true, color_format=FORMAT_B8G8R8A8_SRGB)
+    VulkanWindow(width, height; title="Lava", vsync=true, color_format=FORMAT_B8G8R8A8_SRGB)
 
 Create a new window with Vulkan surface and swapchain.
 
@@ -65,7 +65,7 @@ verbatim. Pass `_UNORM` when the pixels being presented have already been
 gamma-encoded, or they get encoded a second time. The surface may not offer the
 requested format, in which case its first advertised one is used.
 """
-function RenderWindow(width::Integer, height::Integer;
+function VulkanWindow(width::Integer, height::Integer;
                       ctx::VkContext=vk_context(),
                       title::String="Lava", vsync::Bool=true,
                       color_format::VK.Format=VK.FORMAT_B8G8R8A8_SRGB)
@@ -83,7 +83,7 @@ function RenderWindow(width::Integer, height::Integer;
                                 "Ensure Vulkan drivers support window surfaces"))
     surface = VK.SurfaceKHR(surface_ptr, ctx.instance, ctx.instance.refcount)
 
-    win = RenderWindow(
+    win = VulkanWindow(
         handle, surface, nothing,
         VK.Image[], VK.ImageView[],
         color_format, color_format,
@@ -101,11 +101,11 @@ function RenderWindow(width::Integer, height::Integer;
 end
 
 """
-    create_swapchain!(win::RenderWindow; vsync=true)
+    create_swapchain!(win::VulkanWindow; vsync=true)
 
 Create or recreate the swapchain for the window.
 """
-function create_swapchain!(win::RenderWindow; vsync::Bool=true)
+function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
     ctx = win.ctx
     dev = ctx.device
     phys = ctx.physical_device
@@ -259,7 +259,23 @@ This is the handle, not `isopen`: a window whose close button has been clicked i
 still a perfectly good window to draw to, and the loop condition is what decides
 to stop.
 """
-checkopen(win::RenderWindow) =
+# ── What a render pass asks a window ─────────────────────────────────────────
+#
+# The same four questions it asks any attachment, so `WindowSurface` forwards
+# and the shared graph never learns what a swapchain is. These bodies were IN
+# `src/graph/build.jl`, reaching into `views`, `current_image_idx`, `extent` and
+# `format` — this backend's fields, named in core.
+#
+# `current_image_idx` is what makes a window different from an image: the
+# presentation engine chooses which of the swapchain's images the next frame
+# writes, so the answer changes per frame and `acquire_next_image!` is what
+# settles it.
+target_view(w::VulkanWindow)   = w.views[w.current_image_idx + 1]
+target_image(w::VulkanWindow)  = w.images[w.current_image_idx + 1]
+target_extent(w::VulkanWindow) = (Int(w.extent.width), Int(w.extent.height))
+target_format(w::VulkanWindow) = w.format
+
+checkopen(win::VulkanWindow) =
     win.handle.handle == C_NULL &&
         error("this window has been closed; nothing can be drawn to it or read from it")
 
@@ -279,7 +295,7 @@ it starts recording — a graph, whose other attachments have to cover the rende
 area — can bring the swapchain up to date first and bail out without a half
 recorded frame. Zero is a minimised window and has no swapchain to build.
 """
-function sync_swapchain!(win::RenderWindow)
+function sync_swapchain!(win::VulkanWindow)
     checkopen(win)
     fbw, fbh = GLFW.GetFramebufferSize(win.handle)
     (fbw, fbh) == win.fb_size && return false
@@ -289,12 +305,12 @@ function sync_swapchain!(win::RenderWindow)
 end
 
 """
-    acquire_next_image!(win::RenderWindow) -> UInt32
+    acquire_next_image!(win::VulkanWindow) -> UInt32
 
 Acquire the next swapchain image. Returns the image index.
 Must be called before recording rendering commands.
 """
-function acquire_next_image!(win::RenderWindow)
+function acquire_next_image!(win::VulkanWindow)
     checkopen(win)
     ctx = win.ctx
     dev = ctx.device
@@ -342,9 +358,9 @@ function acquire_next_image!(win::RenderWindow)
         # the only place a presented batch is reclaimed — `reclaim_batch!` runs
         # for `submit!`'s batches, not these — so without this they are never
         # returned and every split allocates a fresh one for good.
-        append!((old_batch.bq::BatchQueue).free_cmd_bufs, old_batch.submitted_cmd_bufs)
+        append!((old_batch.bq::VulkanBatchQueue).free_cmd_bufs, old_batch.submitted_cmd_bufs)
         empty!(old_batch.submitted_cmd_bufs)
-        push!((old_batch.bq::BatchQueue).free_batches, old_batch)
+        push!((old_batch.bq::VulkanBatchQueue).free_batches, old_batch)
         win.frame_batches[fi] = nothing
     end
 
@@ -366,12 +382,12 @@ function acquire_next_image!(win::RenderWindow)
 end
 
 """
-    present!(win::RenderWindow)
+    present!(win::VulkanWindow)
 
 Present the rendered frame to the screen.
 Must be called after recording and submitting rendering commands.
 """
-function present!(win::RenderWindow)
+function present!(win::VulkanWindow)
     checkopen(win)
     win.acquired || error("Cannot present: no image acquired (call acquire_next_image! first)")
     ctx = win.ctx
@@ -404,11 +420,11 @@ function present!(win::RenderWindow)
 end
 
 """
-    resize!(win::RenderWindow)
+    resize!(win::VulkanWindow)
 
 Handle window resize by recreating the swapchain.
 """
-function Base.resize!(win::RenderWindow)
+function Base.resize!(win::VulkanWindow)
     checkopen(win)
     ctx = win.ctx
     VK.device_wait_idle(ctx.device)
@@ -423,18 +439,18 @@ function Base.resize!(win::RenderWindow)
             batch.last_was_rt = false
             empty!(batch.pinned)
             empty!(batch.wait_semaphores)
-            push!((batch.bq::BatchQueue).free_batches, batch)
+            push!((batch.bq::VulkanBatchQueue).free_batches, batch)
             win.frame_batches[i] = nothing
         end
     end
     create_swapchain!(win)
 end
 
-function Base.isopen(win::RenderWindow)
+function Base.isopen(win::VulkanWindow)
     win.handle.handle != C_NULL && !GLFW.WindowShouldClose(win.handle)
 end
 
-function Base.close(win::RenderWindow)
+function Base.close(win::VulkanWindow)
     # Idempotent -- safe to call multiple times
     win.handle.handle == C_NULL && return
     ctx = win.ctx
@@ -449,7 +465,7 @@ function Base.close(win::RenderWindow)
             batch.last_was_rt = false
             empty!(batch.pinned)
             empty!(batch.wait_semaphores)
-            push!((batch.bq::BatchQueue).free_batches, batch)
+            push!((batch.bq::VulkanBatchQueue).free_batches, batch)
             win.frame_batches[i] = nothing
         end
     end
@@ -483,4 +499,4 @@ function Base.close(win::RenderWindow)
     win.handle = GLFW.Window(C_NULL)
 end
 
-Base.size(win::RenderWindow) = (Int(win.extent.width), Int(win.extent.height))
+Base.size(win::VulkanWindow) = (Int(win.extent.width), Int(win.extent.height))

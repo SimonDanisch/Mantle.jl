@@ -53,6 +53,11 @@ KI.bestshape(b::LavaBackend, ab, acc; scope::MatrixScope = SubgroupScope()) =
 # cannot end up exercising a type Lava never generated.
 KI.shfl_down_types(::LavaBackend) = collect(KI_SHFL_TYPES)
 
+# …and the same for the reduce-add, off its own list for the reason given beside
+# `KI_REDUCE_ADD_TYPES`: the two families are separate capabilities and only
+# happen to cover the same six types on this backend.
+KI.sub_group_reduce_add_types(::LavaBackend) = collect(KI_REDUCE_ADD_TYPES)
+
 """
 The width the shader will actually run at, from the device rather than a guess:
 32 on NVIDIA, 32 *or* 64 on RDNA3 depending on how the driver compiled the

@@ -361,7 +361,7 @@ function run!(::Liveness, c)
     lastpass = maximum(t -> t.last, ts) + 1
     analysis(c).items =
         [Item(string(i), alias(c) ? Span(t.first, t.last + 1) : Span(0, lastpass),
-              nbytes(t); alignment = alignment(t))
+              nbytes(t); alignment = alignment(c, t))
          for (i, t) in enumerate(ts)]
     return c
 end
@@ -398,8 +398,20 @@ function run!(::Place, c)
         # region, so the arena costs the largest of them instead of their total.
         # A private slice per plan cannot share bytes however well either one is
         # placed, which is the property a device-owned arena exists to have.
+        # The REGION has to be at least as aligned as anything placed in it. The
+        # placer aligns each tenant WITHIN the region, so a region that starts
+        # at a weaker boundary shifts every one of those offsets off theirs —
+        # and the sum is what the backend is handed.
+        #
+        # It defaulted to `reserve!`'s 256, which held only because nothing had
+        # ever asked for more. A Metal render target wants 2048, and the second
+        # one in an arena landed 128 bytes short of its boundary: the driver
+        # refuses to place a texture there, which is at least loud. The Vulkan
+        # side would have bound the image to a misaligned offset.
+        want_align = maximum(it -> it.alignment, a.items[idx]; init = REGION_ALIGN)
+        want_align = max(want_align, REGION_ALIGN)
         reg = reserve!(pool(c), device(c), ar, ts[idx], pl.height;
-                       blocksize = blocksize(device(c)))
+                       align = want_align, blocksize = blocksize(device(c)))
         push!(a.regions, reg)
         push!(a.arenas, ar)
         a.peak += pl.height
