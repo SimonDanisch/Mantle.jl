@@ -237,6 +237,15 @@ writeupdate!(b::Mantle.Buffer, r::AbstractUnitRange, data::AbstractVector) =
     Mantle.update!(b, r, data)
 writeupdate!(s::Mantle.Scalar, ::Nothing, x) = Mantle.update!(s, x)
 
+# A TRANSIENT is written where it lies. On this backend the arena is host memory
+# and there is nothing to stage through, but the shape is the Vulkan one: the
+# write lands at the position the graph reserved, so the ordering against the
+# first pass that reads it is derived and not asserted.
+writeupdate!(t::HostTransient, ::Nothing, data::AbstractVector) =
+    (copyto!(storage(t), data); nothing)
+writeupdate!(t::HostTransient, r::AbstractUnitRange, data::AbstractVector) =
+    (copyto!(view(storage(t), r), data); nothing)
+
 function Mantle.Update(g::HostGraph, buf; range = nothing)
     p = updates_pass!(g)
     return Mantle.registerupdate!(g.updates, p.usages, resourceid(g, buf), buf, range)

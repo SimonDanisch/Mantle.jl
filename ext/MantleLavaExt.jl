@@ -930,7 +930,8 @@ write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, data::Mantle.Buffer) =
 write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, x) =
     (inplace!(bq, r.resource, [x], 1); nothing)
 
-function write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, data::AbstractVector{T}) where {T}
+function write_update_buffer!(g::LavaGraph, bq, r::Mantle.UpdateRef,
+                              data::AbstractVector{T}) where {T}
     dst = r.resource
     n = length(data) * sizeof(T)
     n == 0 && return
@@ -1033,6 +1034,41 @@ function rename!(g::LavaGraph, bq, dst::Mantle.Buffer{T,1}, data::AbstractVector
     retire!(g.recycler, host, -nbytes, signal)
     nothing
 end
+
+"""
+Write a whole TRANSIENT from host data: stage, then copy into its arena slice.
+
+A transient has no store to swap, so the rename route does not apply — but
+renaming was never the point. The point is that the copy is RECORDED at the
+position the graph reserved for it, so the barrier into the first pass that reads
+it comes from `CopyDst` like any other write and no queue is flushed.
+
+This is what lets a per-frame plane — a matte's alpha, a depth map, a colour table
+— be an ordinary resource of the graph instead of a persistent buffer living
+beside it and reaching in.
+"""
+function stagewrite!(g::LavaGraph, bq, dst, data::AbstractVector{T}, from::Integer) where {T}
+    view = Mantle.storage(dst)
+    nbytes = length(data) * sizeof(T)
+    nbytes == 0 && return nothing
+    host = takehost!(g.recycler, bq, nbytes)
+    src = data isa Vector{T} ? data : collect(data)
+    GC.@preserve src Base.unsafe_copyto!(host.mapped_ptr, Ptr{UInt8}(pointer(src)), nbytes)
+    mb = view.buf[]
+    Lava.cmd_copy_buffer!(bq, host.buffer, mb, nbytes;
+                          dst_off = mb.pool_offset + view.offset +
+                                    (Int(from) - 1) * sizeof(T))
+    retire!(g.recycler, host, -nbytes, Lava.ensure_active_batch!(bq).signal_value)
+    return nothing
+end
+
+# A transient takes the staged route whatever the shape of the write: it has no
+# store to point elsewhere, and a partial write into an arena slice is the same
+# copy with a different offset.
+write_update!(g::LavaGraph, bq, r::Mantle.UpdateRef, data::AbstractVector) =
+    r.resource isa TransientBuffer ?
+        stagewrite!(g, bq, r.resource, data, r.range === nothing ? 1 : first(r.range)) :
+        write_update_buffer!(g, bq, r, data)
 
 function Mantle.copy!(g::LavaGraph, name::AbstractString, dst, src)
     p = Pass(name, :copy)
@@ -1367,6 +1403,9 @@ property of how the graph was declared.
 """
 renameable(g::LavaGraph, r) =
     any(u -> u.resource === rootresource(r) && u.range === nothing, g.updates)
+# A transient is never renamed — it has no store of its own to swap, only a slice
+# of the arena — so it keeps its scoped barrier even under a bare `Update`.
+renameable(::LavaGraph, ::TransientBuffer) = false
 
 """
 The barrier a pass needs, as one memory barrier with stages and access ORed over
