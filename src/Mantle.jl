@@ -203,7 +203,8 @@ export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
 export allocate_batch_queue!, release_batch_queue!, ensure_active_batch!, waitidle
 export supports_graphics, supports_batch_queue, use_bindings!, supports_rt_pipeline
-export defaultbackend, availablebackends, register_backend!
+export batchqueue
+export defaultbackend, availablebackends, register_backend!, register_kernel_recorder!
 export devicearray
 export bind_textures
 
@@ -231,6 +232,10 @@ export RayTracingPipeline, AdaptedAccel
 # Hardware ray tracing.
 export build_accel!, refit_tlas!, set_anyhit_pipeline!
 export trace_rays!, trace_rays_indirect!
+# The DECLARATION verb, beside `dispatch!` rather than beside the recording ones
+# above: `trace!` says a pass traces, the others record a trace that was already
+# decided on.
+export trace!, Trace
 export trace_closest_hits!, trace_closest_hits_indirect!
 export trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
 export Topology, TriangleList, TriangleStrip, LineList, LineStrip, PointList,

@@ -122,8 +122,8 @@ else
         v = pp.barrier.vks
         v.memoryBarrierCount == 0 && return nothing
         m = unsafe_load(v.pMemoryBarriers, 1)
-        (Mantle.VK.PipelineStageFlag2(m.srcStageMask),
-         Mantle.VK.PipelineStageFlag2(m.dstStageMask))
+        (MVE.VK.PipelineStageFlag2(m.srcStageMask),
+         MVE.VK.PipelineStageFlag2(m.dstStageMask))
     end
 
     # A quad at a given depth, and a fragment that writes no attachment, which is
@@ -954,7 +954,7 @@ else
                 end
             end
             plan = M.Plan(g)
-            for _ in 1:20; Mantle.GLFW.PollEvents(); M.run!(plan); end
+            for _ in 1:20; MVE.GLFW.PollEvents(); M.run!(plan); end
             KernelAbstractions.synchronize(M.backend(dev))
             img = M.screenshot(win); close(win)
             sum(Float64(p[1]) + p[2] + p[3] for p in img)
@@ -1205,9 +1205,9 @@ else
         # clear colour was given can only ever pick CLEAR or LOAD, so a pass that
         # covers every pixel used to pay for a load it discards.
         E = Mantle
-        @test E.loadop(M.Keep) == Mantle.VK.ATTACHMENT_LOAD_OP_LOAD
-        @test E.loadop(M.Discard) == Mantle.VK.ATTACHMENT_LOAD_OP_DONT_CARE
-        @test E.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == Mantle.VK.ATTACHMENT_LOAD_OP_CLEAR
+        @test E.loadop(M.Keep) == MVE.VK.ATTACHMENT_LOAD_OP_LOAD
+        @test E.loadop(M.Discard) == MVE.VK.ATTACHMENT_LOAD_OP_DONT_CARE
+        @test E.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == MVE.VK.ATTACHMENT_LOAD_OP_CLEAR
         @test E.clearvalue(M.Keep) === nothing
         @test E.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
 
@@ -1288,8 +1288,8 @@ else
         E = Mantle
         zt = only(t for t in probe.plan.graph.transients
                   if t isa E.TransientImage && eltype(t) === Float32)
-        @test zt.format == Mantle.VK.FORMAT_D32_SFLOAT
-        @test E.aspect(zt) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT
+        @test zt.format == MVE.VK.FORMAT_D32_SFLOAT
+        @test E.aspect(zt) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT
 
         for order in ((near, far), (far, near))
             got = shot(order, ZPIPE)
@@ -1371,7 +1371,7 @@ else
         copies = [pp for pp in plan.passes if pp.pass.kind === :copy]
         @test length(copies) == 2
         for pp in copies
-            @test any(b -> b.new == Mantle.VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
+            @test any(b -> b.new == MVE.VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
         end
 
         M.run!(plan)
@@ -1531,12 +1531,12 @@ else
 
         E = Mantle
         depth = only(b for b in plan.passes[1].images
-                     if E.aspect(b.resource) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT)
+                     if E.aspect(b.resource) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT)
         # The layout still comes from UNDEFINED — the clear discards — but the
         # barrier has to wait for the previous frame's depth write all the same.
-        @test depth.old == Mantle.VK.IMAGE_LAYOUT_UNDEFINED
-        @test depth.src_access != Mantle.VK.AccessFlag2(0)
-        @test depth.src_stage != Mantle.VK.PipelineStageFlag2(0)
+        @test depth.old == MVE.VK.IMAGE_LAYOUT_UNDEFINED
+        @test depth.src_access != MVE.VK.AccessFlag2(0)
+        @test depth.src_stage != MVE.VK.PipelineStageFlag2(0)
     end
 
     @testset "a scalar attribute is written in place" begin
@@ -1673,8 +1673,8 @@ else
             b = M.use(p, src; read = true)
             c = M.use(p, out; write = true)
             return function ()
-                bump!(Mantle.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
-                bump!(Mantle.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
+                bump!(MVE.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
+                bump!(MVE.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
             end
         end
         plan = M.Plan(g)
@@ -1718,9 +1718,9 @@ else
             b = M.use(p, src; read = true)
             c = M.use(p, out; write = true)
             return function ()
-                push!(active, Mantle.CONCURRENT_GROUP_ACTIVE[])
-                bump!(Mantle.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
-                bump!(Mantle.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
+                push!(active, MVE.CONCURRENT_GROUP_ACTIVE[])
+                bump!(MVE.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
+                bump!(MVE.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
             end
         end
         plan = M.Plan(g)
@@ -1860,8 +1860,8 @@ else
         # if the barrier is derived they differ, and if it is assumed they cannot.
         N = 256
         dev = M.Device(M.VulkanAPI())
-        every = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-        copybit = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_COPY_BIT)
+        every = MVE.VK.PipelineStageFlag2(MVE.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+        copybit = MVE.VK.PipelineStageFlag2(MVE.VK.PIPELINE_STAGE_2_COPY_BIT)
 
         # (a) the vacating transient was last *read by a shader*
         function shaderlast(dev)

@@ -1,6 +1,6 @@
 using Test, Lava, Mantle
-using Mantle: VulkanInstanceRecord, build_tlas, refit_tlas!,
-              build_accel!, build_blas_aabb, AS_INPUT_USAGE
+using Mantle: refit_tlas!, build_accel!
+using .MVE: VulkanInstanceRecord, build_tlas, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 function translation_transform(x, y, z)
@@ -20,7 +20,7 @@ end
                                   custom_index=UInt32(0), mask=UInt8(0xff))
     inst_b0 = VulkanInstanceRecord(translation_transform(5f0, 0f0, 0f0), blas.address;
                                   custom_index=UInt32(1), mask=UInt8(0xff))
-    instance_buf = Mantle.LavaArray([inst_a0, inst_b0]; extra_usage=AS_INPUT_USAGE)
+    instance_buf = MVE.LavaArray([inst_a0, inst_b0]; extra_usage=AS_INPUT_USAGE)
 
     tlas = build_accel!() do ctx
         build_tlas(ctx, instance_buf, 2; allow_update=true)
@@ -46,7 +46,7 @@ end
         build_blas_aabb(ctx, [aabb])
     end
     inst = VulkanInstanceRecord(Mantle.identity_transform(), blas.address)
-    instance_buf = Mantle.LavaArray([inst]; extra_usage=AS_INPUT_USAGE)
+    instance_buf = MVE.LavaArray([inst]; extra_usage=AS_INPUT_USAGE)
 
     tlas = build_accel!() do ctx
         build_tlas(ctx, instance_buf, 1; allow_update=false)

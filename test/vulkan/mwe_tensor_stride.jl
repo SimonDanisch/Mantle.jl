@@ -32,7 +32,7 @@ const L  = 32      # columns of the array = rows of the matrix
     Mantle.copyto!(pointer(out), 1, L, m)
 end
 
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device — nothing to run"
 else

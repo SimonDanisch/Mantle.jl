@@ -1,6 +1,6 @@
 using Test, Lava, KernelAbstractions
 using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator
-using Mantle: coopmat_gemm_available
+using .MVE: coopmat_gemm_available
 
 # Can a cooperative matrix be loaded out of `@localmem`?
 #
@@ -73,7 +73,7 @@ end
     # launches its own 32-wide kernel and never uses the block GEMM's `lane ÷ 32`
     # subgroup indexing, so it is meaningful (and passes) on a wave64 device where
     # the GEMM path is correctly disabled.
-    if !Mantle.coopmat_shape(Mantle.vk_context(), Float16, TILE, TILE, TILE)
+    if !MVE.coopmat_shape(MVE.vk_context(), Float16, TILE, TILE, TILE)
         @info "skipping: device reports no $(TILE)^3 Float16 cooperative-matrix shape"
     else
         backend = LavaBackend()
@@ -166,7 +166,7 @@ end
 
 @testset "cooperative matrix from a vec2-typed @localmem" begin
     backend = LavaBackend()
-    if !Mantle.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available()
         @info "skipping: no cooperative-matrix support on this device"
     else
         h = Float16.(reshape(1:256, 16, 16))
@@ -209,7 +209,7 @@ end
 
 @testset "cooperative matrix from a vec4-typed @localmem" begin
     backend = LavaBackend()
-    if !Mantle.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available()
         @info "skipping: no cooperative-matrix support on this device"
     else
         h = Float16.(reshape(1:256, 16, 16))
@@ -264,7 +264,7 @@ end
 
 @testset "row-major cooperative-matrix store into @localmem" begin
     backend = LavaBackend()
-    if !Mantle.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available()
         @info "skipping: no cooperative-matrix support on this device"
     else
         h = Float16.(reshape(1:256, 16, 16))

@@ -68,14 +68,14 @@ end
     # @synchronize — the exact triple AK.merge_sort uses.  We just need
     # it to compile + pass spirv-val (which fired on the original bug).
     bv = BVStruct((0f0, 0f0, 0f0), (1f0, 1f0, 1f0), Int32(0), UInt32(0))
-    in_arr = Mantle.LavaArray([bv for _ in 1:8])
-    out_arr = Mantle.LavaArray([bv for _ in 1:8])
-    backend = Mantle.LavaBackend()
+    in_arr = MVE.LavaArray([bv for _ in 1:8])
+    out_arr = MVE.LavaArray([bv for _ in 1:8])
+    backend = MVE.LavaBackend()
     bq = backend.bq
 
     # Compile-only path is enough — emit + spirv-val happen inside.
     @test_nowarn _scatter_gather_kernel!(backend, 8)(in_arr, out_arr; ndrange=8)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     out = Array(out_arr)
     @test out[1] == bv  # round-trip through @localmem worked
 end
@@ -84,7 +84,7 @@ end
 # `ensure_index_i32!` change.  Any fix that breaks this is the same
 # class of bug the user has been complaining about.
 @testset "RT inline ray query — still compiles after AccessChain fix" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping RT half: no VK_KHR_ray_query"
         @test_skip true

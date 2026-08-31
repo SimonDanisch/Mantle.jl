@@ -1,6 +1,6 @@
 using Test, Lava, Raycore
-using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE,
-              write_grain_instances_kernel
+using Mantle: build_accel!
+using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE, write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "VulkanTLAS sync! with instance batch" begin
@@ -9,20 +9,20 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 
     n = 8
     radius = 1f0
-    quats = Mantle.LavaArray([Vec4f(0,0,0,1) for _ in 1:n])
-    positions = Mantle.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
-    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
+    quats = MVE.LavaArray([Vec4f(0,0,0,1) for _ in 1:n])
+    positions = MVE.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
+    instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
 
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = MVE.LavaBackend()
+    bq = MVE.vk_context().default_bq
 
     # Use the KA backend pattern for @kernel-defined kernels.
     write_grain_instances_kernel(backend)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = n)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
-    tlas = Mantle.VulkanTLAS(backend)
+    tlas = MVE.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n=2*n, instance_mask=UInt8(0x02))
     Raycore.sync!(tlas)
 
@@ -39,11 +39,11 @@ end
     blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n_a = 4; n_b = 6
-    instance_buf1 = Mantle.LavaArray{VulkanInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)
-    instance_buf2 = Mantle.LavaArray{VulkanInstanceRecord}(undef, n_b; extra_usage=AS_INPUT_USAGE)
+    instance_buf1 = MVE.LavaArray{VulkanInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)
+    instance_buf2 = MVE.LavaArray{VulkanInstanceRecord}(undef, n_b; extra_usage=AS_INPUT_USAGE)
 
-    backend = Mantle.LavaBackend()
-    tlas = Mantle.VulkanTLAS(backend)
+    backend = MVE.LavaBackend()
+    tlas = MVE.VulkanTLAS(backend)
     h1 = push!(tlas, blas, instance_buf1; n=n_a, instance_mask=UInt8(0x02))
     h2 = push!(tlas, blas, instance_buf2; n=n_b, instance_mask=UInt8(0x04))
 

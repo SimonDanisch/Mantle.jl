@@ -45,26 +45,8 @@ via the BDA argument buffer (same as compute kernel arguments).
 function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLAS,
                      args...;
                      width::Integer, height::Integer, depth::Integer=1)
-    # Resolve or compile the RT pipeline FIRST.  A cold compile builds the
-    # SBT via `upload_typed!`, which calls `flush!(bq)` and invalidates any
-    # active batch — so we must run it before `ensure_active_batch!` below.
-    # On warm calls this is a Dict lookup and does not flush.
-    invalidate_stale_rt_cache!(pipeline)
-    tt_key = Tuple{map(arg_sigtype, args)...}   # pre-adapt types (same as post-adapt for non-LavaArray)
-    cache_key = rt_cache_key(pipeline, tt_key)
-    cached = get((bq.ctx::VkContext).caches.rt_pipelines, cache_key, nothing)
-    if cached === nothing
-        # Compile with post-adapt signature: LavaArray args are seen as
-        # LavaDeviceArray in the kernel, matching what pack_args_direct!
-        # writes.  We drive the adapt through a throwaway batch since the
-        # real batch isn't opened yet; adaptor-side pinning on the throwaway
-        # is irrelevant (we re-adapt against the real batch below).
-        dummy_batch = ensure_active_batch!(bq)
-        tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(dummy_batch), a)), args)...}
-        cached = compile_rt_pipeline(bq.ctx::VkContext, pipeline, tt)
-        (bq.ctx::VkContext).caches.rt_pipelines[cache_key] = cached
-    end
-    vk_pipeline, raygen_compiled, offsets, byval_sizes = cached
+    # Before `ensure_active_batch!` below — see `rt_compiled_for` for why.
+    vk_pipeline, raygen_compiled, offsets, byval_sizes = rt_compiled_for(bq, pipeline, args)
 
     # Now open (or re-open) the real active batch and adapt args into it.
     batch = ensure_active_batch!(bq)
@@ -99,28 +81,53 @@ function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::L
 end
 
 """
+    rt_compiled_for(bq, pipeline, args) -> (vk_pipeline, raygen, offsets, byval_sizes)
+
+The compiled ray-tracing pipeline for these argument types, from the device's
+cache or freshly built.
+
+A cold compile builds the shader binding table through `upload_typed!`, which
+calls `flush!(bq)` and invalidates any active batch — so every caller has to do
+this BEFORE opening the batch it records into. The throwaway batch below exists
+only to drive `Adapt`: the signature has to be the post-adapt one, because that
+is what `pack_args_direct!` writes.
+
+Extracted so `trace_rays!`, `trace_rays_indirect!` and `compile_dispatch(::Trace)`
+share it. It was written out three times, and the third copy is the one that
+would have drifted: a modelled trace resolves the pipeline at COMPILE and records
+later, so a difference in how the key is built would show up as a second pipeline
+for the same work rather than as an error.
+"""
+function rt_compiled_for(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, args)
+    ctx = bq.ctx::VkContext
+    invalidate_stale_rt_cache!(pipeline)
+    tt_key = Tuple{map(arg_sigtype, args)...}
+    key = rt_cache_key(pipeline, tt_key)
+    cached = get(ctx.caches.rt_pipelines, key, nothing)
+    if cached === nothing
+        dummy_batch = ensure_active_batch!(bq)
+        tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(dummy_batch), a)), args)...}
+        cached = compile_rt_pipeline(ctx, pipeline, tt)
+        ctx.caches.rt_pipelines[key] = cached
+    end
+    return cached
+end
+
+"""
     trace_rays_indirect!(pipeline, tlas, args...; n_rays::LavaArray{Int32})
 
 Dispatch a ray tracing pipeline with the ray count read from a GPU buffer.
 No CPU readback — a prepare kernel writes the indirect command, then
 `cmd_trace_rays_indirect_khr` reads it from GPU memory.
+
+The unmodelled form: it packs its arguments into the queue's per-frame scratch
+as it records. Use [`trace!`](@ref) inside a graph, whose arguments live in the
+plan and can therefore be rebound — see `Trace`.
 """
 function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline,
                               tlas::LavaTLAS, args...;
                               n_rays::LavaArray{Int32})
-    # See comment in trace_rays!: a cold compile's SBT upload flushes the
-    # active batch, so compile FIRST, then open the real batch below.
-    invalidate_stale_rt_cache!(pipeline)
-    tt_key = Tuple{map(arg_sigtype, args)...}
-    cache_key = rt_cache_key(pipeline, tt_key)
-    cached = get((bq.ctx::VkContext).caches.rt_pipelines, cache_key, nothing)
-    if cached === nothing
-        dummy_batch = ensure_active_batch!(bq)
-        tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(dummy_batch), a)), args)...}
-        cached = compile_rt_pipeline(bq.ctx::VkContext, pipeline, tt)
-        (bq.ctx::VkContext).caches.rt_pipelines[cache_key] = cached
-    end
-    vk_pipeline, raygen_compiled, offsets, byval_sizes = cached
+    vk_pipeline, raygen_compiled, offsets, byval_sizes = rt_compiled_for(bq, pipeline, args)
 
     # Prepare the indirect buffer before the RT arg buffer: prepare_indirect
     # dispatches its own kernel which may flush-and-reset slab pools, so if

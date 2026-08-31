@@ -24,12 +24,12 @@ using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 
 @testset "a backend knows its device" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
 
     # ── Every construction form resolves to the device it dispatches on.
-    @test Mantle.vk_context(LavaBackend(ctx))                          === ctx
-    @test Mantle.vk_context(LavaBackend(ctx.default_bq))               === ctx
-    @test Mantle.vk_context(LavaBackend(ctx.default_bq, ctx.default_bq)) === ctx
+    @test MVE.vk_context(LavaBackend(ctx))                          === ctx
+    @test MVE.vk_context(LavaBackend(ctx.default_bq))               === ctx
+    @test MVE.vk_context(LavaBackend(ctx.default_bq, ctx.default_bq)) === ctx
 
     # ── Including the unpinned one, which stores no queue at all and resolves
     #    through `vk_context()` at access — the property that lets a
@@ -37,14 +37,14 @@ const KA = KernelAbstractions
     unpinned = LavaBackend()
     pinned   = LavaBackend(ctx)
     @test getfield(unpinned, :dispatch_bq) === nothing
-    @test Mantle.vk_context(unpinned) === ctx
+    @test MVE.vk_context(unpinned) === ctx
 
     # ── The round trip that makes it useful: an array knows its device, and the
     #    backend derived from it agrees. This is the path a per-device cache key
     #    would travel.
-    a = Mantle.LavaArray(zeros(Float32, 8))
-    @test Mantle.vk_context(a) === ctx
-    @test Mantle.vk_context(KA.get_backend(a)) === ctx
+    a = MVE.LavaArray(zeros(Float32, 8))
+    @test MVE.vk_context(a) === ctx
+    @test MVE.vk_context(KA.get_backend(a)) === ctx
 
     # ── And it still works as a backend.
     fill!(a, 2.0f0)

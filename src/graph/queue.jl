@@ -212,6 +212,24 @@ Answering only the second question sends it down a path whose first call is
 """
 supports_batch_queue(backend) = false
 
+"""
+    batchqueue(device) -> BatchQueue
+
+The queue a `custom!` pass on `device` records into.
+
+The portable spelling of what was `Mantle.vk_context().default_bq`, which is how
+Hikari's hardware ray-tracing pass reached its queue: a global lookup, in the
+backend, from a package that is not supposed to know which backend it has. A
+`custom!` body already holds the graph, and the graph holds the device, so the
+queue was one hop away the whole time — and after the runtime moved into an
+extension the global was not reachable at all.
+
+No default. A backend with no queue to record into should say so through
+[`supports_batch_queue`](@ref) and be asked that question first; a fallback here
+would answer "no queue" as some other value and fail further away.
+"""
+function batchqueue end
+
 
 """
     release_batch_queue!(bq)

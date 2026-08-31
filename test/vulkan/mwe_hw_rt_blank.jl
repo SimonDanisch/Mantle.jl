@@ -77,7 +77,7 @@ end
 
 function run_once(label::String)
     println("\n=== $label ===")
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     bq = backend.bq
 
     tri_v0 = Point3f(-1f0, -1f0, 5f0)
@@ -86,7 +86,7 @@ function run_once(label::String)
     verts = [tri_v0, tri_v1, tri_v2]
     faces = [GLTriangleFace(1, 2, 3)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
-    hwtlas = Mantle.VulkanTLAS(backend)
+    hwtlas = MVE.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     Tri = eltype(eltype(hwtlas.blas_triangles))
@@ -112,11 +112,11 @@ function run_once(label::String)
         return nothing
     end
 
-    t_out = Mantle.LavaArray(fill(-2f0, n))
-    origins_g = Mantle.LavaArray(origins)
-    Mantle.lava_launch!(bq, k, t_out, origins_g, accel;
+    t_out = MVE.LavaArray(fill(-2f0, n))
+    origins_g = MVE.LavaArray(origins)
+    MVE.lava_launch!(bq, k, t_out, origins_g, accel;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     gpu_t = Array(t_out)
 
     n_hit_ref = count(>=(0f0), ref)
@@ -143,8 +143,8 @@ end
 
 # ── Run 1: default multi-OpFunction emission ─────────────────────────────
 empty!(Lava.FORCE_INLINE_KERNEL_PATTERNS)
-Mantle.clear_spirv_disk_cache!()
-empty!(Mantle.vk_context().caches.linked)
+MVE.clear_spirv_disk_cache!()
+empty!(MVE.vk_context().caches.linked)
 default_ok = try_run("default (multi-OpFunction)")
 
 # Reset between runs in case of crash
@@ -153,8 +153,8 @@ try Mantle.reset_device!() catch e; @warn "reset failed: $(first(sprint(showerro
 # ── Run 2: force_inline_all=true via the debug hook ──────────────────────
 empty!(Lava.FORCE_INLINE_KERNEL_PATTERNS)
 push!(Lava.FORCE_INLINE_KERNEL_PATTERNS, "")  # empty matches everything
-Mantle.clear_spirv_disk_cache!()
-empty!(Mantle.vk_context().caches.linked)
+MVE.clear_spirv_disk_cache!()
+empty!(MVE.vk_context().caches.linked)
 inlined_ok = try_run("force_inline_all=true")
 
 println("\n────────────────────────────────────────")

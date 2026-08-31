@@ -26,7 +26,7 @@ using Raycore, Lava
 #      unexpected blocking primitive was introduced.
 # ===============================================================================
 
-@testset "Mantle.VulkanTLAS — sync! contains no KA.synchronize" begin
+@testset "MVE.VulkanTLAS — sync! contains no KA.synchronize" begin
     # `pathof(Mantle)`: `hwtlas.jl` came here with the runtime and sits under
     # `src/vulkan/`. Read from source on purpose — the assertion is about what
     # `sync!` does NOT call, which no runtime observation can show.
@@ -43,9 +43,9 @@ using Raycore, Lava
     @test !occursin("wait_on_timeline", sync_body_code)
 end
 
-@testset "Mantle.VulkanTLAS — sync! CPU time is bounded on idle queue" begin
-    backend = Mantle.LavaBackend()
-    hwtlas = Mantle.VulkanTLAS(backend)
+@testset "MVE.VulkanTLAS — sync! CPU time is bounded on idle queue" begin
+    backend = MVE.LavaBackend()
+    hwtlas = MVE.VulkanTLAS(backend)
     mesh = GeometryBasics.normal_mesh(Tessellation(Sphere(Point3f(0), 1f0), 128))
     h = push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
     Raycore.sync!(hwtlas)

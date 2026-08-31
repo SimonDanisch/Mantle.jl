@@ -19,7 +19,7 @@ const KA = KernelAbstractions
 end
 
 backend = LavaBackend()
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 
 println("=== MWE-1: pure-compute alloc/dispatch/free loop ===")
 const N_ITERS = 30
@@ -28,10 +28,10 @@ const N_BUFS_PER_ITER = 12  # ~match VolPathState's count
 # DON'T disable GC — let it race like Hikari does.
 crashed_at = 0
 for iter in 1:N_ITERS
-    bufs = Mantle.LavaArray{Float32, 1}[]
+    bufs = MVE.LavaArray{Float32, 1}[]
     # Allocate N_BUFS_PER_ITER LavaArrays.
     for k in 1:N_BUFS_PER_ITER
-        push!(bufs, Mantle.LavaArray(zeros(Float32, 1024)))
+        push!(bufs, MVE.LavaArray(zeros(Float32, 1024)))
     end
     # Dispatch a kernel against each (forces last_write to be set).
     for arr in bufs
@@ -40,7 +40,7 @@ for iter in 1:N_ITERS
     KA.synchronize(backend)
     # Drop all refs — finalizer thread will free buffers eventually.
     bufs = nothing
-    if Mantle.device_lost(ctx)
+    if MVE.device_lost(ctx)
         global crashed_at = iter
         break
     end
@@ -53,4 +53,4 @@ end
 
 using Test
 @test crashed_at == 0
-@test !Mantle.device_lost(ctx)
+@test !MVE.device_lost(ctx)

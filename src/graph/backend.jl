@@ -221,19 +221,54 @@ recording a command buffer — has none, which is the default.
 makeargmemory(::Device, passes) = nothing
 
 """
+    register_kernel_recorder!(recorder; name)
+
+Register `recorder` as a backend's kernel-cache recorder.
+
+`recorder(f, version)` runs `f` with that backend's on-disk cache recording
+under `version`, and restores whatever it changed afterwards. A backend that
+caches compiled kernels — Vulkan freezes SPIR-V — registers one from its
+extension's `__init__`; one that does not registers nothing.
+
+A registry and NOT dispatch, which is what this was: the backend wrote
+`Mantle.with_kernel_recording(f, version) = …`, the same untyped two-argument
+signature as the default below, so it OVERWROTE it rather than extending it —
+fatal during precompilation, and silently the wrong hook if it had not been. The
+call site has neither a device nor a backend to dispatch on, deliberately:
+`@compile_workload` runs where there may be no driver at all, and asking for one
+to decide how to record would defeat the point.
+
+Nesting also answers the two-backend case, which dispatch could not have: with
+Vulkan and Metal both loaded, every registered cache records, rather than one
+method winning. `name` replaces an earlier registration under the same name, so
+reloading an extension does not stack recorders.
+"""
+function register_kernel_recorder!(recorder; name::Symbol)
+    filter!(e -> first(e) !== name, KERNEL_RECORDERS)
+    push!(KERNEL_RECORDERS, name => recorder)
+    return nothing
+end
+
+const KERNEL_RECORDERS = Pair{Symbol,Any}[]
+
+"""
     with_kernel_recording(f, version)
 
-Run `f` with the backend's kernel cache recording under `version`.
+Run `f` with every registered kernel cache recording under `version`.
 
-The hook behind [`@compile_workload`](@ref). A backend that caches compiled
-kernels on disk — Vulkan freezes SPIR-V — records into it here; one that does
-not just calls `f`, which is the default.
-
-A function and not part of the macro because a MACRO cannot be overridden from
-an extension: `Mantle.@compile_workload` has to expand to the same thing
-everywhere, so what varies is what it calls.
+The hook behind [`@compile_workload`](@ref). With nothing registered this is
+`f()`, which is the whole behaviour on a backend that compiles kernels fresh
+each session.
 """
-with_kernel_recording(f, version) = f()
+function with_kernel_recording(f, version)
+    isempty(KERNEL_RECORDERS) && return f()
+    inner = f
+    for (_, recorder) in KERNEL_RECORDERS
+        outer = inner                       # rebound per iteration, so each
+        inner = () -> recorder(outer, version)   # closure keeps its own link
+    end
+    return inner()
+end
 
 """
     @compile_workload version begin … end

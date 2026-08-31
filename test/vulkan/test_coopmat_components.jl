@@ -29,7 +29,7 @@ it is the regression test for that: `prescan_function_for_coopmat_components!`.
 using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 const AMc = Lava.AcceleratedMatrix
-const TILEc = Mantle.GEMM_TILE
+const TILEc = MVE.GEMM_TILE
 
 # `f` applied to every component, in a loop — the shape that needs the pre-scan.
 @kernel cpu=false function coopmat_map_kernel!(C, @Const(A))
@@ -54,7 +54,7 @@ end
 end
 
 @testset "cooperative-matrix component access" begin
-    if !Mantle.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available()
         @info "no cooperative-matrix support on this device; skipping"
     else
         back = LavaBackend()
@@ -74,7 +74,7 @@ end
 
         @testset "every component is reached exactly once" begin
             h = Float32.(reshape(1:(TILEc * TILEc), TILEc, TILEc))
-            A = Mantle.LavaArray(h)
+            A = MVE.LavaArray(h)
             C = KA.allocate(back, Float32, TILEc, TILEc); fill!(C, 0f0)
             coopmat_map_kernel!(back, 32)(C, A; ndrange = 32)
             KA.synchronize(back)
@@ -90,7 +90,7 @@ end
             # read, so two matrices must not bleed into one another.
             h1 = Float32.(reshape(1:(TILEc * TILEc), TILEc, TILEc))
             h2 = Float32.(reshape((TILEc * TILEc):-1:1, TILEc, TILEc))
-            A1, A2 = Mantle.LavaArray(h1), Mantle.LavaArray(h2)
+            A1, A2 = MVE.LavaArray(h1), MVE.LavaArray(h2)
             C1 = KA.allocate(back, Float32, TILEc, TILEc); fill!(C1, 0f0)
             C2 = KA.allocate(back, Float32, TILEc, TILEc); fill!(C2, 0f0)
             coopmat_map_kernel!(back, 32)(C1, A1; ndrange = 32)
@@ -105,7 +105,7 @@ end
 end
 
 @testset "GEMM epilogue" begin
-    if !Mantle.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available()
         @info "no cooperative-matrix support on this device; skipping"
     else
         back = LavaBackend()
@@ -115,7 +115,7 @@ end
         M, N, K = 2304, 4096, 576
         hA = Float16.(randn(Float32, M, K) .* 0.05f0)
         hB = Float16.(randn(Float32, K, N) .* 0.05f0)
-        A, B = Mantle.LavaArray(hA), Mantle.LavaArray(hB)
+        A, B = MVE.LavaArray(hA), MVE.LavaArray(hB)
 
         @testset "bit-exact against applying it afterwards" begin
             # `2x` and `-x` are exact in binary, which is the point: they cannot
@@ -126,9 +126,9 @@ end
             D0 = KA.allocate(back, Float32, M, N); fill!(D0, 0f0)
             D1 = KA.allocate(back, Float32, M, N); fill!(D1, 0f0)
             D2 = KA.allocate(back, Float32, M, N); fill!(D2, 0f0)
-            Mantle.coopmat_gemm!(D0, A, B, M, N, K)
-            Mantle.coopmat_gemm!(D1, A, B, M, N, K; epilogue = x -> x * 2.0f0)
-            Mantle.coopmat_gemm!(D2, A, B, M, N, K; epilogue = x -> -x)
+            MVE.coopmat_gemm!(D0, A, B, M, N, K)
+            MVE.coopmat_gemm!(D1, A, B, M, N, K; epilogue = x -> x * 2.0f0)
+            MVE.coopmat_gemm!(D2, A, B, M, N, K; epilogue = x -> -x)
             KA.synchronize(back)
             E0 = Array(D0)
             @test maximum(abs, E0) > 1e-3            # it computed something
@@ -140,8 +140,8 @@ end
         @testset "identity is the default and costs nothing" begin
             D0 = KA.allocate(back, Float32, M, N); fill!(D0, 0f0)
             D1 = KA.allocate(back, Float32, M, N); fill!(D1, 0f0)
-            Mantle.coopmat_gemm!(D0, A, B, M, N, K)
-            Mantle.coopmat_gemm!(D1, A, B, M, N, K; epilogue = identity)
+            MVE.coopmat_gemm!(D0, A, B, M, N, K)
+            MVE.coopmat_gemm!(D1, A, B, M, N, K; epilogue = identity)
             KA.synchronize(back)
             @test Array(D0) == Array(D1)
             D0 = D1 = nothing
@@ -200,9 +200,9 @@ end
             # A plane is a PARTIAL sum; an activation on it would be applied to a
             # fraction of the dot product and then summed. Wrong, and silently.
             C = KA.allocate(back, Float32, 64, 64)
-            @test_throws ArgumentError Mantle.coopmat_gemm!(
-                C, Mantle.LavaArray(Float16.(zeros(Float32, 64, 64))),
-                Mantle.LavaArray(Float16.(zeros(Float32, 64, 64))), 64, 64, 64;
+            @test_throws ArgumentError MVE.coopmat_gemm!(
+                C, MVE.LavaArray(Float16.(zeros(Float32, 64, 64))),
+                MVE.LavaArray(Float16.(zeros(Float32, 64, 64))), 64, 64, 64;
                 blk_split = (1, 4), epilogue = x -> x * 2.0f0)
             C = nothing
         end

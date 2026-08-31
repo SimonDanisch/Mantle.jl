@@ -20,23 +20,23 @@ const KA = KernelAbstractions
 
     @testset "the tiling is a device question" begin
         # Legal only where the device reports workgroup-scope shapes at all.
-        @test (Mantle.gemm_cm2_tiling(dev) === nothing) == isempty(dev.wggran)
+        @test (MVE.gemm_cm2_tiling(dev) === nothing) == isempty(dev.wggran)
         none = Lava.DeviceCaps(dev; wggran = NTuple{4,Int}[])
-        @test Mantle.gemm_cm2_tiling(none) === nothing
-        @test !Mantle.gemm_cm2_fits(none, 64, 64, 32, 256)
+        @test MVE.gemm_cm2_tiling(none) === nothing
+        @test !MVE.gemm_cm2_fits(none, 64, 64, 32, 256)
 
         # An invented device, so these assert the RULE and not this card.
         d = Lava.DeviceCaps(dev; wggran = [(128, 32, 16, 16), (256, 32, 32, 16)])
-        @test Mantle.gemm_cm2_fits(d, 64, 64, 32, 256)
-        @test !Mantle.gemm_cm2_fits(d, 64, 16, 32, 256)   # BM 16 < N granularity 32
-        @test !Mantle.gemm_cm2_fits(d, 64, 64, 8, 256)    # BK 8  < K granularity 16
-        @test !Mantle.gemm_cm2_fits(d, 64, 64, 32, 64)    # 64 invocations unreported
+        @test MVE.gemm_cm2_fits(d, 64, 64, 32, 256)
+        @test !MVE.gemm_cm2_fits(d, 64, 16, 32, 256)   # BM 16 < N granularity 32
+        @test !MVE.gemm_cm2_fits(d, 64, 64, 8, 256)    # BK 8  < K granularity 16
+        @test !MVE.gemm_cm2_fits(d, 64, 64, 32, 64)    # 64 invocations unreported
         # …and whatever the chooser returns must satisfy its own predicate. That
         # is the property worth pinning: a chooser handing back a tiling nothing
         # can run is the one failure this pair exists to prevent.
         for c in (dev, d, Lava.DeviceCaps(dev; wggran = [(256, 32, 32, 16)]))
-            t = Mantle.gemm_cm2_tiling(c)
-            t === nothing || @test Mantle.gemm_cm2_fits(c, t...)
+            t = MVE.gemm_cm2_tiling(c)
+            t === nothing || @test MVE.gemm_cm2_fits(c, t...)
         end
     end
 
@@ -48,7 +48,7 @@ const KA = KernelAbstractions
             # `BK = 8` is below every reported K granularity. Before this check it
             # reached `vkCreateComputePipelines` and failed there, naming neither
             # the tiling nor the rule.
-            @test_throws ArgumentError Mantle.coopmat_gemm_cm2!(C, A, B, 64, 64, 64;
+            @test_throws ArgumentError MVE.coopmat_gemm_cm2!(C, A, B, 64, 64, 64;
                                                               tiling = (64, 64, 8, 256))
             A = B = C = nothing; GC.gc()
         end
@@ -67,7 +67,7 @@ const KA = KernelAbstractions
                 scale = maximum(abs, want)
                 for (T, tol) in ((Float32, 1e-4), (Float16, 3e-3))
                     C = KA.allocate(back, T, M, N); fill!(C, T(NaN))
-                    @test Mantle.coopmat_gemm_cm2!(C, A, B, M, N, K) !== nothing
+                    @test MVE.coopmat_gemm_cm2!(C, A, B, M, N, K) !== nothing
                     KA.synchronize(back)
                     got = Float32.(Array(C))
                     # A kernel that writes nothing also matches a zero reference.
@@ -92,7 +92,7 @@ const KA = KernelAbstractions
                 want = Float32.(a) * Float32.(b)
                 for nw in (2, 4)
                     C = KA.allocate(back, Float32, M, N); fill!(C, Float32(NaN))
-                    @test Mantle.coopmat_gemm_cm2_sg!(C, A, B, M, N, K; nw) !== nothing
+                    @test MVE.coopmat_gemm_cm2_sg!(C, A, B, M, N, K; nw) !== nothing
                     KA.synchronize(back)
                     got = Float32.(Array(C))
                     @test all(isfinite, got)
@@ -114,7 +114,7 @@ const KA = KernelAbstractions
             B = KA.allocate(back, Float16, K, N); copyto!(B, b)
             big = KA.allocate(back, Float32, M, N + 8); fill!(big, Float32(NaN))
             C = view(big, :, 1:N)
-            @test Mantle.coopmat_gemm_cm2!(C, A, B, M, N, K) !== nothing
+            @test MVE.coopmat_gemm_cm2!(C, A, B, M, N, K) !== nothing
             KA.synchronize(back)
             g = Array(big)
             @test all(isfinite, g[:, 1:N])

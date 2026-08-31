@@ -58,26 +58,26 @@ end
 
 if get(ENV, "LAVA_PRINTF_LIVE", "0") == "1"
     @testset "@lava_printf live output (resets device)" begin
-        Mantle.reset_device!(debug = Mantle.DebugConfig(printf = true))
+        Mantle.reset_device!(debug = MVE.DebugConfig(printf = true))
         try
-            backend = Mantle.LavaBackend()
-            bq = Mantle.vk_context().default_bq
+            backend = MVE.LavaBackend()
+            bq = MVE.vk_context().default_bq
             @kernel function pf_live!(out)
                 i = @index(Global)
                 @lava_printf "tid=%u val=%f\n" UInt32(i) Float32(i) * 10f0
                 @inbounds out[i] = Float32(i)
             end
-            Mantle.clear_printf_output!()
-            out = Mantle.LavaArray(zeros(Float32, 4))
+            MVE.clear_printf_output!()
+            out = MVE.LavaArray(zeros(Float32, 4))
             pf_live!(backend)(out; ndrange = 4)
-            Mantle.vk_flush!(bq)
+            MVE.vk_flush!(bq)
             KernelAbstractions.synchronize(backend)
-            msgs = Mantle.get_printf_output()
+            msgs = MVE.get_printf_output()
             @test length(msgs) == 4
             @test any(m -> occursin("tid=1 val=10.000000", m), msgs)
             @test Array(out) == Float32[1, 2, 3, 4]   # kernel still computes correctly
         finally
-            Mantle.reset_device!(debug = Mantle.DebugConfig())
+            Mantle.reset_device!(debug = MVE.DebugConfig())
         end
     end
 end

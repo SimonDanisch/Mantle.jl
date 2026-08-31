@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # These tests were split off from Raycore's test_mesh_update.jl in Phase F of
-# the VulkanTLAS release cleanup. They exercise Mantle.VulkanTLAS specifically:
+# the VulkanTLAS release cleanup. They exercise MVE.VulkanTLAS specifically:
 # correctness under size-oscillating mesh swaps, the static_tlas ownership
 # contract, transform propagation via sync!, rt_pipeline identity preservation,
 # and a GPU-resource leak bound.
@@ -17,11 +17,11 @@ using Raycore
 using Lava, Mantle
 using Adapt
 
-const HW_BACKEND = Mantle.LavaBackend()
+const HW_BACKEND = MVE.LavaBackend()
 
 # Reuse buffers across iterations so allocation noise doesn't mask the leak test.
-const HW_RAYS_BUF = Mantle.LavaArray([Raycore.RTRay(0f0, 0f0, 5f0, 0f0, 0f0, 0f0, -1f0, 1f3)])
-const HW_HITS_BUF = Mantle.LavaArray(fill(Raycore.RTHitResult(0, 0, 0, 0, 0, 0, 0, 0), 1))
+const HW_RAYS_BUF = MVE.LavaArray([Raycore.RTRay(0f0, 0f0, 5f0, 0f0, 0f0, 0f0, -1f0, 1f3)])
+const HW_HITS_BUF = MVE.LavaArray(fill(Raycore.RTHitResult(0, 0, 0, 0, 0, 0, 0, 0), 1))
 
 """Unit sphere centred at origin; `n` = tessellation count."""
 function sphere_mesh(n::Int)
@@ -54,16 +54,16 @@ end
 
 """Snapshot GPU resource counters."""
 function snapshot_state_hw()
-    gpu_bytes  = Mantle.gpu_live_bytes()
-    live_bufs  = Mantle.live_buffer_count()
-    pool_blocks = length(Mantle.poolblocks(Mantle.vk_context()))
+    gpu_bytes  = MVE.gpu_live_bytes()
+    live_bufs  = MVE.live_buffer_count()
+    pool_blocks = length(MVE.poolblocks(MVE.vk_context()))
     return (gpu_bytes=gpu_bytes, live_bufs=live_bufs, pool_blocks=pool_blocks)
 end
 
 # ------------------------------------------------------------------------------
 
 @testset "HW HWTLAS — mesh update correctness under size oscillation" begin
-    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
+    hwtlas = MVE.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -93,7 +93,7 @@ end
     # thin immutable wrapper holding a mutable VulkanTLAS reference. Two wrappers around
     # the same VulkanTLAS are always ===. The identity-change contract doesn't apply here
     # — instead we verify that trace results reflect the mutation.
-    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
+    hwtlas = MVE.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
 
     st_before = Adapt.adapt(HW_BACKEND, hwtlas)
@@ -119,7 +119,7 @@ end
 end
 
 @testset "HW HWTLAS — transform update via sync!(hwtlas)" begin
-    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
+    hwtlas = MVE.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -139,7 +139,7 @@ end
 @testset "HW HWTLAS — hw_accel + rt_pipeline reused across sync! rebuilds" begin
     # The HardwareAccel (and thus the RT pipeline compiled into the SBT) must
     # survive mesh swaps — one RT pipeline per VulkanTLAS, not per rebuild.
-    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
+    hwtlas = MVE.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
@@ -155,7 +155,7 @@ end
 end
 
 @testset "HW HWTLAS — mesh update leak bound (GPU resources)" begin
-    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
+    hwtlas = MVE.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
     Raycore.sync!(hwtlas)
 

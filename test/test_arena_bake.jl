@@ -61,7 +61,10 @@ end
     @inbounds d[i] = x[i] + y[i]
 end
 
-const E = Mantle
+# The Vulkan backend module. `handover!` and `pool_offset` below are the
+# BACKEND's — they name a `VkBuffer` and an offset inside one — and since the
+# runtime moved into `MantleVulkanExt` they are not Mantle's to reach.
+const E = MVE
 
 @testset "two plans in one process commit the max, not the sum" begin
     # The gate for the device-owned arena. It can only pass if the `Device` owns
@@ -153,7 +156,7 @@ end
     # And a scoped barrier names the resource's range inside the pool buffer, not
     # offset 0 — `barrierspan` adds `pool_offset`, the same sum a copy computes.
     arr = unsafe_wrap(Array, v.pBufferMemoryBarriers, Int(v.bufferMemoryBarrierCount))
-    want = UInt64(M.pool_offset(M.storage(b).buf[]) + M.storage(b).offset)
+    want = UInt64(E.pool_offset(M.storage(b).buf[]) + M.storage(b).offset)
     @test any(bb -> UInt64(bb.offset) == want, arr)
     @test all(bb -> UInt64(bb.offset) != 0, arr)
 end
@@ -278,7 +281,7 @@ end
     want = reshape(collect(1f0:12f0), 3, 4)
     b = M.Buffer(dev, want)
     @test size(b) == (3, 4)
-    @test M.storage(b) isa Mantle.LavaArray{Float32,2}
+    @test M.storage(b) isa MVE.LavaArray{Float32,2}
     @test size(M.storage(b)) == (3, 4)
     @test Array(b) == want
     M.free!(b)
@@ -305,12 +308,12 @@ end
     # already recorded into it can name these bytes.
     scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
     KernelAbstractions.fill!(scratch, 1f0)          # opens a batch
-    @test Mantle.has_active_recording(dev.bq)
+    @test MVE.has_active_recording(dev.bq)
     M.free!(b)
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 
     # Submit it and wait, so the fence it was stamped with has passed.
-    Mantle.vk_flush!(dev.ctx)
+    MVE.vk_flush!(dev.ctx)
     KernelAbstractions.synchronize(M.backend(dev))
     @test M.reclaim!(pool, dev) == 1        # now
     @test M.reclaim!(pool, dev) == 0
@@ -325,7 +328,7 @@ end
     # application that then submits nothing more waited for a signal nobody
     # would ever raise — the same leak this path removes, wearing a hat.
     KernelAbstractions.synchronize(M.backend(dev))
-    @test !Mantle.has_active_recording(dev.bq)
+    @test !MVE.has_active_recording(dev.bq)
     b3 = M.Buffer(dev, fill(3f0, 4096))
     while M.reclaim!(pool, dev; wait = true) > 0 end
     M.free!(b3)

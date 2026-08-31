@@ -162,10 +162,10 @@ const ALL_STRUCT_TYPES = [
 @testset "C3: Whole-struct copy - $S" for S in ALL_STRUCT_TYPES
     n = 64
     src_data = make_data(S, n)
-    src = Mantle.LavaArray(src_data)
-    dst = Mantle.LavaArray{S}(undef, n)
+    src = MVE.LavaArray(src_data)
+    dst = MVE.LavaArray{S}(undef, n)
     dst .= src
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     result = Array(dst)
     @test result == src_data
 end
@@ -320,12 +320,12 @@ const CHECKSUM_KERNELS = Dict{DataType, Any}(
 @testset "C1: PSB read fields - $S" for S in ALL_STRUCT_TYPES
     n = 64
     src_data = make_data(S, n)
-    src = Mantle.LavaArray(src_data)
-    dst = Mantle.LavaArray{Float64}(undef, n)
+    src = MVE.LavaArray(src_data)
+    dst = MVE.LavaArray{Float64}(undef, n)
 
     kern = CHECKSUM_KERNELS[S]
-    kern(Mantle.LavaBackend(), 64)(dst, src; ndrange=n)
-    Mantle.vk_flush!(Mantle.vk_context())
+    kern(MVE.LavaBackend(), 64)(dst, src; ndrange=n)
+    MVE.vk_flush!(MVE.vk_context())
 
     gpu_result = Array(dst)
     cpu_result = [checksum(s) for s in src_data]
@@ -383,10 +383,10 @@ end
 
     @testset "S01_ThreeF32" begin
         src_data = make_data(S01_ThreeF32, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S01_ThreeF32}(undef, n)
-        write_modified_S01(Mantle.LavaBackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(src_data)
+        dst = MVE.LavaArray{S01_ThreeF32}(undef, n)
+        write_modified_S01(MVE.LavaBackend(), 64)(dst, src, offset; ndrange=n)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         expected = [S01_ThreeF32(s.x + offset, s.y + offset, s.z + offset) for s in src_data]
         @test result == expected
@@ -394,10 +394,10 @@ end
 
     @testset "S03_MiddleBool" begin
         src_data = make_data(S03_MiddleBool, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S03_MiddleBool}(undef, n)
-        write_modified_S03(Mantle.LavaBackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(src_data)
+        dst = MVE.LavaArray{S03_MiddleBool}(undef, n)
+        write_modified_S03(MVE.LavaBackend(), 64)(dst, src, offset; ndrange=n)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         expected = [S03_MiddleBool(s.x + offset, s.flag, s.y + offset) for s in src_data]
         @test result == expected
@@ -405,10 +405,10 @@ end
 
     @testset "S06_MixedI64" begin
         src_data = make_data(S06_MixedI64, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S06_MixedI64}(undef, n)
-        write_modified_S06(Mantle.LavaBackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(src_data)
+        dst = MVE.LavaArray{S06_MixedI64}(undef, n)
+        write_modified_S06(MVE.LavaBackend(), 64)(dst, src, offset; ndrange=n)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         expected = [S06_MixedI64(s.a + offset, s.b + 1, s.c + offset) for s in src_data]
         @test result == expected
@@ -416,10 +416,10 @@ end
 
     @testset "S14_KitchenSink" begin
         src_data = make_data(S14_KitchenSink, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S14_KitchenSink}(undef, n)
-        write_modified_S14(Mantle.LavaBackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(src_data)
+        dst = MVE.LavaArray{S14_KitchenSink}(undef, n)
+        write_modified_S14(MVE.LavaBackend(), 64)(dst, src, offset; ndrange=n)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         expected = [S14_KitchenSink(s.flag1, s.small, s.pad16,
             s.f32val + offset, s.i32val, s.flag2,
@@ -429,10 +429,10 @@ end
 
     @testset "S15_AllF64" begin
         src_data = make_data(S15_AllF64, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S15_AllF64}(undef, n)
-        write_modified_S15(Mantle.LavaBackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(src_data)
+        dst = MVE.LavaArray{S15_AllF64}(undef, n)
+        write_modified_S15(MVE.LavaBackend(), 64)(dst, src, offset; ndrange=n)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         expected = [S15_AllF64(s.a + Float64(offset), s.b + Float64(offset), s.c + Float64(offset)) for s in src_data]
         @test result == expected
@@ -450,9 +450,9 @@ end
     n = 64
     test_vals = make_data(S, 1)
     fill_val = test_vals[1]
-    dst = Mantle.LavaArray{S}(undef, n)
+    dst = MVE.LavaArray{S}(undef, n)
     fill!(dst, fill_val)
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     result = Array(dst)
     @test all(x -> x == fill_val, result)
 end
@@ -466,13 +466,13 @@ end
     for n in [5, 7, 13, 64]
         @testset "n=$n" begin
             src_data = make_data(S, n)
-            src = Mantle.LavaArray(src_data)
-            dst = Mantle.LavaArray{Float64}(undef, n)
+            src = MVE.LavaArray(src_data)
+            dst = MVE.LavaArray{Float64}(undef, n)
 
             kern = CHECKSUM_KERNELS[S]
             wg = min(n, 64)
-            kern(Mantle.LavaBackend(), wg)(dst, src; ndrange=n)
-            Mantle.vk_flush!(Mantle.vk_context())
+            kern(MVE.LavaBackend(), wg)(dst, src; ndrange=n)
+            MVE.vk_flush!(MVE.vk_context())
 
             gpu_result = Array(dst)
             cpu_result = [checksum(s) for s in src_data]
@@ -544,12 +544,12 @@ const SHARED_COPY_KERNELS = Dict{DataType, Any}(
 @testset "C7: Workgroup shared memory - $S" for S in keys(SHARED_COPY_KERNELS)
     n = 64
     src_data = make_data(S, n)
-    src = Mantle.LavaArray(src_data)
-    dst = Mantle.LavaArray{S}(undef, n)
+    src = MVE.LavaArray(src_data)
+    dst = MVE.LavaArray{S}(undef, n)
 
     kern = SHARED_COPY_KERNELS[S]
-    kern(Mantle.LavaBackend(), 64)(dst, src; ndrange=n)
-    Mantle.vk_flush!(Mantle.vk_context())
+    kern(MVE.LavaBackend(), 64)(dst, src; ndrange=n)
+    MVE.vk_flush!(MVE.vk_context())
 
     result = Array(dst)
     @test result == src_data

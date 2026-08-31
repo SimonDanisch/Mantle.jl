@@ -1,7 +1,7 @@
 """
 FIXED. A workgroup passed in the kernel's TYPE used to compute wrong global
 indices when it had an INTERIOR unit extent; it no longer does, verified with
-`Mantle.WORKGROUP_FALLBACK` switched OFF across every shape below.
+`MVE.WORKGROUP_FALLBACK` switched OFF across every shape below.
 
 The fault was: with such a workgroup baked into the kernel's type, the block
 index decode took the wrong divisor for dimension 2 and exactly
@@ -19,7 +19,7 @@ that nobody deleted a load-bearing guard. Those assertions now fail, which is ho
 the fix was noticed — the file was never registered in runtests.jl, so nobody ran
 it. They are flipped to assert correctness.
 
-OPEN: `Mantle.WORKGROUP_FALLBACK` re-launches the affected shapes through the
+OPEN: `MVE.WORKGROUP_FALLBACK` re-launches the affected shapes through the
 dynamic path at roughly 2x the cost of the static one. With the fault gone it is
 dead weight, but it has only been re-verified on one device (AMD 8060S / Windows).
 Confirm on the other drivers before removing it.
@@ -49,16 +49,16 @@ of the output survives, so a guard that refuses the launch would hide the very
 thing they exist to pin. Every other launch in this file stays under it.
 """
 function coverage(nd, wg, mode; fallback::Bool = true,
-                  limit::Int = Lava.caps(Mantle.vk_context()).workgrouplimit)
-    ctx = Mantle.vk_context()
-    old = Mantle.WORKGROUP_FALLBACK[]
+                  limit::Int = Lava.caps(MVE.vk_context()).workgrouplimit)
+    ctx = MVE.vk_context()
+    old = MVE.WORKGROUP_FALLBACK[]
     oldcaps = Lava.caps(ctx)
-    Mantle.WORKGROUP_FALLBACK[] = fallback
+    MVE.WORKGROUP_FALLBACK[] = fallback
     ctx.caches.caps = Lava.DeviceCaps(oldcaps; workgrouplimit = limit)
     try
         return coverage_(nd, wg, mode)
     finally
-        Mantle.WORKGROUP_FALLBACK[] = old
+        MVE.WORKGROUP_FALLBACK[] = old
         ctx.caches.caps = oldcaps
     end
 end
@@ -176,22 +176,22 @@ end
     end
 
     @testset "the guard names exactly the dangerous shapes" begin
-        @test Mantle.interior_unit_workgroup((32, 4, 1, 1))
-        @test Mantle.interior_unit_workgroup((32, 4, 1, 2))
-        @test Mantle.interior_unit_workgroup((16, 4, 2, 1, 1))
-        @test !Mantle.interior_unit_workgroup((32, 4, 2, 1))     # trailing only
-        @test !Mantle.interior_unit_workgroup((32, 4, 1))        # trailing only
-        @test !Mantle.interior_unit_workgroup((32, 4))
-        @test !Mantle.interior_unit_workgroup((64,))
+        @test MVE.interior_unit_workgroup((32, 4, 1, 1))
+        @test MVE.interior_unit_workgroup((32, 4, 1, 2))
+        @test MVE.interior_unit_workgroup((16, 4, 2, 1, 1))
+        @test !MVE.interior_unit_workgroup((32, 4, 2, 1))     # trailing only
+        @test !MVE.interior_unit_workgroup((32, 4, 1))        # trailing only
+        @test !MVE.interior_unit_workgroup((32, 4))
+        @test !MVE.interior_unit_workgroup((64,))
     end
 
     @testset "launchgroup fills the fast axis first" begin
-        @test Mantle.launchgroup((4, 4, 288, 1024)) == (4, 4, 16, 1)
-        @test Mantle.launchgroup((4096, 72, 8, 1)) == (256, 1, 1, 1)
-        @test Mantle.launchgroup((16, 72, 4, 1024)) == (16, 16, 1, 1)
-        @test Mantle.launchgroup((10,)) == (10,)
+        @test MVE.launchgroup((4, 4, 288, 1024)) == (4, 4, 16, 1)
+        @test MVE.launchgroup((4096, 72, 8, 1)) == (256, 1, 1, 1)
+        @test MVE.launchgroup((16, 72, 4, 1024)) == (16, 16, 1, 1)
+        @test MVE.launchgroup((10,)) == (10,)
         for sz in ((4, 4, 288, 1024), (4096, 72, 8, 1), (16, 72, 4, 1024), (2, 2, 576, 1024))
-            wg = Mantle.launchgroup(sz)
+            wg = MVE.launchgroup(sz)
             @test all(wg .<= sz)                    # never larger than the axis
             @test prod(wg) <= 256
         end
@@ -211,7 +211,7 @@ end
             push!(shapes, ntuple(d -> d == n ? 1024 : 3, n))
             push!(shapes, ntuple(d -> isodd(d) ? 1 : 64, n))
         end
-        for sz in shapes, f in (Mantle.launchgroup, Mantle.staticgroup)
+        for sz in shapes, f in (MVE.launchgroup, MVE.staticgroup)
             wg = f(sz)
             @test prod(wg) <= 256
             @test all(wg .>= 1)
@@ -226,9 +226,9 @@ end
         # right. Asserted here so the two rules stay aware of each other.
         for n in 12:18
             sz = ntuple(d -> d == 1 ? 4 : 2, n)
-            wg = Mantle.staticgroup(sz)
+            wg = MVE.staticgroup(sz)
             @test prod(wg) <= 256
-            @test Mantle.interior_unit_workgroup(wg)   # so the fallback fires
+            @test MVE.interior_unit_workgroup(wg)   # so the fallback fires
         end
     end
 end
@@ -263,11 +263,11 @@ end
     end
 
     @testset "the predicate matches the measured trigger" begin
-        @test Mantle.trailing_unit_ndrange((64, 4, 4, 4, 1))          # rank 5, fires
-        @test Mantle.trailing_unit_ndrange((576, 16, 16, 4, 4, 1))    # rank 6, fires
-        @test !Mantle.trailing_unit_ndrange((64, 4, 4, 4, 4, 2))      # last extent 2
-        @test !Mantle.trailing_unit_ndrange((256, 256, 144, 1))       # rank 4 is unaffected
-        @test !Mantle.trailing_unit_ndrange((64, 4, 4))
+        @test MVE.trailing_unit_ndrange((64, 4, 4, 4, 1))          # rank 5, fires
+        @test MVE.trailing_unit_ndrange((576, 16, 16, 4, 4, 1))    # rank 6, fires
+        @test !MVE.trailing_unit_ndrange((64, 4, 4, 4, 4, 2))      # last extent 2
+        @test !MVE.trailing_unit_ndrange((256, 256, 144, 1))       # rank 4 is unaffected
+        @test !MVE.trailing_unit_ndrange((64, 4, 4))
     end
 
     @testset "every element is written" begin
@@ -284,13 +284,13 @@ end
         # The guard is load-bearing, not decorative: with it off, the same launch
         # loses data. If this ever stops failing, the codegen fault is fixed and
         # `trailing_unit_ndrange` can go.
-        prev = Mantle.WORKGROUP_FALLBACK[]
+        prev = MVE.WORKGROUP_FALLBACK[]
         try
-            Mantle.WORKGROUP_FALLBACK[] = false
+            MVE.WORKGROUP_FALLBACK[] = false
             @test written((576, 16, 16, 4, 4, 1), (16, 2, 2, 2, 2, 1)) < 1.0
             @test written((64, 4, 4, 4, 1), (16, 2, 2, 2, 1)) < 1.0
         finally
-            Mantle.WORKGROUP_FALLBACK[] = prev
+            MVE.WORKGROUP_FALLBACK[] = prev
         end
     end
 

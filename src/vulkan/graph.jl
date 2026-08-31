@@ -444,6 +444,14 @@ hazard it was derived for, and sync validation is entitled to say so.
 """
 barrierspan(r, st) = (UInt64(pool_offset(st.buf[]) + st.offset),
                       UInt64(sizeof(eltype(st)) * prod(st.dims)))
+
+# The same sum for a barrier scoped to a SLICE, which adds the slice's own start.
+# Here rather than in `src/graph/build.jl`, where it was: `pool_offset` and
+# `st.buf[]` are this backend's, so from core it was an `UndefVarError` at the
+# first sliced barrier.
+barrierspan(v::BufferRange, st) =
+    (UInt64(pool_offset(st.buf[]) + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
+     UInt64(length(v.range) * sizeof(eltype(st))))
 # A pooled transient's storage is a `LavaDeviceArray` — `(ptr, dims)`, which
 # names no buffer and carries no offset. The transient knows both, and its
 # `offset` is already relative to the block's buffer, so no pool_offset here.
@@ -656,8 +664,13 @@ end
 # `copy` here bumps a refcount that frees nothing and Mantle stays the owner.
 # `todevice` turns this into the `(ptr, dims)` a kernel receives; a host-side
 # caller (copy_framebuffer!, a library) gets the handle it needs.
-storage(t::TransientBuffer{T}) where {T} =
-    LavaArray{T,1}(copy(t.block.ref), (t.n,); offset = t.offset)
+#
+# On the BLOCK, which is this backend's `BufferBlock` — see `storage` in
+# `src/graph/build.jl`. Written as `storage(t::TransientBuffer{T})` it was the
+# same signature as core's and overwrote it, taking Metal and the host backend
+# with it.
+storage(t::TransientBuffer{T}, block::BufferBlock) where {T} =
+    LavaArray{T,1}(copy(block.ref), (t.n,); offset = t.offset)
 
 # What a draw or a dispatch hands the shader: the device-side form, not the host
 # handle.
@@ -1213,7 +1226,12 @@ function run!(::Pipelines, c::Compile{LavaDevice})
             push!(cds, CompiledDraw(compiled, shader, packed, d.count, argcursor, nbytes))
             argcursor += argalign(nbytes)
         end
-        cps = CompiledDispatch[]
+        # `Any[]` and then narrowed, not `CompiledDispatch[]`: a pass declares
+        # `Dispatch`es or `Trace`s, `compile_dispatch` answers both, and the two
+        # compile to different types. `identity.` gives back a concrete vector
+        # when the pass holds one kind — which is every pass in tree — so the
+        # per-frame loop over `pp.dispatches` still specialises.
+        compiled = Any[]
         # A `:custom` pass carries a closure here, not a `Dispatch`. There is
         # nothing to compile and no arguments to lay out: whatever it launches,
         # it launches through the backend at record time.
@@ -1222,9 +1240,10 @@ function run!(::Pipelines, c::Compile{LavaDevice})
             # Not into `c.pipelines`: that set answers how many shaders the draws
             # resolved to — two draws sharing one is the thing worth counting —
             # and a dispatch's pipeline is held by its `CompiledDispatch` anyway.
-            push!(cps, cd)
+            push!(compiled, cd)
             argcursor += argalign(cd.argsize)
         end
+        cps = identity.(compiled)
         push!(c.passes, PassPlan(p, cds, cps, imgs, need, build_pass_barrier(g, rest)))
     end
     c
@@ -1240,7 +1259,11 @@ packing and `vk_dispatch!`. The kernel itself is compiled by the launch plan, an
 this is the only place a Mantle frame can compile one.
 """
 function compile_dispatch(dev::LavaDevice, d::Dispatch, argoff::Int)
-    obj = kernelfor(d.kernel, d.group)
+    # Three arguments. `kernelfor` took two when it lived here and takes the
+    # backend now that it is core's (`graph/kalaunch.jl`), which is what makes it
+    # answerable by a backend at all; this call site kept the old arity and threw
+    # a `MethodError` on the first dispatch a plan compiled.
+    obj = kernelfor(d.kernel, d.group, backend(dev))
     isempty(fieldnames(typeof(obj.f))) ||
         throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
                             "A plan resolves its arguments once, so a captured device array " *
@@ -1261,12 +1284,158 @@ function compile_dispatch(dev::LavaDevice, d::Dispatch, argoff::Int)
                      tlas !== nothing, argoff, launch.total_size)
 end
 
+"""
+What this backend needs to record a trace, worked out once at compile.
+
+The ray-tracing counterpart of a `LaunchPlan`: the `VkPipeline` with its shader
+binding table, the raygen function whose adapted form is packed as argument one,
+and the argument LAYOUT — offsets, by-value sizes, and the total the raygen
+shader's push-constant buffer occupies.
+
+That total is the whole reason this is resolved at compile rather than at
+record: it is the `argsize` `ArgMemory` needs in order to give the trace a fixed
+offset in the plan's slot, which is what makes the arguments rebindable.
+"""
+struct VulkanTracePipeline{P,D,O,B}
+    pipeline::P              # LavaRTPipeline: VkPipeline + SBT + layout
+    # The DESCRIPTION, kept beside the compiled pipeline rather than just the
+    # raygen function: the raygen is packed as `all_args[1]`, and all four of
+    # raygen/chit/miss/anyhit have to be pinned per record, because a per-material
+    # closest-hit closes over the device arrays its material reads.
+    desc::D
+    offsets::O
+    byval::B
+    argbytes::Int            # raygen push_info.arg_buffer_size, before inline extra
+end
+
+"""The `LavaTLAS` a trace descriptor set names, from what the caller declared."""
+tlasof(a::AdaptedAccel) = tlasof(a.hwtlas)
+tlasof(t::VulkanTLAS) = t.hw_tlas
+tlasof(t::LavaTLAS) = t
+tlasof(::Nothing) = throw(ArgumentError(
+    "trace!: the acceleration structure has no hardware TLAS. It was stripped " *
+    "before the pass ran, or the accel was built for a ray-query traversal, " *
+    "which `dispatch!` records rather than `trace!`."))
+
+"""
+Compile one trace: the pipeline and the argument layout, worked out once.
+
+The `Trace` counterpart of [`compile_dispatch`](@ref) above, and reached by the
+same name so the Pipelines phase needs no branch — a pass holds `Dispatch`es or
+`Trace`s and multiple dispatch decides which of these runs.
+
+`rt_compiled_for` has to happen HERE and not at record time, and not only for
+speed: a cold compile flushes the batch queue to upload the shader binding table,
+which is legal while a plan is being compiled and is not while a frame is being
+recorded into an open batch.
+"""
+function compile_dispatch(dev::LavaDevice, t::Trace, argoff::Int)
+    raw = rawargs(t.args)
+    vk_pipeline, raygen, offsets, byval = rt_compiled_for(dev.bq, t.pipeline, raw)
+    argbytes = raygen.push_info.arg_buffer_size
+    total = argbytes + compute_inline_extra_from_byval(byval)
+    compiled = VulkanTracePipeline(vk_pipeline, t.pipeline, offsets, byval, argbytes)
+    CompiledTrace(compiled, t.accel, t.args, t.ndrange, argoff, total)
+end
+
+"""
+Write the current arguments of one compiled thing into the plan's slot.
+
+What `rebind!` does per entry, as a method rather than a branch: the loop had a
+dispatch's iteration-plan lookup inlined into it, so there was nowhere for a
+trace to go. Local to this backend — nothing in core calls it, and importing the
+name would make a private recording helper into Mantle API.
+"""
+function repack!(bq, d::CompiledDispatch, am::ArgMemory, base::Int)
+    nd = dispatchrange(d.ndrange)
+    it = nd == d.nd0 ? d.iter :
+         get_or_build_iter_plan(d.obj, nd, nothing, bq.ctx::VkContext)
+    it.nblocks == 0 && return nothing
+    packdispatch!(bq, d, am, base, it)
+    return nothing
+end
+
+repack!(bq, t::CompiledTrace, am::ArgMemory, base::Int) =
+    (packtrace!(bq, t, am, base); nothing)
+
+"""
+Pack a trace's arguments into the plan's slot. The counterpart of `packdispatch!`.
+
+Into `am` and not into `get_arg_buffer(bq, …)`, which is the whole difference
+between this and the unmodelled path: the queue's scratch has its bump pointer
+rewound every time the queue drains, so an address from it means nothing to a
+replay. A slot in the plan's argument memory belongs to the plan for as long as
+the plan lives, which is what `bake!` needs and what `rebind!` rewrites.
+"""
+function packtrace!(bq, t::CompiledTrace, am::ArgMemory, base::Int)
+    off = base + t.argoff
+    c = t.compiled
+    batch = ensure_active_batch!(bq)
+    # Pinned as the unmodelled path pins: the shaders are closures, and a
+    # per-material closest-hit holds the device arrays of the material it shades.
+    pin_leaves!(batch, c.desc.raygen_func)
+    for chit in c.desc.closesthit_funcs
+        pin_leaves!(batch, chit)
+    end
+    pin_leaves!(batch, c.desc.miss_func)
+    pin_leaves!(batch, c.desc.anyhit_func)     # a no-op on `nothing`
+    ad = LavaAdaptor(batch)
+    # `rawargs` first, so a `Ref` argument is re-read NOW rather than frozen at
+    # compile — that is how a new sample index reaches a plan compiled once.
+    raw = rawargs(t.args)
+    pin_leaves!(batch, raw)
+    all_args = (Adapt.adapt(ad, c.desc.raygen_func), devargs(ad, raw)...)
+    pack_args_direct!(bq, am.ptr + off, am.address + off,
+                      c.offsets, c.argbytes, c.byval, all_args)
+    return am.address + off
+end
+
+"""The acceleration structures a trace reads, held for the life of the batch."""
+function pintrace!(batch, tlas::LavaTLAS)
+    pin!(batch, tlas.accel)
+    pin!(batch, tlas.storage)
+    for blas in tlas.blases
+        pin!(batch, blas.accel)
+        pin!(batch, blas.storage)
+    end
+    return nothing
+end
+
+"""
+Record the trace itself. A host-side ray count traces directly; a
+[`DeviceRange`](@ref) prepares an indirect command from a count on the device.
+
+Two methods rather than a branch, which is how `recordlaunch!` above already
+distinguishes the same two cases. The ORDER differs between them and that is why
+they are not one function with a conditional in the middle: the indirect prepare
+runs a kernel of its own and may flush the slab pools, so it has to happen before
+the arguments are packed.
+"""
+function tracelaunch!(bq, r::DeviceRange, t::CompiledTrace, am::ArgMemory, base::Int, tlas)
+    indirect = get_indirect_buffer(bq)
+    prepare_indirect_rt_dispatch!(bq, indirect, storage(r.count))
+    argaddr = packtrace!(bq, t, am, base)
+    pintrace!(ensure_active_batch!(bq), tlas)
+    rt_dispatch_indirect!(bq, t.compiled.pipeline, tlas, argaddr, indirect)
+    return nothing
+end
+
+function tracelaunch!(bq, n, t::CompiledTrace, am::ArgMemory, base::Int, tlas)
+    argaddr = packtrace!(bq, t, am, base)
+    pintrace!(ensure_active_batch!(bq), tlas)
+    rt_dispatch!(bq, t.compiled.pipeline, tlas, argaddr, Int(n), 1)
+    return nothing
+end
+
+"""Record a trace: resolve the acceleration structure, then launch."""
+record_dispatch!(bq, t::CompiledTrace, am::ArgMemory, base::Int) =
+    tracelaunch!(bq, t.ndrange, t, am, base, tlasof(argvalue(t.accel)))
+
 # An ndrange fixed when the graph was built, or one that is read per frame — the
 # same distinction `drawover` makes for a draw's vertex count.
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
-const INDIRECT_CEILING = 1024 * 1024
 # ↑ moved to src/graph/build.jl
 
 # ↑ moved to src/graph/build.jl
@@ -1588,11 +1757,7 @@ function rebind!(pl::Plan)
     base = slotbase(am)
     for pp in pl.passes
         for d in pp.dispatches
-            nd = dispatchrange(d.ndrange)
-            it = nd == d.nd0 ? d.iter :
-                 get_or_build_iter_plan(d.obj, nd, nothing, bq.ctx::VkContext)
-            it.nblocks == 0 && continue
-            packdispatch!(bq, d, am, base, it)
+            repack!(bq, d, am, base)
         end
         for dr in pp.draws
             off = base + dr.argoff
@@ -1623,11 +1788,15 @@ Base.isopen(s::WindowSurface) = isopen(s.win)
 Device() = Device(VulkanAPI())
 
 
-# `kernelfor` and `adaptor` for this backend. They were moved to core with the
-# rest of the graph and moved back: both name a Vulkan object — `LavaBackend`
-# and `LavaAdaptor` — which is exactly the line the move was drawn along.
-kernelfor(k, ::Nothing, ::LavaBackend) = k(LavaBackend())
-kernelfor(k, group, ::LavaBackend) = k(LavaBackend(), group)
+# `adaptor` for this backend. It names `LavaAdaptor`, which is exactly the line
+# the move to core was drawn along.
+#
+# `kernelfor` was here too, as `kernelfor(k, ::Nothing, ::LavaBackend) =
+# k(LavaBackend())` and its `group` twin. Core's `kernelfor(k, ::Nothing,
+# backend) = k(backend)` already answers that — `backend(::LavaDevice)` IS
+# `LavaBackend()` — so the pair was a second implementation of one rule, and the
+# more specific one was the worse of the two: it discarded the backend it was
+# handed and built a default, which drops the queue a `LavaBackend(bq)` pins.
 adaptor(bq) = LavaAdaptor(ensure_active_batch!(bq))
 
 
@@ -1652,6 +1821,17 @@ devicearray(::LavaBackend, data::AbstractArray) = LavaArray(data)
 makeprofiler(dev::LavaDevice, passes, profile::Bool) =
     profile ? Profiler(dev.ctx, passes) : nothing
 makeargmemory(dev::LavaDevice, passes) = ArgMemory(dev, passes)
+
+# `submit!` takes a DEVICE — that is how core calls it, in `graph/kalaunch.jl`
+# and `graphics/commands.jl`, and how Metal answers it. This backend had only
+# `submit!(::VulkanBatchQueue)`, so core's `submit!(::Any) = nothing` was what
+# ran: the contract that a command buffer must not stay open across a dispatch
+# was simply not enforced here, silently, because doing nothing is a legal
+# implementation of the hook.
+submit!(dev::LavaDevice) = submit!(dev.bq)
+
+# What a `custom!` body records into — see `batchqueue` in `graph/queue.jl`.
+batchqueue(d::LavaDevice) = d.bq
 
 
 # ── Recording and submission ──────────────────────────────────────────────────

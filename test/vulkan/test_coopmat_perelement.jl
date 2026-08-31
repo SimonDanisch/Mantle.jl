@@ -44,7 +44,7 @@ import .SPIRVTestUtils: compile_and_disasm, check, check_not, check_count
 
 const KA = KernelAbstractions
 const AMpe = Lava.AcceleratedMatrix
-const TILEpe = Mantle.GEMM_TILE
+const TILEpe = MVE.GEMM_TILE
 
 # Depends on both indices, and is not symmetric under swapping them.
 rowcolmap(row::UInt32, col::UInt32, e::Float32) = e * Float32(row + 1) + Float32(col)
@@ -92,19 +92,19 @@ end
 end
 
 @testset "cooperative-matrix per-element and component-wise ops" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     back = LavaBackend()
     # A cooperative matrix is subgroup-scoped, and a workgroup smaller than one
     # subgroup has undefined behaviour — so the launches below are exactly one
     # subgroup wide. This must be asked, not assumed: it is 32 on Ada and 64 on
     # RDNA 3.5, and the hardcoded 32 this replaced was half a subgroup there.
-    WGpe = Mantle.device_subgroup_size(ctx)
+    WGpe = MVE.device_subgroup_size(ctx)
     A = KA.allocate(back, Float32, TILEpe, TILEpe)
     copyto!(A, Float32.(reshape(1:TILEpe^2, TILEpe, TILEpe)))
     a = Array(A)
 
     @testset "component-wise multiply with a stride-0 factor matrix" begin
-        if !Mantle.coopmat_gemm_available()
+        if !MVE.coopmat_gemm_available()
             @info "no cooperative-matrix support on this device; skipping"
         else
             for base in Int32.((0, TILEpe))

@@ -38,12 +38,12 @@ const TG = 16          # one tile, one subgroup — the smallest thing that mult
     Mantle.copyto!(pointer(out), 1, TG, r)
 end
 
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device — nothing to run"
 else
     back = LavaBackend()
-    WG = Mantle.device_subgroup_size(ctx)
+    WG = MVE.device_subgroup_size(ctx)
 
     A = KA.allocate(back, Float16, TG, TG)
     B = KA.allocate(back, Float16, TG, TG)

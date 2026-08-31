@@ -43,10 +43,10 @@ end
 @testset "merge_sort_by_key! is correct below 2*block_size" begin
     for n in (7, 100, 511, 1000)
         h = rand(UInt32, n)
-        k = Mantle.LavaArray(copy(h))
-        v = Mantle.LavaArray(collect(Int32(1):Int32(n)))
+        k = MVE.LavaArray(copy(h))
+        v = MVE.LavaArray(collect(Int32(1):Int32(n)))
         AK.merge_sort_by_key!(k, v)
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(k) == sort(h)
         @test h[Array(v)] == sort(h)   # values permuted consistently with keys
     end
@@ -55,13 +55,13 @@ end
 # sortperm must terminate (no mutual recursion) and not blow up the pool.
 @testset "sortperm terminates and does not balloon the pool" begin
     n = 100_000
-    before = Mantle.gpu_live_bytes()
+    before = MVE.gpu_live_bytes()
     h = rand(UInt32, n)
-    v = Mantle.LavaArray(copy(h))
-    ix = Mantle.LavaArray(collect(Int32(1):Int32(n)))
+    v = MVE.LavaArray(copy(h))
+    ix = MVE.LavaArray(collect(Int32(1):Int32(n)))
     AK.sortperm!(ix, v)
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test h[Array(ix)] == sort(h)
     # Recursion used to grow the pool by tens of GB before dying.
-    @test Mantle.gpu_live_bytes() - before < 256_000_000
+    @test MVE.gpu_live_bytes() - before < 256_000_000
 end

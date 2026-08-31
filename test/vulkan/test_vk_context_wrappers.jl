@@ -22,8 +22,8 @@
 using Test, Lava, LinearAlgebra
 
 @testset "vk_context resolves through array wrappers" begin
-    ctx = Mantle.vk_context()
-    a = Mantle.LavaArray(collect(Int16, 1:8))
+    ctx = MVE.vk_context()
+    a = MVE.LavaArray(collect(Int16, 1:8))
 
     wrappers = Dict(
         "SubArray"          => view(a, 1:4),
@@ -34,10 +34,10 @@ using Test, Lava, LinearAlgebra
     )
     for (name, w) in wrappers
         @testset "$name" begin
-            @test Mantle.vk_context(w) === ctx
+            @test MVE.vk_context(w) === ctx
             # …and it is `AnyLavaArray`, i.e. this test is checking the same set
             # the broadcast machinery dispatches on.
-            @test w isa Mantle.AnyLavaArray
+            @test w isa MVE.AnyLavaArray
         end
     end
 

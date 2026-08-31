@@ -1,5 +1,6 @@
 using Test, Lava, Raycore
-using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE
+using Mantle: build_accel!
+using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 # Triangle type used by the default VulkanTLAS.
@@ -10,9 +11,9 @@ const Tri = Raycore.Triangle{UInt32}
     blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
-    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
-    backend = Mantle.LavaBackend()
-    tlas = Mantle.VulkanTLAS(backend)
+    instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
+    backend = MVE.LavaBackend()
+    tlas = MVE.VulkanTLAS(backend)
 
     # 12 dummy triangles -- same count as a cube BLAS.
     # empty_triangle gives a zero-filled sentinel triangle of the correct type.
@@ -42,9 +43,9 @@ end
     blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
-    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
-    backend = Mantle.LavaBackend()
-    tlas = Mantle.VulkanTLAS(backend)
+    instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
+    backend = MVE.LavaBackend()
+    tlas = MVE.VulkanTLAS(backend)
 
     # No triangles supplied -- rayQuery-only backward-compat path.
     push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x02))

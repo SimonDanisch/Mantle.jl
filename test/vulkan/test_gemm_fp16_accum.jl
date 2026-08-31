@@ -81,8 +81,8 @@ end
 end
 
 @testset "gemmaccum widens only the half type" begin
-    @test Mantle.gemmaccum(Float16) === Float32
-    @test Mantle.gemmaccum(Float32) === Float32
-    @test Mantle.gemmaccum(Float64) === Float64
-    @test Mantle.gemmaccum(Int32)   === Int32
+    @test MVE.gemmaccum(Float16) === Float32
+    @test MVE.gemmaccum(Float32) === Float32
+    @test MVE.gemmaccum(Float64) === Float64
+    @test MVE.gemmaccum(Int32)   === Int32
 end

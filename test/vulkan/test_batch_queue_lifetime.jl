@@ -16,7 +16,7 @@
 
 using Test, Lava, Mantle
 @testset "batch queue lifetime" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
 
     @testset "the context owns what it hands out" begin
         held = length(ctx.extra_queues)
@@ -68,7 +68,7 @@ using Test, Lava, Mantle
         # buffer's finalizer queries a timeline semaphore that only the
         # context's reference is keeping alive.
         let bq = Mantle.allocate_batch_queue!()
-            a = Mantle.LavaArray{Float32, 1}(undef, (4096,))
+            a = MVE.LavaArray{Float32, 1}(undef, (4096,))
             Mantle.upload!(a, ones(Float32, 4096))
             Mantle.flush!(bq, ctx.device)
         end

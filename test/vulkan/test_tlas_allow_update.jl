@@ -1,5 +1,6 @@
 using Test, Lava, Mantle
-using Mantle: VulkanInstanceRecord, build_tlas, build_accel!, build_blas_aabb, AS_INPUT_USAGE
+using Mantle: build_accel!
+using .MVE: VulkanInstanceRecord, build_tlas, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 @testset "build_tlas(LavaArray{VulkanInstanceRecord}, n; allow_update=true)" begin

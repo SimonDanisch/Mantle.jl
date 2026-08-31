@@ -29,16 +29,16 @@ N = 32
 
 # Run 1: cold compile, capture the LavaGPUKernel from the in-memory cache
 println("=== Run 1: cold compile + dispatch ===")
-buf = Mantle.LavaArray(zeros(Float32, N))
-Mantle.lava_launch!(bq, rt_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
-Mantle.vk_flush!(bq)
+buf = MVE.LavaArray(zeros(Float32, N))
+MVE.lava_launch!(bq, rt_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
+MVE.vk_flush!(bq)
 ref = Array(buf)
 println("  result[1:8] = ", ref[1:8])
 @assert ref == Float32.(2 .* (1:N))
 
 # Find the compiled kernel in the linked cache
 linked = nothing
-for (key, v) in Mantle.vk_context().caches.linked
+for (key, v) in MVE.vk_context().caches.linked
     if v.compiled.entry_name == "main" && length(v.compiled.spirv_bytes) > 0
         linked = v
     end
@@ -84,12 +84,12 @@ println("    des   byval_sizes: ", deserialized.push_info.byval_llvm_sizes)
 # by hash(spirv_bytes,…) and we'd just reuse the existing VkPipeline from
 # the fresh path — never actually exercising the driver on the cached bytes.
 println("\n=== Clear PIPELINE_CACHE + build pipeline from deserialized bytes ===")
-n_cached = length(Mantle.vk_context().caches.pipelines)
-empty!(Mantle.vk_context().caches.pipelines)
-empty!(Mantle.vk_context().caches.pipeline_order)
+n_cached = length(MVE.vk_context().caches.pipelines)
+empty!(MVE.vk_context().caches.pipelines)
+empty!(MVE.vk_context().caches.pipeline_order)
 println("  cleared $n_cached entries from PIPELINE_CACHE")
-ctx = Mantle.vk_context()
-linked_des = Mantle.link_kernel(ctx, deserialized)
+ctx = MVE.vk_context()
+linked_des = MVE.link_kernel(ctx, deserialized)
 println("  link_kernel OK; pipeline=$(typeof(linked_des.pipeline))")
 println("  offsets = ", linked_des.offsets)
 println("  byval_sizes = ", linked_des.byval_sizes)
@@ -103,20 +103,20 @@ println("  byval_sizes = ", linked_des.byval_sizes)
 # Just compile-and-dispatch a fresh kernel via lava_launch! again (will hit
 # in-memory cache), then SWAP the cached linked kernel with our reconstructed
 # one and dispatch. If the reconstructed kernel works, results match.
-buf2 = Mantle.LavaArray(zeros(Float32, N))
+buf2 = MVE.LavaArray(zeros(Float32, N))
 # Find the cache key whose linked kernel matches `linked` (the one we captured earlier)
 key_to_replace = nothing
-for (key, v) in Mantle.vk_context().caches.linked
+for (key, v) in MVE.vk_context().caches.linked
     if v === linked
         key_to_replace = key
     end
 end
 @assert key_to_replace !== nothing
 println("  replacing caches.linked[$key_to_replace] with reconstructed kernel")
-Mantle.vk_context().caches.linked[key_to_replace] = linked_des
+MVE.vk_context().caches.linked[key_to_replace] = linked_des
 
-Mantle.lava_launch!(bq, rt_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
-Mantle.vk_flush!(bq)
+MVE.lava_launch!(bq, rt_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
+MVE.vk_flush!(bq)
 got = Array(buf2)
 println("  result[1:8] = ", got[1:8])
 println("  match fresh: ", got == ref)

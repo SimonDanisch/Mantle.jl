@@ -1,5 +1,14 @@
 """
-Every name Mantle's Vulkan backend takes from Lava is actually imported.
+Every name a Mantle backend uses bare actually resolves in the module that owns it.
+
+Two ways it can fail to, and both are silent until something runs:
+
+  * the name is Lava's and is not in the import list, or
+  * the name is exported by Mantle AND by the driver package, which binds it to
+    NEITHER.
+
+The first half is the original subject and is described below; the second is at
+the bottom of the file.
 
 `src/vulkan/vulkan.jl` lists them one by one — `using Lava: <name>, <name>, …` —
 and that list is hand-maintained. A name that is used but not listed is not a
@@ -169,6 +178,61 @@ end
         # the next person re-derives what this test already knows.
         @test (nameof(m), [(s, sort(unique(bymod[s]))) for s in unimported]) ==
               (nameof(m), Tuple{Symbol,Vector{String}}[])
+    end
+
+    # ── Names two of the extension's `using`s both export ─────────────────────
+    #
+    # The same question from a direction the loop above cannot see. A module that
+    # says `using Mantle` and `using Vulkan` gets every name they BOTH export
+    # bound to NEITHER: Julia refuses to guess, so the name is `isdefined` ==
+    # false and the first use is an `UndefVarError` whose message suggests
+    # checking the spelling.
+    #
+    # Six collide today, and the backend means Mantle's every time. Three were
+    # disambiguated for unrelated reasons; the others surfaced ONE AT A TIME, in
+    # load order, over four reloads — `DrawIndirectCommand` in
+    # `graphics/pipeline.jl`, `Buffer` in four `rename!` signatures in the last
+    # file included, and `Backend` not until the sync lowering RAN, because that
+    # one is inside a function body. That is the whole argument for checking it
+    # statically instead of finding out.
+    #
+    # Against every module the extension bare-`using`s, not just the driver:
+    # `Backend` collides with KernelAbstractions, not with Vulkan. And a
+    # collision is created by EITHER side adding an export, so neither package's
+    # own tests can see one coming.
+    #
+    # Checked against what the backend actually REFERENCES rather than against
+    # the whole intersection — `Scalar` (Mantle's vs StaticArrays') collides and
+    # appears in this backend only in comments, which is not a defect.
+    """The modules a file bare-`using`s: `using Foo`, not `using Foo: bar`."""
+    function bare_usings(path::AbstractString)
+        out = Symbol[]
+        walk(ex) = ex isa Expr &&
+            (ex.head === :using && !(ex.args[1] isa Expr && ex.args[1].head === :(:)) ?
+             foreach(a -> a isa Expr && a.head === :. && length(a.args) == 1 &&
+                          push!(out, a.args[1]), ex.args) :
+             foreach(walk, ex.args))
+        walk(Meta.parseall(read(path, String)))
+        return out
+    end
+    loadedmod(n) = (for (_, m) in Base.loaded_modules; nameof(m) === n && return m; end;
+                    nothing)
+
+    @testset "$extname" for (_, extname) in BACKEND_EXTS
+        ext = Base.get_extension(Mantle, extname)
+        if ext === nothing
+            @info "$extname is not loaded here, so its collisions are unchecked."
+            continue
+        end
+        extfile = joinpath(pkgdir(Mantle), "ext", string(extname) * ".jl")
+        others = filter(!isnothing, loadedmod.(setdiff(bare_usings(extfile), [:Mantle])))
+        both = union(Set{Symbol}(), (intersect(Set(names(Mantle)), Set(names(m)))
+                                     for m in others)...)
+        used = get(sites, ext, Dict{Symbol,Vector{String}}())
+        # Named with their files, so the failure says where to add the import.
+        clashing = sort([(s, sort(unique(used[s]))) for s in both
+                         if haskey(used, s) && !isdefined(ext, s)]; by = first)
+        @test (extname, clashing) == (extname, Tuple{Symbol,Vector{String}}[])
     end
 
     # Loudly, not silently. A machine with no Vulkan loader cannot load the

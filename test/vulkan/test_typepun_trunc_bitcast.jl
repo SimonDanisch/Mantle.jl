@@ -12,7 +12,7 @@ using KernelAbstractions
 ENV["VK_ICD_FILENAMES"] = get(ENV, "VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json")
 
 @testset "Type-punned trunc+bitcast SPIR-V emission" begin
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
 
     # Struct with mixed int/float fields packed into i64 words (like StaticMultiTypeSet)
     struct PackedFields
@@ -36,7 +36,7 @@ ENV["VK_ICD_FILENAMES"] = get(ENV, "VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/
     hi = UInt64(reinterpret(UInt32, test_val)) << 32
     packed = PackedFields(ntuple(i -> i == 1 ? hi : UInt64(0), 8))
 
-    out = Mantle.LavaArray{Float32}(undef, 4)
+    out = MVE.LavaArray{Float32}(undef, 4)
     fill!(out, 0f0)
 
     extract_float_kernel!(backend)(out, packed; ndrange=4)

@@ -44,7 +44,7 @@ end
 end
 
 @testset "arg-slab pool reset must not fire mid-recording" begin
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     bq = backend.dispatch_bq
     n = 4096
 
@@ -70,7 +70,7 @@ end
     # 3. Wait for the submitted batch to complete WITHOUT sweeping, so it
     #    sits completed-but-unreclaimed in in_flight.
     deadline = time() + 10.0
-    while Mantle.query_timeline(bq) < target
+    while MVE.query_timeline(bq) < target
         time() > deadline && error("timeout waiting for submitted batch")
         sleep(0.001)
     end
@@ -111,19 +111,19 @@ end
 # three lines, because "has this batch recorded a dispatch" was never the right
 # question: what matters is whether anyone is holding pool memory.
 @testset "arg pool must not rewind under a handout (no submit in between)" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
-    Mantle.vk_flush!(ctx)                      # nothing in flight, nothing recorded
+    MVE.vk_flush!(ctx)                      # nothing in flight, nothing recorded
 
     # A batch that has completed but has not been swept yet: that is what the
     # sweep drains, and draining is what used to reset the cursors.
     Mantle.ensure_active_batch!(bq)
     batch = Mantle.submit!(bq)
-    while Mantle.query_timeline(bq) < batch.signal_value; end   # polling does not sweep
+    while MVE.query_timeline(bq) < batch.signal_value; end   # polling does not sweep
 
-    a = Mantle.get_arg_buffer(bq, 256)         # a draw's arguments, not yet recorded
+    a = MVE.get_arg_buffer(bq, 256)         # a draw's arguments, not yet recorded
     Mantle.ensure_active_batch!(bq)            # sweeps: in_flight drains to empty here
-    b = Mantle.get_arg_buffer(bq, 256)         # the next draw's arguments
+    b = MVE.get_arg_buffer(bq, 256)         # the next draw's arguments
 
     @test b.address >= a.address + 256       # pre-fix: b is handed a's very bytes
 end

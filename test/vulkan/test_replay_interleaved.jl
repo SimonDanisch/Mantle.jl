@@ -29,13 +29,13 @@ const KA = KernelAbstractions
     back = LavaBackend()
     # Touch the backend first: the `VkContext` is created lazily, so reading
     # `VK_CONTEXT_REF` before any allocation gets `nothing`.
-    a = Mantle.LavaArray(Float32.(collect(1:1024)))
+    a = MVE.LavaArray(Float32.(collect(1:1024)))
     out = KA.allocate(back, Float32, 1024)
     fill!(out, 0f0)
     KA.synchronize(back)
-    bq = Mantle.VK_CONTEXT_REF[].default_bq
+    bq = MVE.VK_CONTEXT_REF[].default_bq
 
-    seq = Mantle.capture(bq) do
+    seq = MVE.capture(bq) do
         out .= a .* 2f0
     end
     KA.synchronize(back)
@@ -46,7 +46,7 @@ const KA = KernelAbstractions
         # No `synchronize` between the two: this is the case that failed.
         for _ in 1:4
             out .= a .* 3f0          # records, leaves a batch open
-            Mantle.replay!(seq)        # bumps the timeline the open batch reserved
+            MVE.replay!(seq)        # bumps the timeline the open batch reserved
         end
         KA.synchronize(back)
         # The replay ran last, so the captured `*2` is what survives.
@@ -56,14 +56,14 @@ const KA = KernelAbstractions
     @testset "recording still works after a replay" begin
         # The desync surfaced on the *next* submit!, not on the replay, so the
         # assertion is that ordinary work keeps running afterwards.
-        Mantle.replay!(seq)
+        MVE.replay!(seq)
         out .= a .* 5f0
         KA.synchronize(back)
         @test Array(out) == 5 .* Float32.(collect(1:1024))
     end
 
     @testset "many replays in a row" begin
-        for _ in 1:16; Mantle.replay!(seq); end
+        for _ in 1:16; MVE.replay!(seq); end
         KA.synchronize(back)
         @test Array(out) == want
     end

@@ -15,7 +15,7 @@
 # clamp value that the driver ignored entirely would look identical to one that
 # worked, on any test whose expected fill happened to be zero.
 @testset "tensor clamp value" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "no coopmat2 tensor addressing on this device — clamp value not exercised"
     else

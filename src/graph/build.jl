@@ -424,9 +424,12 @@ barrierspan(t::TransientBuffer, st) = (UInt64(t.offset), UInt64(nbytes(t)))
 
 barrierbuffer(t::TransientBuffer, st) = t.block.buffer
 
-barrierspan(v::BufferRange, st) =
-    (UInt64(pool_offset(st.buf[]) + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
-     UInt64(length(v.range) * sizeof(eltype(st))))
+# `barrierspan(::BufferRange, st)` is NOT here, and did not belong: its body
+# reads `st.buf[]` and calls `pool_offset`, both of which only the Vulkan backend
+# has. It is in `src/vulkan/graph.jl` beside the whole-resource method it shares
+# its arithmetic with. In core it was an `UndefVarError` on the first barrier
+# scoped to a slice — which is every Hikari frame with queue slicing, and
+# nothing before that.
 
 function slice(g::Graph, x, range::UnitRange{Int})
     # `length`, not `length(storage(x))`: a transient has no storage until the
@@ -734,6 +737,18 @@ dispatchrange(x) = count(x)
 # `i <= n` check does the rest. Same contract as `ka_launch_indirect!`,
 # which is what records it.
 
+"""
+The thread count a `DeviceRange` kernel is COMPILED against, when it declares no
+`max` of its own.
+
+Here and not in the backend, which is where it stayed when the `dispatchrange`
+methods around it moved to core: it is a compile-time bound on a kernel's index
+space, and every backend needs the same one. Left behind it was an
+`UndefVarError` from core the first time anything dispatched over a device-side
+count — which is every Hikari frame, and nothing before that.
+"""
+const INDIRECT_CEILING = 1024 * 1024
+
 dispatchrange(r::DeviceRange) = something(r.max, INDIRECT_CEILING)
 
 """
@@ -886,7 +901,20 @@ are the same two lines everywhere, but `backend` is the backend's own KA object.
 """
 function kernelfor end
 
-# A materialised transient's storage is the array `Place` gave it: a `Vector`
-# view on the host, a borrowed `MtlArray` on Metal, a `LavaArray` on Vulkan.
-# `materialize!` is what put it there.
-storage(t::TransientBuffer) = t.block
+"""
+A materialised transient's storage, from whatever `materialize!` put in `block`.
+
+Two backends out of three put the finished array there — a `Vector` view on the
+host, a borrowed `MtlArray` on Metal — and hand it straight back. Vulkan cannot:
+`block` holds a [`BufferBlock`](@ref), because `barrierbuffer` above needs the
+`VkBuffer` identity and an array view does not carry it, so the `LavaArray` is
+built over the block on demand.
+
+Dispatch on the block and not one method per backend, which is what this was:
+the backend wrote `storage(t::TransientBuffer{T}) where {T}`, the same signature
+as an untyped `TransientBuffer`, so it OVERWROTE this rather than specialising
+it — fatal during precompilation, and had it loaded, whichever module was
+included last would have decided the answer for every backend at once.
+"""
+storage(t::TransientBuffer) = storage(t, t.block)
+storage(::TransientBuffer, block) = block

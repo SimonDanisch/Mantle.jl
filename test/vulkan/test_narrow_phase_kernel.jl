@@ -157,7 +157,8 @@ end
 # logical addressing) Function-pointer OpBitcasts.
 # ---------------------------------------------------------------------------
 @testset "narrow_phase_kernel — Lava backend (GPU smoke)" begin
-    using Mantle: LavaArray, LavaBackend, EPAResult
+    using Mantle: EPAResult
+    using .MVE: LavaArray, LavaBackend
     using GeometryBasics: Vec3f
     tx_(x, y, z) = (1f0, 0f0, 0f0, Float32(x),
                     0f0, 1f0, 0f0, Float32(y),
@@ -168,7 +169,7 @@ end
     results    = LavaArray([sentinel])
     Mantle.narrow_phase_kernel(LavaBackend())(transforms, pairs, Mantle.UnitCube(), results;
                                             ndrange=1)
-    Mantle.vk_flush!(Mantle.vk_context().default_bq)
+    MVE.vk_flush!(MVE.vk_context().default_bq)
     r = Array(results)[1]
     # Two unit cubes overlapping by 0.1 along +X: depth 0.1, normal (1,0,0),
     # contact on the +X face of cube A at (1, 1, 1) corner-ish.

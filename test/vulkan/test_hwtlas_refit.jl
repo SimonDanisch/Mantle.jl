@@ -1,6 +1,6 @@
 using Test, Lava, Raycore
-using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE,
-              write_grain_instances_kernel
+using Mantle: build_accel!
+using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE, write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "Raycore.sync!(VulkanTLAS) refit cycles" begin
@@ -9,28 +9,28 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 
     n = 4
     radius = 1f0
-    quats = Mantle.LavaArray([Vec4f(0,0,0,1) for _ in 1:n])
-    positions = Mantle.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
-    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    quats = MVE.LavaArray([Vec4f(0,0,0,1) for _ in 1:n])
+    positions = MVE.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
+    instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
+    backend = MVE.LavaBackend()
+    bq = MVE.vk_context().default_bq
 
     write_grain_instances_kernel(backend)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = n)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
-    tlas = Mantle.VulkanTLAS(backend)
+    tlas = MVE.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n=2*n, instance_mask=UInt8(0x02))
     Raycore.sync!(tlas)
     pinned_hw_tlas = tlas.hw_tlas
 
     # Refit cycle: write new positions, mark transforms dirty, sync! (refit path).
-    new_positions = Mantle.LavaArray([Point3f(Float32(3*(i-1) + 100f0),0,0) for i in 1:n])
+    new_positions = MVE.LavaArray([Point3f(Float32(3*(i-1) + 100f0),0,0) for i in 1:n])
     write_grain_instances_kernel(backend)(
         new_positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = n)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
     tlas.transforms_dirty = true
     Raycore.sync!(tlas)

@@ -348,7 +348,7 @@ end
     end
 
     @testset "RT Dispatch Against Triangle" begin
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         rt_props = ctx.rt_pipeline_properties
         if rt_props === nothing
             @warn "Skipping RT test: no ray tracing support"
@@ -360,9 +360,9 @@ end
         # Build triangle: (0,0,0), (1,0,0), (0,1,0)
         vertices = [(0f0, 0f0, 0f0), (1f0, 0f0, 0f0), (0f0, 1f0, 0f0)]
         indices = UInt32[0, 1, 2]
-        blas, tlas = Mantle.as_build() do ctx
-            b = Mantle.build_blas(ctx, vertices, indices)
-            t = Mantle.build_tlas(ctx, [b])
+        blas, tlas = Mantle.build_accel!() do ctx
+            b = MVE.build_blas(ctx, vertices, indices)
+            t = MVE.build_tlas(ctx, [b])
             (b, t)
         end
 
@@ -372,21 +372,21 @@ end
         miss_spirv = build_miss_shader()
 
         # Create output buffer (W*H float32 values)
-        output_buf = Mantle.vk_alloc(ctx.default_bq, W * H * sizeof(Float32))
+        output_buf = MVE.vk_alloc(ctx.default_bq, W * H * sizeof(Float32))
 
         # Create RT pipeline (argument order: ctx, raygen, miss, chit)
-        pipeline = Mantle.create_rt_pipeline(ctx, raygen_spirv, miss_spirv, chit_spirv;
+        pipeline = MVE.create_rt_pipeline(ctx, raygen_spirv, miss_spirv, chit_spirv;
             push_constant_size=8)
 
         # Push constant: BDA of output buffer
         push_bda = output_buf.address
 
         # Dispatch
-        Mantle.rt_dispatch!(Mantle.vk_context().default_bq, pipeline, tlas, push_bda, W, H)
+        MVE.rt_dispatch!(MVE.vk_context().default_bq, pipeline, tlas, push_bda, W, H)
 
         # Read back results
         result_bytes = Vector{UInt8}(undef, W * H * sizeof(Float32))
-        Mantle.download!(result_bytes, output_buf)
+        MVE.download!(result_bytes, output_buf)
         result = reinterpret(Float32, result_bytes)
 
         # Verify: rays clearly inside the triangle should hit (t=1.0),

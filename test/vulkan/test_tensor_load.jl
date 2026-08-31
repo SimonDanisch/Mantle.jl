@@ -47,14 +47,14 @@ end
 end
 
 @testset "OpCooperativeMatrixLoadTensorNV loads what the layout describes" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = LavaBackend()
         # A cooperative matrix is subgroup-scoped; the launch is exactly one
         # subgroup wide, asked rather than assumed (32 on Ada, 64 on RDNA 3.5).
-        WG = Mantle.device_subgroup_size(ctx)
+        WG = MVE.device_subgroup_size(ctx)
         src = KA.allocate(back, Float32, TL_N, TL_N)
         copyto!(src, Float32.(reshape(1:(TL_N * TL_N), TL_N, TL_N)))
         out = KA.allocate(back, Float32, TL_M, TL_M)
@@ -99,12 +99,12 @@ end
 # `OpUndef` instead, which is correct because the edge is only taken where the
 # value is dead.
 @testset "a phi over tensor layouts is typed, not %uint" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = LavaBackend()
-        WG = Mantle.device_subgroup_size(ctx)
+        WG = MVE.device_subgroup_size(ctx)
         src = KA.allocate(back, Float32, TL_N, TL_N)
         s = Float32.(reshape(1:(TL_N * TL_N), TL_N, TL_N))
         copyto!(src, s)

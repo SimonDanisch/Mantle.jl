@@ -42,8 +42,8 @@ end
 end
 
 back = LavaBackend()
-ctx = Mantle.vk_context()
-WG = Mantle.device_subgroup_size(ctx)
+ctx = MVE.vk_context()
+WG = MVE.device_subgroup_size(ctx)
 src = KA.allocate(back, Float32, SRC_R, SRC_C)
 copyto!(src, Float32.(reshape(1:(SRC_R * SRC_C), SRC_R, SRC_C)))
 s = Array(src)

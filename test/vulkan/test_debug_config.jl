@@ -79,7 +79,7 @@ using Test, Lava, Mantle
         # `reset_device!` takes it; `VkContext` takes it. Nothing else does.
         # `any` over the method table, not `first`: `VkContext`'s first method is
         # the inner positional constructor, whose `kwarg_decl` is empty.
-        for f in (Mantle.reset_device!, Mantle.VkContext)
+        for f in (Mantle.reset_device!, MVE.VkContext)
             @test any(m -> :debug in Base.kwarg_decl(m), methods(f))
         end
         # The five presets must not come back — each was a different default
@@ -91,11 +91,11 @@ using Test, Lava, Mantle
         end
         # …and `pool_disabled` is a field of the config rather than a second step
         # (`mempolicy(ctx).disabled = true`) that a caller has to remember.
-        @test Mantle.DebugConfig(pool_disabled = true).pool_disabled
+        @test MVE.DebugConfig(pool_disabled = true).pool_disabled
     end
 
     @testset "the device carries what it was asked for" begin
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         @test ctx.debug isa DebugConfig
         # `debug` is the request; `gpu_assisted` is what was achieved. They can
         # differ — the extension or the layer may be missing — which is why both
@@ -120,7 +120,7 @@ using Test, Lava, Mantle
         # So: assert the GUARD, not the value. `=== nothing` would have passed
         # throughout, and `isnothing(...) == false` would too — only evaluating
         # what the code actually branches on catches a field whose type drifted.
-        d = Mantle.Diagnostics()
+        d = MVE.Diagnostics()
         @test d.slab_dump_target isa UInt64
         @test !(d.slab_dump_target != UInt64(0))
 

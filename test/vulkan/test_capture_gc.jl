@@ -43,14 +43,14 @@ end
 
 @testset "a captured sequence survives a garbage collection" begin
     backend = LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    bq = MVE.vk_context().default_bq
     n = 1 << 16
     src = KA.allocate(backend, Float32, n); fill!(src, 1f0)
     dst = KA.allocate(backend, Float32, n); fill!(dst, 0f0)
     KA.synchronize(backend)
 
     # Two dependent launches, so the sequence is more than a single dispatch.
-    seq = Mantle.capture(bq) do
+    seq = MVE.capture(bq) do
         capgc_bump!(backend)(dst, src, 1f0; ndrange = n)
         capgc_bump!(backend)(dst, dst, 10f0; ndrange = n)
     end
@@ -59,7 +59,7 @@ end
 
     # A replay with nothing in between: the path that already worked.
     fill!(dst, 0f0); KA.synchronize(backend)
-    Mantle.replay!(seq)
+    MVE.replay!(seq)
     KA.synchronize(backend)
     @test all(==(12f0), Array(dst))
 
@@ -67,7 +67,7 @@ end
     # real caller does between replays; `GC.gc(true)` just makes it deterministic.
     fill!(dst, 0f0); KA.synchronize(backend)
     GC.gc(true)
-    Mantle.replay!(seq)
+    MVE.replay!(seq)
     KA.synchronize(backend)
     @test all(==(12f0), Array(dst))
 end

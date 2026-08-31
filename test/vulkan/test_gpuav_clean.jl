@@ -32,8 +32,8 @@ else
     using LinearAlgebra: I
 
     @testset "GPU-AV clean — minimal Hikari HW RT render" begin
-        backend = Mantle.LavaBackend()
-        ctx = Mantle.vk_context()
+        backend = MVE.LavaBackend()
+        ctx = MVE.vk_context()
 
         # Tiny scene + tiny film keeps the GPU-AV-instrumented run finite.
         scene = Hikari.Scene(; backend=backend, hw_accel=true)
@@ -47,15 +47,15 @@ else
         camera = Hikari.PerspectiveCamera(Point3f(0, -3, 1.5), Point3f(0, 0, 0.35),
                                           film; fov=50f0)
 
-        Mantle.clear_validation_messages!()
+        MVE.clear_validation_messages!()
         vp = Hikari.VolPath(samples=1, max_depth=1, hw_accel=true)
         vp(scene, gpu_film, camera)
         close(vp)
 
         # The async debug callback writes into this context's ring; pull
         # anything not yet surfaced by the render's own flushes.
-        ctx = Mantle.vk_context()
-        Mantle.drain_validation_messages!(ctx)
+        ctx = MVE.vk_context()
+        MVE.drain_validation_messages!(ctx)
 
         # The drained list collects setup-noise warnings (validation layer
         # adjusts settings on init) alongside real errors.  Filter to actual
@@ -76,12 +76,12 @@ else
         # If this fails, the SPIR-V emitter has regressed on alignment-tracking
         # for byte-offset GEPs — re-investigate via:
         #   ENV["LAVA_SPIRV_DUMP_DIR"] = "/tmp/lava_spv_debug"
-        #   Mantle.reset_device!(debug = Mantle.DebugConfig(gpu_av = true))
+        #   Mantle.reset_device!(debug = MVE.DebugConfig(gpu_av = true))
         # then disassemble + scan via the script at the bottom of
         # docs/specs/2026-04-25-unaligned-bda-investigation.md.
         @test isempty(real_messages)
         # Also assert the device didn't actually go lost during the render.
-        @test !Mantle.device_lost(ctx)
+        @test !MVE.device_lost(ctx)
     end
 
     # Regression for the GPU-AV fault-readback DEADLOCK.
@@ -98,20 +98,20 @@ else
     # report it within a bounded time; if the callback regresses to allocating
     # or logging, this hangs (caught by a CI watchdog) or never surfaces the OOB.
     @testset "GPU-AV fault readback does not hang" begin
-        Mantle.reset_device!(debug = Mantle.DebugConfig(gpu_av = true, pool_disabled = true))
-        ctx = Mantle.vk_context()
+        Mantle.reset_device!(debug = MVE.DebugConfig(gpu_av = true, pool_disabled = true))
+        ctx = MVE.vk_context()
         if !ctx.gpu_assisted
             @info "GPU-AV did not attach on this driver — skipping fault-readback test"
             @test_skip true
         else
             # First caught fault must be reported (this is exactly the call that
             # used to hang forever).
-            @test Mantle.verify_gpu_av(timeout=30.0) == true
+            @test MVE.verify_gpu_av(timeout=30.0) == true
             # And we must be able to KEEP GOING: a second probe proves the
             # post-fault `reset_device!` left a usable, still-instrumented
             # device rather than a wedged one.
-            @test Mantle.verify_gpu_av(timeout=30.0) == true
+            @test MVE.verify_gpu_av(timeout=30.0) == true
         end
-        Mantle.reset_device!(debug = Mantle.DebugConfig())
+        Mantle.reset_device!(debug = MVE.DebugConfig())
     end
 end

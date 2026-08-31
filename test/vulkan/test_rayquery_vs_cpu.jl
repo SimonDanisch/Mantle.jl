@@ -18,14 +18,14 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 
 @testset "Ray Query - GPU MWE: rayQuery vs CPU Moller-Trumbore" begin
 
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping rayQuery test: VK_KHR_ray_query not available on this device"
         @test_skip true
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     bq = backend.bq
 
     # ----------------------------------------------------------------
@@ -40,7 +40,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     faces = [GLTriangleFace(1, 2, 3)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
-    tlas = Mantle.VulkanTLAS(backend)
+    tlas = MVE.VulkanTLAS(backend)
     push!(tlas, mesh, Mat4f(I))
     Raycore.sync!(tlas)
 
@@ -130,9 +130,9 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
         return nothing
     end
 
-    Mantle.lava_launch!(bq, rq_kernel_noarg, out_g, origins_g;
+    MVE.lava_launch!(bq, rq_kernel_noarg, out_g, origins_g;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=tlas)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
     gpu = Array(out_g)
 

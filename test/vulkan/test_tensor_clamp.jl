@@ -42,12 +42,12 @@ const SENT = -999.0f0
 end
 
 @testset "a clamping layout makes an unpadded extent legal" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = LavaBackend()
-        WG = Mantle.device_subgroup_size(ctx)
+        WG = MVE.device_subgroup_size(ctx)
         src = KA.allocate(back, Float32, EXT_C, EXT_C)
         s = Float32.(reshape(1:(EXT_C * EXT_C), EXT_C, EXT_C))
         copyto!(src, s)
@@ -112,7 +112,7 @@ const EA_V = 10        # rows the array has; the load asks for EXT_V and the res
 end
 
 @testset "the clamp constant is settable, and it is a bit pattern" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "device has no coopmat2 tensor addressing — skipping"
     else

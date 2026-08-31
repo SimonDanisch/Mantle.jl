@@ -1,5 +1,6 @@
 using Test, Lava, Mantle
-using Mantle: VulkanInstanceRecord, identity_transform
+using Mantle: identity_transform
+using .MVE: VulkanInstanceRecord
 
 @testset "VulkanInstanceRecord — size & isbits" begin
     @test sizeof(VulkanInstanceRecord) == 64
@@ -36,7 +37,7 @@ end
 
     # Packed via the existing pack_as_instance! helper
     expected = Vector{UInt8}(undef, 64)
-    Mantle.pack_as_instance!(expected, 0, blas_addr;
+    MVE.pack_as_instance!(expected, 0, blas_addr;
                             transform=transform,
                             custom_index=custom_idx,
                             mask=mask_v,

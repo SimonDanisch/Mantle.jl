@@ -59,7 +59,8 @@ import Mantle: Attribute, Device, Graph, Plan, Surface, Transient, Update,
 # are Vulkan's. `import`, so `Mantle.flush!` resolves for a caller like RayMakie
 # rather than being a separate `MantleVulkanExt.flush!` nothing can reach.
 import Mantle: allocate_batch_queue!, release_batch_queue!, ensure_active_batch!,
-    flush!, waitidle, supports_graphics, use_bindings!, devicearray, supports_rt_pipeline
+    flush!, waitidle, supports_graphics, use_bindings!, devicearray, supports_rt_pipeline,
+    supports_batch_queue, submit!, batchqueue
 
 import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
     draw_indirect_in_pass!, set_viewport!, reset_device!, blit!, present_frame!,
@@ -75,7 +76,14 @@ import Mantle: build_accel!, refit_tlas!, set_anyhit_pipeline!, trace_rays!,
 # fallback cannot see through; `aspect` is NOT, because it is Vulkan's own
 # spelling and nothing outside this module says it.
 import Mantle: isdepth, target_extent, checkextents, refit!, record!,
-    record_pass!, rename!, inplace!, nextslot!, collect!
+    record_pass!, rename!, inplace!, nextslot!, collect!,
+    # The two plan pieces a backend supplies. NOT imported, they became
+    # `MantleVulkanExt.makeargmemory` and core kept its `nothing` default — so
+    # every `Plan` was built with no argument memory and the first `run!` was
+    # `MethodError: no method matching nextslot!(::Nothing, ::BatchQueue)`. That
+    # is every render on this backend, which is how far "it precompiles" is from
+    # "it works".
+    makeargmemory, makeprofiler
 
 # The abstract resource types whose concretes are defined below. Imported rather
 # than reached through `using Mantle` because `VulkanTexture2D <: Texture2D`
@@ -84,24 +92,45 @@ import Mantle: Texture, Texture1D, Texture2D, Sampler, TextureBindings,
     Framebuffer, RenderTarget, HWTLAS, AccelBuildContext, BatchQueue,
     ExternalImage, CompiledGraphicsPipeline, Window
 
+# Not a supertype — a concrete Mantle type this backend adds a CONSTRUCTOR to,
+# `AdaptedAccel(::VulkanTLAS)`. `using Mantle` binds the name (it is exported)
+# but extending a constructor through an exported binding is deprecated in 1.12
+# and assumed at load with a warning, so it has to be an `import`. The Metal
+# extension already imports it; this one did not.
+import Mantle: AdaptedAccel
+
 
 # The graph. `Graph`, `Plan`, `Pass`, `Compile` and the rest are Mantle's now —
 # this backend used to define them and no longer does. It records and submits
 # what the graph produced, so it needs the names, and it adds methods to a good
 # many of them: `import`, for the reason at the top of this file.
+#
+# Seven names that WERE in this list are not: `emit_draw!`, `packdispatch!`,
+# `record_updates!`, `recordlaunch!`, `recycle!`, `takehost!` and
+# `write_update!`. They came over with the runtime and Mantle never declared
+# them, so each one imported a binding that did not exist — legal, and Julia
+# creates it in Mantle with a warning, which made seven of Vulkan's private
+# recording helpers into Mantle API that neither core nor the Metal backend can
+# call. They are defined and used only in `src/vulkan/graph.jl`, so they are
+# this module's, and `test_ext_imports_are_declared.jl` keeps the list honest.
 import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
     Compile, CompiledDispatch, CompiledDraw, DrawCall, Images, Pass,
     PassHandle, PassPlan, Profiler, Recycler, TransientBuffer,
     TransientImage, TransientResource, WindowSurface, argalign, barrierbuffer,
     barrierspan,
     clearvalue, depthclear, devargs, dispatchrange, drawover, elapsed,
-    emit_draw!, extrausage, first_target, imageusage, initial_state,
-    initial_usage, kernelfor, lastuses, lp_of, makeimage, packdispatch!,
+    extrausage, first_target, imageusage, initial_state,
+    initial_usage, kernelfor, lastuses, lp_of, makeimage,
     rawargs, remakeimage!,
-    record_draw!, record_updates!, recordlaunch!, recycle!, renameable,
+    record_draw!, renameable,
+    # The modelled trace pass: the declaration this backend compiles, and the
+    # compiled form it records. `Trace` is exported and would arrive through
+    # `using Mantle`; it is listed because `CompiledTrace` is not, and a pair
+    # split across two mechanisms is how one of them goes missing.
+    Trace, CompiledTrace,
     resourcekind, rootresource, sample!, slice, sliceindex, slotbase,
-    takehost!, target_format, target_image, target_view, updates_pass!,
-    usage_of, write_update!, writes_it
+    target_format, target_image, target_view, updates_pass!,
+    usage_of, writes_it
 
 # Read but not exported by Mantle, so `using Mantle` alone would not bind them.
 # `RayTracingPipeline` is a concrete Mantle type the backend consumes rather
@@ -114,6 +143,25 @@ using Mantle: mat4_to_vk_transform
 using Mantle: Analysis, Compilation, DiscardOp, KeepOp, alias, allocate,
     analysis, arenaof, coopmatgemm, device, humanbytes, memoryof, offset,
     ordered, pinned, policy, region, transients
+
+# Exported by Mantle AND by one of the packages `using`d below, which makes the
+# bare name resolve to NEITHER: two modules exporting one name leaves it
+# ambiguous, and touching it is an `UndefVarError` whose message is about
+# spelling. In every case here this backend means Mantle's.
+#
+# Six collide with Vulkan and KernelAbstractions today. `Device`, `Framebuffer`
+# and `Sampler` are disambiguated by the `import Mantle:` lists above, which they
+# are in for their own reasons; the three below were in no list.
+#
+# It bites at the first USE and not at the import, which is why these surfaced
+# one at a time and in load order rather than together: `DrawIndirectCommand` in
+# `graphics/pipeline.jl`, then `Buffer` in four `rename!` signatures in
+# `graph.jl`, then `Backend` — inside a function body, so not until the sync
+# lowering actually RAN, in the test suite.
+#
+# `Scalar` (Mantle's, vs StaticArrays') is the same collision and is not here,
+# because this backend names it only in comments. Add it the day that changes.
+using Mantle: Buffer, DrawIndirectCommand, Backend
 
 # The device vocabulary. `caps` in particular is one function with a `Device`
 # method in Mantle and a `KI.Backend` method here.
@@ -176,18 +224,29 @@ function __init__()
         vulkan_available() ? LavaBackend() : nothing
     end
 
+    # This backend freezes the SPIR-V it compiles, so a `@compile_workload` in a
+    # downstream package should record into that cache. Registered rather than
+    # dispatched: see `register_kernel_recorder!`.
+    Mantle.register_kernel_recorder!(with_frozen_recording; name = :vulkan)
+
     # The pipeline builder thread. Pipelines are created off the main thread so a
     # first launch does not block on the driver's compiler.
     init_pipeline_thread!()
 
-    # Mark the device lost during shutdown so GC finalizers do not call into the
+    # Mark EVERY device lost during shutdown so GC finalizers do not call into a
     # Vulkan driver after it has been torn down. `atexit` runs BEFORE Julia's
     # global finalizer sweep, which is the whole point — a finalizer that reaches
     # a dead device segfaults inside the driver, where no Julia `try` can catch
     # it and no stack trace names the buffer that did it.
+    #
+    # Every, not just the bound one, which is what this did. A second device is
+    # not hypothetical: Mantle's own `twodevice_probe.jl` makes one, and on
+    # 2026-08-30 the suite passed every test and then took a SIGSEGV at exit
+    # inside `libvulkan_lvp.so` — a `LavaArray` finalizer calling
+    # `vkGetSemaphoreCounterValue` on the software rasterizer's dead device.
+    # See `LIVE_CONTEXTS`.
     atexit() do
-        ctx = VK_CONTEXT_REF[]
-        ctx === nothing || mark_device_lost!(ctx)
+        mark_all_devices_lost!()
         bind_context!(nothing)
     end
 end

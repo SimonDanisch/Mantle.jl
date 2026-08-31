@@ -57,9 +57,14 @@ half, and there is no reason to have a second name for the setup block.
 """
 # `@compile_workload` is Mantle's — a macro cannot be overridden from an
 # extension, so the macro is shared and what varies is the function it calls.
-# This backend's answer is below: record the SPIR-V it compiles into the frozen
-# cache under `version`.
-Mantle.with_kernel_recording(f, version) = with_frozen_recording(f, version)
+# This backend's answer is `with_frozen_recording` below: record the SPIR-V it
+# compiles into the frozen cache under `version`.
+#
+# Registered from `MantleVulkanExt.__init__` rather than written here as
+# `Mantle.with_kernel_recording(f, version) = …`, which is what it was: that is
+# the identical untyped signature as Mantle's default, so it overwrote the
+# default instead of extending it, and method overwriting is fatal during
+# precompilation. See `register_kernel_recorder!` in `src/graph/backend.jl`.
 
 """
     with_frozen_recording(f, version)

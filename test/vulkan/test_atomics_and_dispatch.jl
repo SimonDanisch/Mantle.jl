@@ -79,9 +79,9 @@ end
         end
 
         N = 4096
-        counter = Mantle.LavaArray(Int32[0])
-        atomic_counter_i32!(Mantle.LavaBackend())(counter; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        counter = MVE.LavaArray(Int32[0])
+        atomic_counter_i32!(MVE.LavaBackend())(counter; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(counter)[1] == Int32(N)
     end
 
@@ -91,9 +91,9 @@ end
         end
 
         N = 4096
-        counter = Mantle.LavaArray(UInt32[0])
-        atomic_counter_u32!(Mantle.LavaBackend())(counter; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        counter = MVE.LavaArray(UInt32[0])
+        atomic_counter_u32!(MVE.LavaBackend())(counter; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(counter)[1] == UInt32(N)
     end
 
@@ -103,9 +103,9 @@ end
         end
 
         N = 1024
-        counter = Mantle.LavaArray(Float32[0])
-        atomic_counter_f32!(Mantle.LavaBackend())(counter; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        counter = MVE.LavaArray(Float32[0])
+        atomic_counter_f32!(MVE.LavaBackend())(counter; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(counter)[1] ≈ Float32(N)
     end
 
@@ -117,10 +117,10 @@ end
         end
 
         N = 2048
-        counter = Mantle.LavaArray(Int32[0])
-        results = Mantle.LavaArray(zeros(Int32, N))
-        atomic_unique!(Mantle.LavaBackend())(counter, results; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        counter = MVE.LavaArray(Int32[0])
+        results = MVE.LavaArray(zeros(Int32, N))
+        atomic_unique!(MVE.LavaBackend())(counter, results; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
 
         r = Array(results)
         @test Array(counter)[1] == Int32(N)
@@ -157,18 +157,18 @@ end
         N = 64
         P = N ÷ 2
 
-        data = Mantle.LavaArray(zeros(Float32, N))
-        flags = Mantle.LavaArray(zeros(Int32, P))
-        results = Mantle.LavaArray(zeros(Float32, P))
+        data = MVE.LavaArray(zeros(Float32, N))
+        flags = MVE.LavaArray(zeros(Int32, P))
+        results = MVE.LavaArray(zeros(Float32, P))
 
         # Pair leaves: (1,2)→parent 1, (3,4)→parent 2, ...
         parents_h = Int32[div(i - 1, 2) + 1 for i in 1:N]
         siblings_h = Int32[i % 2 == 1 ? i + 1 : i - 1 for i in 1:N]
-        parents_d = Mantle.LavaArray(parents_h)
-        siblings_d = Mantle.LavaArray(siblings_h)
+        parents_d = MVE.LavaArray(parents_h)
+        siblings_d = MVE.LavaArray(siblings_h)
 
-        refit_pattern!(Mantle.LavaBackend())(data, flags, results, parents_d, siblings_d; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        refit_pattern!(MVE.LavaBackend())(data, flags, results, parents_d, siblings_d; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
 
         r = Array(results)
         expected = Float32[(2k - 1) * 10 + (2k) * 10 for k in 1:P]
@@ -183,47 +183,47 @@ end
 @testset "Batched Dispatch" begin
 
     @testset "multiple dispatches in one batch" begin
-        a = Mantle.LavaArray(Float32[1, 2, 3, 4])
-        b = Mantle.LavaArray(Float32[10, 20, 30, 40])
+        a = MVE.LavaArray(Float32[1, 2, 3, 4])
+        b = MVE.LavaArray(Float32[10, 20, 30, 40])
         c = a .+ b
         d = c .* Float32(2)
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(d) == Float32[22, 44, 66, 88]
     end
 
     @testset "flush counter increments" begin
-        before = Mantle.vk_context().diag.flush_counter[]
-        a = Mantle.LavaArray(Float32[1, 2, 3])
+        before = MVE.vk_context().diag.flush_counter[]
+        a = MVE.LavaArray(Float32[1, 2, 3])
         _ = a .+ Float32(1)
-        Mantle.vk_flush!(Mantle.vk_context())
-        @test Mantle.vk_context().diag.flush_counter[] > before
+        MVE.vk_flush!(MVE.vk_context())
+        @test MVE.vk_context().diag.flush_counter[] > before
     end
 
     @testset "dispatch counter increments" begin
-        Mantle.vk_context().diag.dispatch_logging = true
-        before = Mantle.vk_context().diag.total_dispatches[]
-        a = Mantle.LavaArray(Float32[1, 2, 3])
+        MVE.vk_context().diag.dispatch_logging = true
+        before = MVE.vk_context().diag.total_dispatches[]
+        a = MVE.LavaArray(Float32[1, 2, 3])
         _ = a .+ Float32(1)
-        Mantle.vk_flush!(Mantle.vk_context())
-        @test Mantle.vk_context().diag.total_dispatches[] > before
-        Mantle.vk_context().diag.dispatch_logging = false
+        MVE.vk_flush!(MVE.vk_context())
+        @test MVE.vk_context().diag.total_dispatches[] > before
+        MVE.vk_context().diag.dispatch_logging = false
     end
 
     @testset "KA.synchronize flushes GPU work" begin
-        a = Mantle.LavaArray(ones(Float32, 64))
-        before = Mantle.vk_context().diag.flush_counter[]
+        a = MVE.LavaArray(ones(Float32, 64))
+        before = MVE.vk_context().diag.flush_counter[]
         b = a .+ Float32(1)
         c = b .+ Float32(1)
-        KernelAbstractions.synchronize(Mantle.LavaBackend())
+        KernelAbstractions.synchronize(MVE.LavaBackend())
         # synchronize triggers a flush
-        @test Mantle.vk_context().diag.flush_counter[] - before >= 1
+        @test MVE.vk_context().diag.flush_counter[] - before >= 1
         @test Array(c) == fill(Float32(3), 64)
     end
 
     @testset "empty flush is no-op" begin
-        before = Mantle.vk_context().diag.flush_counter[]
-        Mantle.vk_flush!(Mantle.vk_context())
-        @test Mantle.vk_context().diag.flush_counter[] == before
+        before = MVE.vk_context().diag.flush_counter[]
+        MVE.vk_flush!(MVE.vk_context())
+        @test MVE.vk_context().diag.flush_counter[] == before
     end
 
     @testset "barrier between dispatches preserves ordering" begin
@@ -237,11 +237,11 @@ end
         end
 
         N = 256
-        A = Mantle.LavaArray(zeros(Float32, N))
-        B = Mantle.LavaArray(zeros(Float32, N))
-        write_val!(Mantle.LavaBackend())(A, 42.0f0; ndrange=N)
-        read_add!(Mantle.LavaBackend())(B, A; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        A = MVE.LavaArray(zeros(Float32, N))
+        B = MVE.LavaArray(zeros(Float32, N))
+        write_val!(MVE.LavaBackend())(A, 42.0f0; ndrange=N)
+        read_add!(MVE.LavaBackend())(B, A; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test all(Array(B) .== 43.0f0)
     end
 
@@ -251,23 +251,23 @@ end
             @inbounds A[i] = Float32(i)
         end
 
-        A = Mantle.LavaArray(zeros(Float32, 1024))
-        fill_index!(Mantle.LavaBackend())(A; ndrange=1024)
+        A = MVE.LavaArray(zeros(Float32, 1024))
+        fill_index!(MVE.LavaBackend())(A; ndrange=1024)
         GC.gc()
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(A)
         @test result[1] == 1.0f0
         @test result[1024] == 1024.0f0
     end
 
     @testset "dispatch log records entries" begin
-        Mantle.vk_context().diag.dispatch_logging = true
-        empty!(Mantle.vk_context().diag.dispatch_log)
-        a = Mantle.LavaArray(Float32[1, 2, 3])
+        MVE.vk_context().diag.dispatch_logging = true
+        empty!(MVE.vk_context().diag.dispatch_log)
+        a = MVE.LavaArray(Float32[1, 2, 3])
         _ = a .+ Float32(1)
-        Mantle.vk_flush!(Mantle.vk_context())
-        @test !isempty(Mantle.vk_context().diag.dispatch_log)
-        Mantle.vk_context().diag.dispatch_logging = false
+        MVE.vk_flush!(MVE.vk_context())
+        @test !isempty(MVE.vk_context().diag.dispatch_log)
+        MVE.vk_context().diag.dispatch_logging = false
     end
 end
 
@@ -278,26 +278,26 @@ end
 @testset "Multi-dispatch Patterns" begin
 
     @testset "chain of 10 dispatches" begin
-        a = Mantle.LavaArray(ones(Float32, 128))
+        a = MVE.LavaArray(ones(Float32, 128))
         for _ in 1:10
             a = a .+ Float32(1)
         end
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test all(Array(a) .== 11.0f0)
     end
 
     @testset "interleaved compute and reduction" begin
-        a = Mantle.LavaArray(Float32[1, 2, 3, 4, 5, 6, 7, 8])
+        a = MVE.LavaArray(Float32[1, 2, 3, 4, 5, 6, 7, 8])
         b = a .* Float32(2)
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test sum(b) ≈ 72.0f0
     end
 
     @testset "large dispatch without splitting" begin
         N = 128 * 256 * 2
-        a = Mantle.LavaArray(ones(Float32, N))
+        a = MVE.LavaArray(ones(Float32, N))
         b = a .+ Float32(1)
-        KernelAbstractions.synchronize(Mantle.LavaBackend())
+        KernelAbstractions.synchronize(MVE.LavaBackend())
         @test all(Array(b) .== 2.0f0)
     end
 end
@@ -316,9 +316,9 @@ end
         @inbounds A[I] = priv[1] + priv[4]
     end
 
-    a = Mantle.LavaArray(zeros(Float32, 64))
-    private_accum!(Mantle.LavaBackend(), 64)(a; ndrange=64)
-    Mantle.vk_flush!(Mantle.vk_context())
+    a = MVE.LavaArray(zeros(Float32, 64))
+    private_accum!(MVE.LavaBackend(), 64)(a; ndrange=64)
+    MVE.vk_flush!(MVE.vk_context())
     result = Array(a)
     @test result[1] == 1f0 + 4f0
     @test result[10] == 10f0 + 40f0
@@ -330,9 +330,9 @@ end
             Atomix.@atomic counter[1] += Int64(1)
         end
         N = 2048
-        c = Mantle.LavaArray(Int64[0])
-        atomic_add_i64!(Mantle.LavaBackend())(c; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        c = MVE.LavaArray(Int64[0])
+        atomic_add_i64!(MVE.LavaBackend())(c; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(c)[1] == Int64(N)
     end
 
@@ -341,9 +341,9 @@ end
             Atomix.@atomic counter[1] += UInt64(1)
         end
         N = 1024
-        c = Mantle.LavaArray(UInt64[0])
-        atomic_add_u64!(Mantle.LavaBackend())(c; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        c = MVE.LavaArray(UInt64[0])
+        atomic_add_u64!(MVE.LavaBackend())(c; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(c)[1] == UInt64(N)
     end
 end
@@ -354,9 +354,9 @@ end
             Atomix.@atomic counter[1] += 1.0
         end
         N = 1024
-        c = Mantle.LavaArray(Float64[0.0])
-        atomic_add_f64!(Mantle.LavaBackend())(c; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        c = MVE.LavaArray(Float64[0.0])
+        atomic_add_f64!(MVE.LavaBackend())(c; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(c)[1] ≈ Float64(N)
     end
 
@@ -365,9 +365,9 @@ end
             Atomix.@atomic counter[1] -= 1.0
         end
         N = 1024
-        c = Mantle.LavaArray(Float64[Float64(N)])
-        atomic_sub_f64!(Mantle.LavaBackend())(c; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        c = MVE.LavaArray(Float64[Float64(N)])
+        atomic_sub_f64!(MVE.LavaBackend())(c; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(c)[1] ≈ 0.0
     end
 end
@@ -380,9 +380,9 @@ end
         end
 
         N = 1024
-        counter = Mantle.LavaArray(Float32[Float32(N)])
-        atomic_sub_f32!(Mantle.LavaBackend())(counter; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        counter = MVE.LavaArray(Float32[Float32(N)])
+        atomic_sub_f32!(MVE.LavaBackend())(counter; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(counter)[1] ≈ 0.0f0
     end
 
@@ -394,13 +394,13 @@ end
         end
 
         dims = (4, 4, 4)
-        A = Mantle.LavaArray(zeros(Float32, dims))
+        A = MVE.LavaArray(zeros(Float32, dims))
         # All threads write to the same CartesianIndex
         target = CartesianIndex(2, 3, 1)
         N = 512
-        idx_array = Mantle.LavaArray(fill(target, N))
-        atomic_add_3d!(Mantle.LavaBackend())(A, idx_array; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        idx_array = MVE.LavaArray(fill(target, N))
+        atomic_add_3d!(MVE.LavaBackend())(A, idx_array; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(A)
         @test result[2, 3, 1] ≈ Float32(N)
         @test sum(result) ≈ Float32(N)  # only one cell was touched
@@ -416,10 +416,10 @@ end
         dims = (8, 8)
         N = 256
         target = CartesianIndex(4, 5)
-        A = Mantle.LavaArray(fill(Float32(N), dims))
-        idx_array = Mantle.LavaArray(fill(target, N))
-        atomic_sub_2d!(Mantle.LavaBackend())(A, idx_array, 1.0f0; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        A = MVE.LavaArray(fill(Float32(N), dims))
+        idx_array = MVE.LavaArray(fill(target, N))
+        atomic_sub_2d!(MVE.LavaBackend())(A, idx_array, 1.0f0; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(A)
         @test result[4, 5] ≈ 0.0f0
         # All other cells untouched
@@ -438,13 +438,13 @@ end
         end
 
         dims = (6, 5)
-        A = Mantle.LavaArray(zeros(UInt32, dims))
+        A = MVE.LavaArray(zeros(UInt32, dims))
         # All threads hit (3, 4) with Int32 indices like the solar kernel does.
         N = 1024
-        is = Mantle.LavaArray(fill(Int32(3), N))
-        js = Mantle.LavaArray(fill(Int32(4), N))
-        atomic_add_ij!(Mantle.LavaBackend())(A, is, js; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        is = MVE.LavaArray(fill(Int32(3), N))
+        js = MVE.LavaArray(fill(Int32(4), N))
+        atomic_add_ij!(MVE.LavaBackend())(A, is, js; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(A)
         @test result[3, 4] == UInt32(N)
         @test sum(result) == UInt32(N)

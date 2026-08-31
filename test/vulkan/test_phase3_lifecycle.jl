@@ -2,25 +2,25 @@ using Test, Lava, Mantle
 @testset "Phase 3 — lifecycle state + finalizer/main-thread separation" begin
 
 @testset "buffer state machine" begin
-    @test isdefined(Mantle, :BUF_STATE_ALIVE)
-    @test isdefined(Mantle, :BUF_STATE_DEFERRED)
-    @test isdefined(Mantle, :BUF_STATE_DEAD)
-    @test hasfield(Mantle.VkManagedBuffer, :state)
+    @test isdefined(MVE, :BUF_STATE_ALIVE)
+    @test isdefined(MVE, :BUF_STATE_DEFERRED)
+    @test isdefined(MVE, :BUF_STATE_DEAD)
+    @test hasfield(MVE.VkManagedBuffer, :state)
 
     a = LavaArray{Float32,1}(undef, (4,))
     buf = a.buf[]
-    @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_ALIVE
+    @test (@atomic :acquire buf.state) == MVE.BUF_STATE_ALIVE
 
-    Mantle.vk_free!(buf)
+    MVE.vk_free!(buf)
     # After vk_free!: either DEFERRED (GPU busy) or DEAD (immediately destroyed).
     s = @atomic :acquire buf.state
-    @test s == Mantle.BUF_STATE_DEFERRED || s == Mantle.BUF_STATE_DEAD
+    @test s == MVE.BUF_STATE_DEFERRED || s == MVE.BUF_STATE_DEAD
 
     # Second vk_free! must be idempotent — the CAS from ALIVE fails because
     # state is no longer ALIVE.  Nothing crashes, state doesn't regress.
-    Mantle.vk_free!(buf)
+    MVE.vk_free!(buf)
     s2 = @atomic :acquire buf.state
-    @test s2 == s || s2 == Mantle.BUF_STATE_DEAD   # monotonic progression only
+    @test s2 == s || s2 == MVE.BUF_STATE_DEAD   # monotonic progression only
 end
 
 @testset "LavaArray has no direct finalizer (DataRef refcount is sole owner)" begin
@@ -35,8 +35,8 @@ end
 end
 
 @testset "VulkanBatchQueue has deferred_frees_lock" begin
-    bq = Mantle.vk_context().default_bq
-    @test hasfield(Mantle.VulkanBatchQueue, :deferred_frees_lock)
+    bq = MVE.vk_context().default_bq
+    @test hasfield(MVE.VulkanBatchQueue, :deferred_frees_lock)
     @test bq.deferred_frees_lock isa Base.Threads.SpinLock
 end
 

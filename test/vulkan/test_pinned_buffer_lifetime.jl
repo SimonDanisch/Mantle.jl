@@ -20,16 +20,16 @@ const KA = KernelAbstractions
 
 @testset "pinned buffer survives unsafe_free! until its batch releases" begin
     be = LavaBackend()
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
 
     a = KA.allocate(be, Float32, 64)
     buf = a.buf[]                    # hold the VkManagedBuffer itself
-    @test (@atomic buf.state) == Mantle.BUF_STATE_ALIVE
+    @test (@atomic buf.state) == MVE.BUF_STATE_ALIVE
     @test (@atomic buf.pins) == 0
 
     batch = Mantle.ensure_active_batch!(bq)
-    Mantle.pin!(batch, a)
+    MVE.pin!(batch, a)
     @test (@atomic buf.pins) == 1
 
     # The teardown that used to corrupt the batch.
@@ -37,14 +37,14 @@ const KA = KernelAbstractions
 
     # The batch can still submit, so the buffer stays ALIVE and syncable. Both
     # assertions below are exactly what used to fail.
-    @test (@atomic buf.state) == Mantle.BUF_STATE_ALIVE
+    @test (@atomic buf.state) == MVE.BUF_STATE_ALIVE
     @test (@atomic buf.pins) == 1
-    Mantle.sync_access!(batch, buf)    # must not throw or assert
+    MVE.sync_access!(batch, buf)    # must not throw or assert
 
     # Batch retires -> pin drops -> refcount reaches zero -> buffer is freed.
-    Mantle.release_pinned_refs!(batch)
+    MVE.release_pinned_refs!(batch)
     @test (@atomic buf.pins) == 0
-    @test (@atomic buf.state) != Mantle.BUF_STATE_ALIVE
+    @test (@atomic buf.state) != MVE.BUF_STATE_ALIVE
 end
 
 # The retained DataRef keeps the refcount above zero, so `unsafe_free!(::LavaArray)`
@@ -52,23 +52,23 @@ end
 # bypass that, so the pin gate has to hold on its own.
 @testset "direct vk_free! on a pinned buffer is owed, not performed" begin
     be = LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    bq = MVE.vk_context().default_bq
 
     a = KA.allocate(be, Float32, 64)
     buf = a.buf[]
     batch = Mantle.ensure_active_batch!(bq)
-    Mantle.pin!(batch, a)
+    MVE.pin!(batch, a)
 
-    Mantle.vk_free!(buf)               # e.g. a teardown path that owns the buffer
+    MVE.vk_free!(buf)               # e.g. a teardown path that owns the buffer
 
     # Must not be marked DEFERRED: that is what trips sync_access!'s ALIVE assert.
-    @test (@atomic buf.state) == Mantle.BUF_STATE_ALIVE
+    @test (@atomic buf.state) == MVE.BUF_STATE_ALIVE
     @test (@atomic buf.free_requested)
-    Mantle.sync_access!(batch, buf)
+    MVE.sync_access!(batch, buf)
 
-    Mantle.release_pinned_refs!(batch)
+    MVE.release_pinned_refs!(batch)
     @test (@atomic buf.pins) == 0
-    @test (@atomic buf.state) != Mantle.BUF_STATE_ALIVE
+    @test (@atomic buf.state) != MVE.BUF_STATE_ALIVE
     @test !(@atomic buf.free_requested)
 end
 
@@ -79,5 +79,5 @@ end
     @test (@atomic buf.pins) == 0
     Mantle.unsafe_free!(a)
     # Nothing pinned it, so nothing defers it.
-    @test (@atomic buf.state) != Mantle.BUF_STATE_ALIVE
+    @test (@atomic buf.state) != MVE.BUF_STATE_ALIVE
 end

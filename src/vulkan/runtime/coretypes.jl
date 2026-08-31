@@ -615,6 +615,26 @@ end
 #     threads the kernel indexes, and write part of its tile.
 
 """
+    CompiledRTPipeline
+
+Supertype of a backend's compiled ray-tracing pipeline, declared here so
+`DeviceCaches` can name it.
+
+The forward reference is unavoidable rather than incidental: `LavaRTPipeline`
+holds the `VkContext` it was built against, `VkContext` holds a `DeviceCaches`,
+and `DeviceCaches` caches `LavaRTPipeline`s — so one of the three has to be
+named before it is defined. `IterPlan{Ctx}` in this same file breaks the same
+cycle with a type parameter; a supertype is the cheaper break here, because the
+cache is a `Dict` value read a handful of times per frame and nothing indexes it
+in a hot loop.
+
+Not in Mantle core beside `CompiledGraphicsPipeline`: core never names a
+compiled RT pipeline, and Metal compiles its intersection functions without
+caching them at all.
+"""
+abstract type CompiledRTPipeline end
+
+"""
     DeviceCaches
 
 Everything a `VkContext` caches, owned by the context that owns the handles.
@@ -684,7 +704,10 @@ mutable struct DeviceCaches
     # Keyed like `gfx_pipelines`: the shader identities plus the argument types.
     # The per-object dict got away with keying on argument types alone because
     # the object WAS the rest of the key.
-    rt_pipelines::Dict{UInt64,Tuple{LavaRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
+    #
+    # `CompiledRTPipeline` and not `LavaRTPipeline`: see the supertype above for
+    # why the concrete name cannot be spelled here.
+    rt_pipelines::Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
     blit::Any
     timestamp_pool::Union{Nothing,VK.QueryPool}
     timestamp_next_slot::Int
@@ -731,7 +754,7 @@ DeviceCaches() = DeviceCaches(
     Dict{Any,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
     nothing, MemoryPolicy(), 0, nothing, nothing, false,
     Dict{UInt64,VulkanCompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
-    Dict{UInt64,Tuple{LavaRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
+    Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     nothing, nothing, 0, 1.0, Any[],
     Dict{Tuple{DataType,DataType,Any},Any}(), nothing,
     IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[])

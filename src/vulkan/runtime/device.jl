@@ -112,7 +112,14 @@ function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ct
     type_info = VK.SemaphoreTypeCreateInfo(VK.SEMAPHORE_TYPE_TIMELINE, UInt64(0))
     timeline_sem = unwrap(VK.create_semaphore(device,
         VK.SemaphoreCreateInfo(; next=type_info)))
-    bq = VulkanBatchQueue(device, queue, qf_idx, cmd_pool, nothing,
+    # `{typeof(ctx)}`, and the parameter is not optional. `BatchQueue` gained a
+    # context TYPE PARAMETER when it moved to `src/graph/queue.jl` — `ctx::C`,
+    # so `bq.ctx.caches` infers — and `VulkanBatchQueue{C}` leaves it free.
+    # Julia generates a field-wise constructor for the bare name and for all
+    # parameters given, never for a partial application, so the unparameterised
+    # call this was landed on the four-argument method above and raised a
+    # `MethodError` listing forty-one arguments.
+    bq = VulkanBatchQueue{typeof(ctx)}(device, queue, qf_idx, cmd_pool, nothing,
                     CommandBatch[], batches, VK.CommandBuffer[],
                     as_cmd_buf, as_fence,
                     timeline_sem, UInt64(0),
@@ -479,6 +486,10 @@ mutable struct VkContext
         # validated against this physical device before the driver sees it —
         # `vkCreatePipelineCache` is not a safe place to discover a mismatch.
         ctx.id = (VK_CONTEXT_COUNTER[] += 1)
+        # Registered before anything can allocate against it — see
+        # `LIVE_CONTEXTS`. A context that is not in this list is one whose
+        # buffers will call into a dead driver during Julia's shutdown sweep.
+        push!(LIVE_CONTEXTS, WeakRef(ctx))
         ctx.caches = DeviceCaches()
         ctx.diag = Diagnostics()
         # Filled by the constructor once the device exists; null until then so a
@@ -635,6 +646,52 @@ max_shared_memory(ctx::VkContext = vk_context()) = caps(ctx).sharedbudget
 # reaches them.
 
 const VK_CONTEXT_REF = Ref{Union{Nothing, VkContext}}(nothing)
+
+"""
+Every `VkContext` ever built, weakly.
+
+`VK_CONTEXT_REF` is the BOUND one, and at shutdown that is not the interesting
+set. Julia's `atexit` hooks run before the final finalizer sweep, and the hook in
+`MantleVulkanExt.__init__` marks the bound context lost so that a `LavaArray`
+finalizer running afterwards skips `query_timeline` instead of calling
+`vkGetSemaphoreCounterValue` on a driver that has been torn down.
+
+With one device that is enough. With two it is not, and Mantle's own suite makes
+two: `twodevice_probe.jl` builds a second context, and the software rasterizer
+answers it. Measured 2026-08-30 — the suite finished every test and then took a
+SIGSEGV at exit:
+
+    pthread_mutex_lock                      libc
+    …                                       libvulkan_lvp.so     <- lavapipe
+    vkGetSemaphoreCounterValue
+    query_timeline                          runtime/command.jl:944
+    vk_free!                                runtime/memory.jl:742
+    unsafe_free!(::LavaArray)
+    run_finalizer / ijl_atexit_hook
+
+Weak, so being in this list never keeps a context alive: a device that is
+collected during the session drops out of it, and marking a dead entry is a
+no-op. Never cleaned up in normal running — the list is bounded by how many
+devices a process makes, which is one, or two when something is probing.
+"""
+const LIVE_CONTEXTS = WeakRef[]
+
+"""
+    mark_all_devices_lost!()
+
+Mark every live context lost, so no finalizer reaches a driver afterwards.
+
+Shutdown only. Marking a device lost makes every subsequent Vulkan call on it a
+no-op, which is what the process wants once it has decided to exit and is
+exactly what it must not do while it is still rendering.
+"""
+function mark_all_devices_lost!()
+    for r in LIVE_CONTEXTS
+        c = r.value
+        c isa VkContext && mark_device_lost!(c)
+    end
+    return nothing
+end
 
 """
 Bind the process-wide context, and tell the emitter what this device allows.
@@ -1573,6 +1630,15 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
     return ctx
 end
 
+# This backend has one; see `supports_batch_queue` in `graph/queue.jl` for why
+# that is a separate question from whether it can rasterise.
+#
+# Only the `VulkanAPI` method here. The `LavaBackend` one is in
+# `array/ka_backend.jl` beside the type: `LavaBackend` is defined seven includes
+# after this file, and a method signature needs its argument type to exist when
+# the method is DEFINED, not when it is called.
+supports_batch_queue(::VulkanAPI) = true
+
 """
     allocate_batch_queue!() -> VulkanBatchQueue
 
@@ -1584,11 +1650,6 @@ The context holds the returned queue until [`release_batch_queue!`](@ref) gives
 it back. Call that when done — a caller that just drops the reference keeps the
 command pool, semaphore and slabs alive for the life of the device.
 """
-# This backend has one; see `supports_batch_queue` in `graph/queue.jl` for why
-# that is a separate question from whether it can rasterise.
-supports_batch_queue(::VulkanAPI) = true
-supports_batch_queue(::LavaBackend) = true
-
 function allocate_batch_queue!()
     ctx = vk_context()
     allocate_batch_queue!(ctx)
@@ -2016,15 +2077,14 @@ function check_validation_errors!(context::String,
 end
 
 # Mantle's device-idle wait, in Vulkan's terms. Declared in
-# `src/graph/queue.jl`; this is the method. Both spellings, because a caller
-# holding the KA backend should not have to reach for the context to get at the
-# handle underneath it.
+# `src/graph/queue.jl`; this is the method. The `LavaBackend` spelling — for a
+# caller who holds the KA backend and should not have to reach for the context
+# to get at the handle underneath it — is in `array/ka_backend.jl`, with the
+# type.
 waitidle(ctx::VkContext) = VK.device_wait_idle(ctx.device)
-waitidle(b::LavaBackend) = waitidle(vk_context(b))
 waitidle(d::VK.Device) = VK.device_wait_idle(d)
 
 # Vulkan rasterizes. See `supports_graphics` in `src/graphics/commands.jl`.
-supports_graphics(::LavaBackend) = true
 supports_graphics(::VkContext) = true
 
 """

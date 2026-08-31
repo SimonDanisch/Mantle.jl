@@ -22,11 +22,11 @@ const KA = KernelAbstractions
 
 @testset "free during recording is deferred" begin
     backend = LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    bq = MVE.vk_context().default_bq
 
     # Quiesce, so nothing left over decides the outcome.
     KA.synchronize(backend)
-    Mantle.drain_deferred_frees!(bq)
+    MVE.drain_deferred_frees!(bq)
 
     @testset "never submitted, batch open" begin
         # Open a batch and leave it recording.
@@ -39,33 +39,33 @@ const KA = KernelAbstractions
         # The case the bug turned on: allocated, never dispatched against, so
         # `sync_access!` has never run and there is no timeline value to test.
         @test (@atomic :acquire buf.last_write) === nothing
-        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_ALIVE
+        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_ALIVE
 
         before = length(bq.deferred_frees)
         Mantle.unsafe_free!(a)
 
         # Deferred, and on the list — not destroyed under the open batch.
-        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_DEFERRED
+        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEFERRED
         @test length(bq.deferred_frees) == before + 1
         @test any(x -> x === buf, bq.deferred_frees)
 
         # And the deferral is honoured, not leaked: the drain at the next
         # submit boundary is what finally destroys it.
         KA.synchronize(backend)
-        Mantle.drain_deferred_frees!(bq)
-        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_DEAD
+        MVE.drain_deferred_frees!(bq)
+        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEAD
     end
 
     @testset "no batch recording: freed immediately" begin
         # The other side, so the guard cannot be satisfied by deferring
         # everything forever — which would leak instead of hanging.
         KA.synchronize(backend)
-        Mantle.drain_deferred_frees!(bq)
+        MVE.drain_deferred_frees!(bq)
         b = KA.allocate(backend, Float32, 64)
         buf = b.buf[]
         KA.synchronize(backend)          # closes the batch opened by `allocate`
         @test bq.active_batch === nothing || !bq.active_batch.recording
         Mantle.unsafe_free!(b)
-        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_DEAD
+        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEAD
     end
 end

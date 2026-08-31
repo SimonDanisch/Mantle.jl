@@ -494,8 +494,22 @@ end
 # Generated from `Mantle.SHADER_BUILTINS`, so a builtin added to that list and
 # forgotten here is a `MethodError` naming it rather than a shader that reads
 # the wrong thing.
+#
+# `Lava.$f`, QUALIFIED, and that is not tidiness. Written bare, the right-hand
+# side resolves through this module's bindings: for the builtins in the
+# `using Lava:` list at the top of `vulkan.jl` that happens to be Lava's, and for
+# `frag_coord` — which is not in that list — it is MANTLE's, the very function
+# being overridden. `Mantle.frag_coord(dim) = Mantle.frag_coord(dim)`: infinite
+# recursion in any fragment shader that reads its own position, and nothing says
+# so until such a shader is compiled.
+#
+# Found by `test_lava_import_completeness.jl`, which is exactly the question it
+# asks — "a Lava name this backend uses and did not import". Qualifying is the
+# fix rather than extending the import list, because `frag_coord` is exported by
+# both packages: importing it would make the bare name ambiguous and break the
+# other uses in this file, whereas the qualified form cannot be read two ways.
 for f in Mantle.SHADER_BUILTINS
     f === :frag_coord && continue
-    @eval @lava_device_override Mantle.$f() = $f()
+    @eval @lava_device_override Mantle.$f() = Lava.$f()
 end
-@lava_device_override Mantle.frag_coord(dim::Integer = 1) = frag_coord(dim)
+@lava_device_override Mantle.frag_coord(dim::Integer = 1) = Lava.frag_coord(dim)

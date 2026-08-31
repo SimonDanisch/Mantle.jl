@@ -30,22 +30,22 @@ end
 # Pinned object whose access semantics throw, to drive `submit!` into its
 # post-`vkEndCommandBuffer` failure path on demand.
 struct ThrowsOnSync end
-Mantle.sync_access!(::Mantle.CommandBatch, ::ThrowsOnSync) = error("sync_access! test failure")
+MVE.sync_access!(::MVE.CommandBatch, ::ThrowsOnSync) = error("sync_access! test failure")
 
 @testset "cross-queue sync" begin
     @testset "the stage flag is sync2-typed" begin
         # The bug in one line: right value, wrong wrapper type.
-        # `Mantle.VK`. This file said `import Lava: Vulkan`, which resolved
+        # `MVE.VK`. This file said `import Lava: Vulkan`, which resolved
         # while Lava depended on Vulkan.jl and afterwards bound the name to
         # nothing — Julia reports it as "defined but not assigned a value", so
         # the two assertions below errored rather than failing.
-        @test Mantle.STAGE2_ALL_COMMANDS isa Mantle.VK.PipelineStageFlag2
-        @test UInt64(Mantle.STAGE2_ALL_COMMANDS.val) ==
-              UInt64(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT.val)
+        @test MVE.STAGE2_ALL_COMMANDS isa MVE.VK.PipelineStageFlag2
+        @test UInt64(MVE.STAGE2_ALL_COMMANDS.val) ==
+              UInt64(MVE.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT.val)
     end
 
     @testset "a buffer crossing queues submits" begin
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         b1 = LavaBackend()                             # ctx.default_bq
         bq2 = Mantle.allocate_batch_queue!(ctx)
         b2 = LavaBackend(bq2)
@@ -69,7 +69,7 @@ Mantle.sync_access!(::Mantle.CommandBatch, ::ThrowsOnSync) = error("sync_access!
     end
 
     @testset "a throwing submit! leaves no batch on an ended command buffer" begin
-        bq = Mantle.vk_context().default_bq
+        bq = MVE.vk_context().default_bq
         b = LavaBackend()
         a = KA.allocate(b, Float32, 64)
         xqfill!(b, 64)(a, 1.0f0; ndrange = 64)

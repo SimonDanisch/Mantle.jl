@@ -2,15 +2,15 @@ using Test, Lava, Mantle
 @testset "Phase 4 — single-writer enforcement + GC counter fix" begin
 
 @testset "VulkanBatchQueue has owning_thread set to construction thread" begin
-    bq = Mantle.vk_context().default_bq
-    @test hasfield(Mantle.VulkanBatchQueue, :owning_thread)
+    bq = MVE.vk_context().default_bq
+    @test hasfield(MVE.VulkanBatchQueue, :owning_thread)
     @test bq.owning_thread == Threads.threadid()
 end
 
 @testset "cross-thread dispatch trips the assert" begin
     # Only meaningful under `julia -t N` with N > 1.
     if Threads.nthreads() > 1
-        bq = Mantle.vk_context().default_bq
+        bq = MVE.vk_context().default_bq
         result = Ref{Any}(nothing)
         # Run ensure_active_batch! from a different thread.
         #
@@ -35,7 +35,7 @@ end
 end
 
 @testset "live_bytes is atomic" begin
-    @test Mantle.mempolicy(Mantle.vk_context()).live_bytes isa Threads.Atomic{Int}
+    @test MVE.mempolicy(MVE.vk_context()).live_bytes isa Threads.Atomic{Int}
 end
 
 @testset "VkContext has no public nothing-default_bq path" begin
@@ -48,8 +48,8 @@ end
     # the field to the UnionAll and broke when `VulkanBatchQueue` gained its `{C}`
     # parameter. `VulkanBatchQueue{VkContext}` satisfies the intent MORE strongly (it
     # is concrete), so test the property, not one spelling of it.
-    T = fieldtype(Mantle.VkContext, :default_bq)
-    @test T <: Mantle.VulkanBatchQueue
+    T = fieldtype(MVE.VkContext, :default_bq)
+    @test T <: MVE.VulkanBatchQueue
     @test !(Nothing <: T)
 end
 

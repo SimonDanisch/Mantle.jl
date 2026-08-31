@@ -48,6 +48,31 @@ Trace with the ray count read from the device, as for
 function trace_rays_indirect! end
 
 """
+    trace!(pass, pipeline, accel, args, ndrange)
+
+Trace as part of a pass, so what it reads and writes is what orders it against
+everything else.
+
+The ray-tracing counterpart of [`dispatch!`](@ref), and deliberately the same
+shape: `pipeline` stands where a kernel stands, `ndrange` is a ray count and may
+be a [`DeviceRange`](@ref) for one that only exists on the device, and `args` are
+laid out in the plan's argument memory at compile — which is what makes a traced
+plan bakeable. See [`Trace`](@ref) for why that last part is the point.
+
+    Mantle.trace!(p, rt_pipeline, accel, (queue_in, queue_out, film),
+                  Mantle.DeviceRange(n_rays))
+
+Declare the resources with `use` as for any other pass. Nothing here inspects
+`args` for them: an argument is how the work reaches its data, a declaration is
+what the graph orders on, and a trace needs both said.
+"""
+function trace!(p, pipeline, accel, args, ndrange)
+    n = countresource(ndrange)
+    n === nothing || indirectcount!(p, n)
+    push!(dispatches(passof(p)), Trace(pipeline, accel, args, ndrange))
+end
+
+"""
     trace_closest_hits!(pipeline, tlas, rays, hits)
 
 Trace `rays` and write the nearest intersection of each into `hits`.

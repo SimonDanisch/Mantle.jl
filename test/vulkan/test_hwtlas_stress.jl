@@ -77,7 +77,7 @@ end
 placed at a distinct translation so a single vertical ray per instance
 hits each one exactly once."""
 function build_scene(N::Int)
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
     handles = Raycore.TLASHandle[]
     offsets = NTuple{3,Float32}[]
@@ -102,7 +102,7 @@ end
 
 """Upload rays + run HW trace and return the hit result vector (on CPU).
 Uses the `HardwareAccel` already built by `Raycore.sync!(hwtlas)` — calling
-`Mantle.HardwareAccel(hwtlas)` would rebuild the same thing from scratch via
+`MVE.HardwareAccel(hwtlas)` would rebuild the same thing from scratch via
 the generic CPU-HWTLAS path and fails because `hwtlas.instances` is a
 lightweight length-only shim, not a real instance vector."""
 function trace_rays_cpu(hwtlas, offsets)
@@ -190,9 +190,9 @@ end
 # ------------------------------------------------------------------------------
 
 function snapshot_state()
-    gpu_bytes  = Mantle.gpu_live_bytes()
-    n_buffers  = Mantle.live_buffer_count()
-    n_pool     = length(Mantle.poolblocks(Mantle.vk_context()))
+    gpu_bytes  = MVE.gpu_live_bytes()
+    n_buffers  = MVE.live_buffer_count()
+    n_pool     = length(MVE.poolblocks(MVE.vk_context()))
     (gpu_bytes=gpu_bytes, live_bufs=n_buffers, pool_blocks=n_pool)
 end
 
@@ -269,7 +269,7 @@ end
     # Drive update_transforms! 20 times; sync! must take the refit path
     # (same hw_tlas identity) every time.
     for iter in 1:20
-        new_xfs = Mantle.LavaArray([vk_translation(Float32(2i + 0.05 * iter), 0f0, 0f0) for i in 1:N])
+        new_xfs = MVE.LavaArray([vk_translation(Float32(2i + 0.05 * iter), 0f0, 0f0) for i in 1:N])
         Raycore.update_transforms!(hwtlas, multi_handle, new_xfs)
         @test hwtlas.transforms_dirty == true
         @test hwtlas.dirty == false
@@ -286,12 +286,12 @@ end
 @testset "HW HWTLAS — update_transforms! accepts LavaArray input" begin
     N = 4
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     h = push!(hwtlas, unit_triangle_mesh(), init_xfs; instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
     new_xfs_cpu = [vk_translation(Float32(2i + 5f0), 0f0, 0f0) for i in 1:N]
-    new_xfs_gpu = Mantle.LavaArray(new_xfs_cpu)
+    new_xfs_gpu = MVE.LavaArray(new_xfs_cpu)
     Raycore.update_transforms!(hwtlas, h, new_xfs_gpu)
     @test hwtlas.transforms_dirty == true
     Raycore.sync!(hwtlas)
@@ -304,12 +304,12 @@ end
 @testset "HW HWTLAS — update_transforms! then delete!(handle) is safe" begin
     N = 4
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     h_a = push!(hwtlas, unit_triangle_mesh(), init_xfs; instance_mask=UInt8(0xff))
     h_b = push!(hwtlas, unit_triangle_mesh(), translation(20f0, 0f0, 0f0))
     Raycore.sync!(hwtlas)
 
-    new_xfs = Mantle.LavaArray([vk_translation(Float32(2i + 1f0), 0f0, 0f0) for i in 1:N])
+    new_xfs = MVE.LavaArray([vk_translation(Float32(2i + 1f0), 0f0, 0f0) for i in 1:N])
     Raycore.update_transforms!(hwtlas, h_a, new_xfs)
     # Delete BEFORE syncing the refit -- topology change wins.
     @test Raycore.delete!(hwtlas, h_a) == true
@@ -331,7 +331,7 @@ end
 
 @testset "HW HWTLAS — interleaved update_transforms! + trace tight loop (1000 inst, refit)" begin
     N = 1000
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
     h = push!(hwtlas, mesh, init_xfs; instance_mask=UInt8(0xff))
@@ -345,7 +345,7 @@ end
     n_frames = 50
     for frame in 1:n_frames
         # Move every instance: x_i = 2i + 0.05*frame, y = small oscillation.
-        new_xfs = Mantle.LavaArray([vk_translation(Float32(2i + 0.05 * frame),
+        new_xfs = MVE.LavaArray([vk_translation(Float32(2i + 0.05 * frame),
                                                Float32(0.1 * sinpi(frame / 7)),
                                                0f0)
                                   for i in 1:N])
@@ -425,7 +425,7 @@ function hw_grow_shrink_tess(iter::Int)
 end
 
 @testset "HW HWTLAS — 500-iter mesh grow/shrink + HW trace per iter" begin
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     h = push!(hwtlas, sphere_mesh_n(8), translation(0, 0, 0); instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
@@ -460,7 +460,7 @@ end
 
 @testset "HW HWTLAS — interleaved delete+push+sync+trace tight loop (500 inst, rebuild)" begin
     N = 500
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
     init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
     h = push!(hwtlas, mesh, init_xfs; instance_mask=UInt8(0xff))
@@ -494,7 +494,7 @@ end
 
 @testset "HW HWTLAS — n_instances matches live batch count under churn" begin
     rng = Random.MersenneTwister(0xCAFEBABE)
-    hwtlas = Mantle.VulkanTLAS(LavaBackend())
+    hwtlas = MVE.VulkanTLAS(LavaBackend())
     handles = Raycore.TLASHandle[]
     expected = 0
     for iter in 1:50

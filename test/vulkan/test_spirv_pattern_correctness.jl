@@ -82,10 +82,10 @@ end
 
     N = 256
     data = [Fix3_Struct(Float32(i), Float32(i*2), UInt8(i % 128), Float32(i*3)) for i in 1:N]
-    src = Mantle.LavaArray(data)
-    dst = Mantle.LavaArray{Fix3_Struct}(undef, N)
-    fix3_kernel!(Mantle.LavaBackend())(dst, src; ndrange=N)
-    Mantle.vk_flush!(Mantle.vk_context())
+    src = MVE.LavaArray(data)
+    dst = MVE.LavaArray{Fix3_Struct}(undef, N)
+    fix3_kernel!(MVE.LavaBackend())(dst, src; ndrange=N)
+    MVE.vk_flush!(MVE.vk_context())
     result = Array(dst)
     @test result == data
 end
@@ -121,10 +121,10 @@ end
 
         N = 128
         data = [Struct60(ntuple(j -> Float32(i * 100 + j), 15)...) for i in 1:N]
-        src = Mantle.LavaArray(data)
-        dst = Mantle.LavaArray{Struct60}(undef, N)
-        copy60!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(data)
+        dst = MVE.LavaArray{Struct60}(undef, N)
+        copy60!(MVE.LavaBackend())(dst, src; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         @test result == data
     end
@@ -145,10 +145,10 @@ end
 
         N = 128
         data = [Struct52(ntuple(j -> Float32(i * 100 + j), 13)...) for i in 1:N]
-        src = Mantle.LavaArray(data)
-        dst = Mantle.LavaArray{Struct52}(undef, N)
-        copy52!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(data)
+        dst = MVE.LavaArray{Struct52}(undef, N)
+        copy52!(MVE.LavaBackend())(dst, src; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         @test result == data
     end
@@ -172,10 +172,10 @@ end
         N = 256
         data = [MixedAlign(Float32(i), Float32(2i), Float32(3i),
                            UInt32(i), UInt32(i+1), Float32(4i)) for i in 1:N]
-        src = Mantle.LavaArray(data)
-        dst = Mantle.LavaArray{MixedAlign}(undef, N)
-        copy_mixed!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(data)
+        dst = MVE.LavaArray{MixedAlign}(undef, N)
+        copy_mixed!(MVE.LavaBackend())(dst, src; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         @test result == data
     end
@@ -195,10 +195,10 @@ end
 
         N = 128
         data = [OddOffsets(UInt8(i % 256), Float32(i), Float32(2i), Float32(3i)) for i in 1:N]
-        src = Mantle.LavaArray(data)
-        dst = Mantle.LavaArray{OddOffsets}(undef, N)
-        copy_odd!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        src = MVE.LavaArray(data)
+        dst = MVE.LavaArray{OddOffsets}(undef, N)
+        copy_odd!(MVE.LavaBackend())(dst, src; ndrange=N)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(dst)
         @test result == data
     end
@@ -222,10 +222,10 @@ end
 
     # The critical n=10 case where CompilerMetadata LLVM=24 vs Julia=16
     n = 10
-    src = Mantle.LavaArray([Fix6_S(Float32(i), Float32(2i), Float32(3i)) for i in 1:n])
-    dst = Mantle.LavaArray{Fix6_S}(undef, n)
+    src = MVE.LavaArray([Fix6_S(Float32(i), Float32(2i), Float32(3i)) for i in 1:n])
+    dst = MVE.LavaArray{Fix6_S}(undef, n)
     dst .= src
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test Array(dst) == Array(src)
 end
 
@@ -252,13 +252,13 @@ end
     end
 
     N = 256
-    a = Mantle.LavaArray(ones(Float32, N) .* 2.0f0)
-    b = Mantle.LavaArray(ones(Float32, N) .* 3.0f0)
-    sel = Mantle.LavaArray(rand(Float32, N))
-    output = Mantle.LavaArray(zeros(Float32, N))
+    a = MVE.LavaArray(ones(Float32, N) .* 2.0f0)
+    b = MVE.LavaArray(ones(Float32, N) .* 3.0f0)
+    sel = MVE.LavaArray(rand(Float32, N))
+    output = MVE.LavaArray(zeros(Float32, N))
 
-    phi_cycle_kernel!(Mantle.LavaBackend())(output, a, b, sel; ndrange=N)
-    Mantle.vk_flush!(Mantle.vk_context())
+    phi_cycle_kernel!(MVE.LavaBackend())(output, a, b, sel; ndrange=N)
+    MVE.vk_flush!(MVE.vk_context())
     result = Array(output)
     sel_h = Array(sel)
     for i in 1:N
@@ -283,15 +283,15 @@ end
     end
 
     N = 1024
-    a = Mantle.LavaArray(zeros(Float32, N))
-    b = Mantle.LavaArray(zeros(Float32, N))
+    a = MVE.LavaArray(zeros(Float32, N))
+    b = MVE.LavaArray(zeros(Float32, N))
 
     # 20 rapid dispatches alternating targets
     for _ in 1:10
-        fill_val!(Mantle.LavaBackend())(a, 42.0f0; ndrange=N)
-        fill_val!(Mantle.LavaBackend())(b, 99.0f0; ndrange=N)
+        fill_val!(MVE.LavaBackend())(a, 42.0f0; ndrange=N)
+        fill_val!(MVE.LavaBackend())(b, 99.0f0; ndrange=N)
     end
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
 
     @test all(Array(a) .== 42.0f0)
     @test all(Array(b) .== 99.0f0)
@@ -311,10 +311,10 @@ end
     end
 
     N = 512
-    a = Mantle.LavaArray(zeros(Float32, N))
+    a = MVE.LavaArray(zeros(Float32, N))
 
     # Dispatch a kernel, then download — should piggyback copy onto batch
-    iota!(Mantle.LavaBackend())(a; ndrange=N)
+    iota!(MVE.LavaBackend())(a; ndrange=N)
     # The download triggers _append_copy_and_flush! if batch is active
     result = Array(a)
 
@@ -328,20 +328,20 @@ end
 # ═══════════════════════════════════════════════════════════════════════
 
 @testset "Stress: many small dispatches (100)" begin
-    a = Mantle.LavaArray(ones(Float32, 64))
+    a = MVE.LavaArray(ones(Float32, 64))
     for _ in 1:100
         a = a .+ 1.0f0
     end
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test all(Array(a) .== 101.0f0)
 end
 
 @testset "Stress: large array operations" begin
     N = 4_000_000
-    a = Mantle.LavaArray(ones(Float32, N))
-    b = Mantle.LavaArray(fill(2.0f0, N))
+    a = MVE.LavaArray(ones(Float32, N))
+    b = MVE.LavaArray(fill(2.0f0, N))
     c = a .+ b .* 3.0f0
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test Array(c)[1] == 7.0f0
     @test Array(c)[N] == 7.0f0
 end
@@ -349,14 +349,14 @@ end
 @testset "Stress: GC pressure during recording" begin
     # Allocate and discard many arrays during a recording batch
     # to exercise deferred free + data_refs lifetime tracking
-    result = Mantle.LavaArray(zeros(Float32, 256))
+    result = MVE.LavaArray(zeros(Float32, 256))
     for i in 1:50
-        tmp = Mantle.LavaArray(fill(Float32(i), 256))
+        tmp = MVE.LavaArray(fill(Float32(i), 256))
         result = result .+ tmp
         # Let tmp go out of scope — GC may try to free it
     end
     GC.gc()  # Force GC while batch is still recording
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     r = Array(result)
     # Sum of 1..50 = 1275
     @test r[1] ≈ 1275.0f0
@@ -364,9 +364,9 @@ end
 
 @testset "Stress: rapid alloc/free/dispatch cycle" begin
     for i in 1:20
-        a = Mantle.LavaArray(fill(Float32(i), 1024))
+        a = MVE.LavaArray(fill(Float32(i), 1024))
         b = a .* 2.0f0
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(b)[1] == Float32(2i)
         # a and b go out of scope each iteration
     end
@@ -380,9 +380,9 @@ end
     end
 
     M, N = 128, 64
-    a = Mantle.LavaArray(zeros(Float32, M, N))
-    fill_2d!(Mantle.LavaBackend())(a; ndrange=(M, N))
-    Mantle.vk_flush!(Mantle.vk_context())
+    a = MVE.LavaArray(zeros(Float32, M, N))
+    fill_2d!(MVE.LavaBackend())(a; ndrange=(M, N))
+    MVE.vk_flush!(MVE.vk_context())
     result = Array(a)
     @test result[1, 1] == 101.0f0
     @test result[M, N] == Float32(M * 100 + N)
@@ -390,7 +390,7 @@ end
 
 @testset "Stress: reduction correctness" begin
     for N in [7, 63, 127, 255, 1023, 4096, 100_000]
-        a = Mantle.LavaArray(ones(Float32, N))
+        a = MVE.LavaArray(ones(Float32, N))
         s = sum(a)
         @test s ≈ Float32(N) atol=max(1.0f0, Float32(N) * 1f-5)
     end
@@ -398,21 +398,21 @@ end
 
 @testset "Stress: mixed types" begin
     # Int32
-    a = Mantle.LavaArray(Int32[1, 2, 3, 4])
+    a = MVE.LavaArray(Int32[1, 2, 3, 4])
     b = a .+ Int32(10)
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test Array(b) == Int32[11, 12, 13, 14]
 
     # UInt32
-    a = Mantle.LavaArray(UInt32[10, 20, 30, 40])
+    a = MVE.LavaArray(UInt32[10, 20, 30, 40])
     b = a .- UInt32(5)
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test Array(b) == UInt32[5, 15, 25, 35]
 
     # Float64
-    a = Mantle.LavaArray(Float64[1.0, 2.0, 3.0])
+    a = MVE.LavaArray(Float64[1.0, 2.0, 3.0])
     b = a .* 2.0
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     @test Array(b) ≈ Float64[2.0, 4.0, 6.0]
 end
 
@@ -434,12 +434,12 @@ end
     N = 256
     a_data = [SpectrumData(ntuple(j -> Float32(i * 10 + j), 4)) for i in 1:N]
     b_data = [SpectrumData(ntuple(j -> Float32(j), 4)) for i in 1:N]
-    a = Mantle.LavaArray(a_data)
-    b = Mantle.LavaArray(b_data)
-    dst = Mantle.LavaArray{SpectrumData}(undef, N)
+    a = MVE.LavaArray(a_data)
+    b = MVE.LavaArray(b_data)
+    dst = MVE.LavaArray{SpectrumData}(undef, N)
 
-    spectrum_add!(Mantle.LavaBackend())(dst, a, b; ndrange=N)
-    Mantle.vk_flush!(Mantle.vk_context())
+    spectrum_add!(MVE.LavaBackend())(dst, a, b; ndrange=N)
+    MVE.vk_flush!(MVE.vk_context())
 
     result = Array(dst)
     for i in 1:N
@@ -468,7 +468,7 @@ end
         @inbounds a[i] += 1.0f0
     end
 
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
 
     # These assert what a *batch* accumulates, so they have to hold the batch
     # open: `bq.auto_submit_threshold` defaults to 64 and submits the batch out
@@ -476,7 +476,7 @@ end
     # was written; overlapping recording with execution measured +44%). Pinned
     # to 0 for the duration rather than the assertions being relaxed — CB
     # splitting is a DEVICE_LOST fix and worth keeping covered.
-    bq = Mantle.vk_context().default_bq
+    bq = MVE.vk_context().default_bq
     old_auto = bq.auto_submit_threshold
     bq.auto_submit_threshold = 0
     try
@@ -486,20 +486,20 @@ end
         old_threshold = bq.cb_split_threshold
         bq.cb_split_threshold = 100  # Low threshold for fast test
 
-        a = Mantle.LavaArray(zeros(Float32, 64))
+        a = MVE.LavaArray(zeros(Float32, 64))
         kernel = cb_split_inc!(backend)
         for _ in 1:350
             kernel(a; ndrange=64)
         end
 
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         batch = ctx.default_bq.active_batch
         @test batch !== nothing
         @test batch.dispatch_count == 350
         @test length(batch.sealed_cmd_bufs) == 3  # 100+100+100 sealed, 50 active
         @test batch.segment_dispatches == 50
 
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(a) == fill(350.0f0, 64)
         # Sealed CBs returned to free pool
         @test length(batch.sealed_cmd_bufs) == 0
@@ -512,18 +512,18 @@ end
         old_threshold = bq.cb_split_threshold
         bq.cb_split_threshold = 0
 
-        a = Mantle.LavaArray(zeros(Float32, 64))
+        a = MVE.LavaArray(zeros(Float32, 64))
         kernel = cb_split_inc!(backend)
         for _ in 1:500
             kernel(a; ndrange=64)
         end
 
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         batch = ctx.default_bq.active_batch
         @test batch.dispatch_count == 500
         @test length(batch.sealed_cmd_bufs) == 0  # No splitting
 
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(a) == fill(500.0f0, 64)
 
         bq.cb_split_threshold = old_threshold
@@ -534,21 +534,21 @@ end
         old_threshold = bq.cb_split_threshold
         bq.cb_split_threshold = 50
 
-        a = Mantle.LavaArray(zeros(Float32, 64))
+        a = MVE.LavaArray(zeros(Float32, 64))
         kernel = cb_split_inc!(backend)
 
         # First pass: 200 dispatches → 3 sealed + 1 active
         for _ in 1:200
             kernel(a; ndrange=64)
         end
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(a) == fill(200.0f0, 64)
 
         # Second pass: reuses CB pool, another 200 dispatches
         for _ in 1:200
             kernel(a; ndrange=64)
         end
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(a) == fill(400.0f0, 64)
 
         bq.cb_split_threshold = old_threshold
@@ -556,13 +556,13 @@ end
 
     # Test 4: Large dispatch count (simulating Hikari-scale workload)
     @testset "5000 dispatches" begin
-        a = Mantle.LavaArray(zeros(Float32, 256))
+        a = MVE.LavaArray(zeros(Float32, 256))
         kernel = cb_split_inc!(backend)
         for _ in 1:5000
             kernel(a; ndrange=256)
         end
 
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         batch = ctx.default_bq.active_batch
         @test batch.dispatch_count == 5000
         threshold = bq.cb_split_threshold
@@ -571,7 +571,7 @@ end
             @test length(batch.sealed_cmd_bufs) >= 1
         end
 
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(a) == fill(5000.0f0, 256)
     end
 

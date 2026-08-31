@@ -87,14 +87,14 @@ end
 end
 
 @testset "Raycore.closest_hit via inline ray query (Step 1)" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
         @test_skip true
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     bq = backend.bq
 
     # Single-triangle scene at z=5.  Rays from z=0 firing +z hit at t=5.
@@ -105,7 +105,7 @@ end
     faces = [GLTriangleFace(1, 2, 3)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
-    hwtlas = Mantle.VulkanTLAS(backend)
+    hwtlas = MVE.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     @assert hwtlas.tri_gpu !== nothing && hwtlas.off_gpu !== nothing
@@ -163,13 +163,13 @@ end
         return nothing
     end
 
-    t_out = Mantle.LavaArray(fill(-2f0, n))
-    prim_out = Mantle.LavaArray(fill(UInt32(99), n))
-    origins_g = Mantle.LavaArray(origins)
+    t_out = MVE.LavaArray(fill(-2f0, n))
+    prim_out = MVE.LavaArray(fill(UInt32(99), n))
+    origins_g = MVE.LavaArray(origins)
 
-    Mantle.lava_launch!(bq, closesthit_kernel, t_out, prim_out, origins_g, accel_cpu;
+    MVE.lava_launch!(bq, closesthit_kernel, t_out, prim_out, origins_g, accel_cpu;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
     gpu_t = Array(t_out)
     gpu_prim = Array(prim_out)
@@ -203,14 +203,14 @@ end
 # any_hit must also work when the ray's t_max excludes the only hit.
 # ============================================================================
 @testset "Raycore.any_hit via inline ray query — occlusion" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
         @test_skip true
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     bq = backend.bq
 
     near_v = [Point3f(-1, -1, 2), Point3f(1, -1, 2), Point3f(0, 1, 2)]
@@ -219,7 +219,7 @@ end
     near_mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(near_v, faces))
     far_mesh  = GeometryBasics.normal_mesh(GeometryBasics.Mesh(far_v,  faces))
 
-    hwtlas = Mantle.VulkanTLAS(backend)
+    hwtlas = MVE.VulkanTLAS(backend)
     push!(hwtlas, near_mesh, Mat4f(I))
     push!(hwtlas, far_mesh,  Mat4f(I))
     Raycore.sync!(hwtlas)
@@ -246,22 +246,22 @@ end
 
     # Case 1: tmax=10 — both triangles in range.  any_hit returns *some* hit
     # (impl-defined which; not necessarily nearest).  closest_hit returns t=2.
-    any_t_g = Mantle.LavaArray(fill(-2f0, n))
-    cls_t_g = Mantle.LavaArray(fill(-2f0, n))
-    origins_g = Mantle.LavaArray(origins)
-    Mantle.lava_launch!(bq, any_hit_kernel, any_t_g, cls_t_g, origins_g, 10f0, accel_cpu;
+    any_t_g = MVE.LavaArray(fill(-2f0, n))
+    cls_t_g = MVE.LavaArray(fill(-2f0, n))
+    origins_g = MVE.LavaArray(origins)
+    MVE.lava_launch!(bq, any_hit_kernel, any_t_g, cls_t_g, origins_g, 10f0, accel_cpu;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     any_full   = Array(any_t_g)
     cls_full   = Array(cls_t_g)
 
     # Case 2: tmax=3 — only near triangle in range.  any_hit must report t=2,
     # closest_hit must also report t=2.  Rays that miss the near tri report -1.
-    any_t_g2 = Mantle.LavaArray(fill(-2f0, n))
-    cls_t_g2 = Mantle.LavaArray(fill(-2f0, n))
-    Mantle.lava_launch!(bq, any_hit_kernel, any_t_g2, cls_t_g2, origins_g, 3f0, accel_cpu;
+    any_t_g2 = MVE.LavaArray(fill(-2f0, n))
+    cls_t_g2 = MVE.LavaArray(fill(-2f0, n))
+    MVE.lava_launch!(bq, any_hit_kernel, any_t_g2, cls_t_g2, origins_g, 3f0, accel_cpu;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     any_near = Array(any_t_g2)
     cls_near = Array(cls_t_g2)
 
@@ -305,14 +305,14 @@ end
 # `vp_trace_rays!(::AdaptedAccel, …)` for the unified SW kernel.
 # ============================================================================
 @testset "closest_hit polymorphism — SW BVH vs HW ray query" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
         @test_skip true
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     bq = backend.bq
 
     # Build a small two-triangle scene (one mesh with two faces).
@@ -324,7 +324,7 @@ end
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
     # HW path
-    hwtlas = Mantle.VulkanTLAS(backend)
+    hwtlas = MVE.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     Tri_hw = eltype(eltype(hwtlas.blas_triangles))
@@ -352,22 +352,22 @@ end
 
     n = 64
     origins = [Point3f((i%8 - 3.5f0) * 0.25f0, (i÷8 - 3.5f0) * 0.25f0, 0f0) for i in 0:n-1]
-    origins_g = Mantle.LavaArray(origins)
+    origins_g = MVE.LavaArray(origins)
 
     # Run on HW
-    t_hw = Mantle.LavaArray(fill(-2f0, n))
-    h_hw = Mantle.LavaArray(fill(UInt32(99), n))
-    Mantle.lava_launch!(bq, poly_kernel, t_hw, h_hw, origins_g, accel_hw;
+    t_hw = MVE.LavaArray(fill(-2f0, n))
+    h_hw = MVE.LavaArray(fill(UInt32(99), n))
+    MVE.lava_launch!(bq, poly_kernel, t_hw, h_hw, origins_g, accel_hw;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     t_hw_arr = Array(t_hw); h_hw_arr = Array(h_hw)
 
     # Run on SW (no tlas kwarg; SW kernel doesn't need a HWTLAS descriptor).
-    t_sw = Mantle.LavaArray(fill(-2f0, n))
-    h_sw = Mantle.LavaArray(fill(UInt32(99), n))
-    Mantle.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;
+    t_sw = MVE.LavaArray(fill(-2f0, n))
+    h_sw = MVE.LavaArray(fill(UInt32(99), n))
+    MVE.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;
                       ndrange=n, workgroup_size=(64, 1, 1))
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     t_sw_arr = Array(t_sw); h_sw_arr = Array(h_sw)
 
     # Same kernel, same scene — results must match.

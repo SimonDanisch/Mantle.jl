@@ -16,11 +16,11 @@ function draw_and_readback(pipeline, vertex_count;
         depth=false, instances=1)
     fb = VulkanFramebuffer(width, height; depth, color_format)
     target = OffscreenTarget(fb)
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
     draw!(bq, pipeline, target, vertex_count;
         args, frag_args, instances, clear_color)
-    Mantle.vk_flush!(Mantle.vk_context())
+    MVE.vk_flush!(MVE.vk_context())
     return readback_framebuffer(fb)
 end
 
@@ -192,7 +192,7 @@ end
 
         fb = VulkanFramebuffer(8, 8; depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         bq = ctx.default_bq
 
         # Draw far red at z=0.7
@@ -203,7 +203,7 @@ end
         draw!(bq, pip, target, 3;
             args=(Vec4f(0f0, 0f0, 1f0, 1f0), 0.3f0),
             clear_color=nothing, depth_clear=nothing)
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
 
         pixels = readback_framebuffer(fb)
         # Blue should win (closer)
@@ -222,7 +222,7 @@ end
         draw!(bq, pip, t2, 3;
             args=(Vec4f(1f0, 0f0, 0f0, 1f0), 0.7f0),
             clear_color=nothing, depth_clear=nothing)
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
 
         q = readback_framebuffer(fb2)[4, 4]
         @test q[3] ≈ 1f0 atol=0.05  # still blue: the far draw failed the test
@@ -254,7 +254,7 @@ end
         additive = GraphicsPipeline(; vertex=state_vert, fragment=state_frag,
             blend=Additive(), cull=NoCull(), depth=DepthOff())
 
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         bq = ctx.default_bq
         # Opaque first, so a shared cache entry would hand the additive draws
         # opaque blending.
@@ -265,7 +265,7 @@ end
         target = OffscreenTarget(fb)
         draw!(bq, additive, target, 3; clear_color=(0f0, 0f0, 0f0, 1f0))
         draw!(bq, additive, target, 3; clear_color=nothing)
-        Mantle.vk_flush!(ctx)
+        MVE.vk_flush!(ctx)
         @test readback_framebuffer(fb)[4, 4][1] ≈ 0.5f0 atol=0.01
     end
 
@@ -303,13 +303,13 @@ end
         fb = VulkanFramebuffer(8, 8; depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
-        ctx = Mantle.vk_context()
+        ctx = MVE.vk_context()
         bq = ctx.default_bq
         draw!(bq, pip, target, 3; args=(Vec4f(0f0, 0f0, 1f0, 1f0), 0.3f0),
             clear_color=(0f0, 0f0, 0f0, 1f0))          # near blue
         draw!(bq, pip, target, 3; args=(Vec4f(1f0, 0f0, 0f0, 1f0), 0.7f0),
             clear_color=nothing)                        # far red, drawn later
-        Mantle.vk_flush!(ctx)
+        MVE.vk_flush!(ctx)
         p = readback_framebuffer(fb)[4, 4]
         @test p[1] ≈ 1f0 atol=0.05                      # red: no depth test ran
         @test p[3] ≈ 0f0 atol=0.05
@@ -363,8 +363,8 @@ end
         pipe = Rasterizer(vertex=gbuf_vertex, fragment=gbuf_fragment,
             varyings=(albedo=Vec4f, normal=Vec3f), topology=TriangleList(),
             blend=Opaque(), cull=NoCull(), depth=DepthOff())
-        vfn, vtt, ffn, ftt = Mantle.resolve_shader_pair(pipe, Tuple{}, Tuple{})
-        _, compiled = Mantle.ensure_compiled_with_shader!(pipe, vfn, ffn, vtt, ftt;
+        vfn, vtt, ffn, ftt = MVE.resolve_shader_pair(pipe, Tuple{}, Tuple{})
+        _, compiled = MVE.ensure_compiled_with_shader!(pipe, vfn, ffn, vtt, ftt;
             color_format=Vulkan.Format[Vulkan.FORMAT_R8G8B8A8_UNORM,
                                        Vulkan.FORMAT_R8G8B8A8_UNORM],
             depth_format=Vulkan.FORMAT_UNDEFINED)
@@ -380,7 +380,7 @@ end
         w, h = 32, 16
         fb = VulkanFramebuffer(w, h; depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
-        bq = Mantle.vk_context().default_bq
+        bq = MVE.vk_context().default_bq
         right = LavaArray(reshape([Vec4f(0, 1, 0, 1) for _ in 1:(w * h)], h, w))
         wrong = LavaArray(reshape([Vec4f(0, 1, 0, 1) for _ in 1:(w * h)], w, h))
         @test_throws DimensionMismatch blit!(bq, OffscreenTarget(fb), wrong)
@@ -388,7 +388,7 @@ end
                                             LavaArray([Vec4f(0, 0, 0, 1) for _ in 1:(w * h - 1)]))
 
         blit!(bq, OffscreenTarget(fb), right)
-        Mantle.vk_flush!(Mantle.vk_context())
+        MVE.vk_flush!(MVE.vk_context())
         px = readback_framebuffer(fb)
         @test all(p -> p[2] > 0.9f0, px)
     end

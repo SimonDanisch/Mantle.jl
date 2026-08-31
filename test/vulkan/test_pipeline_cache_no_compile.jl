@@ -55,7 +55,7 @@ end
     backend = LavaBackend()
 
     # ── Cold: compile normally, which populates the VkPipelineCache ──
-    a = Mantle.LavaArray(zeros(Float32, 64))
+    a = MVE.LavaArray(zeros(Float32, 64))
     pcnc_warm!(backend, 64)(a; ndrange = 64)
     KA.synchronize(backend)
     @test Array(a) == ones(Float32, 64)
@@ -83,46 +83,46 @@ end
     # VkPipelineCache blob and MESA_SHADER_CACHE_DISABLE ruled out. So the
     # instrument does not fire there at all, and everything below it is vacuous on
     # that device — which is exactly what the paragraph above warns about.
-    Mantle.PIPELINE_COMPILES_REFUSED[] = 0
+    MVE.PIPELINE_COMPILES_REFUSED[] = 0
     K = rand(10_000:99_999)                           # never compiled before
-    b = Mantle.LavaArray(ones(Float32, 64))
-    Mantle.no_pipeline_compilation() do
+    b = MVE.LavaArray(ones(Float32, 64))
+    MVE.no_pipeline_compilation() do
         pcnc_novel!(backend, 64)(b, Val(K); ndrange = 64)
         KA.synchronize(backend)
     end
-    @test Mantle.PIPELINE_COMPILES_REFUSED[] == 1       # instrument fires…
-    @test length(Mantle.PIPELINE_COMPILE_MISSES) == 1   # …and names what it caught
+    @test MVE.PIPELINE_COMPILES_REFUSED[] == 1       # instrument fires…
+    @test length(MVE.PIPELINE_COMPILE_MISSES) == 1   # …and names what it caught
     # The retry has to have produced a working pipeline, or "a miss is RECORDED,
     # not fatal" is a lie. `no_pipeline_compilation` does not throw by design, so
     # this is what "the instrument fired" has to mean.
     @test Array(b) ≈ fill(3.0f0 - Float32(K) + sqrt(2.5f0), 64)
 
     # ── Warm, same session: the cached pipeline needs no compilation ──
-    Mantle.PIPELINE_COMPILES_REFUSED[] = 0
-    a2 = Mantle.LavaArray(zeros(Float32, 64))
-    Mantle.no_pipeline_compilation() do               # throws if it would compile
+    MVE.PIPELINE_COMPILES_REFUSED[] = 0
+    a2 = MVE.LavaArray(zeros(Float32, 64))
+    MVE.no_pipeline_compilation() do               # throws if it would compile
         pcnc_warm!(backend, 64)(a2; ndrange = 64)
         KA.synchronize(backend)
     end
     @test Array(a2) == ones(Float32, 64)
-    @test Mantle.PIPELINE_COMPILES_REFUSED[] == 0
+    @test MVE.PIPELINE_COMPILES_REFUSED[] == 0
 
     # ── Across a device reset: the ONLY thing that can satisfy creation now is
     #    the on-disk blob, since the VkPipelineCache is rebuilt from scratch. ──
-    ctx = Mantle.vk_context()
-    path = Mantle.lava_pipeline_cache_path(ctx.device_name, string(ctx.driver_version))
-    Mantle.save_pipeline_cache!(ctx)
+    ctx = MVE.vk_context()
+    path = MVE.lava_pipeline_cache_path(ctx.device_name, string(ctx.driver_version))
+    MVE.save_pipeline_cache!(ctx)
     @test isfile(path)
-    @test filesize(path) > Mantle.PIPELINE_CACHE_HEADER_BYTES
+    @test filesize(path) > MVE.PIPELINE_CACHE_HEADER_BYTES
 
     Mantle.reset_device!()
 
-    Mantle.PIPELINE_COMPILES_REFUSED[] = 0
-    a3 = Mantle.LavaArray(zeros(Float32, 64))
-    Mantle.no_pipeline_compilation() do
+    MVE.PIPELINE_COMPILES_REFUSED[] = 0
+    a3 = MVE.LavaArray(zeros(Float32, 64))
+    MVE.no_pipeline_compilation() do
         pcnc_warm!(LavaBackend(), 64)(a3; ndrange = 64)
         KA.synchronize(LavaBackend())
     end
     @test Array(a3) == ones(Float32, 64)
-    @test Mantle.PIPELINE_COMPILES_REFUSED[] == 0     # zero driver compilation
+    @test MVE.PIPELINE_COMPILES_REFUSED[] == 0     # zero driver compilation
 end

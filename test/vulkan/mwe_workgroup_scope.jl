@@ -45,7 +45,7 @@ lay(R, C) = Lava.tensor_slice(
     Mantle.copyto!(pointer(out), 1, M, r)
 end
 
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device — nothing to run"
 else

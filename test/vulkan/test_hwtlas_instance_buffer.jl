@@ -1,5 +1,6 @@
 using Test, Lava, Raycore
-using Mantle: VulkanInstanceRecord, build_blas_aabb, build_accel!, AS_INPUT_USAGE
+using Mantle: build_accel!
+using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
 
 @testset "instance_buffer returns the buffer behind a batch handle" begin
@@ -7,9 +8,9 @@ using GeometryBasics: Point3f
     blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
-    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
-    backend = Mantle.LavaBackend()
-    tlas = Mantle.VulkanTLAS(backend)
+    instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
+    backend = MVE.LavaBackend()
+    tlas = MVE.VulkanTLAS(backend)
 
     handle = push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x04))
 
@@ -19,8 +20,8 @@ using GeometryBasics: Point3f
 end
 
 @testset "instance_buffer errors on invalid handle" begin
-    backend = Mantle.LavaBackend()
-    tlas = Mantle.VulkanTLAS(backend)
+    backend = MVE.LavaBackend()
+    tlas = MVE.VulkanTLAS(backend)
     fake_handle = Raycore.TLASHandle(UInt32(99))
     @test_throws ErrorException Raycore.instance_buffer(tlas, fake_handle)
 end

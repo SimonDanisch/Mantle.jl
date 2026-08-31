@@ -32,13 +32,13 @@ this ran 100x slower there — 164 M iterations took 3m49s inline and about two
 seconds compiled.
 """
 function sweepexact(d::Integer, lim::UInt32)
-    f = Mantle.FastDiv32(d)
+    f = MVE.FastDiv32(d)
     du = UInt32(d)
     wrongq = 0
     wrongr = 0
     n = UInt32(0)
     while n < lim
-        hi = Mantle.fastdiv(n, f)
+        hi = MVE.fastdiv(n, f)
         hi == n ÷ du || (wrongq += 1)
         (n - hi * du) == n % du || (wrongr += 1)
         n += UInt32(1)
@@ -59,7 +59,7 @@ end
     end
 
     @testset "rejects a zero divisor" begin
-        @test_throws ArgumentError Mantle.FastDiv32(0)
+        @test_throws ArgumentError MVE.FastDiv32(0)
     end
 
     @testset "kernels agree with the dividing path" begin

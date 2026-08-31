@@ -2,12 +2,28 @@ using Mantle, Test
 
 include(joinpath(@__DIR__, "backend_probe.jl"))
 
+# ONE outer testset around everything, and the reason is the failure mode the
+# comment below already describes — from the other side.
+#
+# `@testset` only throws at the END of the OUTERMOST one. This file used to have
+# four of those (`Mantle`, `sync`, `Metal backend`, `Vulkan backend`) plus a
+# dozen bare `include`s between them, all at top level, so the first one with a
+# failure ended the run and everything after it never ran. Measured on
+# 2026-08-30: nine errors in `sync` — one ambiguous name — and the 130 Vulkan
+# backend files below reported nothing at all, which reads as "the suite
+# stopped" when it should read "one testset failed and here is the rest".
+#
+# Nested, they record and the run continues; the summary at the bottom is still
+# one number and the process still exits non-zero. The `const`s inside are
+# `global` for it: a testset body is a local scope, and the included files name
+# `VULKAN_TESTS` and `_VULKAN_OK`.
+@testset "Mantle.jl" begin
 
 # Relative to this checkout, not to the tree it was first written in: `dev/Mantle`
 # and `dev/minimalloc` are siblings wherever the project is checked out, and an
 # absolute path here silently reads another tree's benchmarks — or fails on a
 # machine that has only one of them.
-const BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks"))
+global BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks"))
 
 # The corpus is an EXTERNAL checkout, and its absence used to take the whole
 # suite down with it: the four testsets below erred, the enclosing
@@ -20,7 +36,7 @@ const BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks"
 # pinning how GOOD the packing is, as opposed to merely legal (see
 # `docs/design.md`). Clone it beside this checkout to get them back:
 #     git clone https://github.com/google/minimalloc ../../minimalloc
-const HAVE_BENCH = isdir(BENCH)
+global HAVE_BENCH = isdir(BENCH)
 HAVE_BENCH || @warn """
     minimalloc benchmarks not found at $BENCH — the packing-QUALITY ratchet is \
     NOT running. Everything else in this suite still is. Clone google/minimalloc \
@@ -179,8 +195,50 @@ end
 #
 # `Vulkan` is a weakdep of Mantle now, so this file is reached on a machine that
 # has no loader at all. See `backend_probe.jl` for why that used to be fatal.
-const _VULKAN_OK = backend_loadable("Vulkan") !== nothing
-_VULKAN_OK || @info "Mantle tests: no Vulkan driver; skipping the Vulkan backend and the sync lowering"
+#
+# BOTH, because that is what `MantleVulkanExt` is triggered on: Vulkan is the
+# driver and Lava is the Julia→SPIR-V compiler that feeds it, and the extension
+# does not load until both are. Asking only about Vulkan let the gate open on a
+# machine where the backend was not loaded at all — `Mantle.stages` in the `sync`
+# testset just below is defined in `src/vulkan/lowering.jl`, so it would have
+# failed with an `UndefVarError` under a gate that had just said the driver was
+# fine.
+global _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
+                   backend_loadable("Lava") !== nothing
+_VULKAN_OK || @info "Mantle tests: no Vulkan driver and compiler pair; skipping the Vulkan backend and the sync lowering"
+
+# The Vulkan backend module, for the 153 files that test it.
+#
+# `src/vulkan/` is `MantleVulkanExt` now, not `Mantle`, so `Mantle.LavaArray`,
+# `Mantle.vk_context` and 174 other names moved out from under every one of
+# them. They are the BACKEND's tests, so naming the backend module is what they
+# should have been doing; core names stay on `Mantle`, which is why this is not a
+# blanket rename. (`test/metal/` needs no such thing — those tests only ever
+# touch the portable API, which is the shape a backend test gets to have once the
+# backend is not also the runtime.)
+#
+# Here and not in `backend_probe.jl` because an extension does not exist until
+# its triggers are loaded, and the line above is what loads them.
+global MVE = _VULKAN_OK ? Base.get_extension(Mantle, :MantleVulkanExt) : nothing
+_VULKAN_OK && MVE === nothing && error(
+    "Vulkan and Lava both loaded but MantleVulkanExt did not. Its precompilation " *
+    "failed — the error is above this line, and every Vulkan test below would " *
+    "otherwise fail one confusing UndefVarError at a time.")
+
+# The backend names the test files use WITHOUT qualifying, which is a second
+# way the same move broke them: `Mantle.LavaArray` was rewritten to `MVE.`, but
+# a file that said plain `LavaArray` was relying on `using Mantle` exporting it,
+# and Mantle does not export what lives in its extension.
+#
+# Here rather than file by file, because the files are `include`d into `Main` and
+# one import serves all of them — 54 of them name `LavaBackend` alone. Derived by
+# parsing every driven test file for free identifiers that ONLY the extension
+# defines, so the list is what is actually used and not a guess.
+if _VULKAN_OK
+    using .MVE: LavaArray, LavaBackend, VulkanFramebuffer, VulkanWindow,
+                VulkanCompiledGraphicsPipeline, DebugConfig, copy_framebuffer!,
+                fastdiv
+end
 
 if _VULKAN_OK
 
@@ -390,6 +448,11 @@ end  # if _VULKAN_OK — the sync lowering names Vulkan enums in every assertion
 # Outside the driver gate on purpose: that they need no GPU is the assertion.
 include(joinpath(@__DIR__, "test_pool.jl"))
 include(joinpath(@__DIR__, "test_host.jl"))
+# Also outside the driver gate, and for a stronger reason than "needs no GPU":
+# it reads the extension SOURCE, so it checks the Metal extension's import list
+# on a Linux box and the Vulkan one on a Mac. Gating it on a loaded backend
+# would confine each half to the machine that cannot be the one to catch it.
+include(joinpath(@__DIR__, "test_ext_imports_are_declared.jl"))
 
 if _VULKAN_OK
 # Needs a GPU but no display — every graph in it is headless, which is also the
@@ -406,7 +469,44 @@ include(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
 include(joinpath(@__DIR__, "test_devicerange.jl"))
-include(joinpath(@__DIR__, "test_window.jl"))
+
+# ── the window tests, in their own process, on a clock ────────────────────────
+#
+# `test_window.jl` can BLOCK, and its own header says so and says to run it alone
+# with a timeout. It was `include`d here anyway, which is the worst of the two:
+# measured 2026-08-30, a full run reached it, sat in `glfwCreateWindow` at 100 %
+# CPU and never came back — and because it produces no output before the hang and
+# everything before it is buffered, the run looks idle rather than stuck. That
+# cost an hour and a half before anyone looked at a stack.
+#
+# The hang is not Mantle's: on this XWayland session a VISIBLE GLFW window never
+# receives its `VisibilityNotify`, so `_glfwCreateWindowX11` spins forever.
+# Hidden windows take 0.07 s. GLMakie's precompile workload dies the same way.
+#
+# A subprocess with a deadline turns that into a reported failure, which is what
+# the file is worth: skipping it is how it rotted through the runtime move
+# unnoticed, and blocking on it is how the rest of the suite stops existing.
+@testset "windows (separate process)" begin
+    log = joinpath(mktempdir(), "window.log")
+    cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e
+           "using Mantle, Test; include($(repr(joinpath(@__DIR__, "test_window.jl"))))"`
+    proc = run(pipeline(cmd; stdout = log, stderr = log); wait = false)
+    deadline = time() + 600
+    while process_running(proc) && time() < deadline
+        sleep(1)
+    end
+    blocked = process_running(proc)
+    blocked && kill(proc, Base.SIGKILL)
+    wait(proc)
+    blocked && @warn """test_window.jl did not finish in 600 s — almost certainly \
+                        blocked creating a visible window. This is a display-stack \
+                        problem, not a Mantle one; see the note above."""
+    # Not `success(...)`: a failure has to say what failed, and the child's
+    # output is the only place that is written down.
+    ok = !blocked && success(proc)
+    ok || println(read(log, String))
+    @test ok
+end
 end  # if _VULKAN_OK
 
 # ── the Metal backend ─────────────────────────────────────────────────────────
@@ -418,9 +518,9 @@ end  # if _VULKAN_OK
 # These sat in `test/metal/` without being included by anything, which meant
 # every regression they pin was unguarded — the same way `test_host.jl` was
 # before the note above. Two of them were failing when they were finally run.
-const METAL_TESTS = joinpath(@__DIR__, "metal")
+global METAL_TESTS = joinpath(@__DIR__, "metal")
 
-const _METAL_OK = let
+global _METAL_OK = let
     M = backend_loadable("Metal")
     # `functional()` on top of loadability, because Metal.jl imports fine on a
     # machine with no usable device — which Vulkan does not, so only this side
@@ -459,7 +559,7 @@ end
 # The `mwe_*.jl` files beside them are standalone reproducers and are not driven
 # from here, the same as before: each one is run on its own while a bug is being
 # chased.
-const VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
+global VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
 
 if _VULKAN_OK
 @testset "Vulkan backend" begin
@@ -690,6 +790,12 @@ if _VULKAN_OK
         @testset "two devices in one process" begin
             include(joinpath(VULKAN_TESTS, "twodevice_probe.jl"))
             probe()
+            # And that the process can then EXIT. The probe passed for months
+            # while the run it was part of ended in a SIGSEGV, because the crash
+            # is in the shutdown finalizer sweep — after every summary has
+            # printed. Nothing inside this process can observe that, so the check
+            # is a subprocess and an exit code.
+            include(joinpath(VULKAN_TESTS, "test_twodevice_shutdown.jl"))
         end
 
 
@@ -1102,3 +1208,5 @@ if _VULKAN_OK
 end
 
 end  # if _VULKAN_OK
+
+end  # @testset "Mantle.jl"

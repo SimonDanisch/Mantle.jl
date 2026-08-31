@@ -24,28 +24,28 @@ end
     @test !isdefined(Lava, :track_buffer_access!)
     @test !isdefined(Lava, :pin_args!)
     @test !isdefined(Lava, :pin_fields!)
-    @test !hasmethod(Mantle.vk_flush!, Tuple{})
+    @test !hasmethod(MVE.vk_flush!, Tuple{})
 
     # New API must be present
-    @test isdefined(Mantle, :pin!)
-    @test isdefined(Mantle, :sync_access!)
+    @test isdefined(MVE, :pin!)
+    @test isdefined(MVE, :sync_access!)
 
     # Struct must match
-    @test !hasfield(Mantle.CommandBatch, :data_refs)
-    @test !hasfield(Mantle.CommandBatch, :fence)
-    @test !hasfield(Mantle.CommandBatch, :reaper_task)
-    @test !hasfield(Mantle.CommandBatch, :retired)
-    @test !hasfield(Mantle.CommandBatch, :error)
-    @test hasfield(Mantle.CommandBatch, :pinned)
-    @test hasfield(Mantle.CommandBatch, :bq)
+    @test !hasfield(MVE.CommandBatch, :data_refs)
+    @test !hasfield(MVE.CommandBatch, :fence)
+    @test !hasfield(MVE.CommandBatch, :reaper_task)
+    @test !hasfield(MVE.CommandBatch, :retired)
+    @test !hasfield(MVE.CommandBatch, :error)
+    @test hasfield(MVE.CommandBatch, :pinned)
+    @test hasfield(MVE.CommandBatch, :bq)
 
     # LavaAdaptor must carry the batch (no zero-arg constructor)
-    @test fieldnames(Mantle.LavaAdaptor) == (:batch,)
-    @test_throws MethodError Mantle.LavaAdaptor()
+    @test fieldnames(MVE.LavaAdaptor) == (:batch,)
+    @test_throws MethodError MVE.LavaAdaptor()
 end
 
 @testset "pin! deduplication within a batch" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 8))
 
@@ -55,41 +55,41 @@ end
 
     # Same LavaArray pinned 5 times → still one entry (IdSet dedup)
     for _ in 1:5
-        Mantle.pin!(batch, a)
+        MVE.pin!(batch, a)
     end
     @test length(batch.pinned) == empty_size + 1
 
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 end
 
 @testset "sync_access! default is no-op; VkManagedBuffer specialization updates last_write" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 4))
 
     batch = Mantle.ensure_active_batch!(bq)
-    Mantle.pin!(batch, a)
+    MVE.pin!(batch, a)
     @test ispinned(batch, a)
     # Pre-submit, sync_access! hasn't fired yet; last_write may be anything.
     # After flush, the buffer's last_write must reference this bq.
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
     lw = a.buf[].last_write
     @test lw !== nothing
     @test lw[1] === bq
 
     # Default no-op branch: pin something non-buffer, sync_access! should return nothing.
     batch2 = Mantle.ensure_active_batch!(bq)
-    @test Mantle.sync_access!(batch2, "not a buffer") === nothing
-    Mantle.vk_flush!(bq)
+    @test MVE.sync_access!(batch2, "not a buffer") === nothing
+    MVE.vk_flush!(bq)
 end
 
 @testset "LavaAdaptor pins during strip (KA-style Adapt path)" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 8))
 
     batch = Mantle.ensure_active_batch!(bq)
-    adaptor = Mantle.LavaAdaptor(batch)
+    adaptor = MVE.LavaAdaptor(batch)
 
     # adapt strips LavaArray → LavaDeviceArray. It no longer pins as a side
     # effect of stripping; the launch path pins explicitly, which the
@@ -99,7 +99,7 @@ end
     dev_a = Adapt.adapt(adaptor, a)
     @test dev_a isa Lava.LavaDeviceArray
 
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 end
 
 @testset "a launch pins its arrays for the life of the batch" begin
@@ -112,7 +112,7 @@ end
     @test getfield(a.buf[], :pins) == 0
 
     touchkernel!(LavaBackend(), 16)(a; ndrange = 16)
-    batch = Mantle.vk_context().default_bq.active_batch
+    batch = MVE.vk_context().default_bq.active_batch
     @test batch !== nothing
     @test ispinned(batch, a)                       # pinned while recorded
     KernelAbstractions.synchronize(LavaBackend())
@@ -120,7 +120,7 @@ end
 end
 
 @testset "wrapper struct: adaptor leaves an unregistered struct alone" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq = ctx.default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 4))
     b = LavaArray{Int32,1}(zeros(Int32, 4))
@@ -133,7 +133,7 @@ end
     w = TestWrapper(a, b)
 
     batch = Mantle.ensure_active_batch!(bq)
-    adaptor = Mantle.LavaAdaptor(batch)
+    adaptor = MVE.LavaAdaptor(batch)
 
     import Adapt
     # A struct with no `Adapt.@adapt_structure` rule is returned untouched — the
@@ -147,7 +147,7 @@ end
     @test wc.items === a
     @test wc.sizes === b
 
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 end
 
 end  # @testset

@@ -9,8 +9,12 @@ const VK_SHADER_UNUSED_KHR = ~UInt32(0)  # 0xFFFFFFFF
     LavaRTPipeline
 
 A compiled ray tracing pipeline with shader binding table.
+
+Subtypes `CompiledRTPipeline` (`runtime/coretypes.jl`) so `DeviceCaches` can
+cache one: this type holds the `VkContext` that holds those caches, so the
+concrete name cannot appear in the cache's field type.
 """
-struct LavaRTPipeline
+struct LavaRTPipeline <: CompiledRTPipeline
     pipeline::VK.Pipeline
     pipeline_layout::VK.PipelineLayout
     descriptor_set_layout::VK.DescriptorSetLayout

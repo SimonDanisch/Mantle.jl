@@ -86,5 +86,5 @@ end
 
     # And the eligibility test itself, so the default can't silently swallow
     # Tuples again.
-    @test Mantle.flatok(out, (a, b, c)) === false
+    @test MVE.flatok(out, (a, b, c)) === false
 end

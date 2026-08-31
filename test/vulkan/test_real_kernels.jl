@@ -316,7 +316,7 @@ using StaticArrays
                                        Raycore.Triangle{Hikari.TriangleMeta}}
 
         ws = 256
-        kernel_obj = Hikari.workqueue_map_kernel!(Mantle.LavaBackend(), ws)
+        kernel_obj = Hikari.workqueue_map_kernel!(MVE.LavaBackend(), ws)
         iterspace, _ = KernelAbstractions.partition(kernel_obj, (1024 * 1024 * ws,), (ws,))
         ctx = KernelAbstractions.mkcontext(kernel_obj, (1024 * 1024 * ws,), iterspace)
 

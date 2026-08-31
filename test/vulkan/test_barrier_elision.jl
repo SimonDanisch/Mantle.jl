@@ -47,7 +47,7 @@ end
     ref = collect(x)
     @test all(ref .== 50.0f0)
 
-    Mantle.vk_context().default_bq.barrier_elision = true
+    MVE.vk_context().default_bq.barrier_elision = true
     try
         for trial in 1:10
             depchain()
@@ -56,7 +56,7 @@ end
             @test got == ref
         end
     finally
-        Mantle.vk_context().default_bq.barrier_elision = false
+        MVE.vk_context().default_bq.barrier_elision = false
     end
 
     # Independent buffers: nothing aliases, so every barrier after the first is
@@ -64,20 +64,20 @@ end
     bufs = [KA.allocate(be, Float32, n) for _ in 1:8]
     for b in bufs; fill!(b, 0.0f0); end
     KA.synchronize(be)
-    Mantle.vk_context().default_bq.barrier_elision = true
+    MVE.vk_context().default_bq.barrier_elision = true
     try
         for _ in 1:4, b in bufs
             ks(b, 1.0f0; ndrange = n)
         end
         KA.synchronize(be)
     finally
-        Mantle.vk_context().default_bq.barrier_elision = false
+        MVE.vk_context().default_bq.barrier_elision = false
     end
     @test all(all(collect(b) .== 4.0f0) for b in bufs)
 
     # Mixed: a dependent chain on `x`/`y` interleaved with untouched buffers.
     fill!(x, 0.0f0); KA.synchronize(be)
-    Mantle.vk_context().default_bq.barrier_elision = true
+    MVE.vk_context().default_bq.barrier_elision = true
     try
         for i in 1:25
             kc(y, x; ndrange = n)
@@ -86,7 +86,7 @@ end
         end
         KA.synchronize(be)
     finally
-        Mantle.vk_context().default_bq.barrier_elision = false
+        MVE.vk_context().default_bq.barrier_elision = false
     end
     @test collect(x) == ref
 end

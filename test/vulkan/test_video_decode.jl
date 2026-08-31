@@ -10,7 +10,7 @@
 using Test
 using Lava, Mantle
 @testset "H.264 hardware decode" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     # A video-decode queue is necessary but not sufficient: the device must also
     # say whether the DPB and the decode target may share ONE image
     # (DPB_AND_OUTPUT_COINCIDE) or must be separate (DPB_AND_OUTPUT_DISTINCT).
@@ -23,25 +23,25 @@ using Lava, Mantle
     if !ctx.video_decode_available
         @info "skipping H.264 decode test: no video-decode queue on $(ctx.device_name)"
         @test_skip ctx.video_decode_available
-    elseif !Mantle.VideoDecode.decode_supported(ctx)
+    elseif !MVE.VideoDecode.decode_supported(ctx)
         @info "skipping H.264 decode test: $(ctx.device_name) offers neither " *
               "DPB_AND_OUTPUT_COINCIDE nor DPB_AND_OUTPUT_DISTINCT " *
-              "(flags=0x$(string(Mantle.VideoDecode.decode_capability_flags(ctx), base=16)))"
-        @test_skip Mantle.VideoDecode.decode_supported(ctx)
+              "(flags=0x$(string(MVE.VideoDecode.decode_capability_flags(ctx), base=16)))"
+        @test_skip MVE.VideoDecode.decode_supported(ctx)
     else
         @info "H.264 decode on $(ctx.device_name): " *
-              (Mantle.VideoDecode.decode_coincide_supported(ctx) ? "COINCIDE" : "DISTINCT") *
-              " layout (flags=0x$(string(Mantle.VideoDecode.decode_capability_flags(ctx), base=16)))"
+              (MVE.VideoDecode.decode_coincide_supported(ctx) ? "COINCIDE" : "DISTINCT") *
+              " layout (flags=0x$(string(MVE.VideoDecode.decode_capability_flags(ctx), base=16)))"
         annexb = read(joinpath(@__DIR__, "data", "h264_decode_test.h264"))
         yref   = read(joinpath(@__DIR__, "data", "h264_decode_test_y.raw"))
         w, h = 128, 96
         nframes = length(yref) ÷ (w * h)
 
         # GPU-resident decode → device-local LavaArrays, in DISPLAY order.
-        gw, gh, frames = Mantle.decode_h264_gpu(annexb)
+        gw, gh, frames = MVE.decode_h264_gpu(annexb)
         @test (gw, gh) == (w, h)
         @test length(frames) == nframes
-        @test frames[1] isa Mantle.LavaArray{UInt8,2}
+        @test frames[1] isa MVE.LavaArray{UInt8,2}
 
         # Pixel-exact vs ffmpeg across every frame (I, P, and hierarchical B).
         maxerr = 0
@@ -53,7 +53,7 @@ using Lava, Mantle
         @test maxerr == 0
 
         # Host path (downloads each frame via Array(::VideoImage)) is consistent.
-        hw, hh, host = Mantle.decode_h264_luma(annexb)
+        hw, hh, host = MVE.decode_h264_luma(annexb)
         @test (hw, hh) == (w, h)
         @test length(host) == nframes
         @test eltype(host[1]) == UInt8

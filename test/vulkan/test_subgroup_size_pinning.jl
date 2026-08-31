@@ -29,7 +29,7 @@
 using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 const AMsp = Lava.AcceleratedMatrix
-const TILEsp = Mantle.GEMM_TILE
+const TILEsp = MVE.GEMM_TILE
 
 const WG_SP = 64          # one wave64, or two wave32 subgroups
 
@@ -50,14 +50,14 @@ end
 "Drop every cache that can hand back a pipeline built for a different width."
 function sgp_clear_caches!()
     # Fields on the context since 28bf2de, not globals keyed by `ctx.id`.
-    c = Mantle.vk_context().caches
+    c = MVE.vk_context().caches
     empty!(c.pipelines); empty!(c.pipeline_order)
     empty!(c.launchplans); empty!(c.linked)
 end
 
 "Run the probe with Lava's auto-pin gate driven to produce `want` lanes."
 function sgp_run(be, want::Int)
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     # The gate is `device_subgroup_size(ctx) != COOPMAT_SUBGROUP`. Telling Lava the
     # device is already 32 suppresses the pin, so the module runs at the hardware
     # default; leaving the true value (64) makes the pin fire and request 32.
@@ -66,8 +66,8 @@ function sgp_run(be, want::Int)
     # first so the lazy query has run before the value is overridden.
     # `ctx.caches.subgroup_size` since 28bf2de: the per-device caches are fields
     # on the context now, not globals keyed by `ctx.id`.
-    saved = Mantle.device_subgroup_size(ctx)
-    ctx.caches.subgroup_size = want == Mantle.COOPMAT_SUBGROUP ? saved : Mantle.COOPMAT_SUBGROUP
+    saved = MVE.device_subgroup_size(ctx)
+    ctx.caches.subgroup_size = want == MVE.COOPMAT_SUBGROUP ? saved : MVE.COOPMAT_SUBGROUP
     # ALL THREE caches, not just PIPELINE_CACHE. The required subgroup size is part
     # of the pipeline's create-info but NOT part of `get_compute_pipeline`'s cache
     # key, and the KA launch path caches a LaunchPlan that owns a pipeline on top
@@ -93,15 +93,15 @@ function sgp_run(be, want::Int)
 end
 
 @testset "pinned subgroup width is honoured" begin
-    ctx = Mantle.vk_context()
-    c = Mantle.subgroup_size_control(ctx)
-    @info "subgroup size control" min=c.min max=c.max compute=c.compute default=Mantle.device_subgroup_size(ctx)
+    ctx = MVE.vk_context()
+    c = MVE.subgroup_size_control(ctx)
+    @info "subgroup size control" min=c.min max=c.max compute=c.compute default=MVE.device_subgroup_size(ctx)
 
     if !c.compute
         @info "compute pipelines cannot pin a subgroup size here; skipping"
         @test_skip c.compute
     else
-        widths = filter(w -> Mantle.can_require_subgroup_size(ctx, w), (32, 64))
+        widths = filter(w -> MVE.can_require_subgroup_size(ctx, w), (32, 64))
         @test length(widths) >= 1
         results = Dict{Int,Any}()
         for w in widths

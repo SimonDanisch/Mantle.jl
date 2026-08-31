@@ -70,7 +70,7 @@ lay(nrow, ncol) = Lava.tensor_slice(
     Mantle.copyto!(pointer(rowsum), 1, L, rs)
 end
 
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 if !(ctx.coopmat2.tensor_addressing && ctx.coopmat2.per_element_operations)
     @info "device lacks coopmat2 tensor addressing / per-element ops — nothing to run"
 else

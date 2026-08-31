@@ -73,7 +73,7 @@ end
                           (1370, 64, 1370),      # ragged M and N
                           (64, 1370, 1370))      # ragged K and N, M exactly one tile
             f32(a, b) = KA.allocate(back, Float32, a, b)
-            @test Mantle.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N)
+            @test MVE.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N)
             @test gemmerr(M, K, N) < 1e-5
         end
     end
@@ -83,7 +83,7 @@ end
     @testset "ragged extents on the per-element kernel" begin
         for (M, K, N) in ((100, 37, 73), (65, 33, 65), (63, 5, 7), (1, 1, 1))
             f32(a, b) = KA.allocate(back, Float32, a, b)
-            @test !Mantle.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N)
+            @test !MVE.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N)
             @test gemmerr(M, K, N) < 1e-5
         end
     end
@@ -106,7 +106,7 @@ end
     # version, which is why they name shapes rather than just counts.
     @testset "dispatch gate is on tile count" begin
         f32(M, N) = (KA.allocate(back, Float32, M, N))
-        ok(M, K, N) = Mantle.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N)
+        ok(M, K, N) = MVE.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N)
 
         # Too few tiles to fill the device: the per-element kernel wins.
         @test !ok(64, 64, 64)          # 1 tile
@@ -117,7 +117,7 @@ end
         # M = 2048 is 32 tiles, which passes the count, while computing a 64-wide
         # column for one useful column: 64x the work, and measured 0.61x. The
         # tile count alone does not catch this; `SGEMM_MAXWASTE` does.
-        @test cld(2048, Mantle.SGEMM_BM) * cld(1, Mantle.SGEMM_BN) >= Mantle.SGEMM_MINTILES
+        @test cld(2048, MVE.SGEMM_BM) * cld(1, MVE.SGEMM_BN) >= MVE.SGEMM_MINTILES
         @test !ok(2048, 128, 1)     # 64x waste, measured 0.61x
         @test !ok(4096, 64, 8)      # 8x waste,  measured 0.79x
 
@@ -133,9 +133,9 @@ end
         @test ok(2048, 2048, 2048)
 
         # The boundary is the constant, not a coincidence of these shapes.
-        @test Mantle.SGEMM_MINTILES == 16
-        @test !ok(64, 64, 64 * (Mantle.SGEMM_MINTILES - 1))
-        @test ok(64, 64, 64 * Mantle.SGEMM_MINTILES)
+        @test MVE.SGEMM_MINTILES == 16
+        @test !ok(64, 64, 64 * (MVE.SGEMM_MINTILES - 1))
+        @test ok(64, 64, 64 * MVE.SGEMM_MINTILES)
     end
 
     # dtype: the shared blocks are Float32, so anything wider has to keep the
@@ -145,12 +145,12 @@ end
         c32 = KA.allocate(back, Float32, M, N)
         a32 = KA.allocate(back, Float32, M, K)
         b32 = KA.allocate(back, Float32, K, N)
-        @test Mantle.staged_gemm_ok(c32, a32, b32, M, N)
+        @test MVE.staged_gemm_ok(c32, a32, b32, M, N)
 
         c64 = KA.allocate(back, Float64, M, N)
         a64 = KA.allocate(back, Float64, M, K)
         b64 = KA.allocate(back, Float64, K, N)
-        @test !Mantle.staged_gemm_ok(c64, a64, b64, M, N)
+        @test !MVE.staged_gemm_ok(c64, a64, b64, M, N)
 
         # ...and a Float64 product still computes correctly, on the other kernel.
         Ah = rand(Float64, 128, 64) .- 0.5; Bh = rand(Float64, 64, 128) .- 0.5
@@ -173,7 +173,7 @@ end
             Ad = KA.allocate(back, Float16, M, K); copyto!(Ad, Ah)
             Bd = KA.allocate(back, Float16, K, N); copyto!(Bd, Bh)
             Cd = KA.allocate(back, Float32, M, N)
-            @test Mantle.staged_gemm_ok(Cd, Ad, Bd, M, N)
+            @test MVE.staged_gemm_ok(Cd, Ad, Bd, M, N)
             mul!(Cd, Ad, Bd); KA.synchronize(back)
             # Reference in Float32 over the same fp16 inputs: this asserts the
             # accumulation is fp32, since an fp16 one would drift far past this.
@@ -194,7 +194,7 @@ end
         for _ in 1:14
             M = rand(rng, 200:600); N = rand(rng, 200:600); K = rand(rng, 16:300)
             f32(a, b) = KA.allocate(back, Float32, a, b)
-            Mantle.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N) || continue
+            MVE.staged_gemm_ok(f32(M, N), f32(M, K), f32(K, N), M, N) || continue
             checked += 1
             @test gemmerr(M, K, N) < 1e-4
         end
@@ -220,9 +220,9 @@ end
     # SPIR-V is cached on the kernel function and its argument types, so the
     # helper's body is baked in. Compare across processes, not within one.
     @testset "fp16 destinations reduce in fp32" begin
-        @test Mantle.gemmaccum(Float16) === Float32
-        @test Mantle.gemmaccum(Float32) === Float32
-        @test Mantle.gemmaccum(Float64) === Float64
+        @test MVE.gemmaccum(Float16) === Float32
+        @test MVE.gemmaccum(Float32) === Float32
+        @test MVE.gemmaccum(Float64) === Float64
         for (M, K, N) in ((256, 256, 16), (256, 256, 1024),   # MatAnyone's shapes
                           (1024, 257, 256), (1024, 769, 64),
                           (64, 512, 64))                       # long enough to expose it
@@ -234,7 +234,7 @@ end
             # fp16 operands into an fp16 destination: declines coopmat (fp32
             # destination required) and declines the staged kernel (likewise), so
             # this is the per-element kernel by construction.
-            @test !Mantle.staged_gemm_ok(C, A, B, M, N)
+            @test !MVE.staged_gemm_ok(C, A, B, M, N)
             mul!(C, A, B); KA.synchronize(back)
             ref = Float64.(Ah) * Float64.(Bh)
             @test maximum(abs.(Float64.(Array(C)) .- ref)) / maximum(abs, ref) < 1.5e-3
@@ -245,20 +245,20 @@ end
     # from the others, and a config where it does not come out a positive integer
     # is silently wrong rather than an error.
     @testset "tiling identities hold" begin
-        @test Mantle.SGEMM_WNITER * (Mantle.SGEMM_WARP * Mantle.SGEMM_TM *
-              Mantle.SGEMM_TN * Mantle.SGEMM_WMITER) == Mantle.SGEMM_WM * Mantle.SGEMM_WN
-        @test Mantle.SGEMM_WG == Mantle.SGEMM_NUMWARPS * Mantle.SGEMM_WARP
-        @test Mantle.SGEMM_WSUBM * Mantle.SGEMM_WMITER == Mantle.SGEMM_WM
-        @test Mantle.SGEMM_WSUBN * Mantle.SGEMM_WNITER == Mantle.SGEMM_WN
+        @test MVE.SGEMM_WNITER * (MVE.SGEMM_WARP * MVE.SGEMM_TM *
+              MVE.SGEMM_TN * MVE.SGEMM_WMITER) == MVE.SGEMM_WM * MVE.SGEMM_WN
+        @test MVE.SGEMM_WG == MVE.SGEMM_NUMWARPS * MVE.SGEMM_WARP
+        @test MVE.SGEMM_WSUBM * MVE.SGEMM_WMITER == MVE.SGEMM_WM
+        @test MVE.SGEMM_WSUBN * MVE.SGEMM_WNITER == MVE.SGEMM_WN
         # Staging must divide the workgroup, or a block is left partly unwritten.
-        @test (Mantle.SGEMM_BM * Mantle.SGEMM_BK) % Mantle.SGEMM_WG == 0
-        @test (Mantle.SGEMM_BK * Mantle.SGEMM_BN) % Mantle.SGEMM_WG == 0
+        @test (MVE.SGEMM_BM * MVE.SGEMM_BK) % MVE.SGEMM_WG == 0
+        @test (MVE.SGEMM_BK * MVE.SGEMM_BN) % MVE.SGEMM_WG == 0
         # Each invocation's register block covers exactly its share of the tile.
-        @test Mantle.SGEMM_WMITER * Mantle.SGEMM_TM * Mantle.SGEMM_WNITER * Mantle.SGEMM_TN *
-              Mantle.SGEMM_WG == Mantle.SGEMM_BM * Mantle.SGEMM_BN
+        @test MVE.SGEMM_WMITER * MVE.SGEMM_TM * MVE.SGEMM_WNITER * MVE.SGEMM_TN *
+              MVE.SGEMM_WG == MVE.SGEMM_BM * MVE.SGEMM_BN
         # `SHMEM_STRIDE` is the SCALAR branch's `BK/2 + 1`, in floats. The
         # coopmat branch's `BK/2 + 4` (Lava's `GEMM_PAD = 4`) is a different
         # number for a different access pattern and must not be reused here.
-        @test Mantle.SGEMM_SHF == Mantle.SGEMM_BK + 2
+        @test MVE.SGEMM_SHF == MVE.SGEMM_BK + 2
     end
 end

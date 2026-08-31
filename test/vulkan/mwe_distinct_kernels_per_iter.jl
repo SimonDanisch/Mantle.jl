@@ -13,9 +13,9 @@ using KernelAbstractions
 const KA = KernelAbstractions
 
 backend = LavaBackend()
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 
-hwtlas = Mantle.VulkanTLAS(backend)
+hwtlas = MVE.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
@@ -40,10 +40,10 @@ println("=== MWE-4: 12 distinct kernels + indirect RT + per-iter alloc/free ==="
 const N_ITERS = 20
 crashed_at = 0
 for iter in 1:N_ITERS
-    bufs = [Mantle.LavaArray(zeros(Float32, 1024)) for _ in 1:12]
-    rays = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:1024])
-    hits = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1024))
-    n_buf = Mantle.LavaArray(Int32[1024])
+    bufs = [MVE.LavaArray(zeros(Float32, 1024)) for _ in 1:12]
+    rays = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:1024])
+    hits = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1024))
+    n_buf = MVE.LavaArray(Int32[1024])
 
     for sample in 1:4
         for (k, kern) in enumerate(KERNS)
@@ -58,7 +58,7 @@ for iter in 1:N_ITERS
 
     bufs = nothing; rays = nothing; hits = nothing; n_buf = nothing
 
-    if Mantle.device_lost(ctx)
+    if MVE.device_lost(ctx)
         global crashed_at = iter
         break
     end
@@ -69,4 +69,4 @@ println(crashed_at == 0 ? "MWE-4: $N_ITERS iters clean." : "MWE-4: !!! crashed a
 
 using Test
 @test crashed_at == 0
-@test !Mantle.device_lost(ctx)
+@test !MVE.device_lost(ctx)

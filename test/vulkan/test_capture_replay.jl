@@ -50,14 +50,14 @@ end
     # Capture executes once itself, so `a` advances by another 20.
     fill!(a, 0.0f0)
     KA.synchronize(be)
-    seq = Mantle.capture(step!, bq)
+    seq = MVE.capture(step!, bq)
     KA.synchronize(be)
     @test all(collect(a) .== 20.0f0)
     @test all(collect(d) .== 40.0f0)
     @test !isempty(seq.cmd_bufs)
 
     # A replay must do exactly what another recording would have done.
-    Mantle.replay!(seq)
+    MVE.replay!(seq)
     KA.synchronize(be)
     @test all(collect(a) .== 40.0f0)
     @test all(collect(d) .== 80.0f0)
@@ -66,7 +66,7 @@ end
     # buffer, they do not carry a copy of it.
     fill!(a, 100.0f0)
     KA.synchronize(be)
-    Mantle.replay!(seq)
+    MVE.replay!(seq)
     KA.synchronize(be)
     @test all(collect(a) .== 120.0f0)
     @test all(collect(d) .== 240.0f0)
@@ -75,7 +75,7 @@ end
     fill!(a, 0.0f0)
     KA.synchronize(be)
     for _ in 1:5
-        Mantle.replay!(seq)
+        MVE.replay!(seq)
     end
     KA.synchronize(be)
     @test all(collect(a) .== 100.0f0)
@@ -85,7 +85,7 @@ end
     fill!(a, 0.0f0)
     step!()
     KA.synchronize(be)
-    Mantle.replay!(seq)
+    MVE.replay!(seq)
     KA.synchronize(be)
     @test all(collect(a) .== 40.0f0)
 
@@ -102,7 +102,7 @@ end
         best
     end
     rec = hostcost(step!)
-    rep = hostcost(() -> Mantle.replay!(seq))
+    rep = hostcost(() -> MVE.replay!(seq))
     @info "capture/replay host cost" record_ms=round(rec, digits=4) replay_ms=round(rep, digits=4) speedup=round(rec/rep, digits=1)
     @test rep < rec / 3
 end

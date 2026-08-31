@@ -135,12 +135,12 @@ const VULKAN_BUDGET = Dict(
     # did. If these ever disagree, a kernel sized through `caps` is being launched
     # against a different device's limits — which is silent, and wrong.
     @testset "the portable queries agree with the context ones" begin
-        be = Mantle.LavaBackend()
+        be = MVE.LavaBackend()
         a = KA.allocate(be, Float32, 16)
-        ctx = Mantle.vk_context()
-        @test Mantle.workgrouplimit(a) == Mantle.workgroup_limit(ctx)
-        @test Mantle.sharedbudget(a) == Mantle.max_shared_memory(ctx)
-        @test Mantle.coopmatgemm(a) == Mantle.coopmat_gemm_available(ctx)
+        ctx = MVE.vk_context()
+        @test Mantle.workgrouplimit(a) == MVE.workgroup_limit(ctx)
+        @test Mantle.sharedbudget(a) == MVE.max_shared_memory(ctx)
+        @test Mantle.coopmatgemm(a) == MVE.coopmat_gemm_available(ctx)
         # …and they are real numbers, so "they agree" is not two zeros agreeing.
         @test Mantle.workgrouplimit(a) > 0
         @test Mantle.sharedbudget(a) > 0

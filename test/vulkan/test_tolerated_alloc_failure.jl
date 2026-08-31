@@ -28,7 +28,7 @@ using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 
 @testset "a tolerated alloc failure leaves no validation messages" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
 
     # `LAVA_VALIDATION` is read once, when the Vulkan instance is created, so this
     # is the same condition that decided whether a layer is attached to `ctx`.
@@ -38,26 +38,26 @@ const KA = KernelAbstractions
         @test_skip validating
     else
         # Start from a known-clean queue, so what we observe is what we caused.
-        Mantle.drain_validation_messages!(ctx)
+        MVE.drain_validation_messages!(ctx)
         empty!(ctx.validation.messages)
 
         # Larger than `maxBufferSize` AND larger than any heap, so it is refused
         # rather than merely unlucky.
         huge = 40_000_000_000
-        res = Mantle.try_vk_alloc(ctx.default_bq, huge)
-        @test res isa Mantle.AllocFailure          # refused, and refused gracefully
+        res = MVE.try_vk_alloc(ctx.default_bq, huge)
+        @test res isa MVE.AllocFailure          # refused, and refused gracefully
 
         # The ring must be empty too, not just the drained list. Draining is what
         # the buggy version skipped, so this is the assertion with teeth: it fails
         # if the messages are still in the ring waiting to ambush someone else.
-        Mantle.drain_validation_messages!(ctx)
+        MVE.drain_validation_messages!(ctx)
         @test isempty(ctx.validation.messages)
 
         # And the next unrelated operation must survive — this is the shape of the
         # original symptom, a small upload that has nothing to do with the 40 GB.
-        a = Mantle.LavaArray(Float32[1, 2, 3, 4])
+        a = MVE.LavaArray(Float32[1, 2, 3, 4])
         b = a .+ 10.0f0
-        Mantle.vk_flush!(ctx)
+        MVE.vk_flush!(ctx)
         @test Array(b) == Float32[11, 12, 13, 14]
     end
 end

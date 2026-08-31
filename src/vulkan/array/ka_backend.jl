@@ -64,6 +64,21 @@ LavaBackend() = LavaBackend(nothing, nothing)
 LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
 LavaBackend(bq::VulkanBatchQueue) = LavaBackend(bq, bq)
 
+# The three Mantle verbs that dispatch on the BACKEND rather than on the context.
+#
+# Here and not in `runtime/device.jl` beside their `VkContext` methods, which is
+# where they were written: that file is included seven files before this one, so
+# each signature named a type that did not exist yet. A method's argument types
+# are resolved when it is DEFINED — unlike a function body, which is why the
+# `vk_context(b)` call below is fine and the `::LavaBackend` above it was not.
+#
+# `supports_batch_queue` vs `supports_graphics`: having a queue to batch onto is
+# a separate question from being able to rasterise. See `graph/queue.jl` and
+# `graphics/commands.jl` for the declarations.
+supports_batch_queue(::LavaBackend) = true
+supports_graphics(::LavaBackend) = true
+waitidle(b::LavaBackend) = waitidle(vk_context(b))
+
 """
     vk_context(backend) -> VkContext
     vk_context(a::LavaArray) -> VkContext

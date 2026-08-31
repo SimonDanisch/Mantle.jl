@@ -97,21 +97,21 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
         y = Float32[ 0f0, -0f0, -1f0,  2f0, Inf32, -Inf32]
         expected = Float32[1f-5, -1f-5, -1f-5, 3f0, 2f0, -2f0]
 
-        x_arr = Mantle.LavaArray(x)
-        y_arr = Mantle.LavaArray(y)
-        out = Mantle.LavaArray(zeros(Float32, length(x)))
-        copysign_kernel!(Mantle.LavaBackend())(out, x_arr, y_arr; ndrange=length(x))
-        Mantle.vk_flush!(Mantle.vk_context())
+        x_arr = MVE.LavaArray(x)
+        y_arr = MVE.LavaArray(y)
+        out = MVE.LavaArray(zeros(Float32, length(x)))
+        copysign_kernel!(MVE.LavaBackend())(out, x_arr, y_arr; ndrange=length(x))
+        MVE.vk_flush!(MVE.vk_context())
         @test reinterpret(UInt32, Array(out)) == reinterpret(UInt32, expected)
 
         # Float64
         xd = Float64[1e-10,  1e-10,  1e-10, -3.0]
         yd = Float64[  0.0,   -0.0,   -1.0,  2.0]
         expected_d = Float64[1e-10, -1e-10, -1e-10, 3.0]
-        x_arr64 = Mantle.LavaArray(xd); y_arr64 = Mantle.LavaArray(yd)
-        out64 = Mantle.LavaArray(zeros(Float64, length(xd)))
-        copysign_kernel!(Mantle.LavaBackend())(out64, x_arr64, y_arr64; ndrange=length(xd))
-        Mantle.vk_flush!(Mantle.vk_context())
+        x_arr64 = MVE.LavaArray(xd); y_arr64 = MVE.LavaArray(yd)
+        out64 = MVE.LavaArray(zeros(Float64, length(xd)))
+        copysign_kernel!(MVE.LavaBackend())(out64, x_arr64, y_arr64; ndrange=length(xd))
+        MVE.vk_flush!(MVE.vk_context())
         @test reinterpret(UInt64, Array(out64)) == reinterpret(UInt64, expected_d)
     end
 
@@ -126,11 +126,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             i = @index(Global, Linear)
             @inbounds out[i] = @fastmath copysign(x[i], y[i])
         end
-        x = Mantle.LavaArray(Float32[1f-5, 2f0])
-        y = Mantle.LavaArray(Float32[0f0, -1f0])
-        out = Mantle.LavaArray(zeros(Float32, 2))
-        fastmath_cs!(Mantle.LavaBackend())(out, x, y; ndrange=2)
-        Mantle.vk_flush!(Mantle.vk_context())
+        x = MVE.LavaArray(Float32[1f-5, 2f0])
+        y = MVE.LavaArray(Float32[0f0, -1f0])
+        out = MVE.LavaArray(zeros(Float32, 2))
+        fastmath_cs!(MVE.LavaBackend())(out, x, y; ndrange=2)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(out) == Float32[1f-5, -2f0]
 
         # 2. Vectorizable inner loop — gives LLVM a chance to recognize the
@@ -143,11 +143,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             end
             @inbounds out[i] = acc
         end
-        xs = Mantle.LavaArray(fill(1f-5, 16, 8))
-        ys = Mantle.LavaArray(zeros(Float32, 16, 8))  # all zero y's — the bug case
-        lout = Mantle.LavaArray(zeros(Float32, 16))
-        loop_cs!(Mantle.LavaBackend())(lout, xs, ys, Int32(8); ndrange=16)
-        Mantle.vk_flush!(Mantle.vk_context())
+        xs = MVE.LavaArray(fill(1f-5, 16, 8))
+        ys = MVE.LavaArray(zeros(Float32, 16, 8))  # all zero y's — the bug case
+        lout = MVE.LavaArray(zeros(Float32, 16))
+        loop_cs!(MVE.LavaBackend())(lout, xs, ys, Int32(8); ndrange=16)
+        MVE.vk_flush!(MVE.vk_context())
         @test all(Array(lout) .≈ 8f0 * 1f-5)  # would be 0 if old bug reappeared
 
         # 3. Exact `safe_invdir` pattern — the original bug trigger.
@@ -158,10 +158,10 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             clamped = abs(dv) > ooeps ? dv : copysign(ooeps, dv)
             @inbounds out[i] = 1f0 / clamped
         end
-        d = Mantle.LavaArray(Float32[0f0, -0f0, 1f0, -1f0])
-        sout = Mantle.LavaArray(zeros(Float32, 4))
-        safe_invdir_kernel!(Mantle.LavaBackend())(sout, d; ndrange=4)
-        Mantle.vk_flush!(Mantle.vk_context())
+        d = MVE.LavaArray(Float32[0f0, -0f0, 1f0, -1f0])
+        sout = MVE.LavaArray(zeros(Float32, 4))
+        safe_invdir_kernel!(MVE.LavaBackend())(sout, d; ndrange=4)
+        MVE.vk_flush!(MVE.vk_context())
         result = Array(sout)
         # +0 → clamp to +1e-5 → 1/1e-5 = 1e5   (NOT Inf)
         # -0 → clamp to -1e-5 → 1/-1e-5 = -1e5 (NOT Inf)
@@ -186,13 +186,13 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             i = @index(Global, Linear)
             @inbounds out[i] = max(xs[i], ys[i])
         end
-        xs = Mantle.LavaArray(Float32[1f0, NaN32, NaN32, 3f0, -1f0])
-        ys = Mantle.LavaArray(Float32[NaN32, 2f0, NaN32, 5f0, -2f0])
-        mi = Mantle.LavaArray(zeros(Float32, 5))
-        ma = Mantle.LavaArray(zeros(Float32, 5))
-        min_kernel!(Mantle.LavaBackend())(mi, xs, ys; ndrange=5)
-        max_kernel!(Mantle.LavaBackend())(ma, xs, ys; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        xs = MVE.LavaArray(Float32[1f0, NaN32, NaN32, 3f0, -1f0])
+        ys = MVE.LavaArray(Float32[NaN32, 2f0, NaN32, 5f0, -2f0])
+        mi = MVE.LavaArray(zeros(Float32, 5))
+        ma = MVE.LavaArray(zeros(Float32, 5))
+        min_kernel!(MVE.LavaBackend())(mi, xs, ys; ndrange=5)
+        max_kernel!(MVE.LavaBackend())(ma, xs, ys; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         r_min = Array(mi); r_max = Array(ma)
         # Non-NaN wins where exactly one operand is NaN; both-NaN → NaN.
         @test r_min[1] == 1f0
@@ -211,9 +211,9 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             i = @index(Global, Linear)
             @inbounds out[i] = @fastmath min(xs[i], ys[i])
         end
-        fout = Mantle.LavaArray(zeros(Float32, 5))
-        fastmath_min!(Mantle.LavaBackend())(fout, xs, ys; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        fout = MVE.LavaArray(zeros(Float32, 5))
+        fastmath_min!(MVE.LavaBackend())(fout, xs, ys; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(fout)[1] == 1f0  # compiles without emitter error
     end
 
@@ -236,11 +236,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
                 attributes #0 = { alwaysinline }
             """, "entry"), UInt32, Tuple{UInt32, UInt32}, a[i], b[i])
         end
-        a = Mantle.LavaArray(UInt32[10, 5, 0, typemax(UInt32), 3])
-        b = Mantle.LavaArray(UInt32[3, 7, 1, 1, typemax(UInt32)])
-        out = Mantle.LavaArray(zeros(UInt32, 5))
-        usub_sat_kernel!(Mantle.LavaBackend())(out, a, b; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        a = MVE.LavaArray(UInt32[10, 5, 0, typemax(UInt32), 3])
+        b = MVE.LavaArray(UInt32[3, 7, 1, 1, typemax(UInt32)])
+        out = MVE.LavaArray(zeros(UInt32, 5))
+        usub_sat_kernel!(MVE.LavaBackend())(out, a, b; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(out) == UInt32[7, 0, 0, typemax(UInt32) - 1, 0]
 
         @kernel function uadd_sat_kernel!(out, a, b)
@@ -254,11 +254,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
                 attributes #0 = { alwaysinline }
             """, "entry"), UInt32, Tuple{UInt32, UInt32}, a[i], b[i])
         end
-        a = Mantle.LavaArray(UInt32[10, typemax(UInt32), typemax(UInt32) - 5, 0, 1])
-        b = Mantle.LavaArray(UInt32[3, 1, 10, 0, typemax(UInt32)])
-        out = Mantle.LavaArray(zeros(UInt32, 5))
-        uadd_sat_kernel!(Mantle.LavaBackend())(out, a, b; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        a = MVE.LavaArray(UInt32[10, typemax(UInt32), typemax(UInt32) - 5, 0, 1])
+        b = MVE.LavaArray(UInt32[3, 1, 10, 0, typemax(UInt32)])
+        out = MVE.LavaArray(zeros(UInt32, 5))
+        uadd_sat_kernel!(MVE.LavaBackend())(out, a, b; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(out) == UInt32[13, typemax(UInt32), typemax(UInt32), 0, typemax(UInt32)]
 
         # Signed saturating add/sub
@@ -273,11 +273,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
                 attributes #0 = { alwaysinline }
             """, "entry"), Int32, Tuple{Int32, Int32}, a[i], b[i])
         end
-        a = Mantle.LavaArray(Int32[10, typemax(Int32), typemin(Int32), -5, 100])
-        b = Mantle.LavaArray(Int32[3, 1, -1, -typemax(Int32), -50])
-        out = Mantle.LavaArray(zeros(Int32, 5))
-        sadd_sat_kernel!(Mantle.LavaBackend())(out, a, b; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        a = MVE.LavaArray(Int32[10, typemax(Int32), typemin(Int32), -5, 100])
+        b = MVE.LavaArray(Int32[3, 1, -1, -typemax(Int32), -50])
+        out = MVE.LavaArray(zeros(Int32, 5))
+        sadd_sat_kernel!(MVE.LavaBackend())(out, a, b; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(out) == Int32[13, typemax(Int32), typemin(Int32), typemin(Int32), 50]
 
         @kernel function ssub_sat_kernel!(out, a, b)
@@ -291,11 +291,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
                 attributes #0 = { alwaysinline }
             """, "entry"), Int32, Tuple{Int32, Int32}, a[i], b[i])
         end
-        a = Mantle.LavaArray(Int32[10, typemax(Int32), typemin(Int32), 5, -100])
-        b = Mantle.LavaArray(Int32[3, -1, 1, -5, 50])
-        out = Mantle.LavaArray(zeros(Int32, 5))
-        ssub_sat_kernel!(Mantle.LavaBackend())(out, a, b; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        a = MVE.LavaArray(Int32[10, typemax(Int32), typemin(Int32), 5, -100])
+        b = MVE.LavaArray(Int32[3, -1, 1, -5, 50])
+        out = MVE.LavaArray(zeros(Int32, 5))
+        ssub_sat_kernel!(MVE.LavaBackend())(out, a, b; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(out) == Int32[7, typemax(Int32), typemin(Int32), 10, -150]
 
         # End-to-end: Base.rem on Float32 (the use case that triggered this).
@@ -303,11 +303,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             i = @index(Global, Linear)
             @inbounds out[i] = rem(x[i], y[i])
         end
-        rx = Mantle.LavaArray(Float32[7f0, -7f0, 5.5f0, 100f0])
-        ry = Mantle.LavaArray(Float32[3f0, 3f0, 2.0f0, 0.3f0])
-        rout = Mantle.LavaArray(zeros(Float32, 4))
-        rem_kernel!(Mantle.LavaBackend())(rout, rx, ry; ndrange=4)
-        Mantle.vk_flush!(Mantle.vk_context())
+        rx = MVE.LavaArray(Float32[7f0, -7f0, 5.5f0, 100f0])
+        ry = MVE.LavaArray(Float32[3f0, 3f0, 2.0f0, 0.3f0])
+        rout = MVE.LavaArray(zeros(Float32, 4))
+        rem_kernel!(MVE.LavaBackend())(rout, rx, ry; ndrange=4)
+        MVE.vk_flush!(MVE.vk_context())
         gpu = Array(rout)
         cpu = Float32[rem(x, y) for (x, y) in zip(
             Float32[7, -7, 5.5, 100], Float32[3, 3, 2.0, 0.3])]
@@ -327,22 +327,22 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
         end
 
         # Float32, positive base — all cases well-defined in GLSL Pow.
-        x = Mantle.LavaArray(Float32[2f0, 3f0, 0.5f0, 10f0, 1f0])
-        y = Mantle.LavaArray(Float32[3f0, 0.5f0, -2f0, 0f0, 100f0])
-        out = Mantle.LavaArray(zeros(Float32, 5))
-        pow_kernel!(Mantle.LavaBackend())(out, x, y; ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        x = MVE.LavaArray(Float32[2f0, 3f0, 0.5f0, 10f0, 1f0])
+        y = MVE.LavaArray(Float32[3f0, 0.5f0, -2f0, 0f0, 100f0])
+        out = MVE.LavaArray(zeros(Float32, 5))
+        pow_kernel!(MVE.LavaBackend())(out, x, y; ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         cpu = Float32[2f0^3f0, 3f0^0.5f0, 0.5f0^-2f0, 10f0^0f0, 1f0^100f0]
         @test Array(out) ≈ cpu rtol=1f-5
 
         # Float64 — routes through the downcast overlay at math.jl:179
         # (`^(::Float64, ::Float64) = Float64(Float32(x) ^ Float32(y))`),
         # which is required because GLSL.std.450 Pow does not support f64.
-        xd = Mantle.LavaArray(Float64[2.0, 3.0, 0.5])
-        yd = Mantle.LavaArray(Float64[3.0, 0.5, -2.0])
-        outd = Mantle.LavaArray(zeros(Float64, 3))
-        pow_kernel!(Mantle.LavaBackend())(outd, xd, yd; ndrange=3)
-        Mantle.vk_flush!(Mantle.vk_context())
+        xd = MVE.LavaArray(Float64[2.0, 3.0, 0.5])
+        yd = MVE.LavaArray(Float64[3.0, 0.5, -2.0])
+        outd = MVE.LavaArray(zeros(Float64, 3))
+        pow_kernel!(MVE.LavaBackend())(outd, xd, yd; ndrange=3)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(outd) ≈ [8.0, sqrt(3.0), 4.0] rtol=1e-5
 
         # Negative base with integer exponent — must take the
@@ -353,16 +353,16 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             i = @index(Global, Linear)
             @inbounds out[i] = x[i] ^ y
         end
-        xn = Mantle.LavaArray(Float32[-2f0, -3f0, 2f0, 0f0, -1f0])
-        on = Mantle.LavaArray(zeros(Float32, 5))
-        pow_int_kernel!(Mantle.LavaBackend())(on, xn, Int32(3); ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        xn = MVE.LavaArray(Float32[-2f0, -3f0, 2f0, 0f0, -1f0])
+        on = MVE.LavaArray(zeros(Float32, 5))
+        pow_int_kernel!(MVE.LavaBackend())(on, xn, Int32(3); ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(on) == Float32[-8, -27, 8, 0, -1]
 
         # Even integer exponent — sign must flip back
-        oe = Mantle.LavaArray(zeros(Float32, 5))
-        pow_int_kernel!(Mantle.LavaBackend())(oe, xn, Int32(4); ndrange=5)
-        Mantle.vk_flush!(Mantle.vk_context())
+        oe = MVE.LavaArray(zeros(Float32, 5))
+        pow_int_kernel!(MVE.LavaBackend())(oe, xn, Int32(4); ndrange=5)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(oe) == Float32[16, 81, 16, 0, 1]
 
         # `@fastmath ^` on Julia 1.12 rewrites to a fast-math `Base.:(^)`
@@ -371,11 +371,11 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             i = @index(Global, Linear)
             @inbounds out[i] = @fastmath x[i] ^ y[i]
         end
-        xf = Mantle.LavaArray(Float32[2f0, 3f0])
-        yf = Mantle.LavaArray(Float32[3f0, 2f0])
-        of = Mantle.LavaArray(zeros(Float32, 2))
-        fastmath_pow!(Mantle.LavaBackend())(of, xf, yf; ndrange=2)
-        Mantle.vk_flush!(Mantle.vk_context())
+        xf = MVE.LavaArray(Float32[2f0, 3f0])
+        yf = MVE.LavaArray(Float32[3f0, 2f0])
+        of = MVE.LavaArray(zeros(Float32, 2))
+        fastmath_pow!(MVE.LavaBackend())(of, xf, yf; ndrange=2)
+        MVE.vk_flush!(MVE.vk_context())
         @test Array(of) ≈ Float32[8f0, 9f0] rtol=1f-5
     end
 
@@ -390,10 +390,10 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
             @inbounds out[i] = round(xs[i])
         end
 
-        xs = Mantle.LavaArray(Float32[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 4.5])
-        out = Mantle.LavaArray(zeros(Float32, 8))
-        round_kernel!(Mantle.LavaBackend())(out, xs; ndrange=8)
-        Mantle.vk_flush!(Mantle.vk_context())
+        xs = MVE.LavaArray(Float32[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 4.5])
+        out = MVE.LavaArray(zeros(Float32, 8))
+        round_kernel!(MVE.LavaBackend())(out, xs; ndrange=8)
+        MVE.vk_flush!(MVE.vk_context())
         gpu = Array(out)
         cpu = Float32[round(x) for x in Float32[0.5, 1.5, 2.5, 3.5, -0.5, -1.5, -2.5, 4.5]]
         # Expected (round-to-even): 0, 2, 2, 4, -0, -2, -2, 4

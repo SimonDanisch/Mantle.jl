@@ -36,10 +36,10 @@ using Test, Mantle, KernelAbstractions
 const KA = KernelAbstractions
 
 @testset "an impossible allocation is refused, and the device survives" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     bq  = ctx.default_bq
-    dev = Mantle.lavadevice(ctx)
-    be  = Mantle.LavaBackend()
+    dev = MVE.lavadevice(ctx)
+    be  = MVE.LavaBackend()
     huge = 400 * 1024^3
 
     @testset "the driver refuses with the exception the guard names" begin
@@ -49,21 +49,21 @@ const KA = KernelAbstractions
         catch e
             e
         end
-        @test err isa Mantle.VK.VulkanError
+        @test err isa MVE.VK.VulkanError
         # `.code`, and one of the two the guard accepts. A different code here
         # means `acquire_or_reclaim!` rethrows instead of escalating.
-        @test err.code == Mantle.VK.ERROR_OUT_OF_DEVICE_MEMORY ||
-              err.code == Mantle.VK.ERROR_OUT_OF_HOST_MEMORY
+        @test err.code == MVE.VK.ERROR_OUT_OF_DEVICE_MEMORY ||
+              err.code == MVE.VK.ERROR_OUT_OF_HOST_MEMORY
     end
 
     @testset "pool_alloc turns it into a LavaError that says why" begin
         err = try
-            Mantle.pool_alloc(bq, huge)
+            MVE.pool_alloc(bq, huge)
             nothing
         catch e
             e
         end
-        @test err isa Mantle.LavaError
+        @test err isa MVE.LavaError
         msg = sprint(showerror, err)
         @test occursin("out of memory", msg)
         # The footprint is in the message: without it "out of memory" does not
@@ -81,7 +81,7 @@ const KA = KernelAbstractions
         KA.synchronize(be)
         @test all(==(7.0f0), Array(a))
 
-        blocks = Mantle.poolblocks(ctx)
+        blocks = MVE.poolblocks(ctx)
         @test !isempty(blocks)
         # Every block still partitions into what is live and what is free.
         for b in blocks

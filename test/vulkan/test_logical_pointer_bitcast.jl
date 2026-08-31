@@ -79,9 +79,9 @@ end
     prev = get(ENV, "LAVA_SPIRV_DUMP_DIR", nothing)
     ENV["LAVA_SPIRV_DUMP_DIR"] = dumpdir
     try
-        out = Mantle.LavaArray(zeros(Float32, M))
-        lpb_clamped_ternary!(Mantle.LavaBackend())(out; ndrange = M, workgroupsize = M)
-        KA.synchronize(Mantle.LavaBackend())
+        out = MVE.LavaArray(zeros(Float32, M))
+        lpb_clamped_ternary!(MVE.LavaBackend())(out; ndrange = M, workgroupsize = M)
+        KA.synchronize(MVE.LavaBackend())
 
         # The answer must still be right — the fix reconciles the select's
         # operands, it does not change what the kernel computes.
@@ -145,8 +145,8 @@ end
         for T in types
             xc = zeros(T, (2, 3, 4))
             yc = rand(T, (2, 3))
-            x = Mantle.LavaArray(copy(xc))
-            y = Mantle.LavaArray(copy(yc))
+            x = MVE.LavaArray(copy(xc))
+            y = MVE.LavaArray(copy(yc))
 
             x[:, :, 2] = y                 # the store path
             xc[:, :, 2] = yc

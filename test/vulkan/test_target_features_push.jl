@@ -18,7 +18,7 @@ inverse and needs one, which is why the two are in different packages.
 using Test, Mantle, Lava
 
 @testset "the runtime pushes what the device reports" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
 
     # Already bound by the time any test runs, so this reads what `bind_context!`
     # left rather than arranging for it.
@@ -32,11 +32,11 @@ using Test, Mantle, Lava
     # happens to have.
     saved = Lava.targetfeatures()
     try
-        Mantle.bind_context!(nothing)
+        MVE.bind_context!(nothing)
         @test Lava.targetfeatures() == Lava.TargetFeatures()
         @test Lava.FROZEN_LOG_MISSES[] === false
     finally
-        Mantle.bind_context!(ctx)
+        MVE.bind_context!(ctx)
     end
     @test Lava.targetfeatures() == saved
 end

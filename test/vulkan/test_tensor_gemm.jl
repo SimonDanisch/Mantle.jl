@@ -42,12 +42,12 @@ const TGt = 16          # one tile, one subgroup — the smallest thing that mul
 end
 
 @testset "a product of tensor-loaded operands is P' * Q'" begin
-    ctx = Mantle.vk_context()
+    ctx = MVE.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = LavaBackend()
-        WG = Mantle.device_subgroup_size(ctx)
+        WG = MVE.device_subgroup_size(ctx)
 
         A = KA.allocate(back, Float16, TGt, TGt)
         B = KA.allocate(back, Float16, TGt, TGt)

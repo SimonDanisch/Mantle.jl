@@ -21,10 +21,10 @@ using KernelAbstractions
 const KA = KernelAbstractions
 
 backend = LavaBackend()
-ctx = Mantle.vk_context()
+ctx = MVE.vk_context()
 
 # Persistent VulkanTLAS shared across iters (mirrors Hikari: scene built once).
-hwtlas = Mantle.VulkanTLAS(backend)
+hwtlas = MVE.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
@@ -50,9 +50,9 @@ end
 function SoAQueue{T}(n::Int) where T
     fnames = fieldnames(T)
     ftypes = fieldtypes(T)
-    cols = NamedTuple{fnames}(ntuple(i -> Mantle.LavaArray(zeros(ftypes[i], n)), length(fnames)))
+    cols = NamedTuple{fnames}(ntuple(i -> MVE.LavaArray(zeros(ftypes[i], n)), length(fnames)))
     items = StructArray{T}(cols)
-    size  = Mantle.LavaArray(Int32[0])
+    size  = MVE.LavaArray(Int32[0])
     SoAQueue{T,typeof(items),typeof(size)}(items, size, Int32(n))
 end
 
@@ -145,17 +145,17 @@ function alloc_state(n_pixels::Int)
         shadow   = SoAQueue{ShadowWI}(n_pixels),
         escaped  = SoAQueue{EscapedWI}(n_pixels),
         samples  = SoAQueue{RaySamples}(n_pixels).items,  # only items, no counter
-        pixel_L     = Mantle.LavaArray(zeros(Float32, n_pixels)),
-        pixel_rgb   = Mantle.LavaArray(zeros(Float32, n_pixels)),
-        weight_sum  = Mantle.LavaArray(zeros(Float32, n_pixels)),
+        pixel_L     = MVE.LavaArray(zeros(Float32, n_pixels)),
+        pixel_rgb   = MVE.LavaArray(zeros(Float32, n_pixels)),
+        weight_sum  = MVE.LavaArray(zeros(Float32, n_pixels)),
         # HW-RT scratch buffers (mirrors hw_primary_ray_buf etc.)
-        rays      = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
-        hits      = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
-        n_buf     = Mantle.LavaArray(Int32[n_pixels]),
+        rays      = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
+        hits      = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
+        n_buf     = MVE.LavaArray(Int32[n_pixels]),
         # Shadow-round scratch (mirrors hw_shadow_*)
-        shadow_rays = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
-        shadow_hits = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
-        shadow_n    = Mantle.LavaArray(Int32[n_pixels]),
+        shadow_rays = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
+        shadow_hits = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
+        shadow_n    = MVE.LavaArray(Int32[n_pixels]),
     )
 end
 
@@ -241,7 +241,7 @@ for iter in 1:N_ITERS
     s = nothing
     GC.gc(false)
 
-    if Mantle.device_lost(ctx)
+    if MVE.device_lost(ctx)
         global crashed_at = iter
         break
     end
@@ -254,4 +254,4 @@ println(crashed_at == 0 ?
 
 using Test
 @test crashed_at == 0
-@test !Mantle.device_lost(ctx)
+@test !MVE.device_lost(ctx)

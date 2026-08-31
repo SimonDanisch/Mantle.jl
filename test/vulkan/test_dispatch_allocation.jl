@@ -56,7 +56,7 @@ const KA = KernelAbstractions
     # launch is a static call. It must not be WORSE than the generic path — an
     # earlier version of it was 3x worse, because a concrete `isbits` plan handed
     # to a still-dynamic call gets boxed whole.
-    held = Mantle.compiled(allocprobe!(backend), 1024)
+    held = MVE.compiled(allocprobe!(backend), 1024)
     heldrun(n) = for _ in 1:n; held(a); end
     heldrun(200); KA.synchronize(backend)
     heldbytes = @allocated heldrun(n)

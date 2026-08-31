@@ -35,6 +35,41 @@ struct DrawCall
     frag_args::Tuple
 end
 
+"""
+One hardware ray-tracing launch, declared the way a dispatch is.
+
+`Dispatch` is a kernel, its arguments and an ndrange; this is a ray-tracing
+pipeline, its arguments and a ray count. What differs is the two ends — a shader
+binding table where a dispatch has a kernel, a device-side ray count where it has
+an ndrange — and NOT the middle, which is the whole reason this type exists.
+
+Before it, tracing went through `custom!`, the escape hatch for work "the graph
+declares but does not model". That was the wrong home, and the cost was specific:
+a `custom!` body packs its own arguments while it runs, out of the batch queue's
+per-frame scratch slab, and pushes that slab's address as a push constant. The
+host writes those bytes — no GPU command in the buffer does — so a baked plan,
+which never runs the body again, replays a command buffer aimed at a slab region
+the pool has since rewound and handed to somebody else. Not stale values;
+whatever the next caller packed there.
+
+(An indirect DISPATCH is fine in the same situation, and the difference is worth
+stating: its indirect command is written by `fast_prepare_indirect!`, a dispatch
+that is itself inside the captured buffer, so a replay re-executes it and
+rewrites its own region.)
+
+Modelled, the arguments live at a fixed offset in the plan's `ArgMemory` exactly
+as a dispatch's do, `rebind!` rewrites them, and `rebindable` is true — so a
+hardware ray-tracing plan can be baked at all.
+"""
+struct Trace
+    pipeline::Any
+    accel::Any
+    args::Tuple
+    # A count, in the same two shapes `Dispatch` takes it: a plain number, or a
+    # `DeviceRange` over a count only the GPU knows.
+    ndrange::Any
+end
+
 # `draw!` does not take fragment arguments yet — Lava's `draw!` has taken a
 # `frag_args` tuple for a while and this is the field it will arrive in. Empty
 # is what the pipeline phase compiles against today.
@@ -238,6 +273,30 @@ struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O}
     args::A
     ndrange::R
     tlas::Bool                          # whether the pipeline was built for ray query
+    argoff::Int
+    argsize::Int
+end
+
+"""
+A [`Trace`](@ref) after the backend has resolved it — the compiled counterpart of
+[`CompiledDispatch`](@ref), and deliberately the same shape.
+
+`compiled` is whatever the backend needs to record the launch: on Vulkan a
+`VulkanTracePipeline`, which is the `VkPipeline`, its shader binding table, and
+the argument layout the raygen shader was compiled for. Core reads exactly one
+thing out of this type, `argsize`, which is what lets `ArgMemory` reserve a slot
+for the trace's arguments the same way it does for a dispatch's.
+
+`accel` and `args` are held as GIVEN, not as resolved: `rawargs` runs `argvalue`
+over them at every record and rebind, so a `Ref` is re-read each time. That is
+what lets a sample index or a rebuilt acceleration structure reach a plan that
+was compiled once.
+"""
+struct CompiledTrace{P,C,A<:Tuple,R}
+    compiled::P
+    accel::C
+    args::A
+    ndrange::R
     argoff::Int
     argsize::Int
 end

@@ -53,7 +53,7 @@ end
 end
 
 @testset "indirect dispatch inside concurrent_dispatch_group" begin
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     n = 65536
     cap = 100_000
 
@@ -77,7 +77,7 @@ end
         # stage 2 INSIDE a group: its prepare-indirect reads qmid.size and the
         # indirect dispatch must barrier against that prepare even though the
         # group elides inter-dispatch barriers.
-        Mantle.concurrent_dispatch_group() do
+        MVE.concurrent_dispatch_group() do
             c!(qmid, nxt; ndrange=qmid.size)
         end
         cur, nxt = nxt, cur
@@ -93,7 +93,7 @@ end
     # prepares, one shared barrier, then the dispatches overlapped. Items are
     # split modulo 3 across destination mids and re-merged, so a dropped or
     # racing dispatch shows up as a wrong final count.
-    backend = Mantle.LavaBackend()
+    backend = MVE.LavaBackend()
     n = 65536
     cap = 100_000
 
@@ -127,7 +127,7 @@ end
             KA.fill!(q.size, Int32(0))
         end
         sc!(cur, mids...; ndrange=cur.size)
-        Mantle.concurrent_indirect_group() do
+        MVE.concurrent_indirect_group() do
             for q in mids
                 c!(q, nxt; ndrange=q.size)
             end

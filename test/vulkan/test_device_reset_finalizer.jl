@@ -31,7 +31,7 @@ using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 
 @testset "a buffer may outlive a device reset" begin
-    ctx0 = Mantle.vk_context()
+    ctx0 = MVE.vk_context()
     id0 = ctx0.id
 
     b = LavaBackend()
@@ -45,10 +45,10 @@ const KA = KernelAbstractions
     # The reset installs a NEW context, and retires the old one. Both halves
     # matter: a fresh id is what every per-device cache keys on, and the flag is
     # what every finalizer gates on.
-    ctx1 = Mantle.vk_context()
+    ctx1 = MVE.vk_context()
     @test ctx1.id != id0
-    @test Mantle.device_lost(ctx0)
-    @test !Mantle.device_lost(ctx1)
+    @test MVE.device_lost(ctx0)
+    @test !MVE.device_lost(ctx1)
 
     # The finalizer for a pre-reset buffer, run on purpose. Twice, because the
     # first collection may only queue it.

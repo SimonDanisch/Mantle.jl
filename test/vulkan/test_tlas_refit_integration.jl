@@ -1,6 +1,6 @@
 using Test, Lava, Mantle
-using Mantle: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb,
-              build_tlas, refit_tlas!, build_accel!, AS_INPUT_USAGE
+using Mantle: refit_tlas!, build_accel!
+using .MVE: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, build_tlas, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 # Validates the full P1 flow: GPU kernel writes instances, allow_update build,
@@ -14,20 +14,20 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     n = 4
     radius = 1f0
     quats_cpu = [Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:n]
-    quats_gpu = Mantle.LavaArray(quats_cpu)
-    instances_gpu = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
+    quats_gpu = MVE.LavaArray(quats_cpu)
+    instances_gpu = MVE.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
                                                         extra_usage=AS_INPUT_USAGE)
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = MVE.LavaBackend()
+    bq = MVE.vk_context().default_bq
 
     # Frame 0: grains at x = 0, 5, 10, 15 (separated so each has its own AABB).
     pos_a = [Point3f(Float32(5*(i-1)), 0f0, 0f0) for i in 1:n]
-    positions_gpu = Mantle.LavaArray(pos_a)
+    positions_gpu = MVE.LavaArray(pos_a)
     write_grain_instances_kernel(backend)(positions_gpu, quats_gpu, radius,
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
     tlas = build_accel!() do ctx
         build_tlas(ctx, instances_gpu, 2 * n; allow_update=true)
@@ -43,7 +43,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
-    Mantle.vk_flush!(bq)
+    MVE.vk_flush!(bq)
 
     build_accel!() do ctx
         refit_tlas!(ctx, tlas, instances_gpu, 2 * n)
