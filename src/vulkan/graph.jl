@@ -465,37 +465,6 @@ Base.length(a::Attr) = length(a.resource)
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
 
-"""
-Byte span of a usage, for the barrier that scopes to it.
-
-`pool_offset + offset`, not `offset`: a `VkBufferMemoryBarrier2`'s range is
-relative to the **VkBuffer**, and Lava suballocates, so a resource's own offset
-is into its `MemoryBlock` rather than into the buffer the barrier names. This is
-the same sum `inplace!` and `rename!` compute for a copy, and for the same
-reason.
-
-Without it every scoped barrier reads `offset = 0` on a buffer whose resources
-begin tens of megabytes in — a memory dependency over a range nothing in the
-pass touches. Nothing broke, because desktop drivers treat the range as advisory
-and flush at the stages given; it is still a barrier that does not describe the
-hazard it was derived for, and sync validation is entitled to say so.
-"""
-barrierspan(r, st) = (UInt64(pool_offset(st.buf[]) + st.offset),
-                      UInt64(sizeof(eltype(st)) * prod(st.dims)))
-
-# The same sum for a barrier scoped to a SLICE, which adds the slice's own start.
-# Here rather than in `src/graph/build.jl`, where it was: `pool_offset` and
-# `st.buf[]` are this backend's, so from core it was an `UndefVarError` at the
-# first sliced barrier.
-barrierspan(v::BufferRange, st) =
-    (UInt64(pool_offset(st.buf[]) + st.offset + (first(v.range) - 1) * sizeof(eltype(st))),
-     UInt64(length(v.range) * sizeof(eltype(st))))
-# A pooled transient's storage is a `LavaDeviceArray` — `(ptr, dims)`, which
-# names no buffer and carries no offset. The transient knows both, and its
-# `offset` is already relative to the block's buffer, so no pool_offset here.
-# ↑ moved to src/graph/build.jl
-"""The `VkBuffer` a barrier names. Same split as `barrierspan`."""
-barrierbuffer(r, st) = st.buf[].buffer
 # ↑ moved to src/graph/build.jl
 
 # ↑ moved to src/graph/build.jl
@@ -718,77 +687,45 @@ storage(t::TransientBuffer{T}, block::BufferBlock) where {T} =
 # ↑ moved to src/graph/build.jl
 
 """
-The barrier a pass needs, as one memory barrier with stages and access ORed over
-everything it waits for. Built at compile time: a plan is compiled once and
-replayed, so constructing VK.jl wrapper objects per frame would be ~2.3 kB of
-allocation per barrier for a value that never changes.
+The barrier a pass needs: one `VkMemoryBarrier2` per distinct hazard, and no
+handles anywhere.
 
-The low-level `_` form specifically. VK.jl's wrapper converts to the C struct
-on every call and allocates 1840 bytes doing it; `_DependencyInfo` through
-`_cmd_pipeline_barrier_2` allocates nothing. Measured, not assumed.
+Which hazards exist is core's answer — [`barrierhazards`](@ref), derived per
+resource and exact. This maps each to flags, which is the only part that is
+Vulkan's.
+
+What went away with the buffer barriers: a span list, a sort by `(handle,
+offset)`, an adjacent-span merge, `barrierspan`, `barrierbuffer`, and the
+`renameable` special case that already emitted a global barrier for exactly this
+reason. That case was the general one all along — a recording cannot bake a
+handle for anything that can move, and baking makes everything movable.
+
+It also emits FEWER barriers than the span form on any pass touching several
+buffers the same way: one per distinct mask tuple rather than one per buffer.
+
+Built at compile time: a plan is compiled once and replayed, so constructing
+VK.jl wrapper objects per frame would be ~2.3 kB of allocation per barrier for a
+value that never changes. The low-level `_` form specifically — VK.jl's wrapper
+converts to the C struct on every call and allocates 1840 bytes doing it, where
+`_DependencyInfo` through `_cmd_pipeline_barrier_2` allocates nothing. Measured,
+not assumed.
 
 `nothing` when the pass waits for nothing, which is the point: two passes over
-disjoint resources then have no barrier between them at all.
+disjoint resources have no barrier between them at all, and that absence is what
+lets the GPU overlap them.
 """
 function build_pass_barrier(g, ts::Vector{Transition})
     isempty(ts) && return nothing
     be = VulkanAPI()
     mem = VK._MemoryBarrier2[]
-    spans = @NamedTuple{buf::Any, handle::UInt64, off::UInt64, len::UInt64,
-                        ss::Any, sa::Any, ds::Any, da::Any}[]
-    for t in ts
-        src_stage = reduce(|, (stages(be, u, Src()) for u in t.waits))
-        src_access = reduce(|, (access(be, u, Src()) for u in t.waits))
-        dst_stage = stages(be, t.to, Dst())
-        dst_access = access(be, t.to, Dst())
-        r = t.resource == 0 ? nothing : get(g.ids.by_id, t.resource, nothing)
-        # A resource that can be renamed gets a global barrier instead of one
-        # scoped to its buffer. `st.buf[].buffer` below is baked here, at compile
-        # time, and `rename!` points the resource at a *different* store — so a
-        # scoped barrier would name the store the plan was compiled with and
-        # cover none of the memory that is actually read. Widening loses the span
-        # scoping for these resources and is the only correct answer: a handle
-        # cannot be baked for something that moves.
-        st = (r === nothing || renameable(g, r)) ? nothing : storage(r)
-        if st === nothing
-            push!(mem, VK._MemoryBarrier2(;
-                src_stage_mask = src_stage, src_access_mask = src_access,
-                dst_stage_mask = dst_stage, dst_access_mask = dst_access))
-        else
-            off, len = barrierspan(r, st)
-            b = barrierbuffer(r, st)
-            push!(spans, (buf = b, handle = UInt64(b.vks), off = off, len = len,
-                          ss = src_stage, sa = src_access, ds = dst_stage, da = dst_access))
-        end
+    for (waits, to) in barrierhazards(ts)
+        push!(mem, VK._MemoryBarrier2(;
+            src_stage_mask  = reduce(|, (stages(be, u, Src()) for u in waits)),
+            src_access_mask = reduce(|, (access(be, u, Src()) for u in waits)),
+            dst_stage_mask  = stages(be, to, Dst()),
+            dst_access_mask = access(be, to, Dst())))
     end
-
-    # Adjacent segments that ask for the same thing become one barrier — the
-    # merge half of the interval map, without which a whole-buffer usage of a
-    # buffer sliced in four places emits four entries describing one span. Only
-    # touching spans with identical masks merge; anything else stays its own
-    # barrier, which is the whole point of scoping them.
-    sort!(spans, by = s -> (s.handle, s.off))
-    bufs = VK._BufferMemoryBarrier2[]
-    i = 1
-    while i <= length(spans)
-        s = spans[i]
-        off, len = s.off, s.len
-        j = i + 1
-        while j <= length(spans)
-            t = spans[j]
-            (t.handle == s.handle && t.off == off + len &&
-             t.ss == s.ss && t.sa == s.sa && t.ds == s.ds && t.da == s.da) || break
-            len += t.len
-            j += 1
-        end
-        push!(bufs, VK._BufferMemoryBarrier2(
-            VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED,
-            s.buf, off, len;
-            src_stage_mask = s.ss, src_access_mask = s.sa,
-            dst_stage_mask = s.ds, dst_access_mask = s.da))
-        i = j
-    end
-    VK._DependencyInfo(mem, bufs, [])
+    VK._DependencyInfo(mem, VK._BufferMemoryBarrier2[], [])
 end
 
 function emit_pass_barrier!(bq, dep)

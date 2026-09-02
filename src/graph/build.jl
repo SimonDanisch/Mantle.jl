@@ -582,16 +582,6 @@ storage(a::Attr) = storage(a.resource)
 
 resourcekind(::BufferRange) = BufferKind()
 
-barrierspan(t::TransientBuffer, st) = (UInt64(t.offset), UInt64(nbytes(t)))
-
-barrierbuffer(t::TransientBuffer, st) = t.block.buffer
-
-# `barrierspan(::BufferRange, st)` is NOT here, and did not belong: its body
-# reads `st.buf[]` and calls `pool_offset`, both of which only the Vulkan backend
-# has. It is in `src/vulkan/graph.jl` beside the whole-resource method it shares
-# its arithmetic with. In core it was an `UndefVarError` on the first barrier
-# scoped to a slice — which is every Hikari frame with queue slicing, and
-# nothing before that.
 
 function slice(g::Graph, x, range::UnitRange{Int})
     # `length`, not `length(storage(x))`: a transient has no storage until the
@@ -1100,7 +1090,7 @@ A materialised transient's storage, from whatever `materialize!` put in `block`.
 
 Two backends out of three put the finished array there — a `Vector` view on the
 host, a borrowed `MtlArray` on Metal — and hand it straight back. Vulkan cannot:
-`block` holds a [`BufferBlock`](@ref), because `barrierbuffer` above needs the
+`block` holds a [`BufferBlock`](@ref), because placement needs the
 `VkBuffer` identity and an array view does not carry it, so the `LavaArray` is
 built over the block on demand.
 

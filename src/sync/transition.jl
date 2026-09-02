@@ -21,6 +21,45 @@ struct Transition
 end
 
 """
+    barrierhazards(transitions) -> Vector{Tuple{Vector{Type},Type}}
+
+The distinct `(waits, to)` hazards a pass has to order, with the RESOURCE
+dropped.
+
+A resource decides that a transition exists — which is the whole of the
+dependency analysis, and it stays per resource and exact. It does not belong in
+the barrier that results. A `VkBufferMemoryBarrier2` names a buffer and a byte
+range, but the range is not something hardware can act on: cache invalidation is
+per cache, not per address, so the driver flushes exactly what a global barrier
+would. What the barrier really carries is the stage and access masks, and those
+say which caches to make available and visible.
+
+So the resource is used and then forgotten, which is what lets a recording
+outlive the placement it was recorded against: nothing in the command stream
+names a buffer, so a buffer moving in the pool cannot invalidate it. The code
+already reached this conclusion for renameable resources — "a handle cannot be
+baked for something that moves" — and baking makes every resource one of those.
+
+DISTINCT tuples, never unioned into one. Union would make shader writes visible
+to indirect reads and vice versa, invalidating the command processor's fetch
+path and the vector cache when each needed only one; an acceleration-structure
+read would drag in caches it never touches. The precision that matters lives in
+the masks, and it is kept here exactly.
+
+Images are not here. `VkImageMemoryBarrier2` carries a layout transition, which
+is per-image state with no global equivalent, so image barriers keep naming
+their image — and an image that moves is what `refit!` already detects.
+"""
+function barrierhazards(ts::Vector{Transition})
+    out = Tuple{Vector{Type},Type}[]
+    for t in ts
+        key = (sort(t.waits; by = string), t.to)
+        any(==(key), out) || push!(out, key)
+    end
+    out
+end
+
+"""
 Two things have to be tracked separately, and conflating them emits transitions
 from the wrong state.
 

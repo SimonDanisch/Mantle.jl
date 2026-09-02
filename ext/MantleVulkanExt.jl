@@ -119,8 +119,7 @@ import Mantle: AdaptedAccel
 import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
     Compile, CompiledDispatch, CompiledDraw, DrawCall, Images, Pass,
     PassHandle, PassPlan, Profiler, Recycler, TransientBuffer,
-    TransientImage, TransientResource, WindowSurface, argalign, barrierbuffer,
-    barrierspan,
+    TransientImage, TransientResource, WindowSurface, argalign,
     clearvalue, depthclear, devargs, dispatchrange, drawover, elapsed,
     extrausage, first_target, imageusage, initial_state,
     # `repeat!`'s vocabulary. `supportspredicate` in particular MUST be imported:
