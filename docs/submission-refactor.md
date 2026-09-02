@@ -134,10 +134,18 @@ as "removes the entire class of bug". That was a lifetime fix wearing a
 performance hat; the recording owns them instead. See
 `feedback_no_per_dispatch_descriptor_sets`.
 
-**Settle:** whether `ONE_TIME_SUBMIT` is now correct instead of
-`SIMULTANEOUS_USE`. One recording per slot plus `nextslot!`'s wait means a
-buffer's previous submission has provably completed. `build_plans` names giving
-up `ONE_TIME_SUBMIT` as the standing suspect for baking's 2–3%.
+**Settle: `SIMULTANEOUS_USE` or no flag.** Not `ONE_TIME_SUBMIT` — that means
+"submitted once, then reset or freed" and is illegal for a buffer that is
+replayed, so it was never a candidate. No flag permits resubmission but only
+after the previous submission has completed; `SIMULTANEOUS_USE` permits it while
+still pending. With step 3 there are no argument slots, so this reduces to: does
+`run!` submit again before the previous submission finished? If it always waits,
+no flag is correct and cheaper.
+
+`build_plans` names `SIMULTANEOUS_USE` as the suspect for baking's 2–3%, but that
+comparison moved two variables at once (interpreted-and-recorded-fresh against
+baked-and-replayed) through the heuristic recorder. Re-measure after step 2, do
+not inherit the suspicion.
 
 ### 3. Arguments: one copy, and a `GPURef`
 
@@ -160,6 +168,11 @@ Per-run values ride **inline in the command buffer** via `vkCmdUpdateBuffer`
 (≤64 KB, 4-byte aligned) — the `Update`/`UpdateRef` path that already exists for
 `Buffer` contents — so there is nothing for a concurrent run to race and
 ordering comes from the `:update` pass the scheduler already places.
+
+With `sample_idx` device-derived there is nothing host-fed per run at all, so
+there are **no slots**: one recording, and `nextslot!`/`slot_token`/`passed`/
+`waitfor` have nothing left to protect. Anything a future caller genuinely feeds
+per run gets two small copies — 268 bytes and an index flip, not a ring.
 
 **Deletes:** `rebind!`, `argwrites`, `verifywrites`, `ArgWrite`, the write plan,
 `ARG_SLOTS` (the depth is `length(slot_token)`, already data), and most of
