@@ -165,8 +165,23 @@ move `repeat!` makes for the loop counter.
 
 `bake!` refuses any plan with a surface: "a swapchain image is a different image
 every frame and a recording names one". RayMakie draws to a window, so this is
-what keeps the interpreted path alive. Same shape as the argument ring: one
-recording per image, `recordingfor(plan)` keyed on (slot, image).
+what keeps the interpreted path alive.
+
+A swapchain image is **not** patchable the way an argument pointer is. An
+argument lives in host-visible memory the recording points at, so writing it is
+a store; a swapchain image is named inside recorded commands —
+`vkCmdBeginRendering`'s attachment info holds a `VkImageView`, the layout
+transitions hold the `VkImage` — with no indirection to patch. And the index is
+not chosen: `vkAcquireNextImageKHR` returns whichever image is free, so it is a
+lookup on a value handed to you, not a ring for pipelining.
+
+So do NOT record the whole plan per image. **Render into a fixed offscreen
+target** — one recording, image-independent, holding all the work — and make
+presentation a separate recording that copies that target to the acquired image.
+The per-image part is then N recordings of essentially one command, N = swapchain
+length. The expensive recording never names a swapchain image, so windowed plans
+record exactly like headless ones and this step stops being a second
+recording-management scheme.
 
 ### 5. KA launches become plans — the ad-hoc path dies
 
