@@ -96,10 +96,22 @@ should be regions it owns, acquired at `record!`, released with the recording.
 
 **Adds:** nothing. Four hand-rolled bump allocators become zero.
 
-**Open question to settle first:** do the slabs exist because per-dispatch
-`acquire!` is too slow? If yes the answer is a plan-owned `Arena` (`reserve!` /
-`tenant!` exist) rather than per-dispatch acquisition — still a deletion, different
-mechanism. If they predate the pool, it is a straight replacement.
+**Allocator speed is not a constraint here, and the earlier note asking whether
+it was is wrong.** The graph path already allocates argument memory ONCE:
+`CompiledDispatch` carries `argoff`/`argsize` computed at compile, and
+`packdispatch!` writes at `am.ptr + off` into the plan's single `ArgMemory`. The
+`arg_slabs` bump allocator serves only `ka_launch!` — the ad-hoc path step 5
+deletes.
+
+The one per-dispatch allocator call left on the graph path is
+`get_indirect_buffer`, and under recording it fires once per dispatch at RECORD
+time, not per run. It should not be an allocator call at all: the plan knows how
+many device-sized dispatches it has, so give each an `indirectoff` into one
+region, exactly as `argoff` already works. Zero allocations beyond the region.
+
+And the design goes through `acquire!`/`release!` regardless, so if the pool is
+ever too slow it is optimised or replaced behind that interface — a recording
+cannot tell.
 
 **Fixes a live bug for free:** `reset_indirect_buffer_pool!` rewinds the queue's
 indirect pool whenever the queue drains, while a baked recording holds those
