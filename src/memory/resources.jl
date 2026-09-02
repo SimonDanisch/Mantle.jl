@@ -117,10 +117,23 @@ end
 Scalar(dev, x::T) where {T} =
     (s = Scalar{T}(persistentarray(dev, T, (1,)), dev); upload!(dev, s.store, 1, [x]); s)
 
-"A region of `dims` elements of `T`, from the device's pool."
+"""A region of `dims` elements of `T`, from the device's pool.
+
+`bufferusage(dev, T)` is threaded through as the block's constraint, and it was
+not: `allocate` passed `nothing`, so the hook was declared, documented,
+implemented by both backends — and never called. Every persistent `Buffer` got
+the ordinary usage bits whatever its element type asked for.
+
+Nothing failed visibly, because the two types that ask for more were only ever
+reached by other paths. `Predicate` found it immediately: a conditional-rendering
+predicate read from a buffer without `CONDITIONAL_RENDERING_BIT` is undefined,
+and the two drivers here disagree about what undefined means — RADV returned the
+right answer and NVIDIA hung the GPU, with `vkQueueWaitIdle` never returning.
+"""
 persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
     allocate(pool(dev), dev, Persistent(), T, dims;
-             align = 256, blocksize = blocksize(dev))
+             align = 256, blocksize = blocksize(dev),
+             constraint = bufferusage(dev, T))
 
 Base.length(b::Buffer) = b.len
 Base.size(b::Buffer) = size(b.store)

@@ -124,6 +124,11 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     barrier_elision::Bool
     # One-shot, consumed by exactly the next dispatch on THIS queue.
     next_skip_barrier::Bool
+    # How many nested "do not end this command buffer here" scopes are open.
+    # Nonzero means a construct is recording that spans several commands and
+    # cannot survive a split or a submission in the middle — a conditional
+    # rendering scope is the one that exists. See `unsplittable`.
+    scope_depth::Int
     # Set by the KA launch path for the dispatch it is about to record: "this
     # dispatch enumerated its buffers, so the elision tracker saw everything it
     # touches". Same one-shot shape as `next_skip_barrier`, and it was a global
@@ -149,12 +154,22 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     # `Any` because `CapturedSequence` is declared in `command.jl`; use sites
     # assert it, the same shape as `ctx`.
     capturing::Any
-    # Highest timeline value signalled by a replay on this queue. `flush!` has to
-    # wait on it: a replay puts no `CommandBatch` in `in_flight`, so the in-flight
-    # scan alone would return before the GPU had run any of it. Was an
-    # `IdDict{BatchQueue,UInt64}` — a per-queue value in a process-wide dict keyed
-    # by the queue, which is the surrogate a field replaces.
-    replay_watermark::UInt64
+    # Everything handed to the device from this queue and not yet known finished,
+    # oldest first. See `graph/submission.jl`.
+    #
+    # This was `replay_watermark::UInt64` — "highest timeline value signalled by a
+    # replay" — which existed because a replay puts no `CommandBatch` in
+    # `in_flight`, so `flush!` scanning `in_flight` alone returned before the GPU
+    # had run any of it. That is one record of outstanding work per SUBMISSION
+    # PATH, and there were two paths, so there were two records and every consumer
+    # had to remember both.
+    #
+    # One list, and a token per entry that the backend understands. `flush!` waits
+    # for `newest`; `nextslot!` asks whether the token that last used its slot has
+    # `passed`; a replay is a submission like any other. Nothing folds over two
+    # lists looking for a maximum any more, and a third submission path would be
+    # recorded here without touching a single consumer.
+    outstanding::Vector{Outstanding}
     # What the last dispatch on this queue was, for the dispatch log and for
     # DEVICE_LOST diagnostics. Process-wide, these attributed one queue's crash
     # to another queue's kernel.
@@ -253,8 +268,15 @@ function ensure_active_batch! end
 """
     flush!(bq, device)
 
-Submit everything `bq` has recorded. Does not wait — use [`waitidle`](@ref) for
-that.
+Submit everything `bq` has recorded, and wait until the device has finished it.
+
+The docstring said "does not wait — use `waitidle` for that", and the only
+implementation has always waited: it submits and then blocks on the timeline
+until the newest submitted value is signalled. Believing the docstring is how
+`waitidle(::LavaDevice)` came to be `vkDeviceWaitIdle` alone, which waits for
+submitted work and therefore not for the batch the caller was still holding.
+
+To submit without waiting, `submit!(bq)`.
 """
 function flush! end
 
@@ -264,13 +286,25 @@ function flush! end
 # driver-shaped hole this file exists to close.
 flush!(bq::BatchQueue) = flush!(bq, bq.device)
 
+# The submission list this queue keeps — see `graph/submission.jl`.
+outstanding(bq::BatchQueue) = bq.outstanding
+
 """
     waitidle(device)
 
-Block until the device has finished everything submitted to it.
+Hand over everything this device's queue is still holding, then block until it
+has finished all of it.
+
+"Everything SUBMITTED to it" is what this said, and it is the weaker contract
+that made the Vulkan method wrong: a headless plan submits when something asks
+it to, so a `run!` sits in an open batch, and a wait that skips it returns
+before the device has been told the work exists. The caller cannot tell from the
+outside — the readback that usually follows flushes on its own — so what broke
+was the caller who wanted the handover itself, to keep one submission from
+growing past the driver's timeout.
 
 The blunt instrument, for teardown and for reading back a resource whose
-producer was submitted on a queue the reader does not track. Per-submission
-waits belong on the timeline instead.
+producer was submitted on a queue the reader does not track. To wait for ONE
+plan's last run, [`waitfor!`](@ref).
 """
 function waitidle end

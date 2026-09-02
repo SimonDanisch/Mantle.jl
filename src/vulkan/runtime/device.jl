@@ -59,6 +59,22 @@ mutable struct CommandBatch
     # present — but they cannot go back to `free_cmd_bufs` there either, because
     # only `reclaim_batch!` knows the fence has passed. So they wait here.
     submitted_cmd_bufs::Vector{VK.CommandBuffer}
+    # Command buffers a `replay!` asked to run at the end of this batch.
+    #
+    # A captured sequence is not recorded, so it has nothing to record INTO —
+    # but it still has to go to the device in order behind whatever the host
+    # recorded this frame. Appending it here rather than submitting it
+    # separately is what makes a baked `run!` one `vkQueueSubmit2`: the updates
+    # the graph recorded and the replay of everything else leave together.
+    #
+    # `replay!` used to submit on its own, with a hand-rolled wait on the newest
+    # outstanding timeline value to order it behind the batch it had just
+    # force-closed. Two submissions and a semaphore wait, to express what
+    # submission order on one queue already gives.
+    #
+    # NOT returned to `free_cmd_bufs` by `reclaim_batch!`: the capture owns
+    # them and replays them again. They are cleared at submit.
+    replay_cmd_bufs::Vector{VK.CommandBuffer}
 
     # Timeline value this batch will signal on its queue's `timeline_sem`.
     # Assigned at record time so `sync_access!` can store it into `buf.last_write`.
@@ -86,6 +102,7 @@ function init_batch(cb::VK.CommandBuffer)
     sizehint!(pinned, 128)
     waits = Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}[]
     return CommandBatch(cb, false, 0, 0, false, pinned, Any[], String[],
+        VK.CommandBuffer[],
         VK.CommandBuffer[],
         VK.CommandBuffer[],
         UInt64(0),                       # signal_value (assigned at record time)
@@ -132,8 +149,9 @@ function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ct
                     Threads.threadid(),  # owning_thread
                     64, 3000, UInt64(120) * 1_000_000_000,  # auto-submit, CB split, flush timeout
                     :memory, false, false,                  # barrier mode / elision / one-shot skip
+                    0,                                      # scope_depth: no unsplittable scope open
                     false, UInt64[], UInt64[],              # ranges_declared + elision tracker
-                    nothing, nothing, UInt64(0),            # deferred indirect, capture, replay watermark
+                    nothing, nothing, Outstanding[],        # deferred indirect, capture, outstanding submissions
                     "", "",                                 # last / prev dispatch info
                     queue_index)
     # Plug the back-reference into every pre-allocated batch so `batch.bq`
@@ -302,6 +320,11 @@ mutable struct VkContext
     # capability and the raygen can use `lava_rt_hit_object_*` /
     # `lava_rt_reorder_thread_*` intrinsics.  NVIDIA-only.
     ser_available::Bool
+    # Whether VK_EXT_conditional_rendering is enabled. `repeat!` needs it — it is
+    # how a device-written count decides which iterations of a recorded loop
+    # actually run — and a graph that asks for one on a device without it has to
+    # be told so at compile, not silently run every iteration.
+    conditional_rendering_available::Bool
     # Whether VK_KHR_cooperative_matrix is enabled: subgroup-scope matrix
     # multiply-accumulate (tensor cores). `coopmat_shapes` holds the driver's
     # legal (M, N, K, A/B type, C/result type, saturating) combinations -- the
@@ -429,6 +452,7 @@ mutable struct VkContext
                        as_scratch_align::UInt64,
                        ray_query_available::Bool=false,
                        ser_available::Bool=false,
+                       conditional_rendering_available::Bool=false,
                        coopmat_available::Bool=false,
                        coopmat_shapes=nothing,
                        coopmat2::CoopMat2Caps=CoopMat2Caps(),
@@ -466,6 +490,7 @@ mutable struct VkContext
         ctx.as_scratch_align = as_scratch_align
         ctx.ray_query_available = ray_query_available
         ctx.ser_available = ser_available
+        ctx.conditional_rendering_available = conditional_rendering_available
         ctx.coopmat_available = coopmat_available
         ctx.coopmat_shapes = coopmat_shapes === nothing ?
             eltype(fieldtype(VkContext, :coopmat_shapes))[] : coopmat_shapes
@@ -1169,6 +1194,24 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
     # VK_EXT_memory_budget — lets us read VkPhysicalDeviceMemoryBudgetPropertiesEXT
     # for real heap utilisation, used in OOM error reporting.
     has_memory_budget = has_extension(phys_dev, "VK_EXT_memory_budget")
+    # Device-generated commands: a shader writes the command stream and the host
+    # issues one execute whose SEQUENCE COUNT comes from a device address. That
+    # is the only way either backend lets the device decide how much work runs —
+    # neither Vulkan nor Metal has device-side enqueue.
+    #
+    # It is NOT what `repeat!` lowers to, and the reason is worth recording here
+    # because the two extensions look interchangeable and are not: DGC sequences
+    # carry no barriers between them, so N sequences are N dispatches that may
+    # overlap. That expresses "do this independent thing N times"; it cannot
+    # express a loop whose iteration k+1 reads what k wrote, which is every
+    # bounce loop.
+    has_dgc = has_extension(phys_dev, "VK_EXT_device_generated_commands")
+    # Conditional rendering: a 32-bit predicate in a device buffer, read at
+    # EXECUTION time, that discards the commands inside its scope. That is what
+    # `repeat!` lowers to — the body is recorded `maxiters` times with ordinary
+    # barriers between iterations, and the device decides how many of them run.
+    # Barriers still execute inside a discarded scope; only the work is skipped.
+    has_cond_render = has_extension(phys_dev, "VK_EXT_conditional_rendering")
     # Cooperative matrix — subgroup-scope matrix multiply-accumulate (tensor
     # cores). Probed once here; kernels pick a coopmat or a scalar
     # instantiation from `ctx.coopmat_available` / `ctx.coopmat_shapes`.
@@ -1225,6 +1268,12 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
     end
     if has_memory_budget
         push!(extensions, "VK_EXT_memory_budget")
+    end
+    if has_dgc
+        push!(extensions, "VK_EXT_device_generated_commands")
+    end
+    if has_cond_render
+        push!(extensions, "VK_EXT_conditional_rendering")
     end
     if has_coopmat
         push!(extensions, "VK_KHR_cooperative_matrix")
@@ -1469,6 +1518,22 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
             )
         end
     end
+    if has_dgc
+        q = VK.get_physical_device_features_2(phys_dev,
+            VK.PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT).next
+        has_dgc = q.device_generated_commands
+        has_dgc && (feature_chain = VK.PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT(
+            true, q.dynamic_generated_pipeline_layout; next = feature_chain))
+    end
+    if has_cond_render
+        q = VK.get_physical_device_features_2(phys_dev,
+            VK.PhysicalDeviceConditionalRenderingFeaturesEXT).next
+        has_cond_render = q.conditional_rendering
+        # `inherited_conditional_rendering` is for secondary command buffers,
+        # which nothing here records into — asked for as reported, not as `true`.
+        has_cond_render && (feature_chain = VK.PhysicalDeviceConditionalRenderingFeaturesEXT(
+            true, q.inherited_conditional_rendering; next = feature_chain))
+    end
     if has_max_reconv
         q = VK.get_physical_device_features_2(phys_dev,
             VK.PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR).next
@@ -1604,6 +1669,7 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
         as_scratch_align,
         has_ray_query,
         has_ser,
+        has_cond_render,
         has_coopmat,
         coopmat_shapes,
         coopmat2_caps,

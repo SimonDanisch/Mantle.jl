@@ -263,6 +263,40 @@ end
 end
 
 """
+Which positions in an argument tuple occupy a push-constant slot, in order.
+
+The one statement of the rule. Zero-size arguments take no bytes, and
+type-valued ones
+(`T = Float32` captured by an `@kernel`) are ghost in GPUCompiler's view even
+though `typeof(Float32) === DataType` has nonzero `sizeof` — packing into a slot
+that does not exist is a segfault.
+
+Returns `all_args` indices; the position in the returned vector is the LAYOUT
+index, which is what `offsets` and `byval_sizes` are indexed by.
+"""
+function slotpositions(types)
+    non_ghost = Int[]
+    for (i, Ti) in enumerate(types)
+        sizeof(Ti) == 0 && continue
+        Ti <: Type && continue
+        push!(non_ghost, i)
+    end
+    return non_ghost
+end
+
+"""
+Whether `pack_arg!` writes this type at its own offset and nowhere else.
+
+A by-value aggregate goes into the inline area past `base_size`, at a position
+that depends on every by-value argument before it, so it cannot be rewritten on
+its own. Everything else — primitives, pointers, buffer addresses — is a single
+store at `offsets[layout_i]`, which is what makes a per-argument update possible
+at all. Read off the branch in `pack_arg!` rather than restated: that method
+tests exactly `isbitstype(T) && !isprimitivetype(T)`.
+"""
+standalone_slot(::Type{T}) where {T} = !(isbitstype(T) && !isprimitivetype(T))
+
+"""
     pack_args_direct!(bq, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
 
 Write kernel arguments directly into mapped GPU memory via per-type
@@ -275,17 +309,7 @@ before us).
                                         offsets::Vector{Int}, base_size::Int,
                                         byval_sizes::Vector{Int},
                                         all_args::T) where {T <: Tuple}
-    types = T.parameters
-    non_ghost = Int[]
-    for (i, Ti) in enumerate(types)
-        sizeof(Ti) == 0 && continue
-        # Type-valued args (e.g. `T=Float32` captured by @kernel) are ghost
-        # in GPUCompiler's view — push_info allocates no bytes for them —
-        # even though `typeof(Float32) === DataType` has nonzero sizeof.
-        # Skip or we'll pack into a slot that doesn't exist → segfault.
-        Ti <: Type && continue
-        push!(non_ghost, i)
-    end
+    non_ghost = slotpositions(T.parameters)
     exprs = Expr[]
     for (layout_i, arg_i) in enumerate(non_ghost)
         push!(exprs, :(inline_offset = pack_arg!(
@@ -713,7 +737,7 @@ count since the last submit, so it is exactly "this recording holds handouts".
 function reclaim_arg_buffer_pool!(bq::VulkanBatchQueue)
     bq.arg_pool_frontier == UInt64(0) && return false
     bq.arg_alloc_count == 0 || return false
-    query_timeline(bq) >= bq.arg_pool_frontier || return false
+    passed(bq, bq.arg_pool_frontier) || return false
     reset_arg_buffer_pool!(bq)
     bq.arg_pool_frontier = UInt64(0)
     return true

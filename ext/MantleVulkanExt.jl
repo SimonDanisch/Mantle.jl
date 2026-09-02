@@ -60,7 +60,10 @@ import Mantle: Attribute, Device, Graph, Plan, Surface, Transient, Update,
 # rather than being a separate `MantleVulkanExt.flush!` nothing can reach.
 import Mantle: allocate_batch_queue!, release_batch_queue!, ensure_active_batch!,
     flush!, waitidle, supports_graphics, use_bindings!, devicearray, supports_rt_pipeline,
-    supports_batch_queue, submit!, batchqueue
+    supports_batch_queue, submit!, batchqueue,
+    # The submission record — `graph/submission.jl`. One list of what the device
+    # has been given, replacing the five separate records this backend kept.
+    Outstanding, submitted!, newest, sweep!, idle, outstanding
 
 import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
     draw_indirect_in_pass!, set_viewport!, reset_device!, blit!, present_frame!,
@@ -120,9 +123,24 @@ import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
     barrierspan,
     clearvalue, depthclear, devargs, dispatchrange, drawover, elapsed,
     extrausage, first_target, imageusage, initial_state,
+    # `repeat!`'s vocabulary. `supportspredicate` in particular MUST be imported:
+    # without it the method below defines a new function in this module, core's
+    # `false` stands, and `repeat!` refuses the one backend that implements it.
+    Predicate, supportspredicate,
     initial_usage, kernelfor, lastuses, lp_of, makeimage,
     rawargs, remakeimage!,
     record_draw!, renameable,
+    # The argument ring, all of it core's now: how deep a plan pipelines
+    # (`ARG_SLOTS`), which entries a baked run has to write again
+    # (`rebinding`), and what advancing a slot means (`nextslot!`, above).
+    ARG_SLOTS, rebinding,
+    # The baked plan's argument update plan: what `bake!` records and `rebind!`
+    # performs. Core's type; this backend fills it in, because only it knows the
+    # push-constant layout an offset refers to.
+    ArgWrite, argvalue,
+    # Giving a renamed buffer back once the device has passed the run that bound
+    # it. Core's since it stopped comparing timeline values by hand.
+    recycle!,
     # The modelled trace pass: the declaration this backend compiles, and the
     # compiled form it records. `Trace` is exported and would arrive through
     # `using Mantle`; it is listed because `CompiledTrace` is not, and a pair

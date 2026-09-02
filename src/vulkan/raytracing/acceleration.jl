@@ -117,8 +117,7 @@ function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
         # query_timeline throws on healthy-device failure.  In finalizer
         # context Julia logs and moves on; device_lost is checked fresh on
         # the next call.
-        current = query_timeline(bq)
-        if current < val
+        if !passed(bq, val)
             # Finalizer-thread push — guard with the deferred_frees_lock so
             # the main thread's drain doesn't race.
             lock(bq.deferred_frees_lock) do

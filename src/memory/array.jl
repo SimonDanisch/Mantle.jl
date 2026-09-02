@@ -71,8 +71,10 @@ everything else here, and released by `reclaim!` once the device is done rather
 than on the spot, so no caller has to know what is in flight.
 """
 function allocate(pool::Pool, dev, kind, ::Type{T}, dims::NTuple{N,Int};
-                  align::Int = 256, blocksize::Int = 64 << 20) where {T,N}
-    r = acquire!(pool, dev, kind, nothing, prod(dims) * sizeof(T); align, blocksize)
+                  align::Int = 256, blocksize::Int = 64 << 20,
+                  constraint = nothing) where {T,N}
+    r = acquire!(pool, dev, kind, nothing, prod(dims) * sizeof(T);
+                 align, blocksize, constraint)
     return DeviceArray{T}(r, dims)
 end
 allocate(pool::Pool, dev, kind, ::Type{T}, dims::Integer...; kw...) where {T} =

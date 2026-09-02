@@ -49,6 +49,7 @@ const NO_ACCESS = acc(0)
 stages(::VulkanAPI, ::Type{Vertices}, _) = stage(VK.PIPELINE_STAGE_2_VERTEX_SHADER_BIT)
 stages(::VulkanAPI, ::Type{Indices}, _) = stage(VK.PIPELINE_STAGE_2_INDEX_INPUT_BIT)
 stages(::VulkanAPI, ::Type{Indirect}, _) = stage(VK.PIPELINE_STAGE_2_DRAW_INDIRECT_BIT)
+stages(::VulkanAPI, ::Type{Predicated}, _) = stage(VK.PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT)
 # Shader reads, both of them, so they name the shader stages like `Storage` does.
 # No Mantle API produces either yet — there is no uniform binding and no
 # sampled-image binding — but a vocabulary entry that lowers to "everything" is
@@ -103,6 +104,7 @@ stages(::VulkanAPI, ::Type{<:Depth}, ::Dst) =
 access(::VulkanAPI, ::Type{Vertices}, _) = acc(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
 access(::VulkanAPI, ::Type{Indices}, _) = acc(VK.ACCESS_2_INDEX_READ_BIT)
 access(::VulkanAPI, ::Type{Indirect}, _) = acc(VK.ACCESS_2_INDIRECT_COMMAND_READ_BIT)
+access(::VulkanAPI, ::Type{Predicated}, _) = acc(VK.ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT)
 access(::VulkanAPI, ::Type{Uniform}, _) = acc(VK.ACCESS_2_UNIFORM_READ_BIT)
 access(::VulkanAPI, ::Type{Sampled}, _) = acc(VK.ACCESS_2_SHADER_SAMPLED_READ_BIT)
 access(::VulkanAPI, ::Type{CopySrc}, _) = acc(VK.ACCESS_2_TRANSFER_READ_BIT)

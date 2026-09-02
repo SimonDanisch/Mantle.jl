@@ -455,6 +455,14 @@ function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
     # the end of its buffer.
     cb_infos = [VK.CommandBufferSubmitInfo(cb, UInt32(0)) for cb in batch.sealed_cmd_bufs]
     push!(cb_infos, VK.CommandBufferSubmitInfo(cmd, UInt32(0)))
+    # And a replay queued behind them, last, exactly as `submit!` orders it. A
+    # windowed plan cannot be baked today, so this list is empty in every path
+    # that reaches here — but leaving it out is the same silent drop the
+    # paragraph above is about, and it would not announce itself either.
+    for cb in batch.replay_cmd_bufs
+        push!(cb_infos, VK.CommandBufferSubmitInfo(cb, UInt32(0)))
+    end
+    empty!(batch.replay_cmd_bufs)
     # Moved out of `sealed_cmd_bufs`, or the next frame submits them again: this
     # batch is reused across frames and `reclaim_batch!` is what normally empties
     # that list, which does not happen between two presents. Re-submitting a
@@ -469,6 +477,12 @@ function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
     # Store batch in window's per-frame slot — it will be reclaimed in
     # acquire_next_image! after the fence wait confirms GPU completion.
     # Do NOT push to free_batches here: the GPU is still using this command buffer.
+    # In the one place that means "on its way to the device". A present submits
+    # without going through `submit!` — the batch goes into the window's frame
+    # slot rather than `bq.in_flight` — so nothing recorded it, and `flush!`
+    # computed a target that excluded the frame currently being drawn. See
+    # `graph/submission.jl`.
+    submitted!(bq, batch.signal_value; tag = :present)
     bq.active_batch = nothing
     win.frame_batches[fi] = batch
     empty!(batch.wait_semaphores)

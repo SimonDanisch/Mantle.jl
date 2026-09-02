@@ -50,6 +50,10 @@ struct Dst end
 struct Vertices <: Usage end
 struct Indices <: Usage end
 struct Indirect <: Usage end
+# `repeat!`'s per-iteration flags, read by the command processor when it decides
+# whether to run a predicated pass. Distinct from `Indirect` because the stage
+# and access it lowers to are the conditional-rendering ones, not the draw ones.
+struct Predicated <: Usage end
 struct Uniform <: Usage end
 struct Sampled <: Usage end
 struct Present <: Usage end
@@ -102,6 +106,7 @@ struct Depth{DA<:Access,SA<:Access,Discard} <: Usage end
 kindof(::Type{Vertices}) = BufferKind()
 kindof(::Type{Indices}) = BufferKind()
 kindof(::Type{Indirect}) = BufferKind()
+kindof(::Type{Predicated}) = BufferKind()
 kindof(::Type{Uniform}) = BufferKind()
 kindof(::Type{Sampled}) = ImageKind()
 kindof(::Type{Present}) = ImageKind()

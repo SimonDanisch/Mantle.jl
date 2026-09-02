@@ -799,6 +799,45 @@ if _VULKAN_OK
         end
 
 
+        # What baking is FOR, and three things it silently was not: it executed
+        # the plan as it recorded it, it froze `Ref` arguments at capture, and it
+        # pinned one argument slot for life so the repack that fixed the second
+        # raced the device. All three are numbers a run produces, so both files
+        # assert on buffer contents rather than on bookkeeping.
+        # A latent fault in the arena allocator that only a second driver could
+        # show: the memory was not allocated for device addresses, and NVIDIA
+        # returns a usable address anyway. Asserted through the validation layer,
+        # which is the loader's and so reports it on every GPU.
+        @testset "arena memory is allocated for device addresses" begin
+            include(joinpath(VULKAN_TESTS, "test_arena_memory_device_address.jl"))
+        end
+
+
+        @testset "baking" begin
+            include(joinpath(VULKAN_TESTS, "test_capture_does_not_execute.jl"))
+            include(joinpath(VULKAN_TESTS, "test_baked_matches_unbaked.jl"))
+            # A recording belongs to the argument slot it was captured in, and
+            # the ring is not at slot 0 for a plan that has already run.
+            include(joinpath(VULKAN_TESTS, "test_bake_after_run.jl"))
+            # Capturing a plan big enough to allocate inside its own capture.
+            include(joinpath(VULKAN_TESTS, "test_no_pool_trim_while_capturing.jl"))
+        end
+
+        # What "wait for the GPU" has to mean when Mantle owns submission: a
+        # wait that ignores the batch the caller is still holding is not one.
+        @testset "waiting" begin
+            include(joinpath(VULKAN_TESTS, "test_waitidle_submits.jl"))
+        end
+
+        # A loop recorded once whose trip count the device decides. Also the
+        # regression test for `bufferusage` never having been called: a
+        # predicate buffer without `CONDITIONAL_RENDERING_BIT` is undefined, and
+        # the two drivers here disagreed — RADV answered correctly, NVIDIA hung.
+        @testset "repeat!" begin
+            include(joinpath(VULKAN_TESTS, "test_repeat.jl"))
+        end
+
+
         # Catches an invalid module that the driver accepts and runs correctly, so it
         # is invisible to every other test unless the device carries
         # `DebugConfig(validation = true)`.

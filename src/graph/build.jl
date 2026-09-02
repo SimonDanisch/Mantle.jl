@@ -18,6 +18,144 @@ function compute!(f, g::Graph, name::AbstractString)
 end
 
 """
+    repeat!(f, graph, maxiters, count) -> passes
+    repeat!(f, graph, maxiters; while_nonzero = flag) -> passes
+
+Record `maxiters` iterations of a loop body and let the DEVICE decide how many of
+them run. `f(i)` is called once per iteration, `i` in `1:maxiters`, and declares
+that iteration's passes exactly as it would outside a loop.
+
+The gate is re-evaluated BEFORE EACH ITERATION, from device memory, which is what
+makes this a loop rather than a bounded repeat: the body may move the value the
+gate reads, so a loop can end on a condition it discovers as it goes. That is the
+shape a wavefront bounce loop has — it runs until the ray queue empties, and
+nothing knows when that is until it happens.
+
+Two spellings of the gate, one mechanism:
+
+  * `count` — a device integer; iteration `i` runs while `i <= count[]`.
+  * `while_nonzero` — a device integer; the iteration runs while it is not zero.
+    A queue's own live count is usually already this, so the loop needs no
+    bookkeeping of its own.
+
+Nothing about the trip count reaches the host. The loop is recorded once, at its
+maximum, and iterations the gate turns off are discarded at execution.
+
+The lowering is a per-iteration predicate and not device-generated commands, and
+the difference is not an implementation detail: DGC repeats a dispatch with NO
+barriers between the repetitions, which is right for `count` independent things
+and cannot express a loop whose iteration k+1 reads what k wrote.
+
+What a discarded iteration still costs is its barriers, its gate dispatch and its
+predicate test; what it saves is the body. So `maxiters` is a bound to be chosen,
+not a free parameter — a loop recorded at 1000 and running 3 pays 997 iterations
+of that overhead.
+
+The body may not allocate transients that outlive their iteration: every
+iteration names the same resources, which is what makes one recording legal.
+"""
+function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
+                 while_nonzero = nothing)
+    maxiters >= 1 || throw(ArgumentError("repeat!: maxiters must be at least 1, got $maxiters"))
+    (count === nothing) == (while_nonzero === nothing) && throw(ArgumentError(
+        "repeat!: give exactly one gate — a `count` positionally, or " *
+        "`while_nonzero = flag`."))
+    # `typeof` and not the device itself: a device `show`s its whole pool, and an
+    # error message that dumps a few hundred kilobytes of zeroed bytes buries the
+    # sentence that says what went wrong.
+    supportspredicate(g.dev) || throw(ArgumentError(
+        "repeat!: $(nameof(typeof(g.dev))) cannot discard recorded work on a " *
+        "device-written predicate, so a device-decided trip count is not " *
+        "expressible here. Loop on the host, or record a fixed number of " *
+        "iterations."))
+    n = Int(maxiters)
+    src = count === nothing ? while_nonzero : count
+    # ONE flag, rewritten before each iteration, rather than an array expanded
+    # once up front. The array version was the first design and it cannot express
+    # a loop at all: expanding `count` into N flags before the body runs fixes
+    # the trip count at a moment when a bounce loop does not yet know it. Writing
+    # the flag per iteration costs one small dispatch each and is what lets the
+    # body decide whether there is a next one.
+    #
+    # A single slot is enough BECAUSE the gate is per iteration: the flag is
+    # written, read, and written again, and the graph derives both hazards from
+    # the usages declared below.
+    pred = Buffer(g.dev, [Predicate(0)])
+    out = Pass[]
+    for i in 1:n
+        compute!(g, "repeat!/gate-$i") do p
+            use(p, src; read = true)
+            use(p, pred; write = true)
+            if count === nothing
+                dispatch!(p, gate_nonzero!, (pred, src), 1)
+            else
+                dispatch!(p, gate_count!, (pred, src, Int32(i)), 1)
+            end
+        end
+        first_new = length(passes(g)) + 1
+        f(i)
+        for k in first_new:length(passes(g))
+            pp = passes(g)[k]
+            pp.predicate === nothing || throw(ArgumentError(
+                "repeat!: pass \"$(pp.name)\" already has a predicate — nested " *
+                "`repeat!` is not supported, because a pass has one predicate and " *
+                "nesting needs their conjunction."))
+            pp.predicate = (pred, 0)
+            # The predicate READ is a hazard like any other, and declaring it is
+            # what makes the graph put a barrier between the gate that writes the
+            # flag and the passes gated on it — and between those passes and the
+            # NEXT gate, which overwrites it. Left undeclared both are races the
+            # scheduler cannot see.
+            push!(pp.usages, resourceid(g, pred) => Predicated)
+            touch!(g, pred)
+            push!(out, pp)
+        end
+    end
+    return out
+end
+
+"""
+One iteration's go/no-go flag, as the device reads it.
+
+A distinct type rather than a plain `UInt32` because the ELEMENT TYPE is what
+tells a backend how the buffer will be used — the same mechanism
+`DrawIndirectCommand` uses to earn `INDIRECT_BUFFER` usage. A predicate buffer
+needs a usage flag that no ordinary `UInt32` buffer should carry.
+
+Nonzero runs the iteration, zero discards it. That is the Vulkan convention
+(`vkCmdBeginConditionalRenderingEXT` discards on zero) taken as the portable one,
+so a kernel writing predicates reads the same on every backend.
+"""
+struct Predicate
+    go::UInt32
+end
+
+"""The gate for `repeat!(…, count)`: this iteration runs while `i <= count[]`."""
+@kernel function gate_count!(pred, count, i::Int32)
+    @inbounds pred[1] = Predicate(i <= Int32(count[1]) ? UInt32(1) : UInt32(0))
+end
+
+"""The gate for `repeat!(…; while_nonzero)`: this iteration runs while it is set.
+
+Re-read every iteration, so a body that empties the thing it is draining stops
+the loop, and one that refills it carries on."""
+@kernel function gate_nonzero!(pred, flag)
+    @inbounds pred[1] = Predicate(flag[1] != 0 ? UInt32(1) : UInt32(0))
+end
+
+"""
+    supportspredicate(device) -> Bool
+
+Whether this device can discard recorded work on a value it reads from a buffer
+at execution time — what [`repeat!`](@ref) needs.
+
+`false` in core, so a backend that has no such mechanism refuses `repeat!` at
+build rather than silently running every recorded iteration, which would be the
+one wrong answer that still produces a picture.
+"""
+supportspredicate(::Any) = false
+
+"""
     resourceid(graph, r) -> Int
 
 The graph's id for a resource, interning it on first sight.
@@ -92,7 +230,7 @@ DrawCall(shader, args, count) = DrawCall(shader, args, count, ())
 # `Pass` is Mantle's now — see `src/graph/types.jl`.
 
 Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing,
-                        DrawCall[], Pair{Int,Type}[], Any[])
+                        DrawCall[], Pair{Int,Type}[], Any[], nothing)
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 
@@ -125,12 +263,36 @@ alignment(c::Compile, t) = alignment(c.graph.dev, t)
 
 arena(::TransientBuffer) = Buffers()
 
-Recycler() = Recycler(Dict{Int,Vector{Any}}(), Tuple{Int,Any,UInt64}[])
+Recycler() = Recycler(Dict{Int,Vector{Any}}(), Tuple{Int,Any,Any}[])
 
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-"""Hand a buffer back, reusable once the queue timeline passes `signal`."""
-retire!(r::Recycler, store, nbytes::Integer, signal::Integer) =
-    push!(r.retiring, (Int(nbytes), store, UInt64(signal)))
+"""
+Move everything the device has finished with onto the free lists.
+
+Gated on completion tokens rather than on a frame count, because how many runs
+are in flight is not this code's business and changing it must not turn
+recycling into a use-after-free.
+
+Core's, and it took the move to `passed` to make it so: this asked
+`query_timeline(bq)` and compared raw timeline values, which is why it lived in
+the Vulkan backend and why `Recycler` held a `UInt64`.
+"""
+function recycle!(r::Recycler, dev)
+    keep = 0
+    for (bytes, store, tok) in r.retiring
+        if passed(dev, tok)
+            push!(get!(() -> Any[], r.free, bytes), store)
+        else
+            keep += 1
+            r.retiring[keep] = (bytes, store, tok)
+        end
+    end
+    resize!(r.retiring, keep)
+    r
+end
+
+"""Hand a buffer back, reusable once the device has passed `token`."""
+retire!(r::Recycler, store, nbytes::Integer, token) =
+    push!(r.retiring, (Int(nbytes), store, token))
 
 """
     imageusage(device, T) -> backend usage mask
@@ -576,6 +738,35 @@ end
 
 rawargs(args::Tuple) = map(argvalue, args)
 
+"""
+Whether this argument can hold a different value on the next run.
+
+The mirror of [`argvalue`](@ref), and deliberately the same one level deep:
+`rawargs` maps `argvalue` over the argument tuple and `argvalue` unwraps exactly
+one thing, a `Base.RefValue`. So a `Ref` moves and nothing else does, and this
+says so with the same two methods rather than a second opinion about it.
+
+What it is for: a baked plan replays commands that read their arguments out of
+the plan's own memory, so the only per-run host work it needs is rewriting the
+arguments that can differ. Anything else was written at `bake!` and is still
+there. See `Plan.writes`.
+"""
+isdynamic(::Base.RefValue) = true
+
+isdynamic(x) = false
+
+"""Whether any argument in a launch's tuple can move. See [`isdynamic`](@ref)."""
+dynamicargs(args::Tuple) = any(isdynamic, args)
+
+# Per compiled entry, and by dispatch rather than by a field name that happens to
+# be shared: a draw counts vertices and a dispatch and a trace take an ndrange,
+# and the three types name that field differently on purpose.
+rebinding(d::CompiledDraw) = dynamicargs(d.args) || isdynamic(d.count)
+
+rebinding(d::CompiledDispatch) = dynamicargs(d.args) || isdynamic(d.ndrange)
+
+rebinding(t::CompiledTrace) = dynamicargs(t.args) || isdynamic(t.ndrange)
+
 devargs(ad, raw::Tuple) = map(a -> Adapt.adapt(ad, a), raw)
 
 """The resource a usage ultimately names: a slice and a vertex binding both
@@ -770,7 +961,7 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                           a.offsets, a.peak, a.naive,
                           makeprofiler(g.dev, c.passes, profile),
                           alias, coalesce, policy,
-                          makeargmemory(g.dev, c.passes), nothing)
+                          makeargmemory(g.dev, c.passes), nothing, nothing)
             # After construction, because a plan cannot be a tenant before it is a
             # plan — and the arena it was just placed into may grow for the NEXT
             # plan, which is when this registration earns its keep.
@@ -872,8 +1063,11 @@ function free!(pl::Plan)
     # names. Dropping the plan alone would leave both to the GC, which does not
     # know it is holding device memory.
     if pl.baked !== nothing
-        release!(pl.baked)
+        for seq in pl.baked
+            release!(seq)
+        end
         pl.baked = nothing
+        pl.writes = nothing
     end
     giveup!(pool(pl.graph.dev), pl.slabs, pl.arenas, pl)
 end

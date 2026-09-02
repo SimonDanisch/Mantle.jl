@@ -69,12 +69,26 @@ Mantle.Device(::Mantle.HostAPI) = HostDevice(KA.CPU())
 Mantle.Device(b::KA.CPU) = HostDevice(b)
 Mantle.backend(d::HostDevice) = d.backend
 
+# Nothing is ever outstanding here: a CPU launch has completed by the time it
+# returns, which is the same fact the header states about a step doing no
+# synchronisation. Present so that `waitidle(device)` is answerable on every
+# backend — core declares it and portable callers spell it that way, so leaving
+# it out makes the host backend the one where the portable spelling is a
+# `MethodError`.
+Mantle.waitidle(::HostDevice) = nothing
+
 # ── persistent resources ──────────────────────────────────────────────────────
 #
 # `HostBuffer`/`HostScalar` are gone: `Mantle.Buffer` and `Mantle.Scalar` are core
 # types over pool regions, so a backend supplies four primitives and no type.
 
 Mantle.rawalloc(::HostDevice, ::Mantle.Persistent, bytes::Int, c) = zeros(UInt8, max(bytes, 1))
+
+# An element type cannot ask host memory for anything it does not already have —
+# there are no usage flags to get wrong, so every `T` gets the same `Vector{UInt8}`.
+# Present because `persistentarray` asks every device this, and the host backend
+# not answering made an ordinary `Buffer(host, zeros(Int32, 1))` a `MethodError`.
+Mantle.bufferusage(::HostDevice, ::Type) = nothing
 
 """Free physical memory. The honest bound for a host arena — and unlike the
 device case there is swap behind it, so this is advice rather than a wall."""

@@ -126,7 +126,27 @@ Device-local memory that can back any image whose requirements include
 function device_memory(ctx::VkContext, bytes::Integer, type_bits::Integer)
     type_bits == 0 && error("no memory type satisfies every resource in this allocation")
     idx = find_memory_type(ctx, UInt32(type_bits), VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    VK.DeviceMemory(ctx.device, UInt64(bytes), idx)
+    # `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`, always, because this backs graph
+    # ARENAS as well as images: `rawalloc(dev, ::Buffers, …)` creates its buffer
+    # with `BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` — kernels reach a
+    # suballocated transient as `address + offset`, which is the whole bridge —
+    # and the spec requires the memory it binds to have been allocated with the
+    # matching flag.
+    #
+    # It was not, and NVIDIA did not care: it returned a working address anyway,
+    # so every graph on that driver ran. RADV does care, and the failure is not
+    # an error at bind — it is a SIGSEGV inside the driver much later, in
+    # `vkCreateRayTracingPipelinesKHR`, with nothing pointing back here. Only
+    # `DebugConfig(validation = true)` names it.
+    #
+    # Unconditional rather than only for buffers: the flag is legal on any
+    # allocation once `bufferDeviceAddress` is enabled, which this device
+    # requires, and one allocation path with two behaviours is how this was
+    # missed in the first place — the pool and the acceleration structures both
+    # pass it, and this third site did not.
+    flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
+        flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
+    VK.DeviceMemory(ctx.device, UInt64(bytes), idx; next = flags)
 end
 
 """

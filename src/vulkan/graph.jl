@@ -162,6 +162,13 @@ screenshot(w::LavaWindow) = readback_window(w.win)
 
 # ↑ moved to src/graph/build.jl
 extrausage(::Type{DrawIndirectCommand}) = UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+# `repeat!`'s per-iteration flags, read by `vkCmdBeginConditionalRenderingEXT`.
+extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT)
+
+# What `repeat!` needs, and the reason it is a query rather than an assumption:
+# the extension is optional, and a device without it must refuse the graph rather
+# than record one that runs every iteration unconditionally.
+supportspredicate(d::LavaDevice) = (d.ctx::VkContext).conditional_rendering_available
 bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
 rawalloc(dev::LavaDevice, ::Persistent, bytes::Int, usage) =
@@ -181,7 +188,38 @@ constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
 # allocate a command buffer, which is not something a reclaim should do.
 fence(d::LavaDevice) =
     d.bq.next_timeline + (has_active_recording(d.bq) ? UInt64(1) : UInt64(0))
-passed(d::LavaDevice, f) = query_timeline(d.bq) >= f
+# One predicate for "has the device finished this", spelled once.
+#
+# It was written out as `query_timeline(bq) >= v` at each of the places that ask,
+# which is how `flush!` came to fold over two lists and `nextslot!` came to
+# compare against `next_timeline` — a raw counter, in code that had no business
+# knowing there was one. The queue method is the primitive; the device forwards
+# to it, and `Pool`, `Recycler` and the argument ring all go through the device.
+# The portable spelling of "wait for this device to finish everything".
+#
+# `waitidle` had methods for `LavaBackend`, `VkContext` and `VK.Device` here and
+# for `MetalDevice` on the other backend — everything except the one type core
+# names in `graph/queue.jl`, which is the DEVICE. So `waitidle(device)` worked on
+# Metal and was a `MethodError` on Vulkan, and any portable caller had to reach
+# past the device to something backend-shaped.
+#
+# Hands the open batch over BEFORE waiting, which is the part `vkDeviceWaitIdle`
+# does not do. The device is idle with respect to what it has been GIVEN, so a
+# caller that had recorded a run into a batch nobody submitted got an immediate
+# return and then read buffers the GPU had never written — and, worse, the "flush
+# so one submission does not grow past the driver's timeout" callers got no
+# flush at all. `waitidle` that ignores the work you are still holding is not a
+# wait, and the caller cannot tell the difference from the outside.
+#
+# `flush!` covers this device's queue; `device_wait_idle` then covers everything
+# else in the context — a split upload queue, async compute. It throws during a
+# capture, which is correct: a capture has nothing to wait FOR, and returning
+# quietly is how that was hidden before.
+waitidle(d::LavaDevice) = (flush!(d.bq, d.bq.device); waitidle(d.ctx::VkContext))
+
+passed(bq::VulkanBatchQueue, v) = query_timeline(bq) >= v
+
+passed(d::LavaDevice, f) = passed(d.bq, f)
 
 """
 Wait for the timeline to reach `f`, unless nothing has been submitted that will
@@ -543,8 +581,7 @@ end
 
 # ↑ moved to src/graph/build.jl
 
-const ARG_SLOTS = 3
-# ↑ moved to src/graph/build.jl
+# ↑ moved to src/graph/types.jl — how deep a plan pipelines is not a driver's.
 
 """Lay out every draw in the plan, and take the memory once."""
 function ArgMemory(dev::LavaDevice, passes::AbstractVector)   # of PassPlan, defined below
@@ -561,27 +598,10 @@ function ArgMemory(dev::LavaDevice, passes::AbstractVector)   # of PassPlan, def
     store = LavaArray{UInt8,1}(undef, (stride * ARG_SLOTS,); bq = dev.bq, unified = true)
     mb = store.buf[]
     ArgMemory(store, mb.address, Ptr{UInt8}(mb.mapped_ptr), stride,
-              zeros(UInt64, ARG_SLOTS), 0)
+              Vector{Any}(nothing, ARG_SLOTS), 0)
 end
 
-"""Take the next slot, once the GPU is done with what it holds."""
-function nextslot!(am::ArgMemory, bq)
-    am.slot = mod1(am.slot + 1, ARG_SLOTS)
-    want = am.signal[am.slot]
-    want == 0 && return am.slot
-    # The frame that last used this slot may never have been handed to the queue.
-    # A plan with a surface submits every frame in `present_frame!`, but one
-    # without a surface submits when something asks it to — so `ARG_SLOTS` frames
-    # of a headless plan all sit in the same recording batch, and the wait below
-    # is then for a value the queue has not been given and never will be. It
-    # blocks in `vkWaitSemaphores`, which is a foreign call, so the process stops
-    # dead with no stack. Needing the slot back is precisely the reason to submit.
-    want > bq.next_timeline && submit!(bq)
-    if query_timeline(bq) < want
-        wait_semaphores!(bq, VK.SemaphoreWaitInfo([bq.timeline_sem], [want]))
-    end
-    am.slot
-end
+# ↑ moved to src/graph/backend.jl — how deep a plan pipelines is the graph's policy.
 
 # ↑ moved to src/graph/build.jl
 """
@@ -1339,6 +1359,109 @@ function compile_dispatch(dev::LavaDevice, t::Trace, argoff::Int)
 end
 
 """
+    argwrites(entry, argoff, offsets, byval, all_args, nprefix) -> Vector{ArgWrite}
+
+The `Ref` arguments of one compiled entry, with the byte offset each occupies.
+
+`all_args` is the tuple as `pack_args_direct!` sees it and `nprefix` is how many
+of its leading entries are not the caller's — two for a dispatch (the kernel and
+the KA context), one for a trace (the adapted raygen), none for a draw. The
+layout rule is [`slotpositions`](@ref), the same one that packed them.
+
+A `Ref` to a by-value aggregate — a camera, a block of filter parameters — is
+handled, not skipped, and that is why this walks EVERY slot rather than only the
+`Ref`s: such an argument goes into the inline area at an offset that depends on
+every by-value argument before it, so the running `inline_offset` has to be
+carried across the whole tuple.
+
+It is carried by PACKING, not by predicting. This walk performs a real
+`pack_arg!` for every argument and keeps the offset each one was handed, so the
+positions recorded are the ones the packer actually used. A first version
+predicted them instead, from a `standalone_slot(T)` restating the generic
+`pack_arg!`'s branch condition — and `pack_arg!` has specialised methods for
+`UInt64`, `Ptr` and `VkManagedBuffer` ahead of that generic one, so the prediction
+diverged at the first argument reaching one of them and every by-value argument
+after it landed wrong. `verifywrites` caught it, which is what it is for.
+
+Packing here is free and safe: `bake!` has just packed these same values, so this
+writes the bytes that are already there.
+
+Skipping an unsupported `Ref` would be invisible rather than merely incomplete —
+`verifywrites` compares bytes after a pack where nothing has changed, so a
+MISSING write leaves them identical and passes, and the argument silently never
+updates. Hikari's camera is exactly that case.
+"""
+function argwrites(userargs::Tuple, argoff::Int, offsets, byval, base_size::Int,
+                   all_args::Tuple, nprefix::Int, ptr::Ptr{UInt8}, bda::UInt64,
+                   batch)
+    ws = ArgWrite[]
+    slots = slotpositions(map(typeof, all_args))
+    inline = base_size
+    for (layout_i, arg_i) in enumerate(slots)
+        here = inline
+        # The real pack, so the offset recorded is the one the packer used.
+        inline = pack_arg!(all_args[arg_i], ptr, bda, offsets[layout_i],
+                           byval[layout_i], inline, batch)
+        j = arg_i - nprefix
+        if 1 <= j <= length(userargs) && userargs[j] isa Base.RefValue
+            push!(ws, ArgWrite(userargs[j], argoff, offsets[layout_i],
+                               byval[layout_i], here))
+        end
+    end
+    return ws
+end
+
+# Per entry kind, because only the entry knows what its packed tuple looks like
+# in front of the caller's arguments. Each mirrors the `all_args` its `repack!`
+# builds, and that is the coupling to keep an eye on: if one changes, so must the
+# other. `bake!`'s verification is what catches it if they drift.
+function argwrites(bq, d::CompiledDispatch, am::ArgMemory, base::Int)
+    all_args = (d.kernel, d.iter.ka_ctx,
+                devargs(adaptor(bq), rawargs(d.args))...)
+    lp = d.launch
+    off = base + d.argoff
+    argwrites(d.args, d.argoff, lp.offsets, lp.byval_sizes, lp.arg_buffer_size,
+              all_args, 2, am.ptr + off, am.address + off,
+              bq.active_batch::CommandBatch)
+end
+
+function argwrites(bq, dr::CompiledDraw, am::ArgMemory, base::Int)
+    all_args = devargs(adaptor(bq), rawargs(dr.args))
+    info = dr.shader.push_info
+    off = base + dr.argoff
+    argwrites(dr.args, dr.argoff, info.arg_offsets, info.byval_llvm_sizes,
+              info.arg_buffer_size, all_args, 0, am.ptr + off, am.address + off,
+              bq.active_batch::CommandBatch)
+end
+
+function argwrites(bq, t::CompiledTrace, am::ArgMemory, base::Int)
+    c = t.compiled
+    batch = ensure_active_batch!(bq)
+    ad = LavaAdaptor(batch)
+    all_args = (Adapt.adapt(ad, c.desc.raygen_func), devargs(ad, rawargs(t.args))...)
+    off = base + t.argoff
+    argwrites(t.args, t.argoff, c.offsets, c.byval, c.argbytes, all_args, 1,
+              am.ptr + off, am.address + off, batch)
+end
+
+"""
+Perform one [`ArgWrite`](@ref): read the `Ref` as it is now and store it.
+
+`pack_arg!` and nothing else — the same store the full pack does, at the offset
+and with the inline position the full pack used, both recorded by
+[`argwrites`](@ref). The pointer is the START of the entry's argument region, not
+of the individual slot, because `pack_arg!` adds the offsets itself and a by-value
+argument's inline position is relative to that same base.
+"""
+function writearg!(bq, am::ArgMemory, base::Int, w::ArgWrite)
+    entry = base + w.entryoff
+    v = Adapt.adapt(adaptor(bq), argvalue(w.ref))
+    pack_arg!(v, am.ptr + entry, am.address + entry, w.slotoff, w.byval, w.inline,
+              bq.active_batch::CommandBatch)
+    return nothing
+end
+
+"""
 Write the current arguments of one compiled thing into the plan's slot.
 
 What `rebind!` does per entry, as a method rather than a branch: the loop had a
@@ -1357,6 +1480,19 @@ end
 
 repack!(bq, t::CompiledTrace, am::ArgMemory, base::Int) =
     (packtrace!(bq, t, am, base); nothing)
+
+# A draw packs the same way it does while being recorded, minus the recording.
+# `record_draw!` was where these six lines lived and `rebind!` had a copy of
+# them inlined into its loop, which is how the two came to disagree: the copy
+# never learned about a trace, and adding one meant adding it twice.
+function repack!(bq, d::CompiledDraw, am::ArgMemory, base::Int)
+    off = base + d.argoff
+    info = d.shader.push_info
+    pack_args_direct!(bq, am.ptr + off, am.address + off, info.arg_offsets,
+                      info.arg_buffer_size, info.byval_llvm_sizes,
+                      devargs(adaptor(bq), rawargs(d.args)))
+    return nothing
+end
 
 """
 Pack a trace's arguments into the plan's slot. The counterpart of `packdispatch!`.
@@ -1569,7 +1705,7 @@ end
 """One pass: its barriers, then whatever its kind does."""
 function record_pass!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
                       suppress::Bool = derived)
-    p, cds = pp.pass, pp.draws
+    p = pp.pass
     # Mantle's own barriers, derived from the declared usage sequence. Layout
     # changes first: a pass may both need an image transitioned and wait on a
     # buffer, and the two are separate Vulkan barriers.
@@ -1591,6 +1727,55 @@ function record_pass!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
     end
     derived && emit_pass_barrier!(bq, pp.barrier)
 
+    # The predicate scope opens AFTER the barriers and closes before the next
+    # pass's, so a discarded iteration still orders the ones around it. That is
+    # not a nicety: `vkCmdPipelineBarrier` is not in the list of commands
+    # conditional rendering affects, so putting the barriers inside would not
+    # skip them either — it would only make the scope wider and the intent less
+    # clear. Outside, the code says what the hardware does.
+    p.predicate === nothing && return record_pass_work!(g, bq, pp, derived, am; suppress)
+    withpredicate(bq, p.predicate) do
+        record_pass_work!(g, bq, pp, derived, am; suppress)
+    end
+end
+
+"""Run `f` with this pass's work discarded unless its predicate is nonzero.
+
+`unsplittable!` around the whole thing, and it is load-bearing rather than
+defensive. A scope's `begin` and `end` must be in ONE command buffer, and
+`record_dispatch!` ends the current one whenever a dispatch takes the batch past
+`cb_split_threshold` or `auto_submit_threshold` — which a loop of any size
+reaches. Hikari's fused sample ran at `max_depth` 8 (47 dispatches) and hung the
+GPU at 16 (~95), with the auto-submit threshold at 64 sitting exactly between:
+the submission carried away a command buffer holding an unmatched `begin`.
+
+It presents as a foreign call that never returns, so there is no error to read
+and no Julia frame to look at — which is why the guard is here rather than a
+comment warning about it.
+"""
+function withpredicate(f, bq, (pred, i)::Tuple{Any,Int})
+    arr = storage(pred)
+    mb = arr.buf[]::VkManagedBuffer
+    unsplittable!(bq) do
+        cmd = ensure_active_batch!(bq).cmd_buf
+        VK.cmd_begin_conditional_rendering_ext(cmd,
+            VK.ConditionalRenderingBeginInfoEXT(mb.buffer,
+                UInt64(arr.offset + i * sizeof(Predicate))))
+        try
+            f()
+        finally
+            # `finally`, because leaving a scope open makes every later command
+            # in the batch conditional on this iteration's flag — a failure that
+            # shows up as unrelated passes silently not running.
+            VK.cmd_end_conditional_rendering_ext(cmd)
+        end
+    end
+end
+
+"""The pass's own commands, once its barriers and predicate are dealt with."""
+function record_pass_work!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
+                           suppress::Bool = derived)
+    p, cds = pp.pass, pp.draws
     if p.kind === :compute
         base = slotbase(am)
         # A dispatch sized on the device costs a prepare kernel and a barrier the
@@ -1648,7 +1833,7 @@ function record_pass!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
         # Recycling afterwards leaves last frame's store invisible to this
         # frame's take, and the resource ping-pongs across three buffers
         # instead of two.
-        recycle!(g.recycler, bq)
+        recycle!(g.recycler, lavadevice(bq.ctx::VkContext))
         applyupdates!(g.updates) do r, data
             write_update!(g, bq, r, data)
         end
@@ -1738,11 +1923,27 @@ slot, and the slot is host-mapped, so this is a pack per dispatch and no command
 buffer is touched. On an unbaked plan it is a no-op, because every `run!` packs
 already.
 
-**The ordering is the caller's.** A baked plan names one argument slot for its
-whole life, so rewriting it while an earlier replay is still reading it is a
-race — this cannot wait on your behalf without turning every rebind into a device
-drain. Call it where the device is known to be past that replay; a renderer that
-already synchronises once per sample has such a point.
+It writes ARGUMENTS, not entries: one store per `Ref` the plan binds, at the byte
+offset `bake!` recorded for it. A plan with no `Ref` anywhere writes nothing, so
+`run!` on it does no host work at all between the call and the queue.
+
+That is the whole point and it was not always so. This used to re-run `repack!`
+per entry — the RECORD-time path, which re-adapts the argument tree because at
+record time it must. Under a baked plan it cannot have changed: `run!` throws if
+a transient moved, so every device address and every adapted wrapper is provably
+what `bake!` wrote. Rebuilding them cost 1193 microseconds a run on Hikari's
+72-pass chunk plan, against 0.19 for the entire rest of the baked path, and it
+was rebuilding 266 KB of argument tree to move one `Int32`.
+
+The offsets come from [`argwrites`](@ref) and are checked at `bake!` by
+[`verifywrites`](@ref) against the pack that just ran, which is what makes this
+safe to do at all: two earlier attempts computed the offsets independently at run
+time and both produced a wrong picture rather than an error.
+
+`run!` calls this, and the slot it writes is the one [`nextslot!`](@ref) has just
+claimed — so the device is known to be past the replay that last read it. That
+used to be the caller's problem and was documented as such, and the ring is what
+makes it nobody's: see `Plan.baked`.
 """
 function rebind!(pl::Plan)
     pl.baked === nothing && return pl
@@ -1752,20 +1953,21 @@ function rebind!(pl::Plan)
         "values it replays are the ones captured at `bake!`. Returning quietly " *
         "would leave them stale and produce a plausible wrong result. Ask " *
         "`rebindable(plan)` before baking anything whose arguments move."))
+    # Nothing to write: every argument was resolved at `bake!` and is still
+    # there. The `ensure_active_batch!` below would otherwise open a batch to
+    # hold pins nobody takes, and `replay!` would submit its empty command
+    # buffer alongside the recording — a second command buffer per run for a
+    # plan whose whole point is that it prepares nothing.
+    isempty(pl.writes) && return pl
     bq = pl.graph.dev.bq
+    # `pack_arg!` pins the buffers whose addresses it writes into the batch being
+    # recorded, and this is the run's batch — `replay!` appends the recording to
+    # it, so the pins and the work they belong to submit together.
+    ensure_active_batch!(bq)
     am = pl.args
     base = slotbase(am)
-    for pp in pl.passes
-        for d in pp.dispatches
-            repack!(bq, d, am, base)
-        end
-        for dr in pp.draws
-            off = base + dr.argoff
-            info = dr.shader.push_info
-            pack_args_direct!(bq, am.ptr + off, am.address + off, info.arg_offsets,
-                                   info.arg_buffer_size, info.byval_llvm_sizes,
-                                   devargs(adaptor(bq), rawargs(dr.args)))
-        end
+    for w in pl.writes
+        writearg!(bq, am, base, w)
     end
     return pl
 end
@@ -1859,27 +2061,7 @@ function takehost!(r::Recycler, bq, n::Integer)
 end
 
 
-"""
-Move everything the GPU has finished with onto the free lists.
-
-Gated on the timeline rather than on a frame count, because how many frames are
-in flight is not this code's business and changing it must not turn recycling
-into a use-after-free.
-"""
-function recycle!(r::Recycler, bq)
-    now = query_timeline(bq)
-    keep = 0
-    for (bytes, store, signal) in r.retiring
-        if signal <= now
-            push!(get!(() -> Any[], r.free, bytes), store)
-        else
-            keep += 1
-            r.retiring[keep] = (bytes, store, signal)
-        end
-    end
-    resize!(r.retiring, keep)
-    r
-end
+# ↑ moved to src/graph/build.jl — one predicate, `passed`, and it is core's.
 
 # `Graph` is Mantle's now — see `src/graph/types.jl`.
 
@@ -2021,18 +2203,113 @@ function bake!(pl::Plan{LavaDevice})
     bq = g.dev.bq
     refit!(pl)
     checkextents(pl)
-    # The slot this recording names for the rest of its life. Taken once, here,
-    # because `slotbase(am)` is folded into every address the command buffer
-    # holds: rotating afterwards would aim the replay at a slot something else
-    # is free to write.
-    nextslot!(pl.args, bq)
-    pl.baked = capture(bq) do
-        concurrent_dispatch_group() do
-            record!(pl, bq; derived = true, suppress = true, updates = false)
+    # One recording per argument slot, each naming its own.
+    #
+    # `slotbase(am)` is folded into every address a recording holds, so a
+    # recording cannot be pointed at a different slot afterwards. Capturing one
+    # and pinning the slot for the plan's life was the first shape of this, and
+    # it took the ring away from exactly the plans that need it most: `rebind!`
+    # then wrote the bytes a replay still in flight was reading.
+    #
+    # Indexed BY THE SLOT, not by iteration order. `run!` looks the recording up
+    # as `pl.baked[pl.args.slot]`, so the two have to agree on what the index
+    # means — and they do not agree for free: `bake!` was written as
+    # `map(1:ARG_SLOTS)`, which is only right when the ring starts at 0. A plan
+    # that has already RUN is somewhere else in the ring, so recording 1 named
+    # slot 2, and every replay afterwards read the arguments of a neighbouring
+    # slot. It shows up as a rendered image that is wrong for some sample counts
+    # and right for others — right exactly when the number of runs brings the
+    # two indices back into phase.
+    recordings = Vector{Any}(nothing, ARG_SLOTS)
+    for _ in 1:ARG_SLOTS
+        slot = nextslot!(pl.args, g.dev)
+        recordings[slot] = capture(bq) do
+            concurrent_dispatch_group() do
+                record!(pl, bq; derived = true, suppress = true, updates = false)
+            end
         end
     end
+    pl.baked = recordings
+    # Which arguments `run!` has to write again, and — by omission — which are
+    # written here and never again. See `Plan.writes`.
+    #
+    # AFTER the recordings, not before: `argwrites` packs as it walks, so it
+    # needs a slot to pack into, and `am.slot` is 0 until `nextslot!` has run.
+    # Building it first made `slotbase` negative and the first `memset` a
+    # segfault inside the allocator.
+    #
+    # The offsets it records are relative to a slot, so the list serves every
+    # recording in the ring whichever one is current here.
+    writes = ArgWrite[]
+    let am = pl.args, b = slotbase(am)
+        ensure_active_batch!(bq)
+        for pp in pl.passes
+            for d in pp.dispatches
+                append!(writes, argwrites(bq, d, am, b))
+            end
+            for dr in pp.draws
+                append!(writes, argwrites(bq, dr, am, b))
+            end
+        end
+    end
+    pl.writes = writes
+    # And each write stays inside its own bytes — checked here, at `bake!`,
+    # naming the plan, rather than surfacing as a rendered image that is subtly
+    # wrong three layers away. That is how two earlier attempts at this failed.
+    verifywrites(pl)
     pl
 end
+
+"""
+Check that every [`ArgWrite`](@ref) touches only the bytes it claims.
+
+This is the property worth checking, and the obvious one is FALSE. "Performing
+the writes changes nothing, since everything was just packed" sounds right and is
+not: a `Ref` may hold a value whose adapted form contains a device address, and
+that address can legitimately differ between the capture and now. Hikari's
+`filter_sampler` is exactly that, and the byte that gave it away was the high
+half of a pointer — `0x00007f29…` against `0x00007f2b…`. Writing the current
+address is the whole point of the write; a check that forbids it is checking the
+wrong thing, and it cost two rounds of chasing a phantom offset bug.
+
+What must hold is that a write stays inside its own footprint: the eight bytes at
+its slot offset, and — for a by-value argument — the `byval` bytes at its inline
+position. A write whose offsets are wrong reaches outside that and corrupts a
+neighbour, which is the failure this exists to catch.
+"""
+function verifywrites(pl::Plan)
+    am = pl.args
+    base = slotbase(am)
+    n = am.stride
+    ensure_active_batch!(pl.graph.dev.bq)
+    before = Vector{UInt8}(undef, n)
+    after = Vector{UInt8}(undef, n)
+    for w in pl.writes
+        unsafe_copyto!(pointer(before), am.ptr + base, n)
+        writearg!(pl.graph.dev.bq, am, base, w)
+        unsafe_copyto!(pointer(after), am.ptr + base, n)
+        # Slot-relative and 1-based, to match the indices being compared.
+        slot = (w.entryoff + w.slotoff + 1):(w.entryoff + w.slotoff + 8)
+        inl0 = w.entryoff + ((w.inline + 7) & ~7) + 1
+        inl = inl0:(inl0 + w.byval - 1)
+        for i in eachindex(before)
+            before[i] == after[i] && continue
+            (i in slot || i in inl) && continue
+            throw(ArgumentError(
+                "bake!: an argument write reached outside its own bytes — wrote " *
+                "byte $i, which is neither its slot " *
+                "($(first(slot))..$(last(slot))) nor its inline region " *
+                "($(isempty(inl) ? "none" : "$(first(inl))..$(last(inl))")). " *
+                "Entry at $(w.entryoff), slot offset $(w.slotoff), byval " *
+                "$(w.byval), inline $(w.inline), ref $(typeof(w.ref)). The " *
+                "offsets in `plan.writes` disagree with what " *
+                "`pack_args_direct!` used, so a baked run would corrupt a " *
+                "neighbouring argument."))
+        end
+    end
+    return pl
+end
+
 
 
 function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
@@ -2079,10 +2356,33 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
         moved && throw(ArgumentError(
             "run!: a transient moved under a baked plan, so its recording names " *
             "storage that has been replaced. Re-`Plan` and `bake!` again."))
-        # Updates first and fresh — `replay!` closes any batch still recording,
-        # so the copies land ahead of the replay in queue order, which is the
-        # order the derived barriers inside the recording were built for.
+        # Updates first and fresh — `replay!` appends the recording behind
+        # whatever is in the open batch, so the copies land ahead of it in the
+        # one submission, which is the order the derived barriers inside the
+        # recording were built for.
         record_updates!(pl, bq)
+        # One slot per run, and one recording per slot. This is where a baked
+        # run waits, and only when the host is `ARG_SLOTS` runs ahead of the
+        # device — the same rule an unbaked run follows, and the thing that
+        # makes the `rebind!` below safe without a drain.
+        nextslot!(pl.args, g.dev)
+        # The arguments, every run, without the caller asking.
+        #
+        # `rebind!` was the caller's job, which made a baked plan mean something
+        # different from an unbaked one: unbaked re-records, so a `Ref` argument
+        # is re-read by `argvalue` and repacked every frame; baked replays the
+        # bytes from `bake!` unless somebody remembered. A renderer that changes
+        # `sample_idx` per frame silently rendered sample 0 forever.
+        #
+        # That is the mistake `reclaim!` above is explicitly written to avoid —
+        # "a renderer that has to remember to call it is one that stops
+        # reclaiming the day someone forgets". Baking is a decision about WHEN
+        # commands are built, not about what the arguments mean, and the graph
+        # holds every argument, so it repacks them.
+        #
+        # It costs the packing, which is the cheap half. What baking saves is
+        # building the command buffers and the submissions, and that is untouched.
+        rebind!(pl)
         # A replay writes this arena's bytes like any other run, so it has to
         # claim them — even though it cannot emit a barrier of its own, since a
         # recording is frozen. Skipping the claim leaves the arena naming
@@ -2096,7 +2396,9 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
                 takeover!(pool, ar, pl)
             end
         end
-        replay!(pl.baked)
+        # And what covers the slot this run wrote, so the next pass round the
+        # ring knows what to wait for.
+        pl.args.slot_token[pl.args.slot] = replay!(pl.baked[pl.args.slot])
         return nothing
     end
     for s in g.surfaces
@@ -2104,7 +2406,7 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
     end
     # One slot of the plan's argument memory per frame, reused only once the GPU
     # has passed the frame that last used it.
-    nextslot!(pl.args, bq)
+    nextslot!(pl.args, g.dev)
     if barriers === :derived
         # The group is a scope rather than a flag, so nothing leaks past here.
         concurrent_dispatch_group() do
@@ -2116,7 +2418,7 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
     # What this frame signals covers everything written into the slot. A split
     # mid-frame makes later batches with higher values, and the last one covers
     # them all, so reading it after recording is right.
-    pl.args.signal[pl.args.slot] = ensure_active_batch!(bq).signal_value
+    pl.args.slot_token[pl.args.slot] = ensure_active_batch!(bq).signal_value
     for s in g.surfaces
         present_frame!(bq, s.win)
     end
@@ -2147,14 +2449,13 @@ every resource the arguments name is reachable from the plan for as long as it
 lives.
 """
 function record_draw!(bq, d::CompiledDraw, am::ArgMemory, base::Int)
-    off = base + d.argoff
-    info = d.shader.push_info
-    pack_args_direct!(bq, am.ptr + off, am.address + off, info.arg_offsets,
-                           info.arg_buffer_size, info.byval_llvm_sizes,
-                           devargs(adaptor(bq), rawargs(d.args)))
+    # `repack!` is the packing, and it is the same packing `rebind!` does — which
+    # is the point of it being a function: these six lines used to be written out
+    # twice, here and inside `rebind!`'s loop, and the copies drifted.
+    repack!(bq, d, am, base)
     # No viewport, no scissor, no pin: the pass set the first two once, and the
     # plan holds the pipeline for longer than any frame.
-    emit_draw!(bq, d.compiled, d.count, am.address + off)
+    emit_draw!(bq, d.compiled, d.count, am.address + base + d.argoff)
 end
 
 # Where the counts come from, decided once by type rather than per frame by a

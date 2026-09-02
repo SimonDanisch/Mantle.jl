@@ -238,9 +238,14 @@ that anything since the last barrier touched (`ka_backend.jl`), and consumed by
 """
     capture(f, bq) -> CapturedSequence
 
-Run `f` once, recording and executing it normally, and keep its command buffers
-for `replay!`. `f` must not allocate device memory whose address it then
-dispatches against, or the replay will point at freed storage.
+Record `f` without running it, and keep its command buffers for `replay!`.
+
+`f` must not allocate device memory whose address it then dispatches against, or
+the replay will point at freed storage.
+
+Recorded and NOT executed — see [`sealinto!`](@ref) for why it used to be both.
+The difference is visible from outside: `bake!` on a plan whose arguments are
+`Ref`s used to run it once with whatever the refs held at bake time.
 """
 function capture(f, bq::VulkanBatchQueue)
     bq.capturing === nothing || throw(LavaError("capture", "already capturing", "nested capture is not supported"))
@@ -249,11 +254,10 @@ function capture(f, bq::VulkanBatchQueue)
     bq.capturing = seq
     try
         f()
-        submit!(bq)                             # close and collect the trailing batch
+        submit!(bq)                             # seals the trailing batch into `seq`
     finally
         bq.capturing = nothing
     end
-    flush!(bq, bq.device)
     seq
 end
 
@@ -267,37 +271,25 @@ what the last one wrote.
 function replay!(seq::CapturedSequence)
     bq = seq.bq
     @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread replay forbidden"
-    isempty(seq.cmd_bufs) && return
+    isempty(seq.cmd_bufs) && return nothing
     device_lost(bq.ctx::VkContext) && throw(LavaError(
         "replay!", "Vulkan device is lost — cannot replay", "Call reset_device!()"))
-    # Close any batch still being recorded, FIRST. `ensure_active_batch!` hands a
-    # new batch `bq.next_timeline + 1` as its signal value and `submit!` asserts
-    # that reservation still holds — so bumping the shared counter here while a
-    # batch is open makes it stale and the next `submit!` dies with
-    # "batch signal desync: N vs N+1". It costs nothing in the intended usage
-    # (a replay after a drained queue) and it is the only thing that makes
-    # replaying *interleaved* with ordinary recording legal, which is exactly
-    # what a decoder replaying per click inside a live editor does.
-    bq.active_batch !== nothing && bq.active_batch.recording && submit!(bq)
-    bq.next_timeline += 1
-    v = bq.next_timeline
-    prev = bq.replay_watermark
-    cb_infos = [VK.CommandBufferSubmitInfo(cb, UInt32(0)) for cb in seq.cmd_bufs]
-    waits = prev == UInt64(0) ? VK.SemaphoreSubmitInfo[] :
-        [VK.SemaphoreSubmitInfo(bq.timeline_sem, prev, UInt32(0);
-                                    stage_mask=VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)]
-    signal = VK.SemaphoreSubmitInfo(bq.timeline_sem, v, UInt32(0);
-                                        stage_mask=VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-    # Called the same way `submit!` does: the `queue_submit_2!` helper's default
-    # `fence=VK.Fence(C_NULL)` evaluates `create_fence` on a null device.
-    res = VK.queue_submit_2(bq.queue, [VK.SubmitInfo2(waits, cb_infos, [signal])])
-    if iserror(res)
-        mark_if_lost!(bq, res)
-        bq.next_timeline -= 1
-        throw_with_validation_context("vkQueueSubmit2 (replay)", res, length(seq.cmd_bufs), false, bq)
-    end
-    bq.replay_watermark = v
-    return
+    bq.capturing === nothing || throw(LavaError(
+        "replay!", "replay inside a capture",
+        "The replayed buffers would be collected into the enclosing sequence and " *
+        "then replayed twice. Record the work once and replay the recording."))
+    # Behind whatever the host recorded this frame, in one submission with it.
+    # An ordinary batch, so it gets the ordinary bookkeeping — `sync_access!` over
+    # the pins, `arg_pool_in_use!`, a timeline value, `in_flight`, `submitted!` —
+    # none of which a replay used to get, because it submitted on its own and
+    # `replay_watermark` was the patch for the half of it that was noticed.
+    batch = ensure_active_batch!(bq)
+    append!(batch.replay_cmd_bufs, seq.cmd_bufs)
+    # The sequence, not its contents: it owns the command buffers and the
+    # argument slabs they read from, and both have to outlive the submission.
+    pin!(batch, seq)
+    # EXPERIMENT: do not submit here.
+    return batch.signal_value
 end
 
 # ── Batch lifecycle ──
@@ -771,18 +763,51 @@ end
         end
     end
 
-    # Split to a new CB if this segment is full
-    maybe_split_cb!(batch, bq)
+    # Both of the following END the command buffer this dispatch was recorded
+    # into, and neither may happen inside a conditional-rendering scope: the
+    # scope's `begin` and `end` have to be in ONE command buffer, and a
+    # submission between them leaves an unmatched begin in the batch that goes
+    # and an unmatched end in the one that follows.
+    #
+    # That is not a theoretical hazard. Hikari's fused sample hangs the GPU at
+    # `max_depth` 16 and runs at 8, and the boundary is exactly this threshold:
+    # 47 dispatches at depth 8, ~95 at depth 16, `auto_submit_threshold` 64. The
+    # hang is a foreign call that never returns, so it does not even present as
+    # an error — see `unsplittable`.
+    if !unsplittable(bq)
+        maybe_split_cb!(batch, bq)
 
-    # Auto-submit to avoid TDR when a single submission's GPU execution time
-    # approaches amdgpu's ~10 s lockup_timeout.  `submit!` queues the batch
-    # onto the in-flight list without blocking — next `record_dispatch!` will
-    # `ensure_active_batch!` a fresh batch.  Cross-batch buffer synchronisation
-    # is already handled via `sync_access!` writing `buf.last_write` and
-    # wait_semaphores picking it up on the next pin.
-    threshold = bq.auto_submit_threshold
-    if threshold > 0 && batch.dispatch_count >= threshold
-        submit!(bq)
+        # Auto-submit to avoid TDR when a single submission's GPU execution time
+        # approaches amdgpu's ~10 s lockup_timeout.  `submit!` queues the batch
+        # onto the in-flight list without blocking — next `record_dispatch!` will
+        # `ensure_active_batch!` a fresh batch.  Cross-batch buffer synchronisation
+        # is already handled via `sync_access!` writing `buf.last_write` and
+        # wait_semaphores picking it up on the next pin.
+        threshold = bq.auto_submit_threshold
+        if threshold > 0 && batch.dispatch_count >= threshold
+            submit!(bq)
+        end
+    end
+end
+
+"""
+    unsplittable(bq) -> Bool
+
+Whether the command buffer currently being recorded may NOT be ended here.
+
+A conditional-rendering scope spans one pass, so the deferral is bounded by that
+pass — the split or submit it postpones happens at the next dispatch outside a
+scope, which is at most a pass later.
+"""
+unsplittable(bq::VulkanBatchQueue) = bq.scope_depth > 0
+
+"""Record `f`'s commands inside a scope that must not be broken up."""
+function unsplittable!(f, bq::VulkanBatchQueue)
+    bq.scope_depth += 1
+    try
+        f()
+    finally
+        bq.scope_depth -= 1
     end
 end
 
@@ -1063,30 +1088,37 @@ function submit!(bq::VulkanBatchQueue)
     !batch.recording && return nothing
     @assert batch.bq === bq "batch.bq desync: batch was not bound to this VulkanBatchQueue"
     Threads.atomic_add!((bq.ctx::VkContext).diag.flush_counter, 1)
+    # Drop the submissions the device has finished, so the list tracks what is
+    # outstanding rather than everything ever submitted. Once per SUBMISSION, so
+    # the list can only ever grow by one between sweeps.
+    #
+    # It was in `ensure_active_batch!`, which reads like the same thing and is
+    # not: that runs once per DISPATCH, and this costs a `Dict` lookup for the
+    # device plus a dynamic `passed` on an `Any` token. Per dispatch that is 171
+    # bytes, measured — `test_dispatch_allocation.jl` went from 115 to 421 and is
+    # a cliff detector precisely so a line like that cannot be added quietly.
+    sweep!(bq, lavadevice(bq.ctx::VkContext))
 
     throw_if_error(bq, "vkEndCommandBuffer", VK.end_command_buffer(batch.cmd_buf))
 
+    # Everything this batch is responsible for, in execution order: the segments
+    # `maybe_split_cb!` sealed, the one still open, and any replay queued behind
+    # them. The replay is LAST because `replay!` is what a frame ends with — the
+    # host's updates for this frame go to the device in front of the recording
+    # that consumes them.
     n_sealed = length(batch.sealed_cmd_bufs)
-    all_cmd_bufs = Vector{VK.CommandBuffer}(undef, n_sealed + 1)
+    n_replay = length(batch.replay_cmd_bufs)
+    all_cmd_bufs = Vector{VK.CommandBuffer}(undef, n_sealed + 1 + n_replay)
     for i in 1:n_sealed
         all_cmd_bufs[i] = batch.sealed_cmd_bufs[i]
     end
     all_cmd_bufs[n_sealed + 1] = batch.cmd_buf
+    for i in 1:n_replay
+        all_cmd_bufs[n_sealed + 1 + i] = batch.replay_cmd_bufs[i]
+    end
 
-    # Capture takes ownership of these command buffers. Clearing `sealed_cmd_bufs`
-    # keeps `reclaim_batch!` from handing them back to the free pool, and swapping
-    # in a fresh `cmd_buf` keeps the batch itself from re-recording over the one we
-    # just captured — either would silently rewrite a sequence `replay!` still points at.
     let cap = bq.capturing
-        if cap !== nothing
-            append!(cap.cmd_bufs, all_cmd_bufs)
-            for obj in batch.pinned
-                push!(cap.pinned, obj)
-            end
-            empty!(batch.sealed_cmd_bufs)
-            batch.cmd_buf = alloc_cmd_buf(bq)
-            cap.submissions += 1
-        end
+        cap === nothing || return sealinto!(cap, bq, batch, all_cmd_bufs)
     end
 
     saved_dispatch_count = batch.dispatch_count
@@ -1130,6 +1162,9 @@ function submit!(bq::VulkanBatchQueue)
         empty!(batch.pinned)
         release_pinned_refs!(batch)
         empty!(batch.wait_semaphores)
+        # Not freed: a capture owns them. Dropping the reference is all this
+        # batch may do with them.
+        empty!(batch.replay_cmd_bufs)
         bq.active_batch = nothing
         # `bq.next_timeline` is deliberately NOT rolled back. `sync_access!` has
         # already stamped `buf.last_write` on the buffers it reached with this
@@ -1198,12 +1233,23 @@ function submit!(bq::VulkanBatchQueue)
         empty!(batch.pinned)
         release_pinned_refs!(batch)
         empty!(batch.wait_semaphores)
+        # Not freed: a capture owns them. Dropping the reference is all this
+        # batch may do with them.
+        empty!(batch.replay_cmd_bufs)
         bq.active_batch = nothing
         throw_with_validation_context("vkQueueSubmit2", submit_result,
             saved_dispatch_count, saved_last_was_rt, bq)
     end
 
+    # Handed over; the capture that owns them replays them again, so unlike
+    # `sealed_cmd_bufs` they do not move to `submitted_cmd_bufs` either.
+    empty!(batch.replay_cmd_bufs)
     push!(bq.in_flight, batch)
+    # And in the one place that means "on its way to the device". `in_flight` is
+    # this path's own bookkeeping — it also carries the command buffers and pins
+    # a reclaim needs — but it is not what other code should have to consult to
+    # learn whether work is outstanding. See `graph/submission.jl`.
+    submitted!(bq, batch.signal_value; tag = :batch)
     bq.active_batch = nothing
     # Everything handed out of the arg pool so far is read by this batch, and the
     # pool may rewind once the timeline passes it. Recorded here rather than only
@@ -1239,6 +1285,51 @@ function submit!(bq::VulkanBatchQueue)
         mark_if_lost!(bq, wr)
     end
     return batch
+end
+
+"""
+    sealinto!(cap, bq, batch, cmd_bufs) -> nothing
+
+Give a capture everything the batch recorded, and close the batch WITHOUT
+submitting it.
+
+This is the half of [`submit!`](@ref) that `capture` actually wants. The two used
+to be one function: capture ran inside `submit!`, took the command buffers, and
+then fell through to submit them — so `bake!` executed the plan as a side effect
+of recording it. That was never a Vulkan constraint. `vkEndCommandBuffer` and
+`vkQueueSubmit2` are separate calls and Mantle already begins a capture's buffers
+with `SIMULTANEOUS_USE`, precisely so they can be submitted more than once; it
+was one function doing two jobs with the collection step buried between them.
+
+The batch is closed rather than left half-open, which is the mistake an earlier
+attempt at this split made: an early return that skipped the teardown left
+`bq.active_batch` pointing at a batch whose command buffer had been ended, and
+the next `ensure_active_batch!` handed it straight back to be recorded into.
+NVIDIA takes that as a heap abort inside `vkBeginCommandBuffer` — `free():
+invalid size`, in the driver, with no Julia frame.
+
+No timeline value is consumed and nothing goes on `in_flight` or through
+[`submitted!`](@ref): nothing was handed to the device, so nothing is
+outstanding.
+"""
+function sealinto!(cap::CapturedSequence, bq::VulkanBatchQueue, batch::CommandBatch,
+                   cmd_bufs::Vector{VK.CommandBuffer})
+    append!(cap.cmd_bufs, cmd_bufs)
+    # Everything the recording names, kept alive for as long as the sequence is:
+    # a replay reads these buffers and images long after the batch is gone.
+    for obj in batch.pinned
+        push!(cap.pinned, obj)
+    end
+    cap.submissions += 1
+    # The capture owns the command buffers now, so `reclaim_batch!` must not hand
+    # them back to the free pool. A fresh one goes in the batch's place because
+    # reclaim expects a buffer there to return.
+    empty!(batch.sealed_cmd_bufs)
+    empty!(batch.replay_cmd_bufs)
+    batch.cmd_buf = alloc_cmd_buf(bq)
+    bq.active_batch = nothing
+    reclaim_batch!(bq, batch)
+    return nothing
 end
 
 """
@@ -1361,7 +1452,7 @@ function flush_stall_report(bq::VulkanBatchQueue, target::UInt64)
     end
     println(io, "  timeline counter = ", cur isa Exception ? "unreadable ($cur)" : cur,
                 ", next_timeline = ", bq.next_timeline,
-                ", replay watermark = ", bq.replay_watermark)
+                ", outstanding = ", length(bq.outstanding))
     for (i, b) in enumerate(bq.in_flight)
         waits = [v for (_, v, _) in b.wait_semaphores]
         done = cur !== nothing && b.signal_value <= cur
@@ -1377,14 +1468,24 @@ function flush_stall_report(bq::VulkanBatchQueue, target::UInt64)
 end
 
 function flush!(bq::VulkanBatchQueue, device::VK.Device)
+    # A capture records without executing, so there is nothing here to wait for
+    # and `submit!` below would quietly seal a segment into the sequence instead
+    # of running it. Whoever needs the device to have drained — an allocation
+    # path retrying after an out-of-memory, a readback — does not get that, and
+    # would carry on with stale bytes. Say so instead.
+    bq.capturing === nothing || throw(LavaError(
+        "flush!", "cannot flush while capturing",
+        "A capture records commands without submitting them, so there is no " *
+        "device work to wait for. Whatever asked for this flush needs the device " *
+        "to have finished something — do it before `bake!`/`capture`."))
     @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread flush forbidden"
     submit!(bq)
     # A replay signals the timeline without putting a batch in `in_flight`, so
     # the in-flight scan alone would return before the GPU had run any of it.
-    target = bq.replay_watermark
-    for b in bq.in_flight
-        target = max(target, b.signal_value)
-    end
+    # One question, one list. This used to seed `target` from `replay_watermark`
+    # and then fold a maximum over `in_flight`, because the two submission paths
+    # kept separate records; a caller that forgot either returned early.
+    target = something(newest(bq), UInt64(0))
     target == UInt64(0) && return
     budget = bq.flush_timeout_ns
     quantum = budget == 0 ? typemax(UInt64) : min(budget, FLUSH_WAIT_QUANTUM_NS)
@@ -1617,10 +1718,7 @@ function wait_for_write(buf::VkManagedBuffer)
     # Any value <= current counter is already signalled; skip the wait to
     # avoid a pointless syscall.  query_timeline rethrows on a
     # healthy-device failure (no silent "pretend not yet" fallback).
-    current = query_timeline(bq)
-    if current >= val
-        return nothing
-    end
+    passed(bq, val) && return nothing
     wait_semaphores!(bq, VK.SemaphoreWaitInfo([bq.timeline_sem], [val]))
     return nothing
 end

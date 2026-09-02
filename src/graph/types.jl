@@ -85,6 +85,17 @@ mutable struct Pass
     draws::Vector{DrawCall}
     usages::Vector{Pair{Int,Type}}
     dispatches::Vector{Any}
+    # `nothing`, or the `(buffer, index)` whose 32-bit value at record time
+    # decides whether this pass's WORK runs — see [`repeat!`](@ref). Its barriers
+    # run either way, which is what makes a skipped iteration harmless to the
+    # ones around it rather than a hole in the ordering.
+    #
+    # On the pass rather than on a scope enclosing several, because the graph has
+    # no nesting: passes are a flat list that the scheduler reorders and the
+    # placer allocates against, and a construct that owned a *range* of them
+    # would be one more thing every rewrite has to keep consistent. A predicate
+    # is a property of a pass, so it travels with it.
+    predicate::Any
 end
 
 abstract type TransientResource <: Resource end
@@ -158,13 +169,56 @@ GPU is reading — only pays off if getting the fresh buffer is cheap. It is,
 because the sizes repeat exactly: the same resource updated every frame asks for
 the same size every time, so the free list hits from the second update onward.
 
-`retire!` does not free. The GPU may still be reading the outgoing buffer for as
-long as the frame that bound it is in flight, so it goes back on the free list
-only once that frame has been waited on, which is what `recycle!` is called after.
+`retire!` does not free. The device may still be reading the outgoing buffer for
+as long as the run that bound it is in flight, so it goes back on the free list
+only once the device has passed that run — one completion token per retiring
+buffer, opaque here and asked about with `passed`. It was a raw `UInt64` Vulkan
+timeline value, in a core type, which is what made `recycle!` a backend function.
 """
 struct Recycler
     free::Dict{Int,Vector{Any}}
-    retiring::Vector{Tuple{Int,Any,UInt64}}
+    retiring::Vector{Tuple{Int,Any,Any}}
+end
+
+"""
+One argument a baked run has to write, and where it goes.
+
+The whole of what `bake!` learns about arguments and a run needs to act on.
+`offset` is bytes from the start of an argument slot, so it is slot-independent
+and the same write serves every recording in the ring; `byval` is the slot's
+by-value size, which `pack_arg!` wants.
+
+This is the thing that was missing. `bake!` packs every argument — it must, to
+capture — and then threw away the layout, the offsets and the adaptation it had
+just computed, keeping only a count. A run therefore had no way to write "the
+sample index at byte 4128" and had to rediscover everything by re-running the
+RECORD-time packing path, which re-adapts the entire argument tree of every
+entry. Measured on Hikari's chunk plan: 1193 microseconds a run to move one
+`Int32`, against 0.19 for the whole rest of the baked path.
+
+Held per plan rather than per entry so a run is one flat loop, and built at the
+one moment when the layout, the adapted values and the offsets are all in hand.
+"""
+struct ArgWrite{R}
+    ref::R
+    # Bytes from the start of a slot to the start of this ENTRY's argument
+    # region, and then from there to the argument's own slot. Kept apart because
+    # the packer takes them apart: it is handed the entry's base pointer and adds
+    # the per-argument offset itself, and a by-value argument's `inline` position
+    # is relative to that same base.
+    entryoff::Int
+    slotoff::Int
+    byval::Int
+    # Where a by-value argument's bytes go, past the end of the slot's fixed
+    # area. Zero for everything else, which is the case that needs no inline
+    # area at all.
+    #
+    # It depends on every by-value argument BEFORE this one, which is why it has
+    # to be recorded at `bake!` rather than derived at run: the packer threads a
+    # running offset through the whole tuple, and one argument alone cannot know
+    # where it landed. Recording it is what lets a `Ref` to an aggregate — a
+    # camera, a filter parameter block — be rewritten at all.
+    inline::Int
 end
 
 mutable struct Graph{D}
@@ -309,21 +363,33 @@ The plan knows its draws and their argument sizes at compile time, so it can lay
 them out once and write only values into them per frame. That removes the whole
 question the argument pool exists to answer: nothing is allocated per draw, so
 nothing has to work out when it may be reused. The slot is what the GPU is still
-reading, and a slot is reused only after the timeline passes the frame that used
+reading, and a slot is reused only after the device has passed the run that used
 it — the same rule as everything else here, and the only rule.
 
-`signal[i]` is the timeline value the frame using slot `i` will signal. Waiting on
-it before writing is what makes "K slots" correct rather than hopeful; with K
-larger than the frames the queue keeps in flight, that wait never blocks.
+`slot_token[i]` is what covers the run that last used slot `i`, and `nothing`
+means the slot has never been used. Opaque here and handed straight back to
+`passed`/`waitfor`: it was `signal::Vector{UInt64}`, a raw Vulkan timeline value,
+which made the ring a Vulkan concept and left [`nextslot!`](@ref) reading
+`bq.timeline_sem` and `bq.next_timeline` directly.
 """
 mutable struct ArgMemory{S}
     store::S
     address::UInt64
     ptr::Ptr{UInt8}
     stride::Int
-    signal::Vector{UInt64}
+    slot_token::Vector{Any}     # `nothing` = never used
     slot::Int
 end
+
+"""
+How many frames of arguments may be in flight.
+
+Core's, because it is a pipelining decision: it says how far the host may run
+ahead of the device, which is the graph's business and not the driver's. It was
+`const ARG_SLOTS = 3` in the Vulkan backend, so the depth of a Mantle plan was a
+Vulkan constant.
+"""
+const ARG_SLOTS = 3
 
 """
 One pass, its compiled draws, and the barriers that have to run before it.
@@ -390,11 +456,31 @@ mutable struct Plan{D}
     # backend driving KernelAbstractions passes them directly — see
     # `makeargmemory`.
     args::Union{Nothing,ArgMemory}      # laid out at compile, written per frame
-    # The recording `bake!` took, or `nothing` while the plan records per run.
-    # It pins the argument slot it was captured in — `slotbase` is folded into
-    # every address the command buffer holds — so a baked plan stops rotating
-    # slots and `nextslot!` is not called for it.
+    # One recording per argument slot, or `nothing` while the plan records per
+    # run. `slotbase` is folded into every address a recording holds, so a
+    # recording belongs to the slot it was captured in and to no other —
+    # `baked[i]` is the recording for slot `i`, and `run!` rotates through them
+    # with `nextslot!` exactly as an unbaked run rotates the slots themselves.
+    #
+    # One recording would have been simpler and is what this held first. It also
+    # meant a baked plan pinned a single slot for life, so `rebind!` wrote the
+    # bytes a replay still in flight was reading: the ring is the mechanism that
+    # stops the host running ahead of the device, and a baked plan had opted out
+    # of it. Measured as an accumulator reading 36 where the unbaked run read 21.
     baked::Any
+    # How many entries `rebind!` has to write again, counted once at `bake!`.
+    #
+    # `argvalue` says which arguments can move: a `Ref` is read fresh every run
+    # and everything else is resolved once. So the per-run host work of a baked
+    # plan is exactly the entries holding one, and a plan with none does no host
+    # work at all between `run!` and the queue. `nothing` until baked, because
+    # an unbaked run re-records and therefore re-packs everything anyway.
+    #
+    # The [`ArgWrite`](@ref)s a run performs, or `nothing` until baked. One per
+    # (entry, `Ref` argument) pair, and nothing else: everything a baked plan
+    # binds other than a `Ref` is fixed by the plan's own precondition, since
+    # `run!` throws if a transient moved.
+    writes::Any
 end
 
 """

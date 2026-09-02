@@ -169,23 +169,66 @@ end
     want = copy(Array(M.storage(s.out)))
     @test !M.baked(s.plan)
 
+    # Dispatches the host RECORDED, counted at submit. This is the assertion, and
+    # it used to be a wall-clock ratio: baked had to be three times faster than
+    # unbaked over thirty runs.
+    #
+    # That measurement stopped meaning what it said the day `run!` started
+    # rotating argument slots for a baked plan too. A baked run now submits every
+    # run and waits when the host is `ARG_SLOTS` runs ahead of the device, which
+    # is the same backpressure an unbaked run has always had — so both medians are
+    # GPU throughput for this graph (0.73 ms against 0.64 ms measured, and the
+    # unbaked one is lower because it submits three runs at a time rather than
+    # one). Nothing regressed; the clock is simply no longer measuring host work.
+    #
+    # Counting is better than timing anyway: it is exactly the claim in the name
+    # of this testset, it is not a ratio anybody has to keep generous, and it does
+    # not move on a shared machine.
+    diag = M.batchqueue(dev).ctx.diag
+    function recorded(f, n)
+        f()                                  # warm, and outside the count
+        KernelAbstractions.synchronize(M.backend(dev))
+        before = diag.total_dispatches[]
+        for _ in 1:n
+            f()
+        end
+        KernelAbstractions.synchronize(M.backend(dev))   # flushes the trailing batch
+        (diag.total_dispatches[] - before, )
+    end
     host(f, n) = (f(); [(t0 = time_ns(); f(); (time_ns() - t0) / 1e6) for _ in 1:n])
-    un = host(() -> M.run!(s.plan), 30)
+
+    runs = 30
+    npasses = length(s.plan.passes)
+    (un_rec,) = recorded(() -> M.run!(s.plan), runs)
+    un = host(() -> M.run!(s.plan), runs)
     KernelAbstractions.synchronize(M.backend(dev))
+    # Unbaked records every dispatch of every pass, every run — which is the cost
+    # baking exists to remove, and the number the next assertion is against.
+    @test un_rec == runs * npasses
 
     M.bake!(s.plan)
     @test M.baked(s.plan)
     @test M.bake!(s.plan) === s.plan                       # idempotent
+    # No argument here is a `Ref`, so nothing can change between runs and the
+    # host-side update plan is empty: a baked run writes no argument bytes either.
+    @test isempty(s.plan.writes)
 
     fill!(M.storage(s.out), 0f0)
     KernelAbstractions.synchronize(M.backend(dev))
-    bk = host(() -> M.run!(s.plan), 30)
+    (bk_rec,) = recorded(() -> M.run!(s.plan), runs)
+    fill!(M.storage(s.out), 0f0)
+    KernelAbstractions.synchronize(M.backend(dev))
+    bk = host(() -> M.run!(s.plan), runs)
     KernelAbstractions.synchronize(M.backend(dev))
 
     @test Array(M.storage(s.out)) == want                  # bit-exact, not merely close
-    # The point of the whole exercise. Generous because it is a wall-clock median
-    # on a shared machine; the measured figure is ~96%.
-    @test median(sort(bk)) < median(sort(un)) / 3
+    # THE assertion: not "almost nothing", nothing at all.
+    @test bk_rec == 0
+    # And a guard the other way, so baking cannot become a pessimisation without
+    # anyone noticing. Loose on purpose — this is wall clock on a shared machine
+    # and both sides are GPU-bound, so the ratio it can honestly police is "not
+    # much worse", not "much better".
+    @test median(sort(bk)) < 2 * median(sort(un))
 end
 
 @testset "a baked plan survives a full GC between invocations" begin

@@ -23,6 +23,12 @@ M.rawalloc(d::FakeDev, kind, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, b
 M.rawfree(::FakeDev, mem) = nothing
 M.constraintof(::FakeDev, kind, ts) = kind          # kind IS the constraint here
 M.compatible(::FakeDev, a, b) = a === b
+# `nothing` = "this element type asks for nothing beyond the ordinary", which
+# sends `acquire!` back to `constraintof` above — the behaviour these tests were
+# written against. Needed because `persistentarray` now ASKS every device this;
+# it always should have, and until it did, `bufferusage` was a hook that both
+# real backends implemented and nothing ever called.
+M.bufferusage(::FakeDev, ::Type) = nothing
 
 @testset "Pool: a second acquire does not reach the device" begin
     d, p = FakeDev(), M.Pool()

@@ -134,15 +134,88 @@ Write `data` into `dst` starting at index `from`, for the case
 function inplace! end
 
 """
-    nextslot!(args, queue)
+    nextslot!(args, device) -> Int
 
-Advance to the next argument slot for a launch.
+Advance to the next argument slot, once the device is finished with what it
+holds, and return which slot that is.
 
-Arguments are written into a ring of slabs so consecutive launches do not wait
-on each other; the graph knows how many launches there are, the backend knows
-how big a slab is.
+This is the whole of the graph's pipelining policy: `ARG_SLOTS` runs of
+arguments may be in flight, and the run that would make it `ARG_SLOTS + 1`
+waits. It is policy and not mechanism, which is why it is here — the backend
+answers `passed`, `waitfor` and `submit!` about one opaque token and decides
+none of this.
+
+It was the backend's, as `nextslot!(am, bq)` reading `bq.timeline_sem` and
+`bq.next_timeline` directly. Two things followed from that. The depth of a
+Mantle plan was a Vulkan constant; and the "has it been handed over yet" case
+below had to be expressed as `want > bq.next_timeline`, a comparison against a
+counter that only one backend has. Getting it wrong there was not an assertion,
+it was `vkWaitSemaphores` on a value nothing would ever signal — a foreign call
+that never returns, so the process stops dead with no Julia frame to show.
 """
-function nextslot! end
+function nextslot!(am::ArgMemory, dev)
+    am.slot = mod1(am.slot + 1, ARG_SLOTS)
+    tok = am.slot_token[am.slot]
+    # Never used, or the device is already past it.
+    tok === nothing && return am.slot
+    passed(dev, tok) && return am.slot
+    waitfor!(dev, tok)
+    return am.slot
+end
+
+"""
+    waitfor!(device, token)
+
+Block until the device has finished the work `token` covers, handing that work
+over first if the host is still holding it.
+
+`waitfor(device, token)` — no `!` — is the backend's mechanism and answers
+`false` for exactly one case: the token belongs to work that has not been
+submitted, so nothing will ever signal it. That happens because a plan drawing
+to a surface submits every run while a headless one submits when something asks
+it to, so several runs otherwise accumulate in one open batch. Waiting on those
+blocks in a foreign call that never returns.
+
+Needing the result is precisely the reason to hand the work over, so that is
+what happens — but ONLY then. Submitting unconditionally reads the same and is
+not: it breaks up the batch every time, and a renderer running several plans per
+sample pays a submission per wrap of the argument ring. Measured at ~20% across
+four RayDemo scenes.
+"""
+function waitfor!(dev, tok)
+    waitfor(dev, tok) && return nothing
+    submit!(dev)
+    waitfor(dev, tok)
+    return nothing
+end
+
+"""
+    waitfor!(plan)
+
+Block until the device has finished what `run!(plan)` last submitted.
+
+This is what a host loop reading a device-written value between runs needs, and
+it is not `waitidle`: it waits for one plan's last run rather than for the
+device, and it knows to submit that run if it is still sitting in an open batch.
+
+A KernelAbstractions `synchronize` is the wrong tool for it in both directions.
+It reaches the queue behind Mantle's back, so Mantle cannot see the stall, avoid
+it, or later replace it with a device-side predicate; and it waits on the
+dispatch queue AND the upload queue, where the caller wanted "the thing I just
+submitted".
+"""
+function waitfor!(pl::Plan)
+    am = pl.args
+    # No argument memory on a backend that passes arguments directly, and `slot`
+    # is 0 until the first `nextslot!` — a plan that has not run has nothing to
+    # wait for, and `slot_token[0]` is a `BoundsError` rather than an answer.
+    (am === nothing || am.slot == 0) && return nothing
+    tok = am.slot_token[am.slot]
+    tok === nothing && return nothing
+    passed(pl.graph.dev, tok) && return nothing
+    waitfor!(pl.graph.dev, tok)
+    return nothing
+end
 
 """
     collect!(profiler, ctx)

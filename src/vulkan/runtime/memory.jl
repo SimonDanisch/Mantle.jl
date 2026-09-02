@@ -260,7 +260,7 @@ function maybe_trim_pool!(ctx::VkContext)
         reclaimable(ctx) || return
     end
     bq = ctx.default_bq
-    quiesce_before_reclaim!(bq)
+    quiesce_before_reclaim!(bq) || return
     n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
     n_blocks > 0 && @debug "Lava: trimmed empty pool blocks" blocks=n_blocks MiB=(bytes_freed >> 20)
     return
@@ -299,7 +299,7 @@ function trim_gpu_pool!(ctx::VkContext = vk_context())
     GC.gc(true)
     isempty(poolblocks(ctx)) && return (0, 0)
     bq = ctx.default_bq
-    quiesce_before_reclaim!(bq)
+    quiesce_before_reclaim!(bq) || return (0, 0)
     return reclaim_empty_pool_blocks!(bq)
 end
 
@@ -361,10 +361,11 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
     # in-flight batches) when a block would actually be returned.
     if any(b -> isempty(b.live), poolblocks(ctx))
         bq = ctx.default_bq
-        quiesce_before_reclaim!(bq)
-        n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
-        n_blocks > 0 && @debug "Lava: reclaimed empty pool blocks after GC" blocks=n_blocks MiB=(bytes_freed >> 20)
-        post_gc_live = gpu_live_bytes(ctx)
+        if quiesce_before_reclaim!(bq)
+            n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
+            n_blocks > 0 && @debug "Lava: reclaimed empty pool blocks after GC" blocks=n_blocks MiB=(bytes_freed >> 20)
+            post_gc_live = gpu_live_bytes(ctx)
+        end
     end
 
     @atomic stats.last_freed = pre_gc_live - post_gc_live
@@ -455,14 +456,21 @@ function vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
     maybe_collect(bq.ctx::VkContext)
     result = try_vk_alloc(bq, nbytes; extra_usage, unified)
     result isa VkManagedBuffer && return result
-    quiesce_before_reclaim!(bq)
     # Reclaim any pool blocks that are now fully empty after the GC drained
     # their chunks back to the free list.  Without this the pool ratchets
     # up across renders — see Crown 1400×1000 hw_accel=true repro where
     # render 1 left 3.7 GiB of empty 64 MiB blocks pinning the heap.
-    n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
-    if n_blocks > 0
-        @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=n_blocks MiB=(bytes_freed >> 20)
+    #
+    # Skipped entirely while capturing: the drain that makes reclaiming safe
+    # cannot happen there, so the allocation is left to fail with the ordinary
+    # out-of-memory error below rather than free a block a recording still
+    # names. An OOM inside `bake!` is a diagnosable error; a reclaimed block
+    # under a replay is a GPU fault three frames later.
+    if quiesce_before_reclaim!(bq)
+        n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
+        if n_blocks > 0
+            @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=n_blocks MiB=(bytes_freed >> 20)
+        end
     end
     result = try_vk_alloc(bq, nbytes; extra_usage, unified)
     if result isa VkManagedBuffer
@@ -497,7 +505,40 @@ steady state. `pool.reclaiming` guards the re-entry through `flush!`'s own
 allocations.
 """
 
+"""
+Is a recording being captured on this context's queue right now?
+
+Reclaiming a pool block while one is means destroying a `VkBuffer` that the
+captured command buffers still name — and unlike ordinary recorded work, a
+capture is never "finished": it is replayed again later, so no amount of waiting
+makes the block dead. Both trim entry points refuse while it is true.
+
+`quiesce_before_reclaim!` below drains the queue for the same hazard in its
+ordinary form, and drains are what a capture cannot have — `flush!` throws
+during one, because there is no device work to wait for. That throw is how this
+was found: `bake!` on Hikari's 72-pass chunk allocates the capture's own
+argument slab, `vk_alloc` runs the heap heuristic, and the trim asked to flush.
+The answer is not to let it flush. It is not to trim.
+"""
+capturing(ctx::VkContext) = (ctx.default_bq).capturing !== nothing
+
 function quiesce_before_reclaim!(bq::VulkanBatchQueue)
+    # Refuse while a recording is being captured, and say so, because the caller
+    # must not go on to reclaim either.
+    #
+    # A drain is what makes reclaiming safe, and a capture cannot be drained: it
+    # submits nothing, so `flush!` throws — and even a completed drain would not
+    # help, because a captured sequence is never finished. It is replayed again
+    # later, so a block its command buffers name is live for as long as the plan
+    # is.
+    #
+    # Here and not at the two trim entry points, which is where this check went
+    # first. Same effect, worse test: an entry point has three gates in front of
+    # it (`trim_threshold`, `trim_min_interval`, `reclaimable`) and a test-sized
+    # workload trips none of them, so a regression test written against the entry
+    # point passes whether the guard is there or not. Two were, and both were
+    # worthless. Here there is one thing to ask and one answer.
+    capturing(bq.ctx::VkContext) && return false
     p = mempolicy(bq.ctx::VkContext)
     if !p.reclaiming[] && !device_lost(bq.ctx::VkContext)
         p.reclaiming[] = true
@@ -510,7 +551,7 @@ function quiesce_before_reclaim!(bq::VulkanBatchQueue)
     GC.gc(true)
     drain_deferred_frees!(bq)
     drain_deferred_as_frees!(bq)
-    return nothing
+    return true
 end
 
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
@@ -739,10 +780,9 @@ function vk_free!(buf::VkManagedBuffer)
             # query_timeline rethrows on healthy-device failure.  We are
             # inside a finalizer-reachable path: a throw here is logged by
             # Julia's finalizer machinery rather than propagating.
-            current = query_timeline(bq)
             # Defer destruction if EITHER:
             #   (a) GPU still has in-flight work that references this buffer
-            #       (current < val — last submitted dispatch still pending), OR
+            #       (`!passed` — last submitted dispatch still pending), OR
             #   (b) the BQ has an active recording batch — even if all submits
             #       have completed, the recording batch may have captured this
             #       buffer's BDA via a runtime-pinned reference that pin_leaves!
@@ -754,7 +794,7 @@ function vk_free!(buf::VkManagedBuffer)
             #       short, so deferring is cheap; reclaiming the buffer happens
             #       via `drain_deferred_frees!` at the next flush/submit boundary.
             active = (bq.active_batch !== nothing) && bq.active_batch.recording
-            if current < val || active
+            if !passed(bq, val) || active
                 # Finalizer-thread push into the deferred list — SpinLock so
                 # the main thread's drain doesn't race.
                 lock(bq.deferred_frees_lock) do
@@ -1446,10 +1486,13 @@ function acquire_or_reclaim!(bq::VulkanBatchQueue, sp::Pool, dev,
     # only then stall the queue to get pinned and in-flight buffers back.
     GC.gc(true)
     drain_deferred_frees!(bq)
-    quiesce_before_reclaim!(bq)
-    nblocks, freed = reclaim_empty_pool_blocks!(bq)
-    nblocks > 0 &&
-        @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=nblocks MiB=(freed >> 20)
+    # Not while capturing; see `quiesce_before_reclaim!`. The acquire below
+    # still runs and still throws its own out-of-memory error if it cannot.
+    if quiesce_before_reclaim!(bq)
+        nblocks, freed = reclaim_empty_pool_blocks!(bq)
+        nblocks > 0 &&
+            @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=nblocks MiB=(freed >> 20)
+    end
     try
         return acquire!(sp, dev, Buffers(), nothing, nbytes;
                         align = POOL_ALIGN, blocksize = POOL_BLOCK_SIZE,

@@ -95,6 +95,8 @@ include("runtime/dispatch.jl")
 include("phases.jl")
 # The graph itself: one set of data structures, shared by every backend.
 include("graph/types.jl")
+# Before `queue.jl`: a `BatchQueue` holds the outstanding list this declares.
+include("graph/submission.jl")
 include("graph/queue.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
@@ -170,7 +172,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 # this package calls, and GeometryBasics exports the same name.
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
-export Pool, Block, Region, acquire!, release!, trim!, reserved, retire!, reclaim!, fence, passed, waitfor
+export Pool, Block, Region, acquire!, release!, trim!, reserved, retire!, reclaim!, fence, passed, waitfor, waitfor!
 export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable, takeover!
 export DeviceArray, giveup!, blocksize
 export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
@@ -180,7 +182,7 @@ export readproblem
 export Backend, VulkanAPI, MetalAPI, WebGPUAPI, HostAPI
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
-export Vertices, Indices, Indirect, Uniform, Sampled, Present, Undefined
+export Vertices, Indices, Indirect, Predicated, Uniform, Sampled, Present, Undefined
 export CopySrc, CopyDst, TraceRead, TraceBuild, Storage, ColorAttachment, Depth, Unordered
 export reads, writes, discards, kindof, aliasable, evictable, unordered, inner
 export Transition, ResourceState, transition!, transitions, needs_transition
@@ -261,6 +263,11 @@ export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update
+# `repeat!` and its vocabulary: a loop recorded once, whose trip count the device
+# decides. `Predicate` is exported because a kernel writing predicates by hand
+# names the type; `supportspredicate` because a caller may want to pick between
+# `repeat!` and a host loop rather than be thrown at.
+export repeat!, Predicate, supportspredicate
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!,
        argvalue
 export UpdateRef, anypending, applyupdates!, custombody, registerupdate!
