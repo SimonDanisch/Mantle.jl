@@ -305,6 +305,52 @@ function sync_swapchain!(win::VulkanWindow)
 end
 
 """
+    reclaim_frame_batch!(win, i; segments = false)
+
+Give frame slot `i`'s presented batch back to the queue that recorded it.
+
+Its own function because three callers do this — the acquire that reuses the
+slot, `resize!` and `close` — and they had three copies that had already drifted:
+only the first returned the command-buffer segments, which is what `segments`
+names. A presented batch does not go through `reclaim_batch!` at all, because it
+never went on `bq.in_flight`; it sits in the window's frame slot until the fence
+for that slot is signalled.
+
+The caller must have established that the GPU is done with it — a fence wait for
+the acquire, `vkDeviceWaitIdle` for the other two.
+
+Back to its OWNING queue, not to `ctx.default_bq`. Frame batches are recorded on
+`present_bq`, and mixing them breaks the invariant `submit!` asserts, that every
+batch in `bq.free_batches` has `batch.bq === bq`.
+"""
+function reclaim_frame_batch!(win::VulkanWindow, i::Integer; segments::Bool = false)
+    batch = win.frame_batches[i]
+    batch === nothing && return nothing
+    bq = batch.bq::VulkanBatchQueue
+    batch.recording = false
+    batch.dispatch_count = 0
+    batch.last_was_rt = false
+    empty!(batch.pinned)
+    empty!(batch.wait_semaphores)
+    # The argument memory this frame's draws and dispatches read, given back the
+    # same way `reclaim_batch!` gives back a submitted batch's.
+    for r in batch.regions
+        release!(r)
+    end
+    empty!(batch.regions)
+    if segments
+        # The command-buffer segments `present_frame!` sealed and submitted for
+        # this frame. Without this they are never returned and every split
+        # allocates a fresh one for good.
+        append!(bq.free_cmd_bufs, batch.submitted_cmd_bufs)
+        empty!(batch.submitted_cmd_bufs)
+    end
+    push!(bq.free_batches, batch)
+    win.frame_batches[i] = nothing
+    return nothing
+end
+
+"""
     acquire_next_image!(win::VulkanWindow) -> UInt32
 
 Acquire the next swapchain image. Returns the image index.
@@ -346,23 +392,7 @@ function acquire_next_image!(win::VulkanWindow)
     # foreign batches into another queue's free list breaks the invariant that
     # every batch in `bq.free_batches` has `batch.bq === bq`, which `submit!`
     # checks via `@assert batch.bq === bq`.
-    old_batch = win.frame_batches[fi]
-    if old_batch !== nothing
-        old_batch.recording = false
-        old_batch.dispatch_count = 0
-        old_batch.last_was_rt = false
-        empty!(old_batch.pinned)
-        empty!(old_batch.wait_semaphores)
-        # The command-buffer segments `present_frame!` sealed and submitted for
-        # this frame. The fence above says the GPU is done with them, and this is
-        # the only place a presented batch is reclaimed — `reclaim_batch!` runs
-        # for `submit!`'s batches, not these — so without this they are never
-        # returned and every split allocates a fresh one for good.
-        append!((old_batch.bq::VulkanBatchQueue).free_cmd_bufs, old_batch.submitted_cmd_bufs)
-        empty!(old_batch.submitted_cmd_bufs)
-        push!((old_batch.bq::VulkanBatchQueue).free_batches, old_batch)
-        win.frame_batches[fi] = nothing
-    end
+    reclaim_frame_batch!(win, fi; segments = true)
 
     # Same on acquire: a stale swapchain is a condition to recover from, not an
     # error to die on.
@@ -432,16 +462,7 @@ function Base.resize!(win::VulkanWindow)
     # the OWNING bq's free list (frame batches are recorded on present_bq, not
     # default_bq; mixing breaks the `batch.bq === bq` invariant in submit!).
     for i in eachindex(win.frame_batches)
-        batch = win.frame_batches[i]
-        if batch !== nothing
-            batch.recording = false
-            batch.dispatch_count = 0
-            batch.last_was_rt = false
-            empty!(batch.pinned)
-            empty!(batch.wait_semaphores)
-            push!((batch.bq::VulkanBatchQueue).free_batches, batch)
-            win.frame_batches[i] = nothing
-        end
+        reclaim_frame_batch!(win, i)
     end
     create_swapchain!(win)
 end
@@ -458,16 +479,7 @@ function Base.close(win::VulkanWindow)
     # Reclaim any in-flight frame batches — push back to the OWNING bq's free
     # list (see `acquire_next_image!` for the invariant).
     for i in eachindex(win.frame_batches)
-        batch = win.frame_batches[i]
-        if batch !== nothing
-            batch.recording = false
-            batch.dispatch_count = 0
-            batch.last_was_rt = false
-            empty!(batch.pinned)
-            empty!(batch.wait_semaphores)
-            push!((batch.bq::VulkanBatchQueue).free_batches, batch)
-            win.frame_batches[i] = nothing
-        end
+        reclaim_frame_batch!(win, i)
     end
     # Destroy the Vulkan objects here rather than leaving them to finalizers.
     # Julia does not run finalizers at exit, so the surface outlives the

@@ -94,24 +94,13 @@ which is what lets a plan be re-run at a new window size without rebuilding.
 """
 function refit! end
 
-"""
-    record!(plan, queue; derived = true, suppress = derived, updates = false)
-
-Record `plan`'s passes into `queue`.
-
-The graph has already decided the order, the barriers and the memory; this
-writes them into whatever the backend records into. `derived` selects the
-barriers the graph computed over ones declared by hand, and `suppress` elides
-barriers the graph proved redundant.
-"""
-function record! end
-
-"""
-    record_pass!(graph, queue, passplan, derived, args; suppress = false)
-
-Record one pass. The per-pass half of [`record!`](@ref).
-"""
-function record_pass! end
+# `record!` is declared in `Mantle.jl` with the default that makes it meaningful
+# on a backend that has no command buffers to build: the plan, unchanged. The
+# per-pass half is not a hook at all any more — a backend that records emits into
+# something of its own (`Emitter` on Vulkan), and what that is has no portable
+# spelling. `record_pass!(graph, queue, passplan, derived, args; suppress)` was
+# the old one, and four of its six arguments were the queue-shaped machinery step
+# 2 deleted.
 
 """
     rename!(graph, queue, dst, data)

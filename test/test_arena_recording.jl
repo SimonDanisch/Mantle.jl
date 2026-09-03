@@ -1,5 +1,6 @@
-# The device-owned arena and the baked plan. Needs a GPU, but no display: every
-# graph here is headless, which is also the only kind `bake!` takes today.
+# The device-owned arena and the recorded plan. Needs a GPU, but no display:
+# every graph here is headless, which is also the only kind `record!` takes
+# today.
 using Mantle, Test, KernelAbstractions, Lava, Statistics
 const M = Mantle
 
@@ -95,7 +96,10 @@ const E = MVE
     KernelAbstractions.synchronize(M.backend(dev))
     @test all(==(5f0), Array(M.storage(small.out)))
     @test all(==(5f0), Array(M.storage(big.out)))
-    @test E.handover!(small.plan, dev.bq)      # two live tenants -> a barrier
+    # Two live tenants, so a plan taking the arena over emits a barrier. Asked
+    # through an emitter, which is what `emit!` hands it: `handover!` used to
+    # take the queue and reach for its active batch.
+    @test E.handover!(small.plan, E.emitter(dev.bq))
 end
 
 @testset "over budget fails at compile, with numbers" begin
@@ -122,11 +126,21 @@ end
           M.pool(dev).arenas[E.Buffers()].bytes < n * sizeof(Float32)
 end
 
-@testset "a renameable Update gives up its scoped barrier" begin
-    # `build_pass_barrier` bakes `st.buf[].buffer` at compile time, and `rename!`
-    # points the resource at a different store — so a resource an `Update` can
-    # move must get a global memory barrier instead. A *ranged* update writes in
-    # place and keeps its scope, which is the discrimination being asserted.
+@testset "a pass barrier carries mask tuples, not buffers" begin
+    # This used to assert the opposite: that a `renameable` resource was widened
+    # to a global memory barrier while everything else kept a barrier scoped to
+    # its (VkBuffer, offset, size). The `renameable` case was the general one —
+    # a recording cannot bake a handle for anything that can move, and baking
+    # makes everything movable — so `build_pass_barrier` emits one
+    # `VkMemoryBarrier2` per distinct `(waits, to)` tuple and no buffer barriers
+    # at all. `barrierspan`, `barrierbuffer` and the special case are gone.
+    #
+    # Two things are worth pinning here and both survive the change. The
+    # `renameable` DISCRIMINATION is still real — it decides whether an `Update`
+    # writes in place or through a fresh store — it just no longer reaches the
+    # barrier. And the tuples are `unique`, never unioned: `a` and `b` are the
+    # same hazard and collapse into one barrier, which is why three transitions
+    # produce two.
     dev = M.Device(M.VulkanAPI())
     g = M.Graph(dev)
     a   = M.Buffer(dev, zeros(Float32, 1024))
@@ -146,46 +160,55 @@ end
     @test !E.renameable(g, out)
 
     pp = only(p for p in plan.passes if p.pass.name == "read")
-    # One transition per resource; exactly the renameable one is widened. Counted
-    # off the dependency rather than by handle: Lava suballocates, so all three
-    # of these share a VkBuffer and comparing handles proves nothing.
+    # Three transitions: `a` and `b` are both a copy made visible to a shader
+    # read, `out` is a shader write ordered against the last one.
+    @test length(pp.pre) == 3
     v = pp.barrier.vks
-    @test Int(v.memoryBarrierCount) == 1
-    @test Int(v.bufferMemoryBarrierCount) == 2
+    # Two of them, because the first two are the same tuple. A union of all three
+    # would make the shader writes visible to a copy nothing performs and drag in
+    # caches no hazard here touches.
+    @test Int(v.memoryBarrierCount) == 2
+    # And no handle, no offset, no range: a recording names no `VkBuffer`, which
+    # is what lets a buffer move under a recorded plan without invalidating it.
+    @test Int(v.bufferMemoryBarrierCount) == 0
 
-    # And a scoped barrier names the resource's range inside the pool buffer, not
-    # offset 0 — `barrierspan` adds `pool_offset`, the same sum a copy computes.
-    arr = unsafe_wrap(Array, v.pBufferMemoryBarriers, Int(v.bufferMemoryBarrierCount))
-    want = UInt64(E.pool_offset(M.storage(b).buf[]) + M.storage(b).offset)
-    @test any(bb -> UInt64(bb.offset) == want, arr)
-    @test all(bb -> UInt64(bb.offset) != 0, arr)
+    mb = unsafe_wrap(Array, v.pMemoryBarriers, Int(v.memoryBarrierCount))
+    @test allunique((m.srcStageMask, m.srcAccessMask, m.dstStageMask, m.dstAccessMask)
+                    for m in mb)
 end
 
-@testset "a baked plan replays bit-exact, and records almost nothing" begin
+@testset "a recorded plan runs bit-exact, and records nothing" begin
     dev = M.Device(M.VulkanAPI())
     s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes
+    @test !M.recorded(s.plan)
+    M.record!(s.plan)
+    @test M.recorded(s.plan)
+    @test M.record!(s.plan) === s.plan                     # idempotent
+    # No argument here is a `Ref`, so nothing can change between runs and the
+    # host-side update plan is empty: a run writes no argument bytes either.
+    @test isempty(s.plan.writes)
+
     M.run!(s.plan)
     KernelAbstractions.synchronize(M.backend(dev))
     want = copy(Array(M.storage(s.out)))
-    @test !M.baked(s.plan)
 
-    # Dispatches the host RECORDED, counted at submit. This is the assertion, and
-    # it used to be a wall-clock ratio: baked had to be three times faster than
-    # unbaked over thirty runs.
+    # Dispatches the host recorded INTO THE FRAME'S BATCH, counted at submit.
+    # This is the assertion, and it used to be a wall-clock ratio: baked had to
+    # be three times faster than unbaked over thirty runs.
     #
     # That measurement stopped meaning what it said the day `run!` started
-    # rotating argument slots for a baked plan too. A baked run now submits every
+    # rotating argument slots for a baked plan too. A recorded run submits every
     # run and waits when the host is `ARG_SLOTS` runs ahead of the device, which
-    # is the same backpressure an unbaked run has always had — so both medians are
-    # GPU throughput for this graph (0.73 ms against 0.64 ms measured, and the
-    # unbaked one is lower because it submits three runs at a time rather than
-    # one). Nothing regressed; the clock is simply no longer measuring host work.
+    # is the same backpressure the interpreted path always had — so both medians
+    # were GPU throughput for this graph (0.73 ms against 0.64 ms measured).
+    # Nothing regressed; the clock was simply no longer measuring host work.
     #
     # Counting is better than timing anyway: it is exactly the claim in the name
     # of this testset, it is not a ratio anybody has to keep generous, and it does
-    # not move on a shared machine.
+    # not move on a shared machine. `test_recording_lifecycle.jl` owns the
+    # host-cost comparison, where the two sides genuinely differ.
     diag = M.batchqueue(dev).ctx.diag
-    function recorded(f, n)
+    function batchrecorded(f, n)
         f()                                  # warm, and outside the count
         KernelAbstractions.synchronize(M.backend(dev))
         before = diag.total_dispatches[]
@@ -193,56 +216,28 @@ end
             f()
         end
         KernelAbstractions.synchronize(M.backend(dev))   # flushes the trailing batch
-        (diag.total_dispatches[] - before, )
+        diag.total_dispatches[] - before
     end
-    host(f, n) = (f(); [(t0 = time_ns(); f(); (time_ns() - t0) / 1e6) for _ in 1:n])
-
-    runs = 30
-    npasses = length(s.plan.passes)
-    (un_rec,) = recorded(() -> M.run!(s.plan), runs)
-    un = host(() -> M.run!(s.plan), runs)
-    KernelAbstractions.synchronize(M.backend(dev))
-    # Unbaked records every dispatch of every pass, every run — which is the cost
-    # baking exists to remove, and the number the next assertion is against.
-    @test un_rec == runs * npasses
-
-    M.bake!(s.plan)
-    @test M.baked(s.plan)
-    @test M.bake!(s.plan) === s.plan                       # idempotent
-    # No argument here is a `Ref`, so nothing can change between runs and the
-    # host-side update plan is empty: a baked run writes no argument bytes either.
-    @test isempty(s.plan.writes)
 
     fill!(M.storage(s.out), 0f0)
     KernelAbstractions.synchronize(M.backend(dev))
-    (bk_rec,) = recorded(() -> M.run!(s.plan), runs)
-    fill!(M.storage(s.out), 0f0)
+    @test batchrecorded(() -> M.run!(s.plan), 30) == 0
     KernelAbstractions.synchronize(M.backend(dev))
-    bk = host(() -> M.run!(s.plan), runs)
-    KernelAbstractions.synchronize(M.backend(dev))
-
     @test Array(M.storage(s.out)) == want                  # bit-exact, not merely close
-    # THE assertion: not "almost nothing", nothing at all.
-    @test bk_rec == 0
-    # And a guard the other way, so baking cannot become a pessimisation without
-    # anyone noticing. Loose on purpose — this is wall clock on a shared machine
-    # and both sides are GPU-bound, so the ratio it can honestly police is "not
-    # much worse", not "much better".
-    @test median(sort(bk)) < 2 * median(sort(un))
 end
 
-@testset "a baked plan survives a full GC between invocations" begin
-    # The property a plan has and a raw capture does not: a plan holds references
-    # to every resource its recording names, so a full collection between two
-    # replays cannot free storage the command buffer points at. `test_capture_gc.jl`
-    # in Lava owns this for a raw capture; this is where it is owned for a plan.
+@testset "a recorded plan survives a full GC between runs" begin
+    # A plan holds references to every resource its recording names, so a full
+    # collection between two runs cannot free storage the command buffer points
+    # at. `test_recording_lifecycle.jl` asserts the same thing on a smaller plan;
+    # this is the 50 000-element chain.
     dev = M.Device(M.VulkanAPI())
     p = Base.invokelatest(chainplan, dev, 50_000, 8)
     M.run!(p.plan)
     KernelAbstractions.synchronize(M.backend(dev))
     want = copy(Array(M.storage(p.out)))
 
-    M.bake!(p.plan)
+    M.record!(p.plan)
     for _ in 1:6
         GC.gc(true)
         fill!(M.storage(p.out), 0f0)
@@ -253,18 +248,18 @@ end
     end
 end
 
-@testset "growing the arena under a baked plan is refused" begin
+@testset "growing the arena under a recorded plan is refused" begin
     # The one way M1 and M5 interact badly. Plans share the device's arena, so a
-    # later, larger plan grows it and remaps every tenant — but a baked tenant
-    # cannot be remapped: its recording holds the addresses the old allocation
-    # had. Silently re-materialising underneath it gives a replay that reads
-    # freed storage, deterministically and quietly. It has to be an error, and
-    # the error has to name the order that avoids it.
+    # later, larger plan grows it and remaps every tenant — but a recorded tenant
+    # cannot be remapped: its command buffer holds the addresses the old
+    # allocation had. Silently re-materialising underneath it gives a run that
+    # reads freed storage, deterministically and quietly. It has to be an error,
+    # and the error has to name the order that avoids it.
     dev = M.Device(M.VulkanAPI())
     small = Base.invokelatest(chainplan, dev, 100_000, 3)
     M.run!(small.plan)
     KernelAbstractions.synchronize(M.backend(dev))
-    M.bake!(small.plan)
+    M.record!(small.plan)
 
     err = try
         Base.invokelatest(chainplan, dev, 4_000_000, 3)   # needs a much bigger arena
@@ -273,14 +268,19 @@ end
         e
     end
     @test err isa ArgumentError
-    @test occursin("baked", sprint(showerror, err))
-    @test occursin("before baking", sprint(showerror, err))
+    @test occursin("recorded", sprint(showerror, err))
+    @test occursin("before recording", sprint(showerror, err))
 end
 
-@testset "bake! refuses what it cannot record" begin
+@testset "a profiled plan reports both halves of a recorded run" begin
     dev = M.Device(M.VulkanAPI())
-    # Profiling measures host recording per pass, and a baked plan does not
-    # record — the numbers would be the capture's, reported forever.
+    # `bake!` REFUSED a profiled plan, because `timings` measures host recording
+    # per pass and a baked plan did not record — the numbers would have been the
+    # capture's, reported forever. Recording is not a second mode any more: the
+    # host number is what writing the pass cost, sampled once because it happens
+    # once, and the GPU number comes from timestamps inside the recording and is
+    # resampled on every run. Both are honest; neither is a frozen copy of the
+    # other.
     g = M.Graph(dev)
     seed = M.Buffer(dev, zeros(Float32, 64))
     out  = M.Buffer(dev, zeros(Float32, 64))
@@ -289,25 +289,35 @@ end
         M.dispatch!(p, bump!, (d, s), 64)
     end
     profiled = Base.invokelatest(M.Plan, g; profile = true)
-    @test_throws ArgumentError M.bake!(profiled)
+    M.record!(profiled)
+    for _ in 1:4
+        M.run!(profiled)
+    end
+    KernelAbstractions.synchronize(M.backend(dev))
+    t = M.timings(profiled)
+    @test length(t) == 1
+    @test t[1].name == "only"
+    @test t[1].host_ms > 0                 # the one recording
+    @test t[1].samples >= 1                # …and at least one frame of GPU time
+    M.free!(profiled)
 end
 
-@testset "a baked replay still claims the arena it writes" begin
-    # `run!` on a baked plan replays and never calls `record!`, which is where
-    # `takeover!` lives. Skipping the claim leaves the arena naming whoever
-    # RECORDED last — so the next tenant sees itself there and emits no barrier,
-    # a handover away from a baked plan with nothing ordering it. A replay writes
-    # those bytes like any other run and has to say so.
+@testset "a recorded run still claims the arena it writes" begin
+    # `run!` on a recorded plan emits nothing, and emitting is where `takeover!`
+    # used to live. Skipping the claim leaves the arena naming whoever RECORDED
+    # last — so the next tenant sees itself there and emits no barrier, a
+    # handover away from a recorded plan with nothing ordering it. A run writes
+    # those bytes like any other and has to say so.
     dev = M.Device(M.VulkanAPI())
     a = Base.invokelatest(chainplan, dev, 50_000, 2)
     b = Base.invokelatest(chainplan, dev, 50_000, 2)
     M.run!(a.plan)
     KernelAbstractions.synchronize(M.backend(dev))
-    M.bake!(a.plan)
-    M.run!(a.plan)                                  # replay
+    M.record!(a.plan)
+    M.run!(a.plan)
     KernelAbstractions.synchronize(M.backend(dev))
     arena = M.pool(dev).arenas[E.Buffers()]
-    @test arena.lastrun === a.plan                  # the replay claimed it
+    @test arena.lastrun === a.plan                  # the run claimed it
     @test all(==(4f0), Array(M.storage(a.out)))     # and still produced its answer
     @test M.takeover!(M.pool(dev), E.Buffers(), b.plan)  # so b sees a real handover
     M.run!(b.plan)

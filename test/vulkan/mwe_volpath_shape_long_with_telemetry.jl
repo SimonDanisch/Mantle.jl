@@ -6,7 +6,7 @@
 #      ~7600 dispatches in one session.)
 #   2. What Lava-side state grows monotonically across iters?  If
 #      *anything* grows without bound (deferred_frees, in_flight,
-#      arg_slabs, timeline gaps), we have a candidate leak.
+#      unified-arena blocks, timeline gaps), we have a candidate leak.
 #
 # Telemetry is sampled per iter (cheap) into a CSV-shaped buffer.
 
@@ -179,10 +179,11 @@ function snapshot(bq, ctx, iter)
         free_batches  = length(bq.free_batches),
         deferred      = length(bq.deferred_frees),
         deferred_as   = length(bq.deferred_as_frees),
-        arg_slabs     = length(bq.arg_slabs),
-        arg_idx       = bq.arg_slab_idx,
-        ind_slabs     = length(bq.indirect_slabs),
-        ind_idx       = bq.indirect_slab_idx,
+        # What a recording reads: blocks of the unified arena, and how many
+        # regions of them are still handed out. Growth in either is the leak
+        # this MWE is looking for; the two slab rings it used to read are gone.
+        blocks        = length(MVE.unifiedblocks(ctx)),
+        live_regions  = sum(b -> length(b.live), MVE.unifiedblocks(ctx); init = 0),
     )
 end
 
@@ -213,9 +214,9 @@ end
 println()
 
 println("\n--- per-iter snapshots ---")
-println("iter  device_lost  next_tl  in_flight  free_batches  deferred  def_as  arg_slabs/idx  ind_slabs/idx")
+println("iter  device_lost  next_tl  in_flight  free_batches  deferred  def_as  unified blocks/live")
 for s in snapshots
-    @printf "%4d  %-11s  %7d  %9d  %12d  %8d  %6d  %12s  %12s\n" s.iter string(s.device_lost) s.next_tl s.in_flight s.free_batches s.deferred s.deferred_as "$(s.arg_slabs)/$(s.arg_idx)" "$(s.ind_slabs)/$(s.ind_idx)"
+    @printf "%4d  %-11s  %7d  %9d  %12d  %8d  %6d  %19s\n" s.iter string(s.device_lost) s.next_tl s.in_flight s.free_batches s.deferred s.deferred_as "$(s.blocks)/$(s.live_regions)"
 end
 
 if crashed_at == 0

@@ -340,7 +340,11 @@ copied in one region.
 convenient standalone and wrong under a graph, which knows what the image was
 doing before and what it will do next and can often need no barrier at all.
 """
-function copy_image_to_buffer!(bq, dst::LavaArray{T, 1}, image::VK.Image,
+copy_image_to_buffer!(bq::VulkanBatchQueue, dst::LavaArray, image::VK.Image,
+                      width::Integer, height::Integer, format::VK.Format; kw...) =
+    copy_image_to_buffer!(emitter(bq), dst, image, width, height, format; kw...)
+
+function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image,
                                width::Integer, height::Integer, format::VK.Format;
                                aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT) where {T}
     # Any element type, because the copy moves bytes and the destination's is the
@@ -349,7 +353,6 @@ function copy_image_to_buffer!(bq, dst::LavaArray{T, 1}, image::VK.Image,
     nbytes = width * height * format_pixel_size(format)
     sizeof(T) * length(dst) >= nbytes ||
         error("destination holds $(sizeof(T) * length(dst)) bytes, need $nbytes")
-    batch = ensure_active_batch!(bq)
     managed = dst.buf[]
     region = VK.BufferImageCopy(
         UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
@@ -358,9 +361,9 @@ function copy_image_to_buffer!(bq, dst::LavaArray{T, 1}, image::VK.Image,
         VK.Offset3D(0, 0, 0),
         VK.Extent3D(UInt32(width), UInt32(height), UInt32(1)),
     )
-    VK.cmd_copy_image_to_buffer(batch.cmd_buf, image,
+    VK.cmd_copy_image_to_buffer(e.cmd, image,
         VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
-    pin!(batch, dst)
+    pin!(e, dst)
     return dst
 end
 

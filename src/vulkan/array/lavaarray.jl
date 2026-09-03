@@ -189,7 +189,7 @@ end
 # buffer — which `sync_access!` rightly asserts against.
 # `sync_access!(::LavaArray)` below forwards to the underlying VkManagedBuffer
 # so cross-queue last_write tracking still runs on the leaf.
-@inline pin!(batch::CommandBatch, a::LavaArray) = begin
+@inline pin!(batch::O, a::LavaArray) where {O<:Pinned} = begin
     a in batch.pinned && return
     push!(batch.pinned, a)
     # Two claims, and both are needed:
@@ -211,8 +211,13 @@ end
 # kernel compilation, and pins every visited LavaArray into the current batch.
 # Declared here (ahead of ka_backend.jl which uses it in method signatures);
 # the `adapt_storage` / `adapt_structure` methods live in gpuarrays.jl.
-struct LavaAdaptor
-    batch::CommandBatch
+# PARAMETERISED on the owner, not `batch::Pinned`. A `Union`-typed field makes
+# the struct non-concrete, so `adaptor.batch` is a union load and every
+# `pin_leaves!`/`pack_arg!` reached through it becomes a dynamic call — 835 bytes
+# per dispatch, measured by `test_dispatch_allocation.jl`, which exists for
+# exactly this class of regression.
+struct LavaAdaptor{P<:Pinned}
+    batch::P
 end
 
 # ── Transfers ──

@@ -57,27 +57,21 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     # Guards `deferred_frees` AND `deferred_as_frees`.  Acquired on every
     # push from finalizer threads and on every drain from the main thread.
     deferred_frees_lock::Base.Threads.SpinLock
-    # Per-BQ argument-buffer slab pool.  Each submit bump-allocates from
-    # the current slab; `reset_arg_buffer_pool!(bq)` (called from
-    # reclaim_batch! once in_flight is empty) rewinds the bump pointer.
-    # Element type is `LavaArray{UInt8,1}` (unified/BAR memory); kept loose
-    # because LavaArray is declared later in array/lavaarray.jl.
-    arg_slabs::Vector{Any}
-    arg_slab_idx::Int
-    arg_slab_offset::Int
-    arg_alloc_count::Int
-    # Timeline value the GPU must reach before the pool may be rewound: the
-    # newest batch that allocated from it. 0 = nothing outstanding. Rewinding
-    # earlier hands the next caller bytes an in-flight shader is still reading,
-    # since a dispatch's arg address is baked into its command buffer as a push
-    # constant (see `arg_pool_in_use!`).
-    arg_pool_frontier::UInt64
-    # Per-BQ indirect-dispatch buffer slab pool.  Element type is
-    # `LavaArray{UInt32,1}` (unified + INDIRECT_BUFFER_BIT).  Reset by
-    # `reset_indirect_buffer_pool!(bq)`.
-    indirect_slabs::Vector{Any}
-    indirect_slab_idx::Int
-    indirect_slab_offset::Int
+    # Seven fields are gone from here: an argument-slab ring (`arg_slabs`,
+    # `arg_slab_idx`, `arg_slab_offset`, `arg_alloc_count`, `arg_pool_frontier`)
+    # and an indirect-slab ring beside it (`indirect_slabs`, `indirect_slab_idx`,
+    # `indirect_slab_offset`).
+    #
+    # They were two hand-rolled bump allocators, and every one of those fields
+    # existed to answer "when may these bytes be handed out again" — a question
+    # the pool answers with a `Region` and an owner. A recording's arguments now
+    # belong to whoever owns the recording: to the plan when the plan laid them
+    # out, to the batch when an ad-hoc launch took them, to the capture when one
+    # is open. None of those has to guess, because a fence says when its work is
+    # done and `release!` is what "done" means.
+    #
+    # The rewind was also a live bug wearing a performance hat: it fired whenever
+    # the queue drained, while a recording holds its addresses for ever.
     # Per-BQ staging buffer for CPU↔GPU transfers. A single VkManagedBuffer
     # that grows as needed via get_staging!. Reused across transfers.
     # Loose type — VkManagedBuffer is declared later in memory.jl.
@@ -124,11 +118,14 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     barrier_elision::Bool
     # One-shot, consumed by exactly the next dispatch on THIS queue.
     next_skip_barrier::Bool
-    # How many nested "do not end this command buffer here" scopes are open.
-    # Nonzero means a construct is recording that spans several commands and
-    # cannot survive a split or a submission in the middle — a conditional
-    # rendering scope is the one that exists. See `unsplittable`.
-    scope_depth::Int
+    # `scope_depth` is gone from here. It counted open "do not end this command
+    # buffer" scopes, because a conditional-rendering scope's begin and end have
+    # to be in ONE command buffer and `auto_submit_threshold` would cut between
+    # them. Only `repeat!` opens one, and a plan's passes are emitted into the
+    # plan's own command buffer now — which nothing splits and nothing submits
+    # while it is being written. The heuristic it suppressed is not reachable
+    # from there at all, which is what makes deleting the counter the fix rather
+    # than moving it.
     # Set by the KA launch path for the dispatch it is about to record: "this
     # dispatch enumerated its buffers, so the elision tracker saw everything it
     # touches". Same one-shot shape as `next_skip_barrier`, and it was a global
@@ -146,14 +143,13 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     # Non-`nothing` inside `concurrent_indirect_group`: dispatches append here
     # instead of recording, and the group's flush fuses them.
     deferred_indirect::Union{Nothing,Vector{Any}}
-    # The `CapturedSequence` being recorded on THIS queue, or `nothing`. It was a
-    # module-level `Ref`, so every site that used it had to re-check `cap.bq ===
-    # bq` to find out whether the capture was even this queue's — and
-    # `cb_begin_flags` had no queue to check with, so a capture running on one
-    # queue silently made every OTHER queue's command buffers reusable.
-    # `Any` because `CapturedSequence` is declared in `command.jl`; use sites
-    # assert it, the same shape as `ctx`.
-    capturing::Any
+    # `capturing` is gone from here. It held the `CapturedSequence` open on this
+    # queue, and four separate places asked it what to do: which flags to begin a
+    # command buffer with, whether `submit!` should seal instead of submit,
+    # whether `flush!` was legal, who owned a scratch region. All four are
+    # questions about ONE recording, and a recording is now a value with an
+    # owner — so each of them is answered by the argument rather than by a field
+    # that any code anywhere could be looking at.
     # Everything handed to the device from this queue and not yet known finished,
     # oldest first. See `graph/submission.jl`.
     #
@@ -230,16 +226,13 @@ supports_batch_queue(backend) = false
 """
     batchqueue(device) -> BatchQueue
 
-The queue a `custom!` pass on `device` records into.
+The queue `device` records and submits on.
 
-The portable spelling of what was `Mantle.vk_context().default_bq`, which is how
-Hikari's hardware ray-tracing pass reached its queue: a global lookup, in the
-backend, from a package that is not supposed to know which backend it has. A
-`custom!` body already holds the graph, and the graph holds the device, so the
-queue was one hop away the whole time — and after the runtime moved into an
-extension the global was not reachable at all.
+The portable spelling of what was `Mantle.vk_context().default_bq`: a global
+lookup, in the backend, from a package that is not supposed to know which backend
+it has. A caller holds a device, and a device holds its queue.
 
-No default. A backend with no queue to record into should say so through
+No default. A backend with no queue should say so through
 [`supports_batch_queue`](@ref) and be asked that question first; a fallback here
 would answer "no queue" as some other value and fail further away.
 """

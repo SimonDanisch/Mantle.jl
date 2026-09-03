@@ -178,35 +178,18 @@ function Update end
     dispatches(pass)           -> where its recorded work goes
     passes(graph)              -> the graph's passes, in declaration order
 
-The four things a backend has to say about passes, so that `custom!` and
-`compute!` do not have to exist twice.
+The four things a backend has to say about passes, so that `compute!` and
+`render!` do not have to exist twice.
 
 They had become identical: make a pass, push it, hand a block the pass handle,
-keep what it returns. Only the pass TYPE differed — `Pass(name, :custom)` against
+keep what it declares. Only the pass TYPE differed — `Pass(name, kind)` against
 `HostPass(name)` — which is what these hooks are for. A backend that represents
 passes differently still says so in one place instead of reimplementing the
-recording protocol around it.
+declaration protocol around it.
 """
 function newpass end
 function handle end
 function dispatches end
-
-"""
-    custombody(body) -> body
-
-Check that a `custom!` block returned the callable it is contracted to.
-
-The contract, not a mechanism: what a backend does with the body differs, that it
-must BE one does not. Both extensions carried this test and its wording verbatim,
-and an error message that exists twice is one that will eventually say two
-different things about one rule.
-"""
-function custombody(body)
-    applicable(body) || throw(ArgumentError(
-        "custom!: the block has to return a zero-argument callable — it is what " *
-        "runs at record time. Declare the uses, then return the work."))
-    return body
-end
 
 """
     checklive(plan, regions, ntransients)

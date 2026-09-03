@@ -31,15 +31,15 @@
 """
     scan_arg_slabs_for_bda!(buf) -> Int
 
-Scan every live VulkanBatchQueue's `arg_slabs` (and `indirect_slabs`) for any
-UInt64 word matching `buf.address`.  For each hit, append a record to
-`diag.freed_bda_scan_log` and overwrite the slot with 0 so the GPU faults
-cleanly on a null reference instead of touching the freed memory.
+Scan every block of the unified arena — the argument blocks and indirect commands
+a recording reads — for any UInt64 word matching `buf.address`.  For each hit,
+append a record to `diag.freed_bda_scan_log` and overwrite the slot with 0 so the
+GPU faults cleanly on a null reference instead of touching the freed memory.
 Returns the number of hits found.
 
 Defined AFTER VkManagedBuffer + VulkanBatchQueue (forward-call from vk_free!).
-Cost is ~`(slab_size_bytes / 8)` UInt64 reads per live slab — for 4 MiB
-slabs that's ~512 K reads, fast enough for debug.
+Cost is ~`(block_bytes / 8)` UInt64 reads per block — for 4 MiB blocks that is
+~512 K reads, fast enough for debug.
 """
 function scan_arg_slabs_for_bda! end
 
@@ -505,32 +505,19 @@ steady state. `pool.reclaiming` guards the re-entry through `flush!`'s own
 allocations.
 """
 
-"""
-Is a recording being captured on this context's queue right now?
-
-Reclaiming a pool block while one is means destroying a `VkBuffer` that the
-captured command buffers still name — and unlike ordinary recorded work, a
-capture is never "finished": it is replayed again later, so no amount of waiting
-makes the block dead. Both trim entry points refuse while it is true.
-
-`quiesce_before_reclaim!` below drains the queue for the same hazard in its
-ordinary form, and drains are what a capture cannot have — `flush!` throws
-during one, because there is no device work to wait for. That throw is how this
-was found: `bake!` on Hikari's 72-pass chunk allocates the capture's own
-argument slab, `vk_alloc` runs the heap heuristic, and the trim asked to flush.
-The answer is not to let it flush. It is not to trim.
-"""
-capturing(ctx::VkContext) = (ctx.default_bq).capturing !== nothing
-
 function quiesce_before_reclaim!(bq::VulkanBatchQueue)
-    # Refuse while a recording is being captured, and say so, because the caller
-    # must not go on to reclaim either.
+    # Refuse while any plan on this device holds a recording, and say so, because
+    # the caller must not go on to reclaim either.
     #
-    # A drain is what makes reclaiming safe, and a capture cannot be drained: it
-    # submits nothing, so `flush!` throws — and even a completed drain would not
-    # help, because a captured sequence is never finished. It is replayed again
-    # later, so a block its command buffers name is live for as long as the plan
-    # is.
+    # A drain is what makes reclaiming safe, and a recording cannot be drained
+    # into safety: it is submitted again next run, so a block its command buffer
+    # names is live for as long as the plan is. Waiting does not change that.
+    #
+    # It used to ask `bq.capturing !== nothing` — whether a capture was OPEN,
+    # which is true only during `bake!` and false for every recording that had
+    # already been taken. `movable` asks the pool about its tenants instead,
+    # which is the property, and it is the same one arena growth already refuses
+    # on.
     #
     # Here and not at the two trim entry points, which is where this check went
     # first. Same effect, worse test: an entry point has three gates in front of
@@ -538,7 +525,7 @@ function quiesce_before_reclaim!(bq::VulkanBatchQueue)
     # workload trips none of them, so a regression test written against the entry
     # point passes whether the guard is there or not. Two were, and both were
     # worthless. Here there is one thing to ask and one answer.
-    capturing(bq.ctx::VkContext) && return false
+    movable(pool(lavadevice(bq.ctx::VkContext))) || return false
     p = mempolicy(bq.ctx::VkContext)
     if !p.reclaiming[] && !device_lost(bq.ctx::VkContext)
         p.reclaiming[] = true
@@ -934,40 +921,38 @@ function destroy_buffer!(buf::VkManagedBuffer)
     buf.size = 0
 end
 
+"""Every mapped block of the unified arena — the memory a recording reads its
+arguments and its workgroup counts out of, and therefore the only place a stale
+device address can be sitting when the device runs.
+
+It was two slab lists on the queue. The blocks are what backs them now, so the
+scans below read the same bytes through the owner that has them."""
+unifiedblocks(ctx::VkContext) = get(() -> Block[], spans(ctx).blocks, Unified())
+
 # Scanner method — reachable now that VkManagedBuffer + VulkanBatchQueue are defined.
 function scan_arg_slabs_for_bda!(buf::VkManagedBuffer)
     target = buf.address
     target == UInt64(0) && return 0
     hits = 0
     ctx = buf.ctx
-    bq = ctx.default_bq
-    for (kind, slabs) in ((:arg, bq.arg_slabs), (:indirect, bq.indirect_slabs))
-        for (i, slab) in enumerate(slabs)
-            # A slab whose own DataRef has been released is not something to
-            # read: `getindex` throws "Attempt to use a freed reference", and
-            # this runs from `vk_free!`, which finalizers reach — so the throw
-            # is swallowed by Julia's finalizer machinery and the scan silently
-            # stops partway. `freed` is the predicate for it; there is nothing
-            # to scan in a slab whose storage is gone anyway.
-            slab.buf.freed && continue
-            mb = slab.buf[]::VkManagedBuffer
-            mb.mapped_ptr == Ptr{UInt8}(0) && continue
-            n = mb.size ÷ 8
-            p = Ptr{UInt64}(mb.mapped_ptr)
-            for k in 0:(n-1)
-                v = unsafe_load(p, k+1)
-                if v == target
-                    push!(buf.ctx.diag.freed_bda_scan_log,
-                          (slab=kind, idx=i, offset=k*8, freed_bda=target,
-                           buf_size=buf.size))
-                    # Poisoning is the point of finding it — a null BDA faults
-                    # cleanly where a recycled one corrupts. Skippable so the
-                    # scan can be a pure observer, which is how you tell whether
-                    # the poisoning is what stopped a fault or merely the
-                    # slowdown that came with it.
-                    ctx.diag.freed_bda_scan_poisons && unsafe_store!(p, UInt64(0), k+1)
-                    hits += 1
-                end
+    for (i, blk) in enumerate(unifiedblocks(ctx))
+        mb = (blk.memory::BufferBlock).ref[]::VkManagedBuffer
+        mb.mapped_ptr == Ptr{UInt8}(0) && continue
+        n = mb.size ÷ 8
+        p = Ptr{UInt64}(mb.mapped_ptr)
+        for k in 0:(n-1)
+            v = unsafe_load(p, k+1)
+            if v == target
+                push!(ctx.diag.freed_bda_scan_log,
+                      (slab=:unified, idx=i, offset=k*8, freed_bda=target,
+                       buf_size=buf.size))
+                # Poisoning is the point of finding it — a null BDA faults
+                # cleanly where a recycled one corrupts. Skippable so the
+                # scan can be a pure observer, which is how you tell whether
+                # the poisoning is what stopped a fault or merely the
+                # slowdown that came with it.
+                ctx.diag.freed_bda_scan_poisons && unsafe_store!(p, UInt64(0), k+1)
+                hits += 1
             end
         end
     end
@@ -977,67 +962,52 @@ end
 """
     scan_slabs_for_unknown_bdas() -> Vector{NamedTuple}
 
-Walk every UInt64 in every live arg/indirect slab.  Report any value that
-LOOKS like a BDA (in the upper half of the address space, i.e. high bit
-of bit 63 set OR top 16 bits = 0xffff) but is NOT the address of any
-buffer in the pool's `live_buffers` and is NOT 0.  Useful for catching stale BDAs
-that pin_leaves! / pack_args_direct! missed.
+Walk every UInt64 of the unified arena — the argument blocks and indirect
+commands a recording reads. Report any value that LOOKS like a BDA (in the upper
+half of the address space, i.e. high bit of bit 63 set OR top 16 bits = 0xffff)
+but is NOT the address of any buffer in the pool's `live_buffers` and is NOT 0.
+Useful for catching stale BDAs that pin_leaves! / pack_args_direct! missed.
 
 Call this RIGHT BEFORE submit to catch problems before they reach the GPU.
 """
 function scan_slabs_for_unknown_bdas(bq)
     bq === nothing && return NamedTuple[]
+    ctx = bq.ctx::VkContext
     live = Set{UInt64}()
-    for buf in mempolicy(bq.ctx::VkContext).live_buffers
+    for buf in mempolicy(ctx).live_buffers
         push!(live, buf.address)
     end
-    pool_ranges = Tuple{UInt64,UInt64}[]
-    for blk in poolblocks(bq.ctx::VkContext)
-        bb = blk.memory::BufferBlock
-        push!(pool_ranges, (bb.address, bb.address + UInt64(bb.bytes)))
-    end
-    # Slabs themselves are valid arenas — the arg slab packs nested structs
-    # by writing pointers to within the slab itself (a "byval-inline" arg's
-    # outer arg pointer is `slab_base + inline_offset`).  Whitelist any value
-    # that lands inside a known slab's address range.
-    slab_ranges = Tuple{UInt64,UInt64}[]
-    for slabs in (bq.arg_slabs, bq.indirect_slabs)
-        for slab in slabs
-            mb = slab.buf[]::VkManagedBuffer
-            push!(slab_ranges, (mb.address, mb.address + UInt64(mb.size)))
-        end
+    # A pool block is a valid arena, and so is the unified one: packing a nested
+    # struct writes a pointer to WITHIN the argument block itself (a
+    # "byval-inline" argument's outer pointer is `base + inline_offset`), so any
+    # value landing inside a block is expected rather than stale.
+    ranges = Tuple{UInt64,UInt64}[]
+    for blk in poolblocks(ctx)
+        bb = blk.memory
+        bb isa BufferBlock || continue
+        push!(ranges, (bb.address, bb.address + UInt64(bb.bytes)))
     end
     @inline function in_known_range(addr)
-        for (lo, hi) in pool_ranges
-            lo <= addr < hi && return true
-        end
-        for (lo, hi) in slab_ranges
+        for (lo, hi) in ranges
             lo <= addr < hi && return true
         end
         return false
     end
     results = NamedTuple[]
-    for (kind, slabs) in ((:arg, bq.arg_slabs), (:indirect, bq.indirect_slabs))
-        for (i, slab) in enumerate(slabs)
-            mb = slab.buf[]::VkManagedBuffer
-            mb.mapped_ptr == Ptr{UInt8}(0) && continue
-            n_bytes = if kind == :arg && i == bq.arg_slab_idx
-                bq.arg_slab_offset
-            else
-                Int(mb.size)
-            end
-            n = n_bytes ÷ 8
-            p = Ptr{UInt64}(mb.mapped_ptr)
-            for k in 0:(n-1)
-                v = unsafe_load(p, k+1)
-                # Look only for "0xffff8…" sign-extended BDA-shaped values
-                # whose 48-bit form is in the high half (bit 47 set).
-                v < UInt64(0xffff800000000000) && continue
-                v == typemax(UInt64) && continue  # 0xff..ff often appears in scratch
-                v in live && continue
-                in_known_range(v) && continue
-                push!(results, (slab=kind, idx=i, offset=k*8, val=v))
-            end
+    for (i, blk) in enumerate(unifiedblocks(ctx))
+        mb = (blk.memory::BufferBlock).ref[]::VkManagedBuffer
+        mb.mapped_ptr == Ptr{UInt8}(0) && continue
+        n = Int(mb.size) ÷ 8
+        p = Ptr{UInt64}(mb.mapped_ptr)
+        for k in 0:(n-1)
+            v = unsafe_load(p, k+1)
+            # Look only for "0xffff8…" sign-extended BDA-shaped values
+            # whose 48-bit form is in the high half (bit 47 set).
+            v < UInt64(0xffff800000000000) && continue
+            v == typemax(UInt64) && continue  # 0xff..ff often appears in scratch
+            v in live && continue
+            in_known_range(v) && continue
+            push!(results, (slab=:unified, idx=i, offset=k*8, val=v))
         end
     end
     return results
@@ -1708,13 +1678,12 @@ end
 
 # VkMappedBuffer / VkIndirectBuffer / alloc_indirect_slab / vk_alloc_mapped /
 # vk_alloc_unified: deleted.  Every GPU buffer allocation goes through
-# `vk_alloc(bq, nbytes; extra_usage, unified)` now.  Slab pools (arg buffer
-# + indirect dispatch) live on top of `LavaArray`s declared in
-# `array/lavaarray.jl` and allocated via `runtime/launch.jl`.
-
-# Indirect buffer slab size — 256 KB of UInt32 storage, enough for ~1000
-# 12-byte indirect dispatches.
-const INDIRECT_SLAB_SIZE = 256 * 1024
+# `vk_alloc(bq, nbytes; extra_usage, unified)` now.
+#
+# The two slab pools that stood beside them — the arg buffer ring and the
+# indirect dispatch ring, and `INDIRECT_SLAB_SIZE` with them — are gone as well.
+# What a recording reads is a `Region` of the `Unified` arena, owned by whoever
+# owns the recording: see `scratch!` in `runtime/launch.jl`.
 
 function find_memory_type_optional(ctx::VkContext, type_bits::UInt32, required_flags)
     mem_props = ctx.memory_properties

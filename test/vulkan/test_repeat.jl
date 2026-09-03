@@ -92,14 +92,14 @@ end
 # Baked, because that is the point: a loop whose count the device decides is what
 # lets a whole render be ONE recording. If `repeat!` only worked interpreted it
 # would have bought nothing — the host would still be deciding, just later.
-@testset "repeat! survives baking" begin
+@testset "repeat! survives recording" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
     n, maxiters = 64, 8
     x = Mantle.Buffer(dev, zeros(Int32, n))
     count = Mantle.Buffer(dev, zeros(Int32, 1))
     src = Mantle.Buffer(dev, zeros(Int32, 1))
     pl = Base.invokelatest(_repeatplan, dev, x, count, src, maxiters, n)
-    Mantle.bake!(pl)
+    Mantle.record!(pl)
     Mantle.waitidle(dev)
 
     for k in (2, 5, 0, 7)

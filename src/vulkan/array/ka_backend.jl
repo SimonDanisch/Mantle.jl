@@ -935,15 +935,20 @@ function ka_launch!(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
     # descriptor and accepts OpRayQueryInitializeKHR / Proceed / Get*KHR.
     plan = launch_plan(bq, f, all_args, workgroup_size, tlas !== nothing)
 
-    # Get host-visible mapped arg buffer (per-BQ slab pool)
-    arg_buf = get_arg_buffer(bq, plan.total_size)
+    # The batch is what owns the argument memory and what the packed buffers are
+    # pinned into, so it is taken ONCE and passed. Reaching it through `bq` at
+    # each of the three calls below cost 96 bytes a dispatch — `bq` is a
+    # `BatchQueue{...}` UnionAll in those signatures, so `.active_batch` came back
+    # abstract and the pack walker's leaves were dynamic. Measured by
+    # `test_dispatch_allocation.jl`, which is a cliff detector for exactly this.
+    batch = ensure_active_batch!(bq)
+    arg_buf = get_arg_buffer(batch, plan.total_size)
 
     # The KA.Kernel entry point already ran `Adapt.adapt(LavaAdaptor(batch), ..)`
     # on each original arg, which both pinned every LavaArray (and nested
     # LavaArrays in wrapper structs) AND stripped them to LavaDeviceArray.
     # Here `all_args` is post-adapt, so pack sees no further pinnable leaves.
-    ensure_active_batch!(bq)
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, plan.offsets,
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, plan.offsets,
                        plan.arg_buffer_size, plan.byval_sizes, all_args)
 
     # Dispatch with N-D block grid (preserves KA's block dimensions)
@@ -1019,10 +1024,10 @@ function fast_prepare_indirect!(bq::VulkanBatchQueue,
 
     # f is a ghost singleton (prepare_indirect_kernel), pack_args_direct! skips it.
     all_args = (prepare_indirect_kernel, dev_indirect, dev_ndrange, UInt32(workgroup_size))
-    arg_buf = get_arg_buffer(bq, arg_size)
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets, arg_size, byval_sizes, all_args)
+    arg_buf = get_arg_buffer(batch, arg_size)
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets, arg_size, byval_sizes, all_args)
 
-    vk_dispatch_base!(bq, pipeline, arg_buf.address, 0, 0, 0, 1, 1, 1)
+    vk_dispatch!(bq, pipeline, arg_buf.address, (1, 1, 1))
 end
 
 function prepare_indirect_dispatch!(bq::VulkanBatchQueue,
@@ -1089,12 +1094,12 @@ function ka_launch_indirect!(obj, args, ndrange_buf::LavaArray, workgroupsize, o
     # through this function.
     GC.@preserve original_args begin
 
-    arg_buf = get_arg_buffer(bq, total_size)
+    arg_buf = get_arg_buffer(batch, total_size)
     @assert batch === bq.active_batch  "adaptor batch diverged from active bq batch"
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets,
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        compiled.push_info.arg_buffer_size, byval_sizes, all_args)
 
-    indirect_view = get_indirect_buffer(bq)
+    indirect_view = indirect_command!(batch)
 
     if (bq.ctx::VkContext).diag.dispatch_logging
         bq.last_dispatch_info = Base.invokelatest(dispatch_log_string, "indirect f=",
@@ -1106,9 +1111,9 @@ function ka_launch_indirect!(obj, args, ndrange_buf::LavaArray, workgroupsize, o
         # prepare (fused into one multi-prepare dispatch) and the indirect
         # dispatch happen at the group's flush, so all pairs in the group
         # share two barriers total and the dispatches overlap on the GPU.
-        # The packed args + indirect slot stay valid across the gap: both
-        # live in this batch's slabs and the pool-reset guard keeps the
-        # cursors from rewinding while the batch holds recorded dispatches.
+        # The packed args + indirect command stay valid across the gap: both are
+        # regions this batch owns, and nothing else can be given them until it
+        # completes.
         push!(deferred, (bq, pipeline, arg_buf.address, indirect_view, tlas,
                          ndrange_buf, ws_prod))
     else

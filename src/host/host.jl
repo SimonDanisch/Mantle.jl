@@ -54,9 +54,9 @@ VkDevice. Two pools, no sharing — the two-paths problem again, one level up, a
 the sharing is the entire reason any of this exists.
 
 **Fidelity is per PASS, not per backend, and it already exists.** `dispatch!` is
-a KA launch, `render!` is a render pass, `custom!` is anything else. A model uses
-`dispatch!` and never touches `render!` — same graph, same device, same pool as
-an editor's chain. There is nothing for a second backend to add.
+a KA launch, `render!` is a render pass, `trace!` is a hardware trace. A model
+uses `dispatch!` and never touches `render!` — same graph, same device, same pool
+as an editor's chain. There is nothing for a second backend to add.
 
 Dispatched on the backend TAG, never on the module. The Vulkan backend used to
 define `Device(::typeof(Lava))`, and `typeof(Lava)` is `Module` — so a

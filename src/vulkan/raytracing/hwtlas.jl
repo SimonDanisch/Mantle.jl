@@ -900,44 +900,28 @@ end
 
 # ── VulkanTLAS-bound compute dispatch overloads (specialized on `tlas` type) ──
 #
-# These are the type-dispatched counterparts to the no-HWTLAS fast paths in
+# These are the type-dispatched counterparts to the no-HWTLAS paths in
 # runtime/command.jl. Splitting on `tlas` type at the method level removes the
-# `pipeline.needs_tlas_descriptor` runtime branch and the `extra_dst_access`
-# ternary from every pure-compute record. The lava_launch! HWTLAS-vs-no-HWTLAS
-# safety check still runs before getting here, so we know `pipeline` agrees
-# with `tlas`.
+# `extra_dst_access` ternary from every pure-compute record. The lava_launch!
+# HWTLAS-vs-no-HWTLAS safety check still runs before getting here, so we know
+# `pipeline` agrees with `tlas`.
 
-@inline function vk_dispatch_base!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline, push_bda::UInt64,
-                                   base_x::Int, base_y::Int, base_z::Int,
-                                   gx::Int, gy::Int, gz::Int, tlas::VulkanTLAS)
-    dispatch_info = (bq.ctx::VkContext).diag.dispatch_logging ?
-        "$(bq.last_dispatch_info) base=($base_x,$base_y,$base_z) g=($gx,$gy,$gz)" : ""
+function vk_dispatch!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline, push_bda::UInt64,
+                      groups::NTuple{3, Integer}, tlas::VulkanTLAS)
+    g = (Int(groups[1]), Int(groups[2]), Int(groups[3]))
+    info = dispatchinfo(bq, " g=", g)
     record_dispatch!(bq;
         dst_stage=VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         extra_dst_access=VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-        info=dispatch_info
     ) do batch
-        cmd = batch.cmd_buf
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-        pin!(batch, pipeline)
-        _bind_compute_tlas!(batch, cmd, pipeline, tlas)
-        push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, push_bda)
-        if base_x == 0 && base_y == 0 && base_z == 0
-            VK.cmd_dispatch(cmd, UInt32(gx), UInt32(gy), UInt32(gz))
-        else
-            VK.cmd_dispatch_base(cmd,
-                UInt32(base_x), UInt32(base_y), UInt32(base_z),
-                UInt32(gx), UInt32(gy), UInt32(gz))
-        end
+        emit_dispatch!(Emitter(batch, nothing, 0), pipeline, push_bda, g, tlas, info)
     end
 end
 
-@inline function vk_dispatch_indirect_base!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline,
-                                            push_bda::UInt64,
-                                            indirect, tlas::VulkanTLAS;
-                                            first_in_group::Bool=true)
-    dispatch_info = (bq.ctx::VkContext).diag.dispatch_logging ?
-        "$(bq.last_dispatch_info) (indirect)" : ""
+function vk_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline,
+                               push_bda::UInt64, indirect, tlas::VulkanTLAS;
+                               first_in_group::Bool=true)
+    info = dispatchinfo(bq, " (indirect)")
     record_dispatch!(bq;
         dst_stage=VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         extra_dst_access=VK.ACCESS_INDIRECT_COMMAND_READ_BIT |
@@ -947,37 +931,64 @@ end
         # deferred group's shared barrier.
         force_pre_barrier=first_in_group,
         skip_pre_barrier=!first_in_group,
-        info=dispatch_info
     ) do batch
-        cmd = batch.cmd_buf
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-        pin!(batch, pipeline)
-        _bind_compute_tlas!(batch, cmd, pipeline, tlas)
-        push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, push_bda)
-        mb = indirect.buf[]::VkManagedBuffer
-        byte_offset = UInt64(indirect.offset)
-        VK.cmd_dispatch_indirect(cmd, mb.buffer, byte_offset)
-        pin!(batch, indirect)
+        emit_dispatch_indirect!(Emitter(batch, nothing, 0), pipeline, push_bda,
+                                indirect, tlas, info)
     end
 end
 
-# Shared HWTLAS-bind body, deduplicated between direct and indirect.
-@inline function _bind_compute_tlas!(batch, cmd, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
-    lava_tlas = tlas.hw_tlas::LavaTLAS
-    dev = batch.bq.ctx.device
-    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, lava_tlas)
-    VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_COMPUTE,
-        pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
+"""
+    tlasset!(owner, dev, pipeline, tlas) -> VkDescriptorSet
+
+The descriptor set binding `tlas` for `pipeline`'s layout, owned by whoever owns
+the commands that bind it.
+
+A [`Recording`](@ref) keeps ONE per (layout, acceleration structure) pair and
+holds its pool for as long as it can be submitted. A batch allocates a fresh one
+per dispatch and pins it, which is what both used to do.
+
+Per-dispatch allocation was defended as removing a class of bug, and the bug was
+real: a cache keyed by `(layout, objectid(LavaTLAS))` grew without bound because
+`Raycore.sync!` makes a new `LavaTLAS` per rebuild, and its `WeakRef` eviction
+lagged Julia's GC, so pools were destroyed while their sets were still in flight.
+Both halves of that are about a cache with no owner. This one has exactly one:
+nothing evicts, and `release!` is the only thing that frees.
+
+The recorded case is also where the per-dispatch version stopped being a lifetime
+fix at all — a recording bakes the set into its command buffer, so allocating a
+fresh set while writing it means N pools kept alive for one plan, all naming the
+same acceleration structure.
+"""
+function tlasset!(rec::Recording, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
+    layout = pipeline.descriptor_set_layout::VK.DescriptorSetLayout
+    for (l, t, _, set) in rec.sets
+        (l === layout && t === tlas) && return set
+    end
+    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, tlas)
+    push!(rec.sets, (layout, tlas, desc_pool, desc_set))
+    return desc_set
+end
+
+function tlasset!(batch::CommandBatch, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
+    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, tlas)
     pin!(batch, desc_pool)
-    pin!(batch, lava_tlas.accel)
-    pin!(batch, lava_tlas.storage)
+    return desc_set
+end
+
+function bindtlas!(e::Emitter, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
+    lava_tlas = tlas.hw_tlas::LavaTLAS
+    set = tlasset!(e.owner, e.ctx.device, pipeline, lava_tlas)
+    VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_COMPUTE,
+        pipeline.pipeline_layout, UInt32(0), [set], UInt32[])
+    pin!(e, lava_tlas.accel)
+    pin!(e, lava_tlas.storage)
     # Pin every BLAS the HWTLAS references — rayQuery walks the HWTLAS into its
     # BLASes and reads their storage; without pinning each BLAS storage,
     # `Raycore.sync!`-driven BLAS swaps can free a BLAS whose GPU memory the
     # GPU is still using through this dispatch.
     for blas in lava_tlas.blases
-        pin!(batch, blas.accel)
-        pin!(batch, blas.storage)
+        pin!(e, blas.accel)
+        pin!(e, blas.storage)
     end
     return nothing
 end

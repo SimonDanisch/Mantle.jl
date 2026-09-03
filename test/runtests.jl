@@ -464,11 +464,15 @@ if _VULKAN_OK
 # shared arena, and `Device(VulkanAPI())` is cached per context, so any earlier file
 # that compiled a plan is still a tenant until a GC reaps it. Adding an include
 # above this line that touches the Lava device breaks it.
-include(joinpath(@__DIR__, "test_arena_bake.jl"))
+include(joinpath(@__DIR__, "test_arena_recording.jl"))
 include(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
 include(joinpath(@__DIR__, "test_devicerange.jl"))
+# And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
+# compile beside its arguments, rather than in a slab ring the queue rewinds.
+# The path is spelled out because `VULKAN_TESTS` is not bound until further down.
+include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #
@@ -813,14 +817,21 @@ if _VULKAN_OK
         end
 
 
-        @testset "baking" begin
-            include(joinpath(VULKAN_TESTS, "test_capture_does_not_execute.jl"))
-            include(joinpath(VULKAN_TESTS, "test_baked_matches_unbaked.jl"))
-            # A recording belongs to the argument slot it was captured in, and
+        @testset "recording" begin
+            include(joinpath(VULKAN_TESTS, "test_record_does_not_execute.jl"))
+            include(joinpath(VULKAN_TESTS, "test_recorded_run_semantics.jl"))
+            # What a recording has to survive between the run that wrote it and
+            # the runs that submit it: a collection, ad hoc work on the same
+            # queue, and input rewritten in place.
+            include(joinpath(VULKAN_TESTS, "test_recording_lifecycle.jl"))
+            # A recording belongs to the argument slot it was written for, and
             # the ring is not at slot 0 for a plan that has already run.
-            include(joinpath(VULKAN_TESTS, "test_bake_after_run.jl"))
-            # Capturing a plan big enough to allocate inside its own capture.
-            include(joinpath(VULKAN_TESTS, "test_no_pool_trim_while_capturing.jl"))
+            include(joinpath(VULKAN_TESTS, "test_record_after_run.jl"))
+            # Recording a plan big enough to allocate while it is being written.
+            include(joinpath(VULKAN_TESTS, "test_no_pool_trim_while_recorded.jl"))
+            # Which plans can be recorded at all, and that a render pass and both
+            # `Update` routes come out the same either way.
+            include(joinpath(VULKAN_TESTS, "test_recordable_plans.jl"))
         end
 
         # What "wait for the GPU" has to mean when Mantle owns submission: a
@@ -1175,8 +1186,8 @@ if _VULKAN_OK
                 include(joinpath(VULKAN_TESTS, "test_hwtlas_nonblocking_sync.jl"))
             end
 
-            @testset "arg-slab mid-recording sweep" begin
-                include(joinpath(VULKAN_TESTS, "test_argslab_midrecording_sweep.jl"))
+            @testset "argument memory isolation" begin
+                include(joinpath(VULKAN_TESTS, "test_argument_memory_isolation.jl"))
             end
 
             @testset "indirect in concurrent group" begin

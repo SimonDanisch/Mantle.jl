@@ -350,8 +350,12 @@ function refit!(pl::Plan)
     end
     # A recompile can change the draws and therefore the layout, so the argument
     # memory is laid out again with them. The old slots may still be read by
-    # frames in flight, which is why a backend that has any waits for the device
-    # before it reports a resize.
+    # frames in flight, which is why the outgoing region is RETIRED rather than
+    # released: `reclaim!` hands it back one submission boundary later, by which
+    # point the frames that named it have run.
+    let am = pl.args
+        am === nothing || retire!(pool(pl.graph.dev), am.store)
+    end
     pl.args = makeargmemory(pl.graph.dev, c.passes)
     return true
 end
@@ -690,11 +694,27 @@ argalign(n::Integer) = (Int(n) + 255) & ~255
 
 slotbase(am::ArgMemory) = (am.slot - 1) * am.stride
 
+"""
+One `VkDispatchIndirectCommand`'s worth of the plan's memory, 256-byte aligned so
+a device address derived from it satisfies every backend's indirect-buffer
+alignment. Twelve bytes are used; the alignment is what decides the stride.
+"""
+const INDIRECT_STRIDE = 256
+
+"""
+Where this dispatch's workgroup counts live in the slot that is current, or
+`nothing` if the host already knows its ndrange.
+
+The one lookup a recording does per device-sized dispatch, and it is an index
+rather than an allocation: `ArgMemory` built the view when it laid the slot out.
+"""
+indirectof(am::ArgMemory, k::Int) = k == 0 ? nothing : am.indirect[am.slot][k]
+
 # ── lowering a transition into a Vulkan barrier ───────────────────────────────
 
-# `indirect` is asked of a recorded dispatch, which has an `ndrange`. A baked
-# callable does not — the KA path resolved its count into the closure — so the
-# probe is `hasproperty`-guarded rather than assuming the recording shape.
+# `indirect` is asked of a recorded dispatch, which has an `ndrange`. A KA
+# backend's baked callable does not — it resolved its count into the closure — so
+# the probe is `hasproperty`-guarded rather than assuming the recording shape.
 PassPlan(pass, draws, dispatches, images, pre, barrier) =
     PassPlan(pass, draws, dispatches, images, pre, barrier,
              any(d -> hasproperty(d, :ndrange) && d.ndrange isa DeviceRange,
@@ -736,9 +756,9 @@ The mirror of [`argvalue`](@ref), and deliberately the same one level deep:
 one thing, a `Base.RefValue`. So a `Ref` moves and nothing else does, and this
 says so with the same two methods rather than a second opinion about it.
 
-What it is for: a baked plan replays commands that read their arguments out of
+What it is for: a recorded plan submits commands that read their arguments out of
 the plan's own memory, so the only per-run host work it needs is rewriting the
-arguments that can differ. Anything else was written at `bake!` and is still
+arguments that can differ. Anything else was written at `record!` and is still
 there. See `Plan.writes`.
 """
 isdynamic(::Base.RefValue) = true
@@ -1004,24 +1024,12 @@ averaged in.
 elapsed(lo::UInt64, hi::UInt64, period) = hi < lo ? nothing : Float64(hi - lo) * period
 
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-"""
-    run!(plan; barriers = :derived)
+"""Whether this plan's commands have been written — see `record!`."""
+recorded(pl::Plan) = pl.recordings !== nothing
 
-`:derived` emits the ordering the declarations call for and suppresses Lava's
-automatic per-dispatch barrier. `:backend` does the opposite and exists so the
-two can be measured against each other rather than argued about.
-
-`:both` emits the derived barriers *and* leaves the automatic one in place. It is
-a diagnostic, and the only one that separates the two ways a `custom!` graph can
-be wrong: a result that is correct under `:both` and wrong under `:derived` says
-the declared set is incomplete, while one that is wrong under both says the
-declarations are right and something is reading the wrong bytes.
-"""
-baked(pl::Plan) = pl.baked !== nothing
-
-"""A baked plan's recording holds the addresses its region has today, so the
-arena it is placed in can no longer grow. See `remappable`."""
-remappable(pl::Plan) = pl.baked === nothing
+"""A recorded plan's command buffers hold the addresses its region has today, so
+the arena it is placed in can no longer grow. See `remappable`."""
+remappable(pl::Plan) = pl.recordings === nothing
 
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
@@ -1033,32 +1041,37 @@ remappable(pl::Plan) = pl.baked === nothing
 lp_of(d::CompiledDispatch) = d.launch
 
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-"""A plan with a `custom!` pass cannot be rebound: the body packs its own
-arguments as it runs, and a baked plan never runs it again."""
-rebindable(pl::Plan) = !any(pp -> pp.pass.kind === :custom, pl.passes)
-
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 """
-Give this plan's regions back to the pool. The argument memory and the
-pipelines are ordinary Lava objects — the GC reclaims those; the regions are
-the thing only an explicit call can return, because nothing here finalizes.
+Give this plan's regions back to the pool — its transients', and the argument
+memory its recordings read. The pipelines are ordinary backend objects and the
+GC reclaims those; a region is the thing only an explicit call can return,
+because nothing here finalizes.
 
 No precondition: the regions are retired, so a plan freed immediately after its
 last `run!` — the ordinary case, with its recording still in flight — is fine.
 """
 function free!(pl::Plan)
-    # The capture too, and before the regions: it holds the argument memory its
-    # recording points at, plus a reference to every resource the recording
-    # names. Dropping the plan alone would leave both to the GC, which does not
-    # know it is holding device memory.
-    if pl.baked !== nothing
-        for seq in pl.baked
-            release!(seq)
+    # The recordings too, and before the regions: each holds a command buffer, a
+    # descriptor set per acceleration structure it binds, and a reference to
+    # every resource its commands name. Dropping the plan alone would leave all
+    # of that to the GC, which does not know it is holding device memory.
+    if pl.recordings !== nothing
+        for rec in pl.recordings
+            release!(rec)
         end
-        pl.baked = nothing
+        pl.recordings = nothing
         pl.writes = nothing
     end
+    # The argument memory is a region like the transients' are, so it goes back
+    # the same way. It used to be a device array from the backend's own allocator
+    # and was left to the GC, which is what "the argument memory … the GC reclaims
+    # those" above meant; there is one owner now and it is this call.
+    let am = pl.args
+        am === nothing || retire!(pool(pl.graph.dev), am.store)
+    end
+    pl.args = nothing
     giveup!(pool(pl.graph.dev), pl.slabs, pl.arenas, pl)
 end
 

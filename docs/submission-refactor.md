@@ -81,7 +81,7 @@ Verified: 0 buffer barriers across 91 passes; 225 memory barriers, 1–5 per pas
 Hikari bit-identical on NVIDIA across 12 configurations. The aliasing handover
 barrier already used `resource == 0` and so was already global — unaffected.
 
-### 1. Recording resources come from the pool
+### 1. Recording resources come from the pool — DONE
 
 `Pool`/`Block`/`Region`/`acquire!`/`release!` already solve placement and
 lifetime, and a plan is already a `tenant!`. Argument memory and indirect scratch
@@ -119,33 +119,144 @@ addresses for ever. Two plans replaying in one frame write each other's workgrou
 counts. It has not fired because a recording writes its own slot at replay and
 reads it immediately. **Do not fix this in place** — step 1 deletes it.
 
-### 2. `record!` / `run!` with a real emitter
+#### What it did
 
-`emit_*(e, …)` takes a plan, a slot and a command buffer — never a queue. So
+A `Unified()` arena kind in core, and the one thing a recording needs from a
+backend: `rawalloc` gives it a BAR buffer with `INDIRECT_BUFFER` usage, mapped
+once for the life of the block. Everything a recording reads is a `Region` of it,
+and the question the four allocators existed to answer — when may these bytes go
+to somebody else — is answered by the OWNER: the plan for its own arguments and
+indirect commands, the batch for an unmodelled launch's, the capture while one is
+open.
+
+`ArgMemory` lays the indirect commands out beside the arguments, in the same
+slot: `CompiledDispatch`/`CompiledTrace` carry an `indirect` index the way they
+already carried `argoff`, `Pipelines` assigns it, and `ArgMemory` builds the view
+once per (slot, dispatch) so a record does a lookup rather than an allocation.
+Being per SLOT is what makes the deleted bug unreachable — two runs in flight
+cannot write each other's counts for the same reason they cannot write each
+other's arguments.
+
+Deleted: the seven queue fields, the three `CapturedSequence` slab fields, the
+eight functions the plan names, `ARG_SLAB_SIZE`/`INDIRECT_SLAB_SIZE` and their
+alignment constants, the twenty-five-line "is the queue idle enough to rewind"
+test in `sweep_retired_batches!`, and the two `arg_pool_in_use!` calls. The two
+BDA scanners read the arena's blocks instead of the slab lists, which is the same
+bytes through the owner that has them. Also folded: three copies of "give a
+presented frame batch back" in `graphics/window.jl` became one
+`reclaim_frame_batch!`, because each needed the region release and they had
+already drifted (only one returned its command-buffer segments).
+
+Added: `scratch!`, and `get_arg_buffer`/`indirect_command!` over it.
+
+#### Measured, RADV RX 7900 XTX, warm 20, min of 41, same session back to back
+
+| | before | after |
+|---|---|---|
+| 12-dispatch plan, `run!` + flush | 0.0827 | 0.0814 |
+| …record only | 0.0131 | 0.0130 |
+| baked replay + flush | 0.0723 | 0.0713 |
+| …record only | 0.0013 | 0.0013 |
+| 13 dispatches, 6 device-sized, record only | 0.0275 | 0.0293 |
+| **64 ad-hoc KA launches + flush** | **0.2350** | **0.2740** |
+
+The graph path does not move, which is the point: it allocated its argument
+memory once before and allocates it once now. The ad-hoc path pays **+17%, about
+0.6 µs per launch**, which is one `acquire!` where there was a bump-pointer add.
+That is the trade the doc above authorises, on a path step 5 deletes; it is
+recorded here rather than waved past.
+
+It also costs **+96 bytes per unmodelled dispatch** — 162.8 with the slab ring
+against 258.9 with the pool, measured back to back, with `--track-allocation`
+putting the whole 96 on `compatible(dev, blk.constraint, want)` and `takespan!`
+inside `Pool.acquire!`. That was found during step 2 rather than here, because
+`test_dispatch_allocation.jl` was not run at step 1 and its 250-byte ceiling had
+been calibrated against the slab ring. The ceiling is now 400 with both numbers
+and the reason written into the test; it is still a cliff detector, since the
+regression class it exists for is 781 against 115. A `run!` + flush on a device-sized plan is
+not quoted at all — min and median disagreed by 30% on repeated runs of the
+unchanged build, so nothing can be attributed to it.
+
+No growth: 2000 plan runs, 8000 ad-hoc dispatches and 500 device-sized runs leave
+one 4 MiB unified block with exactly the plans' regions live.
+
+### 2. `record!` / `run!` with a real emitter — DONE
+
+`emit_*(e, …)` takes an `Emitter` — a command buffer, an owner for what the
+commands name, and the plan's argument slot — never a queue. So
 `maybe_split_cb!`, `auto_submit_threshold`, the elision tracker,
-`next_skip_barrier`, `ranges_declared` and `scope_depth` become unreachable.
+`next_skip_barrier` and `ranges_declared` are unreachable from a plan, and
+`scope_depth` is unreachable from anywhere.
 
-**Deletes:** `capture`, `sealinto!`, `bq.capturing`, `cb_begin_flags`'s branch,
-`scope_depth`, `record_pass_work!`'s queue coupling, and the `:custom` pass kind
-(unused — Hikari has none; Mantle's tests do).
+**Deletes:** `capture`, `replay!`, `CapturedSequence`, `sealinto!`,
+`bq.capturing`, `bq.scope_depth`, `cb_begin_flags`, `unsplittable`/
+`unsplittable!`, `vk_dispatch_base!`/`vk_dispatch_indirect_base!` (three callers,
+all passing zero for the base), `batch.replay_cmd_bufs`, `custom!`, `custombody`,
+`rebindable`, `bake(::Compile, body)`, the `record_pass!` hook, `run!`'s
+`barriers` keyword and `record!`'s `derived`/`suppress`/`updates` ones.
 
-**Also:** descriptor sets for HWTLAS are allocated per dispatch today, defended
-as "removes the entire class of bug". That was a lifetime fix wearing a
-performance hat; the recording owns them instead. See
-`feedback_no_per_dispatch_descriptor_sets`.
+**Adds:** `Recording` (one command buffer, its regions, its descriptor sets, its
+pins), `Emitter`, `emit_dispatch!`/`emit_dispatch_indirect!`/`emit_trace!`/
+`emit_trace_indirect!`/`emit_barrier!`, `emitkernel!`, `preparekernel`, `Pinned`,
+`sealsegment!`, `tlasset!`, `bindtlas!`, `movable`, `recordable`.
 
-**Settle: `SIMULTANEOUS_USE` or no flag.** Not `ONE_TIME_SUBMIT` — that means
-"submitted once, then reset or freed" and is illegal for a buffer that is
-replayed, so it was never a candidate. No flag permits resubmission but only
-after the previous submission has completed; `SIMULTANEOUS_USE` permits it while
-still pending. With step 3 there are no argument slots, so this reduces to: does
-`run!` submit again before the previous submission finished? If it always waits,
-no flag is correct and cheaper.
+#### What it did
 
-`build_plans` names `SIMULTANEOUS_USE` as the suspect for baking's 2–3%, but that
-comparison moved two variables at once (interpreted-and-recorded-fresh against
-baked-and-replayed) through the heuristic recorder. Re-measure after step 2, do
-not inherit the suspicion.
+`bake!` is `record!`, and the rename is the content: a "baked" plan was one whose
+commands had been frozen out of an ordinary interpreted run, which is why it
+EXECUTED the plan as a side effect, why it collected a LIST of command buffers
+(five per recording on Hikari's fused sample, cut by a threshold about when to
+submit while nothing was being submitted), and why `bake!` and `run!` had to
+agree about barriers, slots and what a `Ref` meant. `record!` writes into a
+command buffer of its own and ends it; `run!` records on the first run of any
+plan it can record and submits every time.
+
+**Ownership replaced position.** `submit!(bq, ::Recording)` seals the batch's
+open segment and appends the recording behind it, so ONE list is in submission
+order and a second (`replay_cmd_bufs`, submitted last) is gone. That was not
+tidying: a readback taken after `run!` records its copy into the same open batch,
+and under the old order it executed BEFORE the plan and read zeros — silently.
+`test_devicerange.jl` caught it the moment recording stopped being opt-in.
+
+**The fused prepare moved to the pass.** `concurrent_indirect_group` needed a
+list on the queue, a launch path that pushed onto it instead of recording, and
+two process-wide atomics; `emitprepares!` reads `pp.indirect`, which the pass
+already knows.
+
+**Descriptor sets belong to the recording.** Per-dispatch allocation was defended
+as removing a class of bug, and the bug was real — a cache keyed by
+`(layout, objectid(LavaTLAS))` grew without bound and its `WeakRef` eviction
+lagged the GC. Both halves are about a cache with no owner. `tlasset!` keeps one
+per (layout, acceleration structure) in the `Recording`, which nothing evicts and
+only `release!` frees.
+
+**Settled: no flag.** `ONE_TIME_SUBMIT` was never a candidate — it means
+"submitted once, then reset or freed". `SIMULTANEOUS_USE` is only needed to
+submit a buffer again while its previous submission is still pending, and that
+cannot happen: there is one recording per argument slot and `nextslot!` claims a
+slot only once the token covering the run that last used it has passed. So the
+recordings are begun with no flags, which is the cheaper of the two. The 2–3%
+`build_plans` attributed to `SIMULTANEOUS_USE` is therefore not comparable across
+this change and both of its numbers were dropped rather than carried forward.
+
+**Two restrictions, both named in the error and both removed later.** A plan with
+a SURFACE cannot be recorded (step 4), and neither can one with a whole-buffer
+`Update` — it lands by renaming, and a recording holds the address it was written
+with (step 3, where a per-run value rides inline and nothing moves). `recordable`
+is the one place that decides, and `run!` emits per run for anything it refuses.
+A RANGED update always writes in place and records fine.
+
+#### Found on the way
+
+  * `checkusage` assigned `VK = Vulkan` in its body, which makes `VK` a local for
+    the whole function — so every `Transient.Image` threw `UndefVarError: VK not
+    defined in local scope`. Nothing caught it because `test_window.jl`, which is
+    where transient images live, aborts in its first testset.
+  * `test_window.jl` fails at HEAD compiling `scatter_vertex`
+    (`KernelError: kernel returns a value of type Any`), verified by stashing,
+    and that abort hides the whole graphics half of the suite.
+    `test/vulkan/test_recordable_plans.jl` is the coverage the emitter's render
+    verbs would otherwise have none of. NOT step 2's, and not fixed here.
 
 ### 3. Arguments: one copy, and a `GPURef`
 
@@ -176,7 +287,10 @@ per run gets two small copies — 268 bytes and an index flip, not a ring.
 
 **Deletes:** `rebind!`, `argwrites`, `verifywrites`, `ArgWrite`, the write plan,
 `ARG_SLOTS` (the depth is `length(slot_token)`, already data), and most of
-`nextslot!`. A plan with no per-run values needs **one** slot and no wait.
+`nextslot!`. A plan with no per-run values needs **one** slot and no wait. It
+also deletes the RENAME route through `write_update!`, and with it the second
+reason `recordable` can answer false: a per-run value that rides inline in the
+command buffer moves no store, so nothing a recording names can move under it.
 
 `Scalar` is `GPURef` plus a `stride`-0 draw-binding rule; it has one real caller
 in three packages. Fold it in, keeping `Buffer{T}`/`Scalar{T}` erasing to the
@@ -188,9 +302,10 @@ move `repeat!` makes for the loop counter.
 
 ### 4. Per-swapchain-image recordings
 
-`bake!` refuses any plan with a surface: "a swapchain image is a different image
-every frame and a recording names one". RayMakie draws to a window, so this is
-what keeps the interpreted path alive.
+`record!` refuses any plan with a surface: "a swapchain image is a different
+image every frame and a recording names one". RayMakie draws to a window, so this
+is one of the two things keeping the per-run emit path alive (the other is a
+renaming `Update`, which step 3 removes).
 
 A swapchain image is **not** patchable the way an argument pointer is. An
 argument lives in host-visible memory the recording points at, so writing it is
@@ -214,10 +329,13 @@ recording-management scheme.
 operation (`gemv`, `fft`, `mapreduce`, sort, narrow-phase). It is the last
 caller of the heuristics, and why they exist.
 
-A single dispatch is a one-pass graph; the machinery exists. **Deletes:** the
-remaining queue fields, `record_dispatch!`'s decision-making, `barrier_mode`
-(`:derived` becomes the only mode — `:backend`/`:both` are A/B scaffolding),
-`concurrent_dispatch_group`, `concurrent_indirect_group`, `deferred_indirect`.
+A single dispatch is a one-pass graph; the machinery exists. **Deletes:** the remaining queue fields, `record_dispatch!`'s decision-making,
+`barrier_mode`, `barrier_elision`, `next_skip_barrier`, `ranges_declared`,
+`touched_ranges`, `dispatch_ranges`, `auto_submit_threshold`,
+`cb_split_threshold`, `maybe_split_cb!`, `concurrent_dispatch_group`,
+`concurrent_indirect_group`, `deferred_indirect`, `lava_launch!` and
+`fast_prepare_indirect!` — `emitkernel!` and `preparekernel` are already the
+half of them a plan uses.
 
 ## Rules that were broken while writing this
 
@@ -242,7 +360,36 @@ remaining queue fields, `record_dispatch!`'s decision-making, `barrier_mode`
 
 Committed on `sd/lava-refactor`: `0d3f3b5` (Mantle — `repeat!`, `waitfor!`,
 `bufferusage`, `waitidle`), `d472e98` (Hikari — a sample is one plan, chunking
-deleted). Uncommitted: step 0.
+deleted), `7f8396c` (step 0). Uncommitted: steps 1 and 2.
+
+### Failing before any of this, and left alone deliberately
+
+`test_window.jl` errors in its FIRST testset compiling `scatter_vertex` —
+`KernelError: kernel returns a value of type Any` — and that takes every testset
+after it down with it, which is most of the graphics coverage. Identical at
+HEAD with step 2 stashed, so it is not this refactor's; the suspect is the
+environment ("dependencies precompiled but different versions are currently
+loaded", which includes GeometryBasics and StaticArrays), since the shader
+differs from a working one only in a `Mat4f * Vec4f`.
+
+`test_capture_replay.jl`, `test_capture_gc.jl` and `test_replay_interleaved.jl`
+asserted that `capture` EXECUTES what it records, which stopped being true when
+`sealinto!` split recording from submission. They were rewritten against a plan
+and merged into `test_recording_lifecycle.jl` in step 2.
+
+`test_real_kernels.jl` fails in `GPUCompiler.methodinstance` on
+`AssertionError: Base.isdispatchtuple(sig)`, before any Mantle runtime code runs:
+the test builds `Hikari.Conductor{…}` with four parameters and that type is not
+concrete any more (`isconcretetype` says so directly). Hikari type drift in a
+test, not a runtime failure.
+
+`test_arena_bake.jl`'s "a renameable Update gives up its scoped barrier" was
+stale from step 0 and IS fixed here, since nothing later touches the barrier form:
+it asserted one memory barrier and two scoped buffer barriers, and step 0 deleted
+scoped buffer barriers entirely. It now pins what step 0 built — two memory
+barriers for three transitions, because `a` and `b` are the same tuple and the
+tuples are `unique` — and zero buffer barriers, which is the property that lets a
+buffer move under a recorded plan.
 
 `dev/Vulkan` is dirty on purpose: a local patch to `generated/linux.jl:51890`
 for a Vulkan.jl generator bug that makes `VK_EXT_device_generated_commands`

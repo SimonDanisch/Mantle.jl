@@ -260,6 +260,13 @@ end
 
         a = MVE.LavaArray(zeros(Float32, 64))
         drain!()
+        # What the unified arena holds BEFORE the burst. Not zero, and asserting
+        # zero is what this used to do: a recorded plan owns its argument memory
+        # there for as long as it lives, so any plan an earlier file left alive
+        # makes an absolute count fail on file order. The claim is about these
+        # 500 dispatches — their regions belong to batches, and every batch is
+        # reclaimed — so it is a DELTA.
+        before = sum(b -> length(b.live), MVE.unifiedblocks(BQ.ctx); init = 0)
         # 50 flushes × 10 dispatches = 500 total dispatches across many batches
         for _ in 1:50
             for _ in 1:10
@@ -272,9 +279,11 @@ end
         @test length(BQ.in_flight)         == 0
         @test length(BQ.deferred_frees)    == 0
         @test length(BQ.deferred_as_frees) == 0
-        # Arg slabs are pool-limited (cap is a small constant).
-        @test length(BQ.arg_slabs)         <= 4
-        @test length(BQ.indirect_slabs)    <= 4
+        # And the argument memory those 500 dispatches read is back: every
+        # region belonged to a batch, and every batch has been reclaimed. A
+        # handful of blocks, not one per hundred launches.
+        @test length(MVE.unifiedblocks(BQ.ctx)) <= 4
+        @test sum(b -> length(b.live), MVE.unifiedblocks(BQ.ctx); init = 0) == before
 
         @test Array(a)[1] ≈ 500f0  # sanity: kernel did run 500 times
         Mantle.unsafe_free!(a)

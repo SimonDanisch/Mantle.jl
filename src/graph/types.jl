@@ -43,23 +43,23 @@ pipeline, its arguments and a ray count. What differs is the two ends — a shad
 binding table where a dispatch has a kernel, a device-side ray count where it has
 an ndrange — and NOT the middle, which is the whole reason this type exists.
 
-Before it, tracing went through `custom!`, the escape hatch for work "the graph
-declares but does not model". That was the wrong home, and the cost was specific:
-a `custom!` body packs its own arguments while it runs, out of the batch queue's
-per-frame scratch slab, and pushes that slab's address as a push constant. The
-host writes those bytes — no GPU command in the buffer does — so a baked plan,
-which never runs the body again, replays a command buffer aimed at a slab region
-the pool has since rewound and handed to somebody else. Not stale values;
-whatever the next caller packed there.
+Before it, tracing went through `custom!` — the escape hatch for work "the graph
+declares but does not model", since deleted. That was the wrong home, and the
+cost was specific: a `custom!` body packed its own arguments while it ran, out of
+the batch queue's per-run scratch, and pushed that address as a push constant.
+The host writes those bytes — no GPU command in the buffer does — so a recorded
+plan, which never runs the body again, submits a command buffer aimed at memory
+the queue has since handed to somebody else. Not stale values; whatever the next
+caller packed there.
 
 (An indirect DISPATCH is fine in the same situation, and the difference is worth
-stating: its indirect command is written by `fast_prepare_indirect!`, a dispatch
-that is itself inside the captured buffer, so a replay re-executes it and
-rewrites its own region.)
+stating: its indirect command is written by a prepare kernel that is itself
+inside the recorded buffer, so each run re-executes it and rewrites its own
+region.)
 
 Modelled, the arguments live at a fixed offset in the plan's `ArgMemory` exactly
-as a dispatch's do, `rebind!` rewrites them, and `rebindable` is true — so a
-hardware ray-tracing plan can be baked at all.
+as a dispatch's do and `rebind!` rewrites them — so a hardware ray-tracing plan
+can be recorded at all.
 """
 struct Trace
     pipeline::Any
@@ -162,6 +162,25 @@ struct Buffers end
 struct Images end
 
 """
+Bytes a RECORDING reads while it runs: host-writable, device-addressable, and
+never moved while a recording that names them exists.
+
+A recorded dispatch holds its argument block's address as a push constant and its
+workgroup counts as an indirect command the command processor reads, so both have
+to be memory the host writes and the device addresses. Neither may be handed to
+anyone else for as long as the recording is replayable — which is a `Region`, and
+is what the pool has been handing out all along.
+
+It is an arena KIND rather than a bump allocator per queue because four of those
+were written for want of one: an argument slab ring on the queue, an indirect
+slab ring beside it, and a third copy of the first inside every capture. A kind
+is what `acquire!`/`release!` need in order to answer the question, and the
+lifetime then belongs to whoever owns the recording rather than to a cursor that
+has to guess when the device is finished.
+"""
+struct Unified end
+
+"""
 Buffers by byte size, so renaming one is a recycle rather than an allocation.
 
 Renaming — write a fresh buffer and swap it in, rather than overwrite the one the
@@ -181,20 +200,20 @@ struct Recycler
 end
 
 """
-One argument a baked run has to write, and where it goes.
+One argument a run has to write, and where it goes.
 
-The whole of what `bake!` learns about arguments and a run needs to act on.
+The whole of what `record!` learns about arguments and a run needs to act on.
 `offset` is bytes from the start of an argument slot, so it is slot-independent
 and the same write serves every recording in the ring; `byval` is the slot's
 by-value size, which `pack_arg!` wants.
 
-This is the thing that was missing. `bake!` packs every argument — it must, to
+This is the thing that was missing. `record!` packs every argument — it must, to
 capture — and then threw away the layout, the offsets and the adaptation it had
 just computed, keeping only a count. A run therefore had no way to write "the
 sample index at byte 4128" and had to rediscover everything by re-running the
 RECORD-time packing path, which re-adapts the entire argument tree of every
 entry. Measured on Hikari's chunk plan: 1193 microseconds a run to move one
-`Int32`, against 0.19 for the whole rest of the baked path.
+`Int32`, against 0.19 for the whole rest of a recorded run.
 
 Held per plan rather than per entry so a run is one flat loop, and built at the
 one moment when the layout, the adapted values and the offsets are all in hand.
@@ -214,7 +233,7 @@ struct ArgWrite{R}
     # area at all.
     #
     # It depends on every by-value argument BEFORE this one, which is why it has
-    # to be recorded at `bake!` rather than derived at run: the packer threads a
+    # to be recorded at `record!` rather than derived at run: the packer threads a
     # running offset through the whole tuple, and one argument alone cannot know
     # where it landed. Recording it is what lets a `Ref` to an aggregate — a
     # camera, a filter parameter block — be rewritten at all.
@@ -329,6 +348,12 @@ struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O}
     tlas::Bool                          # whether the pipeline was built for ray query
     argoff::Int
     argsize::Int
+    # Which of the plan's indirect commands this dispatch reads its workgroup
+    # counts from, or 0 when the ndrange is the host's. Assigned at compile beside
+    # `argoff` and for the same reason: the plan knows how many device-sized
+    # dispatches it has, so each gets a fixed place in the plan's own memory
+    # rather than a slot from an allocator that has to be told when to rewind.
+    indirect::Int
 end
 
 """
@@ -353,6 +378,7 @@ struct CompiledTrace{P,C,A<:Tuple,R}
     ndrange::R
     argoff::Int
     argsize::Int
+    indirect::Int            # as `CompiledDispatch.indirect`; 0 for a host ndrange
 end
 
 """
@@ -371,6 +397,21 @@ means the slot has never been used. Opaque here and handed straight back to
 `passed`/`waitfor`: it was `signal::Vector{UInt64}`, a raw Vulkan timeline value,
 which made the ring a Vulkan concept and left [`nextslot!`](@ref) reading
 `bq.timeline_sem` and `bq.next_timeline` directly.
+
+`store` is the [`Unified`](@ref) region the plan owns. It was a device array from
+the backend's own allocator, which put the plan's arguments outside the one pool
+that is supposed to see every workload.
+
+**The indirect commands are in here too**, past the arguments and inside the same
+slot, one 256-byte block per device-sized dispatch. They belong to the plan for
+exactly the reason the arguments do — the plan knows at compile how many it has,
+and a recording bakes the address of each into a `vkCmdDispatchIndirect` — and
+putting them anywhere else is what the queue's third bump allocator was. Being
+per SLOT is not incidental: two runs in flight would otherwise write each other's
+workgroup counts, which is the hazard the argument ring already exists to stop.
+
+`indirect[slot][k]` is dispatch `k`'s view, built once here because building one
+per record is an allocation on the recording path and the offsets never move.
 """
 mutable struct ArgMemory{S}
     store::S
@@ -379,6 +420,7 @@ mutable struct ArgMemory{S}
     stride::Int
     slot_token::Vector{Any}     # `nothing` = never used
     slot::Int
+    indirect::Vector{Vector{Any}}   # [slot][k] — one indirect command each
 end
 
 """
@@ -456,30 +498,26 @@ mutable struct Plan{D}
     # backend driving KernelAbstractions passes them directly — see
     # `makeargmemory`.
     args::Union{Nothing,ArgMemory}      # laid out at compile, written per frame
-    # One recording per argument slot, or `nothing` while the plan records per
-    # run. `slotbase` is folded into every address a recording holds, so a
-    # recording belongs to the slot it was captured in and to no other —
-    # `baked[i]` is the recording for slot `i`, and `run!` rotates through them
-    # with `nextslot!` exactly as an unbaked run rotates the slots themselves.
+    # One recording per argument slot, or `nothing` before `record!`. The slot's
+    # base offset is folded into every address a recording holds, so a recording
+    # belongs to the slot it was written for and to no other — `recordings[i]` is
+    # slot `i`'s, and `run!` rotates through them with `nextslot!`.
     #
     # One recording would have been simpler and is what this held first. It also
-    # meant a baked plan pinned a single slot for life, so `rebind!` wrote the
-    # bytes a replay still in flight was reading: the ring is the mechanism that
-    # stops the host running ahead of the device, and a baked plan had opted out
-    # of it. Measured as an accumulator reading 36 where the unbaked run read 21.
-    baked::Any
-    # How many entries `rebind!` has to write again, counted once at `bake!`.
+    # meant a recorded plan pinned a single slot for life, so `rebind!` wrote the
+    # bytes a submission still in flight was reading: the ring is the mechanism
+    # that stops the host running ahead of the device, and the plan had opted out
+    # of it. Measured as an accumulator reading 36 where an interpreted run read
+    # 21.
+    recordings::Any
+    # The [`ArgWrite`](@ref)s a run performs, or `nothing` before `record!`. One
+    # per (entry, `Ref` argument) pair, and nothing else.
     #
     # `argvalue` says which arguments can move: a `Ref` is read fresh every run
-    # and everything else is resolved once. So the per-run host work of a baked
-    # plan is exactly the entries holding one, and a plan with none does no host
-    # work at all between `run!` and the queue. `nothing` until baked, because
-    # an unbaked run re-records and therefore re-packs everything anyway.
-    #
-    # The [`ArgWrite`](@ref)s a run performs, or `nothing` until baked. One per
-    # (entry, `Ref` argument) pair, and nothing else: everything a baked plan
-    # binds other than a `Ref` is fixed by the plan's own precondition, since
-    # `run!` throws if a transient moved.
+    # and everything else is resolved once. So the per-run host work of a plan is
+    # exactly the entries holding one, and a plan with none does no host work at
+    # all between `run!` and the queue — everything else is fixed by the plan's
+    # own precondition, since `run!` throws if a transient moved.
     writes::Any
 end
 

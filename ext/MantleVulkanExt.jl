@@ -40,12 +40,12 @@ using Mantle
 
 # Extended here — see the note above on why `import`.
 import Mantle: Attribute, Device, Graph, Plan, Surface, Transient, Update,
-    Window, access, alignment, arena, backend, bake!, baked, bufferusage,
+    Window, access, alignment, arena, backend, bufferusage,
     capacity, compatible, constraintof, copy!, count, describe, devicecopy!,
     deviceview, dispatches, download, draw!, fence, free!, handle,
     indirectcount!, layout, materialize!, maxalloc, mergeconstraints, nbytes,
     needs_transition, newpass, npipelines, overlapping, passed, passes, pool,
-    rawalloc, rawfree, rebind!, rebindable, release!, remap!, remappable,
+    rawalloc, rawfree, rebind!, recorded, release!, remap!, remappable,
     render!, retire!, run!, screenshot, stages, storage, stride, timings,
     touch!, upload!, usages, use, vkformat, waitfor
 
@@ -79,7 +79,7 @@ import Mantle: build_accel!, refit_tlas!, set_anyhit_pipeline!, trace_rays!,
 # fallback cannot see through; `aspect` is NOT, because it is Vulkan's own
 # spelling and nothing outside this module says it.
 import Mantle: isdepth, target_extent, checkextents, refit!, record!,
-    record_pass!, rename!, inplace!, nextslot!, collect!,
+    rename!, inplace!, nextslot!, collect!,
     # The two plan pieces a backend supplies. NOT imported, they became
     # `MantleVulkanExt.makeargmemory` and core kept its `nothing` default — so
     # every `Plan` was built with no argument memory and the first `run!` was
@@ -158,8 +158,12 @@ using Mantle: _normalise_chit
 using Mantle: mat4_to_vk_transform
 
 using Mantle: Analysis, Compilation, DiscardOp, KeepOp, alias, allocate,
-    analysis, arenaof, coopmatgemm, device, humanbytes, memoryof, offset,
-    ordered, pinned, policy, region, transients
+    analysis, arenaof, coopmatgemm, device, humanbytes, memoryof, movable,
+    offset, ordered, pinned, policy, region, transients,
+    # What a recording reads, and where the plan put it: the stride of one
+    # indirect command and the lookup that turns a dispatch's index into the view
+    # for the slot that is current.
+    INDIRECT_STRIDE, indirectof
 
 # Exported by Mantle AND by one of the packages `using`d below, which makes the
 # bare name resolve to NEITHER: two modules exporting one name leaves it

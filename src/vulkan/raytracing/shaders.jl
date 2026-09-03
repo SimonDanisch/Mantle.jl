@@ -65,9 +65,9 @@ function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::L
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
 
-    arg_buf = get_arg_buffer(bq, total_size)
+    arg_buf = get_arg_buffer(batch, total_size)
 
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets,
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
     # HWTLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
     pin!(batch, tlas.accel)
@@ -129,10 +129,7 @@ function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline
                               n_rays::LavaArray{Int32})
     vk_pipeline, raygen_compiled, offsets, byval_sizes = rt_compiled_for(bq, pipeline, args)
 
-    # Prepare the indirect buffer before the RT arg buffer: prepare_indirect
-    # dispatches its own kernel which may flush-and-reset slab pools, so if
-    # we allocated the RT arg buffer first it could be invalidated.
-    indirect_view = get_indirect_buffer(bq)
+    indirect_view = indirect_command!(ensure_active_batch!(bq))
     prepare_indirect_rt_dispatch!(bq, indirect_view, n_rays)
 
     batch = ensure_active_batch!(bq)
@@ -151,9 +148,9 @@ function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
 
-    arg_buf = get_arg_buffer(bq, total_size)
+    arg_buf = get_arg_buffer(batch, total_size)
 
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets,
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
     pin!(batch, tlas.accel)
     pin!(batch, tlas.storage)

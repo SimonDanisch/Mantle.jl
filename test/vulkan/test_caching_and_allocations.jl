@@ -111,30 +111,32 @@ using KernelAbstractions
         end
     end
 
-    # ── 4. Arg-slab allocator reuse ──
-    # `bq.arg_slabs` is the per-BQ slab pool. Asserting length-stability across
-    # two batches of dispatches is the same signal as the old `ARG_SLABS`
-    # global, just through the current field.
-    @testset "arg slab allocator reuse" begin
-        @testset "slabs reused across flushes" begin
+    # ── 4. Argument memory reuse ──
+    # A launch's arguments are a `Region` of the unified arena, owned by the
+    # batch that recorded the dispatch and released when the batch is reclaimed.
+    # Asserting block-count stability across two runs of dispatches is the same
+    # signal the old `arg_slabs` length gave: the second hundred launches reuse
+    # the bytes the first hundred gave back, rather than growing the pool.
+    @testset "argument memory reuse" begin
+        @testset "regions reused across flushes" begin
             a = MVE.LavaArray{Float32}(undef, 16)
             @kernel function slab_k!(x)
                 i = @index(Global, Linear)
                 @inbounds x[i] = Float32(i)
             end
-            bq = MVE.vk_context().default_bq
+            ctx = MVE.vk_context()
 
             for _ in 1:100
                 slab_k!(MVE.LavaBackend())(a; ndrange=16)
             end
-            MVE.vk_flush!(MVE.vk_context())
-            n_after_first = length(bq.arg_slabs)
+            MVE.vk_flush!(ctx)
+            n_after_first = length(MVE.unifiedblocks(ctx))
 
             for _ in 1:100
                 slab_k!(MVE.LavaBackend())(a; ndrange=16)
             end
-            MVE.vk_flush!(MVE.vk_context())
-            n_after_second = length(bq.arg_slabs)
+            MVE.vk_flush!(ctx)
+            n_after_second = length(MVE.unifiedblocks(ctx))
 
             @test n_after_second == n_after_first
 

@@ -59,23 +59,31 @@ mutable struct CommandBatch
     # present — but they cannot go back to `free_cmd_bufs` there either, because
     # only `reclaim_batch!` knows the fence has passed. So they wait here.
     submitted_cmd_bufs::Vector{VK.CommandBuffer}
-    # Command buffers a `replay!` asked to run at the end of this batch.
+    # Which of `sealed_cmd_bufs` belong to a [`Recording`](@ref) rather than to
+    # this batch, so `reclaim_batch!` returns the batch's own and leaves the
+    # recording's alone — a recording submits its buffer again on the next run.
     #
-    # A captured sequence is not recorded, so it has nothing to record INTO —
-    # but it still has to go to the device in order behind whatever the host
-    # recorded this frame. Appending it here rather than submitting it
-    # separately is what makes a baked `run!` one `vkQueueSubmit2`: the updates
-    # the graph recorded and the replay of everything else leave together.
-    #
-    # `replay!` used to submit on its own, with a hand-rolled wait on the newest
-    # outstanding timeline value to order it behind the batch it had just
-    # force-closed. Two submissions and a semaphore wait, to express what
-    # submission order on one queue already gives.
-    #
-    # NOT returned to `free_cmd_bufs` by `reclaim_batch!`: the capture owns
-    # them and replays them again. They are cleared at submit.
-    replay_cmd_bufs::Vector{VK.CommandBuffer}
+    # This was `replay_cmd_bufs`, a SEPARATE list submitted after everything the
+    # batch recorded. That made position stand for ownership and got the ORDER
+    # wrong: a readback recorded into the open batch after a plan ran executed
+    # BEFORE the plan, because `submit!` built its list as sealed-then-open-then-
+    # replay. It read zeros from a buffer the plan had just filled, and it read
+    # them silently. `submit!(bq, ::Recording)` seals the open segment and
+    # appends the recording behind it, so the one list is in submission order and
+    # this says only who may hand a buffer back.
+    borrowed::Vector{VK.CommandBuffer}
 
+    # The [`Unified`](@ref) regions the dispatches recorded here read their
+    # arguments and workgroup counts from, released when the batch is reclaimed.
+    #
+    # A batch is the OWNER because an address handed to `get_arg_buffer` is baked
+    # into a push constant of a dispatch in this batch and read until the batch
+    # completes — no earlier, and no later, since nothing else names it. That is
+    # exactly what an owner is, and it is what the queue's argument slab ring was
+    # trying to express with a bump pointer, a high-water mark and a handout
+    # counter: three pieces of state to work out when bytes were safe to hand
+    # over again, where the fence already says it.
+    regions::Vector{Region}
     # Timeline value this batch will signal on its queue's `timeline_sem`.
     # Assigned at record time so `sync_access!` can store it into `buf.last_write`.
     signal_value::UInt64
@@ -102,9 +110,10 @@ function init_batch(cb::VK.CommandBuffer)
     sizehint!(pinned, 128)
     waits = Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}[]
     return CommandBatch(cb, false, 0, 0, false, pinned, Any[], String[],
-        VK.CommandBuffer[],
-        VK.CommandBuffer[],
-        VK.CommandBuffer[],
+        VK.CommandBuffer[],          # sealed segments, in submission order
+        VK.CommandBuffer[],          # already submitted, waiting on the fence
+        VK.CommandBuffer[],          # of the sealed ones, which belong elsewhere
+        Region[],                        # argument regions, released at reclaim
         UInt64(0),                       # signal_value (assigned at record time)
         waits,
         nothing,                         # bq (set after VulkanBatchQueue is fully built)
@@ -142,16 +151,13 @@ function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ct
                     timeline_sem, UInt64(0),
                     Any[], Any[],    # deferred_frees, deferred_as_frees
                     Base.Threads.SpinLock(),  # deferred_frees_lock
-                    Any[], 1, 0, 0, UInt64(0),  # arg_slabs: idx=1, offset=0, count=0, frontier=0
-                    Any[], 1, 0,     # indirect_slabs: idx=1, offset=0
                     nothing,         # staging (lazy)
                     ctx,             # owning VkContext (required)
                     Threads.threadid(),  # owning_thread
                     64, 3000, UInt64(120) * 1_000_000_000,  # auto-submit, CB split, flush timeout
                     :memory, false, false,                  # barrier mode / elision / one-shot skip
-                    0,                                      # scope_depth: no unsplittable scope open
                     false, UInt64[], UInt64[],              # ranges_declared + elision tracker
-                    nothing, nothing, Outstanding[],        # deferred indirect, capture, outstanding submissions
+                    nothing, Outstanding[],                 # deferred indirect, outstanding submissions
                     "", "",                                 # last / prev dispatch info
                     queue_index)
     # Plug the back-reference into every pre-allocated batch so `batch.bq`

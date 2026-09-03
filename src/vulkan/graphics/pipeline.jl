@@ -527,9 +527,23 @@ The depth attachment takes the same three-way answer as the colour one:
 there, and `depth_load_op` states it outright, which is the only way to reach
 DONT_CARE.
 """
-begin_pass!(bq::VulkanBatchQueue, color_view::VK.ImageView, color_image::VK.Image,
+begin_pass!(target, color_view::VK.ImageView, color_image::VK.Image,
                extent::VK.Extent2D; kw...) =
-    begin_pass!(bq, [color_view], [color_image], extent; kw...)
+    begin_pass!(target, [color_view], [color_image], extent; kw...)
+
+# The four render-pass verbs take an EMITTER. A queue is accepted too and means
+# "whatever batch is open", which is what every caller outside a plan wants —
+# RayMakie's overlay, `blit!`, a test drawing a triangle. One line each, so
+# there is one implementation and the queue form cannot drift from it.
+begin_pass!(bq::VulkanBatchQueue, views::AbstractVector{<:VK.ImageView},
+            images::AbstractVector{<:VK.Image}, extent::VK.Extent2D; kw...) =
+    begin_pass!(emitter(bq), views, images, extent; kw...)
+end_pass!(bq::VulkanBatchQueue) = end_pass!(emitter(bq))
+set_viewport!(bq::VulkanBatchQueue, args...) = set_viewport!(emitter(bq), args...)
+draw_in_pass!(bq::VulkanBatchQueue, pipeline, n::Integer; kw...) =
+    draw_in_pass!(emitter(bq), pipeline, n; kw...)
+draw_indirect_in_pass!(bq::VulkanBatchQueue, pipeline, commands; kw...) =
+    draw_indirect_in_pass!(emitter(bq), pipeline, commands; kw...)
 
 """One value for every attachment, or one value each. Anything else is a mistake
 worth naming rather than a silent recycle."""
@@ -539,7 +553,7 @@ function perattachment(x, n::Integer, what::String)
     error("$what has $(length(x)) entries but the pass has $n colour attachments")
 end
 
-function begin_pass!(bq::VulkanBatchQueue,
+function begin_pass!(e::Emitter,
                          color_views::AbstractVector{<:VK.ImageView},
                          color_images::AbstractVector{<:VK.Image},
                          extent::VK.Extent2D;
@@ -551,8 +565,7 @@ function begin_pass!(bq::VulkanBatchQueue,
                          depth_store_op::VK.AttachmentStoreOp=VK.ATTACHMENT_STORE_OP_STORE,
                          transition::Bool=true,
                          load_op=nothing)
-    batch = ensure_active_batch!(bq)
-    cmd = batch.cmd_buf
+    cmd = e.cmd
     n = length(color_views)
     n == length(color_images) ||
         error("$n colour views but $(length(color_images)) colour images")
@@ -679,7 +692,7 @@ end
 Record a draw command within an active rendering pass.
 Viewport/scissor are Vulkan structs for per-scene rendering.
 """
-function draw_in_pass!(bq::VulkanBatchQueue,
+function draw_in_pass!(e::Emitter,
                            pipeline::VulkanCompiledGraphicsPipeline,
                            vertex_count::Integer;
                            push_data::Vector{UInt8}=UInt8[],
@@ -693,9 +706,7 @@ function draw_in_pass!(bq::VulkanBatchQueue,
                            # A caller that owns the pipeline for longer than the
                            # frame does not need it pinned into every batch.
                            pin::Bool=true)
-    batch = bq.active_batch
-    batch === nothing && error("draw_in_pass! called without an active rendering pass")
-    cmd = batch.cmd_buf
+    cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
 
@@ -725,10 +736,9 @@ function draw_in_pass!(bq::VulkanBatchQueue,
     end
 
     VK.cmd_draw(cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
-    batch.dispatch_count += 1
-    batch.last_was_rt = false
-    # Pin pipeline to batch — prevents GC from destroying it while command buffer references it
-    pin && pin!(batch, pipeline)
+    drawn!(e.owner)
+    # Pin the pipeline — prevents GC from destroying it while the command buffer references it
+    pin && pin!(e, pipeline)
 end
 
 """
@@ -757,16 +767,14 @@ would mean waiting for it.
 The array has to have been allocated with `BUFFER_USAGE_INDIRECT_BUFFER_BIT`,
 which `indirect_buffer` does.
 """
-function draw_indirect_in_pass!(bq::VulkanBatchQueue,
+function draw_indirect_in_pass!(e::Emitter,
                                    pipeline::VulkanCompiledGraphicsPipeline,
                                    commands::LavaArray{DrawIndirectCommand,1};
                                    first::Integer=1,
                                    count::Integer=1,
                                    push_bda::UInt64=UInt64(0),
                                    pin::Bool=true)
-    batch = bq.active_batch
-    batch === nothing && error("draw_indirect_in_pass! called without an active rendering pass")
-    cmd = batch.cmd_buf
+    cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
 
@@ -784,9 +792,9 @@ function draw_indirect_in_pass!(bq::VulkanBatchQueue,
              (first - 1) * sizeof(DrawIndirectCommand)
     VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
                              UInt32(count), UInt32(sizeof(DrawIndirectCommand)))
-    batch.dispatch_count += 1
-    batch.last_was_rt = false
-    pin && pin!(batch, pipeline)
+    drawn!(e.owner)
+    pin && pin!(e, pipeline)
+    pin!(e, commands)
 end
 
 """
@@ -833,24 +841,18 @@ them per draw records two extra commands and allocates two vectors per draw per
 frame — at a hundred plots, a third of the frame's garbage for a value that does
 not change.
 """
-function set_viewport!(bq::VulkanBatchQueue, viewport::VK.Viewport, scissor::VK.Rect2D)
-    batch = bq.active_batch
-    batch === nothing && error("set_viewport! called without an active rendering pass")
-    VK.cmd_set_viewport(batch.cmd_buf, [viewport])
-    VK.cmd_set_scissor(batch.cmd_buf, [scissor])
+function set_viewport!(e::Emitter, viewport::VK.Viewport, scissor::VK.Rect2D)
+    VK.cmd_set_viewport(e.cmd, [viewport])
+    VK.cmd_set_scissor(e.cmd, [scissor])
     nothing
 end
 
 """
-    end_pass!(bq::VulkanBatchQueue)
+    end_pass!(emitter)
 
-End the current dynamic rendering pass on the given batch queue.
+End the dynamic rendering pass the emitter opened.
 """
-function end_pass!(bq::VulkanBatchQueue)
-    batch = bq.active_batch
-    batch === nothing && error("end_pass! called without an active rendering pass")
-    VK.cmd_end_rendering(batch.cmd_buf)
-end
+end_pass!(e::Emitter) = VK.cmd_end_rendering(e.cmd)
 
 """
 Mantle's portable viewport verb: plain numbers in, viewport AND the scissor it
@@ -867,8 +869,8 @@ height, which is how Y-down clip space is handled) puts the rectangle's origin
 at `y + h`. Deriving it in one place is what stops each caller getting that
 wrong in its own way.
 """
-function set_viewport!(bq::VulkanBatchQueue, x::Real, y::Real, w::Real, h::Real)
-    cmd = bq.active_batch.cmd_buf
+function set_viewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
+    cmd = e.cmd
     VK.cmd_set_viewport(cmd, [VK.Viewport(Float32(x), Float32(y), Float32(w), Float32(h), 0f0, 1f0)])
 
     sx = Int32(floor(x))

@@ -6,7 +6,8 @@
 #   `replay_watermark`                     flush!, replay!
 #   `am.signal[slot]`                      nextslot!
 #   `buf.last_write :: (bq, UInt64)`       vk_free!, sync_access!
-#   `arg_pool_frontier`                    the slab rewind
+#   `arg_pool_frontier`                    the slab rewind — the slabs are gone;
+#                                          a region's owner says when it is free
 #
 # Five records of one fact is five chances to read the wrong one, and the
 # comments in tree record two occasions when that happened: `flush!` returning
@@ -46,7 +47,7 @@ end
 Record that `token` covers work now on its way to the device.
 
 Every path that hands work over calls this and nothing else records it: a
-recorded batch, a replay of a baked plan, a one-off upload. That is the whole
+recorded batch, a run of a recorded plan, a one-off upload. That is the whole
 point — before this, a replay was invisible to `flush!` because it created no
 batch, and the fix was a second field rather than a second caller here.
 """

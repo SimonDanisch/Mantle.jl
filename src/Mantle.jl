@@ -175,7 +175,7 @@ export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved, retire!, reclaim!, fence, passed, waitfor, waitfor!
 export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable, takeover!
 export DeviceArray, giveup!, blocksize
-export upload!, download, deviceview, bufferusage, devicecopy!, Persistent
+export upload!, download, deviceview, bufferusage, devicecopy!, Persistent, Unified
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints
 export readproblem
 
@@ -216,7 +216,7 @@ export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
 
 # The graph's backend interface. `isdepth` is a definition, not a hook — see
 # `graph/backend.jl` for why it and `aspect` swapped places.
-export isdepth, target_extent, checkextents, refit!, record!, record_pass!,
+export isdepth, target_extent, checkextents, refit!,
        rename!, inplace!, nextslot!, collect!
 export blit!, present_frame!, acquire_next_image!, transition_image!
 export readback_framebuffer, readback_window, readback_target
@@ -270,7 +270,7 @@ export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, 
 export repeat!, Predicate, supportspredicate
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!,
        argvalue
-export UpdateRef, anypending, applyupdates!, custombody, registerupdate!
+export UpdateRef, anypending, applyupdates!, registerupdate!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
 export Phase, Dag, Schedule, Liveness, Place, Aliasing, Barriers, Pipelines
@@ -280,14 +280,15 @@ export PHASES, compile!
 # the one a Makie-shaped caller means — `update!(plot; positions = …)` sets an
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
-export run!, npipelines, capacity, use, peakbytes, naivebytes, storage, custom!, free!
-export bake!, baked, rebind!, rebindable
+export run!, npipelines, capacity, use, peakbytes, naivebytes, storage, free!
+export record!, recorded, rebind!
 export timings, PassTiming, NSAMPLES
 
 """
-    bake!(plan) -> plan
+    record!(plan) -> plan
 
-Record the plan once and re-submit that recording on every later `run!`.
+Write the plan's commands once, so every `run!` hands the same command buffers to
+the device instead of rebuilding them.
 
 The prize is host time. A plan whose launch sequence is identical every
 invocation pays to rebuild it every invocation, and on SAM 2's encoder that is
@@ -296,85 +297,61 @@ than running it.
 
 The precondition is that every device address the recording names is the same
 next time. A plan already gives that: placement is fixed, the arena is the
-device's, and a plan holds references to everything it names — which is the
-property raw capture lacks and the reason this lives here rather than on the
-capture. What a plan does *not* fix is an input written by reallocating, so an
-`Update` that renames is recorded fresh per invocation and submitted ahead of the
-replay rather than baked into it.
+device's, and a plan holds references to everything it names. What a plan does
+*not* fix is an input written by reallocating, so an `Update` that renames is
+emitted fresh per run and submitted ahead of the recording rather than written
+into it.
 
-Opt-in, and it stays opt-in: `run!` on an unbaked plan records as it always did.
-That is what lets the same plan be measured both ways in one process, which
-matters because a placement bug and a stale-recording bug both present as a
-number that moved.
+`run!` calls this on the first run of any plan that can be recorded, so the
+ordinary caller never says it. Call it directly to pay the cost somewhere it does
+not count — before a timing loop, or before the first frame.
 
     plan = Plan(g)
-    run!(plan)          # records
-    bake!(plan)
-    run!(plan)          # replays
+    record!(plan)
+    run!(plan)          # no recording, no per-dispatch bookkeeping
 
-**This RUNS the plan, once.** The recording is taken by recording, and the
-commands reach the queue on the way past — so `bake!` is `run!` plus a capture,
-not a capture instead of a run. For a plan that computes a value from its inputs
-that is invisible; for one that ACCUMULATES it is a whole extra contribution, and
-it lands on whichever invocation happened to build the plan. That shows up as a
-first frame that is wrong and every later frame exact, which reads like a bug in
-the work rather than in when it was baked. Bake such a plan where an extra run
-does not count, or leave it unbaked — a plan of one dispatch has nothing to gain
-here anyway.
+It does NOT run the plan. `bake!`, which this replaces, did: it collected command
+buffers out of an ordinary interpreted run and let them reach the queue on the
+way past, so baking an accumulating plan added a whole extra contribution to
+whichever invocation happened to build it. That showed up as a first frame that
+was wrong and every later frame exact, which reads like a bug in the work rather
+than in when it was recorded.
 
-An argument that moves needs [`rebind!`](@ref): a baked plan does not record, so
-the values it packed at `bake!` are the ones it replays until told otherwise.
+An argument that moves is re-read every run by [`rebind!`](@ref), which `run!`
+calls — a `Ref` argument means "read fresh", and it still means that after
+recording.
 
 Not yet for plans with a surface: a swapchain image is a different image every
-frame and the recording names one. Headless plans have no such thing.
+frame and a recording names one. Headless plans have no such thing.
 
-A backend that does not record per run has nothing to capture, and gets the
-default: baking is the plan, unchanged. That is a no-op rather than an error
-because `bake!` asks for an outcome — "stop paying to rebuild this" — that such a
+A backend that does not build command buffers has nothing to record, and gets the
+default: the plan, unchanged. That is a no-op rather than an error because
+`record!` asks for an outcome — "stop paying to rebuild this" — that such a
 backend already has, and making the caller ask which backend it is on is the
 branch this library exists to remove.
 """
-bake!(plan) = plan
+record!(plan) = plan
 
-"""Whether `bake!` has been called on this plan and the recording is in use.
-False by default, which is the honest answer for a backend that never records
+"""Whether this plan's commands have been written and are what `run!` submits.
+False by default, which is the honest answer for a backend that never builds
 one."""
-baked(plan) = false
+recorded(plan) = false
 
 """
     rebind!(plan) -> plan
 
-Re-read the arguments a baked plan's work was given, so a value that moved is
-replayed as it is now rather than as it was when the recording was captured.
+Re-read the arguments a recorded plan's work was given, so a value that moved is
+run as it is now rather than as it was when the commands were written.
 
-A backend that records nothing per run has to offer this or `bake!` is only safe
+A backend that emits nothing per run has to offer this or recording is only safe
 for plans whose every argument is constant — and unsafe SILENTLY, since a stale
 value produces a plausible result rather than an error. A backend that resolves
 arguments at launch (the host one does) needs nothing, and gets the default.
 
-The ordering is the caller's: see the Lava method for what a baked plan's single
-argument slot means for a rebind that overlaps a replay.
+`run!` calls it, on the slot `nextslot!` has just claimed, so the device is known
+to be past the run that last read those bytes.
 """
 rebind!(plan) = plan
-
-"""
-    rebindable(plan) -> Bool
-
-Whether [`rebind!`](@ref) can deliver its contract for this plan.
-
-It cannot when the plan has a `custom!` pass. Such a pass declares what it
-touches but not how, and its body packs its own arguments while it runs — so a
-baked plan, which never runs the body again, replays whatever the body packed at
-capture, and nothing outside the body knows where those bytes are to rewrite
-them. `rebind!` would return having quietly done nothing for that pass.
-
-Ask this before baking anything whose arguments move. The answer is a property of
-the graph, not of the values, so it is stable for the life of the plan.
-
-True by default: a backend that resolves arguments at launch rebinds by
-construction.
-"""
-rebindable(plan) = true
 
 function update! end
 function use end
@@ -419,32 +396,6 @@ DEVICE_MEMORY somewhere later" into a message naming the buffers that did not
 fit.
 """
 capacity(dev) = typemax(Int)
-
-"""
-    custom!(f, graph, name) -> pass
-
-A pass that declares what it touches but not how. `f` receives the pass handle,
-calls `use` for every resource the work reads or writes, and returns a zero-arg
-callable; that callable runs at record time with the batch open, and may launch
-whatever it likes.
-
-`dispatch!` needs one kernel, its arguments and an ndrange. Work that is a *unit*
-to the caller but several launches underneath — a fused attention block, an ATen
-operator with a host-side branch, a library call — has no way to say so, and
-wrapping each launch as its own pass would declare a resource sequence the caller
-does not actually have. This is the escape hatch: the graph still derives
-lifetimes and barriers from the declaration, and stays out of the body.
-
-The declaration is a promise. Nothing checks that the body touches only what was
-declared, and memory it reaches without saying so is memory the placer is free to
-alias with something else.
-"""
-function custom!(f, g::Graph, name::AbstractString)
-    p = newpass(g, name, :custom)
-    push!(passes(g), p)
-    push!(dispatches(p), custombody(f(handle(g, p))))
-    return p
-end
 
 # `__init__` is `MantleVulkanExt`'s: both halves of it — the pipeline builder
 # thread and the `atexit` device-lost hook — reach into the Vulkan context, and

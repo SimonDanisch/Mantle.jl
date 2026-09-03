@@ -22,9 +22,9 @@ import. And if the extension gets that far, seven of Vulkan's private recording
 helpers have become Mantle API that neither core nor another backend can reach.
 
 Found on 2026-08-30, when the Vulkan half of the split was loaded for the first
-time: `emit_draw!`, `packdispatch!`, `record_updates!`, `recordlaunch!`,
-`recycle!`, `takehost!` and `write_update!` were all in the list, all defined and
-used only in `src/vulkan/graph.jl`, and all of them made it through the Mac's
+time: `emit_draw!`, `packdispatch!`, `recycle!`, `takehost!`, `write_update!` and
+two recording helpers since renamed were all in the list, all defined and used
+only in `src/vulkan/graph.jl`, and all of them made it through the Mac's
 Metal-only test run because that machine never loads this extension.
 
 Source-level and device-free on purpose. It reads the extension SOURCE, so it

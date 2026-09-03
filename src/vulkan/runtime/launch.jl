@@ -115,7 +115,59 @@ function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
                        tlas=nothing)  # Union{Nothing, VulkanTLAS} — declared later in raytracing/hwtlas.jl
-    validate_launch_args(bq.ctx::VkContext, args)
+    batch = ensure_active_batch!(bq)
+    pipeline, argaddr, groups, name =
+        preparekernel(batch, f, args, ndrange, workgroup_size, tlas)
+    if (bq.ctx::VkContext).diag.dispatch_logging
+        bq.last_dispatch_info = name
+    end
+    vk_dispatch!(bq, pipeline, argaddr, groups, tlas)
+    return nothing
+end
+
+"""
+    emitkernel!(emitter, f, args...; ndrange, workgroup_size, tlas = nothing)
+
+The same launch, written where the emitter is writing and WITHOUT the automatic
+inter-dispatch barrier.
+
+Two functions rather than one with a flag, because the contract differs and the
+difference is the whole of what the graph is for. `lava_launch!` is the
+unmodelled path: nothing has declared what the kernel touches, so the recorder
+inserts a barrier in front of it and the caller may argue it away. This one is
+reached only from a plan, whose barriers were derived from declared usage and
+already emitted — a second one here would be the redundancy the derivation
+exists to remove.
+
+Everything up to the dispatch is shared: [`preparekernel`](@ref) compiles,
+adapts, pins and packs identically for both.
+"""
+function emitkernel!(e::Emitter, @nospecialize(f), args...;
+                     ndrange::Union{Integer, NTuple{3,<:Integer}},
+                     workgroup_size::NTuple{3,Int} = (64, 1, 1),
+                     tlas = nothing)
+    pipeline, argaddr, groups, name =
+        preparekernel(e.owner, f, args, ndrange, workgroup_size, tlas)
+    emit_dispatch!(e, pipeline, argaddr, groups, tlas, name)
+    return nothing
+end
+
+"""
+Compile `f` for `args`, pin and pack them where `owner` holds memory, and answer
+what a dispatch needs: the pipeline, the argument address, the workgroup counts
+and a name for the log.
+
+The whole of a launch except the launch. `lava_launch!` and [`emitkernel!`](@ref)
+differ in one line each — which command they then write — so this is where the
+kernel cache lookup, the `Adapt` walk, the HWTLAS check and the argument packing
+live once.
+"""
+function preparekernel(owner::O, @nospecialize(f), args::Tuple,
+                       ndrange::Union{Integer, NTuple{3,<:Integer}},
+                       workgroup_size::NTuple{3,Int}, tlas) where {O<:Pinned}
+    bq = owner.bq::VulkanBatchQueue
+    ctx = bq.ctx::VkContext
+    validate_launch_args(ctx, args)
     if ndrange isa Integer
         ndrange_3d = (Int(ndrange), 1, 1)
     else
@@ -128,13 +180,13 @@ function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
     )
 
     # Pin pass (side effects): walk the closure + args and pin every LavaArray
-    # leaf into `batch.pinned` so the backing VkManagedBuffers outlive submit.
+    # leaf into the owner's pinned set so the backing VkManagedBuffers outlive
+    # the last submission that names them.
     # Strip pass (pure): Adapt.jl rewrites LavaArray → LavaDeviceArray via the
     # side-effect-free `adapt_storage(::LavaAdaptor, ::LavaArray)`.
-    batch = ensure_active_batch!(bq)
-    pin_leaves!(batch, f)
-    pin_leaves!(batch, args)
-    adaptor = LavaAdaptor(batch)
+    pin_leaves!(owner, f)
+    pin_leaves!(owner, args)
+    adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, f)
     converted_args = map(a -> Adapt.adapt(adaptor, a), args)
 
@@ -143,7 +195,7 @@ function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
 
     enable_ray_query = tlas !== nothing
     compiled, pipeline, offsets, byval_sizes =
-        get_compiled_kernel_and_pipeline(bq.ctx::VkContext, converted_f, tt, workgroup_size;
+        get_compiled_kernel_and_pipeline(ctx, converted_f, tt, workgroup_size;
                                          enable_ray_query)
 
     # Loud error: kernel needs HWTLAS but none was provided at launch.
@@ -158,16 +210,14 @@ function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
     all_args = (converted_f, converted_args...)
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
-    arg_buf = get_arg_buffer(bq, total_size)
+    arg_buf = get_arg_buffer(owner, total_size)
 
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets,
+    pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        compiled.push_info.arg_buffer_size, byval_sizes, all_args)
 
-    if (bq.ctx::VkContext).diag.dispatch_logging
-        bq.last_dispatch_info = "compute f=$(nameof(typeof(converted_f))) groups=$groups"
-    end
-    vk_dispatch!(bq, pipeline, arg_buf.address, groups, tlas)
-    return nothing
+    name = ctx.diag.dispatch_logging || ctx.diag.dispatch_timing ?
+           "compute f=$(nameof(typeof(converted_f))) groups=$groups" : ""
+    return pipeline, arg_buf.address, groups, name
 end
 
 # ── Zero-allocation argument packing ──
@@ -214,7 +264,7 @@ end
 @inline function pack_arg!(x::T,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::CommandBatch) where T
+                           batch::O) where {T,O<:Pinned}
     if isbitstype(T) && !isprimitivetype(T)
         inline_offset = (inline_offset + 7) & ~7
         ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
@@ -232,7 +282,7 @@ end
 @inline function pack_arg!(x::UInt64,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::CommandBatch)
+                           batch::O) where {O<:Pinned}
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), x)
     return inline_offset
 end
@@ -240,7 +290,7 @@ end
 @inline function pack_arg!(p::Ptr,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::CommandBatch)
+                           batch::O) where {O<:Pinned}
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), UInt64(p))
     return inline_offset
 end
@@ -248,7 +298,7 @@ end
 @inline function pack_arg!(buf::VkManagedBuffer,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::CommandBatch)
+                           batch::O) where {O<:Pinned}
     pin!(batch, buf)
     if (buf.ctx::VkContext).diag.pack_arg_assert_live
         st = @atomic :acquire buf.state
@@ -297,14 +347,18 @@ tests exactly `isbitstype(T) && !isprimitivetype(T)`.
 standalone_slot(::Type{T}) where {T} = !(isbitstype(T) && !isprimitivetype(T))
 
 """
-    pack_args_direct!(bq, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
+    pack_args_direct!(owner, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
 
 Write kernel arguments directly into mapped GPU memory via per-type
 `pack_arg!` dispatch.  Zero heap allocations for the arg packing itself.
-`bq.active_batch` must already exist (callers call `ensure_active_batch!`
-before us).
+
+`owner` is what the buffer-typed leaves are pinned into — the batch for work
+submitted once, the [`Recording`](@ref) for work a plan submits every run. It
+was `bq`, and the body read `bq.active_batch::CommandBatch`: a recording's
+arguments were therefore pinned into whatever batch happened to be open while it
+was being written, and that batch's completion released them.
 """
-@generated function pack_args_direct!(bq::VulkanBatchQueue,
+@generated function pack_args_direct!(batch::Pinned,
                                         mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                                         offsets::Vector{Int}, base_size::Int,
                                         byval_sizes::Vector{Int},
@@ -319,12 +373,12 @@ before us).
             inline_offset, batch)))
     end
     quote
-        batch = bq.active_batch::CommandBatch
         inline_offset = base_size
         $(exprs...)
         return nothing
     end
 end
+
 
 
 # ── Lava disk cache ──
@@ -595,203 +649,84 @@ and world-age tracking means Revise edits invalidate correctly.
     return linked.compiled, linked.pipeline, linked.offsets, linked.byval_sizes
 end
 
-# ── Arg buffer + indirect dispatch slab allocators ──
+# ── What a recording reads while it runs ──
 #
-# Each GPU dispatch needs an arg buffer region (for push-constant BDA pointer
-# target) and optionally an indirect dispatch buffer (3 UInt32s).  Both kinds
-# of slab are plain `LavaArray`s with BAR-mapped memory (unified=true) —
-# there is no raw "VkMappedBuffer" type any more.  Slabs are bump-allocated
-# with 256-byte alignment and recycled when `bq.in_flight` drains.
+# A dispatch reaches its arguments through a device address baked into the
+# command buffer as a push constant, so those bytes have to be host-writable,
+# device-addressable, and untouchable by anyone else for as long as the command
+# that names them can still run. That is a `Region` of the [`Unified`](@ref)
+# arena and an OWNER, and both already exist.
+#
+# What was here instead: two bump allocators on the queue and a third inside
+# every capture, with a high-water mark, a handout counter and a rewind test
+# between them, all working out when bytes were safe to reuse. The fence already
+# knew. A modelled plan does not come through here at all — it lays its arguments
+# and its indirect commands out at compile and owns the region they live in.
 
-const ARG_SLAB_SIZE = 4 * 1024 * 1024     # 4 MiB per arg slab (~16K dispatches)
-const ARG_SLAB_ALIGN = 256                # BDA alignment for sub-allocations
-const INDIRECT_SLAB_ALIGN = 256           # 12 bytes needed, 256-aligned
-const INDIRECT_SLAB_ELEMS = INDIRECT_SLAB_SIZE ÷ sizeof(UInt32)
+const ARG_ALIGN = 256                     # BDA alignment for sub-allocations
+"""A block of the [`Unified`](@ref) arena. Small, because BAR memory is scarce on
+a device without resizable BAR and a recording's arguments are kilobytes."""
+const UNIFIED_BLOCK_SIZE = 4 * 1024 * 1024
 
-"""A sub-allocation within an arg buffer slab (CPU-mapped write target)."""
+"""A slice of the unified arena a recording writes its arguments into."""
 struct ArgBufferAlloc
     address::UInt64           # BDA of this sub-allocation
     mapped_ptr::Ptr{UInt8}    # CPU-writable pointer
     size::Int
 end
 
-"""Lazy-grow `bq.arg_slabs` so `bq.arg_slab_idx` indexes a live slab big
-enough for `min_size`.  Advances `arg_slab_idx` if the current slab is full."""
-function ensure_arg_slab!(bq::VulkanBatchQueue, min_size::Int)
-    while length(bq.arg_slabs) < bq.arg_slab_idx
-        push!(bq.arg_slabs,
-              LavaArray{UInt8,1}(undef, (max(ARG_SLAB_SIZE, min_size),);
-                                 bq=bq, unified=true))
-    end
-    slab = bq.arg_slabs[bq.arg_slab_idx]::LavaArray{UInt8,1}
-    if bq.arg_slab_offset + min_size > slab.buf[].size
-        bq.arg_slab_idx += 1
-        bq.arg_slab_offset = 0
-        while length(bq.arg_slabs) < bq.arg_slab_idx
-            push!(bq.arg_slabs,
-                  LavaArray{UInt8,1}(undef, (max(ARG_SLAB_SIZE, min_size),);
-                                     bq=bq, unified=true))
-        end
-    end
-end
-
-function get_arg_buffer(bq::VulkanBatchQueue, nbytes::Integer)
-    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread arg-buf alloc forbidden"
-    aligned_size = (max(Int(nbytes), 16) + ARG_SLAB_ALIGN - 1) & ~(ARG_SLAB_ALIGN - 1)
-    # A capture allocates from its OWN slabs. The address is baked into the
-    # command buffer as a push constant, so a replay reads whatever those bytes
-    # hold at replay time — which means nothing else may ever be given them. That
-    # used to be arranged by pushing the shared pool's high-water mark past them
-    # for good; owning them says the same thing and can also be undone. See
-    # `CapturedSequence`.
-    let cap = bq.capturing
-        cap === nothing || return capture_arg_buffer!(cap, bq, aligned_size)
-    end
-    # Rewind here rather than at end-of-frame: safe exactly when the GPU has
-    # passed every batch that allocated from the pool (see `arg_pool_in_use!`).
-    reclaim_arg_buffer_pool!(bq)
-    ensure_arg_slab!(bq, aligned_size)
-    slab = bq.arg_slabs[bq.arg_slab_idx]::LavaArray{UInt8,1}
-    mb = slab.buf[]::VkManagedBuffer
-    offset = bq.arg_slab_offset
-    bq.arg_slab_offset = offset + aligned_size
-    bq.arg_alloc_count += 1
-    return ArgBufferAlloc(
-        mb.address + UInt64(offset),
-        mb.mapped_ptr + offset,
-        aligned_size
-    )
-end
-
-"""Bump-allocate `aligned_size` bytes from a capture's own slabs, growing them
-as needed. No reclaim and no frontier: a capture's slabs are never rewound,
-which is the whole point of them being its own."""
-function capture_arg_buffer!(cap, bq::VulkanBatchQueue, aligned_size::Int)
-    while length(cap.slabs) < cap.slab_idx
-        push!(cap.slabs, LavaArray{UInt8,1}(undef, (max(ARG_SLAB_SIZE, aligned_size),);
-                                            bq = bq, unified = true))
-    end
-    slab = cap.slabs[cap.slab_idx]::LavaArray{UInt8,1}
-    if cap.slab_offset + aligned_size > slab.buf[].size
-        cap.slab_idx += 1
-        cap.slab_offset = 0
-        while length(cap.slabs) < cap.slab_idx
-            push!(cap.slabs, LavaArray{UInt8,1}(undef, (max(ARG_SLAB_SIZE, aligned_size),);
-                                                bq = bq, unified = true))
-        end
-        slab = cap.slabs[cap.slab_idx]::LavaArray{UInt8,1}
-    end
-    mb = slab.buf[]::VkManagedBuffer
-    offset = cap.slab_offset
-    cap.slab_offset = offset + aligned_size
-    return ArgBufferAlloc(mb.address + UInt64(offset), mb.mapped_ptr + offset, aligned_size)
-end
-
-# `reserve_arg_slabs!` used to live here: it pushed a high-water mark past the
-# slabs a capture had filled so `reset_arg_buffer_pool!` could not hand them out
-# again, because a replay reads whatever the baked push-constant address points
-# at. The mark only went up and nothing ever lowered it, so every capture cost
-# the pool a few megabytes for the life of the process. A capture owns its
-# argument slabs now, which says the same thing about who may write them and can
-# also be given back — see `CapturedSequence` and `release!`.
-
 """
-    arg_pool_in_use!(bq, signal_value)
+    scratch!(owner, nbytes) -> Region
 
-Record that everything allocated from `bq`'s arg pool is read by batches up to
-`signal_value`; the pool may be rewound once the timeline passes it.
+`nbytes` of the unified arena for the commands `owner` holds, owned BY it —
+which is what decides when the bytes go back. A batch gives them up when its
+timeline signals; a [`Recording`](@ref) when it is released, because until then
+it may be submitted again and read them again.
 
-The pool is a bump allocator whose addresses are baked into command buffers as
-push constants, so rewinding it while a batch that allocated from it is still
-executing hands the next caller memory an in-flight shader is still reading.
-Rewinding at end-of-frame did exactly that: geometry corruption over a static
-scene, intermittent, hidden by any full sync, and invisible to validation —
-overwriting your own host-mapped memory is perfectly legal.
+`own!(bq, r)` stood in front of this and asked `bq.capturing` which of the two
+was the owner. The owner is now the argument, so there is nothing to ask.
+
+One `acquire!` per launch, where the two allocators this replaces did a
+bump-pointer add. That is deliberate and it is the cheap half of the trade: the
+only caller is the unmodelled launch path, which looks up a compiled kernel,
+adapts an argument tree and packs it on every call — and what the bump pointer
+bought was five fields of state that could rewind under a recording still holding
+the address. A modelled plan does not come through here at all.
 """
-function arg_pool_in_use!(bq::VulkanBatchQueue, signal_value::Integer)
-    bq.arg_pool_frontier = UInt64(signal_value)
-    # Everything handed out so far now belongs to a submitted batch, and the
-    # frontier covers it. The recording that starts next holds nothing yet, which
-    # is what `arg_alloc_count` means from here on.
-    bq.arg_alloc_count = 0
-    nothing
+@inline function scratch!(owner::O, nbytes::Integer) where {O<:Pinned}
+    bq = owner.bq::VulkanBatchQueue
+    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread scratch alloc forbidden"
+    dev = lavadevice(bq.ctx::VkContext)
+    r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
+                 align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE)
+    push!(owner.regions, r)
+    return r
+end
+
+"""Bytes for one launch's arguments, as the address the push constant carries and
+the pointer the packer writes through."""
+@inline function get_arg_buffer(owner::O, nbytes::Integer) where {O<:Pinned}
+    r = scratch!(owner, nbytes)
+    blk = memoryof(r)::BufferBlock
+    off = offset(r)
+    return ArgBufferAlloc(blk.address + UInt64(off),
+                          (blk.ref[]::VkManagedBuffer).mapped_ptr + off,
+                          length(r))
 end
 
 """
-Rewind the arg pool if — and only if — the GPU has finished with everything
-allocated from it *and* the recording in progress holds none of it. Cheap: one
-non-blocking timeline query, and only when there is a frontier to clear.
+    indirect_command!(bq) -> LavaArray{UInt32,1}
 
-The second condition is not redundant, and leaving it out is a GPU crash. The
-timeline can cross the frontier *while a frame is being recorded*: draws 1..k have
-already had their arg buffer addresses baked into push constants, the GPU then
-finishes the previous frame, and the next `get_arg_buffer` rewinds to offset zero
-and hands the same bytes to draw k+1. The earlier draws are left reading whatever
-the later ones wrote — a null buffer device address, and a GPUVM fault at 0x0.
+One `VkDispatchIndirectCommand` for an unmodelled indirect launch: three
+`UInt32`s a prepare kernel writes and the command processor reads.
 
-It needs many draws in one frame for a reclaim to land mid-recording, and frames
-in flight for the timeline to move during it, which is why it appeared the day the
-per-frame flush went away and only with a hundred plots. `arg_alloc_count` is the
-count since the last submit, so it is exactly "this recording holds handouts".
+`get_indirect_buffer` was this, from a slab ring on the queue that was rewound
+whenever the queue drained — while a recording holds the address of its
+command for as long as it can be replayed. A modelled plan has no need of either:
+its commands are laid out at compile, in its own slot, beside its arguments.
 """
-function reclaim_arg_buffer_pool!(bq::VulkanBatchQueue)
-    bq.arg_pool_frontier == UInt64(0) && return false
-    bq.arg_alloc_count == 0 || return false
-    passed(bq, bq.arg_pool_frontier) || return false
-    reset_arg_buffer_pool!(bq)
-    bq.arg_pool_frontier = UInt64(0)
-    return true
-end
-
-"""Reset arg buffer slab allocator for `bq` after its in_flight batches drained.
-
-All the way to the first slab: nothing is reserved here any more, because a
-capture allocates its arguments from slabs it owns rather than from this pool."""
-function reset_arg_buffer_pool!(bq::VulkanBatchQueue)
-    bq.arg_slab_idx = 1
-    bq.arg_slab_offset = 0
-    bq.arg_alloc_count = 0
-    bq.arg_pool_frontier = UInt64(0)
-end
-
-"""Lazy-grow `bq.indirect_slabs` with a LavaArray{UInt32,1} backed by
-host-mapped BAR memory + INDIRECT_BUFFER usage.  Same sub-allocation shape
-as arg slabs; every sub-allocation is a LavaArray view over the slab so
-callers never see a raw Vulkan buffer."""
-function ensure_indirect_slab!(bq::VulkanBatchQueue)
-    while length(bq.indirect_slabs) < bq.indirect_slab_idx
-        push!(bq.indirect_slabs,
-              LavaArray{UInt32,1}(undef, (INDIRECT_SLAB_ELEMS,);
-                  bq=bq, unified=true,
-                  extra_usage=UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT)))
-    end
-end
-
-"""
-    get_indirect_buffer(bq) -> LavaArray{UInt32,1}
-
-Sub-allocate a 3-element LavaArray view from `bq`'s indirect-dispatch slab
-(enough for one `VkDispatchIndirectCommand`).  The view shares the slab's
-DataRef, so the slab stays alive while any view is pinned.
-"""
-function get_indirect_buffer(bq::VulkanBatchQueue)
-    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread indirect-buf alloc forbidden"
-    alloc_bytes = INDIRECT_SLAB_ALIGN
-    ensure_indirect_slab!(bq)
-    slab = bq.indirect_slabs[bq.indirect_slab_idx]::LavaArray{UInt32,1}
-    if bq.indirect_slab_offset + alloc_bytes > slab.buf[].size
-        bq.indirect_slab_idx += 1
-        bq.indirect_slab_offset = 0
-        ensure_indirect_slab!(bq)
-        slab = bq.indirect_slabs[bq.indirect_slab_idx]::LavaArray{UInt32,1}
-    end
-    byte_offset = bq.indirect_slab_offset
-    bq.indirect_slab_offset = byte_offset + alloc_bytes
-    ref = copy(slab.buf)
-    return LavaArray{UInt32,1}(ref, (3,); offset=byte_offset)
-end
-
-function reset_indirect_buffer_pool!(bq::VulkanBatchQueue)
-    bq.indirect_slab_idx = 1
-    bq.indirect_slab_offset = 0
+function indirect_command!(owner::O) where {O<:Pinned}
+    r = scratch!(owner, INDIRECT_STRIDE)
+    blk = memoryof(r)::BufferBlock
+    return LavaArray{UInt32,1}(copy(blk.ref), (3,); offset = offset(r))
 end

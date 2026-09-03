@@ -130,77 +130,298 @@ const STAGE2_ALL_COMMANDS = VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMAN
 # unaffected.
 
 
-# ── Capture / replay ──
+# ── Recordings ──────────────────────────────────────────────────────────────
 #
-# A workload whose launch sequence is identical every iteration pays to rebuild
-# that sequence every iteration. On the MatAnyone inference step that is 12.1 ms
-# of host time against 11.6 ms of GPU time — recording the step costs slightly
-# more than running it. Capturing the command buffers once and re-submitting
-# them removes the recording entirely.
+# A plan's work, written into ONE command buffer once and handed to the queue
+# every time the plan runs. Nothing here is heuristic: the graph decided the pass
+# order, the barriers and where the arguments live, and [`Emitter`](@ref) writes
+# exactly that. There is no threshold to cut the buffer on, because a recording
+# is not being submitted while it is being written.
 #
-# The precondition is that every device address the recorded commands refer to
-# is the same next time: a statically planned slab (DNNKernels' `planslab`), fixed
-# weights, and an input buffer written in place rather than reallocated. Command
-# buffers recorded under `capture` therefore use SIMULTANEOUS_USE rather than
-# ONE_TIME_SUBMIT, and ownership of them moves to the `CapturedSequence` so the
-# batch pool can never re-record over one.
+# What a recording OWNS is the whole of its lifetime rule. The command buffer,
+# the argument regions its dispatches read, the descriptor sets they bind and a
+# strong reference to every resource they name stay alive until `release!`,
+# because until then the recording may be submitted again.
 #
-# Arg buffers are the subtle part. `pack_args_direct!` writes each dispatch's
-# arguments into a bump-allocated slab and bakes that slab's address into the
-# command buffer as a push constant, so a replay reads whatever those bytes hold
-# *now*. Nothing rewrites them as long as no other recording happens on this
-# queue between replays — which is why `capture` reserves the slab range it used
-# instead of letting `reset_arg_buffer_pool!` hand it out again.
+# This replaces `CapturedSequence`, which held a LIST of command buffers because
+# the thing that produced it was `submit!` — a capture ran the ordinary recorder
+# and collected whatever segments `cb_split_threshold` and
+# `auto_submit_threshold` happened to cut. Measured on Hikari's fused sample:
+# five command buffers per recording, decided by a threshold about when to
+# submit, applied while nothing was being submitted.
 
-mutable struct CapturedSequence
+mutable struct Recording
     bq::VulkanBatchQueue
-    cmd_bufs::Vector{VK.CommandBuffer}
-    pinned::Vector{Any}          # keeps every referenced GPU object alive
-    submissions::Int             # submit! boundaries folded into one replay
-    # The argument memory this capture's dispatches point at, OWNED here.
-    #
-    # It used to come from the queue's shared bump allocator, with
-    # `reserve_arg_slabs!` pushing a high-water mark past it so a later recording
-    # could not overwrite the bytes a replay reads. That mark only ever went up:
-    # the slabs were never handed back, by `release!`, by dropping the sequence,
-    # or by a full GC. Capturing was a permanent ~4 MB, which is invisible when a
-    # model is baked once for the life of a process and a leak when a renderer
-    # rebuilds its plans on every scene edit.
-    #
-    # Owning them instead makes the lifetime ordinary: nothing else can allocate
-    # from these, so nothing can overwrite them, and when the sequence goes they
-    # go — promptly via [`release!`](@ref), or through the array finalizers if it
-    # is simply dropped.
-    slabs::Vector{Any}
-    slab_idx::Int
-    slab_offset::Int
+    cmd::VK.CommandBuffer
+    pinned::Base.IdSet{Any}
+    pinned_refs::Vector{Any}
+    # The `Unified` regions the emitted commands read. A plan's arguments live in
+    # its own `ArgMemory`, so this is usually empty — it is here because "who may
+    # hand these bytes out again" has to have exactly one answer per owner.
+    regions::Vector{Region}
+    # Descriptor sets the emitted commands bind, one per (pipeline layout,
+    # acceleration structure) pair rather than one per dispatch — see
+    # [`tlasset!`](@ref).
+    sets::Vector{Any}
+    # What covers the last submission of this recording, or `nothing` if it has
+    # never been handed over. `release!` waits on it, which is the whole reason
+    # it is kept: the command buffer goes back to the free pool there, and
+    # re-beginning one the device is still reading is undefined behaviour that
+    # presents as a driver-side abort with no Julia frame.
+    token::Any
+    open::Bool
 end
-CapturedSequence(bq, cmd_bufs, pinned, submissions) =
-    CapturedSequence(bq, cmd_bufs, pinned, submissions, Any[], 1, 0)
 
 """
-    release!(seq::CapturedSequence)
+    recording!(bq) -> Recording
 
-Give back everything a capture holds: its argument slabs, its pinned set and its
-command buffers. The sequence is empty afterwards and replaying it does nothing.
+Open a command buffer that is not a batch's, and begin it.
 
-Explicit because the caller knows when the recording is dead and the GC does not
-know it is holding device memory. Dropping the sequence works too — the slabs are
-ordinary arrays with ordinary finalizers — this just makes it prompt, and is what
-`Mantle.free!` on a baked plan calls.
+**No usage flags.** `ONE_TIME_SUBMIT` means "submitted once, then reset or
+freed" and is illegal for a buffer that is submitted again, so it was never a
+candidate. `SIMULTANEOUS_USE` permits resubmission while the previous submission
+is still pending, and that cannot happen here: there is one recording per
+argument slot, and [`nextslot!`](@ref) claims a slot only once the token
+covering the run that last used it has passed. No flag is therefore correct and
+is the cheaper of the two.
 
-The device has to be past the last replay, which is the same precondition every
-other `free!` here carries.
+That settles `cb_begin_flags`, which chose between them by asking whether a
+capture happened to be open — a per-process question standing in for a per-buffer
+one, so a capture on one queue made every other queue's command buffers reusable.
 """
-function release!(seq::CapturedSequence)
-    empty!(seq.cmd_bufs)
-    empty!(seq.pinned)
-    for s in seq.slabs
-        finalize(s)
+function recording!(bq::VulkanBatchQueue)
+    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread recording forbidden"
+    device_lost(bq.ctx::VkContext) && throw(LavaError(
+        "recording!", "Vulkan device is lost — cannot record",
+        "Call reset_device!() to reinitialize, or restart Julia."))
+    cmd = alloc_cmd_buf(bq)
+    throw_if_error(bq, "vkBeginCommandBuffer",
+        VK.begin_command_buffer(cmd, VK.CommandBufferBeginInfo()))
+    pinned = Base.IdSet{Any}()
+    sizehint!(pinned, 128)
+    return Recording(bq, cmd, pinned, Any[], Region[], Any[], nothing, true)
+end
+
+"""Close a recording. Nothing more may be emitted into it, and it can be run."""
+function seal!(rec::Recording)
+    rec.open || return rec
+    throw_if_error(rec.bq, "vkEndCommandBuffer", VK.end_command_buffer(rec.cmd))
+    rec.open = false
+    return rec
+end
+
+"""
+    release!(rec::Recording)
+
+Give back everything the recording holds: its regions, its pinned set, its
+descriptor sets and its command buffer. Running it afterwards is an error.
+
+Explicit because the caller knows when a recording is dead and the GC does not
+know it is holding device memory; `Mantle.free!` on a plan calls it.
+
+It WAITS if the last submission of this recording has not completed, and that is
+not a precondition moved onto the caller — the regions are retired rather than
+released, so they cost nothing either way, but the command buffer goes back to
+the free pool here and re-beginning one the device is still reading is undefined
+behaviour. `CapturedSequence` dropped its buffers on the floor instead, which
+left VK.jl's finalizer to free them at whatever moment the GC chose.
+"""
+function release!(rec::Recording)
+    bq = rec.bq
+    dev = lavadevice(bq.ctx::VkContext)
+    let tok = rec.token
+        tok === nothing || passed(dev, tok) || waitfor!(dev, tok)
     end
-    empty!(seq.slabs)
-    seq.slab_idx = 1
-    seq.slab_offset = 0
+    rec.token = nothing
+    empty!(rec.pinned)
+    release_pinned_refs!(rec)
+    let p = pool(dev)
+        for r in rec.regions
+            retire!(p, r)
+        end
+    end
+    empty!(rec.regions)
+    empty!(rec.sets)
+    rec.open && seal!(rec)
+    push!(bq.free_cmd_bufs, rec.cmd)
+    return nothing
+end
+
+"""
+    submit!(bq, rec::Recording) -> token
+
+Hand a recording to the device, behind whatever the host recorded into the open
+batch this run.
+
+An ordinary batch carries it, so it gets the ordinary bookkeeping —
+`sync_access!` over the pins, a timeline value, `in_flight`, `submitted!` —
+and the updates the host wrote for this run leave in the SAME `vkQueueSubmit2`,
+ahead of the recording that consumes them.
+"""
+function submit!(bq::VulkanBatchQueue, rec::Recording)
+    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread submit forbidden"
+    rec.open && throw(LavaError(
+        "submit!", "this recording is still open",
+        "`seal!` it before running it — a command buffer that has not been ended " *
+        "cannot be submitted."))
+    device_lost(bq.ctx::VkContext) && throw(LavaError(
+        "submit!", "Vulkan device is lost — cannot run a recording",
+        "Call reset_device!()"))
+    batch = ensure_active_batch!(bq)
+    # IN ORDER. Everything the host has written into this batch so far — the
+    # frame's updates, an upload, a readback's copy — goes ahead of the
+    # recording, and anything written afterwards goes behind it. That is not a
+    # nicety: `run!` emits an update pass and then submits the recording that
+    # consumes it, and a readback taken after `run!` records its copy into the
+    # same open batch and must see what the recording wrote.
+    sealsegment!(batch, bq)
+    push!(batch.sealed_cmd_bufs, rec.cmd)
+    push!(batch.borrowed, rec.cmd)
+    # The recording, not its contents: it owns the command buffer and the memory
+    # that buffer reads, and both have to outlive the submission.
+    pin!(batch, rec)
+    rec.token = batch.signal_value
+    return batch.signal_value
+end
+
+# ── The emitter ─────────────────────────────────────────────────────────────
+#
+# Where commands go, and who keeps alive what they name. Every `emit_*` takes one
+# of these and never a queue, which is the whole of step 2: a queue is what
+# `maybe_split_cb!`, `auto_submit_threshold`, the elision tracker,
+# `next_skip_barrier` and `ranges_declared` are reached through, and none of them
+# can fire on something that has no queue to consult.
+
+"""
+    Emitter(owner, args, base)
+
+`owner` is a [`Recording`](@ref) when the plan was recorded once and a
+`CommandBatch` when the work belongs to this run alone (updates, presentation,
+the unmodelled launch path). Both answer `pin!`, which is all an emitter asks of
+one.
+
+`args` is the plan's `ArgMemory` and `base` the byte offset of the slot it is
+currently on, so nothing downstream has to be handed a slot separately. Both are
+`nothing`/`0` off the plan path, where arguments come from a scratch region
+instead.
+"""
+struct Emitter{O,C,A}
+    cmd::VK.CommandBuffer
+    owner::O
+    ctx::C
+    args::A
+    base::Int
+end
+
+Emitter(rec::Recording, am, base::Integer) =
+    Emitter(rec.cmd, rec, rec.bq.ctx::VkContext, am, Int(base))
+
+# `VulkanBatchQueue{VkContext}`, fully applied. `CommandBatch.bq` is typed `Any`
+# (the queue is declared above the context), and asserting the bare
+# `VulkanBatchQueue` leaves a UnionAll — so `.ctx` stays a dynamic `getfield` and
+# building an emitter costs a boxed load per dispatch. There is one
+# instantiation; naming it is what makes this a static read.
+Emitter(b::CommandBatch, am, base::Integer) =
+    Emitter(b.cmd_buf, b, (b.bq::VulkanBatchQueue{VkContext}).ctx, am, Int(base))
+
+"""An emitter over whatever `bq` has open, opening a batch if it has nothing."""
+emitter(bq::VulkanBatchQueue, am = nothing, base::Integer = 0) =
+    Emitter(ensure_active_batch!(bq), am, base)
+
+@inline pin!(e::Emitter, obj) = pin!(e.owner, obj)
+
+"""The queue an emitter's commands will be submitted on."""
+queueof(e::Emitter{Recording}) = e.owner.bq
+queueof(e::Emitter{CommandBatch}) = e.owner.bq::VulkanBatchQueue
+
+"""
+    emit_dispatch!(emitter, pipeline, argaddr, groups, tlas, name = "")
+    emit_dispatch_indirect!(emitter, pipeline, argaddr, indirect, tlas, name = "")
+
+Write one compute dispatch. Bind, push the argument address, dispatch — and
+nothing else.
+
+**No barrier.** That is the difference from `record_dispatch!`, which is the
+unmodelled path's recorder: it inserts a global `SHADER_WRITE → SHADER_READ|WRITE`
+barrier before every dispatch after the first, then spends `barrier_elision`,
+`next_skip_barrier`, `ranges_declared` and two concurrent-group flags deciding
+when not to. A plan already knows: `use(p, x; read/write)` says what each pass
+touches, the compile derives the hazards, and `emitpass!` emits exactly those.
+Between independent passes it emits nothing and the GPU pipelines them.
+
+The acceleration structure goes through [`bindtlas!`](@ref), which is a no-op
+for `nothing` — so there is one body here rather than one per HWTLAS-ness, and
+no `pipeline.needs_tlas_descriptor` branch. The set it binds belongs to the
+emitter's owner rather than being allocated per dispatch; see [`tlasset!`](@ref).
+"""
+@inline function emit_dispatch!(e::Emitter, pipeline::LavaComputePipeline, argaddr::UInt64,
+                        groups::NTuple{3,<:Integer}, tlas = nothing,
+                        name::AbstractString = "")
+    cmd = e.cmd
+    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
+    pin!(e, pipeline)
+    bindtlas!(e, pipeline, tlas)
+    push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
+    ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
+    VK.cmd_dispatch(cmd, UInt32(groups[1]), UInt32(groups[2]), UInt32(groups[3]))
+    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
+    emitted!(e, name)
+    return nothing
+end
+
+@inline function emit_dispatch_indirect!(e::Emitter, pipeline::LavaComputePipeline,
+                                 argaddr::UInt64, indirect, tlas = nothing,
+                                 name::AbstractString = "")
+    cmd = e.cmd
+    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
+    pin!(e, pipeline)
+    bindtlas!(e, pipeline, tlas)
+    push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
+    mb = indirect.buf[]::VkManagedBuffer
+    ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
+    VK.cmd_dispatch_indirect(cmd, mb.buffer, UInt64(indirect.offset))
+    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
+    pin!(e, indirect)
+    emitted!(e, name)
+    return nothing
+end
+
+"""
+    bindtlas!(emitter, pipeline, tlas)
+
+Bind an acceleration structure at set 0, binding 0, and hold everything a ray
+query walks into. A no-op without one — the `VulkanTLAS` method is in
+`raytracing/hwtlas.jl`, where the type exists.
+"""
+@inline bindtlas!(::Emitter, ::LavaComputePipeline, ::Nothing) = nothing
+
+"""
+Note that a dispatch was written, for the log a DEVICE_LOST error prints.
+
+At EMIT time, which for a recorded plan is once rather than once per run. That is
+the honest place for it: the log answers "which kernel is in the command buffer
+that died", and the command buffer is built here.
+"""
+# Note that a draw was written, for the unmodelled path's barrier tracker.
+#
+# `record_dispatch!` decides whether a dispatch needs a barrier from
+# `batch.dispatch_count`, and a draw that did not count itself would let the next
+# dispatch on that batch skip a barrier against what it wrote. A recording has no
+# such tracker — its barriers came from the plan — so this is where the two
+# genuinely differ, and it is a method rather than a field test.
+@inline function drawn!(b::CommandBatch)
+    b.dispatch_count += 1
+    b.last_was_rt = false
+    return nothing
+end
+@inline drawn!(::Recording) = nothing
+
+@inline function emitted!(e::Emitter, name::AbstractString)
+    d = e.ctx.diag
+    (d.dispatch_logging && !isempty(name)) || return nothing
+    Threads.atomic_add!(d.total_dispatches, 1)
+    log_dispatch!(queueof(e), Base.invokelatest(dispatch_log_string,
+                                                d.total_dispatches[], " ", name)::String)
     return nothing
 end
 
@@ -230,67 +451,10 @@ that anything since the last barrier touched (`ka_backend.jl`), and consumed by
 `CONCURRENT_GROUP_ACTIVE` is: a `VulkanBatchQueue` is single-writer by construction.
 """
 
-"""Begin-flags for a command buffer: reusable while capturing, one-shot otherwise."""
-@inline cb_begin_flags(bq::VulkanBatchQueue) = bq.capturing === nothing ?
-    VK.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT :
-    VK.COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT
-
-"""
-    capture(f, bq) -> CapturedSequence
-
-Record `f` without running it, and keep its command buffers for `replay!`.
-
-`f` must not allocate device memory whose address it then dispatches against, or
-the replay will point at freed storage.
-
-Recorded and NOT executed — see [`sealinto!`](@ref) for why it used to be both.
-The difference is visible from outside: `bake!` on a plan whose arguments are
-`Ref`s used to run it once with whatever the refs held at bake time.
-"""
-function capture(f, bq::VulkanBatchQueue)
-    bq.capturing === nothing || throw(LavaError("capture", "already capturing", "nested capture is not supported"))
-    flush!(bq, bq.device)                       # start from a drained queue
-    seq = CapturedSequence(bq, VK.CommandBuffer[], Any[], 0)
-    bq.capturing = seq
-    try
-        f()
-        submit!(bq)                             # seals the trailing batch into `seq`
-    finally
-        bq.capturing = nothing
-    end
-    seq
-end
-
-"""
-    replay!(seq)
-
-Re-submit a captured sequence: one `vkQueueSubmit2` for the whole thing, no
-recording. Serialised against the previous replay, since an inference step reads
-what the last one wrote.
-"""
-function replay!(seq::CapturedSequence)
-    bq = seq.bq
-    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread replay forbidden"
-    isempty(seq.cmd_bufs) && return nothing
-    device_lost(bq.ctx::VkContext) && throw(LavaError(
-        "replay!", "Vulkan device is lost — cannot replay", "Call reset_device!()"))
-    bq.capturing === nothing || throw(LavaError(
-        "replay!", "replay inside a capture",
-        "The replayed buffers would be collected into the enclosing sequence and " *
-        "then replayed twice. Record the work once and replay the recording."))
-    # Behind whatever the host recorded this frame, in one submission with it.
-    # An ordinary batch, so it gets the ordinary bookkeeping — `sync_access!` over
-    # the pins, `arg_pool_in_use!`, a timeline value, `in_flight`, `submitted!` —
-    # none of which a replay used to get, because it submitted on its own and
-    # `replay_watermark` was the patch for the half of it that was noticed.
-    batch = ensure_active_batch!(bq)
-    append!(batch.replay_cmd_bufs, seq.cmd_bufs)
-    # The sequence, not its contents: it owns the command buffers and the
-    # argument slabs they read from, and both have to outlive the submission.
-    pin!(batch, seq)
-    # EXPERIMENT: do not submit here.
-    return batch.signal_value
-end
+# A batch's command buffer is submitted once and then reset, which is exactly
+# what `ONE_TIME_SUBMIT` says — unconditionally, with nothing to ask. A
+# recording's is begun with no flags at all; see `recording!` for why that is the
+# right answer rather than `SIMULTANEOUS_USE`.
 
 # ── Batch lifecycle ──
 
@@ -320,7 +484,7 @@ function ensure_active_batch!(bq::VulkanBatchQueue)
         if !batch.recording
             throw_if_error(bq, "vkBeginCommandBuffer",
                 VK.begin_command_buffer(batch.cmd_buf, VK.CommandBufferBeginInfo(
-                    flags=cb_begin_flags(bq)
+                    flags=VK.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
                 )))
             batch.recording = true
             # Fresh open on reused batch — assign the timeline value it will
@@ -347,7 +511,7 @@ function ensure_active_batch!(bq::VulkanBatchQueue)
 
     throw_if_error(bq, "vkBeginCommandBuffer",
         VK.begin_command_buffer(batch.cmd_buf, VK.CommandBufferBeginInfo(
-            flags=cb_begin_flags(bq)
+            flags=VK.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
         )))
     batch.recording = true
     batch.signal_value = bq.next_timeline + 1
@@ -380,11 +544,35 @@ function alloc_cmd_buf(bq::VulkanBatchQueue)
         VK.allocate_command_buffers(bq.device, alloc_info))[1]
 end
 
-# Drop the DataRefs retained by `pin!`.  Called once the batch can no longer be
-# submitted — it either completed (`reclaim_batch!`) or its submit failed.  This
-# is what lets a buffer whose owning LavaArray was `unsafe_free!`d mid-batch
-# finally reach refcount zero and release its VkManagedBuffer.
-function release_pinned_refs!(batch::CommandBatch)
+"""
+What can keep a resource alive for as long as commands that name it may run: a
+batch, for work submitted once, and a [`Recording`](@ref), for work submitted
+again every time a plan runs.
+
+A `Union` and not an abstract type, because `pin!` is the ONLY thing either is
+asked for here and both answer it with the same three fields. Writing the methods
+twice is what an abstract type would have bought, and the two copies would drift
+the way `sealinto!` and `reclaim_batch!` did — one took the `pinned_refs` and the
+other did not.
+"""
+const Pinned = Union{CommandBatch, Recording}
+
+# **Take `owner::O where {O<:Pinned}`, never `owner::Pinned`.** Julia compiles ONE
+# method for a `Union`-declared parameter and every field access through it is
+# dynamic; a type parameter forces a specialisation per concrete owner. Measured
+# on the same body, 500 calls: 96 bytes with `::CommandBatch`, 96 with
+# `where {O<:Pinned}`, and 744 with `::Pinned` — and the allocation lands inside
+# `Pool.acquire!`, which is a long way from the signature that caused it.
+# `test_dispatch_allocation.jl` is what catches this.
+#
+# `@inline` and `@generated` methods are exempt: both specialise anyway.
+
+# Drop the DataRefs retained by `pin!`.  Called once the owner can no longer
+# submit — a batch that completed (`reclaim_batch!`) or whose submit failed, a
+# recording that was released.  This is what lets a buffer whose owning LavaArray
+# was `unsafe_free!`d mid-batch finally reach refcount zero and release its
+# VkManagedBuffer.
+function release_pinned_refs!(batch::O) where {O<:Pinned}
     for ref in batch.pinned_refs
         # Drop the buffer pin first: this is the point where a free that was
         # requested mid-batch actually happens, and it must happen while the
@@ -404,10 +592,26 @@ function reclaim_batch!(bq::VulkanBatchQueue, batch::CommandBatch)
     batch.last_was_rt = false
     empty!(batch.pinned)
     release_pinned_refs!(batch)
+    # The argument memory this batch's dispatches read. Released outright rather
+    # than retired: this runs from the owning thread, and it runs either because
+    # the timeline has passed the batch or because the batch never reached the
+    # device — nothing is reading those bytes in either case.
+    if !isempty(batch.regions)
+        for r in batch.regions
+            release!(r)
+        end
+        empty!(batch.regions)
+    end
     empty!(batch.wait_semaphores)
     empty!(batch.dispatch_log)
-    append!(bq.free_cmd_bufs, batch.sealed_cmd_bufs)
+    # This batch's own segments go back to the pool; the ones a `Recording` lent
+    # it do not — it submits them again on the next run.
+    for cb in batch.sealed_cmd_bufs
+        any(x -> x === cb, batch.borrowed) && continue
+        push!(bq.free_cmd_bufs, cb)
+    end
     empty!(batch.sealed_cmd_bufs)
+    empty!(batch.borrowed)
     # Segments `present_frame!` already submitted: the fence has passed by the
     # time a batch is reclaimed, so the GPU is done reading them and they can go
     # back to the pool with the rest.
@@ -436,19 +640,32 @@ function maybe_split_cb!(batch::CommandBatch, bq::VulkanBatchQueue)
     threshold = bq.cb_split_threshold
     threshold <= 0 && return
     batch.segment_dispatches < threshold && return
+    sealsegment!(batch, bq)
+end
 
-    # Seal current CB
+"""
+End the command buffer being written, put it in the batch's list, and open a
+fresh one behind it.
+
+Two callers and one rule: everything already written goes to the device before
+anything written next. `maybe_split_cb!` does it to bound a buffer's size;
+`submit!(bq, ::Recording)` does it so a recording lands in the submission at the
+point it was handed over rather than at the end.
+
+`recording` stays true and `dispatch_count` stays (barrier logic and totals span
+the whole batch); only the per-segment count restarts, because the new buffer is
+empty.
+"""
+function sealsegment!(batch::CommandBatch, bq::VulkanBatchQueue)
     throw_if_error(bq, "vkEndCommandBuffer", VK.end_command_buffer(batch.cmd_buf))
     push!(batch.sealed_cmd_bufs, batch.cmd_buf)
-
-    # Start fresh CB segment
     batch.cmd_buf = alloc_cmd_buf(bq)
     throw_if_error(bq, "vkBeginCommandBuffer",
         VK.begin_command_buffer(batch.cmd_buf, VK.CommandBufferBeginInfo(
-            flags=cb_begin_flags(bq)
+            flags=VK.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
         )))
     batch.segment_dispatches = 0
-    # recording stays true; dispatch_count stays (for barrier logic + total tracking)
+    return nothing
 end
 
 # ── Recording API ──
@@ -655,8 +872,8 @@ function concurrent_indirect_group(f::F, bq::VulkanBatchQueue = vk_context().def
     for (i, entry) in enumerate(list)
         bq, pipeline, push_bda, indirect, tlas = entry
         @assert bq === bq0  "concurrent_indirect_group: all dispatches must share one VulkanBatchQueue"
-        vk_dispatch_indirect_base!(bq, pipeline, push_bda, indirect, tlas;
-                                   first_in_group = i == 1)
+        vk_dispatch_indirect!(bq, pipeline, push_bda, indirect, tlas;
+                              first_in_group = i == 1)
     end
     return nothing
 end
@@ -755,8 +972,12 @@ end
     batch.dispatch_count += 1
     batch.segment_dispatches += 1
     batch.last_was_rt = is_rt
+    # `info` empty means the command writer logs it — `emit_dispatch!` does,
+    # because that is where a command is written and a recorded plan writes its
+    # commands once. Only the paths that do NOT go through an emitter (draws, RT)
+    # still name themselves here.
     let d = (bq.ctx::VkContext).diag
-        if d.dispatch_logging
+        if d.dispatch_logging && !isempty(info)
             Threads.atomic_add!(d.total_dispatches, 1)
             log_dispatch!(bq, Base.invokelatest(dispatch_log_string,
                                             d.total_dispatches[], " ", info)::String)
@@ -764,50 +985,29 @@ end
     end
 
     # Both of the following END the command buffer this dispatch was recorded
-    # into, and neither may happen inside a conditional-rendering scope: the
-    # scope's `begin` and `end` have to be in ONE command buffer, and a
-    # submission between them leaves an unmatched begin in the batch that goes
-    # and an unmatched end in the one that follows.
+    # into. That used to need guarding — `unsplittable`/`scope_depth`, three
+    # fields and two functions — because a conditional-rendering scope's `begin`
+    # and `end` have to be in ONE command buffer, and a `repeat!` loop recorded
+    # through here put a submission between them. Hikari's fused sample hung the
+    # GPU at `max_depth` 16 and ran at 8, with `auto_submit_threshold` 64 sitting
+    # exactly between the two dispatch counts, and it presented as a foreign call
+    # that never returned.
     #
-    # That is not a theoretical hazard. Hikari's fused sample hangs the GPU at
-    # `max_depth` 16 and runs at 8, and the boundary is exactly this threshold:
-    # 47 dispatches at depth 8, ~95 at depth 16, `auto_submit_threshold` 64. The
-    # hang is a foreign call that never returns, so it does not even present as
-    # an error — see `unsplittable`.
-    if !unsplittable(bq)
-        maybe_split_cb!(batch, bq)
+    # The scope is not recorded here any more: a `repeat!` predicate is emitted
+    # into a plan's own command buffer, which nothing splits and nothing submits
+    # while it is being written. So the guard has nothing left to guard, and what
+    # remains below is the unmodelled launch path — the one step 5 deletes.
+    maybe_split_cb!(batch, bq)
 
-        # Auto-submit to avoid TDR when a single submission's GPU execution time
-        # approaches amdgpu's ~10 s lockup_timeout.  `submit!` queues the batch
-        # onto the in-flight list without blocking — next `record_dispatch!` will
-        # `ensure_active_batch!` a fresh batch.  Cross-batch buffer synchronisation
-        # is already handled via `sync_access!` writing `buf.last_write` and
-        # wait_semaphores picking it up on the next pin.
-        threshold = bq.auto_submit_threshold
-        if threshold > 0 && batch.dispatch_count >= threshold
-            submit!(bq)
-        end
-    end
-end
-
-"""
-    unsplittable(bq) -> Bool
-
-Whether the command buffer currently being recorded may NOT be ended here.
-
-A conditional-rendering scope spans one pass, so the deferral is bounded by that
-pass — the split or submit it postpones happens at the next dispatch outside a
-scope, which is at most a pass later.
-"""
-unsplittable(bq::VulkanBatchQueue) = bq.scope_depth > 0
-
-"""Record `f`'s commands inside a scope that must not be broken up."""
-function unsplittable!(f, bq::VulkanBatchQueue)
-    bq.scope_depth += 1
-    try
-        f()
-    finally
-        bq.scope_depth -= 1
+    # Auto-submit to avoid TDR when a single submission's GPU execution time
+    # approaches amdgpu's ~10 s lockup_timeout.  `submit!` queues the batch
+    # onto the in-flight list without blocking — next `record_dispatch!` will
+    # `ensure_active_batch!` a fresh batch.  Cross-batch buffer synchronisation
+    # is already handled via `sync_access!` writing `buf.last_write` and
+    # wait_semaphores picking it up on the next pin.
+    threshold = bq.auto_submit_threshold
+    if threshold > 0 && batch.dispatch_count >= threshold
+        submit!(bq)
     end
 end
 
@@ -842,54 +1042,51 @@ stack-promoted by the Julia compiler).
     end
 end
 
-# ── Compute Dispatch ──
+# ── Compute Dispatch, on the unmodelled path ────────────────────────────────
+#
+# `record_dispatch!`'s barrier, and then the commands `emit_dispatch!` writes.
+# The two halves are separated because only the first is a guess: nothing has
+# declared what these kernels touch, so a barrier goes in front of every one and
+# the caller may argue it away. A plan comes nowhere near here — it emits the
+# same commands, with the barriers its declarations produced.
+#
+# `vk_dispatch_base!` is gone. It took `base_x`/`base_y`/`base_z` and chose
+# between `vkCmdDispatch` and `vkCmdDispatchBase`, and all three callers passed
+# zero: configurability nothing used, spread across two methods and a branch on
+# the dispatch path.
 
 """
-    vk_dispatch!(pipeline, push_bda, groups)
+What to log and to label a timestamp with, or `""` when nobody is looking.
 
-Record a compute dispatch.
-`push_bda` is the BDA address of the argument buffer (passed as 8-byte push constant).
+`suffix...` and not one built string: the caller's pieces have to stay UNBUILT
+past the gate, or a dispatch pays for a name nothing reads. That is 835 bytes per
+dispatch when the pieces are `" g="` and a tuple — measured, and
+`test_dispatch_allocation.jl` is the test that measures it.
 """
-function vk_dispatch!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline, push_bda::UInt64,
-                      groups::NTuple{3, Integer},
-                      tlas=nothing)  # positional with Nothing default — hot-path callers pass `tlas` positionally to avoid per-dispatch NamedTuple construction (~3 µs/dispatch)
-    vk_dispatch_base!(bq, pipeline, push_bda, 0, 0, 0,
-                      Int(groups[1]), Int(groups[2]), Int(groups[3]), tlas)
+@inline function dispatchinfo(bq::VulkanBatchQueue, suffix...)
+    d = (bq.ctx::VkContext).diag
+    (d.dispatch_logging || d.dispatch_timing) || return ""
+    return Base.invokelatest(dispatch_log_string, bq.last_dispatch_info, suffix...)::String
 end
 
-# Two methods specialized on `tlas` type. The fast (no-HWTLAS) path is here; the
-# `tlas::VulkanTLAS` overload lives in raytracing/hwtlas.jl (where VulkanTLAS exists). The
-# kwarg call site above gets the right method by ordinary dispatch — there is no
-# `pipeline.needs_tlas_descriptor` branch and no `extra_dst_access` ternary on the
-# pure-compute hot path.
-"""Record a single compute dispatch with optional base group offset (no-HWTLAS fast path)."""
-@inline function vk_dispatch_base!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline, push_bda::UInt64,
-                            base_x::Int, base_y::Int, base_z::Int,
-                            gx::Int, gy::Int, gz::Int, ::Nothing=nothing)
-    dispatch_info = (bq.ctx::VkContext).diag.dispatch_logging ?
-        Base.invokelatest(dispatch_log_string, bq.last_dispatch_info, " base=(",
-                          base_x, ",", base_y, ",", base_z, ") g=(",
-                          gx, ",", gy, ",", gz, ")")::String : ""
-    record_dispatch!(bq;
-        dst_stage=VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        info=dispatch_info
-    ) do batch
-        cmd = batch.cmd_buf
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-        pin!(batch, pipeline)
-        push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, push_bda)
-        # Profiling: optional GPU-side timestamp around the dispatch.  Returns
-        # -1 (and does nothing) when `with_dispatch_timing` is not active, so
-        # the hot path stays unperturbed.
-        ts_slot = maybe_write_dispatch_start_timestamp!(bq.ctx::VkContext, cmd, bq.last_dispatch_info)
-        if base_x == 0 && base_y == 0 && base_z == 0
-            VK.cmd_dispatch(cmd, UInt32(gx), UInt32(gy), UInt32(gz))
-        else
-            VK.cmd_dispatch_base(cmd,
-                UInt32(base_x), UInt32(base_y), UInt32(base_z),
-                UInt32(gx), UInt32(gy), UInt32(gz))
-        end
-        maybe_write_dispatch_end_timestamp!(bq.ctx::VkContext, cmd, ts_slot, barrier_fptr(bq))
+"""
+    vk_dispatch!(bq, pipeline, push_bda, groups, tlas = nothing)
+
+Record a compute dispatch. `push_bda` is the BDA of the argument buffer, passed
+as the one 8-byte push constant.
+
+Two methods specialized on `tlas` type: this is the no-HWTLAS fast path and the
+`::VulkanTLAS` one is in `raytracing/hwtlas.jl`, where that type exists. So there
+is no `pipeline.needs_tlas_descriptor` branch and no `extra_dst_access` ternary
+on the pure-compute path.
+"""
+@inline function vk_dispatch!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline, push_bda::UInt64,
+                      groups::NTuple{3, Integer},
+                      ::Nothing = nothing)  # positional with Nothing default — hot-path callers pass `tlas` positionally to avoid per-dispatch NamedTuple construction (~3 µs/dispatch)
+    g = (Int(groups[1]), Int(groups[2]), Int(groups[3]))
+    info = dispatchinfo(bq, " g=", g)
+    record_dispatch!(bq; dst_stage = VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT) do batch
+        emit_dispatch!(Emitter(batch, nothing, 0), pipeline, push_bda, g, nothing, info)
     end
 end
 
@@ -899,30 +1096,20 @@ end
     vk_dispatch_indirect!(bq, pipeline, push_bda, indirect::LavaArray{UInt32,1})
 
 Record an indirect compute dispatch.  `indirect` is a LavaArray view of 3
-UInt32s (groupCountX/Y/Z), typically obtained from `get_indirect_buffer(bq)`
-and populated by a prepare-indirect kernel.
+UInt32s (groupCountX/Y/Z) — a slot of the plan's argument memory, or
+`indirect_command!(bq)` on the unmodelled path — populated by a prepare-indirect
+kernel.
+
+`first_in_group=false` is ONLY for `concurrent_indirect_group`'s flush phase: the
+group's first dispatch already recorded the barrier covering every prepare's
+writes, so the rest may skip (they share only atomically-claimed queue slots).
 """
-function vk_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline,
+@inline function vk_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline,
                                push_bda::UInt64,
                                indirect,  # LavaArray{UInt32,1} — declared later in array/lavaarray.jl
-                               tlas=nothing)  # positional with Nothing default — same NamedTuple-avoidance as vk_dispatch!
-    vk_dispatch_indirect_base!(bq, pipeline, push_bda, indirect, tlas)
-end
-
-# Specialized on `tlas` type. The HWTLAS overload lives in raytracing/hwtlas.jl.
-"""Record an indirect compute dispatch (no-HWTLAS fast path).
-
-`first_in_group=false` is ONLY for `concurrent_indirect_group`'s flush
-phase: the group's first dispatch already recorded the barrier covering
-every prepare's writes, so the rest may skip (they share only
-atomically-claimed queue slots)."""
-@inline function vk_dispatch_indirect_base!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline,
-                                            push_bda::UInt64,
-                                            indirect,  # LavaArray{UInt32,1}
-                                            ::Nothing=nothing;
-                                            first_in_group::Bool=true)
-    dispatch_info = (bq.ctx::VkContext).diag.dispatch_logging ?
-        Base.invokelatest(dispatch_log_string, bq.last_dispatch_info, " (indirect)")::String : ""
+                               ::Nothing = nothing;
+                               first_in_group::Bool = true)
+    info = dispatchinfo(bq, " (indirect)")
     record_dispatch!(bq;
         dst_stage=VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         extra_dst_access=VK.ACCESS_INDIRECT_COMMAND_READ_BIT,
@@ -931,18 +1118,9 @@ atomically-claimed queue slots)."""
         # except behind a deferred group's shared barrier.
         force_pre_barrier=first_in_group,
         skip_pre_barrier=!first_in_group,
-        info=dispatch_info
     ) do batch
-        cmd = batch.cmd_buf
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-        pin!(batch, pipeline)
-        push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, push_bda)
-        mb = indirect.buf[]::VkManagedBuffer
-        byte_offset = UInt64(indirect.offset)
-        ts_slot = maybe_write_dispatch_start_timestamp!(bq.ctx::VkContext, cmd, bq.last_dispatch_info)
-        VK.cmd_dispatch_indirect(cmd, mb.buffer, byte_offset)
-        maybe_write_dispatch_end_timestamp!(bq.ctx::VkContext, cmd, ts_slot, barrier_fptr(bq))
-        pin!(batch, indirect)
+        emit_dispatch_indirect!(Emitter(batch, nothing, 0), pipeline, push_bda,
+                                indirect, nothing, info)
     end
 end
 
@@ -1101,25 +1279,15 @@ function submit!(bq::VulkanBatchQueue)
 
     throw_if_error(bq, "vkEndCommandBuffer", VK.end_command_buffer(batch.cmd_buf))
 
-    # Everything this batch is responsible for, in execution order: the segments
-    # `maybe_split_cb!` sealed, the one still open, and any replay queued behind
-    # them. The replay is LAST because `replay!` is what a frame ends with — the
-    # host's updates for this frame go to the device in front of the recording
-    # that consumes them.
-    n_sealed = length(batch.sealed_cmd_bufs)
-    n_replay = length(batch.replay_cmd_bufs)
-    all_cmd_bufs = Vector{VK.CommandBuffer}(undef, n_sealed + 1 + n_replay)
-    for i in 1:n_sealed
+    # Everything this batch is responsible for, in execution order: the sealed
+    # segments and then the one still open. ONE list, and it is in the order the
+    # commands were written — a plan's recording is sealed into it at the point
+    # `submit!(bq, ::Recording)` was called, rather than appended at the end.
+    all_cmd_bufs = Vector{VK.CommandBuffer}(undef, length(batch.sealed_cmd_bufs) + 1)
+    for i in eachindex(batch.sealed_cmd_bufs)
         all_cmd_bufs[i] = batch.sealed_cmd_bufs[i]
     end
-    all_cmd_bufs[n_sealed + 1] = batch.cmd_buf
-    for i in 1:n_replay
-        all_cmd_bufs[n_sealed + 1 + i] = batch.replay_cmd_bufs[i]
-    end
-
-    let cap = bq.capturing
-        cap === nothing || return sealinto!(cap, bq, batch, all_cmd_bufs)
-    end
+    all_cmd_bufs[end] = batch.cmd_buf
 
     saved_dispatch_count = batch.dispatch_count
     saved_last_was_rt = batch.last_was_rt
@@ -1162,9 +1330,9 @@ function submit!(bq::VulkanBatchQueue)
         empty!(batch.pinned)
         release_pinned_refs!(batch)
         empty!(batch.wait_semaphores)
-        # Not freed: a capture owns them. Dropping the reference is all this
-        # batch may do with them.
-        empty!(batch.replay_cmd_bufs)
+        # Not freed: a recording owns the borrowed ones. Dropping the reference
+        # is all this batch may do with them.
+        empty!(batch.borrowed)
         bq.active_batch = nothing
         # `bq.next_timeline` is deliberately NOT rolled back. `sync_access!` has
         # already stamped `buf.last_write` on the buffers it reached with this
@@ -1175,43 +1343,39 @@ function submit!(bq::VulkanBatchQueue)
         rethrow()
     end
 
-    # Pre-submit safety scan: catch stale-BDA-in-arg-slab corruption BEFORE
-    # the GPU sees it.  Off by default (`ctx.diag.presubmit_scan = true` to
-    # turn on for debugging).  Cost ~hundreds-of-µs per submit; never on by
+    # Pre-submit safety scan: catch stale-BDA-in-argument-memory corruption
+    # BEFORE the GPU sees it.  Off by default (`ctx.diag.presubmit_scan = true`
+    # to turn on for debugging).  Cost ~hundreds-of-µs per submit; never on by
     # default.
     if (bq.ctx::VkContext).diag.presubmit_scan
         unknowns = scan_slabs_for_unknown_bdas(bq)
         if !isempty(unknowns)
-            @warn "Pre-submit found $(length(unknowns)) unknown BDA(s) in arg slabs"
+            @warn "Pre-submit found $(length(unknowns)) unknown BDA(s) in argument memory"
             for u in unknowns
                 @warn "  STALE: slab=$(u.slab) idx=$(u.idx) offset=$(u.offset) val=0x$(string(u.val, base=16, pad=16))"
             end
             if (bq.ctx::VkContext).diag.presubmit_scan_throws
-                throw(LavaError("submit!", "stale BDA in arg slab", "see warnings"))
+                throw(LavaError("submit!", "stale BDA in argument memory", "see warnings"))
             end
         end
     end
 
-    # SLAB DUMP for cascade investigation: if `ctx.diag.slab_dump_target` is non-zero,
-    # search the active arg slab for any UInt64 == target and log offsets.
-    if (bq.ctx::VkContext).diag.slab_dump_target != UInt64(0) &&
-       !isempty(bq.arg_slabs) && bq.arg_slab_idx <= length(bq.arg_slabs)
+    # SLAB DUMP for cascade investigation: if `ctx.diag.slab_dump_target` is
+    # non-zero, search the unified arena for any UInt64 == target and log offsets.
+    if (bq.ctx::VkContext).diag.slab_dump_target != UInt64(0)
         target = (bq.ctx::VkContext).diag.slab_dump_target
-        slab = bq.arg_slabs[bq.arg_slab_idx]
-        mb = slab.buf[]
-        mp = mb.mapped_ptr
-        if mp != Ptr{UInt8}(0)
-            n = bq.arg_slab_offset ÷ 8
-            p = Ptr{UInt64}(mp)
-            hits = Int[]
-            for k in 0:(n-1)
-                if unsafe_load(p, k+1) == target
-                    push!(hits, k*8)
-                end
+        hits = Int[]
+        for blk in unifiedblocks(bq.ctx::VkContext)
+            mb = (blk.memory::BufferBlock).ref[]::VkManagedBuffer
+            mb.mapped_ptr == Ptr{UInt8}(0) && continue
+            p = Ptr{UInt64}(mb.mapped_ptr)
+            for k in 0:(Int(mb.size) ÷ 8 - 1)
+                unsafe_load(p, k+1) == target && push!(hits, k*8)
             end
-            if !isempty(hits)
-                push!((bq.ctx::VkContext).diag.slab_dump_log, (sub=Int(bq.next_timeline)+1, target=target, offsets=hits))
-            end
+        end
+        if !isempty(hits)
+            push!((bq.ctx::VkContext).diag.slab_dump_log,
+                  (sub=Int(bq.next_timeline)+1, target=target, offsets=hits))
         end
     end
 
@@ -1233,17 +1397,14 @@ function submit!(bq::VulkanBatchQueue)
         empty!(batch.pinned)
         release_pinned_refs!(batch)
         empty!(batch.wait_semaphores)
-        # Not freed: a capture owns them. Dropping the reference is all this
-        # batch may do with them.
-        empty!(batch.replay_cmd_bufs)
+        # Not freed: a recording owns the borrowed ones. Dropping the reference
+        # is all this batch may do with them.
+        empty!(batch.borrowed)
         bq.active_batch = nothing
         throw_with_validation_context("vkQueueSubmit2", submit_result,
             saved_dispatch_count, saved_last_was_rt, bq)
     end
 
-    # Handed over; the capture that owns them replays them again, so unlike
-    # `sealed_cmd_bufs` they do not move to `submitted_cmd_bufs` either.
-    empty!(batch.replay_cmd_bufs)
     push!(bq.in_flight, batch)
     # And in the one place that means "on its way to the device". `in_flight` is
     # this path's own bookkeeping — it also carries the command buffers and pins
@@ -1251,11 +1412,6 @@ function submit!(bq::VulkanBatchQueue)
     # learn whether work is outstanding. See `graph/submission.jl`.
     submitted!(bq, batch.signal_value; tag = :batch)
     bq.active_batch = nothing
-    # Everything handed out of the arg pool so far is read by this batch, and the
-    # pool may rewind once the timeline passes it. Recorded here rather than only
-    # in `present_frame!`, because a compute-only queue never presents and would
-    # otherwise never be allowed to rewind at all.
-    arg_pool_in_use!(bq, batch.signal_value)
     dg = (bq.ctx::VkContext).diag
     # GATED. This built a fresh `String` on EVERY submit — 7.9 bytes per dispatch
     # amortised — for a field only ever read by `maybe_write_dispatch_start_
@@ -1288,51 +1444,6 @@ function submit!(bq::VulkanBatchQueue)
 end
 
 """
-    sealinto!(cap, bq, batch, cmd_bufs) -> nothing
-
-Give a capture everything the batch recorded, and close the batch WITHOUT
-submitting it.
-
-This is the half of [`submit!`](@ref) that `capture` actually wants. The two used
-to be one function: capture ran inside `submit!`, took the command buffers, and
-then fell through to submit them — so `bake!` executed the plan as a side effect
-of recording it. That was never a Vulkan constraint. `vkEndCommandBuffer` and
-`vkQueueSubmit2` are separate calls and Mantle already begins a capture's buffers
-with `SIMULTANEOUS_USE`, precisely so they can be submitted more than once; it
-was one function doing two jobs with the collection step buried between them.
-
-The batch is closed rather than left half-open, which is the mistake an earlier
-attempt at this split made: an early return that skipped the teardown left
-`bq.active_batch` pointing at a batch whose command buffer had been ended, and
-the next `ensure_active_batch!` handed it straight back to be recorded into.
-NVIDIA takes that as a heap abort inside `vkBeginCommandBuffer` — `free():
-invalid size`, in the driver, with no Julia frame.
-
-No timeline value is consumed and nothing goes on `in_flight` or through
-[`submitted!`](@ref): nothing was handed to the device, so nothing is
-outstanding.
-"""
-function sealinto!(cap::CapturedSequence, bq::VulkanBatchQueue, batch::CommandBatch,
-                   cmd_bufs::Vector{VK.CommandBuffer})
-    append!(cap.cmd_bufs, cmd_bufs)
-    # Everything the recording names, kept alive for as long as the sequence is:
-    # a replay reads these buffers and images long after the batch is gone.
-    for obj in batch.pinned
-        push!(cap.pinned, obj)
-    end
-    cap.submissions += 1
-    # The capture owns the command buffers now, so `reclaim_batch!` must not hand
-    # them back to the free pool. A fresh one goes in the batch's place because
-    # reclaim expects a buffer there to return.
-    empty!(batch.sealed_cmd_bufs)
-    empty!(batch.replay_cmd_bufs)
-    batch.cmd_buf = alloc_cmd_buf(bq)
-    bq.active_batch = nothing
-    reclaim_batch!(bq, batch)
-    return nothing
-end
-
-"""
     sweep_retired_batches!(bq::VulkanBatchQueue)
 
 Reclaim any in-flight batches whose signal_value has been reached.  Uses
@@ -1358,52 +1469,15 @@ function sweep_retired_batches!(bq::VulkanBatchQueue)
     end
     drain_deferred_frees!(bq)
     drain_deferred_as_frees!(bq)
-    # Reset pools once the queue is idle.  Done HERE (not inside reclaim_batch!)
-    # because reclaim is called with the batch still in `bq.in_flight` — the
-    # isempty check had to run after `deleteat!` to ever return true.
-    #
-    # CRITICAL: "idle" must include the ACTIVE batch. sweep_retired_batches!
-    # runs opportunistically from `ensure_active_batch!` and the allocation
-    # paths — i.e. potentially MID-RECORDING. If the active batch already
-    # holds recorded dispatches, their packed args / indirect-command slots
-    # live in the slabs at offsets below the current cursors; resetting the
-    # cursors here lets the very next dispatch overwrite them, so the earlier
-    # dispatches read garbage arg buffers when the batch finally submits
-    # (silently — typically as kernels seeing wrong buffer pointers).
-    # Latent for a long time because `in_flight` only drains to empty
-    # mid-recording when the GPU runs ahead of the host — exactly what
-    # happens after a host-side mid-pipeline synchronize, e.g. volpath's
-    # bounce-loop early-exit check (Hikari, 2026-06-10: every sample after
-    # the first rendered black because round-0's trace dispatch read a
-    # clobbered queue pointer).
-    #
-    # A capture widens "idle" further still: its command buffers outlive the
-    # batches that recorded them, and every dispatch in them keeps reading its
-    # arguments from the slab at replay time. So the bytes of batches that have
-    # already been submitted AND signalled are still live — the one case this
-    # test otherwise treats as the safest of all. Mid-capture the queue drains to
-    # empty routinely (the GPU is running a step's worth of work while the host
-    # records the next), so without this the second half of a capture overwrites
-    # the argument records of the first, and the replay dispatches valid commands
-    # against wrong pointers: no validation error, no device fault, just a kernel
-    # that never returns. A capture's own slabs (see `CapturedSequence`) are
-    # never rewound at all, which is what actually protects it — this test still
-    # matters for the SHARED pool, which a capture's non-argument allocations and
-    # every ordinary recording keep using.
-    # "Recorded dispatches" is the wrong question, and asking it is a GPU crash.
-    # An arg buffer is handed out *before* the dispatch that uses it is recorded,
-    # and a caller may take several before recording any — every draw in a frame
-    # packs its arguments and only then records the draw. `arg_alloc_count` is
-    # the handouts since the last submit, which is what "someone is still holding
-    # pool memory" actually means.
-    capturing_here = bq.capturing !== nothing
-    active = bq.active_batch
-    active_has_commands = active !== nothing && active.dispatch_count > 0
-    if isempty(bq.in_flight) && !active_has_commands && !capturing_here &&
-       bq.arg_alloc_count == 0
-        reset_arg_buffer_pool!(bq)
-        reset_indirect_buffer_pool!(bq)
-    end
+    # Nothing to reset. Twenty-five lines of "is the queue idle enough to rewind
+    # the slab cursors" stood here, and each clause was a bug that had already
+    # fired once: the active batch's recorded dispatches, the handouts taken
+    # before their dispatch was recorded, a recording whose command buffer
+    # outlives every batch that carried it. All three asked when bytes could be
+    # handed out again, from a place that could only guess, because the bytes had
+    # no owner. They have one now — `reclaim_batch!` above for a batch's, and
+    # `release!(::Recording)` for a recording's — and the question is answered
+    # where the answer is known.
     return nothing
 end
 
@@ -1468,16 +1542,6 @@ function flush_stall_report(bq::VulkanBatchQueue, target::UInt64)
 end
 
 function flush!(bq::VulkanBatchQueue, device::VK.Device)
-    # A capture records without executing, so there is nothing here to wait for
-    # and `submit!` below would quietly seal a segment into the sequence instead
-    # of running it. Whoever needs the device to have drained — an allocation
-    # path retrying after an out-of-memory, a readback — does not get that, and
-    # would carry on with stale bytes. Say so instead.
-    bq.capturing === nothing || throw(LavaError(
-        "flush!", "cannot flush while capturing",
-        "A capture records commands without submitting them, so there is no " *
-        "device work to wait for. Whatever asked for this flush needs the device " *
-        "to have finished something — do it before `bake!`/`capture`."))
     @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread flush forbidden"
     submit!(bq)
     # A replay signals the timeline without putting a batch in `in_flight`, so
@@ -1594,7 +1658,7 @@ end
 # submit! required.
 
 """
-    pin!(batch::CommandBatch, obj) -> nothing
+    pin!(owner, obj) -> nothing
 
 Keep `obj` alive until this batch's timeline signals.  Idempotent: repeated
 calls with the same `obj` (within one batch) are no-ops.  `VkManagedBuffer`
@@ -1629,7 +1693,7 @@ closures, RT AS handles, indirect buffers).
 # the crossover: this is break-even today, chosen for the bytes. It degrades
 # quadratically if batches grow, and `auto_submit_threshold` (64) is what sets
 # that. **Raise the threshold and this should go back to `in`.**
-@inline function pin!(batch::CommandBatch, obj)
+@inline function pin!(batch::O, obj) where {O<:Pinned}
     for x in batch.pinned
         x === obj && return nothing
     end
@@ -1637,7 +1701,7 @@ closures, RT AS handles, indirect buffers).
     return nothing
 end
 
-@inline function pin!(batch::CommandBatch, buf::VkManagedBuffer)
+@inline function pin!(batch::O, buf::VkManagedBuffer) where {O<:Pinned}
     bq = batch.bq::VulkanBatchQueue
     @assert buf.ctx === bq.ctx  "cross-ctx buffer use forbidden"
     # Same trade as the method above, for the same reason: `in` on this `IdSet`
@@ -1769,18 +1833,32 @@ function cmd_copy_buffer!(bq::VulkanBatchQueue, src, dst, nbytes::Integer;
     # SIGSEGV inside vkCmdPipelineBarrier instead of a Julia error naming the
     # thread. Check before the driver sees it, not after.
     @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread copy forbidden (owner=$(bq.owning_thread), caller=$(Threads.threadid()))"
-    batch = ensure_active_batch!(bq)
-    cmd = batch.cmd_buf
     # A copy writes memory the tracker never saw — but the post-copy barrier
-    # below already orders that write against every later shader read, so the
+    # inside already orders that write against every later shader read, so the
     # tracker can simply start clean rather than poison. (Poisoning here would
     # force a redundant barrier on the next dispatch and, worse, on every
-    # dispatch until one fired.)
+    # dispatch until one fired.) The tracker is the unmodelled path's, so it is
+    # dealt with here rather than where the commands are written.
     bq.barrier_elision && reset_barrier_elision!(bq)
+    return cmd_copy_buffer!(emitter(bq), src, dst, nbytes; src_off, dst_off)
+end
 
-    # Barrier: shader writes → transfer read. Only needed if we already
-    # recorded dispatches into this batch (barrier across those writes).
-    if batch.dispatch_count > 0
+"""
+Whether the emitter has already written shader work the copy has to order
+against. A batch counts its dispatches for the unmodelled path's barrier logic;
+a recording does not count anything, because its ordering came from the plan.
+"""
+@inline priorwork(b::CommandBatch) = b.dispatch_count > 0
+@inline priorwork(::Recording) = false
+
+function cmd_copy_buffer!(e::Emitter, src, dst, nbytes::Integer;
+                          src_off::Integer=0, dst_off::Integer=0)
+    batch = e.owner
+    cmd = e.cmd
+
+    # Barrier: shader writes → transfer read. Only needed if shader work was
+    # already written where this copy is going (barrier across those writes).
+    if priorwork(batch)
         src_stage = batch.last_was_rt ?
             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR :
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
@@ -1789,7 +1867,7 @@ function cmd_copy_buffer!(bq::VulkanBatchQueue, src, dst, nbytes::Integer;
             VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT),
             VkAccessFlags(VK_ACCESS_TRANSFER_READ_BIT)))
         GC.@preserve barrier_ref begin
-            ccall(barrier_fptr(bq), Cvoid,
+            ccall(e.ctx.cmd_pipeline_barrier_fptr, Cvoid,
                   (Ptr{Nothing}, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
                    UInt32, Ptr{VkMemoryBarrier}, UInt32, Ptr{Nothing}, UInt32, Ptr{Nothing}),
                   cmd.vks,
@@ -1826,8 +1904,8 @@ function cmd_copy_buffer!(bq::VulkanBatchQueue, src, dst, nbytes::Integer;
         VkAccessFlags(VK_ACCESS_TRANSFER_WRITE_BIT),
         VkAccessFlags(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
                       VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT)))
-    barrier_fptr(bq) == C_NULL || GC.@preserve barrier_post begin
-        ccall(barrier_fptr(bq), Cvoid,
+    e.ctx.cmd_pipeline_barrier_fptr == C_NULL || GC.@preserve barrier_post begin
+        ccall(e.ctx.cmd_pipeline_barrier_fptr, Cvoid,
               (Ptr{Nothing}, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
                UInt32, Ptr{VkMemoryBarrier}, UInt32, Ptr{Nothing}, UInt32, Ptr{Nothing}),
               cmd.vks,
@@ -1846,6 +1924,17 @@ function cmd_copy_buffer!(bq::VulkanBatchQueue, src, dst, nbytes::Integer;
     dst isa VkManagedBuffer && pin!(batch, dst)
     return nothing
 end
+
+"""
+The timeline value covering what this emitter is writing.
+
+Only a batch can answer: a recording is submitted many times, so "the value that
+covers it" is a per-run fact and not the recording's. That is exactly the
+constraint the update path lives under — an `Update` that renames hands the old
+store to the recycler against this value, and a rename cannot be recorded once
+because the fresh store is a different handle every time.
+"""
+signalof(e::Emitter{CommandBatch}) = e.owner.signal_value
 
 # ── Error Reporting ──
 

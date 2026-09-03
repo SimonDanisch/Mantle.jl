@@ -18,7 +18,7 @@
 # anonymous closures.
 
 """
-    pin_leaves!(batch::CommandBatch, x) -> nothing
+    pin_leaves!(batch::Pinned, x) -> nothing
 
 Recursively pin every `LavaArray` leaf inside `x` into `batch.pinned`.
 Specializes per type via `@generated` — no runtime walker overhead, no
@@ -31,16 +31,16 @@ function pin_leaves! end
 
 # Leaf: the one case that has side effects.  `pin!` is idempotent (IdSet
 # push) so repeated calls on the same buffer are O(1).
-@inline pin_leaves!(batch::CommandBatch, a::LavaArray) =
+@inline pin_leaves!(batch::Pinned, a::LavaArray) =
     (pin!(batch, a); nothing)
 
 # Tuple / NamedTuple — fixed-arity, unrolled via @generated.
-@generated function pin_leaves!(batch::CommandBatch, x::Tuple)
+@generated function pin_leaves!(batch::Pinned, x::Tuple)
     exprs = Expr[:(pin_leaves!(batch, x[$i])) for i in 1:fieldcount(x)]
     Expr(:block, exprs..., :(nothing))
 end
 
-@generated function pin_leaves!(batch::CommandBatch, x::NamedTuple)
+@generated function pin_leaves!(batch::Pinned, x::NamedTuple)
     exprs = Expr[:(pin_leaves!(batch, x[$i])) for i in 1:fieldcount(x)]
     Expr(:block, exprs..., :(nothing))
 end
@@ -102,7 +102,7 @@ end
 # codegen time so the fast path is a literal `:(nothing)` with no runtime
 # branching.  This is also the sole fallback — no `::Any` method exists, so
 # there is nothing for the @generated to collide with during precompile.
-@generated function pin_leaves!(batch::CommandBatch, x::T) where T
+@generated function pin_leaves!(batch::Pinned, x::T) where T
     # isbits: LavaArray is mutable, so an isbits type cannot transitively
     # contain one.  Emit a no-op.
     isbitstype(T) && return :(nothing)

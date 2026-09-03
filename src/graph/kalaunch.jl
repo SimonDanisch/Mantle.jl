@@ -124,8 +124,6 @@ function bake(c::Compile, d::Dispatch)
            map(a -> resolve(dev, a), d.args), bakedrange(c, d.ndrange), dev)
 end
 
-bake(::Compile, body) = body        # a `custom!` body already IS the callable
-
 bakedrange(::Compile, n) = n
 
 # A `DeviceRange` with a ceiling does NOT need the host to read its count.

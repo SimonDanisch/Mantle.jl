@@ -406,9 +406,14 @@ not both available everywhere. This turns it into a message that names the forma
 and the bit.
 """
 function checkusage(ctx, fmt::VK.Format, usage::VK.ImageUsageFlag)
+    # `VK = Vulkan` stood on the next line, and Julia decides scope statically:
+    # the assignment made `VK` a LOCAL for the whole body, so the call above ran
+    # against an unassigned local and every `Transient.Image` threw
+    # `UndefVarError: VK not defined in local scope`. Nothing caught it because
+    # `test_window.jl`, which is where transient images are exercised, aborts in
+    # its first testset on an unrelated shader compile failure.
     props = VK.get_physical_device_format_properties(ctx.physical_device, fmt)
     have = props.optimal_tiling_features
-    VK = Vulkan
     for (bit, feature, name) in
             ((VK.IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK.FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, "COLOR_ATTACHMENT"),
              (VK.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK.FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, "DEPTH_STENCIL_ATTACHMENT"),
@@ -498,27 +503,26 @@ anything else that never went through the host — needs no staging buffer and n
 the same two routes as above, differing only in where the source is, so it is a
 method rather than a branch.
 """
-function rename!(g::Graph, bq, dst::Buffer{T,1}, data::LavaArray{T,1}) where {T}
+function rename!(g::Graph, e::Emitter, dst::Buffer{T,1}, data::LavaArray{T,1}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
     fview = deviceview(dst.dev, fresh)
 
     smb, fmb = data.buf[], fview.buf[]
-    cmd_copy_buffer!(bq, smb, fmb, nbytes;
+    cmd_copy_buffer!(e, smb, fmb, nbytes;
                           src_off = pool_offset(smb) + data.offset,
                           dst_off = pool_offset(fmb) + fview.offset)
 
     dst.store = fresh
-    retire!(g.recycler, old, dst.capacity * sizeof(T),
-            ensure_active_batch!(bq).signal_value)
+    retire!(g.recycler, old, dst.capacity * sizeof(T), signalof(e))
     nothing
 end
 
-function inplace!(bq, dst, data::LavaArray{T,1}, from::Integer) where {T}
+function inplace!(e::Emitter, dst, data::LavaArray{T,1}, from::Integer) where {T}
     store = storage(dst)
     dmb, smb = store.buf[], data.buf[]
-    cmd_copy_buffer!(bq, smb, dmb, length(data) * sizeof(T);
+    cmd_copy_buffer!(e, smb, dmb, length(data) * sizeof(T);
                           src_off = pool_offset(smb) + data.offset,
                           dst_off = pool_offset(dmb) + store.offset + (Int(from) - 1) * sizeof(T))
     nothing
@@ -530,7 +534,7 @@ end
 
 """In-place, inline in the command buffer. Falls back to renaming when the
 update is too big for `cmd_update_buffer` to carry."""
-function inplace!(bq, dst, data::AbstractVector{T}, from::Integer) where {T}
+function inplace!(e::Emitter, dst, data::AbstractVector{T}, from::Integer) where {T}
     store = storage(dst)
     mb = store.buf[]
     off = pool_offset(mb) + store.offset + (Int(from) - 1) * sizeof(T)
@@ -538,7 +542,7 @@ function inplace!(bq, dst, data::AbstractVector{T}, from::Integer) where {T}
     if n <= 65536 && n % 4 == 0 && off % 4 == 0
         src = data isa Vector{T} ? data : collect(data)
         GC.@preserve src VK.cmd_update_buffer(
-            ensure_active_batch!(bq).cmd_buf, mb.buffer,
+            e.cmd, mb.buffer,
             UInt64(off), UInt64(n), Ptr{Cvoid}(pointer(src)))
     else
         upload!(store, data)      # partial and large: rare, and it stalls
@@ -552,22 +556,52 @@ end
 
 # ↑ moved to src/graph/types.jl — how deep a plan pipelines is not a driver's.
 
-"""Lay out every draw in the plan, and take the memory once."""
+"""
+Lay out everything the plan's recordings read, and take the memory once — from
+the pool, as one [`Unified`](@ref) region the plan owns.
+
+A slot is the arguments of every draw and dispatch, and then one indirect command
+per device-sized dispatch. Both are fixed by the plan: the draws and dispatches
+are known, and so is each one's argument size, so nothing here is allocated per
+frame and nothing has to work out when it may be reused. The slot is what the
+device is still reading, and a slot comes round again only once it has passed the
+run that used it.
+
+The indirect commands are in the SAME slot rather than in a pool of their own —
+which is what the queue held, rewound whenever the queue happened to drain. That
+put a recording's workgroup counts on a free list while it still
+named them, and two plans replaying in one frame wrote each other's counts. Here
+the slot rule covers them for the same reason it covers the arguments.
+"""
 function ArgMemory(dev::LavaDevice, passes::AbstractVector)   # of PassPlan, defined below
-    stride = 0
+    args = 0
+    nind = 0
     for pp in passes
         for d in pp.draws
-            stride += argalign(d.argsize)
+            args += argalign(d.argsize)
         end
         for d in pp.dispatches
-            stride += argalign(d.argsize)
+            args += argalign(d.argsize)
+            d.indirect == 0 || (nind += 1)
         end
     end
-    stride = max(argalign(stride), 256)
-    store = LavaArray{UInt8,1}(undef, (stride * ARG_SLOTS,); bq = dev.bq, unified = true)
-    mb = store.buf[]
-    ArgMemory(store, mb.address, Ptr{UInt8}(mb.mapped_ptr), stride,
-              Vector{Any}(nothing, ARG_SLOTS), 0)
+    indbase = argalign(args)
+    stride = max(argalign(indbase + nind * INDIRECT_STRIDE), 256)
+    region = acquire!(pool(dev), dev, Unified(), nothing, stride * ARG_SLOTS;
+                      align = 256, blocksize = UNIFIED_BLOCK_SIZE)
+    blk = memoryof(region)::BufferBlock
+    base = offset(region)
+    mb = blk.ref[]::VkManagedBuffer
+    # One view per (slot, dispatch), built here because the offsets never move and
+    # building one per record is an allocation on the recording path — which is
+    # what `get_indirect_buffer` was, once per device-sized dispatch per frame.
+    indirect = [Any[LavaArray{UInt32,1}(copy(blk.ref), (3,);
+                                        offset = base + (s - 1) * stride + indbase +
+                                                 (k - 1) * INDIRECT_STRIDE)
+                    for k in 1:nind]
+                for s in 1:ARG_SLOTS]
+    ArgMemory(region, blk.address + UInt64(base), mb.mapped_ptr + base, stride,
+              Vector{Any}(nothing, ARG_SLOTS), 0, indirect)
 end
 
 # ↑ moved to src/graph/backend.jl — how deep a plan pipelines is the graph's policy.
@@ -610,7 +644,26 @@ function ImageBarrier(resource, t::Transition)
         access(be, t.to, Dst()))
 end
 
-function emit_barrier!(bq, b::ImageBarrier)
+"""
+    emit_barrier!(emitter, what) -> Bool
+
+Write one barrier where the emitter is writing. Three methods and no branch:
+an image barrier looks its image up now (a window's target is a different
+swapchain image every frame), a pass's `_DependencyInfo` was built at compile,
+and `nothing` is a pass that waits for no one — which is the point, because that
+absence is what lets the GPU overlap two passes.
+
+`emit_pass_barrier!` was the second of these, taking a queue and reaching for its
+active batch. One function, dispatching on what it was given.
+"""
+emit_barrier!(::Emitter, ::Nothing) = false
+
+function emit_barrier!(e::Emitter, dep::VK._DependencyInfo)
+    VK._cmd_pipeline_barrier_2(e.cmd, dep)
+    return true
+end
+
+function emit_barrier!(e::Emitter, b::ImageBarrier)
     barrier = VK._ImageMemoryBarrier2(
         b.old, b.new,
         VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED,
@@ -619,11 +672,8 @@ function emit_barrier!(bq, b::ImageBarrier)
                                            UInt32(0), UInt32(1), UInt32(0), UInt32(1));
         src_stage_mask = b.src_stage, src_access_mask = b.src_access,
         dst_stage_mask = b.dst_stage, dst_access_mask = b.dst_access)
-    batch = bq.active_batch
-    batch === nothing && (batch = ensure_active_batch!(bq))
-    VK._cmd_pipeline_barrier_2(batch.cmd_buf,
-        VK._DependencyInfo([], [], [barrier]))
-    nothing
+    VK._cmd_pipeline_barrier_2(e.cmd, VK._DependencyInfo([], [], [barrier]))
+    return true
 end
 
 # `PassPlan` is Mantle's now — see `src/graph/types.jl`.
@@ -728,14 +778,6 @@ function build_pass_barrier(g, ts::Vector{Transition})
     VK._DependencyInfo(mem, VK._BufferMemoryBarrier2[], [])
 end
 
-function emit_pass_barrier!(bq, dep)
-    dep === nothing && return false
-    batch = bq.active_batch
-    batch === nothing && (batch = ensure_active_batch!(bq))
-    VK._cmd_pipeline_barrier_2(batch.cmd_buf, dep)
-    true
-end
-
 """
 The barrier between two plans that share an arena pool.
 
@@ -754,7 +796,7 @@ graph knows nothing about what ran before it.
 Not needed *between* runs of the same plan: that hazard is the plan's own, and
 `nextslot!` plus the derived barriers already cover it.
 """
-function handover!(pl::Plan, bq)
+function handover!(pl::Plan, e::Emitter)
     # `p`, not `pool`. Written `pool = pool(pl.graph.dev)`, which makes `pool` a
     # local for the whole body — so the call on the right resolved to the local
     # that had not been assigned yet, and this threw
@@ -764,7 +806,7 @@ function handover!(pl::Plan, bq)
     # on every call. Not intermittently: Julia decides scope statically, so the
     # handover barrier has never been emitted, and two plans sharing an arena
     # have been relying on whatever ordering they happened to get. Found by
-    # `test_arena_bake.jl` and `test_devicerange.jl` erroring together, which is
+    # `test_arena_recording.jl` and `test_devicerange.jl` erroring together, which is
     # how a bug in a shared path presents.
     p = pool(pl.graph.dev)
     # `foldl`, not `any`: short-circuiting would skip recording this plan as the
@@ -802,7 +844,7 @@ function handover!(pl::Plan, bq)
         end
     end
     dep = VK._DependencyInfo(mems, bufs, VK._ImageMemoryBarrier2[])
-    emit_pass_barrier!(bq, dep)
+    emit_barrier!(e, dep)
 end
 
 # `peakbytes`/`naivebytes` are NOT defined here. `Plan <: Plan` and
@@ -857,6 +899,59 @@ end
 
 rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
     device_memory(dev.ctx, max(bytes, 1), bits)
+
+"""
+Back a [`Unified`](@ref) arena: one buffer in BAR memory, mapped for the whole
+life of the block.
+
+`INDIRECT_BUFFER` unconditionally, because the arena holds both halves of what a
+recording reads — argument blocks the host writes and workgroup counts the
+command processor does — and one usage mask is what makes them one allocation.
+Splitting them would be two blocks to satisfy two bits.
+
+Mapped once here rather than per region: `vkMapMemory` may be called only once
+per allocation, and a `Region` is a slice of one. The pointer rides in the
+`VkManagedBuffer` the block already carries, so a region's host address is
+`ptr + offset` exactly as its device address is `address + offset`.
+"""
+function rawalloc(dev::LavaDevice, ::Unified, bytes::Int, usage)
+    ctx = dev.ctx::VkContext
+    n = max(bytes, 1)
+    u = VK.BufferUsageFlag(usage) |
+        VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        VK.BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+        VK.BUFFER_USAGE_TRANSFER_SRC_BIT |
+        VK.BUFFER_USAGE_TRANSFER_DST_BIT
+    buf = unbound_buffer(ctx, n, u)
+    req = buffer_requirements(ctx, buf)
+    # Device-local AND host-visible where the device has such a heap, plain
+    # host-visible where it does not. `find_memory_type_optional` is the one that
+    # may answer `nothing`, which is the whole reason for the pair: a card with no
+    # resizable BAR still has to be able to back this arena.
+    idx = find_memory_type_optional(ctx, req.type_bits,
+              VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+              VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+              VK.MEMORY_PROPERTY_HOST_COHERENT_BIT)
+    idx === nothing && (idx = find_memory_type(ctx, req.type_bits,
+              VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+              VK.MEMORY_PROPERTY_HOST_COHERENT_BIT))
+    flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
+        flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
+    mem = VK.DeviceMemory(ctx.device, UInt64(req.size), idx; next = flags)
+    bind_buffer!(ctx, buf, mem, 0)
+    ptr = Ptr{UInt8}(unwrap(VK.map_memory(ctx.device, mem, 0, UInt64(req.size))))
+    addr = VK.get_buffer_device_address(ctx.device, VK.BufferDeviceAddressInfo(buf))
+    managed = VkManagedBuffer(buf, mem, UInt64(addr), ptr, Int(req.size),
+                              nothing, nothing, BUF_STATE_ALIVE, 0, false, ctx)
+    ref = GPUArrays.DataRef(_ -> nothing, managed)
+    return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
+end
+
+# Nothing a caller of this arena declares narrows it: the usage mask above is
+# fixed, because what a recording reads is the same on every plan.
+constraintof(::LavaDevice, ::Unified, ts) = UInt32(0)
+mergeconstraints(::LavaDevice, ::Unified, a::Integer, b::Integer) = a | b
 
 """
 Destroy a block's Vulkan objects.
@@ -1134,6 +1229,10 @@ pipeline. That is the whole reason `Attr{T}` erases a `Buffer` from a `Scalar`.
 function run!(::Pipelines, c::Compile{LavaDevice})
     g = c.graph
     argcursor = 0        # every draw's argument block, laid out once
+    # …and every device-sized dispatch's indirect command beside them. Counted
+    # here rather than allocated at record because the plan knows how many it has,
+    # which is the same reason `argcursor` is here.
+    indcursor = 0
     # A layout change is per-image and cannot be folded into the pass's one memory
     # barrier, so the needed transitions split by resource kind: images become an
     # image barrier each, everything else is ORed into the memory barrier.
@@ -1189,11 +1288,9 @@ function run!(::Pipelines, c::Compile{LavaDevice})
         # when the pass holds one kind — which is every pass in tree — so the
         # per-frame loop over `pp.dispatches` still specialises.
         compiled = Any[]
-        # A `:custom` pass carries a closure here, not a `Dispatch`. There is
-        # nothing to compile and no arguments to lay out: whatever it launches,
-        # it launches through the backend at record time.
-        for d in (p.kind === :custom ? () : p.dispatches)
-            cd = compile_dispatch(g.dev, d, argcursor)
+        for d in p.dispatches
+            ind = d.ndrange isa DeviceRange ? (indcursor += 1) : 0
+            cd = compile_dispatch(g.dev, d, argcursor, ind)
             # Not into `c.pipelines`: that set answers how many shaders the draws
             # resolved to — two draws sharing one is the thing worth counting —
             # and a dispatch's pipeline is held by its `CompiledDispatch` anyway.
@@ -1215,7 +1312,7 @@ a launch plan for the argument types — taken here so that recording is only
 packing and `vk_dispatch!`. The kernel itself is compiled by the launch plan, and
 this is the only place a Mantle frame can compile one.
 """
-function compile_dispatch(dev::LavaDevice, d::Dispatch, argoff::Int)
+function compile_dispatch(dev::LavaDevice, d::Dispatch, argoff::Int, indirect::Int)
     # Three arguments. `kernelfor` took two when it lived here and takes the
     # backend now that it is core's (`graph/kalaunch.jl`), which is what makes it
     # answerable by a backend at all; this call site kept the old arity and threw
@@ -1238,7 +1335,7 @@ function compile_dispatch(dev::LavaDevice, d::Dispatch, argoff::Int)
     all_args = (obj.f, iter.ka_ctx, args...)
     launch = launch_plan(dev.bq, obj.f, all_args, iter.ws_3d, tlas !== nothing)
     CompiledDispatch(launch, iter, nd, obj, obj.f, d.args, d.ndrange,
-                     tlas !== nothing, argoff, launch.total_size)
+                     tlas !== nothing, argoff, launch.total_size, indirect)
 end
 
 """
@@ -1286,13 +1383,13 @@ speed: a cold compile flushes the batch queue to upload the shader binding table
 which is legal while a plan is being compiled and is not while a frame is being
 recorded into an open batch.
 """
-function compile_dispatch(dev::LavaDevice, t::Trace, argoff::Int)
+function compile_dispatch(dev::LavaDevice, t::Trace, argoff::Int, indirect::Int)
     raw = rawargs(t.args)
     vk_pipeline, raygen, offsets, byval = rt_compiled_for(dev.bq, t.pipeline, raw)
     argbytes = raygen.push_info.arg_buffer_size
     total = argbytes + compute_inline_extra_from_byval(byval)
     compiled = VulkanTracePipeline(vk_pipeline, t.pipeline, offsets, byval, argbytes)
-    CompiledTrace(compiled, t.accel, t.args, t.ndrange, argoff, total)
+    CompiledTrace(compiled, t.accel, t.args, t.ndrange, argoff, total, indirect)
 end
 
 """
@@ -1320,7 +1417,7 @@ predicted them instead, from a `standalone_slot(T)` restating the generic
 diverged at the first argument reaching one of them and every by-value argument
 after it landed wrong. `verifywrites` caught it, which is what it is for.
 
-Packing here is free and safe: `bake!` has just packed these same values, so this
+Packing here is free and safe: `record!` has just packed these same values, so this
 writes the bytes that are already there.
 
 Skipping an unsupported `Ref` would be invisible rather than merely incomplete —
@@ -1352,33 +1449,33 @@ end
 # in front of the caller's arguments. Each mirrors the `all_args` its `repack!`
 # builds, and that is the coupling to keep an eye on: if one changes, so must the
 # other. `bake!`'s verification is what catches it if they drift.
-function argwrites(bq, d::CompiledDispatch, am::ArgMemory, base::Int)
-    all_args = (d.kernel, d.iter.ka_ctx,
-                devargs(adaptor(bq), rawargs(d.args))...)
+function argwrites(e::Emitter, d::CompiledDispatch)
+    am = e.args
+    all_args = (d.kernel, d.iter.ka_ctx, devargs(adaptor(e), rawargs(d.args))...)
     lp = d.launch
-    off = base + d.argoff
+    off = e.base + d.argoff
     argwrites(d.args, d.argoff, lp.offsets, lp.byval_sizes, lp.arg_buffer_size,
-              all_args, 2, am.ptr + off, am.address + off,
-              bq.active_batch::CommandBatch)
+              all_args, 2, am.ptr + off, am.address + off, e.owner)
 end
 
-function argwrites(bq, dr::CompiledDraw, am::ArgMemory, base::Int)
-    all_args = devargs(adaptor(bq), rawargs(dr.args))
+function argwrites(e::Emitter, dr::CompiledDraw)
+    am = e.args
+    all_args = devargs(adaptor(e), rawargs(dr.args))
     info = dr.shader.push_info
-    off = base + dr.argoff
+    off = e.base + dr.argoff
     argwrites(dr.args, dr.argoff, info.arg_offsets, info.byval_llvm_sizes,
               info.arg_buffer_size, all_args, 0, am.ptr + off, am.address + off,
-              bq.active_batch::CommandBatch)
+              e.owner)
 end
 
-function argwrites(bq, t::CompiledTrace, am::ArgMemory, base::Int)
+function argwrites(e::Emitter, t::CompiledTrace)
+    am = e.args
     c = t.compiled
-    batch = ensure_active_batch!(bq)
-    ad = LavaAdaptor(batch)
+    ad = adaptor(e)
     all_args = (Adapt.adapt(ad, c.desc.raygen_func), devargs(ad, rawargs(t.args))...)
-    off = base + t.argoff
+    off = e.base + t.argoff
     argwrites(t.args, t.argoff, c.offsets, c.byval, c.argbytes, all_args, 1,
-              am.ptr + off, am.address + off, batch)
+              am.ptr + off, am.address + off, e.owner)
 end
 
 """
@@ -1390,11 +1487,12 @@ and with the inline position the full pack used, both recorded by
 of the individual slot, because `pack_arg!` adds the offsets itself and a by-value
 argument's inline position is relative to that same base.
 """
-function writearg!(bq, am::ArgMemory, base::Int, w::ArgWrite)
-    entry = base + w.entryoff
-    v = Adapt.adapt(adaptor(bq), argvalue(w.ref))
+function writearg!(e::Emitter, w::ArgWrite)
+    am = e.args
+    entry = e.base + w.entryoff
+    v = Adapt.adapt(adaptor(e), argvalue(w.ref))
     pack_arg!(v, am.ptr + entry, am.address + entry, w.slotoff, w.byval, w.inline,
-              bq.active_batch::CommandBatch)
+              e.owner)
     return nothing
 end
 
@@ -1406,28 +1504,28 @@ dispatch's iteration-plan lookup inlined into it, so there was nowhere for a
 trace to go. Local to this backend — nothing in core calls it, and importing the
 name would make a private recording helper into Mantle API.
 """
-function repack!(bq, d::CompiledDispatch, am::ArgMemory, base::Int)
+function repack!(e::Emitter, d::CompiledDispatch)
     nd = dispatchrange(d.ndrange)
     it = nd == d.nd0 ? d.iter :
-         get_or_build_iter_plan(d.obj, nd, nothing, bq.ctx::VkContext)
+         get_or_build_iter_plan(d.obj, nd, nothing, e.ctx)
     it.nblocks == 0 && return nothing
-    packdispatch!(bq, d, am, base, it)
+    packdispatch!(e, d, it)
     return nothing
 end
 
-repack!(bq, t::CompiledTrace, am::ArgMemory, base::Int) =
-    (packtrace!(bq, t, am, base); nothing)
+repack!(e::Emitter, t::CompiledTrace) = (packtrace!(e, t); nothing)
 
 # A draw packs the same way it does while being recorded, minus the recording.
 # `record_draw!` was where these six lines lived and `rebind!` had a copy of
 # them inlined into its loop, which is how the two came to disagree: the copy
 # never learned about a trace, and adding one meant adding it twice.
-function repack!(bq, d::CompiledDraw, am::ArgMemory, base::Int)
-    off = base + d.argoff
+function repack!(e::Emitter, d::CompiledDraw)
+    am = e.args
+    off = e.base + d.argoff
     info = d.shader.push_info
-    pack_args_direct!(bq, am.ptr + off, am.address + off, info.arg_offsets,
+    pack_args_direct!(e.owner, am.ptr + off, am.address + off, info.arg_offsets,
                       info.arg_buffer_size, info.byval_llvm_sizes,
-                      devargs(adaptor(bq), rawargs(d.args)))
+                      devargs(adaptor(e), rawargs(d.args)))
     return nothing
 end
 
@@ -1438,71 +1536,78 @@ Into `am` and not into `get_arg_buffer(bq, …)`, which is the whole difference
 between this and the unmodelled path: the queue's scratch has its bump pointer
 rewound every time the queue drains, so an address from it means nothing to a
 replay. A slot in the plan's argument memory belongs to the plan for as long as
-the plan lives, which is what `bake!` needs and what `rebind!` rewrites.
+the plan lives, which is what recording needs and what `rebind!` rewrites.
 """
-function packtrace!(bq, t::CompiledTrace, am::ArgMemory, base::Int)
-    off = base + t.argoff
+function packtrace!(e::Emitter, t::CompiledTrace)
+    am = e.args
+    off = e.base + t.argoff
     c = t.compiled
-    batch = ensure_active_batch!(bq)
+    owner = e.owner
     # Pinned as the unmodelled path pins: the shaders are closures, and a
     # per-material closest-hit holds the device arrays of the material it shades.
-    pin_leaves!(batch, c.desc.raygen_func)
+    pin_leaves!(owner, c.desc.raygen_func)
     for chit in c.desc.closesthit_funcs
-        pin_leaves!(batch, chit)
+        pin_leaves!(owner, chit)
     end
-    pin_leaves!(batch, c.desc.miss_func)
-    pin_leaves!(batch, c.desc.anyhit_func)     # a no-op on `nothing`
-    ad = LavaAdaptor(batch)
+    pin_leaves!(owner, c.desc.miss_func)
+    pin_leaves!(owner, c.desc.anyhit_func)     # a no-op on `nothing`
+    ad = LavaAdaptor(owner)
     # `rawargs` first, so a `Ref` argument is re-read NOW rather than frozen at
     # compile — that is how a new sample index reaches a plan compiled once.
     raw = rawargs(t.args)
-    pin_leaves!(batch, raw)
+    pin_leaves!(owner, raw)
     all_args = (Adapt.adapt(ad, c.desc.raygen_func), devargs(ad, raw)...)
-    pack_args_direct!(bq, am.ptr + off, am.address + off,
+    pack_args_direct!(owner, am.ptr + off, am.address + off,
                       c.offsets, c.argbytes, c.byval, all_args)
     return am.address + off
 end
 
-"""The acceleration structures a trace reads, held for the life of the batch."""
-function pintrace!(batch, tlas::LavaTLAS)
-    pin!(batch, tlas.accel)
-    pin!(batch, tlas.storage)
+"""The acceleration structures a trace reads, held for as long as it can run."""
+function pintrace!(e::Emitter, tlas::LavaTLAS)
+    pin!(e, tlas.accel)
+    pin!(e, tlas.storage)
     for blas in tlas.blases
-        pin!(batch, blas.accel)
-        pin!(batch, blas.storage)
+        pin!(e, blas.accel)
+        pin!(e, blas.storage)
     end
     return nothing
 end
 
 """
-Record the trace itself. A host-side ray count traces directly; a
+Emit the trace itself. A host-side ray count traces directly; a
 [`DeviceRange`](@ref) prepares an indirect command from a count on the device.
 
-Two methods rather than a branch, which is how `recordlaunch!` above already
-distinguishes the same two cases. The ORDER differs between them and that is why
-they are not one function with a conditional in the middle: the indirect prepare
-runs a kernel of its own and may flush the slab pools, so it has to happen before
-the arguments are packed.
+Two methods rather than a branch, which is how `emitlaunch!` above already
+distinguishes the same two cases.
+
+The prepare is NOT fused with the compute prepares `emitprepares!` writes: it is
+a different kernel writing a different command — `(n_rays, 1, 1)`, not workgroup
+counts — and there is one trace per pass in every graph in tree. Its barrier is
+the same one, and it is emitted here so the ordering is stated where the pair is
+written rather than inferred from where they sit.
 """
-function tracelaunch!(bq, r::DeviceRange, t::CompiledTrace, am::ArgMemory, base::Int, tlas)
-    indirect = get_indirect_buffer(bq)
-    prepare_indirect_rt_dispatch!(bq, indirect, storage(r.count))
-    argaddr = packtrace!(bq, t, am, base)
-    pintrace!(ensure_active_batch!(bq), tlas)
-    rt_dispatch_indirect!(bq, t.compiled.pipeline, tlas, argaddr, indirect)
+function tracelaunch!(e::Emitter, r::DeviceRange, t::CompiledTrace, tlas,
+                      name::AbstractString)
+    indirect = indirectof(e.args, t.indirect)
+    emitkernel!(e, prepare_indirect_rt_kernel, indirect, storage(r.count);
+                ndrange = 1, workgroup_size = (1, 1, 1))
+    emit_barrier!(e, preparebarrier())
+    argaddr = packtrace!(e, t)
+    pintrace!(e, tlas)
+    emit_trace_indirect!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
     return nothing
 end
 
-function tracelaunch!(bq, n, t::CompiledTrace, am::ArgMemory, base::Int, tlas)
-    argaddr = packtrace!(bq, t, am, base)
-    pintrace!(ensure_active_batch!(bq), tlas)
-    rt_dispatch!(bq, t.compiled.pipeline, tlas, argaddr, Int(n), 1)
+function tracelaunch!(e::Emitter, n, t::CompiledTrace, tlas, name::AbstractString)
+    argaddr = packtrace!(e, t)
+    pintrace!(e, tlas)
+    emit_trace!(e, t.compiled.pipeline, tlas, argaddr, Int(n), 1, 1, name)
     return nothing
 end
 
-"""Record a trace: resolve the acceleration structure, then launch."""
-record_dispatch!(bq, t::CompiledTrace, am::ArgMemory, base::Int) =
-    tracelaunch!(bq, t.ndrange, t, am, base, tlasof(argvalue(t.accel)))
+"""Emit a trace: resolve the acceleration structure, then launch."""
+emitdispatch!(e::Emitter, t::CompiledTrace, name::AbstractString) =
+    tracelaunch!(e, t.ndrange, t, tlasof(argvalue(t.accel)), name)
 
 # An ndrange fixed when the graph was built, or one that is read per frame — the
 # same distinction `drawover` makes for a draw's vertex count.
@@ -1597,41 +1702,52 @@ brackets everything the pass does. Two adjacent passes therefore overlap in what
 they report, because the GPU is free to overlap them; a sum of pass times is not
 the frame time and is not meant to be.
 """
-function profiled!(f, pl::Plan, bq, i::Integer)
+function profiled!(f, pl::Plan, e::Emitter, i::Integer)
     prof = pl.profiler
     prof === nothing && return f()
-    cmd = ensure_active_batch!(bq).cmd_buf
-    VK.cmd_write_timestamp(cmd, VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                     prof.pool, UInt32(2i - 2))
     t0 = time_ns()
     r = f()
     sample!(prof.host_ns[i], Float64(time_ns() - t0))
-    cmd = ensure_active_batch!(bq).cmd_buf   # a pass may have split the batch
-    VK.cmd_write_timestamp(cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+    # One command buffer, so the second timestamp goes where the first did. It
+    # used to re-open the batch here, with the comment "a pass may have split the
+    # batch" — which is exactly what a plan's own command buffer cannot do.
+    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                     prof.pool, UInt32(2i - 1))
     prof.pending = true
     r
 end
 
-function record!(pl::Plan, bq; derived::Bool = true, suppress::Bool = derived,
-                 updates::Bool = true)
+"""
+    emit!(emitter, plan; updates = false)
+
+Write the plan's passes, in the order the compile settled on, into the one
+command buffer the emitter holds.
+
+`updates = false` is the recorded case and is the default: an update writes
+through a fresh store on the rename route, so the copy's destination handle is
+not the one a recording could hold — see `renameable`. `run!` emits those alone,
+fresh, in front of the recording that consumes them.
+
+Three keyword arguments went from here. `derived` and `suppress` selected
+between the barriers the graph computed and the ones Lava's recorder inserted
+per dispatch, which was an A/B for a comparison that has been made: an emitter
+writes what the plan says and there is no automatic barrier to suppress.
+"""
+function emit!(e::Emitter, pl::Plan; updates::Bool = false)
     g = pl.graph
-    # Before anything this plan records: the pool it is about to write may still
-    # be being read by whichever plan ran last.
-    handover!(pl, bq)
+    # Before anything this plan emits: the pool it is about to write may still be
+    # being read by whichever plan ran last.
+    handover!(pl, e)
     if pl.profiler !== nothing
-        VK.cmd_reset_query_pool(ensure_active_batch!(bq).cmd_buf,
-                                         pl.profiler.pool, UInt32(0),
-                                         UInt32(pl.profiler.nslots))
+        VK.cmd_reset_query_pool(e.cmd, pl.profiler.pool, UInt32(0),
+                                UInt32(pl.profiler.nslots))
     end
     for (i, pp) in enumerate(pl.passes)
-        # `bake!` records everything except this, and `run!` records this alone
-        # before each replay. An update writes through a fresh store on the
-        # rename route, so the copy's destination handle is not the one the
-        # recording would hold — see `renameable`.
         (!updates && pp.pass.kind === :update) && continue
-        profiled!(pl, bq, i) do
-            record_pass!(g, bq, pp, derived, pl.args; suppress)
+        profiled!(pl, e, i) do
+            emitpass!(e, g, pp)
         end
     end
     nothing
@@ -1640,8 +1756,7 @@ end
 # ↑ moved to src/graph/build.jl
 
 """One pass: its barriers, then whatever its kind does."""
-function record_pass!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
-                      suppress::Bool = derived)
+function emitpass!(e::Emitter, g::Graph, pp::PassPlan)
     p = pp.pass
     # Mantle's own barriers, derived from the declared usage sequence. Layout
     # changes first: a pass may both need an image transitioned and wait on a
@@ -1655,14 +1770,10 @@ function record_pass!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
         return nothing
     end
 
-    # Image barriers are emitted in both modes. `:backend` hands the buffer
-    # hazards to Lava's automatic per-dispatch barrier, but nothing in Lava
-    # knows what layout a graph's render target should be in, so dropping
-    # these would not be a comparison, it would be a broken frame.
     for b in pp.images
-        emit_barrier!(bq, b)
+        emit_barrier!(e, b)
     end
-    derived && emit_pass_barrier!(bq, pp.barrier)
+    emit_barrier!(e, pp.barrier)
 
     # The predicate scope opens AFTER the barriers and closes before the next
     # pass's, so a discarded iteration still orders the ones around it. That is
@@ -1670,98 +1781,64 @@ function record_pass!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
     # conditional rendering affects, so putting the barriers inside would not
     # skip them either — it would only make the scope wider and the intent less
     # clear. Outside, the code says what the hardware does.
-    p.predicate === nothing && return record_pass_work!(g, bq, pp, derived, am; suppress)
-    withpredicate(bq, p.predicate) do
-        record_pass_work!(g, bq, pp, derived, am; suppress)
+    p.predicate === nothing && return emitwork!(e, g, pp)
+    withpredicate(e, p.predicate) do
+        emitwork!(e, g, pp)
     end
 end
 
 """Run `f` with this pass's work discarded unless its predicate is nonzero.
 
-`unsplittable!` around the whole thing, and it is load-bearing rather than
-defensive. A scope's `begin` and `end` must be in ONE command buffer, and
-`record_dispatch!` ends the current one whenever a dispatch takes the batch past
-`cb_split_threshold` or `auto_submit_threshold` — which a loop of any size
-reaches. Hikari's fused sample ran at `max_depth` 8 (47 dispatches) and hung the
-GPU at 16 (~95), with the auto-submit threshold at 64 sitting exactly between:
-the submission carried away a command buffer holding an unmatched `begin`.
+The scope's `begin` and `end` have to be in ONE command buffer. That used to need
+`unsplittable!` around this whole block, because the work inside went through the
+queue's recorder and a dispatch could take the batch past `cb_split_threshold` or
+`auto_submit_threshold` — Hikari's fused sample ran at `max_depth` 8 (47
+dispatches) and hung the GPU at 16 (~95), with the auto-submit threshold at 64
+sitting exactly between, and the failure was a foreign call that never returned.
 
-It presents as a foreign call that never returns, so there is no error to read
-and no Julia frame to look at — which is why the guard is here rather than a
-comment warning about it.
+An emitter has one command buffer and nothing that ends it, so the scope cannot
+be broken any more. That is the guard, and it is structural rather than a counter
+saying "not now".
 """
-function withpredicate(f, bq, (pred, i)::Tuple{Any,Int})
+function withpredicate(f, e::Emitter, (pred, i)::Tuple{Any,Int})
     arr = storage(pred)
     mb = arr.buf[]::VkManagedBuffer
-    unsplittable!(bq) do
-        cmd = ensure_active_batch!(bq).cmd_buf
-        VK.cmd_begin_conditional_rendering_ext(cmd,
-            VK.ConditionalRenderingBeginInfoEXT(mb.buffer,
-                UInt64(arr.offset + i * sizeof(Predicate))))
-        try
-            f()
-        finally
-            # `finally`, because leaving a scope open makes every later command
-            # in the batch conditional on this iteration's flag — a failure that
-            # shows up as unrelated passes silently not running.
-            VK.cmd_end_conditional_rendering_ext(cmd)
-        end
+    VK.cmd_begin_conditional_rendering_ext(e.cmd,
+        VK.ConditionalRenderingBeginInfoEXT(mb.buffer,
+            UInt64(arr.offset + i * sizeof(Predicate))))
+    try
+        f()
+    finally
+        # `finally`, because leaving a scope open makes every later command in
+        # the buffer conditional on this iteration's flag — a failure that shows
+        # up as unrelated passes silently not running.
+        VK.cmd_end_conditional_rendering_ext(e.cmd)
     end
 end
 
-"""The pass's own commands, once its barriers and predicate are dealt with."""
-function record_pass_work!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMemory;
-                           suppress::Bool = derived)
+"""The pass's own commands, once its barriers and predicate are dealt with.
+
+The `:custom` pass kind is gone from here. It ran an opaque body that recorded
+through `Mantle.batchqueue(dev)` — the queue, reached from inside a pass — so
+this function had to hand one over, and with it every heuristic reachable from a
+queue: `exclusive_dispatch_group` to put the automatic barrier back for launches
+the graph could not see, `next_skip_barrier` to take it away again for the first
+of them, and a one-shot disarm afterwards in case the body recorded nothing. All
+three lines were about a pass whose contents were not declared.
+
+Its two consequences went with it: `rebindable(plan)`, which was false for a plan
+containing one because a `custom!` body packs its own arguments while it runs and
+a recorded plan never runs it again; and `bake(::Compile, body)` on the
+KernelAbstractions path, whose whole content was "a body already IS a callable".
+Hikari moved its hardware-RT pass off `custom!` to `trace!` for exactly the
+rebinding reason; the graph verbs — `compute!`, `render!`, `copy!`, `trace!`,
+`repeat!` — are what is left, and each of them says what it touches."""
+function emitwork!(e::Emitter, g::Graph, pp::PassPlan)
     p, cds = pp.pass, pp.draws
     if p.kind === :compute
-        base = slotbase(am)
-        # A dispatch sized on the device costs a prepare kernel and a barrier the
-        # command processor's read of the count depends on, and that barrier is
-        # forced — it is the one hazard a graph cannot derive away, since the
-        # prepare is the backend's own machinery rather than a pass. Left per
-        # dispatch it serialises a pass's dispatches whatever the schedule said
-        # they could do: twelve per-material shading kernels become twelve
-        # barriers.
-        #
-        # So the pass's prepares are fused into one and the dispatches share the
-        # single barrier behind it. The prepares are still ordered after this
-        # pass's derived barrier, which is what puts them after whoever wrote the
-        # counts; within a pass the dispatches are independent by construction,
-        # which is the same assumption that already lets them run without
-        # barriers between them.
-        if pp.indirect
-            concurrent_indirect_group(bq) do
-                for d in pp.dispatches
-                    record_dispatch!(bq, d, am, base)
-                end
-            end
-        else
-            for d in pp.dispatches
-                record_dispatch!(bq, d, am, base)
-            end
-        end
-        return nothing
-    elseif p.kind === :custom
-        # The barriers this pass declared are already emitted. Open the batch so
-        # the body records into this frame's command buffer rather than opening
-        # one of its own, then get out of the way.
-        ensure_active_batch!(bq)
-        # Two launches inside one body may depend on each other — a two-pass
-        # reduction, a split-K matmul, an operator with a scratch buffer — and
-        # nothing declared to the graph says so, because the declaration is about
-        # what the pass touches and not about how. So the surrounding concurrent
-        # group is lifted and Lava's automatic barrier orders the body's own
-        # launches, while the *first* of them skips it: that one is the hazard
-        # this pass just emitted a derived barrier for.
-        exclusive_dispatch_group() do
-            bq.next_skip_barrier = suppress
-            for body in p.dispatches
-                body()
-            end
-            # A body that recorded no dispatch at all leaves the one-shot armed,
-            # and the next pass's first launch would consume it without anyone
-            # having decided that.
-            bq.next_skip_barrier = false
+        emitprepares!(e, pp)
+        for d in pp.dispatches
+            emitdispatch!(e, d, p.name)
         end
         return nothing
     elseif p.kind === :update
@@ -1770,14 +1847,14 @@ function record_pass_work!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMem
         # Recycling afterwards leaves last frame's store invisible to this
         # frame's take, and the resource ping-pongs across three buffers
         # instead of two.
-        recycle!(g.recycler, lavadevice(bq.ctx::VkContext))
+        recycle!(g.recycler, lavadevice(e.ctx))
         applyupdates!(g.updates) do r, data
-            write_update!(g, bq, r, data)
+            write_update!(g, e, r, data)
         end
         return nothing
     elseif p.kind === :copy
         src, dst = first_target(p), p.dst
-        copy_image_to_buffer!(bq, storage(dst), target_image(src),
+        copy_image_to_buffer!(e, storage(dst), target_image(src),
                                    size(src)..., target_format(src);
                                    aspect = aspect(src))
         return nothing
@@ -1789,7 +1866,7 @@ function record_pass_work!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMem
     # `transition = false` on both attachments: the layout each is in was
     # derived from the declared usages and emitted above, and Lava's own
     # transition would either double up with it or contradict it.
-    begin_pass!(bq,
+    begin_pass!(e,
                         VK.ImageView[target_view(t) for t in p.targets],
                         VK.Image[target_image(t) for t in p.targets],
                         VK.Extent2D(target_extent(first_target(p))...);
@@ -1803,17 +1880,99 @@ function record_pass_work!(g::Graph, bq, pp::PassPlan, derived::Bool, am::ArgMem
     # you; draw_in_pass! only does so when passed, and omitting them
     # rasterizes nothing without raising anything.
     ext = target_extent(first_target(p))
-    set_viewport!(bq,
+    set_viewport!(e,
         VK.Viewport(0f0, 0f0, Float32(ext[1]), Float32(ext[2]), 0f0, 1f0),
         VK.Rect2D(VK.Offset2D(0, 0), VK.Extent2D(ext...)))
-    base = slotbase(am)
     for d in cds
-        record_draw!(bq, d, am, base)
+        emitdraw!(e, d)
     end
-    end_pass!(bq)
+    end_pass!(e)
     nothing
 end
 
+"""
+One fused prepare for every dispatch in this pass that sizes itself on the
+device, and one barrier behind all of them.
+
+A device-sized dispatch costs a prepare kernel and a barrier the command
+processor's read of the count depends on, and that barrier cannot be derived
+away — the prepare is the backend's own machinery rather than a pass, so nothing
+declared it. Left per dispatch it serialises a pass's dispatches whatever the
+schedule said they could do: twelve per-material shading kernels become twelve
+barriers.
+
+So: one prepare writing every count, then ONE barrier, then the dispatches
+back-to-back with nothing between them. Net for N pairs, 2 barriers and N+1
+commands instead of N barriers and 2N.
+
+This is what `concurrent_indirect_group` did, and the machinery it needed to do
+it was a list on the queue (`bq.deferred_indirect`), a launch path that checked
+that list and pushed instead of recording, and two process-wide atomics saying
+whether a concurrent group was open and whether it had started. The pass knows
+which of its dispatches are device-sized — it is a field, `pp.indirect` — so the
+deferral was carrying information from one part of a record to another part of
+the same record.
+
+The prepares are still ordered after this pass's derived barrier, which is what
+puts them after whoever wrote the counts; within a pass the dispatches are
+independent by construction, which is the same assumption that already lets them
+run without barriers between them.
+"""
+function emitprepares!(e::Emitter, pp::PassPlan)
+    pp.indirect || return nothing
+    am = e.args
+    inds = Any[]
+    counts = Any[]
+    wss = UInt32[]
+    for d in pp.dispatches
+        d isa CompiledDispatch || continue          # a trace prepares its own
+        d.ndrange isa DeviceRange || continue
+        push!(inds, indirectof(am, d.indirect))
+        push!(counts, storage(d.ndrange.count))
+        push!(wss, UInt32(prod(d.iter.ws_3d)))
+    end
+    n = length(inds)
+    n == 0 && return nothing
+    # Statically unrolled over the tuples, compiled per arity — the same kernel
+    # `concurrent_indirect_group` flushed with.
+    emitkernel!(e, multi_prepare_indirect_kernel,
+                ntuple(i -> inds[i], n), ntuple(i -> counts[i], n),
+                ntuple(i -> wss[i], n);
+                ndrange = 1, workgroup_size = (1, 1, 1))
+    emit_barrier!(e, preparebarrier())
+    return nothing
+end
+
+"""
+The one barrier a fused prepare is followed by: its shader writes, made visible
+to the command processor's read of the workgroup counts and to the dispatches
+behind it.
+
+The same value for every pass of every plan — it names no handle, only masks —
+so it is built once and kept. Memoised rather than `const` because constructing
+it calls into Vulkan.jl's wrapper types, and this module precompiles on machines
+with no driver.
+"""
+function preparebarrier()
+    b = PREPARE_BARRIER[]
+    b === nothing || return b
+    b = VK._DependencyInfo(
+        [VK._MemoryBarrier2(;
+            src_stage_mask = VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
+            src_access_mask = VK.AccessFlag2(VK.ACCESS_2_SHADER_WRITE_BIT),
+            dst_stage_mask = VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT) |
+                             VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_DRAW_INDIRECT_BIT),
+            dst_access_mask = VK.AccessFlag2(VK.ACCESS_2_SHADER_READ_BIT) |
+                              VK.AccessFlag2(VK.ACCESS_2_SHADER_WRITE_BIT) |
+                              VK.AccessFlag2(VK.ACCESS_2_INDIRECT_COMMAND_READ_BIT))],
+        VK._BufferMemoryBarrier2[], VK._ImageMemoryBarrier2[])
+    PREPARE_BARRIER[] = b
+    return b
+end
+
+const PREPARE_BARRIER = Ref{Any}(nothing)
+
+# ── plan ─────────────────────────────────────────────────────────────────────
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
@@ -1827,13 +1986,16 @@ An ndrange that has not moved reuses the iteration plan the pipeline was built
 with; one that has costs a lookup keyed on the shape, which is not keyed on the
 world and so still cannot reach the compiler.
 """
-function record_dispatch!(bq, d::CompiledDispatch{K,A,I}, am::ArgMemory, base::Int) where {K,A,I}
+function emitdispatch!(e::Emitter, d::CompiledDispatch{K,A,I},
+                       name::AbstractString) where {K,A,I}
     nd = dispatchrange(d.ndrange)
     it = nd == d.nd0 ? d.iter :
-         get_or_build_iter_plan(d.obj, nd, nothing, bq.ctx::VkContext)::I
+         get_or_build_iter_plan(d.obj, nd, nothing, e.ctx)::I
     it.nblocks == 0 && return nothing
-    tlas = packdispatch!(bq, d, am, base, it)
-    recordlaunch!(bq, d.ndrange, lp_of(d), am.address + base + d.argoff, it, tlas)
+    am = e.args
+    tlas = packdispatch!(e, d, it)
+    emitlaunch!(e, d.ndrange, lp_of(d), am.address + e.base + d.argoff, it, tlas,
+                indirectof(am, d.indirect), name)
     nothing
 end
 
@@ -1846,65 +2008,60 @@ end
 """
     rebind!(plan) -> plan
 
-Re-read the arguments a **baked** plan's work was given and write the current
+Re-read the arguments a recorded plan's work was given and write the current
 values into the recording's argument memory.
 
-A baked plan does not record, so the values packed at `bake!` are the ones it
-replays — for ever, and silently. A frozen sample index renders the same sample
-every time and converges to a picture that looks plausible and is wrong, which is
-the failure this exists to prevent. Anything given as a `Ref` moves; this is what
-makes it move again once the plan is baked.
+A recorded plan does not record, so without this the values packed at `record!`
+are the ones it runs — for ever, and silently. A frozen sample index renders the
+same sample every time and converges to a picture that looks plausible and is
+wrong, which is the failure this exists to prevent. Anything given as a `Ref`
+moves; this is what makes it move again.
 
-It writes bytes and records nothing: the command buffer holds the address of the
-slot, and the slot is host-mapped, so this is a pack per dispatch and no command
-buffer is touched. On an unbaked plan it is a no-op, because every `run!` packs
-already.
+It writes bytes and emits nothing: the command buffer holds the address of the
+slot, and the slot is host-mapped, so this is a store per `Ref` and no command
+buffer is touched.
 
 It writes ARGUMENTS, not entries: one store per `Ref` the plan binds, at the byte
-offset `bake!` recorded for it. A plan with no `Ref` anywhere writes nothing, so
-`run!` on it does no host work at all between the call and the queue.
+offset `record!` recorded for it. A plan with no `Ref` anywhere writes nothing,
+so `run!` on it does no host work at all between the call and the queue.
 
 That is the whole point and it was not always so. This used to re-run `repack!`
-per entry — the RECORD-time path, which re-adapts the argument tree because at
-record time it must. Under a baked plan it cannot have changed: `run!` throws if
-a transient moved, so every device address and every adapted wrapper is provably
-what `bake!` wrote. Rebuilding them cost 1193 microseconds a run on Hikari's
-72-pass chunk plan, against 0.19 for the entire rest of the baked path, and it
-was rebuilding 266 KB of argument tree to move one `Int32`.
+per entry — the record-time path, which re-adapts the argument tree because at
+record time it must. It cannot have changed: `run!` throws if a transient moved,
+so every device address and every adapted wrapper is provably what `record!`
+wrote. Rebuilding them cost 1193 microseconds a run on Hikari's 72-pass chunk
+plan, against 0.19 for the entire rest of the path, and it was rebuilding 266 KB
+of argument tree to move one `Int32`.
 
-The offsets come from [`argwrites`](@ref) and are checked at `bake!` by
+The offsets come from [`argwrites`](@ref) and are checked by
 [`verifywrites`](@ref) against the pack that just ran, which is what makes this
 safe to do at all: two earlier attempts computed the offsets independently at run
 time and both produced a wrong picture rather than an error.
 
 `run!` calls this, and the slot it writes is the one [`nextslot!`](@ref) has just
-claimed — so the device is known to be past the replay that last read it. That
-used to be the caller's problem and was documented as such, and the ring is what
-makes it nobody's: see `Plan.baked`.
+claimed — so the device is known to be past the run that last read it. That used
+to be the caller's problem and was documented as such, and the ring is what makes
+it nobody's.
+
+`rebindable(plan)` was checked here and is gone with the `:custom` pass kind it
+was about: such a pass packed its own arguments while its body ran, so a plan
+holding one could not be rebound at all. Every pass kind left declares what it
+touches, so every argument a plan binds is reachable from the plan.
 """
 function rebind!(pl::Plan)
-    pl.baked === nothing && return pl
-    rebindable(pl) || throw(ArgumentError(
-        "rebind!: this plan has a `custom!` pass, whose body packs its own " *
-        "arguments while it runs — and a baked plan never runs it again, so the " *
-        "values it replays are the ones captured at `bake!`. Returning quietly " *
-        "would leave them stale and produce a plausible wrong result. Ask " *
-        "`rebindable(plan)` before baking anything whose arguments move."))
-    # Nothing to write: every argument was resolved at `bake!` and is still
-    # there. The `ensure_active_batch!` below would otherwise open a batch to
-    # hold pins nobody takes, and `replay!` would submit its empty command
-    # buffer alongside the recording — a second command buffer per run for a
-    # plan whose whole point is that it prepares nothing.
+    pl.recordings === nothing && return pl
+    # Nothing to write: every argument was resolved at `record!` and is still
+    # there. The emitter below would otherwise open a batch to hold pins nobody
+    # takes, and `submit!` would send its empty command buffer alongside the
+    # recording — a second command buffer per run for a plan whose whole point is
+    # that it prepares nothing.
     isempty(pl.writes) && return pl
-    bq = pl.graph.dev.bq
     # `pack_arg!` pins the buffers whose addresses it writes into the batch being
-    # recorded, and this is the run's batch — `replay!` appends the recording to
-    # it, so the pins and the work they belong to submit together.
-    ensure_active_batch!(bq)
-    am = pl.args
-    base = slotbase(am)
+    # recorded, and this is the run's batch — `submit!` appends the recording to
+    # it, so the pins and the work they belong to leave together.
+    e = emitter(pl.graph.dev.bq, pl.args, slotbase(pl.args))
     for w in pl.writes
-        writearg!(bq, am, base, w)
+        writearg!(e, w)
     end
     return pl
 end
@@ -1936,7 +2093,10 @@ Device() = Device(VulkanAPI())
 # `LavaBackend()` — so the pair was a second implementation of one rule, and the
 # more specific one was the worse of the two: it discarded the backend it was
 # handed and built a default, which drops the queue a `LavaBackend(bq)` pins.
-adaptor(bq) = LavaAdaptor(ensure_active_batch!(bq))
+adaptor(e::Emitter) = LavaAdaptor(e.owner)
+# At COMPILE, where there is nothing to emit into yet and the adaptor is used for
+# its pure half — `adapt_storage` is a strip, and the pinning is a separate walk.
+adaptor(bq::VulkanBatchQueue) = LavaAdaptor(ensure_active_batch!(bq))
 
 
 # The portable constructors. A caller writes `Framebuffer(backend, w, h)` and
@@ -1989,12 +2149,12 @@ batchqueue(d::LavaDevice) = d.bq
 Keyed negatively so host and device buffers of the same size never share a free
 list — handing a device-local buffer to a memcpy would be a segfault, not a
 wrong picture."""
-function takehost!(r::Recycler, bq, n::Integer)
+function takehost!(r::Recycler, e::Emitter, n::Integer)
     pool = get(r.free, -Int(n), nothing)
     if pool !== nothing && !isempty(pool)
         return pop!(pool)
     end
-    host_buffer(bq, n)
+    host_buffer(queueof(e), n)
 end
 
 
@@ -2020,8 +2180,8 @@ Renaming a buffer to change one element would device-copy everything that did
 not change, and writing a whole 2 MB array in place would need the hazard
 handled. Each route is bad at the other's job, which is why both exist.
 """
-write_update!(g::Graph, bq, r::UpdateRef, data::Buffer) =
-    write_update!(g, bq, r, storage(data))
+write_update!(g::Graph, e::Emitter, r::UpdateRef, data::Buffer) =
+    write_update!(g, e, r, storage(data))
 
 # A scalar attribute is a one-element buffer, so a new value is a one-element
 # write: in place, inline in the command buffer, four to sixteen bytes riding
@@ -2030,29 +2190,29 @@ write_update!(g::Graph, bq, r::UpdateRef, data::Buffer) =
 # stall per changed colour.
 
 
-write_update!(g::Graph, bq, r::UpdateRef, x) =
-    (inplace!(bq, r.resource, [x], 1); nothing)
+write_update!(g::Graph, e::Emitter, r::UpdateRef, x) =
+    (inplace!(e, r.resource, [x], 1); nothing)
 
 
-function write_update!(g::Graph, bq, r::UpdateRef, data::AbstractVector{T}) where {T}
+function write_update!(g::Graph, e::Emitter, r::UpdateRef, data::AbstractVector{T}) where {T}
     dst = r.resource
     n = length(data) * sizeof(T)
     n == 0 && return
     if r.range === nothing && length(data) == length(dst)
-        rename!(g, bq, dst, data)
+        rename!(g, e, dst, data)
     else
-        inplace!(bq, dst, data, r.range === nothing ? 1 : first(r.range))
+        inplace!(e, dst, data, r.range === nothing ? 1 : first(r.range))
     end
     nothing
 end
 
 
-rename!(g::Graph, bq, dst::Buffer{T,1}, data::Buffer{T,1}) where {T} =
-    rename!(g, bq, dst, storage(data))
+rename!(g::Graph, e::Emitter, dst::Buffer{T,1}, data::Buffer{T,1}) where {T} =
+    rename!(g, e, dst, storage(data))
 
 
-inplace!(bq, dst, data::Buffer, from::Integer) =
-    inplace!(bq, dst, storage(data), from)
+inplace!(e::Emitter, dst, data::Buffer, from::Integer) =
+    inplace!(e, dst, storage(data), from)
 
 
 """
@@ -2067,22 +2227,22 @@ The staging buffer is recycled by size for the same reason the stores are: it is
 the same size every frame, and a recorded copy reads it later, so it cannot be
 handed out again until the GPU is past this frame.
 """
-function rename!(g::Graph, bq, dst::Buffer{T,1}, data::AbstractVector{T}) where {T}
+function rename!(g::Graph, e::Emitter, dst::Buffer{T,1}, data::AbstractVector{T}) where {T}
     old = dst.store
     nbytes = length(data) * sizeof(T)
     fresh = take!(g.recycler, dst.dev, T, dst.capacity)
-    host = takehost!(g.recycler, bq, nbytes)
+    host = takehost!(g.recycler, e, nbytes)
 
     src = data isa Vector{T} ? data : collect(data)
     GC.@preserve src Base.unsafe_copyto!(host.mapped_ptr, Ptr{UInt8}(pointer(src)), nbytes)
 
     fview = deviceview(dst.dev, fresh)
     fmb = fview.buf[]
-    cmd_copy_buffer!(bq, host.buffer, fmb, nbytes;
+    cmd_copy_buffer!(e, host.buffer, fmb, nbytes;
                           dst_off = pool_offset(fmb) + fview.offset)
 
     dst.store = fresh
-    signal = ensure_active_batch!(bq).signal_value
+    signal = signalof(e)
     retire!(g.recycler, old, dst.capacity * sizeof(T), signal)
     retire!(g.recycler, host, -nbytes, signal)
     nothing
@@ -2125,48 +2285,65 @@ function timings(pl::Plan{LavaDevice})
 end
 
 
-function bake!(pl::Plan{LavaDevice})
-    pl.baked === nothing || return pl      # idempotent; re-baking would strand the old one
+"""
+    record!(plan) -> plan
+
+Emit the plan's work into command buffers it owns, one per argument slot, and
+seal them. `run!` then writes per-run values and submits; it never records.
+
+Idempotent — a second call would strand the first set of recordings.
+
+**One recording per slot**, and that is not an optimisation. `e.base` is folded
+into every address a recording holds, so a recording cannot be pointed at a
+different slot afterwards; recording once and pinning the slot for the plan's
+life was the first shape of this, and it took the argument ring away from exactly
+the plans that need it most, so `rebind!` wrote the bytes a submission still in
+flight was reading. Measured as an accumulator reading 36 where an interpreted
+run read 21.
+
+Indexed BY THE SLOT, not by iteration order. `run!` looks a recording up as
+`pl.recordings[pl.args.slot]`, so the two have to agree on what the index means —
+and they do not agree for free: this was written as `map(1:ARG_SLOTS)`, which is
+only right when the ring starts at 0. A plan that has already RUN is somewhere
+else in the ring, so recording 1 named slot 2 and every submission afterwards
+read a neighbouring slot's arguments. It shows up as an image that is wrong for
+some sample counts and right for others — right exactly when the number of runs
+brings the two indices back into phase.
+
+This was `bake!`, and the name went with the idea it named: a plan that had been
+"baked" was a plan whose commands had been frozen out of an ordinary interpreted
+run, which is why `bake!` used to EXECUTE the plan as a side effect of recording
+it, and why `bake!`/`run!` had to agree about barriers, slots and what a `Ref`
+meant. Recording is what running a plan is.
+"""
+function record!(pl::Plan{LavaDevice})
+    pl.recordings === nothing || return pl
     g = pl.graph
     isempty(g.surfaces) || throw(ArgumentError(
-        "bake!: this plan draws to a surface. A swapchain image is a different image " *
-        "every frame and a recording names one, so a windowed plan needs a recording " *
-        "per swapchain image — which is not built yet. Headless plans bake today."))
-    pl.profiler === nothing || throw(ArgumentError(
-        "bake!: profiling and baking do not combine yet. `timings` measures host " *
-        "recording per pass, and a baked plan does not record — the numbers would be " *
-        "the ones from the capture, reported forever. Build the plan without " *
-        "`profile = true`, or do not bake it."))
+        "record!: this plan draws to a surface. A swapchain image is a different " *
+        "image every frame and a recording names one, so a windowed plan needs a " *
+        "recording per swapchain image — which is not built yet. Headless plans " *
+        "record today."))
+    renaming(g) === nothing || throw(ArgumentError(
+        "record!: this plan has a whole-buffer `Update`, which lands by RENAMING — " *
+        "the contents go into a fresh store and the resource is pointed at it, " *
+        "because writing them in place would overwrite bytes the previous run may " *
+        "still be reading. A recording holds the address it was written with, so " *
+        "it would keep reading the store the update moved away from. Narrow the " *
+        "update with `range =`, which always writes in place, or leave the plan " *
+        "unrecorded."))
     bq = g.dev.bq
     refit!(pl)
     checkextents(pl)
-    # One recording per argument slot, each naming its own.
-    #
-    # `slotbase(am)` is folded into every address a recording holds, so a
-    # recording cannot be pointed at a different slot afterwards. Capturing one
-    # and pinning the slot for the plan's life was the first shape of this, and
-    # it took the ring away from exactly the plans that need it most: `rebind!`
-    # then wrote the bytes a replay still in flight was reading.
-    #
-    # Indexed BY THE SLOT, not by iteration order. `run!` looks the recording up
-    # as `pl.baked[pl.args.slot]`, so the two have to agree on what the index
-    # means — and they do not agree for free: `bake!` was written as
-    # `map(1:ARG_SLOTS)`, which is only right when the ring starts at 0. A plan
-    # that has already RUN is somewhere else in the ring, so recording 1 named
-    # slot 2, and every replay afterwards read the arguments of a neighbouring
-    # slot. It shows up as a rendered image that is wrong for some sample counts
-    # and right for others — right exactly when the number of runs brings the
-    # two indices back into phase.
     recordings = Vector{Any}(nothing, ARG_SLOTS)
     for _ in 1:ARG_SLOTS
         slot = nextslot!(pl.args, g.dev)
-        recordings[slot] = capture(bq) do
-            concurrent_dispatch_group() do
-                record!(pl, bq; derived = true, suppress = true, updates = false)
-            end
-        end
+        rec = recording!(bq)
+        emit!(Emitter(rec, pl.args, slotbase(pl.args)), pl)
+        seal!(rec)
+        recordings[slot] = rec
     end
-    pl.baked = recordings
+    pl.recordings = recordings
     # Which arguments `run!` has to write again, and — by omission — which are
     # written here and never again. See `Plan.writes`.
     #
@@ -2178,21 +2355,20 @@ function bake!(pl::Plan{LavaDevice})
     # The offsets it records are relative to a slot, so the list serves every
     # recording in the ring whichever one is current here.
     writes = ArgWrite[]
-    let am = pl.args, b = slotbase(am)
-        ensure_active_batch!(bq)
+    let e = emitter(bq, pl.args, slotbase(pl.args))
         for pp in pl.passes
             for d in pp.dispatches
-                append!(writes, argwrites(bq, d, am, b))
+                append!(writes, argwrites(e, d))
             end
             for dr in pp.draws
-                append!(writes, argwrites(bq, dr, am, b))
+                append!(writes, argwrites(e, dr))
             end
         end
     end
     pl.writes = writes
-    # And each write stays inside its own bytes — checked here, at `bake!`,
-    # naming the plan, rather than surfacing as a rendered image that is subtly
-    # wrong three layers away. That is how two earlier attempts at this failed.
+    # And each write stays inside its own bytes — checked here, naming the plan,
+    # rather than surfacing as a rendered image that is subtly wrong three layers
+    # away. That is how two earlier attempts at this failed.
     verifywrites(pl)
     pl
 end
@@ -2203,7 +2379,7 @@ Check that every [`ArgWrite`](@ref) touches only the bytes it claims.
 This is the property worth checking, and the obvious one is FALSE. "Performing
 the writes changes nothing, since everything was just packed" sounds right and is
 not: a `Ref` may hold a value whose adapted form contains a device address, and
-that address can legitimately differ between the capture and now. Hikari's
+that address can legitimately differ between the recording and now. Hikari's
 `filter_sampler` is exactly that, and the byte that gave it away was the high
 half of a pointer — `0x00007f29…` against `0x00007f2b…`. Writing the current
 address is the whole point of the write; a check that forbids it is checking the
@@ -2216,15 +2392,14 @@ neighbour, which is the failure this exists to catch.
 """
 function verifywrites(pl::Plan)
     am = pl.args
-    base = slotbase(am)
     n = am.stride
-    ensure_active_batch!(pl.graph.dev.bq)
+    e = emitter(pl.graph.dev.bq, am, slotbase(am))
     before = Vector{UInt8}(undef, n)
     after = Vector{UInt8}(undef, n)
     for w in pl.writes
-        unsafe_copyto!(pointer(before), am.ptr + base, n)
-        writearg!(pl.graph.dev.bq, am, base, w)
-        unsafe_copyto!(pointer(after), am.ptr + base, n)
+        unsafe_copyto!(pointer(before), am.ptr + e.base, n)
+        writearg!(e, w)
+        unsafe_copyto!(pointer(after), am.ptr + e.base, n)
         # Slot-relative and 1-based, to match the indices being compared.
         slot = (w.entryoff + w.slotoff + 1):(w.entryoff + w.slotoff + 8)
         inl0 = w.entryoff + ((w.inline + 7) & ~7) + 1
@@ -2233,23 +2408,60 @@ function verifywrites(pl::Plan)
             before[i] == after[i] && continue
             (i in slot || i in inl) && continue
             throw(ArgumentError(
-                "bake!: an argument write reached outside its own bytes — wrote " *
+                "record!: an argument write reached outside its own bytes — wrote " *
                 "byte $i, which is neither its slot " *
                 "($(first(slot))..$(last(slot))) nor its inline region " *
                 "($(isempty(inl) ? "none" : "$(first(inl))..$(last(inl))")). " *
                 "Entry at $(w.entryoff), slot offset $(w.slotoff), byval " *
                 "$(w.byval), inline $(w.inline), ref $(typeof(w.ref)). The " *
                 "offsets in `plan.writes` disagree with what " *
-                "`pack_args_direct!` used, so a baked run would corrupt a " *
+                "`pack_args_direct!` used, so a run would corrupt a " *
                 "neighbouring argument."))
         end
     end
     return pl
 end
 
+"""
+The first `Update` on this graph that may rename its target, or `nothing`.
 
+A whole-buffer write renames — see `write_update!` — and a ranged one never
+does, so this is the property that decides whether the plan can be recorded. It
+is asked of the GRAPH rather than of the values, so the answer is fixed for the
+plan's life.
 
-function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
+Conservative on purpose: a ref with no range that is written a SHORTER vector
+goes in place, and this still says it may rename. The alternative is a plan that
+records fine until the day a caller writes the whole buffer.
+"""
+function renaming(g::Graph)
+    for u in g.updates
+        u.range === nothing && return u
+    end
+    return nothing
+end
+
+"""Whether this plan's commands can be written once, or have to be emitted per
+run. Two reasons they cannot, and both go away later in the refactor: a surface
+(step 4) and an `Update` that renames (step 3, where a per-run value rides inline
+in the command buffer and nothing has to move)."""
+recordable(pl::Plan) = isempty(pl.graph.surfaces) && renaming(pl.graph) === nothing
+
+"""
+    run!(plan)
+
+Write this run's values and hand the plan's recording to the device.
+
+**It does not record.** The `barriers` keyword is gone with the branch it
+selected: `:backend` meant "let Lava's per-dispatch recorder insert the
+ordering", `:both` meant "emit the derived barriers as well", and both were A/B
+scaffolding for a comparison that has been made. An emitter writes what the plan
+derived, and there is no automatic barrier left to compare against.
+
+A plan that cannot be recorded still emits per run, into the batch — see
+[`recordable`](@ref) for the two reasons, both of which later steps remove.
+"""
+function run!(pl::Plan{LavaDevice})
     checklive(pl, pl.slabs, length(pl.graph.transients))
     # Anything dropped without a `free!` goes back here, one submission boundary
     # after it was dropped. Cheap and a no-op when nothing was — see
@@ -2257,11 +2469,9 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
     # renderer that has to remember to call it is one that stops reclaiming the
     # day someone forgets, which is the failure this exists to remove.
     reclaim!(pool(pl.graph.dev), pl.graph.dev)
-    barriers in (:derived, :backend, :both) ||
-        throw(ArgumentError("barriers must be :derived, :backend or :both, got $barriers"))
     g = pl.graph
     bq = g.dev.bq
-    # Before this frame overwrites them, and without waiting: see `collect!`.
+    # Before this run overwrites them, and without waiting: see `collect!`.
     pl.profiler === nothing || collect!(pl.profiler, g.dev.ctx)
     # Once per frame, here rather than in `isopen`: a predicate that also pumps
     # the event queue is a surprise, and a frame loop that has to remember to
@@ -2286,75 +2496,15 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
     # per tracking transient.
     moved = refit!(pl)
     checkextents(pl)            # and anything with a fixed size has to still fit
-    if pl.baked !== nothing
-        # A refit re-places every transient, so the recording names storage that
-        # no longer exists. Nothing tracking can move in a headless plan today,
-        # which is why this is an assertion rather than a re-bake.
-        moved && throw(ArgumentError(
-            "run!: a transient moved under a baked plan, so its recording names " *
-            "storage that has been replaced. Re-`Plan` and `bake!` again."))
-        # Updates first and fresh — `replay!` appends the recording behind
-        # whatever is in the open batch, so the copies land ahead of it in the
-        # one submission, which is the order the derived barriers inside the
-        # recording were built for.
-        record_updates!(pl, bq)
-        # One slot per run, and one recording per slot. This is where a baked
-        # run waits, and only when the host is `ARG_SLOTS` runs ahead of the
-        # device — the same rule an unbaked run follows, and the thing that
-        # makes the `rebind!` below safe without a drain.
-        nextslot!(pl.args, g.dev)
-        # The arguments, every run, without the caller asking.
-        #
-        # `rebind!` was the caller's job, which made a baked plan mean something
-        # different from an unbaked one: unbaked re-records, so a `Ref` argument
-        # is re-read by `argvalue` and repacked every frame; baked replays the
-        # bytes from `bake!` unless somebody remembered. A renderer that changes
-        # `sample_idx` per frame silently rendered sample 0 forever.
-        #
-        # That is the mistake `reclaim!` above is explicitly written to avoid —
-        # "a renderer that has to remember to call it is one that stops
-        # reclaiming the day someone forgets". Baking is a decision about WHEN
-        # commands are built, not about what the arguments mean, and the graph
-        # holds every argument, so it repacks them.
-        #
-        # It costs the packing, which is the cheap half. What baking saves is
-        # building the command buffers and the submissions, and that is untouched.
-        rebind!(pl)
-        # A replay writes this arena's bytes like any other run, so it has to
-        # claim them — even though it cannot emit a barrier of its own, since a
-        # recording is frozen. Skipping the claim leaves the arena naming
-        # whoever RECORDED last, and the next tenant then sees itself there and
-        # emits nothing: a handover away from a baked plan with no barrier at
-        # all. (The baked plan taking over from someone else is still
-        # unbarriered — that is what `bake!`ing into a shared arena costs, and
-        # `remappable` already refuses the growth case.)
-        let pool = pool(pl.graph.dev)
-            for ar in pl.arenas
-                takeover!(pool, ar, pl)
-            end
-        end
-        # And what covers the slot this run wrote, so the next pass round the
-        # ring knows what to wait for.
-        pl.args.slot_token[pl.args.slot] = replay!(pl.baked[pl.args.slot])
-        return nothing
-    end
+    recordable(pl) && return submitrun!(pl, bq, moved)
     for s in g.surfaces
         acquire_next_image!(s.win)
     end
     # One slot of the plan's argument memory per frame, reused only once the GPU
     # has passed the frame that last used it.
     nextslot!(pl.args, g.dev)
-    if barriers === :derived
-        # The group is a scope rather than a flag, so nothing leaks past here.
-        concurrent_dispatch_group() do
-            record!(pl, bq; derived = true, suppress = true)
-        end
-    else
-        record!(pl, bq; derived = barriers === :both, suppress = false)
-    end
-    # What this frame signals covers everything written into the slot. A split
-    # mid-frame makes later batches with higher values, and the last one covers
-    # them all, so reading it after recording is right.
+    emit!(emitter(bq, pl.args, slotbase(pl.args)), pl; updates = true)
+    # What this frame signals covers everything written into the slot.
     pl.args.slot_token[pl.args.slot] = ensure_active_batch!(bq).signal_value
     for s in g.surfaces
         present_frame!(bq, s.win)
@@ -2362,19 +2512,68 @@ function run!(pl::Plan{LavaDevice}; barriers::Symbol = :derived)
     nothing
 end
 
+"""One run of a recorded plan: its updates, this run's arguments, and a submit."""
+function submitrun!(pl::Plan, bq, moved::Bool)
+    pl.recordings === nothing && record!(pl)
+    # A refit re-places every transient, so the recordings name storage that no
+    # longer exists. Nothing tracking can move in a headless plan today, which is
+    # why this is an assertion rather than a re-record.
+    moved && throw(ArgumentError(
+        "run!: a transient moved under a recorded plan, so its command buffer " *
+        "names storage that has been replaced. Re-`Plan` and `record!` again."))
+    # Updates first and fresh — `submit!` appends the recording behind whatever
+    # is in the open batch, so the copies land ahead of it in the one submission,
+    # which is the order the barriers inside the recording were built for.
+    emitupdates!(pl, bq)
+    # One slot per run, and one recording per slot. This is where a run waits,
+    # and only when the host is `ARG_SLOTS` runs ahead of the device — which is
+    # also what makes the `rebind!` below safe without a drain.
+    nextslot!(pl.args, pl.graph.dev)
+    # The arguments, every run, without the caller asking.
+    #
+    # `rebind!` was the caller's job, which made a recorded plan mean something
+    # different from an interpreted one: interpreted re-recorded, so a `Ref`
+    # argument was re-read by `argvalue` and repacked every frame; recorded
+    # replayed the bytes from `bake!` unless somebody remembered. A renderer that
+    # changes `sample_idx` per frame silently rendered sample 0 forever.
+    #
+    # That is the mistake `reclaim!` above is explicitly written to avoid — "a
+    # renderer that has to remember to call it is one that stops reclaiming the
+    # day someone forgets". Recording is a decision about WHEN commands are
+    # built, not about what the arguments mean, and the graph holds every
+    # argument, so it repacks them.
+    rebind!(pl)
+    # A run writes this arena's bytes like any other, so it has to claim them —
+    # even though it cannot emit a barrier of its own, since the commands are
+    # already written. Skipping the claim leaves the arena naming whoever
+    # RECORDED last, and the next tenant then sees itself there and emits
+    # nothing: a handover with no barrier at all. (This plan taking over from
+    # someone else is still unbarriered — that is what recording into a shared
+    # arena costs, and `remappable` already refuses the growth case.)
+    let p = pool(pl.graph.dev)
+        for ar in pl.arenas
+            takeover!(p, ar, pl)
+        end
+    end
+    # And what covers the slot this run wrote, so the next pass round the ring
+    # knows what to wait for.
+    pl.args.slot_token[pl.args.slot] = submit!(bq, pl.recordings[pl.args.slot]::Recording)
+    return nothing
+end
 
-"""The update passes alone, recorded fresh in front of a replay."""
-function record_updates!(pl::Plan, bq)
+"""The update passes alone, emitted fresh in front of a recording."""
+function emitupdates!(pl::Plan, bq)
+    anypending(pl.graph.updates) || return nothing
+    e = emitter(bq, pl.args, slotbase(pl.args))
     for pp in pl.passes
         pp.pass.kind === :update || continue
-        record_pass!(pl.graph, bq, pp, true, pl.args; suppress = true)
+        emitpass!(e, pl.graph, pp)
     end
     nothing
 end
 
-
 """
-One draw: write its arguments into the plan's slot and record it.
+One draw: write its arguments into the plan's slot and emit it.
 
 Its own function because a pass's draws are differently parameterised, so the
 loop dispatches once per draw and everything inside is concrete — including
@@ -2385,85 +2584,68 @@ Nothing is allocated and nothing is pinned: the memory belongs to the plan, and
 every resource the arguments name is reachable from the plan for as long as it
 lives.
 """
-function record_draw!(bq, d::CompiledDraw, am::ArgMemory, base::Int)
+function emitdraw!(e::Emitter, d::CompiledDraw)
     # `repack!` is the packing, and it is the same packing `rebind!` does — which
     # is the point of it being a function: these six lines used to be written out
     # twice, here and inside `rebind!`'s loop, and the copies drifted.
-    repack!(bq, d, am, base)
+    repack!(e, d)
     # No viewport, no scissor, no pin: the pass set the first two once, and the
     # plan holds the pipeline for longer than any frame.
-    emit_draw!(bq, d.compiled, d.count, am.address + base + d.argoff)
+    emit_draw!(e, d.compiled, d.count, e.args.address + e.base + d.argoff)
 end
 
 # Where the counts come from, decided once by type rather than per frame by a
-# branch. The indirect one records the same command whatever the numbers are,
+# branch. The indirect one emits the same command whatever the numbers are,
 # which is why nothing has to be read back to record a frame.
 
+emit_draw!(e, pipe, n::Integer, addr::UInt64) =
+    draw_in_pass!(e, pipe, n; push_bda = addr, pin = false)
 
-emit_draw!(bq, pipe, n::Integer, addr::UInt64) =
-    draw_in_pass!(bq, pipe, n; push_bda = addr, pin = false)
+emit_draw!(e, pipe, x, addr::UInt64) =
+    draw_in_pass!(e, pipe, count(x); push_bda = addr, pin = false)
 
-
-emit_draw!(bq, pipe, x, addr::UInt64) =
-    draw_in_pass!(bq, pipe, count(x); push_bda = addr, pin = false)
-
-
-emit_draw!(bq, pipe, c::Commands, addr::UInt64) =
-    draw_indirect_in_pass!(bq, pipe, storage(c.resource);
-                                   push_bda = addr, pin = false)
-
+emit_draw!(e, pipe, c::Commands, addr::UInt64) =
+    draw_indirect_in_pass!(e, pipe, storage(c.resource);
+                           push_bda = addr, pin = false)
 
 """
 Write one dispatch's arguments into the plan's slot, and answer with the
 acceleration structure they name.
 
-Separate from recording because a **baked** plan has to do exactly this and
-nothing else: its command buffer holds the ADDRESS of the slot, so a value that
-moved is a write to host-mapped memory rather than a new recording. See
-[`rebind!`](@ref).
+Separate from emitting because a recorded plan has to do exactly this and nothing
+else: its command buffer holds the ADDRESS of the slot, so a value that moved is
+a write to host-mapped memory rather than a new recording. See [`rebind!`](@ref).
 """
-function packdispatch!(bq, d::CompiledDispatch, am::ArgMemory, base::Int, it)
-    off = base + d.argoff
+function packdispatch!(e::Emitter, d::CompiledDispatch, it)
+    am = e.args
+    off = e.base + d.argoff
     lp = d.launch
     raw = rawargs(d.args)
-    args = devargs(adaptor(bq), raw)
-    pack_args_direct!(bq, am.ptr + off, am.address + off, lp.offsets,
+    args = devargs(adaptor(e), raw)
+    pack_args_direct!(e.owner, am.ptr + off, am.address + off, lp.offsets,
                            lp.arg_buffer_size, lp.byval_sizes,
                            (d.kernel, it.ka_ctx, args...))
     return d.tlas ? find_tlas_in_args(raw) : nothing
 end
 
-
 """
-Record the launch itself. A host-side ndrange dispatches directly; a
-[`DeviceRange`](@ref) converts the element count to workgroup counts on the
-device and dispatches indirectly off that.
+Emit the launch itself. A host-side ndrange dispatches directly; a
+[`DeviceRange`](@ref) reads workgroup counts the pass's fused prepare already
+wrote, and dispatches indirectly off them.
 
 The conversion is a kernel, so it cannot live in Mantle core — but the CONTRACT
 does: core hands over an element count and knows nothing about workgroups, and
 the graph orders whatever wrote the count before this dispatch because
-`indirectcount!` registered it as an `Indirect` read. That barrier is the one
-Hikari places by hand today, and getting it wrong is what
-`concurrent_indirect_group` had to be taught about the hard way.
+`indirectcount!` registered it as an `Indirect` read.
+
+The prepare is NOT here any more. It was, and it consulted `bq.deferred_indirect`
+to decide whether to write it now or hand it to a group flush that would fuse it
+with the pass's others — a per-dispatch decision made from queue state about
+something the pass already knows. `emitprepares!` writes them all, once, before
+the first dispatch of the pass.
 """
-recordlaunch!(bq, ::Any, lp, argaddr, it, tlas) =
-    vk_dispatch!(bq, lp.pipeline, argaddr, it.block_dims, tlas)
+emitlaunch!(e::Emitter, ::Any, lp, argaddr, it, tlas, ::Nothing, name) =
+    emit_dispatch!(e, lp.pipeline, argaddr, it.block_dims, tlas, name)
 
-
-function recordlaunch!(bq, r::DeviceRange, lp, argaddr, it, tlas)
-    indirect = get_indirect_buffer(bq)
-    deferred = bq.deferred_indirect
-    if deferred === nothing
-        fast_prepare_indirect!(bq, indirect, storage(r.count), prod(it.ws_3d))
-        vk_dispatch_indirect!(bq, lp.pipeline, argaddr, indirect, tlas)
-    else
-        # Inside the pass's group: hand over the slot and the count, and let the
-        # flush emit one prepare for all of them. Same protocol Lava's own
-        # `ka_launch_indirect!` uses, so there is one deferral format rather than
-        # two that have to agree.
-        push!(deferred, (bq, lp.pipeline, argaddr, indirect, tlas,
-                         storage(r.count), prod(it.ws_3d)))
-    end
-    nothing
-end
-
+emitlaunch!(e::Emitter, ::DeviceRange, lp, argaddr, it, tlas, indirect, name) =
+    emit_dispatch_indirect!(e, lp.pipeline, argaddr, indirect, tlas, name)

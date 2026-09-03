@@ -254,58 +254,100 @@ function get_rt_descriptor_set(pipeline::LavaRTPipeline, tlas::LavaTLAS)
 end
 
 """
-    rt_dispatch!(pipeline, tlas, push_bda, width, height; depth=1)
+    emit_trace!(emitter, pipeline, tlas, push_bda, width, height, depth, name)
+    emit_trace_indirect!(emitter, pipeline, tlas, push_bda, indirect, name)
 
-Record an RT trace dispatch into the batched command buffer.
-`push_bda` is the BDA address of the argument buffer.
+Write one ray-tracing dispatch, and nothing else. The descriptor set comes from
+`get_rt_descriptor_set`, which has always cached per (TLAS, layout) on the TLAS
+itself — so unlike the compute HWTLAS path there was never a per-dispatch pool
+here.
+"""
+function emit_trace!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
+                     push_bda::UInt64, width::Integer, height::Integer,
+                     depth::Integer, name::AbstractString = "")
+    cmd = e.cmd
+    desc_set = get_rt_descriptor_set(pipeline, tlas)
+    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
+    pin!(e, pipeline)
+    VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
+    pin!(e, tlas.accel)
+    pin!(e, tlas.storage)
+    push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
+    # Same optional GPU timestamps as the compute paths.  Without these the
+    # profiler is blind to hardware ray tracing — on an hw_accel=true frame
+    # that is where nearly all the GPU time goes, so a report built only
+    # from `cmd_dispatch` accounts for a small fraction of the frame and
+    # invites the wrong conclusion about what is slow.
+    ts_slot = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name;
+                                             stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
+    VK.cmd_trace_rays_khr(cmd,
+        pipeline.raygen_region, pipeline.miss_region,
+        pipeline.hit_region, pipeline.callable_region,
+        UInt32(width), UInt32(height), UInt32(depth))
+    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts_slot, e.ctx.cmd_pipeline_barrier_fptr;
+        stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
+    emitted!(e, name)
+    return nothing
+end
+
+function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
+                              push_bda::UInt64, indirect::LavaArray{UInt32,1},
+                              name::AbstractString = "")
+    cmd = e.cmd
+    desc_set = get_rt_descriptor_set(pipeline, tlas)
+    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
+    pin!(e, pipeline)
+    VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+        pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
+    pin!(e, tlas.accel)
+    pin!(e, tlas.storage)
+    push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
+    # bda_address(indirect) includes the view's element offset, so the address
+    # passed to Vulkan points exactly at the 3-UInt32 command.
+    ts_slot = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name;
+                                             stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
+    VK.cmd_trace_rays_indirect_khr(cmd,
+        pipeline.raygen_region, pipeline.miss_region,
+        pipeline.hit_region, pipeline.callable_region,
+        bda_address(indirect))
+    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts_slot, e.ctx.cmd_pipeline_barrier_fptr;
+        stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
+    pin!(e, indirect)
+    emitted!(e, name)
+    return nothing
+end
+
+"""
+    rt_dispatch!(bq, pipeline, tlas, push_bda, width, height; depth=1)
+
+The unmodelled form: `record_dispatch!`'s barrier, then the same commands.
 """
 function rt_dispatch!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
                       push_bda::UInt64, width::Integer, height::Integer;
                       depth::Integer=1)
     bq.last_dispatch_info = "rt_trace w=$width h=$height"
-
     record_dispatch!(bq;
         dst_stage=VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         extra_dst_access=VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
         is_rt=true,
-        info="rt_trace w=$width h=$height"
     ) do batch
-        cmd = batch.cmd_buf
-        desc_set = get_rt_descriptor_set(pipeline, tlas)
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-        pin!(batch, pipeline)
-        VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-            pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-        pin!(batch, tlas.accel)
-        pin!(batch, tlas.storage)
-        push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
-        # Same optional GPU timestamps as the compute paths.  Without these the
-        # profiler is blind to hardware ray tracing — on an hw_accel=true frame
-        # that is where nearly all the GPU time goes, so a report built only
-        # from `cmd_dispatch` accounts for a small fraction of the frame and
-        # invites the wrong conclusion about what is slow.
-        ts_slot = maybe_write_dispatch_start_timestamp!(bq.ctx::VkContext, cmd, bq.last_dispatch_info;
-                                                 stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
-        VK.cmd_trace_rays_khr(cmd,
-            pipeline.raygen_region, pipeline.miss_region,
-            pipeline.hit_region, pipeline.callable_region,
-            UInt32(width), UInt32(height), UInt32(depth))
-        maybe_write_dispatch_end_timestamp!(bq.ctx::VkContext, cmd, ts_slot, barrier_fptr(bq);
-            stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
+        emit_trace!(Emitter(batch, nothing, 0), pipeline, tlas, push_bda,
+                    width, height, depth, bq.last_dispatch_info)
     end
 end
 
 """
-    rt_dispatch_indirect!(pipeline, tlas, push_bda, indirect::LavaArray{UInt32,1})
+    rt_dispatch_indirect!(bq, pipeline, tlas, push_bda, indirect::LavaArray{UInt32,1})
 
-Record an indirect RT trace dispatch. The `indirect_buf` must contain a
+Record an indirect RT trace dispatch. `indirect` must contain a
 VkTraceRaysIndirectCommandKHR (3×UInt32), written by a previous GPU kernel.
 """
 function rt_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
                                push_bda::UInt64, indirect::LavaArray{UInt32,1})
     bq.last_dispatch_info = "rt_indirect"
-
     record_dispatch!(bq;
         dst_stage=VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
         extra_dst_access=VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK.ACCESS_INDIRECT_COMMAND_READ_BIT,
@@ -313,30 +355,9 @@ function rt_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, t
         # Indirect-args read depends on the preceding prepare write — never
         # elide this barrier (see record_dispatch! docs).
         force_pre_barrier=true,
-        info="rt_indirect"
     ) do batch
-        cmd = batch.cmd_buf
-        desc_set = get_rt_descriptor_set(pipeline, tlas)
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-        pin!(batch, pipeline)
-        VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-            pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-        pin!(batch, tlas.accel)
-        pin!(batch, tlas.storage)
-        push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
-
-        # bda_address(indirect) includes the view's element offset, so the
-        # address we pass to Vulkan points exactly at the 3-UInt32 command.
-        ts_slot = maybe_write_dispatch_start_timestamp!(bq.ctx::VkContext, cmd, bq.last_dispatch_info;
-                                                 stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
-        VK.cmd_trace_rays_indirect_khr(cmd,
-            pipeline.raygen_region, pipeline.miss_region,
-            pipeline.hit_region, pipeline.callable_region,
-            bda_address(indirect))
-        maybe_write_dispatch_end_timestamp!(bq.ctx::VkContext, cmd, ts_slot, barrier_fptr(bq);
-            stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
-        pin!(batch, indirect)
+        emit_trace_indirect!(Emitter(batch, nothing, 0), pipeline, tlas, push_bda,
+                             indirect, bq.last_dispatch_info)
     end
 end
 

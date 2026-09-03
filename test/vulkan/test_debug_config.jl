@@ -110,8 +110,8 @@ using Test, Lava, Mantle
         #     ctx.diag.slab_dump_target != UInt64(0)
         #
         # and `nothing != UInt64(0)` is TRUE, so the debug scan of the argument
-        # slab ran on EVERY submit — a loop over `arg_slab_offset ÷ 8` words of
-        # host-visible memory, growing with every dispatch recorded. It cost ~41 µs
+        # memory ran on EVERY submit — a loop over every word of the host-visible
+        # blocks a recording reads, growing with the pool. It cost ~41 µs
         # of host CPU per dispatch (SAM 2 decode 7.1 -> 25 ms, encode 103 -> 131)
         # and said nothing, because `target` was `nothing` so no word ever matched
         # and the hit list stayed empty. The global it replaced was a

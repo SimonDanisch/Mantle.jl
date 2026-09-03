@@ -218,8 +218,8 @@ function pack_gfx_args_bda(bq::VulkanBatchQueue, args, push_info::PushConstantIn
     converted = map(a -> Adapt.adapt(adaptor, a), args)
     byval_sizes = push_info.byval_llvm_sizes
     total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(byval_sizes)
-    arg_buf = get_arg_buffer(bq, total_size)
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, push_info.arg_offsets,
+    arg_buf = get_arg_buffer(batch, total_size)
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, push_info.arg_offsets,
                       push_info.arg_buffer_size, byval_sizes, converted)
     return arg_buf.address
 end
@@ -244,9 +244,9 @@ function pack_gfx_args(bq::VulkanBatchQueue, args, push_info::PushConstantInfo)
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = push_info.arg_buffer_size + inline_extra
 
-    arg_buf = get_arg_buffer(bq, total_size)
+    arg_buf = get_arg_buffer(batch, total_size)
 
-    pack_args_direct!(bq, arg_buf.mapped_ptr, arg_buf.address, offsets,
+    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        push_info.arg_buffer_size, byval_sizes, converted)
 
     # Push constant = BDA of arg buffer
@@ -455,22 +455,22 @@ function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
     # the end of its buffer.
     cb_infos = [VK.CommandBufferSubmitInfo(cb, UInt32(0)) for cb in batch.sealed_cmd_bufs]
     push!(cb_infos, VK.CommandBufferSubmitInfo(cmd, UInt32(0)))
-    # And a replay queued behind them, last, exactly as `submit!` orders it. A
-    # windowed plan cannot be baked today, so this list is empty in every path
-    # that reaches here — but leaving it out is the same silent drop the
-    # paragraph above is about, and it would not announce itself either.
-    for cb in batch.replay_cmd_bufs
-        push!(cb_infos, VK.CommandBufferSubmitInfo(cb, UInt32(0)))
-    end
-    empty!(batch.replay_cmd_bufs)
     # Moved out of `sealed_cmd_bufs`, or the next frame submits them again: this
     # batch is reused across frames and `reclaim_batch!` is what normally empties
     # that list, which does not happen between two presents. Re-submitting a
     # sealed segment executes it twice — harmless for a clear, wrong for anything
     # that accumulates. They cannot go straight back to `free_cmd_bufs` either;
     # the GPU is still reading them until the fence. `reclaim_batch!` drains this.
-    append!(batch.submitted_cmd_bufs, batch.sealed_cmd_bufs)
+    #
+    # A buffer a `Recording` lent this batch is dropped rather than moved: the
+    # recording owns it and submits it again. A windowed plan cannot be recorded
+    # today, so `borrowed` is empty on every path that reaches here.
+    for cb in batch.sealed_cmd_bufs
+        any(x -> x === cb, batch.borrowed) && continue
+        push!(batch.submitted_cmd_bufs, cb)
+    end
     empty!(batch.sealed_cmd_bufs)
+    empty!(batch.borrowed)
     submit_info = VK.SubmitInfo2(wait_infos, cb_infos, signal_infos)
     queue_submit_2!(bq, [submit_info]; fence=win.in_flight[fi])
 
@@ -489,10 +489,6 @@ function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
 
     drain_deferred_frees!(bq)
     drain_deferred_as_frees!(bq)
-    # NOT a rewind: this frame is still executing and its shaders read their
-    # arguments out of the pool. Record how far the GPU must get before the pool
-    # can be reused; `get_arg_buffer` rewinds once the timeline passes it.
-    arg_pool_in_use!(bq, batch.signal_value)
 
     # Present
     present!(win)

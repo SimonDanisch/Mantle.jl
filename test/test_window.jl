@@ -366,12 +366,12 @@ else
         end
 
         seedchains!()
-        M.run!(s.plan; barriers = :backend)
+        M.run!(s.plan)
         KernelAbstractions.synchronize(M.backend(dev))
         reference = Array(M.storage(s.bufs[1][end]))
 
         seedchains!()
-        M.run!(s.plan; barriers = :derived)
+        M.run!(s.plan)
         KernelAbstractions.synchronize(M.backend(dev))
         @test Array(M.storage(s.bufs[1][end])) == reference
     end
@@ -1656,81 +1656,25 @@ else
         @test_throws "is never used by any pass" M.Plan(g)
     end
 
-    @testset "a custom pass declares what it touches, not how" begin
-        # `dispatch!` takes one kernel, its arguments and an ndrange. Work that is
-        # one unit to the caller and several launches underneath — an ATen
-        # operator, a fused block, a library call — has no way to say so, and
-        # splitting it into a pass per launch would declare a resource sequence
-        # the caller does not have. `custom!` is the declaration without the how.
-        n = 1 << 12
-        dev = M.Device(M.VulkanAPI())
-        g = M.Graph(dev)
-        src = M.Buffer(dev, fill(1f0, n))
-        mid = M.Transient.Buffer(g, Float32, n)
-        out = M.Buffer(dev, zeros(Float32, n))
-        M.custom!(g, "two launches") do p
-            a = M.use(p, mid; read = true, write = true)
-            b = M.use(p, src; read = true)
-            c = M.use(p, out; write = true)
-            return function ()
-                bump!(MVE.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
-                bump!(MVE.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
-            end
-        end
-        plan = M.Plan(g)
-        @test length(plan.passes) == 1
-        M.run!(plan)
-        KernelAbstractions.synchronize(M.backend(dev))
-        @test all(==(12f0), Array(out))      # 1 + 1, then + 10
-    end
-
-    @testset "the launches inside a custom pass are ordered against each other" begin
-        # The graph derives hazards between *passes*. Inside one it derives
-        # nothing, because the body did not say — and a body's second launch
-        # reading what its first wrote is the ordinary case, not an exotic one: a
-        # two-pass reduction, a split-K matmul, an operator with scratch.
-        #
-        # `run!(; barriers = :derived)` records inside a `concurrent_dispatch_group`
-        # so that Lava's automatic per-dispatch barrier does not double up with the
-        # derived ones. Left switched on through a custom body that suppressed
-        # exactly the barrier nobody else was going to emit, which is why SAM 2's
-        # image encoder came back as NaN through this path and matched to the bit
-        # under `:backend`.
-        #
-        # Two assertions, because the numeric one alone passes on a lucky day: the
-        # group has to be *lifted* for the body, and the result has to be right.
-        #
-        # `n` is SMALL on purpose. Two unordered dispatches only produce a wrong
-        # answer where the second one's workgroups can start before the first has
-        # finished, and a big grid saturates the device so thoroughly that they
-        # cannot. Measured here, wrong elements over ten runs of the same pair
-        # inside a `concurrent_dispatch_group`: 1<<14 fails 10/10 and mostly
-        # everywhere, 1<<16 fails 3/10, 1<<18 and up 0/10.
-        n = 1 << 14
-        dev = M.Device(M.VulkanAPI())
-        g = M.Graph(dev)
-        src = M.Buffer(dev, fill(1f0, n))
-        mid = M.Transient.Buffer(g, Float32, n)
-        out = M.Buffer(dev, zeros(Float32, n))
-        active = Bool[]
-        M.custom!(g, "dependent launches") do p
-            a = M.use(p, mid; read = true, write = true)
-            b = M.use(p, src; read = true)
-            c = M.use(p, out; write = true)
-            return function ()
-                push!(active, MVE.CONCURRENT_GROUP_ACTIVE[])
-                bump!(MVE.LavaBackend())(M.storage(a), M.storage(b), 1f0; ndrange = n)
-                bump!(MVE.LavaBackend())(M.storage(c), M.storage(a), 10f0; ndrange = n)
-            end
-        end
-        plan = M.Plan(g)
-        for mode in (:derived, :backend, :both), _ in 1:5
-            M.run!(plan; barriers = mode)
-            KernelAbstractions.synchronize(M.backend(dev))
-            @test all(==(12f0), Array(out))
-        end
-        @test all(!, active)                 # the group is lifted in every mode
-    end
+    # `custom!` stood here, with two testsets: a pass that declared what it
+    # touched but not how, whose body was a zero-argument callable run with the
+    # batch open, and a second one asserting that the launches INSIDE such a body
+    # were ordered against each other. Both are gone with the pass kind.
+    #
+    # What made it untenable is the second testset's subject. The graph derives
+    # hazards between passes; inside an opaque body it derives nothing, so
+    # `record_pass_work!` had to hand the body a QUEUE and then arrange the
+    # queue's heuristics around it — lift the concurrent group so Lava's
+    # automatic per-dispatch barrier came back for the body's own launches, arm
+    # `next_skip_barrier` so the FIRST of them skipped the one the pass had
+    # already emitted, and disarm it afterwards in case the body launched
+    # nothing. Three pieces of queue state, to compensate for a declaration that
+    # did not say what it was doing.
+    #
+    # Its one real user moved off it first: Hikari's hardware-RT pass is a
+    # `trace!` now, because a `custom!` body packs its own arguments while it
+    # runs and a recorded plan never runs the body again — see
+    # `Hikari/test/test_trace_pass_rebind.jl`. Nothing in `src/` used it.
 
     @testset "a dispatch takes a workgroup size" begin
         # The default partitions an ndrange along its first axis, so for anything
@@ -1932,10 +1876,10 @@ else
 
         # And they compute what they should, derived barriers against Lava's own.
         for s in (a, b)
-            M.run!(s.plan; barriers = :backend)
+            M.run!(s.plan)
             KernelAbstractions.synchronize(M.backend(dev))
             reference = Array(s.out)
-            M.run!(s.plan; barriers = :derived)
+            M.run!(s.plan)
             KernelAbstractions.synchronize(M.backend(dev))
             @test Array(s.out) == reference
             @test all(>(0f0), reference)

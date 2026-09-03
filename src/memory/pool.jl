@@ -303,11 +303,11 @@ function remap! end
 
 Whether this tenant can survive its arena moving. `true` unless it says otherwise.
 
-The one thing a tenant knows that the pool cannot: a plan whose command buffer
-has been recorded once and is replayed (`bake!`) holds the addresses the old
-region had, and nothing can rewrite a command buffer. Re-materialising underneath
-it produces a replay that reads freed storage — deterministic, quiet, and wrong,
-which is the worst of the three.
+The one thing a tenant knows that the pool cannot: a plan whose commands have
+been written once and are submitted again every run (`record!`) holds the
+addresses the old region had, and nothing can rewrite a command buffer.
+Re-materialising underneath it produces a run that reads freed storage —
+deterministic, quiet, and wrong, which is the worst of the three.
 
 So growth asks first and refuses, rather than discovering it later. Asked of
 every live tenant, not of the one growing: it is the INCUMBENT that cannot move.
@@ -337,6 +337,25 @@ Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
               Region[], Tuple{Region,Any}[], ReentrantLock())
 
 arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
+
+"""
+    movable(pool) -> Bool
+
+Whether every live tenant of every arena could survive its memory moving.
+
+`false` means a plan somewhere has been recorded: its command buffer holds the
+addresses its regions have today, and nothing can rewrite a command buffer.
+`growarena!` asks this of ONE arena before growing it; the block trim asks it of
+the whole pool before destroying a buffer, which is the same hazard with no arena
+to name it against.
+
+It replaces a `bq.capturing !== nothing` read in the Vulkan backend, which asked
+whether a capture happened to be OPEN. That is a different question and it was
+answerable only while `bake!` was running — a recording that had already been
+taken pinned nothing, so the trim was free to destroy a block it named.
+"""
+movable(p::Pool) =
+    all(a -> all(wr -> remappable(wr.value), tenants!(a)), values(p.arenas))
 
 blocksof(p::Pool, kind) = get!(() -> Block[], p.blocks, kind)
 
@@ -752,11 +771,11 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     # was, not half-grown with a region nobody is placed in.
     for wr in tenants!(a)
         remappable(wr.value) || throw(ArgumentError(
-            "a plan placed in arena $kind cannot be moved — it has been baked, and " *
-            "its recording holds the addresses the current region has. Another plan " *
-            "now needs $(humanbytes(bytes)) there, which would grow the arena and " *
-            "leave that recording pointing at freed storage. Build every plan that " *
-            "shares a device before baking any of them."))
+            "a plan placed in arena $kind cannot be moved — it has been recorded, " *
+            "and its command buffer holds the addresses the current region has. " *
+            "Another plan now needs $(humanbytes(bytes)) there, which would grow the " *
+            "arena and leave that recording pointing at freed storage. Build every " *
+            "plan that shares a device before recording any of them."))
     end
     fresh = acquire!(pool, dev, kind, transients, max(bytes, a.bytes);
                      align, blocksize, constraint = want)
@@ -823,7 +842,7 @@ the bytes over from a DIFFERENT one.
 What a backend asks before emitting the handover barrier. `sharing` is the wrong
 question on its own: it says the arena has more than one tenant, which is true
 for every run once two plans exist — so a plan run repeatedly, which is the
-common case (playing one clip, replaying a baked model), paid a full memory
+common case (playing one clip, running a recorded model), paid a full memory
 barrier per frame to be ordered against itself. Its own hazards are its
 schedule's business and already handled.
 

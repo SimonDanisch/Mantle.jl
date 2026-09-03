@@ -21,6 +21,11 @@ using KernelAbstractions: @kernel, @index, @Const
     @inbounds dst[i] = src[i] * a
 end
 
+@kernel function hostcopy!(dst, @Const(src))
+    i = @index(Global)
+    @inbounds dst[i] = src[i]
+end
+
 "A forced chain: each pass reads what the previous wrote."
 function buildhostchain(dev, n::Integer, links::Integer = 3)
     g = M.Graph(dev)
@@ -99,18 +104,12 @@ end
     @test M.peakbytes(M.Plan(g; alias = false)) == 3 * n * sizeof(Float32)
 end
 
-@testset "Host: custom! bodies are steps too" begin
-    ran = Ref(0)
-    dev = M.Device(M.HostAPI())
-    g = M.Graph(dev)
-    b = M.Buffer(dev, fill(1.0f0, 8))
-    M.custom!(g, "by hand") do p
-        M.use(p, b; read = true, write = true)
-        () -> (ran[] += 1; nothing)
-    end
-    M.run!(M.Plan(g))
-    @test ran[] == 1
-end
+# `custom!` stood here — a pass that declared what it touched and returned a
+# zero-argument callable to do it. It is gone: on a recording backend the body
+# had to be handed the QUEUE, and with it every heuristic reachable from one, to
+# compensate for a declaration that never said what it was doing. This backend's
+# half of it was one line (`bake(::Compile, body) = body`, "a body already IS the
+# callable"), so nothing here is worse off.
 
 @testset "Host: an Update writes at the position the graph reserved" begin
     dev = M.Device(M.HostAPI())
@@ -118,33 +117,40 @@ end
     b = M.Buffer(dev, zeros(Float32, 4))
     ref = M.Update(g, b)
     seen = Float32[]
-    M.custom!(g, "read it") do p
-        M.use(p, b; read = true)
-        () -> (append!(seen, copy(M.storage(b))); nothing)
+    # A `compute!` pass whose kernel copies the buffer somewhere the host can
+    # read, which is what `custom!` was doing here — declare a read, observe what
+    # the pass sees. `dispatch!` says the same thing and says it in a form the
+    # graph can model.
+    dst = M.Buffer(dev, zeros(Float32, 4))
+    M.compute!(g, "read it") do p
+        M.dispatch!(p, hostcopy!, (M.use(p, dst; write = true),
+                                   M.use(p, b; read = true)), 4)
     end
     plan = M.Plan(g)
+    observe!() = append!(seen, copy(M.storage(dst)))
 
     # Not fired: the update writes nothing, and the reader sees what was there.
-    M.run!(plan)
+    M.run!(plan); observe!()
     @test seen == zeros(Float32, 4)
 
     # Fired: the write lands BEFORE the pass that declared the read, which is the
     # whole claim — `ref(x)` itself only stores a reference.
     empty!(seen)
     ref(Float32[1, 2, 3, 4])
-    M.run!(plan)
+    M.run!(plan); observe!()
     @test seen == Float32[1, 2, 3, 4]
 
-    # …and it is consumed, so the next frame writes nothing again.
+    # …and it is consumed, so the next frame writes nothing again: the buffer
+    # still holds what the update landed, and the reader sees the same values.
     empty!(seen)
-    M.run!(plan)
+    M.run!(plan); observe!()
     @test seen == Float32[1, 2, 3, 4]
 
     # Host memory is directly addressable, so the write is in place and the
     # resource keeps its storage — where the Lava route renames into a fresh one.
     store = b.store
     ref(Float32[9, 9, 9, 9])
-    M.run!(plan)
+    M.run!(plan); observe!()
     @test b.store === store
     @test seen[(end - 3):end] == Float32[9, 9, 9, 9]
 end

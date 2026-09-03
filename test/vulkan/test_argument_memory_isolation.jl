@@ -3,13 +3,16 @@ using Lava, Mantle
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index
 
-# Regression: `sweep_retired_batches!` reset the arg/indirect slab cursors
-# whenever `in_flight` drained to empty — including when called
-# opportunistically from the ALLOCATION path in the middle of recording a
-# batch. The active batch's already-recorded dispatches keep their packed
-# args at slab offsets below the cursor; after the reset, the next
-# dispatch's args overwrite them, so the earlier dispatches read garbage
-# arg buffers (wrong buffer pointers) when the batch submits.
+# No two launches may be handed the same argument bytes while both can still
+# run. That is the property; these are the two ways it was broken.
+#
+# `sweep_retired_batches!` reset the arg/indirect slab cursors whenever
+# `in_flight` drained to empty — including when called opportunistically from
+# the ALLOCATION path in the middle of recording a batch. The active batch's
+# already-recorded dispatches keep their packed args at slab offsets below the
+# cursor; after the reset, the next dispatch's args overwrite them, so the
+# earlier dispatches read garbage arg buffers (wrong buffer pointers) when the
+# batch submits.
 #
 # Latent because `in_flight` only drains mid-recording when the GPU runs
 # ahead of the host. First surfaced through Hikari's volpath bounce-loop
@@ -17,7 +20,12 @@ using KernelAbstractions: @kernel, @index
 # sample's first trace dispatch read a clobbered queue pointer — whole
 # samples rendered black, nondeterministically.
 #
-# The sequence below reproduces it deterministically:
+# There is no cursor to reset now: a launch's arguments are a `Region` owned by
+# the batch that recorded it, released when that batch is reclaimed. The tests
+# stay, because they pin the property rather than the mechanism, and the second
+# one is the reason the mechanism changed.
+#
+# The sequence below reproduces the original deterministically:
 #   1. drain, then record dispatch A and submit its batch (→ in_flight)
 #   2. record dispatch B into the NEW active batch (args at cursor > 0)
 #   3. wait (WITHOUT sweeping) until the submitted batch completes
@@ -43,7 +51,7 @@ end
     @inbounds arr[i] = v + (acc > 0f0 ? Int32(0) : Int32(1))
 end
 
-@testset "arg-slab pool reset must not fire mid-recording" begin
+@testset "a mid-recording sweep must not reclaim a recorded dispatch's arguments" begin
     backend = MVE.LavaBackend()
     bq = backend.dispatch_bq
     n = 4096
@@ -109,8 +117,9 @@ end
 # It took a hundred plots and no per-frame flush to hit in the wild — many draws
 # per frame is what makes a sweep land between a handout and its draw. Here it is
 # three lines, because "has this batch recorded a dispatch" was never the right
-# question: what matters is whether anyone is holding pool memory.
-@testset "arg pool must not rewind under a handout (no submit in between)" begin
+# question: what matters is who owns the bytes, and the answer is now a `Region`
+# the batch holds until it is reclaimed.
+@testset "two handouts are two disjoint blocks, whatever the sweep does" begin
     ctx = MVE.vk_context()
     bq = ctx.default_bq
     MVE.vk_flush!(ctx)                      # nothing in flight, nothing recorded
@@ -121,9 +130,13 @@ end
     batch = Mantle.submit!(bq)
     while MVE.query_timeline(bq) < batch.signal_value; end   # polling does not sweep
 
-    a = MVE.get_arg_buffer(bq, 256)         # a draw's arguments, not yet recorded
-    Mantle.ensure_active_batch!(bq)            # sweeps: in_flight drains to empty here
-    b = MVE.get_arg_buffer(bq, 256)         # the next draw's arguments
+    # `get_arg_buffer` takes the OWNER of the bytes, not the queue: what decides
+    # when they may be handed out again is who holds them, and a queue does not.
+    a = MVE.get_arg_buffer(Mantle.ensure_active_batch!(bq), 256)   # a draw's arguments, not yet recorded
+    Mantle.ensure_active_batch!(bq)         # sweeps: in_flight drains to empty here
+    b = MVE.get_arg_buffer(Mantle.ensure_active_batch!(bq), 256)   # the next draw's arguments
 
-    @test b.address >= a.address + 256       # pre-fix: b is handed a's very bytes
+    # Disjoint, not ordered: the pool fits a request into the best free span it
+    # has, so the second handout is under no obligation to be above the first.
+    @test b.address >= a.address + a.size || a.address >= b.address + b.size
 end
