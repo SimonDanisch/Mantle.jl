@@ -237,7 +237,7 @@ export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
-export supports_graphics, supports_batch_queue, use_bindings!, supports_rt_pipeline
+export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export batchqueue
 export defaultbackend, availablebackends, eachbackend, register_backend!, register_kernel_recorder!
 export devicearray

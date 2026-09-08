@@ -392,12 +392,21 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
                           color_formats::Vector{MTLm.MTLPixelFormat},
                           depth_format::Union{Nothing,MTLm.MTLPixelFormat},
                           vert_bufs::Type, frag_bufs::Type)
-    p.geometry === nothing ||
-        error("Metal has no geometry shader stage; Apple's replacement is the " *
-              "mesh pipeline (object + mesh stages), which Mantle does not " *
-              "describe yet")
+    # Asked through the capability, not asserted here: a caller can now ask
+    # `supports_geometry_stage(backend)` BEFORE building a pipeline, which is
+    # the point of phase 2.7 — the answer used to be reachable only by
+    # compiling one and reading the error.
+    be = Metal.MetalBackend()
+    p.geometry === nothing || Mantle.supports_geometry_stage(be) ||
+        error("this backend has no geometry stage; ask " *
+              "`supports_geometry_stage(backend)` before building a pipeline " *
+              "with one. Apple's replacement is the mesh pipeline (object + " *
+              "mesh stages), which Mantle does not describe.")
     (p.tess_control === nothing && p.tess_eval === nothing) ||
-        error("tessellation is not implemented on the Metal backend")
+        Mantle.supports_tessellation(be) ||
+        error("this backend has no tessellation; ask " *
+              "`supports_tessellation(backend)` before building a pipeline " *
+              "with it.")
 
     key = (p.vertex, p.fragment, vert_bufs, frag_bufs, color_formats, depth_format,
            typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth),

@@ -169,6 +169,26 @@ asks here and takes the readback path rather than failing on a Mac.
 supports_graphics(backend) = false
 
 """
+    supports_geometry_stage(backend) -> Bool
+    supports_tessellation(backend) -> Bool
+
+Whether this backend has the stage at all.
+
+`false` by default, so a backend opts in — and both defaults are the honest
+answer for Metal, which has no geometry stage (Apple's replacement is the mesh
+pipeline, which Mantle does not describe) and no tessellation through Mantle.
+
+They exist because `GraphicsPipeline` HAS a `geometry` field and a
+`tess_control`/`tess_eval` pair, so a caller can build one that a device cannot
+run — and the only way to find out was to compile it and read the error. A
+capability a caller cannot ask about is one they find out about from a shader
+compile, which is the wrong place and the wrong time. RayMakie's overlay is the
+caller that needs the answer: its scatter path emits geometry.
+"""
+supports_geometry_stage(backend) = false
+@doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
+
+"""
     use_bindings!(bq, pipeline, bindings)
 
 Make `bindings` — the resource set built by [`bind_textures`](@ref) — the one

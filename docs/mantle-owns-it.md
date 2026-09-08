@@ -257,13 +257,18 @@ The flip is one line to make once 2.3 is settled.
 `test_compile_golden.jl`'s `all(r.barriered)` reads the answer now instead of
 assuming one, which is what made it portable rather than what silenced it.
 
-**2.7 Capabilities are queries, not exceptions.**
+**2.7 Capabilities are queries, not exceptions. — DONE 2026-09-08**
 `compile_pipeline` throws on geometry shaders and on tessellation;
 `GraphicsPipeline` has both fields; `DeviceCaps` has no answer and
 `supports_graphics` is one Bool. A caller cannot ask. Add the queries, and let
 `GraphicsPipeline` construction fail against a device that says no.
-*Done when:* RayMakie can ask whether to take its geometry-shader path instead
-of finding out at compile time.
+`supports_geometry_stage(backend)` and `supports_tessellation(backend)` beside
+`supports_graphics`, `false` by default so a backend opts in and silence means
+no — the safe direction for a capability. Vulkan answers `true` to both; Metal
+leaves the default, which is the honest answer (Apple's replacement for a
+geometry stage is the mesh pipeline, which Mantle does not describe).
+`compile_pipeline` asks instead of asserting, and its message now names the
+question a caller should have asked first.
 
 **2.8 Portable window and format.**
 Add `using ColorTypes: RGBA, BGRA` to Mantle — the dependency is already

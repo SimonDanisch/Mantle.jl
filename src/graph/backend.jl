@@ -571,7 +571,8 @@ const BACKEND_VOCABULARY = (
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
     :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
-    :supports, :supports_graphics, :supports_batch_queue, :supports_rt_pipeline,
+    :supports, :supports_graphics, :supports_geometry_stage,
+    :supports_tessellation, :supports_batch_queue, :supports_rt_pipeline,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,

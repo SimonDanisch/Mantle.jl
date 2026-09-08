@@ -98,3 +98,18 @@ end
                                   geometry = (mantle_gfx_vertex, nothing)),
         MTLg.MTLPixelFormat[MTLg.MTLPixelFormatBGRA8Unorm], nothing, Tuple{}, Tuple{})
 end
+
+@testset "2.7: a capability is asked, not discovered from a compile error" begin
+    # `GraphicsPipeline` has a `geometry` field and a tess pair, so a caller can
+    # build one this device cannot run. Before this the only way to find out was
+    # to compile it and read the message — the wrong place and the wrong time,
+    # and the reason RayMakie's geometry-emitting scatter path had no way to
+    # choose a different one.
+    be = Metal.MetalBackend()
+    @test Mantle.supports_graphics(be)
+    @test !Mantle.supports_geometry_stage(be)
+    @test !Mantle.supports_tessellation(be)
+    # The default is `false`, so a backend that answers nothing answers no —
+    # which is the safe direction for a capability.
+    @test !Mantle.supports_geometry_stage(:something_that_is_not_a_backend)
+end
