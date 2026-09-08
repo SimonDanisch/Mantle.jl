@@ -189,6 +189,22 @@ supports_geometry_stage(backend) = false
 @doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
 
 """
+    supports_mesh_pipeline(backend) -> Bool
+
+Whether this backend can run a [`MeshPipeline`](@ref).
+
+The pair to compare against [`supports_geometry_stage`](@ref), and the reason
+that one answering `false` is not the end of the sentence. Metal has no geometry
+stage, but Apple's replacement for it is the mesh pipeline, and Khronos arrived
+at the same two stages under different names in `VK_EXT_mesh_shader` — so this
+is the capability a caller with a geometry body actually wants to ask about. A
+geometry stage is expressible on a mesh pipeline; the reverse is not.
+
+`false` by default, so a backend opts in.
+"""
+supports_mesh_pipeline(backend) = false
+
+"""
     use_bindings!(bq, pipeline, bindings)
 
 Make `bindings` — the resource set built by [`bind_textures`](@ref) — the one

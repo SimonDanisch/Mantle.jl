@@ -424,12 +424,12 @@ using ColorTypes: BGRA
     # Hand-bracketed, because the readback has to happen BEFORE the present,
     # and `closerun!` is what presents: after that the drawable belongs to the
     # compositor. This is `run!`'s own sequence with the readback spliced in —
-    # `beforeframe!` acquires, `openrun`/`emit!` walk the passes, `closerun!`
+    # `beforeframe!` acquires, `openrun`/`emitplan!` walk the passes, `closerun!`
     # closes the run and presents — so it stays a frame and not a special path.
     M.beforeframe!(RG_DEV, plan)
     @test M.target_view(win) isa Metal.MTL.MTLTexture
     e = M.openrun(RG_DEV, plan)
-    M.emit!(e, plan)
+    M.emitplan!(e, plan)
     img = M.readback_window(win)
     @test size(img) == (64, 64)
     @test count(p -> ColorTypes.green(p) > 0.5, img) == 1682
@@ -484,7 +484,7 @@ tinted_fragment(inputs) = inputs.tint
     plan_win, _ = draw_into(g -> M.Surface(g, win))
     M.beforeframe!(RG_DEV, plan_win)
     e = M.openrun(RG_DEV, plan_win)
-    M.emit!(e, plan_win)
+    M.emitplan!(e, plan_win)
     b = M.readback_window(win)
     M.closerun!(RG_DEV, plan_win, e)
 
@@ -524,7 +524,7 @@ end
         M.beforeframe!(RG_DEV, plan)
         M.refit!(plan)
         e = M.openrun(RG_DEV, plan)
-        M.emit!(e, plan)
+        M.emitplan!(e, plan)
         img = M.readback_window(w)
         M.closerun!(RG_DEV, plan, e)
         return img

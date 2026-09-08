@@ -50,6 +50,18 @@ using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
 export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
     frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
     sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y
+# The mesh pipeline's half of the same vocabulary. `emit!`/`endprimitive!` are
+# what a geometry body calls, and the emitter it is handed decides whether that
+# reaches a native geometry stage or a mesh stage — which is why the body needs
+# no backend name and no second version. See `KernelInterface/src/mesh.jl`.
+using KernelInterface: MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter,
+    MeshEmitter, emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!,
+    set_mesh_line!, set_mesh_point!, set_mesh_outputs!, set_mesh_groups!,
+    mesh_thread_index, mesh_group_index
+export MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter,
+    emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!, set_mesh_line!,
+    set_mesh_point!, set_mesh_outputs!, set_mesh_groups!, mesh_thread_index,
+    mesh_group_index
 using KernelInterface: rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
     rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
     rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
@@ -156,6 +168,7 @@ include("array/fft.jl")
 include("graphics/state.jl")
 include("graphics/resources.jl")   # needs RenderTarget (state.jl) and Window (runtime/api.jl)
 include("graphics/pipeline.jl")    # needs the state vocabulary above
+include("graphics/mesh.jl")        # needs the same state vocabulary
 include("graphics/commands.jl")
 include("graphics/builtins.jl")
 
@@ -257,10 +270,13 @@ export readback_framebuffer, readback_window, readback_target
 
 # Pipeline descriptions and the indirect draw record.
 export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
-# The shader builtins. Exported because a shader is written against them and
-# nothing else; see `graphics/builtins.jl` for why they are overridden rather
-# than defined.
-# DELETED in phase 1.4: see docs/mantle-owns-it.mdexport DrawIndirectCommand
+export DrawIndirectCommand
+# The mesh pipeline. Described here, run by a backend that answers
+# `supports_mesh_pipeline`; see `graphics/mesh.jl`.
+export MeshPipeline, meshconfig, objectconfig
+export supports_mesh_pipeline
+# The shader builtins were declared here and are now KernelInterface's, imported
+# and re-exported above: phase 1.4 deleted the file, see docs/mantle-owns-it.md.
 export RayTracingPipeline, AdaptedAccel
 
 # Hardware ray tracing.

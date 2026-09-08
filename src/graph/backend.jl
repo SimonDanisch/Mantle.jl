@@ -85,7 +85,7 @@ function refit! end
 
 # ── The pass walk's primitives ───────────────────────────────────────────────
 #
-# The walk itself — what a pass is made of and in what order — is `emit!` in
+# The walk itself — what a pass is made of and in what order — is `emitplan!` in
 # `graph/kalaunch.jl`, and it is Mantle's. What each step DOES on a device is
 # answered here, once per backend. A backend that records (Vulkan) answers with
 # commands into an emitter it opened; one that does not (KernelAbstractions,
@@ -572,7 +572,8 @@ const BACKEND_VOCABULARY = (
     :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
-    :supports_tessellation, :supports_batch_queue, :supports_rt_pipeline,
+    :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
+    :supports_rt_pipeline,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,

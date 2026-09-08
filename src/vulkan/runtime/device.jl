@@ -127,7 +127,7 @@ mutable struct Recording <: Closed
     # iterates THIS — a concrete vector — rather than the `IdSet{Any}` of pins,
     # which boxed on every element: ~640 bytes a submission on a plan that pins
     # a ray-tracing acceleration structure's two dozen handles. The set of
-    # buffers is fixed for the recording's life (pins happen during `emit!`),
+    # buffers is fixed for the recording's life (pins happen during `emitplan!`),
     # so the snapshot cannot drift the way a per-run walk of `pinned` could not
     # either — it is the same buffers, un-boxed.
     sync::Vector{VkManagedBuffer}

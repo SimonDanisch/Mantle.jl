@@ -481,6 +481,10 @@ include(joinpath(@__DIR__, "test_host.jl"))
 # it reads the extension SOURCE, so it checks the Metal extension's import list
 # on a Linux box and the Vulkan one on a Mac. Gating it on a loaded backend
 # would confine each half to the machine that cannot be the one to catch it.
+# Also needs no GPU: a pipeline DESCRIPTION and the names a shader body reaches
+# the mesh stage through. The emitter arithmetic those names lower to is
+# tested in KernelInterface, over its host output object.
+include(joinpath(@__DIR__, "test_mesh_pipeline.jl"))
 include(joinpath(@__DIR__, "test_ext_imports_are_declared.jl"))
 # The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
 # written before the refactor deletes anything, so each one fails today and

@@ -433,7 +433,7 @@ function execute!(dev, pl::Plan)
             "building it; `run!` submits that recording and never records."))
         e = openrun(dev, pl)
         try
-            emit!(e, pl)
+            emitplan!(e, pl)
         catch
             abandonrun!(dev, e)
             rethrow()
@@ -545,17 +545,22 @@ end
 # through the primitives declared in `graph/backend.jl`. `record!` walks it once
 # into a backend's recording; a backend without recordings walks it on every
 # `execute!` with the `Immediate` emitter below, whose primitives do the work on
-# the spot. The Vulkan backend carried a second copy of this walk — `emit!`,
+# the spot. The Vulkan backend carried a second copy of this walk — `emitplan!`,
 # `emitpass!`, `emitwork!` — with `record!` hung off it, which put the
 # sequence in a backend and left core with a stub.
 
 """
-    emit!(emitter, plan)
+    emitplan!(emitter, plan)
 
 Walk the plan's passes into `emitter`: the head barrier, then every pass —
 its barriers, its predicate scope and its work — in compile order.
+
+Named for what it walks, beside `emithead!`, `emitpass!` and `emitwork!`. It was
+`emit!`, which is also what a geometry body calls to emit a vertex; two
+unrelated meanings of one name in one module is one too many, and this is the
+half that is internal and has a family to be consistent with.
 """
-function emit!(e, pl::Plan)
+function emitplan!(e, pl::Plan)
     emithead!(e, pl)
     # Two loops rather than one with a branch in it: a frame that is not being
     # profiled must not pay a comparison per pass.
@@ -667,7 +672,7 @@ function record!(pl::Plan)
     # `notify_move!`, never per run.
     empty!(pl.patchtab)
     empty!(pl.pending_patches)
-    emit!(e, pl)
+    emitplan!(e, pl)
     pl.recording = closerecording!(e, pl)
     listen_moves!(pool(pl.graph.dev), pl)
     return pl
