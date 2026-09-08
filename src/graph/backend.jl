@@ -569,7 +569,7 @@ const BACKEND_VOCABULARY = (
     :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
-    :upload!, :download, :devicecopy!, :resource_moved!, :arena_moved!, :release!,
+    :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_batch_queue, :supports_rt_pipeline,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded

@@ -104,44 +104,23 @@ Mantle.passed(::HostDevice, _) = true
 # Already true, so there is never anything to wait for.
 Mantle.waitfor(::HostDevice, _) = true
 
-"""
-`dims` elements of `T` at `offset` in `slab`, as an array sharing those bytes.
+# A slab IS the host address space, so this backend's whole answer is a pointer
+# and a length; `hostview`, `upload!`, `download` and `devicecopy!` are core's
+# over it (see `hostspan` in `memory/resources.jl`). What used to be `wrapbytes`
+# here, and `hostview` again in the Metal backend, is one function now.
+#
+# The bounds check it carries is worth naming once more, because this backend is
+# the one every other is checked against: two transients the placer put at
+# overlapping offsets corrupt each other loudly and deterministically, instead of
+# each quietly getting private storage.
+Mantle.hostspan(::HostDevice, slab::Vector{UInt8}) = (pointer(slab), length(slab))
 
-`unsafe_wrap` and NOT `reinterpret(T, view(slab, ...))`, which is what this was.
-A `ReinterpretArray` over `UInt8` refuses `setindex!` for any `T` that has
-padding — `LightBVHNode`, and most work-item structs — so a buffer allocated
-here could be read but never written, on a backend whose whole job is to be the
-one every other backend is checked against. The wrapper is an ordinary `Array`
-and has neither restriction, including for `N > 1`.
-
-It still aliases the slab, which is the property that matters: two transients the
-placer put at overlapping offsets corrupt each other here, loudly and
-deterministically, rather than each quietly getting private storage.
-
-`own = false` — the `Block` owns the memory, as everywhere else in Mantle. The
-slab is reachable from whatever handed us this offset (a `DeviceArray` holds its
-region, which holds the block) and from the pool, so it outlives any wrapper a
-live handle can make; using a region after its pool released it was already
-undefined.
-"""
-function wrapbytes(::Type{T}, slab::Vector{UInt8}, offset::Int, dims::Dims) where {T}
-    need = prod(dims) * sizeof(T)
-    offset + need <= length(slab) ||
-        throw(ArgumentError("$(join(dims, "x")) $T at offset $offset needs $need bytes, slab has $(length(slab))"))
-    return unsafe_wrap(Array, Ptr{T}(pointer(slab, offset + 1)), dims; own = false)
-end
-
-"The bytes of `a`, as a `T` array over its block. Host memory is directly
-addressable, so this is a wrapper rather than a mapping."
-hostview(a::Mantle.DeviceArray{T}) where {T} =
-    wrapbytes(T, Mantle.memoryof(a), Mantle.offset(a), size(a))
-
-Mantle.deviceview(::HostDevice, a::Mantle.DeviceArray) = hostview(a)
-Mantle.upload!(::HostDevice, a::Mantle.DeviceArray, first::Integer, data::AbstractVector) =
-    (copyto!(hostview(a), first, data, 1, length(data)); a)
-Mantle.download(::HostDevice, a::Mantle.DeviceArray) = collect(hostview(a))
-Mantle.devicecopy!(::HostDevice, dst::Mantle.DeviceArray, src::Mantle.DeviceArray, n::Integer) =
-    (copyto!(hostview(dst), 1, hostview(src), 1, n); dst)
+Mantle.deviceview(d::HostDevice, a::Mantle.DeviceArray) = Mantle.hostview(d, a)
+Mantle.upload!(d::HostDevice, a::Mantle.DeviceArray, first::Integer, data::AbstractVector) =
+    Mantle.hostupload!(d, a, first, data)
+Mantle.download(d::HostDevice, a::Mantle.DeviceArray) = Mantle.hostdownload(d, a)
+Mantle.devicecopy!(d::HostDevice, dst::Mantle.DeviceArray, src::Mantle.DeviceArray, n::Integer) =
+    Mantle.hostdevicecopy!(d, dst, src, n)
 
 
 # ── transients ────────────────────────────────────────────────────────────────
@@ -192,13 +171,13 @@ Mantle.compatible(::HostDevice, a, b) = true
 Give a transient its slice of the arena.
 
 A wrapper over the arena's bytes and not a copy of them, so the bytes really are
-shared — see [`wrapbytes`](@ref) for why it is a wrapper and not a reinterpret.
+shared — see [`hostview`](@ref) for why it is a wrapper and not a reinterpret.
 The view goes in `block`, which is the field every backend keeps its placed
 storage in.
 """
 function Mantle.materialize!(t::Mantle.TransientBuffer{T}, slab::Vector{UInt8},
                              offset::Int) where {T}
-    t.block = wrapbytes(T, slab, offset, (t.n,))
+    t.block = Mantle.hostview(T, pointer(slab), length(slab), offset, (t.n,))
     t.offset = offset
     return t
 end

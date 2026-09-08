@@ -49,7 +49,11 @@ end
     @test length(g.transients) == 1
 
     plan = Mantle.Plan(g)
-    @test length(plan.passes) == 2
+    # Every plan opens with the `updates` pass, on every backend: pending host
+    # stores land there, ahead of anything that reads them. Spelled as the kinds
+    # rather than a count, because a count says nothing about which pass moved.
+    @test [p.pass.kind for p in plan.passes] == [:update, :compute, :compute]
+    @test [p.pass.name for p in plan.passes] == ["updates", "scale", "add"]
     # The transient was placed into an arena, not allocated on its own.
     @test Mantle.peakbytes(plan) >= n * sizeof(Float32)
     # A KernelAbstractions backend has no argument memory and no profiler; the
