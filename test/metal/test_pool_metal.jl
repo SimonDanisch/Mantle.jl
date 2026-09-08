@@ -17,7 +17,17 @@ using Test, Mantle, Metal
 
 @testset "Metal: the pool primitives" begin
     d = Mantle.Device(Mantle.MetalAPI())
-    p = Mantle.pool(d)
+    # A pool of this testset's OWN, not the device's.
+    #
+    # `Mantle.pool(d)` is process-wide, and once the second device cache was
+    # removed (phase 1.6) it really is one per process — so anything that
+    # rendered earlier in the session had already grown it, and three testsets
+    # here silently depended on running first: "a new block was allocated",
+    # "the acquire lands at offset 0", "trim! leaves nothing reserved". None of
+    # those is a statement about the pool; they are statements about being
+    # early. A private `Pool` over the same real device asserts the properties
+    # exactly and in any order.
+    p = Mantle.Pool()
     B = Mantle.Buffers()
 
     @testset "budgets are real numbers from the device" begin
@@ -31,12 +41,10 @@ using Test, Mantle, Metal
     end
 
     @testset "a second acquire does not reach the device" begin
-        # Measured as a DELTA, not an absolute. `Mantle.Device(MetalAPI())` is a
-        # process-wide singleton, so anything that rendered earlier in the same
-        # session has already grown this pool; asserting `reserved(p) == 4096`
-        # passes only in a virgin process and fails for a reason that has
-        # nothing to do with what is being tested.
+        # An absolute, because the pool is this testset's own: one block, and
+        # both regions inside it.
         before = Mantle.reserved(p)
+        @test before == 0
         r1 = Mantle.acquire!(p, d, B, nothing, 1000; blocksize = 4096)
         r2 = Mantle.acquire!(p, d, B, nothing, 1000; blocksize = 4096)
         # One new block, both regions in it — the headline property, and the
@@ -110,7 +118,17 @@ end
 
 @testset "Metal: deviceview borrows, it does not own" begin
     d = Mantle.Device(Mantle.MetalAPI())
-    p = Mantle.pool(d)
+    # A pool of this testset's OWN, not the device's.
+    #
+    # `Mantle.pool(d)` is process-wide, and once the second device cache was
+    # removed (phase 1.6) it really is one per process — so anything that
+    # rendered earlier in the session had already grown it, and three testsets
+    # here silently depended on running first: "a new block was allocated",
+    # "the acquire lands at offset 0", "trim! leaves nothing reserved". None of
+    # those is a statement about the pool; they are statements about being
+    # early. A private `Pool` over the same real device asserts the properties
+    # exactly and in any order.
+    p = Mantle.Pool()
     B = Mantle.Buffers()
 
     a = Mantle.allocate(p, d, B, Float32, 64; blocksize = 4096)

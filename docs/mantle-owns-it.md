@@ -295,7 +295,8 @@ habits, written here because each was violated today:
 `test_compile_golden.jl` and `test_devicerange.jl` had never executed against
 anything but Vulkan. Running them per backend cost nothing to arrange and
 immediately produced six failures, none of which is breakage — each is a
-portability gap that was there all along and had no way to be seen.
+portability gap that was there all along and had no way to be seen. Three are
+fixed; three remain and each maps to a phase.
 
 1. **`test_compile_golden.jl:95`, `all(r.barriered)`.** Nothing is barriered on
    Metal, because `passbarriers` is core's empty default there. This is the
@@ -312,12 +313,14 @@ portability gap that was there all along and had no way to be seen.
    X11 question, and the file skipped itself on macOS), and it fails — 26 of
    its assertions still reach for `MVE`, which phase 2.8 removes.
 
-4-6. **Three pool tests.** Not a regression: with 0.6's second device cache
-   gone there is genuinely ONE Metal device per process, so the portable tests
-   that now run before them leave the pool in a state their
-   `reserved(p) == before + 4096` no longer sees. They depended on running
-   early. The property they mean — a second acquire does not reach the device —
-   has to be asserted without leaning on pool history.
+4-6. **Three pool tests — FIXED.** Not a regression: with 0.6's second device
+   cache gone there is genuinely ONE Metal device per process, so the portable
+   tests that now run before them left the pool in a state their assertions
+   could not see. All three were statements about running FIRST rather than
+   about the pool — "a new block was allocated", "the acquire lands at offset
+   0", "trim! leaves nothing reserved". They take a private `Pool` over the same
+   real device now and hold in any order.
 
-The suite is red on six real differences instead of green on one backend. That
-is the trade 0.7 was for, and it is the right way round.
+Three remain: 1 is phase 2.6, 2 is a real behavioural difference that needs a
+decision, 3 is the rest of 2.8. The suite is red on three real differences
+instead of green on one backend, which is the trade 0.7 was for.
