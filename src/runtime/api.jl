@@ -149,30 +149,6 @@ function draw! end
 function render! end
 
 """
-    Update(graph, buf) -> ref
-
-Reserve a position in the schedule where `buf` may be rewritten, and return a
-callable that supplies the data.
-
-    ref = Update(g, positions)
-    on(obs) do new_data
-        ref(new_data)          # a store. any thread, any moment.
-    end
-
-`ref(x)` retains `x` and marks the resource dirty. It does not copy, allocate or
-touch the GPU, because it runs on whatever task set the observable and there is
-no command buffer open there. The write happens at the reserved position during
-`run!`, and the barriers around it are derived from `CopyDst` like any other
-usage.
-
-Firing twice before a frame replaces the reference; the older array is dropped.
-If the caller means to mutate `x` before the next frame, they pass `copy(x)` —
-there is no keyword for it, because `copy` says the same thing where a profile
-can see it.
-"""
-function Update end
-
-"""
     newpass(graph, name, kind) -> pass
     handle(graph, pass)        -> what a pass block is given
     dispatches(pass)           -> where its recorded work goes
@@ -252,70 +228,6 @@ no pass ever touched.
 Base.getindex(t::IdTable, r) = t.ids[r]
 Base.get(t::IdTable, r, default) = get(t.ids, r, default)
 Base.length(t::IdTable) = length(t.ids)
-
-"""
-    registerupdate!(refs, usages, id, buf, range) -> UpdateRef
-
-Reserve `id` as a `CopyDst` of the update pass — once, however many refs name it
-— and hand back the ref that writes it.
-
-The "once" is the part worth sharing: several `Update`s on one resource are one
-hazard, and a usage list that repeats it makes the barrier phase derive the same
-dependency twice. Both extensions had this test spelled the same way.
-"""
-function registerupdate!(refs, usages, id, buf, range)
-    any(u -> u.first == id, usages) || push!(usages, id => CopyDst)
-    r = UpdateRef(buf, range)
-    push!(refs, r)
-    return r
-end
-
-"""
-What [`Update`](@ref) hands back.
-
-Calling it stores a reference and nothing else: it runs on whatever task set the
-observable, where there is no command buffer open and no guarantee the device is
-done with the resource. `pending` is swapped atomically for that reason — an
-observable can fire while `run!` is reading it.
-
-In core because both backends had this verbatim, down to the `@atomic`, and two
-copies of a lock-free protocol drift in exactly the place nobody looks. A backend
-supplies where the write goes and how, not when it is safe to read the box.
-"""
-mutable struct UpdateRef
-    resource::Any
-    range::Union{Nothing,UnitRange{Int}}
-    @atomic pending::Any
-end
-UpdateRef(resource, range = nothing) = UpdateRef(resource, range, nothing)
-
-(r::UpdateRef)(data) = (@atomic r.pending = data; nothing)
-
-"""Whether any of these refs has data waiting.
-
-What an update pass asks before emitting its barriers: a pass whose refs are all
-clean writes nothing, and ordering against a write that did not happen is cost
-without a hazard."""
-anypending(rs) = any(r -> (@atomic r.pending) !== nothing, rs)
-
-"""
-    applyupdates!(f, refs)
-
-Hand each waiting write to `f(ref, data)` and consume it.
-
-Consumed, so a ref that is not fired again writes nothing next run — the
-difference between "this value changed" and "this value exists". Reading and
-clearing are both here so a backend cannot implement half of it.
-"""
-function applyupdates!(f, rs)
-    for r in rs
-        data = @atomic r.pending
-        data === nothing && continue
-        f(r, data)
-        @atomic r.pending = nothing
-    end
-    return nothing
-end
 
 """
     copy!(graph, name, dst, src)

@@ -168,6 +168,40 @@ unordered(::Type{<:Unordered}) = true
 inner(::Type{Unordered{U}}) where {U} = U
 inner(::Type{U}) where {U<:Usage} = U
 
+"""
+A shader access made by a ray-tracing PIPELINE rather than by a compute, vertex
+or fragment shader: the same read or write, at a different pipeline stage.
+
+The stage is what a barrier is made of, and a pass that traces does its storage
+reads and writes from raygen, hit and miss shaders. Lowered as an ordinary
+`Storage` access, its barriers named the compute/vertex/fragment stages, and on
+a device where ray tracing is its own stage — NVIDIA; AMD runs it as compute —
+that is no dependency at all in either direction: the trace could start before
+the pass that filled its queue had finished, and the pass after it could read
+the queue it was still writing. Bit-identical images almost always, and one
+`VK_ERROR_DEVICE_LOST` on a medium-heavy scene when it was not.
+
+Applied by `compute!` to every shader usage of a pass that holds a [`Trace`](@ref)
+(see [`traced`](@ref)), so no call site names it — a `use(p, x; read = true)`
+inside a trace pass IS a traced read. Outermost is `Unordered`, when both apply.
+"""
+struct Traced{U<:Usage} <: Usage end
+
 for f in (:kindof, :reads, :writes, :discards, :aliasable, :evictable)
     @eval $f(::Type{Unordered{U}}) where {U} = $f(U)
+    @eval $f(::Type{Traced{U}}) where {U} = $f(U)
 end
+
+"""
+    traced(U) -> Type
+
+`U` as a ray-tracing pipeline makes it. Shader accesses — storage, uniform,
+sampled — become [`Traced`](@ref); what the command processor reads (indirect
+counts, predicates), what a copy touches and the acceleration structure itself
+are what they were, because a trace pass does not access those from a shader.
+"""
+traced(::Type{Unordered{U}}) where {U} = Unordered{traced(U)}
+traced(::Type{S}) where {S<:Storage} = Traced{S}
+traced(::Type{Uniform}) = Traced{Uniform}
+traced(::Type{Sampled}) = Traced{Sampled}
+traced(::Type{U}) where {U<:Usage} = U

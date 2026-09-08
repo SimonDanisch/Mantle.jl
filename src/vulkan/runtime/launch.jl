@@ -115,29 +115,22 @@ function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
                        tlas=nothing)  # Union{Nothing, VulkanTLAS} — declared later in raytracing/hwtlas.jl
-    batch = ensure_active_batch!(bq)
-    pipeline, argaddr, groups, name =
-        preparekernel(batch, f, args, ndrange, workgroup_size, tlas)
-    if (bq.ctx::VkContext).diag.dispatch_logging
-        bq.last_dispatch_info = name
+    oneshot!(bq; tag = :launch) do e
+        emitkernel!(e, f, args...; ndrange, workgroup_size, tlas)
     end
-    vk_dispatch!(bq, pipeline, argaddr, groups, tlas)
     return nothing
 end
 
 """
     emitkernel!(emitter, f, args...; ndrange, workgroup_size, tlas = nothing)
 
-The same launch, written where the emitter is writing and WITHOUT the automatic
-inter-dispatch barrier.
+The same launch, written where the emitter is writing.
 
-Two functions rather than one with a flag, because the contract differs and the
-difference is the whole of what the graph is for. `lava_launch!` is the
-unmodelled path: nothing has declared what the kernel touches, so the recorder
-inserts a barrier in front of it and the caller may argue it away. This one is
-reached only from a plan, whose barriers were derived from declared usage and
-already emitted — a second one here would be the redundancy the derivation
-exists to remove.
+`lava_launch!` is the unmodelled path: nothing has declared what the kernel
+touches, so it goes into a one-shot of its own, which opens with the global
+barrier and is submitted on the way out. This one writes into whatever the
+emitter holds — a plan's recording, whose barriers were derived from declared
+usage and already emitted, or a one-shot a caller is composing.
 
 Everything up to the dispatch is shared: [`preparekernel`](@ref) compiles,
 adapts, pins and packs identically for both.
@@ -148,6 +141,9 @@ function emitkernel!(e::Emitter, @nospecialize(f), args...;
                      tlas = nothing)
     pipeline, argaddr, groups, name =
         preparekernel(e.owner, f, args, ndrange, workgroup_size, tlas)
+    if e.ctx.diag.dispatch_logging
+        queueof(e).last_dispatch_info = name
+    end
     emit_dispatch!(e, pipeline, argaddr, groups, tlas, name)
     return nothing
 end
@@ -164,8 +160,8 @@ live once.
 """
 function preparekernel(owner::O, @nospecialize(f), args::Tuple,
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
-                       workgroup_size::NTuple{3,Int}, tlas) where {O<:Pinned}
-    bq = owner.bq::VulkanBatchQueue
+                       workgroup_size::NTuple{3,Int}, tlas) where {O<:Closed}
+    bq = queueof(owner)
     ctx = bq.ctx::VkContext
     validate_launch_args(ctx, args)
     if ndrange isa Integer
@@ -264,7 +260,7 @@ end
 @inline function pack_arg!(x::T,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {T,O<:Pinned}
+                           batch::O) where {T,O<:Closed}
     if isbitstype(T) && !isprimitivetype(T)
         inline_offset = (inline_offset + 7) & ~7
         ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
@@ -282,7 +278,7 @@ end
 @inline function pack_arg!(x::UInt64,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {O<:Pinned}
+                           batch::O) where {O<:Closed}
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), x)
     return inline_offset
 end
@@ -290,7 +286,7 @@ end
 @inline function pack_arg!(p::Ptr,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {O<:Pinned}
+                           batch::O) where {O<:Closed}
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), UInt64(p))
     return inline_offset
 end
@@ -298,7 +294,7 @@ end
 @inline function pack_arg!(buf::VkManagedBuffer,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
-                           batch::O) where {O<:Pinned}
+                           batch::O) where {O<:Closed}
     pin!(batch, buf)
     if (buf.ctx::VkContext).diag.pack_arg_assert_live
         st = @atomic :acquire buf.state
@@ -309,7 +305,29 @@ end
         end
     end
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), buf.address)
+    # A single store at the layout slot, so a move can rewrite exactly there.
+    recpatch!(batch, buf.address, mapped_ptr + offset)
     return inline_offset
+end
+
+# A device array is the one by-value aggregate whose bytes a move must be able
+# to rewrite: the struct is inlined past `base_size`, and its first field IS
+# the resource's device address. Same stores as the generic branch, plus noting
+# where the pointer landed — see `recpatch!`. (An aggregate that CONTAINS a
+# device array several fields deep is not here on purpose: those are scene
+# structures, whose moves invalidate the plan rather than patch it.)
+@inline function pack_arg!(x::LavaDeviceArray{T,N},
+                           mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
+                           offset::Int, byval_size::Int, inline_offset::Int,
+                           batch::O) where {T,N,O<:Closed}
+    inline_offset = (inline_offset + 7) & ~7
+    ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t),
+          mapped_ptr + inline_offset, 0, byval_size)
+    unsafe_store!(Ptr{LavaDeviceArray{T,N}}(mapped_ptr + inline_offset), x)
+    unsafe_store!(Ptr{UInt64}(mapped_ptr + offset),
+                  arg_buf_bda + UInt64(inline_offset))
+    recpatch!(batch, UInt64(x.ptr), mapped_ptr + inline_offset)
+    return inline_offset + byval_size
 end
 
 """
@@ -352,13 +370,13 @@ standalone_slot(::Type{T}) where {T} = !(isbitstype(T) && !isprimitivetype(T))
 Write kernel arguments directly into mapped GPU memory via per-type
 `pack_arg!` dispatch.  Zero heap allocations for the arg packing itself.
 
-`owner` is what the buffer-typed leaves are pinned into — the batch for work
-submitted once, the [`Recording`](@ref) for work a plan submits every run. It
-was `bq`, and the body read `bq.active_batch::CommandBatch`: a recording's
+`owner` is what the buffer-typed leaves are pinned into — the [`OneShot`](@ref)
+for work submitted once, the [`Recording`](@ref) for work a plan submits every
+run. It was `bq`, and the body read the queue's open batch: a recording's
 arguments were therefore pinned into whatever batch happened to be open while it
 was being written, and that batch's completion released them.
 """
-@generated function pack_args_direct!(batch::Pinned,
+@generated function pack_args_direct!(batch::Closed,
                                         mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                                         offsets::Vector{Int}, base_size::Int,
                                         byval_sizes::Vector{Int},
@@ -667,6 +685,10 @@ const ARG_ALIGN = 256                     # BDA alignment for sub-allocations
 """A block of the [`Unified`](@ref) arena. Small, because BAR memory is scarce on
 a device without resizable BAR and a recording's arguments are kilobytes."""
 const UNIFIED_BLOCK_SIZE = 4 * 1024 * 1024
+"""A block of the [`Readback`](@ref) arena. A download of a full frame is tens of
+megabytes and `acquire!` sizes a block to the larger of the request and this, so
+this only decides how many SMALL downloads share one allocation."""
+const READBACK_BLOCK_SIZE = 16 * 1024 * 1024
 
 """A slice of the unified arena a recording writes its arguments into."""
 struct ArgBufferAlloc
@@ -679,9 +701,9 @@ end
     scratch!(owner, nbytes) -> Region
 
 `nbytes` of the unified arena for the commands `owner` holds, owned BY it —
-which is what decides when the bytes go back. A batch gives them up when its
-timeline signals; a [`Recording`](@ref) when it is released, because until then
-it may be submitted again and read them again.
+which is what decides when the bytes go back. A [`OneShot`](@ref) gives them up
+when the submission that carried it has passed; a [`Recording`](@ref) when it
+is released, because until then it may be submitted again and read them again.
 
 `own!(bq, r)` stood in front of this and asked `bq.capturing` which of the two
 was the owner. The owner is now the argument, so there is nothing to ask.
@@ -693,8 +715,8 @@ adapts an argument tree and packs it on every call — and what the bump pointer
 bought was five fields of state that could rewind under a recording still holding
 the address. A modelled plan does not come through here at all.
 """
-@inline function scratch!(owner::O, nbytes::Integer) where {O<:Pinned}
-    bq = owner.bq::VulkanBatchQueue
+@inline function scratch!(owner::O, nbytes::Integer) where {O<:Closed}
+    bq = queueof(owner)
     @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread scratch alloc forbidden"
     dev = lavadevice(bq.ctx::VkContext)
     r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
@@ -705,7 +727,7 @@ end
 
 """Bytes for one launch's arguments, as the address the push constant carries and
 the pointer the packer writes through."""
-@inline function get_arg_buffer(owner::O, nbytes::Integer) where {O<:Pinned}
+@inline function get_arg_buffer(owner::O, nbytes::Integer) where {O<:Closed}
     r = scratch!(owner, nbytes)
     blk = memoryof(r)::BufferBlock
     off = offset(r)
@@ -715,7 +737,7 @@ the pointer the packer writes through."""
 end
 
 """
-    indirect_command!(bq) -> LavaArray{UInt32,1}
+    indirect_command!(owner) -> LavaArray{UInt32,1}
 
 One `VkDispatchIndirectCommand` for an unmodelled indirect launch: three
 `UInt32`s a prepare kernel writes and the command processor reads.
@@ -725,7 +747,7 @@ whenever the queue drained — while a recording holds the address of its
 command for as long as it can be replayed. A modelled plan has no need of either:
 its commands are laid out at compile, in its own slot, beside its arguments.
 """
-function indirect_command!(owner::O) where {O<:Pinned}
+function indirect_command!(owner::O) where {O<:Closed}
     r = scratch!(owner, INDIRECT_STRIDE)
     blk = memoryof(r)::BufferBlock
     return LavaArray{UInt32,1}(copy(blk.ref), (3,); offset = offset(r))

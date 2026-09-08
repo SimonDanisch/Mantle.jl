@@ -45,39 +45,36 @@ via the BDA argument buffer (same as compute kernel arguments).
 function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLAS,
                      args...;
                      width::Integer, height::Integer, depth::Integer=1)
-    # Before `ensure_active_batch!` below — see `rt_compiled_for` for why.
+    # Before the one-shot below — see `rt_compiled_for` for why.
     vk_pipeline, raygen_compiled, offsets, byval_sizes = rt_compiled_for(bq, pipeline, args)
 
-    # Now open (or re-open) the real active batch and adapt args into it.
-    batch = ensure_active_batch!(bq)
-    pin_leaves!(batch, pipeline.raygen_func)
-    for chit in pipeline.closesthit_funcs
-        pin_leaves!(batch, chit)
+    oneshot!(bq; tag = :trace) do e
+        owner = e.owner
+        pin_leaves!(owner, pipeline.raygen_func)
+        for chit in pipeline.closesthit_funcs
+            pin_leaves!(owner, chit)
+        end
+        pin_leaves!(owner, pipeline.miss_func)
+        pin_leaves!(owner, pipeline.anyhit_func)   # pin_leaves!(::Nothing) is a no-op
+        pin_leaves!(owner, args)
+        adaptor = LavaAdaptor(owner)
+        converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
+        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+
+        all_args = (converted_raygen, converted_args...)
+        inline_extra = compute_inline_extra_from_byval(byval_sizes)
+        total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
+
+        arg_buf = get_arg_buffer(owner, total_size)
+        pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
+                          raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
+        # HWTLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
+        pintrace!(owner, tlas)
+        bq.last_dispatch_info = "rt_trace w=$width h=$height"
+        emit_trace!(e, vk_pipeline, tlas, arg_buf.address, width, height, depth,
+                    bq.last_dispatch_info)
     end
-    pin_leaves!(batch, pipeline.miss_func)
-    pin_leaves!(batch, pipeline.anyhit_func)   # pin_leaves!(::Nothing) is a no-op
-    pin_leaves!(batch, args)
-    adaptor = LavaAdaptor(batch)
-    converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
-    converted_args = map(a -> Adapt.adapt(adaptor, a), args)
-
-    all_args = (converted_raygen, converted_args...)
-    inline_extra = compute_inline_extra_from_byval(byval_sizes)
-    total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
-
-    arg_buf = get_arg_buffer(batch, total_size)
-
-    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
-                       raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
-    # HWTLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
-    pin!(batch, tlas.accel)
-    pin!(batch, tlas.storage)
-    for blas in tlas.blases
-        pin!(batch, blas.accel)
-        pin!(batch, blas.storage)
-    end
-
-    rt_dispatch!(bq, vk_pipeline, tlas, arg_buf.address, width, height; depth=depth)
+    return nothing
 end
 
 """
@@ -87,10 +84,11 @@ The compiled ray-tracing pipeline for these argument types, from the device's
 cache or freshly built.
 
 A cold compile builds the shader binding table through `upload_typed!`, which
-calls `flush!(bq)` and invalidates any active batch — so every caller has to do
-this BEFORE opening the batch it records into. The throwaway batch below exists
-only to drive `Adapt`: the signature has to be the post-adapt one, because that
-is what `pack_args_direct!` writes.
+is a submission of its own — so every caller does this BEFORE the one-shot it
+records into, where a submission in the middle would be a second command
+buffer. The ownerless adaptor below exists only to drive `Adapt`: the signature
+has to be the post-adapt one, because that is what `pack_args_direct!` writes,
+and the strip is pure.
 
 Extracted so `trace_rays!`, `trace_rays_indirect!` and `compile_dispatch(::Trace)`
 share it. It was written out three times, and the third copy is the one that
@@ -105,8 +103,7 @@ function rt_compiled_for(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, arg
     key = rt_cache_key(pipeline, tt_key)
     cached = get(ctx.caches.rt_pipelines, key, nothing)
     if cached === nothing
-        dummy_batch = ensure_active_batch!(bq)
-        tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(dummy_batch), a)), args)...}
+        tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(nothing), a)), args)...}
         cached = compile_rt_pipeline(ctx, pipeline, tt)
         ctx.caches.rt_pipelines[key] = cached
     end
@@ -120,55 +117,58 @@ Dispatch a ray tracing pipeline with the ray count read from a GPU buffer.
 No CPU readback — a prepare kernel writes the indirect command, then
 `cmd_trace_rays_indirect_khr` reads it from GPU memory.
 
-The unmodelled form: it packs its arguments into the queue's per-frame scratch
+The unmodelled form: it packs its arguments into scratch its own one-shot owns
 as it records. Use [`trace!`](@ref) inside a graph, whose arguments live in the
-plan and can therefore be rebound — see `Trace`.
+plan — see `Trace`.
 """
 function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline,
                               tlas::LavaTLAS, args...;
                               n_rays::LavaArray{Int32})
     vk_pipeline, raygen_compiled, offsets, byval_sizes = rt_compiled_for(bq, pipeline, args)
 
-    indirect_view = indirect_command!(ensure_active_batch!(bq))
-    prepare_indirect_rt_dispatch!(bq, indirect_view, n_rays)
+    oneshot!(bq; tag = :trace) do e
+        owner = e.owner
+        # The prepare, the barrier that makes its write visible to the command
+        # processor, then the trace that reads it — three commands in one
+        # closed buffer.
+        indirect_view = indirect_command!(owner)
+        prepare_indirect_rt_dispatch!(e, indirect_view, n_rays)
+        indirectbarrier!(e, VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                         VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
 
-    batch = ensure_active_batch!(bq)
-    pin_leaves!(batch, pipeline.raygen_func)
-    for chit in pipeline.closesthit_funcs
-        pin_leaves!(batch, chit)
+        pin_leaves!(owner, pipeline.raygen_func)
+        for chit in pipeline.closesthit_funcs
+            pin_leaves!(owner, chit)
+        end
+        pin_leaves!(owner, pipeline.miss_func)
+        pin_leaves!(owner, pipeline.anyhit_func)   # pin_leaves!(::Nothing) is a no-op
+        pin_leaves!(owner, args)
+        adaptor = LavaAdaptor(owner)
+        converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
+        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+
+        all_args = (converted_raygen, converted_args...)
+        inline_extra = compute_inline_extra_from_byval(byval_sizes)
+        total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
+
+        arg_buf = get_arg_buffer(owner, total_size)
+        pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
+                          raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
+        pintrace!(owner, tlas)
+        bq.last_dispatch_info = "rt_indirect"
+        emit_trace_indirect!(e, vk_pipeline, tlas, arg_buf.address, indirect_view,
+                             bq.last_dispatch_info)
     end
-    pin_leaves!(batch, pipeline.miss_func)
-    pin_leaves!(batch, pipeline.anyhit_func)   # pin_leaves!(::Nothing) is a no-op
-    pin_leaves!(batch, args)
-    adaptor = LavaAdaptor(batch)
-    converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
-    converted_args = map(a -> Adapt.adapt(adaptor, a), args)
-
-    all_args = (converted_raygen, converted_args...)
-    inline_extra = compute_inline_extra_from_byval(byval_sizes)
-    total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
-
-    arg_buf = get_arg_buffer(batch, total_size)
-
-    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
-                       raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
-    pin!(batch, tlas.accel)
-    pin!(batch, tlas.storage)
-    for blas in tlas.blases
-        pin!(batch, blas.accel)
-        pin!(batch, blas.storage)
-    end
-
-    rt_dispatch_indirect!(bq, vk_pipeline, tlas, arg_buf.address, indirect_view)
+    return nothing
 end
 
 
 """Prepare indirect RT dispatch buffer: writes (n_rays, 1, 1) from a GPU-resident count."""
-function prepare_indirect_rt_dispatch!(bq::VulkanBatchQueue,
+function prepare_indirect_rt_dispatch!(e::Emitter,
                                        indirect::LavaArray{UInt32,1},
                                        n_rays::LavaArray{Int32})
-    lava_launch!(bq, prepare_indirect_rt_kernel, indirect, n_rays;
-                 ndrange=1, workgroup_size=(1, 1, 1))
+    emitkernel!(e, prepare_indirect_rt_kernel, indirect, n_rays;
+                ndrange=1, workgroup_size=(1, 1, 1))
 end
 
 function prepare_indirect_rt_kernel(indirect::LavaDeviceArray{UInt32,1},

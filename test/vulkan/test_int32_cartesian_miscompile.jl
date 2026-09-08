@@ -84,7 +84,8 @@
 # first quotient afterwards is exposed. `MVE.splitidx` / `cart32` (magic-number
 # division, no `OpSDiv`) is the standing workaround and is why Lava's broadcast
 # path is safe; narrowing the arithmetic to `Int32` also avoids it. Both cases
-# below stay `@test_broken` so a driver fix announces itself.
+# below were `@test_broken` waiting on a driver fix, and on 2026-09-04 they
+# announced it: promoted to `@test`.
 #
 # Symptom when it regresses in the other direction: `Mantle.lava_broadcast_flat_*`
 # in `array/gpuarrays.jl` may go back to `cis[I % Int32]`.
@@ -142,9 +143,9 @@ end
             reshape(Array(out), sz)
         end
         @test run(:wide) ≈ want              # 64-bit through Base: correct
-        # Base's `CartesianIndices` under a narrow index: still wrong. Turns into
-        # a failure the day it is fixed.
-        @test_broken run(:narrowci) ≈ want
+        # Base's `CartesianIndices` under a narrow index: was wrong, and the
+        # `@test_broken` announced the fix on 2026-09-04 (RADV, this tree).
+        @test run(:narrowci) ≈ want
         # The two that isolate it. `:handdiv` is 32-bit AND divides and is exact,
         # which rules out both the width and the division; `:magic` is the form
         # Lava's broadcast kernels actually use.
@@ -177,6 +178,7 @@ end
 
     h3 = reshape(collect(1f0:75f0), 5, 5, 3)
     A3 = KA.allocate(be, Float32, 5, 5, 3); copyto!(A3, h3)
-    @test_broken narrow(A3, h3, (5, 5, 3))       # rank 3 + Extruded: the bug
+    @test narrow(A3, h3, (5, 5, 3))              # rank 3 + Extruded: was the bug,
+                                                 # fixed — the `@test_broken` announced it
 end
 

@@ -14,8 +14,9 @@ end
 @testset "safe_fin_log and @vk_checked exist" begin
     @test isdefined(MVE, :safe_fin_log)
     # `Symbol("@vk_checked")` — a macro, so the plain `isdefined(Lava, :name)`
-    # sweep that moved the rest of these to Mantle did not match it.
-    @test isdefined(Mantle, Symbol("@vk_checked"))
+    # sweep that moved the rest of these to Mantle did not match it. It lives
+    # in the Vulkan extension now, like the rest of the runtime it checks.
+    @test isdefined(MVE, Symbol("@vk_checked"))
 
     # safe_fin_log should not throw on a normal string.
     @test MVE.safe_fin_log("test: safe_fin_log smoke\n") === nothing

@@ -73,17 +73,6 @@ attachment in a pass agrees, and that comparison is not Vulkan's.
 function target_extent end
 
 """
-    checkextents(plan)
-
-Verify every pass in `plan` renders into attachments that agree on size.
-
-A backend answers because it knows what its targets measure; the graph asks
-because a mismatch is a graph error, not a driver one — the driver would only
-report it later, as a validation message naming a framebuffer.
-"""
-function checkextents end
-
-"""
     refit!(x) -> Bool
 
 Resize `x` in place to match what the plan now needs, returning whether
@@ -94,86 +83,260 @@ which is what lets a plan be re-run at a new window size without rebuilding.
 """
 function refit! end
 
-# `record!` is declared in `Mantle.jl` with the default that makes it meaningful
-# on a backend that has no command buffers to build: the plan, unchanged. The
-# per-pass half is not a hook at all any more — a backend that records emits into
-# something of its own (`Emitter` on Vulkan), and what that is has no portable
-# spelling. `record_pass!(graph, queue, passplan, derived, args; suppress)` was
-# the old one, and four of its six arguments were the queue-shaped machinery step
-# 2 deleted.
+# ── The pass walk's primitives ───────────────────────────────────────────────
+#
+# The walk itself — what a pass is made of and in what order — is `emit!` in
+# `graph/kalaunch.jl`, and it is Mantle's. What each step DOES on a device is
+# answered here, once per backend. A backend that records (Vulkan) answers with
+# commands into an emitter it opened; one that does not (KernelAbstractions,
+# Metal) answers on the spot through the core `Immediate` emitter, and never
+# defines a method below. `record_pass!(graph, queue, passplan, derived, args;
+# suppress)` was the old shape, and the Vulkan backend then grew a whole second
+# copy of the walk around it.
 
 """
-    rename!(graph, queue, dst, data)
+    openrecording(device, plan) -> emitter or nothing
 
-Point `dst` at `data` without copying, when the graph has proved the old
-contents are dead.
-
-The optimisation that makes an `Update` cheap: a buffer the next pass fully
-overwrites does not need its previous contents moved, so the graph hands the
-backend a rename instead of a copy.
+Open a command buffer for `plan` and hand back what the walk emits into.
+`nothing` from a backend that has no command buffers to build: the plan is then
+walked by every `execute!` instead, which is the same walk.
 """
-function rename! end
+openrecording(::Device, ::Plan) = nothing
 
 """
-    inplace!(queue, dst, data, from)
+    closerecording!(emitter, plan) -> recording
 
-Write `data` into `dst` starting at index `from`, for the case
-[`rename!`](@ref) cannot take — the destination is aliased, or partially live.
+Seal what the walk emitted and give back the recording `run!` will submit,
+with the plan's patch table filled from where the pack landed its addresses.
 """
-function inplace! end
+function closerecording! end
 
 """
-    nextslot!(args, device) -> Int
+    emithead!(emitter, plan)
 
-Advance to the next argument slot, once the device is finished with what it
-holds, and return which slot that is.
-
-This is the whole of the graph's pipelining policy: `ARG_SLOTS` runs of
-arguments may be in flight, and the run that would make it `ARG_SLOTS + 1`
-waits. It is policy and not mechanism, which is why it is here — the backend
-answers `passed`, `waitfor` and `submit!` about one opaque token and decides
-none of this.
-
-It was the backend's, as `nextslot!(am, bq)` reading `bq.timeline_sem` and
-`bq.next_timeline` directly. Two things followed from that. The depth of a
-Mantle plan was a Vulkan constant; and the "has it been handed over yet" case
-below had to be expressed as `want > bq.next_timeline`, a comparison against a
-counter that only one backend has. Getting it wrong there was not an assertion,
-it was `vkWaitSemaphores` on a value nothing would ever signal — a foreign call
-that never returns, so the process stops dead with no Julia frame to show.
+Before anything the plan emits: whatever ran last on the queue may still be
+reading the pool this plan is about to write, and a cross-plan hazard cannot be
+derived — so a backend puts one global barrier here, always.
 """
-function nextslot!(am::ArgMemory, dev)
-    am.slot = mod1(am.slot + 1, ARG_SLOTS)
-    tok = am.slot_token[am.slot]
-    # Never used, or the device is already past it.
-    tok === nothing && return am.slot
-    passed(dev, tok) && return am.slot
-    waitfor!(dev, tok)
-    return am.slot
+emithead!(e, ::Plan) = nothing
+
+"""
+    emitbarriers!(emitter, passplan)
+
+The barriers the graph derived for this pass, before its work.
+"""
+emitbarriers!(e, ::PassPlan) = nothing
+
+"""
+    withpredicate(f, emitter, predicate)
+
+Run `f` with this pass's work discarded unless its `repeat!` predicate is
+nonzero. `nothing` is no predicate.
+"""
+withpredicate(f, e, ::Nothing) = f()
+
+"""
+    emitupdate!(emitter, plan, passplan)
+
+An update pass: land the plan's pending host stores. Whether that can happen
+where the walk is or has to wait for the run that has the values is the
+emitter's answer — a recording holds no store, since it would replay this run's
+values for ever.
+"""
+function emitupdate! end
+
+"""
+    emitkernel!(emitter, f, args...; ndrange, workgroup_size)
+
+Launch a plain Julia kernel into the emitter — what core's fused prepare
+(`emitprepares!`, in `graph/kalaunch.jl`) is written with. Never reached on a
+backend whose dispatches are sized on the host.
+"""
+function emitkernel! end
+
+"""
+    emitpreparebarrier!(emitter)
+
+The one barrier a fused prepare is followed by: its writes, made visible to
+the command processor's read of the counts and to the dispatches behind it.
+"""
+emitpreparebarrier!(e) = nothing
+
+"""
+    workgroupsize(compiled) -> UInt32
+
+Invocations per workgroup of a compiled dispatch, which is what the prepare
+divides a device-written count by. One for a trace, whose indirect command
+counts rays rather than groups — that method is core's.
+"""
+function workgroupsize end
+
+"""
+    emitdispatch!(emitter, dispatch, name)
+
+One compiled dispatch or trace of a compute pass.
+"""
+function emitdispatch! end
+
+"""
+    emitcopy!(emitter, plan, passplan)
+
+A `copy!` pass: one target into one buffer.
+"""
+function emitcopy! end
+
+"""
+    beginrender!(emitter, plan, passplan) -> handle
+    emitdraw!(emitter, handle, draw)
+    endrender!(emitter, handle)
+
+A render pass: open its attachments, each draw in order, close it. `handle` is
+whatever `beginrender!` returned and means nothing to the walk.
+"""
+function beginrender! end
+function emitdraw! end
+function endrender! end
+
+"""
+    compiledraw(c, pass, draw, argoff) -> CompiledDraw
+    compile_dispatch(c, dispatch, argoff, indirect) -> compiled dispatch
+
+What a draw or a dispatch of the graph IS on this backend, compiled once at
+`Pipelines` against the layout core decided: `argoff` is the argument block
+the item owns, `indirect` its indirect-command slot (zero for a host-sized
+dispatch). The interpreted defaults live in `graph/kalaunch.jl`: a `Launch`,
+and a draw of argument size zero.
+"""
+function compiledraw end
+function compile_dispatch end
+
+"""
+    passbarriers(c, pass) -> (images, pre, barrier)
+
+What the `Barriers` phase derived for this pass, in the form the backend emits:
+its image layout changes, the transitions it needs, and its one memory barrier.
+Nothing on a backend whose order IS its synchronisation, which is the default.
+"""
+passbarriers(::Compile, ::Pass) = (Nothing[], Transition[], nothing)
+
+"""
+    recordsplans(device) -> Bool
+
+Whether this backend records plans at all. `false` by default — an
+interpreted backend walks every run — and it decides only whether `run!`
+refuses a recordable plan that was never `record!`ed.
+"""
+recordsplans(::Device) = false
+
+"""
+    openrun(device, plan) -> emitter
+    closerun!(device, plan, emitter) -> token
+    abandonrun!(device, emitter)
+    abandonframe!(device, plan)
+
+One run, as the backend sees it. `openrun` opens whatever this run's commands
+go into — the frame's image was acquired by `beforeframe!`, before the plan was
+refit, so nothing about the surface changes under an opened run; `closerun!`
+closes it and hands the run to the device — the recording behind it when the
+plan has one — and presents; it returns the token `waitfor!(plan)` waits on.
+`abandonrun!` is what happens to an opened run whose emit threw.
+`abandonframe!` is what happens to a frame that failed anywhere after its image
+was acquired: the image goes back to the presentation engine untouched, so the
+next frame can acquire, and nothing when the frame was presented or never
+acquired. The defaults are the interpreted backend's: an `Immediate` emitter,
+present, no token, and nothing to hand back.
+"""
+openrun(dev, pl) = Immediate()
+function closerun!(dev, pl, ::Immediate)
+    for s in pl.graph.surfaces
+        present_frame!(dev, s.win)
+    end
+    return nothing
 end
+abandonrun!(dev, ::Immediate) = nothing
+abandonframe!(dev, pl) = nothing
+
+"""
+    emitinline!(emitter, region, offset, ptr, nbytes)
+
+`nbytes` from `ptr`, carried inside the command buffer, into `region` at
+`offset`. What a pointer patch is, and (step 5) a small store.
+"""
+function emitinline! end
+
+"""
+    collect!(profiler, device)
+
+Read back the timestamps the last run recorded, without waiting: a frame still
+in flight is skipped rather than waited for. Nothing on a backend without
+timestamp queries, which is the default.
+"""
+collect!(::Profiler, dev) = nothing
+
+"""
+    syncbackend(device) -> Backend
+
+The marker the `Barriers` phase asks `needs_transition` of, and the lowering
+asks `stages`, `access` and `layout` of: `VulkanAPI()`, `MetalAPI()`,
+`HostAPI()`. A device says which; core never guesses from its type.
+"""
+function syncbackend end
+
+"""
+    profiled!(f, plan, emitter, i)
+
+Run `f`, which emits pass `i`, and sample what it cost when the plan is
+profiled. The default times the host side and asks [`gpupasstime!`](@ref); a
+backend with timestamp queries writes them around the pass instead.
+"""
+function profiled!(f, pl::Plan, e, i::Integer)
+    prof = pl.profiler
+    prof === nothing && return f()
+    t0 = time_ns()
+    r = f()
+    g = gpupasstime!(pl.graph.dev)
+    sample!(prof.host_ns[i], Float64(time_ns() - t0))
+    isnan(g) || sample!(prof.gpu_ns[i], g)
+    return r
+end
+
+# `rename!` is gone. It pointed a resource at a fresh store rather than
+# overwriting the one the GPU was reading, which is the one thing a RECORDING
+# cannot follow: the commands hold the address they were written with, so they
+# keep reading the store the update moved away from. It was one of the two
+# reasons `record!` could refuse a plan.
+
+"""
+    storebytes!(emitter, store, offset, ptr, nbytes)
+
+`nbytes` from `ptr` into `store` — a resource's `DeviceArray` — at byte
+`offset`, as a command in this run, ordered before what the run reads. Inside
+the command buffer where the backend can carry the bytes, staged where it
+cannot; which is the backend's constraint, not a decision of the graph's.
+"""
+function storebytes! end
+
+# `nextslot!` is gone with the argument ring. It advanced to the next of
+# `ARG_SLOTS` copies of a plan's arguments and waited when the host got that far
+# ahead of the device — the whole of the graph's pipelining policy, and all of it
+# in service of one thing: a run wrote argument bytes on the HOST while an
+# earlier run's submission could still be reading them. Nothing writes those
+# bytes after `record!` any more (see [`GPURef`](@ref)), so there is nothing to
+# rotate and nothing to wait for. A run is one `submit!` with no host stores and
+# no possibility of a stall in front of it.
 
 """
     waitfor!(device, token)
 
-Block until the device has finished the work `token` covers, handing that work
-over first if the host is still holding it.
+Block until the device has finished the work `token` covers.
 
-`waitfor(device, token)` — no `!` — is the backend's mechanism and answers
-`false` for exactly one case: the token belongs to work that has not been
-submitted, so nothing will ever signal it. That happens because a plan drawing
-to a surface submits every run while a headless one submits when something asks
-it to, so several runs otherwise accumulate in one open batch. Waiting on those
-blocks in a foreign call that never returns.
-
-Needing the result is precisely the reason to hand the work over, so that is
-what happens — but ONLY then. Submitting unconditionally reads the same and is
-not: it breaks up the batch every time, and a renderer running several plans per
-sample pays a submission per wrap of the argument ring. Measured at ~20% across
-four RayDemo scenes.
+It used to hand over an open batch first when the token was not out yet, and
+only then wait, because a headless plan submitted when something asked it to.
+Every token is out the moment it exists now — `submit!` is the only way work
+reaches the device and it goes at once — so this is the wait and nothing
+else, and a token nothing will signal is an error rather than a submit.
 """
 function waitfor!(dev, tok)
-    waitfor(dev, tok) && return nothing
-    submit!(dev)
     waitfor(dev, tok)
     return nothing
 end
@@ -185,7 +348,7 @@ Block until the device has finished what `run!(plan)` last submitted.
 
 This is what a host loop reading a device-written value between runs needs, and
 it is not `waitidle`: it waits for one plan's last run rather than for the
-device, and it knows to submit that run if it is still sitting in an open batch.
+device.
 
 A KernelAbstractions `synchronize` is the wrong tool for it in both directions.
 It reaches the queue behind Mantle's back, so Mantle cannot see the stall, avoid
@@ -195,26 +358,17 @@ submitted".
 """
 function waitfor!(pl::Plan)
     am = pl.args
-    # No argument memory on a backend that passes arguments directly, and `slot`
-    # is 0 until the first `nextslot!` — a plan that has not run has nothing to
-    # wait for, and `slot_token[0]` is a `BoundsError` rather than an answer.
-    (am === nothing || am.slot == 0) && return nothing
-    tok = am.slot_token[am.slot]
-    tok === nothing && return nothing
+    # No argument memory on a backend that passes arguments directly, and
+    # `token` is 0 until the first run — a plan that has not run has nothing
+    # to wait for.
+    am === nothing && return nothing
+    tok = argtoken(am)      # a method, not a field read: no boxing (see types.jl)
+    tok == 0 && return nothing
     passed(pl.graph.dev, tok) && return nothing
     waitfor!(pl.graph.dev, tok)
     return nothing
 end
 
-"""
-    collect!(profiler, ctx)
-
-Read back the timestamps a run recorded.
-
-Separate from the run because it synchronises, and a caller that is not reading
-timings should not pay for it.
-"""
-function collect! end
 
 """
     makeprofiler(device, passes, profile::Bool)
@@ -272,15 +426,63 @@ gpupasstime!(::Device) = NaN
 
 
 """
-    makeargmemory(device, passes)
+    makeargmemory(device, passes) -> ArgMemory or nothing
 
-The plan's argument memory, or `nothing`.
+The plan's argument memory, laid out once at compile so a frame only writes
+arguments: every draw's and dispatch's block at the offset `Pipelines` gave it,
+then one indirect command per device-sized dispatch, 256-byte aligned.
 
-Laid out once at compile so a frame only writes arguments. A backend that passes
-kernel arguments directly — anything driving KernelAbstractions rather than
-recording a command buffer — has none, which is the default.
+**One copy.** It was a ring, `ARG_SLOTS` deep, because a run rewrote argument
+bytes on the host while an earlier run's submission could still be reading
+them. Nothing rewrites these bytes after `record!` — a value that changes
+between runs is a [`GPURef`](@ref), and what a dispatch is packed with is its
+address — so there is nothing to race and nothing to rotate.
+
+The layout is Mantle's. What backs it is the backend's, through [`argbytes`](@ref)
+and [`indirectslot`](@ref); a backend that passes kernel arguments directly —
+anything driving KernelAbstractions rather than recording a command buffer —
+answers `argbytes` with `nothing` and the plan has no argument memory.
 """
-makeargmemory(::Device, passes) = nothing
+function makeargmemory(dev, passes)
+    args = 0
+    nind = 0
+    for pp in passes
+        for d in pp.draws
+            args += argalign(argsize(d))
+        end
+        for d in pp.dispatches
+            args += argalign(argsize(d))
+            indirectindex(d) == 0 || (nind += 1)
+        end
+    end
+    indbase = argalign(args)
+    bytes = max(argalign(indbase + nind * INDIRECT_STRIDE), 256)
+    mem = argbytes(dev, bytes)
+    mem === nothing && return nothing
+    store, address, ptr = mem
+    # One view per device-sized dispatch, built here because the offsets never
+    # move and building one per record is an allocation on the recording path.
+    indirect = Any[indirectslot(dev, store, indbase + (k - 1) * INDIRECT_STRIDE) for k in 1:nind]
+    return ArgMemory(store, address, ptr, Ref(UInt64(0)), indirect)
+end
+
+"""
+    argbytes(device, nbytes) -> (store, address, ptr) or nothing
+
+`nbytes` of host-writable, device-addressable memory for a plan's arguments,
+for as long as the plan lives: the store the plan will retire, its device
+address, and the host pointer the pack writes through. `nothing` from a
+backend that binds arguments directly, which is the default.
+"""
+argbytes(::Device, nbytes) = nothing
+
+"""
+    indirectslot(device, store, offset) -> device array of three UInt32
+
+The indirect command `offset` bytes into `store`, as the view a prepare kernel
+writes and an indirect dispatch reads.
+"""
+function indirectslot end
 
 """
     register_kernel_recorder!(recorder; name)
@@ -350,3 +552,55 @@ macro compile_workload(version, ex)
         end
     end)
 end
+
+# ── The vocabulary, and the test that holds the line ─────────────────────────
+#
+# Every core function or type a backend is allowed to add a method to. This is
+# the whole surface between `src/graph/` and a backend, written down so that it
+# can be CHECKED: `test/vulkan/test_backend_vocabulary.jl` enumerates the core
+# functions each loaded backend actually extends and fails on any name that is
+# not here. Adding a name is a design decision made in this file; a backend that
+# quietly grows a `record!`, a `run!` or an `execute!` of its own fails the
+# suite. The names below marked with a step are the ones
+# `docs/backend-independence.md` deletes; a step is done when its names are
+# gone from this list and the test still passes.
+const BACKEND_VOCABULARY = (
+    # devices, memory, resources
+    :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
+    :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
+    :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
+    :upload!, :download, :devicecopy!, :resource_moved!, :arena_moved!, :release!,
+    :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
+    :supports, :supports_graphics, :supports_batch_queue, :supports_rt_pipeline,
+    :supportspredicate,                       # only whether fixed-size gated work can be discarded
+    # the queue and its tokens
+    :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
+    :waitfor, :waitfor!, :passed, :fence, :reset_device!,
+    # sync lowering
+    :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
+    :vkformat,
+    # compile: the phases are core's, a backend answers these
+    :syncbackend,
+    :compiledraw, :compile_dispatch, :passbarriers,
+    :argbytes, :indirectslot,
+    :makeprofiler, :Profiler,
+    # the walk's primitives
+    :openrecording, :closerecording!, :emithead!, :emitbarriers!, :withpredicate,
+    :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
+    :profiled!, :collect!,
+    :emitkernel!, :emitpreparebarrier!, :workgroupsize,
+    :storebytes!,
+    :recordsplans, :recycle!, :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    :beginframe!,
+    # graphics verbs, immediate and windowed
+    :Framebuffer, :Window, :Surface, :Texture2D, :Sampler, :screenshot,
+    :acquire_next_image!, :present_frame!, :begin_pass!, :end_pass!, :draw!,
+    :draw_in_pass!, :draw_indexed_in_pass!, :draw_indirect_in_pass!, :set_viewport!,
+    :use_bindings!, :bind_textures, :blit!, :transition_image!, :readback_framebuffer,
+    :readback_window, :target_extent, :target_format, :target_image, :target_view,
+    # ray tracing
+    :pin!, :blases,
+    :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
+    :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
+    :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
+)

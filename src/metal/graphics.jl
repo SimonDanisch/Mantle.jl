@@ -535,8 +535,8 @@ function Mantle.draw!(be::Metal.MetalBackend, p::Mantle.GraphicsPipeline,
         depth_clear === nothing || (da.clearDepth = Float64(depth_clear))
     end
 
-    # The immediate path draws and waits, so it takes the frame's buffer like
-    # any pass and closes it at the end.
+    # The immediate path draws and waits: its own command buffer, committed and
+    # waited for at the end.
     cb = framebuffer!(dev)
     enc = MTLm.MTLRenderCommandEncoder(cb, rp)
     MTLm.set_pipeline!(enc, compiled.state)
@@ -551,14 +551,15 @@ function Mantle.draw!(be::Metal.MetalBackend, p::Mantle.GraphicsPipeline,
     end
     MTLm.draw_primitives!(enc, compiled.primitive, 0, vertex_count, instances)
     MTLm.endEncoding!(enc)
-    submitwait!(dev)
+    submitwait!(cb)
     return nothing
 end
 
 # ── How this backend submits ─────────────────────────────────────────────────
 #
-# **One queue, shared with compute**, and one command buffer across consecutive
-# render and copy passes.
+# **One queue, shared with compute**, and one command buffer PER CALL: a
+# render pass, a copy, a present, a readback each open their own, and commit
+# it before the call that opened it returns.
 #
 # The queue first, because it is a correctness matter. A second queue of its own
 # is what this had, and it quietly threw away the ordering the graph had just
@@ -570,63 +571,44 @@ end
 # run in COMMIT order, which is exactly the ordering Mantle's barrier phase
 # established.
 #
-# The sharing second, because it is a cost matter. A command buffer per pass is
-# nine of them in `bench/showcase.jl`'s frame, and a submission costs far more
-# than the drawing in it: the whole frame's GPU work is 5 ms and the frame took
-# ten times that. Encoders are cheap and a command buffer takes as many as you
-# like in sequence, so consecutive render and copy passes share one — two per
-# frame instead of eight.
+# One buffer per call, because the alternative was an open one. This backend
+# used to keep a command buffer open across consecutive render and copy passes
+# and commit it only where the graph said a dispatch was about to follow
+# (`Mantle.submit!(device)`): that is the open command buffer the Vulkan
+# backend deleted, by the same rule — what is open depends on every call since
+# it was opened, and nothing can be scheduled around it. A submission costs
+# more than the drawing in it (`bench/showcase.jl`'s frame is 5 ms of GPU work
+# and took ten times that when every pass committed), so the per-pass
+# submissions this costs are the same regression the Vulkan side accepts for
+# its ad hoc launches; batching is the graph's job, later, not the queue's.
 #
-# Only a DISPATCH forces one out, and it must: drawing still open when a
-# dispatch is committed would run after it. `Mantle.submit!` is the graph
-# telling the backend where those points are, because it knows the pass kinds
-# and the backend does not.
-
-const OPEN_CB = Ref{Union{Nothing,MTLm.MTLCommandBuffer}}(nothing)
+# What stays is the flush of Metal.jl's OWN batched compute before one of our
+# buffers is created: Metal.jl accumulates KA dispatches in a command buffer of
+# its own, and if one is open, ours has to go behind it.
 
 """
-A command buffer for this backend's own work, reusing the open one when it can.
-
-Reuse is only safe while nothing has been recorded on the COMPUTE side since:
-Metal.jl batches dispatches into a command buffer of its own, and if one is
-open, ours has to go first.
+A fresh command buffer for this backend's own work, behind whatever compute
+Metal.jl has batched and not yet committed.
 """
 function framebuffer!(dev)
     bq = Metal.global_queue(dev)
-    if bq.cmdbuf !== nothing
-        # Compute was recorded after our last pass. Ours first, then theirs.
-        #
-        # `submitopen!`, NOT `Mantle.submit!`: `dev` here is the `MTLDevice`,
-        # and `Mantle.submit!` dispatches on the `MetalDevice` — the MTLDevice
-        # hits the `::Any` default, which does nothing, and the drawing would
-        # then be committed after the dispatch that must follow it.
-        submitopen!(dev)
-        Metal.flush!(bq)
-    end
-    cb = OPEN_CB[]
-    cb === nothing || return cb
-    return OPEN_CB[] = MTLm.MTLCommandBuffer(bq.queue)
+    # Compute was recorded since our last buffer. Theirs first, then ours.
+    bq.cmdbuf === nothing || Metal.flush!(bq)
+    return MTLm.MTLCommandBuffer(bq.queue)
 end
 
-"""Commit whatever is open. Idempotent, and `nothing` open is the common case."""
-function Mantle.submit!(dev::MetalDevice)
-    submitopen!(dev.dev)
-    return nothing
-end
-
-function submitopen!(dev)
-    cb = OPEN_CB[]
-    cb === nothing && return nothing
-    OPEN_CB[] = nothing
+"""Commit a command buffer this backend opened. Every caller of `framebuffer!`
+ends with this or with `submitwait!`."""
+function commit!(cb::MTLm.MTLCommandBuffer)
     MTLm.commit!(cb)
     committed!(cb)
     return cb
 end
 
-"""Commit what is open and wait for it — the only way to read bytes back."""
-function submitwait!(dev)
-    cb = submitopen!(dev)
-    cb === nothing || MTLm.wait_completed(cb)
+"""Commit and wait — the only way to read bytes back."""
+function submitwait!(cb::MTLm.MTLCommandBuffer)
+    commit!(cb)
+    MTLm.wait_completed(cb)
     return nothing
 end
 
@@ -697,11 +679,9 @@ reports zeros for both ends, and contributes nothing rather than a negative.
 """
 function Mantle.gpupasstime!(d::MetalDevice)
     bq = Metal.global_queue(d.dev)
-    # The batch that is open right now belongs to the pass being measured; it
-    # is about to be committed by the flush below.
-    # This backend's own open buffer first, then Metal.jl's batch — the same
-    # order `framebuffer!` keeps, so the numbers describe the frame as it ran.
-    submitopen!(d.dev)
+    # Every buffer this backend opened for the pass has been committed by the
+    # call that opened it; Metal.jl's batch may still be open and is picked up
+    # here, so the numbers describe the frame as it ran.
     open_cb = bq.cmdbuf
     open_cb === nothing || push!(COMMITTED, open_cb)
     Metal.flush!(bq)
@@ -772,23 +752,19 @@ converted, and an address the render encoder was never told about is not
 resident — Metal reads it as zeros rather than faulting. `record_draw!` hands
 each one to `use!`.
 
-**A `Ref` is kept as a `Ref`.** Everything else is converted once here, because
-`mtlconvert` on a buffer also makes it persistently resident and that is a setup
-cost; a `Ref` is the one argument whose whole point is that the value changes
-between frames. `argvalue` reads one at record time on the other backend and so
-does `bind_stage!` here — baking it would freeze a camera matrix at whatever it
-held when the plan was compiled.
+Everything is converted once here, because `mtlconvert` on a buffer also makes
+it persistently resident and that is a setup cost. A `Ref` used to be kept as a
+`Ref` and re-read per frame; `refuserefs` refuses one at the declaration now,
+and a value that changes between frames is a `GPURef`.
 """
 struct StageArgs
-    device::Tuple      # what gets bound, byte for byte; a `Ref` stands for itself
+    device::Tuple      # what gets bound, byte for byte
     buffers::Vector{MTLm.MTLBuffer}
 end
 
-bakearg(a::Base.RefValue) = a
 bakearg(a) = Metal.mtlconvert(a)
 
 """What a baked argument is once it reaches the shader."""
-argdevtype(a::Base.RefValue) = typeof(Metal.mtlconvert(a[]))
 argdevtype(a) = typeof(a)
 
 function StageArgs(args)
@@ -841,8 +817,7 @@ function Mantle.begin_render_pass!(d::MetalDevice, targets, loads, depth, depth_
         dv = depth_load === nothing ? nothing : Mantle.depthclear(depth_load)
         dv === nothing || (da.clearDepth = Float64(dv))
     end
-    # Reuses the frame's open command buffer, and starts one only when there is
-    # none — see `framebuffer!` for when that is.
+    # This pass's own command buffer; `end_render_pass!` commits it.
     cb  = framebuffer!(d.dev)
     enc = MTLm.MTLRenderCommandEncoder(cb, rp)
     return MetalPassHandle(cb, enc)
@@ -869,9 +844,6 @@ end
 # A function barrier: the argument tuple is heterogeneous, so the loop above is
 # dynamic whatever happens, and one call per argument keeps the byte copy itself
 # concrete.
-bind_arg!(setbytes!, enc, r::Base.RefValue, i::Int) =
-    bind_arg!(setbytes!, enc, Metal.mtlconvert(r[]), i)
-
 function bind_arg!(setbytes!, enc, arg::T, i::Int) where {T}
     ref = Base.RefValue(arg)
     GC.@preserve ref begin
@@ -906,14 +878,16 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
 end
 
 """
-End the encoder and leave the command buffer OPEN.
+End the encoder and commit the pass's command buffer.
 
-Not committed: the next pass may be another render or a copy, and those share
-this buffer. `submit!` is what closes it, and the graph calls that before a
-dispatch and at the end of the frame.
+One buffer per pass, committed here: nothing stays open across the call
+boundary. It used to stay open for the next render or copy pass to share, and
+the graph's `submit!` hook closed it before a dispatch — the open buffer this
+backend, like the Vulkan one, no longer has.
 """
 function Mantle.end_render_pass!(h::MetalPassHandle)
     MTLm.endEncoding!(h.encoder)
+    commit!(h.cmdbuf)
     return nothing
 end
 

@@ -119,7 +119,9 @@ The list above was produced by RUNNING two devices. Reading produced a list of
 four caches, and **none of the four was what actually broke it.**
 """
 
-using Lava, KernelAbstractions, LinearAlgebra
+using Lava, Mantle, KernelAbstractions, LinearAlgebra
+@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
+@isdefined(LavaBackend) || (LavaBackend = MVE.LavaBackend)
 const KA = KernelAbstractions
 
 @kernel function twodev!(d, s)
@@ -218,7 +220,7 @@ function probe()
         println("  $name: pipelines=$(length(ctx.caches.pipelines)) ",
                 "linked=$(length(ctx.caches.linked)) ",
                 "launchplans=$(length(ctx.caches.launchplans)) ",
-                "pool blocks=$(length(ctx.caches.pool.blocks))")
+                "pool blocks=$(length(Mantle.pool(MVE.lavadevice(ctx)).blocks))")
     end
     gpu.caches === cpu.caches && error("both contexts share one DeviceCaches")
     gpu.caches.pipelines === cpu.caches.pipelines && error("both contexts share one pipeline cache")

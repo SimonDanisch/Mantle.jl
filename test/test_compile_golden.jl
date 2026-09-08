@@ -76,15 +76,20 @@ compileresult(g, plan) = (
     # prose ("about two buffers, not five") and what this asserts in numbers.
     @test r.peak == 524_288
 
-    # The chain is forced; the branches are free but must not overtake it.
-    @test r.scheduled == ["chain1", "chain2", "chain3", "branch1", "branch2"]
+    # The chain is forced; the branches are free but must not overtake it. The
+    # `updates` pass is first in every plan: it is where the host's stores to
+    # declared `Buffer`s and `GPURef`s land (`Plan.hostwritten`), and it is
+    # scheduled ahead of everything that could read them.
+    @test r.scheduled == ["updates", "chain1", "chain2", "chain3", "branch1", "branch2"]
 
     # Every pass, including the two that share no data with anything — those are
     # ALIASING barriers. If a refactor drops them the peak stays right and the
     # picture goes wrong intermittently, which is the worst failure available.
     @test all(r.barriered)
 
-    @test r.intervals == [(1, 2), (2, 3), (3, 3), (4, 4), (5, 5)]
+    # Pass indices are 1-based over the schedule above, so the update pass at
+    # position 1 shifts every transient's interval by one.
+    @test r.intervals == [(2, 3), (3, 4), (4, 4), (5, 5), (6, 6)]
 end
 
 # ── KNOWN GAP: nothing above guards `Dag` ─────────────────────────────────────

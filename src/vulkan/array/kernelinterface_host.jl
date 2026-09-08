@@ -158,17 +158,19 @@ function (k::KI.Kernel{LavaBackend})(args...;
     # `find_tlas_in_args` BEFORE Adapt, which strips the hwtlas — same ordering
     # the KA entry point depends on.
     tlas    = find_tlas_in_args(args)
-    batch   = ensure_active_batch!(bq)
-    pin_leaves!(batch, k.kern)
-    pin_leaves!(batch, args)
-    adaptor = LavaAdaptor(batch)
-
-    # `ka_launch!` drops `all_args[1]` from the compiled signature
-    # (`Base.tail`, ka_backend.jl:865) and `pack_args_direct!` skips it as a
-    # ghost, because the KA path puts its `CompilerMetadata` there. A KI kernel
-    # is a plain function with no such leading value, so it passes `nothing` —
-    # zero-sized, hence dropped by both — to satisfy the same contract.
-    all_args = (nothing, map(a -> Adapt.adapt(adaptor, a), args)...)
-    ka_launch!(bq, k.kern, all_args, blocks, wg, tlas)
+    oneshot!(bq; tag = :launch) do e
+        owner = e.owner
+        pin_leaves!(owner, k.kern)
+        pin_leaves!(owner, args)
+        adaptor = LavaAdaptor(owner)
+        # `ka_launch!` drops `all_args[1]` from the compiled signature
+        # (`Base.tail`, ka_backend.jl) and `pack_args_direct!` skips it as a
+        # ghost, because the KA path puts its `CompilerMetadata` there. A KI
+        # kernel is a plain function with no such leading value, so it passes
+        # `nothing` — zero-sized, hence dropped by both — to satisfy the same
+        # contract.
+        all_args = (nothing, map(a -> Adapt.adapt(adaptor, a), args)...)
+        ka_launch!(e, k.kern, all_args, blocks, wg, tlas)
+    end
     return nothing
 end

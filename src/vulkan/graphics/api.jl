@@ -161,10 +161,12 @@ function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::WindowT
     view = win.views[win.current_image_idx + 1]
     image = win.images[win.current_image_idx + 1]
 
-    push_data = isempty(args) ? UInt8[] : pack_gfx_args(bq, args, vert_shader.push_info)
-
-    vk_draw!(bq, compiled, view, image, win.extent, vertex_count;
-        push_data, instances, clear_color)
+    oneshot!(bq; tag = :draw) do e
+        push_data = isempty(args) ? UInt8[] : pack_gfx_args(e.owner, args, vert_shader.push_info)
+        vk_draw!(e, compiled, view, image, win.extent, vertex_count;
+            push_data, instances, clear_color)
+    end
+    return nothing
 end
 
 function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::OffscreenTarget, vertex_count::Integer;
@@ -188,20 +190,22 @@ function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::Offscre
         depth_format=fb.depth_view === nothing ? VK.FORMAT_UNDEFINED : fb.depth_format,
         descriptor_set_layout)
 
-    push_data = isempty(args) ? UInt8[] : pack_gfx_args(bq, args, vert_shader.push_info)
-
-    vk_draw!(bq, compiled, fb.color_view, fb.color_image,
-        VK.Extent2D(UInt32(fb.width), UInt32(fb.height)),
-        vertex_count;
-        push_data, instances,
-        depth_view=fb.depth_view,
-        depth_image=fb.depth_image,
-        depth_clear,
-        clear_color, descriptor_set)
+    oneshot!(bq; tag = :draw) do e
+        push_data = isempty(args) ? UInt8[] : pack_gfx_args(e.owner, args, vert_shader.push_info)
+        vk_draw!(e, compiled, fb.color_view, fb.color_image,
+            VK.Extent2D(UInt32(fb.width), UInt32(fb.height)),
+            vertex_count;
+            push_data, instances,
+            depth_view=fb.depth_view,
+            depth_image=fb.depth_image,
+            depth_clear,
+            clear_color, descriptor_set)
+    end
+    return nothing
 end
 
 """
-    pack_gfx_args_bda(bq, args, push_info) -> UInt64
+    pack_gfx_args_bda(owner, args, push_info) -> UInt64
 
 Pack a draw's arguments and return the buffer device address to push, rather than
 an eight-byte `Vector` holding it.
@@ -211,9 +215,8 @@ allocated 48 bytes of header plus the payload *per draw per frame*, which at a
 hundred plots is most of a frame's garbage. `pack_gfx_args` still returns the
 vector for callers written against it.
 """
-function pack_gfx_args_bda(bq::VulkanBatchQueue, args, push_info::PushConstantInfo)
+function pack_gfx_args_bda(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
-    batch = ensure_active_batch!(bq)
     adaptor = LavaAdaptor(batch)
     converted = map(a -> Adapt.adapt(adaptor, a), args)
     byval_sizes = push_info.byval_llvm_sizes
@@ -224,15 +227,14 @@ function pack_gfx_args_bda(bq::VulkanBatchQueue, args, push_info::PushConstantIn
     return arg_buf.address
 end
 
-function pack_gfx_args(bq::VulkanBatchQueue, args, push_info::PushConstantInfo)
+function pack_gfx_args(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
     push_info.push_size == 0 && return UInt8[]
     isempty(args) && return UInt8[]
 
-    batch = ensure_active_batch!(bq)
     # LavaAdaptor is the single point that strips LavaArray → LavaDeviceArray
-    # AND pins the original into batch.pinned.  Adapt.jl's recursion handles
-    # wrapper structs / Broadcasted / NamedTuple, so any nested LavaArray
-    # gets both its pointer strip and its pin in the same pass.
+    # AND pins the original into the owner's pinned set.  Adapt.jl's recursion
+    # handles wrapper structs / Broadcasted / NamedTuple, so any nested
+    # LavaArray gets both its pointer strip and its pin in the same pass.
     adaptor = LavaAdaptor(batch)
     converted = map(a -> Adapt.adapt(adaptor, a), args)
 
@@ -258,7 +260,7 @@ function pack_gfx_args(bq::VulkanBatchQueue, args, push_info::PushConstantInfo)
 end
 
 # Empty-args variant
-function pack_gfx_args(::VulkanBatchQueue, args, ::Nothing=nothing)
+function pack_gfx_args(::Closed, args, ::Nothing=nothing)
     isempty(args) && return UInt8[]
     error("pack_gfx_args requires push_info for non-empty args.")
 end
@@ -334,13 +336,19 @@ checkblitsize(a::LavaArray{<:Any,1}, w::Integer, h::Integer) =
         "blit source holds $(length(a)) pixels and a $(w)x$(h) target needs $(w * h)"))
 
 """
+    blit!(e::Emitter, target::RenderTarget, source::LavaArray; clear=true)
     blit!(bq, target::RenderTarget, source::LavaArray; clear=true)
 
 Display a GPU array on screen using a fullscreen blit.
 The source array should contain RGBA Float32 pixels (or any 4-component type).
 Its layout is `(height, width)` — see `checkblitsize`.
+
+The emitter form writes the blit where the caller is writing — a frame's
+one-shot, which has to hold the blit, the overlays drawn over it and the
+`presentready!` transition, and go to `present_frame!` as ONE closed buffer.
+The queue form is the same blit in a one-shot of its own, submitted at once.
 """
-function blit!(bq::VulkanBatchQueue, target::RenderTarget, source::LavaArray;
+function blit!(e::Emitter, target::RenderTarget, source::LavaArray;
                clear::Bool=true)
     if target isa WindowTarget
         win = target.window
@@ -361,9 +369,9 @@ function blit!(bq::VulkanBatchQueue, target::RenderTarget, source::LavaArray;
     end
     checkblitsize(source, w, h)
 
-    # Create or reuse blit pipeline. `bq.ctx`, not `vk_context()`: this pipeline
-    # is a device-owned handle and the queue we are recording on names its device.
-    ctx = bq.ctx::VkContext
+    # Create or reuse blit pipeline. `e.ctx`, not `vk_context()`: this pipeline
+    # is a device-owned handle and the buffer we are writing into names its device.
+    ctx = e.ctx::VkContext
     if ctx.caches.blit === nothing
         ctx.caches.blit = GraphicsPipeline(;
             vertex=blit_vertex,
@@ -388,110 +396,89 @@ function blit!(bq::VulkanBatchQueue, target::RenderTarget, source::LavaArray;
 
     # Pack fragment args via the fragment shader's push_info
     frag_shader = get_or_compile_gfx(pipeline.fragment, frag_tt, :fragment)
-    push_data = pack_gfx_args(bq, frag_args, frag_shader.push_info)
-
     clear_color = clear ? (0.0f0, 0.0f0, 0.0f0, 1.0f0) : nothing
 
-    vk_draw!(bq, compiled, view, image, extent, 3;
+    push_data = pack_gfx_args(e.owner, frag_args, frag_shader.push_info)
+    vk_draw!(e, compiled, view, image, extent, 3;
         push_data, clear_color)
+    return nothing
+end
+
+function blit!(bq::VulkanBatchQueue, target::RenderTarget, source::LavaArray;
+               clear::Bool=true)
+    oneshot!(bq; tag = :blit) do e
+        blit!(e, target, source; clear)
+    end
+    return nothing
 end
 
 """
-    present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
+    presentready!(e, win)
 
-Submit recorded draw commands and present to screen.
+Transition the acquired swapchain image to `PRESENT_SRC`, as the last command
+of the frame's one-shot. The frame draws into the image in
+`COLOR_ATTACHMENT_OPTIMAL`; the presentation engine wants it in this one.
 """
-function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow)
-    batch = bq.active_batch
-    batch === nothing && error("present_frame! called without an active recording batch")
-    cmd = batch.cmd_buf
-
-    # Transition swapchain image to PRESENT_SRC before presenting
+function presentready!(e::Emitter, win::VulkanWindow)
     image = win.images[win.current_image_idx + 1]
-    transition_image!(cmd, image,
+    transition_image!(e.cmd, image,
         VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.AccessFlag(0))
+    pin!(e, win)
+    return nothing
+end
 
-    # End command buffer
-    throw_if_error(bq, "vkEndCommandBuffer", VK.end_command_buffer(cmd))
+"""
+    presentuntouched!(e, win)
 
+The whole of an abandoned frame's one-shot: the acquired image to `PRESENT_SRC`
+from `UNDEFINED`, its contents discarded, so it can be presented without having
+been drawn into. From `UNDEFINED` and not from the layout the last frame left it
+in, because an acquired image's contents are undefined by the specification and
+a transition from `UNDEFINED` is valid whatever the presentation engine did.
+"""
+function presentuntouched!(e::Emitter, win::VulkanWindow)
+    image = win.images[win.current_image_idx + 1]
+    transition_image!(e.cmd, image,
+        VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK.AccessFlag(0), VK.AccessFlag(0))
+    pin!(e, win)
+    return nothing
+end
+
+"""
+    present_frame!(bq::VulkanBatchQueue, win::VulkanWindow, frame::OneShot) -> token
+
+Submit the frame's one-shot and present.
+
+One submission, through the same `submit!` everything else goes through, with
+the two extra semaphores a swapchain image needs — wait for the image to be
+available before colour attachment writes, signal render-finished for the
+present — and the frame slot's fence, which `acquire_next_image!` waits on
+before it reuses the slot. The one-shot must end with [`presentready!`](@ref).
+
+It used to take the open batch over and submit it by a second route, with its
+own list of sealed segments and its own bookkeeping of which of them a
+recording had lent it. There is one route now.
+"""
+function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow, frame::OneShot)
+    win.acquired || error("present_frame!: no image acquired (call acquire_next_image! first)")
     fi = win.current_frame
-
-    # ensure_active_batch! pre-assigned batch.signal_value = next_timeline + 1.
-    # We must signal the timeline semaphore here so any `last_write` entries
-    # set by dispatches in this batch can be observed as "complete".
-    # Otherwise `wait_for_write(buf)` will hang forever on a value that
-    # never arrives.
-    bq.next_timeline += 1
-    @assert batch.signal_value == bq.next_timeline "present_frame! signal desync"
-
-    wait_infos = [
-        # Wait for collected cross-queue deps:
-        [VK.SemaphoreSubmitInfo(s, v, UInt32(0); stage_mask=stage)
-         for (s, v, stage) in batch.wait_semaphores]...,
+    tok = submit!(bq, frame;
         # Wait for swapchain image availability before color attachment writes:
-        VK.SemaphoreSubmitInfo(win.image_available[fi], UInt64(0), UInt32(0);
-            stage_mask=VK.PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT),
-    ]
-    signal_infos = [
-        # Signal timeline for in-Lava lifetime tracking:
-        VK.SemaphoreSubmitInfo(bq.timeline_sem, batch.signal_value, UInt32(0);
-            stage_mask=VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT),
-        # Signal render_finished for the subsequent present operation. Indexed by
-        # IMAGE, not frame slot — see the comment where these are created.
-        VK.SemaphoreSubmitInfo(win.render_finished[win.current_image_idx + 1], UInt64(0), UInt32(0);
-            stage_mask=VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT),
-    ]
-    # Sealed segments first, then the one still being recorded — the same order
-    # `submit!` uses, and for the same reason: `maybe_split_cb!` ends the current
-    # CB mid-frame and starts a fresh one, so everything recorded before the split
-    # lives in `sealed_cmd_bufs`. Submitting only `batch.cmd_buf` here dropped it,
-    # silently: no validation error, because nothing is invalid about commands
-    # that are simply never handed to the queue. What it looked like was a frame
-    # that did nothing, once every `cb_split_threshold` dispatches — and for a
-    # graph whose first pass clears a counter that a later pass accumulates into,
-    # a lost clear means the counter never restarts and the consumer indexes off
-    # the end of its buffer.
-    cb_infos = [VK.CommandBufferSubmitInfo(cb, UInt32(0)) for cb in batch.sealed_cmd_bufs]
-    push!(cb_infos, VK.CommandBufferSubmitInfo(cmd, UInt32(0)))
-    # Moved out of `sealed_cmd_bufs`, or the next frame submits them again: this
-    # batch is reused across frames and `reclaim_batch!` is what normally empties
-    # that list, which does not happen between two presents. Re-submitting a
-    # sealed segment executes it twice — harmless for a clear, wrong for anything
-    # that accumulates. They cannot go straight back to `free_cmd_bufs` either;
-    # the GPU is still reading them until the fence. `reclaim_batch!` drains this.
-    #
-    # A buffer a `Recording` lent this batch is dropped rather than moved: the
-    # recording owns it and submits it again. A windowed plan cannot be recorded
-    # today, so `borrowed` is empty on every path that reaches here.
-    for cb in batch.sealed_cmd_bufs
-        any(x -> x === cb, batch.borrowed) && continue
-        push!(batch.submitted_cmd_bufs, cb)
-    end
-    empty!(batch.sealed_cmd_bufs)
-    empty!(batch.borrowed)
-    submit_info = VK.SubmitInfo2(wait_infos, cb_infos, signal_infos)
-    queue_submit_2!(bq, [submit_info]; fence=win.in_flight[fi])
-
-    # Store batch in window's per-frame slot — it will be reclaimed in
-    # acquire_next_image! after the fence wait confirms GPU completion.
-    # Do NOT push to free_batches here: the GPU is still using this command buffer.
-    # In the one place that means "on its way to the device". A present submits
-    # without going through `submit!` — the batch goes into the window's frame
-    # slot rather than `bq.in_flight` — so nothing recorded it, and `flush!`
-    # computed a target that excluded the frame currently being drawn. See
-    # `graph/submission.jl`.
-    submitted!(bq, batch.signal_value; tag = :present)
-    bq.active_batch = nothing
-    win.frame_batches[fi] = batch
-    empty!(batch.wait_semaphores)
-
+        waits = ((win.image_available[fi], UInt64(0),
+                  VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)),),
+        # Signal render_finished for the subsequent present operation. Indexed
+        # by IMAGE, not frame slot — see the comment where these are created.
+        signals = ((win.render_finished[win.current_image_idx + 1], UInt64(0),
+                    VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)),),
+        fence = win.in_flight[fi], tag = :present)
     drain_deferred_frees!(bq)
     drain_deferred_as_frees!(bq)
-
-    # Present
     present!(win)
+    return tok
 end
 
 # ── Mantle's shader builtins, on this backend ────────────────────────────────

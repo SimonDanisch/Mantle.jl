@@ -74,7 +74,7 @@ end
                         M.DeviceRange(n; max = cap))
         end
 
-        plan = M.Plan(g)
+        plan = M.record!(M.Plan(g))
         M.run!(plan)
 
         @test Array(n)[1] == Int32(want)
@@ -109,7 +109,7 @@ end
     marks = only(filter(p -> any(u -> last(u) === M.Indirect, p.usages), g.passes))
     @test marks !== nothing
 
-    M.run!(M.Plan(g))
+    M.run!(M.record!(M.Plan(g)))
     @test count(==(1.0f0), Array(M.storage(dst))) == 64
 end
 
@@ -134,6 +134,6 @@ end
         M.dispatch!(p, dr_mark_unguarded!, (M.use(p, dst; write = true),),
                     M.DeviceRange(n; max = cap); group = group)
     end
-    M.run!(M.Plan(g))
+    M.run!(M.record!(M.Plan(g)))
     @test count(==(1.0f0), Array(M.storage(dst))) == cld(want, group) * group
 end

@@ -67,6 +67,7 @@ Declare the resources with `use` as for any other pass. Nothing here inspects
 what the graph orders on, and a trace needs both said.
 """
 function trace!(p, pipeline, accel, args, ndrange)
+    refuserefs(args)
     n = countresource(ndrange)
     n === nothing || indirectcount!(p, n)
     push!(dispatches(passof(p)), Trace(pipeline, accel, args, ndrange))
@@ -130,3 +131,41 @@ callers that need to ask have one of those to hand and not always the same one.
 """
 supports_rt_pipeline(::Any) = false
 supports_rt_pipeline(a::AdaptedAccel) = supports_rt_pipeline(a.hwtlas)
+
+"""
+    pin!(owner, x)
+
+Hold `x` for as long as `owner` — a closed command buffer, a recording, or the
+emitter writing into one — can still run. A backend implements it for what its
+commands can name: arrays, acceleration structures, descriptor pools.
+"""
+function pin! end
+
+"""
+    blases(tlas)
+
+The bottom-level acceleration structures `tlas` instances. A backend answers
+for its top-level type.
+"""
+function blases end
+
+"""
+    pintrace!(owner, tlas)
+
+The acceleration structures a trace reads, held for as long as it can run: the
+top level, and every bottom level it instances. A trace walks from the one into
+the others, so a BLAS swapped out underneath a running trace (`Raycore.sync!`
+does that) must stay alive until the trace has passed, and pinning the top
+level alone does not say so.
+
+Core over two backend answers, `pin!` and `blases`. It used to be written out
+four times in the Vulkan backend — once in the recorded walk and once in each
+unmodelled path — and a Metal backend would have written a fifth.
+"""
+function pintrace!(owner, tlas)
+    pin!(owner, tlas)
+    for blas in blases(tlas)
+        pin!(owner, blas)
+    end
+    return nothing
+end

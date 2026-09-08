@@ -12,6 +12,18 @@ using Lava, Mantle
 using Vulkan
 using Test
 
+# The hand-written pipeline's dispatch, as the unmodelled path spells it today:
+# one one-shot holding the trace, the acceleration structures it reads pinned
+# by core's `pintrace!`, submitted when it closes. `rt_dispatch!` was the name
+# of the open-batch version.
+function rt_dispatch!(bq, pipeline, tlas, push_bda, W, H)
+    MVE.oneshot!(bq; tag = :trace) do e
+        Mantle.pintrace!(e, tlas)
+        MVE.emit_trace!(e, pipeline, tlas, push_bda, W, H, 1)
+    end
+    return nothing
+end
+
 # =====================================================================
 # SPIR-V Shader Builders
 # =====================================================================
@@ -382,7 +394,7 @@ end
         push_bda = output_buf.address
 
         # Dispatch
-        MVE.rt_dispatch!(MVE.vk_context().default_bq, pipeline, tlas, push_bda, W, H)
+        rt_dispatch!(MVE.vk_context().default_bq, pipeline, tlas, push_bda, W, H)
 
         # Read back results
         result_bytes = Vector{UInt8}(undef, W * H * sizeof(Float32))

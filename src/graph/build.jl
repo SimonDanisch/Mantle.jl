@@ -14,6 +14,14 @@ function compute!(f, g::Graph, name::AbstractString)
     p = newpass(g, name, :compute)
     push!(passes(g), p)
     f(handle(g, p))
+    # A pass that traces makes its shader accesses from a ray-tracing pipeline,
+    # which is a stage of its own — see `Traced`. Decided here, after the body,
+    # because `use` runs before `trace!` in every body that has both.
+    if any(d -> d isa Trace, dispatches(p))
+        for (i, (id, U)) in enumerate(p.usages)
+            p.usages[i] = id => traced(U)
+        end
+    end
     return p
 end
 
@@ -60,14 +68,6 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
     (count === nothing) == (while_nonzero === nothing) && throw(ArgumentError(
         "repeat!: give exactly one gate — a `count` positionally, or " *
         "`while_nonzero = flag`."))
-    # `typeof` and not the device itself: a device `show`s its whole pool, and an
-    # error message that dumps a few hundred kilobytes of zeroed bytes buries the
-    # sentence that says what went wrong.
-    supportspredicate(g.dev) || throw(ArgumentError(
-        "repeat!: $(nameof(typeof(g.dev))) cannot discard recorded work on a " *
-        "device-written predicate, so a device-decided trip count is not " *
-        "expressible here. Loop on the host, or record a fixed number of " *
-        "iterations."))
     n = Int(maxiters)
     src = count === nothing ? while_nonzero : count
     # ONE flag, rewritten before each iteration, rather than an array expanded
@@ -101,6 +101,17 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
                 "`repeat!` is not supported, because a pass has one predicate and " *
                 "nesting needs their conjunction."))
             pp.predicate = (pred, 0)
+            # A gated pass whose every dispatch is sized on the device runs
+            # nothing when discarded on ANY backend: the prepare writes zero
+            # groups for it (`emitprepares!`). Fixed-size work — a draw, a
+            # host-sized dispatch — needs the backend to discard the commands
+            # themselves. `typeof` and not the device: a device `show`s its
+            # whole pool, and that buries the sentence that says what went wrong.
+            supportspredicate(g.dev) || devicesized(pp) || throw(ArgumentError(
+                "repeat!: pass \"$(pp.name)\" has fixed-size work and " *
+                "$(nameof(typeof(g.dev))) cannot discard recorded work on a " *
+                "device-written predicate. Size every dispatch of a gated pass " *
+                "on the device (a `DeviceRange`), or loop on the host."))
             # The predicate READ is a hazard like any other, and declaring it is
             # what makes the graph put a barrier between the gate that writes the
             # flag and the passes gated on it — and between those passes and the
@@ -146,14 +157,21 @@ end
 """
     supportspredicate(device) -> Bool
 
-Whether this device can discard recorded work on a value it reads from a buffer
-at execution time — what [`repeat!`](@ref) needs.
+Whether this device can discard fixed-size recorded work — a draw, a host-sized
+dispatch — on a value it reads from a buffer at execution time.
 
-`false` in core, so a backend that has no such mechanism refuses `repeat!` at
-build rather than silently running every recorded iteration, which would be the
-one wrong answer that still produces a picture.
+Not what every [`repeat!`](@ref) needs: a gated pass whose dispatches are all
+sized on the device is discarded by the prepare writing zero groups, on every
+backend. This decides only whether a gated pass may also hold fixed-size work.
+`true` in core, because a backend that walks its passes on the host reads the
+flag between them and can skip anything; a recording backend answers with
+whether its driver can.
 """
-supportspredicate(::Any) = false
+supportspredicate(::Any) = true
+
+"""Every dispatch of the pass reads its size on the device, and it draws nothing:
+discarded, it runs nothing, whatever the backend can do."""
+devicesized(p::Pass) = isempty(p.draws) && all(d -> d.ndrange isa DeviceRange, p.dispatches)
 
 """
     resourceid(graph, r) -> Int
@@ -234,6 +252,20 @@ Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, n
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 
+# A transient buffer's length is what it was declared with — core, because a
+# `TransientBuffer` is core and its count is not a driver's.
+Base.length(t::TransientBuffer) = t.n
+
+"""The device base address of a region's bytes. Core: a `Region` is `Pool`'s and
+a `BufferBlock`'s `address` is a plain `UInt64`, so the arithmetic names no
+driver type."""
+region_bda(r::Region) = r.block.memory.address + offset(r)
+
+# A window surface is open while its window is — core forwards, the backend's
+# `isopen(win)` answers.
+Base.isopen(s::WindowSurface) = isopen(s.win)
+
+
 # The load op, lowered. `Discard` is the one that needs saying: it is the only
 # way to reach DONT_CARE, and a pass that covers every pixel should not pay to
 # load what it is about to overwrite.
@@ -263,37 +295,6 @@ alignment(c::Compile, t) = alignment(c.graph.dev, t)
 
 arena(::TransientBuffer) = Buffers()
 
-Recycler() = Recycler(Dict{Int,Vector{Any}}(), Tuple{Int,Any,Any}[])
-
-"""
-Move everything the device has finished with onto the free lists.
-
-Gated on completion tokens rather than on a frame count, because how many runs
-are in flight is not this code's business and changing it must not turn
-recycling into a use-after-free.
-
-Core's, and it took the move to `passed` to make it so: this asked
-`query_timeline(bq)` and compared raw timeline values, which is why it lived in
-the Vulkan backend and why `Recycler` held a `UInt64`.
-"""
-function recycle!(r::Recycler, dev)
-    keep = 0
-    for (bytes, store, tok) in r.retiring
-        if passed(dev, tok)
-            push!(get!(() -> Any[], r.free, bytes), store)
-        else
-            keep += 1
-            r.retiring[keep] = (bytes, store, tok)
-        end
-    end
-    resize!(r.retiring, keep)
-    r
-end
-
-"""Hand a buffer back, reusable once the device has passed `token`."""
-retire!(r::Recycler, store, nbytes::Integer, token) =
-    push!(r.retiring, (Int(nbytes), store, token))
-
 """
     imageusage(device, T) -> backend usage mask
 
@@ -321,15 +322,19 @@ Give every tracking transient the size its source now has, and recompile if any
 moved.
 
 `true` means the plan is a different plan: different offsets, possibly
-different arenas, and a fresh argument memory. A caller that recorded anything
-against the old one has to record it again.
+different arenas, and a fresh argument memory. Its recording is dropped — the
+commands name the old placement's image handles and argument bytes — and the
+next `run!` records again. (A move that changes nothing but addresses never
+comes through here: it is patched — see `notify_move!`.)
 
 Not `any`, which short-circuits — the first transient that moved would be the
 only one refitted, and the rest would keep a size their source no longer has.
 
-The caller is `run!`, once per frame, before anything is acquired or recorded:
-failing here leaves nothing behind, while the same check inside recording left
-a half-recorded frame and an acquired image.
+The caller is `run!`, once per frame, after the frame's image is acquired and
+before anything is recorded: the acquire is the last place a resize is noticed,
+so this is where the size is final. Failing here hands the image back untouched
+(`abandonframe!`), while the same check inside recording left a half-recorded
+frame.
 """
 function refit!(pl::Plan)
     moved = false
@@ -337,6 +342,9 @@ function refit!(pl::Plan)
         moved |= refit!(t)
     end
     moved || return false
+    # Dropped before the recompile — the commands name the old placement —
+    # and `run!` writes it again against the new one before it submits.
+    invalidate!(pl)
     c = compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
     let a = analysis(c)
@@ -564,6 +572,8 @@ function indirectcount!(p::PassHandle, n)
 end
 
 function draw!(p::PassHandle, shader, args, n; frag_args = ())
+    refuserefs(args)
+    refuserefs(frag_args)
     # Here rather than at compile: the pipeline has one push constant range, so a
     # draw with arguments on both stages is a mistake in the call, and by the time
     # a shader is compiled it surfaces as one stage failing to take an argument it
@@ -650,7 +660,7 @@ dispatches(p::Pass) = p.dispatches
 
 passes(g::Graph) = g.passes
 
-"""The single pass every `Update` shares, so one pair of barriers covers them all."""
+"""The pass every host store lands in, so one pair of barriers covers them all."""
 function updates_pass!(g::Graph)
     for p in g.passes
         p.kind === :update && return p
@@ -660,10 +670,44 @@ function updates_pass!(g::Graph)
     p
 end
 
-function Update(g::Graph, buf; range = nothing)
-    p = updates_pass!(g)
-    touch!(g, buf)
-    return registerupdate!(g.updates, p.usages, resourceid(g, buf), buf, range)
+# What a host store can be waiting on, and so what `hostwritten!` collects.
+hostwritable(::Buffer) = true
+hostwritable(::GPURef) = true
+hostwritable(::Any) = false
+
+"""
+    hostwritten!(graph) -> Tuple
+
+Every `Buffer` and `GPURef` a pass of `graph` declares, registered as a
+`CopyDst` of the update pass — once each, however many passes name it — and
+returned as a tuple with every element's concrete type in the tuple's type,
+which is what `Plan.hostwritten` holds and `run!` walks.
+
+"Declares" is every usage, followed through `rootresource`: a vertex `Attr`, a
+`BufferRange` slice and a `Commands` buffer all reach the `Buffer` under them.
+A resource handed to a kernel and declared by nothing is not here, which is
+what undeclared means. The "once" is worth having: several passes reading one
+buffer are one hazard against the store, and a usage list that repeats it
+makes the barrier phase derive the same dependency twice. Idempotent, so a
+recompile (`refit!`) sees the registrations `Plan` made.
+"""
+function hostwritten!(g::Graph)
+    found = Any[]
+    for p in g.passes
+        p.kind === :update && continue
+        for (id, _) in p.usages
+            r = rootresource(byid(g.ids, id))
+            hostwritable(r) || continue
+            any(x -> x === r, found) || push!(found, r)
+        end
+    end
+    isempty(found) && return ()
+    up = updates_pass!(g)
+    for r in found
+        id = resourceid(g, r)
+        any(u -> u.first == id, up.usages) || push!(up.usages, id => CopyDst)
+    end
+    return Tuple(found)
 end
 
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
@@ -692,7 +736,10 @@ end
 
 argalign(n::Integer) = (Int(n) + 255) & ~255
 
-slotbase(am::ArgMemory) = (am.slot - 1) * am.stride
+# `slotbase(am)` is gone with the argument ring. It was `(am.slot - 1) *
+# am.stride`, threaded through every emitter as `e.base` and added to every
+# address a recording held; with one copy of the arguments the base is zero
+# everywhere, so the field, the parameter and the addition all go.
 
 """
 One `VkDispatchIndirectCommand`'s worth of the plan's memory, 256-byte aligned so
@@ -702,23 +749,27 @@ alignment. Twelve bytes are used; the alignment is what decides the stride.
 const INDIRECT_STRIDE = 256
 
 """
-Where this dispatch's workgroup counts live in the slot that is current, or
-`nothing` if the host already knows its ndrange.
+Where this dispatch's workgroup counts live, or `nothing` if the host already
+knows its ndrange.
 
 The one lookup a recording does per device-sized dispatch, and it is an index
-rather than an allocation: `ArgMemory` built the view when it laid the slot out.
+rather than an allocation: `ArgMemory` built the view when it laid the arguments
+out.
 """
-indirectof(am::ArgMemory, k::Int) = k == 0 ? nothing : am.indirect[am.slot][k]
+indirectof(am::ArgMemory, k::Int) = k == 0 ? nothing : am.indirect[k]
 
 # ── lowering a transition into a Vulkan barrier ───────────────────────────────
 
-# `indirect` is asked of a recorded dispatch, which has an `ndrange`. A KA
-# backend's baked callable does not — it resolved its count into the closure — so
-# the probe is `hasproperty`-guarded rather than assuming the recording shape.
+# Whether a compiled thing sizes itself on the device, one method per compiled
+# kind. The recording kinds carry the `ndrange` they were declared with; a
+# KernelAbstractions `Launch` resolved its count at `bake` and says so beside
+# its definition.
+devicesized(d::CompiledDispatch) = countresource(d.ndrange) !== nothing
+devicesized(t::CompiledTrace) = countresource(t.ndrange) !== nothing
+
 PassPlan(pass, draws, dispatches, images, pre, barrier) =
     PassPlan(pass, draws, dispatches, images, pre, barrier,
-             any(d -> hasproperty(d, :ndrange) && d.ndrange isa DeviceRange,
-                 dispatches))
+             any(devicesized, dispatches))
 
 # `Profiler` is Mantle's now — see `src/graph/types.jl`.
 
@@ -737,8 +788,8 @@ end
 # `adaptor` builds a backend's argument adaptor; it is the backend's.
 
 # In two steps, and the order matters for one thing: an acceleration structure.
-# `rawargs` is what the caller gave, with `Ref`s read and Mantle's own resources
-# resolved to their storage; `devargs` is that after Lava's conversion. A ray
+# `rawargs` is what the caller gave, with Mantle's own resources resolved to
+# their storage; `devargs` is that after Lava's conversion. A ray
 # query needs the `VulkanTLAS` bound as a descriptor, and adapting an
 # `AdaptedAccel` deliberately strips it — the device side of a ray query is a
 # variable, not a pointer the kernel carries. So the HWTLAS is looked for in the
@@ -746,36 +797,14 @@ end
 # nothing, and a shading kernel then compiles with ray query disabled and fails
 # in the emitter rather than at the call site.
 
-rawargs(args::Tuple) = map(argvalue, args)
+rawargs(args::Tuple) = map(storage, args)
 
-"""
-Whether this argument can hold a different value on the next run.
-
-The mirror of [`argvalue`](@ref), and deliberately the same one level deep:
-`rawargs` maps `argvalue` over the argument tuple and `argvalue` unwraps exactly
-one thing, a `Base.RefValue`. So a `Ref` moves and nothing else does, and this
-says so with the same two methods rather than a second opinion about it.
-
-What it is for: a recorded plan submits commands that read their arguments out of
-the plan's own memory, so the only per-run host work it needs is rewriting the
-arguments that can differ. Anything else was written at `record!` and is still
-there. See `Plan.writes`.
-"""
-isdynamic(::Base.RefValue) = true
-
-isdynamic(x) = false
-
-"""Whether any argument in a launch's tuple can move. See [`isdynamic`](@ref)."""
-dynamicargs(args::Tuple) = any(isdynamic, args)
-
-# Per compiled entry, and by dispatch rather than by a field name that happens to
-# be shared: a draw counts vertices and a dispatch and a trace take an ndrange,
-# and the three types name that field differently on purpose.
-rebinding(d::CompiledDraw) = dynamicargs(d.args) || isdynamic(d.count)
-
-rebinding(d::CompiledDispatch) = dynamicargs(d.args) || isdynamic(d.ndrange)
-
-rebinding(t::CompiledTrace) = dynamicargs(t.args) || isdynamic(t.ndrange)
+# `isdynamic`, `dynamicargs` and the three `rebinding` methods are gone. They
+# answered "can this argument hold a different value on the next run", which is
+# the question the per-run host rewrite existed to act on. Nothing rewrites
+# argument memory after `record!`, so the answer is no for every argument and
+# the predicate has no caller: a value that changes is a [`GPURef`](@ref), and
+# what its dispatches were packed with is an address that does not.
 
 devargs(ad, raw::Tuple) = map(a -> Adapt.adapt(ad, a), raw)
 
@@ -787,24 +816,12 @@ rootresource(v::BufferRange) = rootresource(v.parent)
 
 rootresource(a::Attr) = rootresource(a.resource)
 
-"""
-Whether an `Update` on this resource can move it.
-
-Only the whole-buffer route renames: `write_update!` renames when the ref has no
-range *and* the data is the buffer's whole length, and writes in place otherwise.
-So an `Update(g, buf; range = 1:100)` never moves its target and keeps a scoped
-barrier; a bare `Update(g, buf)` may, and gives it up.
-
-Through a slice as well as directly: `slice(g, buf, 1:100)` is a different object
-from `buf`, so an identity test against the update refs misses it — and a slice of
-a renamed buffer is exactly as stale as the buffer, having no storage of its own.
-
-Asked of the graph rather than of the resource because the resource cannot know:
-a `LavaBuffer` is the same type either way, and whether it is renameable is a
-property of how the graph was declared.
-"""
-renameable(g::Graph, r) =
-    any(u -> u.resource === rootresource(r) && u.range === nothing, g.updates)
+# `renameable(g, r)` is gone. It answered "can a store to this resource move
+# it", which was true for a whole-buffer store and false for a ranged one, and
+# it had two consumers: the barrier phase widened a renameable resource's barrier
+# to a global one (step 0 made every barrier global, so that went), and `record!`
+# refused a plan holding one (step 3 deleted renaming, so that went too). Nothing
+# can move now, so the question has no answer worth having.
 
 Compile(g::Graph; alias = true, coalesce = true, policy = Overlap()) =
     Compile(g, alias, coalesce, policy, Analysis(), Transition[],
@@ -953,6 +970,36 @@ const INDIRECT_CEILING = 1024 * 1024
 dispatchrange(r::DeviceRange) = something(r.max, INDIRECT_CEILING)
 
 """
+    checkextents(plan)
+
+Verify every pass renders into attachments that agree on size.
+
+Core, over [`target_extent`](@ref): a mismatch is a graph error, not a driver
+one — Vulkan calls the result undefined (VUID-VkRenderingInfo-pNext-06079) and
+RADV draws it anyway, so without this it is a wrong picture rather than a
+message. A resize follows the swapchain and not a transient sized when the
+graph was built, so this is what catches a plan run at a size it was not
+compiled for.
+"""
+function checkextents(pl::Plan)
+    for pp in pl.passes
+        p = pp.pass
+        p.kind === :render || continue
+        want = target_extent(first_target(p))
+        for t in (p.targets..., p.depth)
+            t === nothing && continue
+            e = target_extent(t)
+            (e[1] < want[1] || e[2] < want[2]) &&
+                error("pass \"$(p.name)\": the render area is $(want[1])x$(want[2]) " *
+                      "but an attachment is $(e[1])x$(e[2]). A resize follows the " *
+                      "swapchain and not a transient sized when the graph was built — " *
+                      "rebuild the graph and the plan at the new size.")
+        end
+    end
+    nothing
+end
+
+"""
     Plan(graph; alias = true, coalesce = true, profile = false, policy = Overlap())
 
 Compile `graph` into a plan.
@@ -965,13 +1012,17 @@ neither.
 """
 Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
             profile::Bool = false, policy::Policy = Overlap()) =
-    let c = compile!(Compile(g; alias, coalesce, policy))
+    # Before the compile: registering the host-written resources adds the update
+    # pass and its `CopyDst` usages, which the barrier phase derives from.
+    let hw = hostwritten!(g), c = compile!(Compile(g; alias, coalesce, policy))
         let a = analysis(c)
             pl = Plan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
                           a.offsets, a.peak, a.naive,
                           makeprofiler(g.dev, c.passes, profile),
                           alias, coalesce, policy,
-                          makeargmemory(g.dev, c.passes), nothing, nothing)
+                          makeargmemory(g.dev, c.passes), nothing,
+                          Dict{UInt64,Vector{Tuple{Region,Int}}}(),
+                          Tuple{Region,Int,UInt64}[], hw, false)
             # After construction, because a plan cannot be a tenant before it is a
             # plan — and the arena it was just placed into may grow for the NEXT
             # plan, which is when this registration earns its keep.
@@ -993,7 +1044,7 @@ here.
 """
 Graph(dev::Device) =
     Graph{typeof(dev)}(dev, Pass[], WindowSurface[], TransientResource[],
-                       Dict{Int,TransientResource}(), IdTable(), Any[], Recycler(),
+                       Dict{Int,TransientResource}(), IdTable(),
                        Dict{Tuple{Int,UnitRange{Int}},Any}())
 
 function Transient.Buffer(g::Graph, ::Type{T}, n::Integer) where {T}
@@ -1025,11 +1076,52 @@ elapsed(lo::UInt64, hi::UInt64, period) = hi < lo ? nothing : Float64(hi - lo) *
 
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 """Whether this plan's commands have been written — see `record!`."""
-recorded(pl::Plan) = pl.recordings !== nothing
+recorded(pl::Plan) = pl.recording !== nothing
 
-"""A recorded plan's command buffers hold the addresses its region has today, so
-the arena it is placed in can no longer grow. See `remappable`."""
-remappable(pl::Plan) = pl.recordings === nothing
+"""Whether this plan is free of a recording whose baked addresses constrain the
+pool. `movable` asks it for the block trim: trimming destroys whole blocks, which
+patching cannot follow. Arena GROWTH no longer asks — a buffers arena patches
+its recorded tenants (see `notify_move!`), an images arena re-records them."""
+remappable(pl::Plan) = pl.recording === nothing
+
+"""
+    invalidate!(pl)
+
+Throw a recording away that something other than this plan made wrong, and
+have `run!` write it again before it next submits. For the one kind of move
+patching cannot express — an image, whose `VkImage` and view the commands name
+directly — and for a refit that re-laid the plan out. Nothing for a plan that
+was never recorded: `run!` refuses those instead of recording them.
+
+Marked and restored rather than recorded here, because an images arena grows
+under whichever thread is compiling the OTHER plan, inside the pool's lock, and
+a recording is written on the owning thread only.
+"""
+function invalidate!(pl::Plan)
+    pl.recording === nothing && return pl
+    droprecording!(pl)
+    pl.stale = true
+    return pl
+end
+
+"""
+    droprecording!(pl)
+
+Throw the recording away. The patch table goes with it: its offsets are into
+the argument memory the next recording rewrites.
+"""
+function droprecording!(pl::Plan)
+    pl.recording === nothing && return pl
+    # Stop listening FIRST: a patch target can be a region the recording owns,
+    # so no move may be allowed to queue a write into it once `release!` has
+    # handed the bytes back to the pool.
+    unlisten_moves!(pool(pl.graph.dev), pl)
+    release!(pl.recording)
+    pl.recording = nothing
+    empty!(pl.patchtab)
+    empty!(pl.pending_patches)
+    return pl
+end
 
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
@@ -1045,7 +1137,7 @@ lp_of(d::CompiledDispatch) = d.launch
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 """
 Give this plan's regions back to the pool — its transients', and the argument
-memory its recordings read. The pipelines are ordinary backend objects and the
+memory its recording reads. The pipelines are ordinary backend objects and the
 GC reclaims those; a region is the thing only an explicit call can return,
 because nothing here finalizes.
 
@@ -1053,17 +1145,12 @@ No precondition: the regions are retired, so a plan freed immediately after its
 last `run!` — the ordinary case, with its recording still in flight — is fine.
 """
 function free!(pl::Plan)
-    # The recordings too, and before the regions: each holds a command buffer, a
+    # The recording too, and before the regions: it holds a command buffer, a
     # descriptor set per acceleration structure it binds, and a reference to
     # every resource its commands name. Dropping the plan alone would leave all
-    # of that to the GC, which does not know it is holding device memory.
-    if pl.recordings !== nothing
-        for rec in pl.recordings
-            release!(rec)
-        end
-        pl.recordings = nothing
-        pl.writes = nothing
-    end
+    # of that to the GC, which does not know it is holding device memory. This
+    # also takes the plan off the move listeners and drops its patch table.
+    droprecording!(pl)
     # The argument memory is a region like the transients' are, so it goes back
     # the same way. It used to be a device array from the backend's own allocator
     # and was left to the GC, which is what "the argument memory … the GC reclaims

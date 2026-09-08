@@ -111,11 +111,10 @@ end
 # half of it was one line (`bake(::Compile, body) = body`, "a body already IS the
 # callable"), so nothing here is worse off.
 
-@testset "Host: an Update writes at the position the graph reserved" begin
+@testset "Host: a store lands at the position the graph reserved" begin
     dev = M.Device(M.HostAPI())
     g = M.Graph(dev)
     b = M.Buffer(dev, zeros(Float32, 4))
-    ref = M.Update(g, b)
     seen = Float32[]
     # A `compute!` pass whose kernel copies the buffer somewhere the host can
     # read, which is what `custom!` was doing here — declare a read, observe what
@@ -127,32 +126,85 @@ end
                                    M.use(p, b; read = true)), 4)
     end
     plan = M.Plan(g)
+    # Both declared buffers are what a store can be waiting on, and the update
+    # pass that lands one is a pass, FIRST — that ordering is what makes the
+    # write visible to the reader in the same frame.
+    @test plan.hostwritten == (dst, b)
+    @test first(plan.passes).pass.kind === :update
     observe!() = append!(seen, copy(M.storage(dst)))
 
-    # Not fired: the update writes nothing, and the reader sees what was there.
+    # Nothing stored: the update pass writes nothing, and the reader sees what
+    # was there.
     M.run!(plan); observe!()
     @test seen == zeros(Float32, 4)
 
-    # Fired: the write lands BEFORE the pass that declared the read, which is the
-    # whole claim — `ref(x)` itself only stores a reference.
+    # Stored: the write lands BEFORE the pass that declared the read, which is
+    # the whole claim — `b[:] = x` itself only retains a reference.
     empty!(seen)
-    ref(Float32[1, 2, 3, 4])
+    b[:] = Float32[1, 2, 3, 4]
+    @test M.isdirty(b)
     M.run!(plan); observe!()
     @test seen == Float32[1, 2, 3, 4]
+    @test !M.isdirty(b)
 
     # …and it is consumed, so the next frame writes nothing again: the buffer
-    # still holds what the update landed, and the reader sees the same values.
+    # still holds what the store landed, and the reader sees the same values.
     empty!(seen)
     M.run!(plan); observe!()
     @test seen == Float32[1, 2, 3, 4]
 
+    # Two ranged stores before one run are two writes, in order: the second
+    # does not drop the first.
+    empty!(seen)
+    b[1:2] = Float32[7, 7]
+    b[2:4] = Float32[5, 5, 5]
+    M.run!(plan); observe!()
+    @test seen == Float32[7, 5, 5, 5]
+
     # Host memory is directly addressable, so the write is in place and the
-    # resource keeps its storage — where the Lava route renames into a fresh one.
+    # resource keeps its storage.
     store = b.store
-    ref(Float32[9, 9, 9, 9])
+    b[:] = Float32[9, 9, 9, 9]
     M.run!(plan); observe!()
     @test b.store === store
     @test seen[(end - 3):end] == Float32[9, 9, 9, 9]
+end
+
+# The host twin of `test_recorded_run_semantics.jl`'s first testset: the
+# contract is the same on every backend. A `GPURef` is a one-element buffer the
+# kernel reads through; the value behind it is whatever was last stored before
+# the run, and a run with no store reads what the last one landed.
+@kernel function host_addref!(out, kref)
+    i = @index(Global)
+    @inbounds out[i] += kref[1]
+end
+
+@testset "Host: a run reads the value its GPURef holds now" begin
+    dev = M.Device(M.HostAPI())
+    n = 8
+    steps = Int32[3, 7, 11, 13]
+    out = M.Buffer(dev, zeros(Int32, n))
+    kref = M.GPURef(dev, Int32(0))
+    g = M.Graph(dev)
+    M.compute!(g, "add") do p
+        M.use(p, out; read = true, write = true)
+        M.use(p, kref; read = true)
+        M.dispatch!(p, host_addref!, (out, kref), n)
+    end
+    plan = M.Plan(g)
+    for k in steps
+        kref[] = k
+        M.run!(plan)
+    end
+    @test Array(out) == fill(sum(steps), n)
+    @test !M.anydirty(plan.hostwritten)
+    # No store: the last value is read again.
+    M.run!(plan)
+    @test Array(out) == fill(sum(steps) + steps[end], n)
+    # A `Ref` is refused at the declaration, on this backend as on the other.
+    M.compute!(g, "refused") do p
+        @test_throws ArgumentError M.dispatch!(p, host_addref!, (out, Ref(Int32(1))), n)
+    end
 end
 
 # ── the thing that used to be silently broken ─────────────────────────────────

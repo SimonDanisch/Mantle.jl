@@ -147,6 +147,17 @@ function Base.getproperty(b::LavaBackend, s::Symbol)
     return getfield(b, s)
 end
 
+# Two backends are the same backend when they drive the same queues, however
+# they were spelled: `LavaBackend()` resolves to the device's default queue at
+# each access, `LavaBackend(ctx)` and `KA.get_backend(array)` pin that same
+# queue, and the default `==` compared the unresolved fields — `nothing` against
+# a queue — so `KA.get_backend(a) == Mantle.defaultbackend()` was false for an
+# array the default backend had just allocated (RayMakie's meshscatter tests).
+Base.:(==)(a::LavaBackend, b::LavaBackend) =
+    a.dispatch_bq === b.dispatch_bq && a.upload_bq === b.upload_bq
+Base.hash(b::LavaBackend, h::UInt) =
+    hash(objectid(b.dispatch_bq), hash(objectid(b.upload_bq), hash(:LavaBackend, h)))
+
 # ── Backend queries ──
 
 # Derive the backend from the array's own context so cross-context arrays
@@ -155,7 +166,7 @@ KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::VkContext)
 # KA.synchronize submits all recorded dispatches and waits for GPU completion.
 # This matches CUDA/AMDGPU semantics: after synchronize(), the CPU can safely
 # read GPU results. GPU-side ordering between dispatches is handled by pipeline
-# barriers in record_dispatch!, so synchronize() is only needed when the CPU
+# the barrier every closed command buffer opens with, so synchronize() is only needed when the CPU
 # must observe GPU results (or at natural batch boundaries like end-of-sample).
 function KA.synchronize(backend::LavaBackend)
     flush!(backend.dispatch_bq, backend.dispatch_bq.device)
@@ -438,86 +449,26 @@ function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroups
     return new_plan
 end
 
-"""
-    bq.barrier_elision :: Bool
-
-Drop the barrier in front of a dispatch whose buffers are disjoint from every
-buffer touched since the last barrier.
-
-Sound without read/write annotations: disjoint memory cannot alias, so it does
-not matter which side reads and which writes. Unsound only if a kernel reaches
-device memory that is not in its argument tree — Lava kernels address memory
-through `LavaDeviceArray` BDAs derived from exactly that tree.
-
-Off by default because the check is O(ranges since last barrier) *per dispatch*,
-which is real host cost. It is meant to be turned on around `capture`: the
-analysis is then paid once and every `replay!` gets the shorter command buffer
-for free. On the MatAnyone step barriers are 3.35 ms of an 11.07 ms replay.
-"""
-
-# `bq.touched_ranges` is a flat [lo₁,hi₁,lo₂,hi₂,…] of everything touched since
-# the last barrier on that queue, and `bq.dispatch_ranges` is scratch for the
-# dispatch being recorded. Both live on the queue: the ranges describe one
-# command buffer's contents, so a second queue recording concurrently would
-# otherwise merge its writes into the first queue's set and let it elide a
-# barrier it needed.
-
-"""Reset the elision state — call whenever the queue is known to be drained."""
-@inline reset_barrier_elision!(bq::VulkanBatchQueue) = (empty!(bq.touched_ranges); nothing)
-
-"""
-    poison_barrier_elision!(bq)
-
-Record that something touched memory we cannot enumerate, so nothing may be
-elided until a barrier clears it.
-
-Only the KA launch path knows a dispatch's buffers. Everything else that records
-into the same command buffer — `cmd_copy_buffer!`, `lava_launch!` used directly
-by Lava's own internals, indirect prepares — writes memory this tracker never
-sees. Left alone that is not conservative but *wrong*: a later dispatch reading
-what a copy just wrote finds no overlap in the tracker and drops the barrier it
-needed. It cost 0.024 of alpha on the MatAnyone step, which is the sort of small
-plausible error a race gives you.
-
-Modelled as one range covering the whole address space: every subsequent
-dispatch overlaps it, takes its barrier, and clears it — no special cases.
-"""
-@inline function poison_barrier_elision!(bq::VulkanBatchQueue)
-    touched = bq.touched_ranges
-    empty!(touched)
-    push!(touched, UInt64(0))
-    push!(touched, typemax(UInt64))
-    nothing
-end
-
-"""
-True when `new` overlaps anything in `bq.touched_ranges`. On overlap the caller
-emits a barrier and the set restarts from `new`; otherwise `new` is merged in and
-the barrier is skipped.
-"""
-function barrier_needed!(bq::VulkanBatchQueue, new::Vector{UInt64})
-    touched = bq.touched_ranges
-    hit = false
-    @inbounds for i in 1:2:length(new)
-        lo, hi = new[i], new[i+1]
-        for j in 1:2:length(touched)
-            if lo < touched[j+1] && touched[j] < hi
-                hit = true
-                break
-            end
-        end
-        hit && break
-    end
-    # The set only clears when a barrier fires, so a long run of elided
-    # dispatches would make this scan quadratic. Past the cap, force a barrier
-    # and start over — conservative, so it can only cost performance.
-    if hit || length(touched) > 512
-        empty!(touched)
-        hit = true
-    end
-    append!(touched, new)
-    hit
-end
+# `barrier_elision` and the tracker behind it are gone: `bq.touched_ranges`, a
+# flat [lo₁,hi₁,lo₂,hi₂,…] of everything touched since the last barrier,
+# `bq.dispatch_ranges` as scratch, `barrier_needed!` to test overlap,
+# `reset_barrier_elision!` and `poison_barrier_elision!`.
+#
+# The idea was sound and the cost of being wrong was not. Two dispatches whose
+# argument address ranges are pairwise disjoint cannot alias, so the barrier
+# between them is unnecessary whichever side reads and whichever writes — no
+# read/write annotation needed. But only the KA launch path knows a dispatch's
+# buffers, and everything else recording into the same command buffer (a copy, a
+# prepare, Lava's own launches) writes memory the tracker never saw, so it needed
+# `poison_barrier_elision!` to cover them. Miss one and a later dispatch reading
+# what a copy just wrote finds no overlap and drops the barrier it needed: 0.024
+# of alpha on the MatAnyone step, which is the small plausible error a race gives
+# you. A caller that knows what its kernels touch says so with
+# `use(p, x; read/write)`, and the graph derives the same answer where it can be
+# checked.
+#
+# `range_leaves!` in `pin_leaves.jl` went with it — it was the walk that
+# collected the ranges.
 
 """
     interior_unit_workgroup(W) -> Bool
@@ -615,12 +566,14 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
 
     # GPU-resident ndrange → indirect dispatch (no CPU readback)
     if ndrange isa LavaArray
-        batch = ensure_active_batch!(bq)
-        pin_leaves!(batch, obj.f)
-        pin_leaves!(batch, args)
-        adaptor = LavaAdaptor(batch)
-        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
-        ka_launch_indirect!(obj, converted_args, ndrange, workgroupsize, args, adaptor, bq, tlas)
+        oneshot!(bq; tag = :launch) do e
+            owner = e.owner
+            pin_leaves!(owner, obj.f)
+            pin_leaves!(owner, args)
+            adaptor = LavaAdaptor(owner)
+            converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+            ka_launch_indirect!(e, obj, converted_args, ndrange, workgroupsize, args, adaptor, tlas)
+        end
         return nothing
     end
 
@@ -709,30 +662,19 @@ end
     block_dims = plan.block_dims
     ws_3d      = plan.ws_3d
 
-    batch = ensure_active_batch!(bq)
-    # Side-effect pass: pin every LavaArray leaf in the closure + args into
-    # `batch.pinned`, once, via @generated walker (zero alloc, straight-line
-    # code).  `Adapt.adapt` below is now pure — it only strips.
-    pin_leaves!(batch, obj.f)
-    pin_leaves!(batch, args)
-    # Same tree the pins just walked, so every buffer this dispatch can reach is
-    # covered. Decided here rather than in `record_dispatch!` because this is the
-    # last point that still has the pre-adapt arguments.
-    if bq.barrier_elision
-        ranges = bq.dispatch_ranges
-        empty!(ranges)
-        range_leaves!(ranges, obj.f)
-        range_leaves!(ranges, args)
-        bq.next_skip_barrier = !barrier_needed!(bq, ranges)
-        bq.ranges_declared = true
+    oneshot!(bq; tag = :launch) do e
+        owner = e.owner
+        # Side-effect pass: pin every LavaArray leaf in the closure + args into
+        # the one-shot's `pinned`, once, via @generated walker (zero alloc,
+        # straight-line code).  `Adapt.adapt` below is pure — it only strips.
+        pin_leaves!(owner, obj.f)
+        pin_leaves!(owner, args)
+        adaptor = LavaAdaptor(owner)
+        converted_f = Adapt.adapt(adaptor, obj.f)
+        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+        all_args = (converted_f, ka_ctx, converted_args...)
+        ka_launch!(e, converted_f, all_args, block_dims, ws_3d, tlas)
     end
-    adaptor = LavaAdaptor(batch)
-    converted_f = Adapt.adapt(adaptor, obj.f)
-    converted_args = map(a -> Adapt.adapt(adaptor, a), args)
-    all_args = (converted_f, ka_ctx, converted_args...)
-
-    ka_launch!(bq, converted_f, all_args, block_dims, ws_3d, tlas)
-
     return nothing
 end
 
@@ -927,37 +869,38 @@ and what follows is a SPIR-V compile. On the hit path nothing here runs."""
     p
 end
 
-function ka_launch!(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
+function ka_launch!(e::Emitter, @nospecialize(f), all_args::Tuple,
                     block_dims::NTuple{3,Int}, workgroup_size::NTuple{3,Int},
                     tlas=nothing)  # positional, Nothing default — hot path
+    bq = queueof(e)
     # When `tlas` was auto-discovered from kernel args (e.g. an AdaptedAccel
     # was passed), enable ray_query so the SPIR-V emitter binds the HWTLAS
     # descriptor and accepts OpRayQueryInitializeKHR / Proceed / Get*KHR.
     plan = launch_plan(bq, f, all_args, workgroup_size, tlas !== nothing)
 
-    # The batch is what owns the argument memory and what the packed buffers are
-    # pinned into, so it is taken ONCE and passed. Reaching it through `bq` at
-    # each of the three calls below cost 96 bytes a dispatch — `bq` is a
-    # `BatchQueue{...}` UnionAll in those signatures, so `.active_batch` came back
-    # abstract and the pack walker's leaves were dynamic. Measured by
-    # `test_dispatch_allocation.jl`, which is a cliff detector for exactly this.
-    batch = ensure_active_batch!(bq)
-    arg_buf = get_arg_buffer(batch, plan.total_size)
+    # The one-shot owns the argument memory and is what the packed buffers are
+    # pinned into, so it is taken ONCE from the emitter and passed. Reaching it
+    # through the queue at each call cost 96 bytes a dispatch when the queue's
+    # field came back abstract — `test_dispatch_allocation.jl` is the cliff
+    # detector for exactly this.
+    owner = e.owner
+    arg_buf = get_arg_buffer(owner, plan.total_size)
 
-    # The KA.Kernel entry point already ran `Adapt.adapt(LavaAdaptor(batch), ..)`
+    # The KA.Kernel entry point already ran `Adapt.adapt(LavaAdaptor(owner), ..)`
     # on each original arg, which both pinned every LavaArray (and nested
     # LavaArrays in wrapper structs) AND stripped them to LavaDeviceArray.
     # Here `all_args` is post-adapt, so pack sees no further pinnable leaves.
-    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, plan.offsets,
+    pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, plan.offsets,
                        plan.arg_buffer_size, plan.byval_sizes, all_args)
 
-    # Dispatch with N-D block grid (preserves KA's block dimensions)
+    name = ""
     if (bq.ctx::VkContext).diag.dispatch_logging
-        bq.last_dispatch_info = Base.invokelatest(dispatch_log_string, "ka f=",
-                                   dispatch_name(f, all_args), " groups=", block_dims)::String
+        name = Base.invokelatest(dispatch_log_string, "ka f=",
+                                 dispatch_name(f, all_args), " groups=", block_dims)::String
+        bq.last_dispatch_info = name
     end
-    vk_dispatch!(bq, plan.pipeline, arg_buf.address, block_dims, tlas)
-
+    # Dispatch with N-D block grid (preserves KA's block dimensions).
+    emit_dispatch!(e, plan.pipeline, arg_buf.address, block_dims, tlas, name)
     return nothing
 end
 
@@ -978,78 +921,36 @@ function prepare_indirect_kernel(indirect::LavaDeviceArray{UInt32,1},
     return nothing
 end
 
-# ── Fast prepare-indirect path ──
-# Bypasses full lava_launch! to avoid per-dispatch ceremony overhead.
-# The prepare-indirect kernel is always the same function with the same types,
-# so we compile once and cache everything. Saves ~30K lava_launch! calls per render
-# (hash lookups, validation, auto-flush, keep_alive, etc.).
+# `fast_prepare_indirect!` is gone, and with it `PrepareIndirect`,
+# `init_prepare_indirect_pipeline!` and the `ctx.caches.prepare_indirect` slot
+# it filled. It was `preparekernel`'s body written out a second time with the
+# pipeline hand-cached, to save "~30K lava_launch! calls per render" on a path
+# a modelled plan no longer takes: `emitprepares!` writes ONE fused prepare per
+# pass from `pp.indirect`, and what is left here is the unmodelled indirect
+# launch, which is not on anybody's inner loop.
 
-
-# Register cleanup callback for reset_device!
-
-function init_prepare_indirect_pipeline!(ctx::VkContext)
-    ctx.caches.prepare_indirect === nothing || return
-    # Kernel signature (post-adapt): indirect::LavaDeviceArray{UInt32,1},
-    # ndrange_buf::LavaDeviceArray{Int32,1}, ws::UInt32.
-    tt = Tuple{LavaDeviceArray{UInt32,1}, LavaDeviceArray{Int32,1}, UInt32}
-    ws = (1, 1, 1)
-    compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
-        ctx, prepare_indirect_kernel, tt, ws)
-    ctx.caches.prepare_indirect = PrepareIndirect(pipeline, offsets, byval_sizes,
-                                               compiled.push_info.arg_buffer_size)
-end
-
-"""
-    fast_prepare_indirect!(bq, indirect::LavaArray{UInt32,1}, ndrange_buf::LavaArray{<:Integer}, workgroup_size)
-
-Fast path for prepare-indirect dispatch.  Bypasses lava_launch!'s validation/
-logging overhead: manually adapts the two LavaArrays (pin + strip) and
-packs directly.
-"""
-function fast_prepare_indirect!(bq::VulkanBatchQueue,
-                                indirect::LavaArray{UInt32,1},
-                                ndrange_buf::LavaArray{<:Integer},
-                                workgroup_size::Integer)
-    ctx = bq.ctx::VkContext
-    init_prepare_indirect_pipeline!(ctx)
-
-    pi = ctx.caches.prepare_indirect::PrepareIndirect
-    pipeline, offsets = pi.pipeline, pi.offsets
-    byval_sizes, arg_size = pi.byval_sizes, pi.arg_buffer_size
-
-    batch = ensure_active_batch!(bq)
-    adaptor = LavaAdaptor(batch)
-    dev_indirect = Adapt.adapt(adaptor, indirect)::LavaDeviceArray{UInt32,1}
-    dev_ndrange  = Adapt.adapt(adaptor, ndrange_buf)
-
-    # f is a ghost singleton (prepare_indirect_kernel), pack_args_direct! skips it.
-    all_args = (prepare_indirect_kernel, dev_indirect, dev_ndrange, UInt32(workgroup_size))
-    arg_buf = get_arg_buffer(batch, arg_size)
-    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets, arg_size, byval_sizes, all_args)
-
-    vk_dispatch!(bq, pipeline, arg_buf.address, (1, 1, 1))
-end
-
-function prepare_indirect_dispatch!(bq::VulkanBatchQueue,
+function prepare_indirect_dispatch!(e::Emitter,
                                     indirect::LavaArray{UInt32,1},
                                     ndrange_buf::LavaArray{<:Integer},
                                     workgroup_size::Integer)
-    lava_launch!(bq, prepare_indirect_kernel,
-                 indirect, ndrange_buf, UInt32(workgroup_size);
-                 ndrange=1, workgroup_size=(1, 1, 1))
+    emitkernel!(e, prepare_indirect_kernel,
+                indirect, ndrange_buf, UInt32(workgroup_size);
+                ndrange=1, workgroup_size=(1, 1, 1))
 end
 
 """
-    ka_launch_indirect!(obj, args, ndrange_buf, workgroupsize)
+    ka_launch_indirect!(e, obj, args, ndrange_buf, workgroupsize, original_args, adaptor, tlas)
 
-Launch a KA kernel using indirect dispatch. `ndrange_buf` is a GPU array containing
-the work item count (1-element Int32 array). The prepare-indirect kernel writes
-group counts to an indirect buffer, then vk_dispatch_indirect! dispatches the main kernel.
+Launch a KA kernel using indirect dispatch, into the one-shot `e` writes.
+`ndrange_buf` is a GPU array containing the work item count (1-element Int32
+array). The prepare-indirect kernel writes group counts to an indirect buffer,
+a barrier makes them visible, and the main kernel dispatches off them — three
+commands in one closed buffer.
 """
-function ka_launch_indirect!(obj, args, ndrange_buf::LavaArray, workgroupsize, original_args,
-                             adaptor::LavaAdaptor,
-                             bq::VulkanBatchQueue=obj.backend.bq,
+function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, workgroupsize,
+                             original_args, adaptor::LavaAdaptor,
                              tlas=nothing)  # positional — same NamedTuple-avoidance as ka_launch!
+    bq = queueof(e)
     # Respect static workgroup size from @kernel definition
     ws = if workgroupsize !== nothing
         workgroupsize isa Integer ? (workgroupsize,) : workgroupsize
@@ -1095,31 +996,28 @@ function ka_launch_indirect!(obj, args, ndrange_buf::LavaArray, workgroupsize, o
     GC.@preserve original_args begin
 
     arg_buf = get_arg_buffer(batch, total_size)
-    @assert batch === bq.active_batch  "adaptor batch diverged from active bq batch"
     pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
                        compiled.push_info.arg_buffer_size, byval_sizes, all_args)
 
     indirect_view = indirect_command!(batch)
 
+    name = ""
     if (bq.ctx::VkContext).diag.dispatch_logging
-        bq.last_dispatch_info = Base.invokelatest(dispatch_log_string, "indirect f=",
-                                   dispatch_name(obj.f, all_args))::String
+        name = Base.invokelatest(dispatch_log_string, "indirect f=",
+                                 dispatch_name(obj.f, all_args))::String
+        bq.last_dispatch_info = name
     end
-    deferred = bq.deferred_indirect
-    if deferred !== nothing
-        # Inside `concurrent_indirect_group`: record NOTHING here — both the
-        # prepare (fused into one multi-prepare dispatch) and the indirect
-        # dispatch happen at the group's flush, so all pairs in the group
-        # share two barriers total and the dispatches overlap on the GPU.
-        # The packed args + indirect command stay valid across the gap: both are
-        # regions this batch owns, and nothing else can be given them until it
-        # completes.
-        push!(deferred, (bq, pipeline, arg_buf.address, indirect_view, tlas,
-                         ndrange_buf, ws_prod))
-    else
-        fast_prepare_indirect!(bq, indirect_view, ndrange_buf, ws_prod)
-        vk_dispatch_indirect!(bq, pipeline, arg_buf.address, indirect_view, tlas)
-    end
+    # The prepare, the barrier that makes its write visible to the command
+    # processor, then the dispatch that reads it. `bq.deferred_indirect` used to
+    # stand here: inside a `concurrent_indirect_group` this pushed onto a list
+    # on the QUEUE and recorded nothing, so the group's flush could fuse every
+    # prepare into one dispatch. A pass knows which of its dispatches are
+    # device-sized without being told — see `emitprepares!` — and this path is
+    # the one nothing declared.
+    prepare_indirect_dispatch!(e, indirect_view, ndrange_buf, ws_prod)
+    indirectbarrier!(e, VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                     VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
+    emit_dispatch_indirect!(e, pipeline, arg_buf.address, indirect_view, tlas, name)
 
     end # GC.@preserve
 

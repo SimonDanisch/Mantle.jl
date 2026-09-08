@@ -3,24 +3,27 @@ using Lava, Mantle
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index
 
-# Regression: inside a `concurrent_dispatch_group`, the group's barrier
-# elision also dropped the barrier between a prepare-indirect kernel and the
-# `vkCmdDispatchIndirect` that reads the VkDispatchIndirectCommand it wrote.
-# That read raced the prepare's write: with a deep GPU pipeline the race was
-# usually won (latent), but with an empty queue — e.g. right after a
-# mid-pipeline flush — the indirect dispatch read stale group counts and
-# silently ran with 0 (or garbage) workgroups.
+# An unmodelled indirect dispatch reads its `VkDispatchIndirectCommand` with the
+# command processor, and the kernel that wrote it ran a moment earlier in the
+# same command buffer. Nothing derives that dependency — nothing declared what
+# either touches — so `record_dispatch!` emits the barrier unconditionally, with
+# `INDIRECT_COMMAND_READ` in the destination access mask.
 #
-# Surfaced through Hikari's volpath bounce loop (2026-06-10):
-# `vp_shade_typed!` runs 12 prepare+indirect pairs inside one group; adding
-# an early-exit synchronize to the loop made the race lose reliably and
-# dropped ~15% of shadow_bumpgold's energy. Fixed by `force_pre_barrier=true`
-# on every indirect dispatch record.
+# It was conditional once, and this file is what that cost. A
+# `concurrent_dispatch_group` asserted by hand that the dispatches inside it were
+# independent and elided the barriers between them, which dropped exactly this
+# one. With a deep GPU pipeline the race was usually won (latent); with an empty
+# queue — right after a mid-pipeline flush — the indirect dispatch read stale
+# group counts and silently ran zero workgroups. Surfaced through Hikari's
+# volpath bounce loop (2026-06-10): `vp_shade_typed!` runs 12 prepare+indirect
+# pairs, and adding an early-exit synchronize made the race lose reliably and
+# dropped ~15% of shadow_bumpgold's energy. It was patched with a
+# `force_pre_barrier` flag — an exception to an exception — and the groups and
+# the flag are both deleted now.
 #
-# The chain below reproduced the race deterministically pre-fix (final
-# count 0 instead of 65536): each round copies a queue through a middle
-# queue, with the second (indirect) copy recorded inside a group so its
-# dispatch immediately follows its own prepare.
+# The chains below reproduced the race deterministically pre-fix (final count 0
+# instead of 65536): each round copies a queue through a middle queue, so the
+# second (indirect) copy's dispatch immediately follows its own prepare.
 
 # Minimal WorkQueue clone — this is a Lava test; it must not depend on Hikari.
 struct TestQueue{V, S}
@@ -52,7 +55,7 @@ end
     end
 end
 
-@testset "indirect dispatch inside concurrent_dispatch_group" begin
+@testset "an indirect dispatch is ordered after its own prepare" begin
     backend = MVE.LavaBackend()
     n = 65536
     cap = 100_000
@@ -74,12 +77,9 @@ end
         KA.fill!(qmid.size, Int32(0))
         # stage 1: cur → qmid (indirect dispatch, group count from cur.size)
         c!(cur, qmid; ndrange=cur.size)
-        # stage 2 INSIDE a group: its prepare-indirect reads qmid.size and the
-        # indirect dispatch must barrier against that prepare even though the
-        # group elides inter-dispatch barriers.
-        MVE.concurrent_dispatch_group() do
-            c!(qmid, nxt; ndrange=qmid.size)
-        end
+        # stage 2: its prepare-indirect reads qmid.size and the indirect
+        # dispatch must be ordered after that prepare's write.
+        c!(qmid, nxt; ndrange=qmid.size)
         cur, nxt = nxt, cur
     end
     KA.synchronize(backend)
@@ -87,12 +87,14 @@ end
     @test final == n
 end
 
-@testset "concurrent_indirect_group (deferred two-phase)" begin
-    # Same chain, but stage 2 fans out into THREE indirect dispatches inside
-    # a `concurrent_indirect_group` — the deferred two-phase form records all
-    # prepares, one shared barrier, then the dispatches overlapped. Items are
+@testset "three indirect dispatches, each after its own prepare" begin
+    # Same chain, but stage 2 fans out into THREE indirect dispatches. Items are
     # split modulo 3 across destination mids and re-merged, so a dropped or
-    # racing dispatch shows up as a wrong final count.
+    # racing dispatch shows up as a wrong final count. This was the shape
+    # `concurrent_indirect_group` existed for — it deferred all three prepares,
+    # fused them into one dispatch and put one shared barrier behind them; a
+    # plan does that from `emitprepares!`, and an undeclared launch does not get
+    # to.
     backend = MVE.LavaBackend()
     n = 65536
     cap = 100_000
@@ -127,10 +129,8 @@ end
             KA.fill!(q.size, Int32(0))
         end
         sc!(cur, mids...; ndrange=cur.size)
-        MVE.concurrent_indirect_group() do
-            for q in mids
-                c!(q, nxt; ndrange=q.size)
-            end
+        for q in mids
+            c!(q, nxt; ndrange=q.size)
         end
         cur, nxt = nxt, cur
     end

@@ -32,18 +32,54 @@ mutable struct Buffer{T,N} <: Resource
     len::Int
     capacity::Int
     dev::Any
+    # Stores made through `setindex!` and not yet landed — `(range, data)`, in
+    # the order they were made — and the flag a run reads before touching the
+    # list. See `setindex!` below.
+    pending::Vector{Tuple{UnitRange{Int},Vector{T}}}
+    pendinglock::ReentrantLock
+    @atomic dirty::Bool
 end
 
-"""
-One value shared by every element.
+Buffer{T,N}(store, len::Int, capacity::Int, dev) where {T,N} =
+    Buffer{T,N}(store, len, capacity, dev, Tuple{UnitRange{Int},Vector{T}}[],
+                ReentrantLock(), false)
 
-A distinct type rather than a length-1 buffer: "shared by all" is a claim about
-meaning, not a length that happens to be one.
 """
-mutable struct Scalar{T} <: Resource
+    GPURef(dev, x) -> GPURef{T}
+
+One value, on the device, at an address that never moves.
+
+The thing a plan is given when the value has to change between runs. A dispatch
+is packed with the ref's ADDRESS — once, at `record!`, like every other argument
+— and the value behind it is written by a store, `ref[] = x`, which lands as a
+command in the run's own submission. So changing it costs one small transfer however many
+dispatches read it, and nothing rewrites the plan's argument memory, which is
+what let the argument ring go.
+
+Passing the value directly instead says the opposite, and that is the whole of
+the distinction: what a dispatch is given by value is resolved when the plan
+records and is that value for the plan's life.
+
+A distinct type rather than a length-1 `Buffer`: "one value shared by every
+element" is a claim about meaning rather than a length that happens to be one,
+and it is what `stride` reads to bind a vertex attribute at stride zero.
+
+This was `Scalar`, and the rename is the content — it was described as an
+attribute binding and used as one, while what it actually is is the storage a
+per-run value lives in.
+"""
+mutable struct GPURef{T} <: Resource
     store::DeviceArray{T,1}
     dev::Any
+    # The value of the last store, and the seqlock a run reads it under. See
+    # `setindex!` below.
+    pending::Base.RefValue{T}
+    @atomic seq::UInt64
+    @atomic dirty::Bool
 end
+
+GPURef{T}(store, dev) where {T} =
+    GPURef{T}(store, dev, Base.RefValue{T}(), UInt64(0), false)
 
 """
     upload!(dev, dst::DeviceArray, first, data)
@@ -114,8 +150,8 @@ function Buffer(dev, data::AbstractArray{T,N}) where {T,N}
     return b
 end
 
-Scalar(dev, x::T) where {T} =
-    (s = Scalar{T}(persistentarray(dev, T, (1,)), dev); upload!(dev, s.store, 1, [x]); s)
+GPURef(dev, x::T) where {T} =
+    (s = GPURef{T}(persistentarray(dev, T, (1,)), dev); upload!(dev, s.store, 1, [x]); s)
 
 """A region of `dims` elements of `T`, from the device's pool.
 
@@ -138,20 +174,21 @@ persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
 Base.length(b::Buffer) = b.len
 Base.size(b::Buffer) = size(b.store)
 Base.ndims(::Buffer{T,N}) where {T,N} = N
-Base.length(::Scalar) = 1
-# `stride` zero means "one value shared by every element", so a `Scalar` and a
+Base.length(::GPURef) = 1
+# `stride` zero means "one value shared by every element", so a `GPURef` and a
 # per-element `Buffer` take the same shader path and the same pipeline — see
 # `stride`'s docstring in runtime/api.jl. `count` is what a draw covers, taken
 # from the binding so it cannot disagree with it.
 stride(::Buffer) = 1
-stride(::Scalar) = 0
+stride(::GPURef) = 0
 count(b::Buffer) = b.len
-count(::Scalar) = 1
+count(::GPURef) = 1
 Base.eltype(::Buffer{T}) where {T} = T
-Base.eltype(::Scalar{T}) where {T} = T
+Base.eltype(::GPURef{T}) where {T} = T
+
 capacity(b::Buffer) = b.capacity
 storage(b::Buffer) = deviceview(b.dev, b.store)
-storage(s::Scalar) = deviceview(s.dev, s.store)
+storage(s::GPURef) = deviceview(s.dev, s.store)
 # `len` is a vector's notion — the prefix a draw covers — so only the vector
 # form trims. An `N > 1` buffer comes back with its shape.
 Base.Array(b::Buffer{T,1}) where {T} = download(b.dev, b.store)[1:b.len]
@@ -165,7 +202,141 @@ function update!(b::Buffer{T,1}, r::AbstractUnitRange, data::AbstractVector) whe
     b.len = max(b.len, last(r))
     return b
 end
-update!(s::Scalar{T}, x) where {T} = (upload!(s.dev, s.store, 1, T[x]); s)
+# The immediate write, for a ref that is not in a graph. Inside one, `ref[] = x`
+# is the route: it lands in the run's submission instead of stalling for a
+# staged upload, and it is ordered against the dispatches that read it.
+update!(s::GPURef{T}, x) where {T} = (upload!(s.dev, s.store, 1, T[x]); s)
+
+"""
+    ref[] = x
+    buf[range] = data
+    buf[:] = data
+
+Store a value into a persistent resource, to be landed by the next plan that
+reads it.
+
+A store retains what it is given and marks the resource dirty. It copies
+nothing, touches no command buffer and may be made from any thread, which is
+what lets an observable's handler or a render loop's caller feed a plan without
+holding a queue. The bytes land at the update pass of the next `run!` of any
+plan that declares the resource — `use(p, x; read = true)`, an `Attribute`, a
+slice — as a command in that run's own submission, ordered ahead of every pass
+that reads them by the barriers the graph derives from the `CopyDst` the plan
+registered for it (see `hostwritten!`).
+
+A `GPURef` holds one pending value and the last store wins, which is what a
+scalar means. A `Buffer` holds a LIST of pending `(range, data)` stores and
+lands them in order, so two stores to different ranges before one run are two
+writes and the second does not drop the first. `data` is retained, not copied:
+a caller who means to mutate it before the next run passes `copy(data)`.
+`buf[:] = data` is `buf[1:length(data)] = data`, as `update!` reads it.
+
+Nothing is compared against the last store. A ref the device also writes — a
+counter the host resets — must land a store of an equal value, so a caller who
+wants to skip unchanged values compares on their side, where they know what
+changed. There is no `getindex`: reading a device value is a download, and it
+is spelled as one (`Array(buf)`).
+
+`update!` is the other verb and not the same one: it uploads NOW, on the
+calling thread, for a resource that is not in a graph.
+"""
+function Base.setindex!(r::GPURef{T}, x) where {T}
+    v = convert(T, x)
+    # Claim the payload: even `seq` -> odd. A concurrent setter spins on the
+    # same CAS; a reader sees the odd count and waits the write out.
+    while true
+        s = @atomic :acquire r.seq
+        iseven(s) || continue
+        _, ok = @atomicreplace :sequentially_consistent :monotonic r.seq s => s + one(UInt64)
+        ok && break
+    end
+    r.pending[] = v
+    @atomic :release r.seq += one(UInt64)
+    @atomic :release r.dirty = true
+    return r
+end
+
+function Base.setindex!(b::Buffer{T,1}, data::AbstractVector, r::AbstractUnitRange) where {T}
+    rng = UnitRange{Int}(r)
+    length(data) == length(rng) || throw(DimensionMismatch(
+        "setindex!: $(length(data)) elements were given for a range of $(length(rng))"))
+    first(rng) >= 1 || throw(ArgumentError("setindex!: a range starts at 1 or later, not $(first(rng))"))
+    last(rng) <= b.capacity || throw(ArgumentError(
+        "setindex!: a store to $(last(rng)) elements into a capacity of $(b.capacity)"))
+    v = data isa Vector{T} ? data : convert(Vector{T}, data)
+    lock(b.pendinglock) do
+        push!(b.pending, (rng, v))
+        @atomic :release b.dirty = true
+    end
+    return b
+end
+
+Base.setindex!(b::Buffer{T,1}, data::AbstractVector, ::Colon) where {T} =
+    setindex!(b, data, 1:length(data))
+
+"""Whether a resource holds a store not yet landed: one flag read."""
+isdirty(r::Union{Buffer,GPURef}) = @atomic :acquire r.dirty
+
+"""Whether any resource in the tuple does — a plan's `hostwritten`. Unrolled at
+compile time (`@generated`), so a heterogeneous tuple costs no `Base.tail` box
+on a run's allocation-free path; the plain recursion left 48 bytes on Hikari's
+five-element sample tuple."""
+@generated function anydirty(rs::T) where {T<:Tuple}
+    n = fieldcount(T)
+    n == 0 && return :(false)
+    expr = :(isdirty(rs[1]))
+    for i in 2:n
+        expr = :($expr || isdirty(rs[$i]))
+    end
+    expr
+end
+
+"""
+    landstores!(f, r)
+    landstores!(f, rs::Tuple)
+
+Hand what is waiting on `r` to `f` and clear it; nothing but the flag read when
+nothing is.
+
+For a `GPURef`, `f(r, ptr::Ptr{T})` with a pointer to the pending value, read
+in place under the seqlock — no copy of the value exists on the way, and `f`
+runs again if a store lands mid-read, so it must be safe to repeat. For a
+`Buffer`, `f(b, data, from)` once per pending `(range, data)`, in order, under
+the store lock. The tuple form walks a plan's `hostwritten`.
+"""
+function landstores!(f, r::GPURef{T}) where {T}
+    isdirty(r) || return nothing
+    # Cleared BEFORE the read. A store that lands after this line sets the flag
+    # again and is landed by the next run whichever value this read saw; cleared
+    # after the read, a store made between the two would be dropped.
+    @atomic :release r.dirty = false
+    while true
+        s1 = @atomic :acquire r.seq
+        isodd(s1) && continue
+        GC.@preserve r f(r, Base.unsafe_convert(Ptr{T}, r.pending))
+        (@atomic :acquire r.seq) == s1 && return nothing
+    end
+end
+
+function landstores!(f, b::Buffer{T}) where {T}
+    isdirty(b) || return nothing
+    lock(b.pendinglock) do
+        for (rng, data) in b.pending
+            f(b, data, first(rng))
+            # What a draw covers, as `update!` keeps it.
+            b.len = max(b.len, last(rng))
+        end
+        empty!(b.pending)
+        @atomic :release b.dirty = false
+    end
+    return nothing
+end
+
+# Unrolled for the same reason as `anydirty`: a plan's `hostwritten` is walked
+# on the run path, which allocates nothing.
+@generated function landstores!(f, rs::T) where {T<:Tuple}
+    Expr(:block, (:(landstores!(f, rs[$i])) for i in 1:fieldcount(T))..., :(nothing))
+end
 
 """
 Grow to `n` elements, keeping what fits.
@@ -175,6 +346,11 @@ source — and it is retired rather than released, because that copy is a DEVICE
 copy: it has been recorded, not necessarily run, and handing those bytes to the
 next caller on the strength of having recorded a read of them is the same
 use-after-free in a different costume.
+
+The store MOVING is announced (`resource_moved!`): a recorded plan packed with
+the old address is patched, not re-recorded — its next run writes the new
+address into the plan's argument memory as a command in that run's own
+submission. So a plan survives its buffers resizing.
 """
 function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
     n = Int(n)
@@ -184,11 +360,17 @@ function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
     old = b.store
     b.store, b.capacity = fresh, n
     retire!(pool(b.dev), region(old))
+    resource_moved!(b.dev, old, fresh)
     return b
 end
 
+"""A persistent resource's storage moved from `old` to `fresh`; a backend with
+recorded plans patches their argument memory (see `notify_move!`). `nothing`
+where there are no device addresses to patch."""
+resource_moved!(dev, old, fresh) = nothing
+
 """
-    free!(r::Buffer) / free!(r::Scalar)
+    free!(r::Buffer) / free!(r::GPURef)
 
 Give a persistent resource's region back to the pool.
 
@@ -205,7 +387,7 @@ already belong to somebody else.
 One method for both because they are one thing, a region and a length, and a
 caller that owns a mix should not have to remember which is which.
 """
-free!(r::Union{Buffer,Scalar}) = (retire!(pool(r.dev), region(r.store)); nothing)
+free!(r::Union{Buffer,GPURef}) = (retire!(pool(r.dev), region(r.store)); nothing)
 
 """
     devicecopy!(dev, dst::DeviceArray, src::DeviceArray, n)

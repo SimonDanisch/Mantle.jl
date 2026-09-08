@@ -173,9 +173,9 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved, retire!, reclaim!, fence, passed, waitfor, waitfor!
-export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable, takeover!
+export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable
 export DeviceArray, giveup!, blocksize
-export upload!, download, deviceview, bufferusage, devicecopy!, Persistent, Unified
+export upload!, download, deviceview, bufferusage, devicecopy!, Persistent, Unified, Readback
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints
 export readproblem
 
@@ -183,7 +183,7 @@ export Backend, VulkanAPI, MetalAPI, WebGPUAPI, HostAPI
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Predicated, Uniform, Sampled, Present, Undefined
-export CopySrc, CopyDst, TraceRead, TraceBuild, Storage, ColorAttachment, Depth, Unordered
+export CopySrc, CopyDst, TraceRead, TraceBuild, Storage, ColorAttachment, Depth, Unordered, Traced
 export reads, writes, discards, kindof, aliasable, evictable, unordered, inner
 export Transition, ResourceState, transition!, transitions, needs_transition, barrierhazards
 export stages, access, layout
@@ -203,7 +203,7 @@ export RenderTarget
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
-export allocate_batch_queue!, release_batch_queue!, ensure_active_batch!, waitidle
+export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export batchqueue
 export defaultbackend, availablebackends, register_backend!, register_kernel_recorder!
@@ -217,7 +217,7 @@ export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
 # The graph's backend interface. `isdepth` is a definition, not a hook — see
 # `graph/backend.jl` for why it and `aspect` swapped places.
 export isdepth, target_extent, checkextents, refit!,
-       rename!, inplace!, nextslot!, collect!
+       collect!
 export blit!, present_frame!, acquire_next_image!, transition_image!
 export readback_framebuffer, readback_window, readback_target
 
@@ -262,15 +262,13 @@ export CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope
 export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
-export Buffer, Scalar, Surface, Attribute, draw!, dispatch!, render!, compute!, Update
+export Buffer, GPURef, Surface, Attribute, draw!, dispatch!, render!, compute!
 # `repeat!` and its vocabulary: a loop recorded once, whose trip count the device
 # decides. `Predicate` is exported because a kernel writing predicates by hand
 # names the type; `supportspredicate` because a caller may want to pick between
 # `repeat!` and a host loop rather than be thrown at.
 export repeat!, Predicate, supportspredicate
-export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!,
-       argvalue
-export UpdateRef, anypending, applyupdates!, registerupdate!
+export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
 export Phase, Dag, Schedule, Liveness, Place, Aliasing, Barriers, Pipelines
@@ -281,77 +279,20 @@ export PHASES, compile!
 # attribute. Mantle's writes a buffer now, which is a different verb with the same
 # spelling, so it stays `Mantle.update!` and the bare name belongs to Makie's.
 export run!, npipelines, capacity, use, peakbytes, naivebytes, storage, free!
-export record!, recorded, rebind!
+export record!, recorded
 export timings, PassTiming, NSAMPLES
 
-"""
-    record!(plan) -> plan
-
-Write the plan's commands once, so every `run!` hands the same command buffers to
-the device instead of rebuilding them.
-
-The prize is host time. A plan whose launch sequence is identical every
-invocation pays to rebuild it every invocation, and on SAM 2's encoder that is
-16.3 ms of recording against ~12 ms of GPU work — recording the step costs more
-than running it.
-
-The precondition is that every device address the recording names is the same
-next time. A plan already gives that: placement is fixed, the arena is the
-device's, and a plan holds references to everything it names. What a plan does
-*not* fix is an input written by reallocating, so an `Update` that renames is
-emitted fresh per run and submitted ahead of the recording rather than written
-into it.
-
-`run!` calls this on the first run of any plan that can be recorded, so the
-ordinary caller never says it. Call it directly to pay the cost somewhere it does
-not count — before a timing loop, or before the first frame.
-
-    plan = Plan(g)
-    record!(plan)
-    run!(plan)          # no recording, no per-dispatch bookkeeping
-
-It does NOT run the plan. `bake!`, which this replaces, did: it collected command
-buffers out of an ordinary interpreted run and let them reach the queue on the
-way past, so baking an accumulating plan added a whole extra contribution to
-whichever invocation happened to build it. That showed up as a first frame that
-was wrong and every later frame exact, which reads like a bug in the work rather
-than in when it was recorded.
-
-An argument that moves is re-read every run by [`rebind!`](@ref), which `run!`
-calls — a `Ref` argument means "read fresh", and it still means that after
-recording.
-
-Not yet for plans with a surface: a swapchain image is a different image every
-frame and a recording names one. Headless plans have no such thing.
-
-A backend that does not build command buffers has nothing to record, and gets the
-default: the plan, unchanged. That is a no-op rather than an error because
-`record!` asks for an outcome — "stop paying to rebuild this" — that such a
-backend already has, and making the caller ask which backend it is on is the
-branch this library exists to remove.
-"""
-record!(plan) = plan
 
 """Whether this plan's commands have been written and are what `run!` submits.
 False by default, which is the honest answer for a backend that never builds
 one."""
 recorded(plan) = false
 
-"""
-    rebind!(plan) -> plan
-
-Re-read the arguments a recorded plan's work was given, so a value that moved is
-run as it is now rather than as it was when the commands were written.
-
-A backend that emits nothing per run has to offer this or recording is only safe
-for plans whose every argument is constant — and unsafe SILENTLY, since a stale
-value produces a plausible result rather than an error. A backend that resolves
-arguments at launch (the host one does) needs nothing, and gets the default.
-
-`run!` calls it, on the slot `nextslot!` has just claimed, so the device is known
-to be past the run that last read those bytes.
-"""
-rebind!(plan) = plan
+# `rebind!` is gone. It re-read every `Ref` a recorded plan was given and wrote
+# the current value into the plan's argument memory, once per (entry, `Ref`)
+# pair, so that a recorded plan meant the same thing as an interpreted one. A
+# value that changes is a [`GPURef`](@ref) now: the commands hold its address,
+# one `Update` writes it, and there is nothing per-run for a backend to offer.
 
 function update! end
 function use end

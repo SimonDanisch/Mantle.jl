@@ -189,7 +189,7 @@ end
 # buffer — which `sync_access!` rightly asserts against.
 # `sync_access!(::LavaArray)` below forwards to the underlying VkManagedBuffer
 # so cross-queue last_write tracking still runs on the leaf.
-@inline pin!(batch::O, a::LavaArray) where {O<:Pinned} = begin
+@inline pin!(batch::O, a::LavaArray) where {O<:Closed} = begin
     a in batch.pinned && return
     push!(batch.pinned, a)
     # Two claims, and both are needed:
@@ -205,18 +205,22 @@ end
     return nothing
 end
 
-@inline sync_access!(batch::CommandBatch, a::LavaArray) = sync_access!(batch, a.buf[])
+@inline sync_access!(sub::Submission, a::LavaArray) = sync_access!(sub, a.buf[])
 
 # LavaAdaptor: converts LavaArray → LavaDeviceArray (Ptr-wrapping) for GPU
 # kernel compilation, and pins every visited LavaArray into the current batch.
 # Declared here (ahead of ka_backend.jl which uses it in method signatures);
 # the `adapt_storage` / `adapt_structure` methods live in gpuarrays.jl.
-# PARAMETERISED on the owner, not `batch::Pinned`. A `Union`-typed field makes
-# the struct non-concrete, so `adaptor.batch` is a union load and every
+# PARAMETERISED on the owner, not `batch::Closed`. An abstract-typed field makes
+# the struct non-concrete, so `adaptor.batch` is a dynamic load and every
 # `pin_leaves!`/`pack_arg!` reached through it becomes a dynamic call — 835 bytes
 # per dispatch, measured by `test_dispatch_allocation.jl`, which exists for
 # exactly this class of regression.
-struct LavaAdaptor{P<:Pinned}
+#
+# `nothing` is an owner too: at COMPILE there is nothing to emit into yet, and
+# the adaptor is used for its pure half — `adapt_storage` is a strip, and the
+# pinning is a separate walk that never sees this field.
+struct LavaAdaptor{P<:Union{Nothing,Closed}}
     batch::P
 end
 
@@ -251,10 +255,9 @@ end
 Base.collect(a::LavaArray) = Array(a)
 
 # ── Memory management ──
-
-function unsafe_free!(a::LavaArray)
-    GPUArrays.unsafe_free!(a.buf)
-end
+#
+# No `unsafe_free!(::LavaArray)`: GPUArrays' generic method is
+# `unsafe_free!(storage(x))`, and `storage(a::LavaArray)` is `a.buf` above.
 
 # ── Aliasing ──
 #

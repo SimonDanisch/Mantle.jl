@@ -189,13 +189,14 @@ end
 # only ever fire when something upstream was already broken, so keeping it meant
 # a demo that quietly rendered a wrong scene instead of a demo that shows the
 # bug — and surfacing infrastructure bugs is what this file is for.
-@kernel function cull!(visible, counter, @Const(centers), vp::Mat4f)
+@kernel function cull!(visible, counter, @Const(centers), vp::AbstractVector{Mat4f})
     i = @index(Global)
     @inbounds begin
         c = centers[i]
+        m = vp[1]
         keep = true
         for k in Int32(1):Int32(6)
-            p = frustum_plane(vp, k)
+            p = frustum_plane(m, k)
             keep &= (p[1] * c[1] + p[2] * c[2] + p[3] * c[3] + p[4]) >= -c[4]
         end
         if keep
@@ -212,13 +213,14 @@ end
 # Moves the lights and the crystals that stand for them: the last NLIGHT
 # instances are the sources, so what is lit and what is visible cannot disagree.
 @kernel function move_lights!(pos, centers, params, @Const(home), @Const(lcol),
-                              t::Float32, first::Int32)
+                              t::AbstractVector{Float32}, first::Int32)
     i = @index(Global)
     @inbounds begin
         h = home[i]
+        tv = t[1]
         ph = 0.7f0 * Float32(i)
-        p = Vec4f(h[1] + 7f0 * sin(0.42f0 * t + ph), h[2] + 1.6f0 * sin(0.9f0 * t + ph),
-                  h[3] + 7f0 * cos(0.33f0 * t + ph), h[4])
+        p = Vec4f(h[1] + 7f0 * sin(0.42f0 * tv + ph), h[2] + 1.6f0 * sin(0.9f0 * tv + ph),
+                  h[3] + 7f0 * cos(0.33f0 * tv + ph), h[4])
         pos[i] = p
         c = lcol[i]
         centers[first + i] = Vec4f(p[1], p[2], p[3], centers[first + i][4])
@@ -226,7 +228,8 @@ end
     end
 end
 
-function gbuffer_vertex(protopos, protonrm, visible, centers, sizes, colors, params, vp::Mat4f)
+function gbuffer_vertex(protopos, protonrm, visible, centers, sizes, colors, params,
+                        vp::AbstractVector{Mat4f})
     v = vertex_index() - Int32(1)
     inst = v ÷ Int32(72)
     k = v - inst * Int32(72)
@@ -241,7 +244,8 @@ function gbuffer_vertex(protopos, protonrm, visible, centers, sizes, colors, par
         nx, ny, nz = ln[1] / s[1], ln[2] / s[2], ln[3] / s[3]
         world = Vec4f(c[1] + ca * px + sa * pz, c[2] + py, c[3] - sa * px + ca * pz, 1f0)
         n = normalize(Vec3f(ca * nx + sa * nz, ny, -sa * nx + ca * nz))
-        (position = vp * world, albedo = colors[o], surface = params[o],
+        m = vp[1]
+        (position = m * world, albedo = colors[o], surface = params[o],
          normal = n, wpos = Vec3f(world[1], world[2], world[3]))
     end
 end
@@ -264,7 +268,7 @@ GBUFFER = Rasterizer(vertex = gbuffer_vertex, fragment = gbuffer_fragment,
 
 # The same instancing as the g-buffer pass with nothing but the position kept:
 # a depth-only pass has no attachment to write, so its fragment returns nothing.
-function shadow_vertex(protopos, visible, centers, sizes, vp::Mat4f)
+function shadow_vertex(protopos, visible, centers, sizes, vp::AbstractVector{Mat4f})
     v = vertex_index() - Int32(1)
     inst = v ÷ Int32(72)
     k = v - inst * Int32(72)
@@ -274,8 +278,9 @@ function shadow_vertex(protopos, visible, centers, sizes, vp::Mat4f)
         lp = protopos[k + Int32(1)]
         ca, sa = cos(s[4]), sin(s[4])
         px, py, pz = lp[1] * s[1], lp[2] * s[2], lp[3] * s[3]
-        (position = vp * Vec4f(c[1] + ca * px + sa * pz, c[2] + py,
-                               c[3] - sa * px + ca * pz, 1f0),)
+        m = vp[1]
+        (position = m * Vec4f(c[1] + ca * px + sa * pz, c[2] + py,
+                              c[3] - sa * px + ca * pz, 1f0),)
     end
 end
 shadow_fragment(inputs) = nothing
@@ -356,9 +361,9 @@ end
     (kd * albedo * (1f0 / Float32(pi)) + spec) * ndl
 end
 
-@kernel function tile_lights!(tilelights, tilecount, @Const(dep), @Const(lpos), invvp::Mat4f,
-                              w::Int32, h::Int32, tile::Int32, ntx::Int32,
-                              nlight::Int32, pertile::Int32)
+@kernel function tile_lights!(tilelights, tilecount, @Const(dep), @Const(lpos),
+                              invvp::AbstractVector{Mat4f}, w::Int32, h::Int32, tile::Int32,
+                              ntx::Int32, nlight::AbstractVector{Int32}, pertile::Int32)
     tx0, ty0 = @index(Global, NTuple)
     @inbounds begin
         ti = (Int32(ty0) - Int32(1)) * ntx + Int32(tx0)
@@ -375,14 +380,15 @@ end
         if dmax > 0f0
             lo = Vec3f(1f30, 1f30, 1f30)
             hi = Vec3f(-1f30, -1f30, -1f30)
+            m = invvp[1]
             for c in Int32(0):Int32(7)
-                p = unproject(invvp, Float32((c & Int32(1)) == 0 ? x0 : x1),
+                p = unproject(m, Float32((c & Int32(1)) == 0 ? x0 : x1),
                               Float32((c & Int32(2)) == 0 ? y0 : y1),
                               (c & Int32(4)) == 0 ? dmin : dmax, w, h)
                 lo = Vec3f(min(lo[1], p[1]), min(lo[2], p[2]), min(lo[3], p[3]))
                 hi = Vec3f(max(hi[1], p[1]), max(hi[2], p[2]), max(hi[3], p[3]))
             end
-            for l in Int32(1):nlight
+            for l in Int32(1):nlight[1]
                 lp = lpos[l]
                 dx = max(0f0, max(lo[1] - lp[1], lp[1] - hi[1]))
                 dy = max(0f0, max(lo[2] - lp[2], lp[2] - hi[2]))
@@ -421,22 +427,33 @@ end
 
 @kernel function shade!(hdr, @Const(alb), @Const(mat), @Const(nrm), @Const(dep),
                         @Const(lpos), @Const(lcol), @Const(tilelights), @Const(tilecount),
-                        @Const(smap), @Const(aomap), invvp::Mat4f, eye::Vec4f,
-                        sun::Vec4f, suncol::Vec4f, sunvp::Mat4f,
+                        @Const(smap), @Const(aomap), invvp::AbstractVector{Mat4f},
+                        eye::AbstractVector{Vec4f}, sun::AbstractVector{Vec4f},
+                        suncol::AbstractVector{Vec4f}, sunvp::AbstractVector{Mat4f},
                         w::Int32, h::Int32, tile::Int32, ntx::Int32,
-                        pertile::Int32, fog::Float32, emitscale::Float32,
-                        smapres::Int32, stexel::Float32, sbias::Float32,
-                        aoparams::AOParams)
+                        pertile::Int32, fog::AbstractVector{Float32},
+                        emitscale::AbstractVector{Float32},
+                        smapres::Int32, stexel::Float32, sbias::AbstractVector{Float32},
+                        aoparams::AbstractVector{AOParams})
     ix, iy = @index(Global, NTuple)
     px = Int32(ix) - Int32(1)
     py = Int32(iy) - Int32(1)
     @inbounds begin
+        invvpv = invvp[1]
+        eyev = eye[1]
+        sunv = sun[1]
+        suncolv = suncol[1]
+        sunvpv = sunvp[1]
+        fogv = fog[1]
+        emitscalev = emitscale[1]
+        sbiasv = sbias[1]
+        ap = aoparams[1]
         i = py * w + px + Int32(1)
         d = dep[i]
-        sundir = Vec3f(sun[1], sun[2], sun[3])
-        sunrgb = Vec3f(suncol[1], suncol[2], suncol[3]) * suncol[4]
-        world = unproject(invvp, Float32(px) + 0.5f0, Float32(py) + 0.5f0, min(d, 0.999999f0), w, h)
-        eyep = Vec3f(eye[1], eye[2], eye[3])
+        sundir = Vec3f(sunv[1], sunv[2], sunv[3])
+        sunrgb = Vec3f(suncolv[1], suncolv[2], suncolv[3]) * suncolv[4]
+        world = unproject(invvpv, Float32(px) + 0.5f0, Float32(py) + 0.5f0, min(d, 0.999999f0), w, h)
+        eyep = Vec3f(eyev[1], eyev[2], eyev[3])
         ray = normalize(world - eyep)
         out = sky(ray, sundir, sunrgb)
         if d < 1f0
@@ -455,7 +472,7 @@ end
             # print the occlusion grid onto every surface
             fax = (Float32(px) + 0.5f0) * 0.5f0 - 0.5f0
             fay = (Float32(py) + 0.5f0) * 0.5f0 - 0.5f0
-            aow, aoh = aoparams.w, aoparams.h
+            aow, aoh = ap.w, ap.h
             ax0 = clamp(unsafe_trunc(Int32, fax), Int32(0), aow - Int32(1))
             ay0 = clamp(unsafe_trunc(Int32, fay), Int32(0), aoh - Int32(1))
             ax1 = min(ax0 + Int32(1), aow - Int32(1)); ay1 = min(ay0 + Int32(1), aoh - Int32(1))
@@ -467,13 +484,13 @@ end
             # Full strength on the ambient, which is the term it actually models,
             # and a share of the point lights, which is not physical but is what
             # keeps a crevice from being filled in by whatever drifts past it.
-            ao = clamp(1f0 - occ * aoparams.amb, 0f0, 1f0)
-            aol = 1f0 - aoparams.direct * (1f0 - ao)
+            ao = clamp(1f0 - occ * ap.amb, 0f0, 1f0)
+            aol = 1f0 - ap.direct * (1f0 - ao)
             up = 0.5f0 * n[2] + 0.5f0
             amb = (Vec3f(0.055f0, 0.070f0, 0.115f0) * up +
                    Vec3f(0.020f0, 0.017f0, 0.016f0) * (1f0 - up)) * (1f0 - 0.7f0 * metal) * ao
             ndl = max(0f0, n[1] * sundir[1] + n[2] * sundir[2] + n[3] * sundir[3])
-            sh = ndl > 0f0 ? sunshadow(smap, sunvp, world, n, ndl, smapres, stexel, sbias) : 1f0
+            sh = ndl > 0f0 ? sunshadow(smap, sunvpv, world, n, ndl, smapres, stexel, sbiasv) : 1f0
             acc = albedo * amb + ggx(n, view, sundir, albedo, rough, metal) * sunrgb * sh
             ti = (py ÷ tile) * ntx + (px ÷ tile) + Int32(1)
             for k in Int32(1):Int32(tilecount[ti])
@@ -489,9 +506,9 @@ end
                 end
             end
             # the sources themselves, so the lights are things and not just effects
-            acc += albedo * (emit * emitscale)
+            acc += albedo * (emit * emitscalev)
             dist = sqrt((world[1] - eyep[1])^2 + (world[2] - eyep[2])^2 + (world[3] - eyep[3])^2)
-            f = 1f0 - exp(-dist * fog)
+            f = 1f0 - exp(-dist * fogv)
             out = acc + (sky(ray, sundir, sunrgb) - acc) * f
         end
         # no tone map here: bloom wants the values before they are squashed
@@ -513,11 +530,18 @@ end
 # Half resolution, because the samples are scattered reads into the depth buffer
 # and there are AOSAMPLES of them per pixel. The blur below is what makes half
 # resolution and twelve samples look like more of both.
-@kernel function ssao!(ao, @Const(dep), @Const(nrm), vp::Mat4f, invvp::Mat4f, eye::Vec4f,
+@kernel function ssao!(ao, @Const(dep), @Const(nrm), vp::AbstractVector{Mat4f},
+                       invvp::AbstractVector{Mat4f}, eye::AbstractVector{Vec4f},
                        w::Int32, h::Int32, aow::Int32, aoh::Int32,
-                       radius::Float32, bias::Float32, nsample::Int32)
+                       radius::AbstractVector{Float32}, bias::AbstractVector{Float32},
+                       nsample::Int32)
     ix, iy = @index(Global, NTuple)
     @inbounds begin
+        vpv = vp[1]
+        invvpv = invvp[1]
+        eyev = eye[1]
+        radiusv = radius[1]
+        biasv = bias[1]
         px = (Int32(ix) - Int32(1)) * Int32(2)
         py = (Int32(iy) - Int32(1)) * Int32(2)
         i = py * w + px + Int32(1)
@@ -528,8 +552,8 @@ end
             n = normalize(Vec3f(2f0 * unpack8(nn, UInt32(0)) - 1f0,
                                 2f0 * unpack8(nn, UInt32(8)) - 1f0,
                                 2f0 * unpack8(nn, UInt32(16)) - 1f0))
-            p = unproject(invvp, Float32(px) + 0.5f0, Float32(py) + 0.5f0, d, w, h)
-            ep = Vec3f(eye[1], eye[2], eye[3])
+            p = unproject(invvpv, Float32(px) + 0.5f0, Float32(py) + 0.5f0, d, w, h)
+            ep = Vec3f(eyev[1], eyev[2], eyev[3])
             up = abs(n[3]) < 0.9f0 ? Vec3f(0, 0, 1) : Vec3f(1, 0, 0)
             t = normalize(cross(up, n)); b = cross(n, t)
             rot = hash01(px, py) * 6.2831854f0
@@ -538,8 +562,8 @@ end
                 rr = sqrt(a)
                 phi = Float32(k) * 2.3999632f0 + rot
                 dir = t * (rr * cos(phi)) + b * (rr * sin(phi)) + n * sqrt(max(0f0, 1f0 - a))
-                s = p + dir * (radius * (0.3f0 + 0.7f0 * a))
-                q = vp * Vec4f(s[1], s[2], s[3], 1f0)
+                s = p + dir * (radiusv * (0.3f0 + 0.7f0 * a))
+                q = vpv * Vec4f(s[1], s[2], s[3], 1f0)
                 if q[4] > 0f0
                     sx = (0.5f0 * q[1] / q[4] + 0.5f0) * Float32(w)
                     sy = (0.5f0 * q[2] / q[4] + 0.5f0) * Float32(h)
@@ -547,14 +571,14 @@ end
                         jx = unsafe_trunc(Int32, sx); jy = unsafe_trunc(Int32, sy)
                         ds = dep[jy * w + jx + Int32(1)]
                         if ds < 1f0
-                            ps = unproject(invvp, sx, sy, ds, w, h)
+                            ps = unproject(invvpv, sx, sy, ds, w, h)
                             dp = sqrt((ps[1] - ep[1])^2 + (ps[2] - ep[2])^2 + (ps[3] - ep[3])^2)
                             dsamp = sqrt((s[1] - ep[1])^2 + (s[2] - ep[2])^2 + (s[3] - ep[3])^2)
-                            if dp < dsamp - bias
+                            if dp < dsamp - biasv
                                 # a surface far behind the point is a different
                                 # object, not a crevice, so it must not darken it
                                 gap = sqrt((ps[1] - p[1])^2 + (ps[2] - p[2])^2 + (ps[3] - p[3])^2)
-                                occ += clamp(radius / max(1f-4, gap), 0f0, 1f0)
+                                occ += clamp(radiusv / max(1f-4, gap), 0f0, 1f0)
                             end
                         end
                     end
@@ -596,9 +620,10 @@ end
 # blur that follows is wider than the block: reading every pixel cost 0.59 ms
 # against 0.15 and there is nothing in the result to show for it.
 @kernel function bright!(dst, @Const(hdr), w::Int32, h::Int32, bw::Int32,
-                         shift::Int32, thr::Float32)
+                         shift::Int32, thr::AbstractVector{Float32})
     ix, iy = @index(Global, NTuple)
     @inbounds begin
+        thrv = thr[1]
         acc = Vec3f(0)
         half = shift ÷ Int32(2)
         for dy in (Int32(0), half), dx in (Int32(0), half)
@@ -606,7 +631,7 @@ end
             sy = min((Int32(iy) - Int32(1)) * shift + dy, h - Int32(1))
             c = hdr[sy * w + sx + Int32(1)]
             m = max(c[1], max(c[2], c[3]))
-            acc += Vec3f(c[1], c[2], c[3]) * (m > thr ? (m - thr) / m : 0f0)
+            acc += Vec3f(c[1], c[2], c[3]) * (m > thrv ? (m - thrv) / m : 0f0)
         end
         dst[(Int32(iy) - Int32(1)) * bw + Int32(ix)] =
             Vec4f(acc[1] * 0.25f0, acc[2] * 0.25f0, acc[3] * 0.25f0, 1f0)
@@ -640,10 +665,13 @@ end
 # Bilinear on the way back up: nearest across a quarter-resolution blur is a
 # grid of squares wherever the bloom has an edge, which is everywhere it matters.
 function composite_fragment(inputs, hdr, bloom, w::Int32, h::Int32, bw::Int32, bh::Int32,
-                            shift::Int32, exposure::Float32, amount::Float32)
+                            shift::Int32, exposure::AbstractVector{Float32},
+                            amount::AbstractVector{Float32})
     px = unsafe_trunc(Int32, frag_coord_x())
     py = unsafe_trunc(Int32, frag_coord_y())
     @inbounds begin
+        expv = exposure[1]
+        amountv = amount[1]
         c = hdr[py * w + px + Int32(1)]
         fx = (Float32(px) + 0.5f0) / Float32(shift) - 0.5f0
         fy = (Float32(py) + 0.5f0) / Float32(shift) - 0.5f0
@@ -658,7 +686,7 @@ function composite_fragment(inputs, hdr, bloom, w::Int32, h::Int32, bw::Int32, b
         bt = b00 + (b10 - b00) * tx
         bb = b01 + (b11 - b01) * tx
         b = bt + (bb - bt) * ty
-        v = Vec3f(c[1] + b[1] * amount, c[2] + b[2] * amount, c[3] + b[3] * amount) * exposure
+        v = Vec3f(c[1] + b[1] * amountv, c[2] + b[2] * amountv, c[3] + b[3] * amountv) * expv
         Vec4f(v[1] / (1f0 + v[1]), v[2] / (1f0 + v[2]), v[3] / (1f0 + v[3]), 1f0)
     end
 end
@@ -735,28 +763,38 @@ function showcase_plan(dev, screenof; profile::Bool = false)
     lightpos = M.Buffer(dev, zeros(Vec4f, NLIGHT))
     lightcol = M.Buffer(dev, lighthue)
 
-    vpref = Ref(first(camera(0f0, 62f0, 14f0)))
-    cullref = Ref(vpref[])
-    invref = Ref(inv(vpref[]))
-    eyeref = Ref(Vec4f(0, 0, 0, 1))
-    timeref = Ref(0f0)
-    lightref = Ref(Int32(NLIGHT))
-    exposure = Ref(0.85f0)
-    fogref = Ref(0.0035f0)
-    threshold = Ref(1.6f0)
-    bloomamt = Ref(0.30f0)
-    emitref = Ref(9f0)
-    sunvpref = Ref(sunmatrix(Vec3f(-0.62, 0.045, 0.35), SEXTENT, SDEPTH))
-    sbiasref = Ref(0.004f0)
-    aoradius = Ref(4.5f0)
-    aobias = Ref(0.05f0)
+    # Every per-frame value the passes read is a `GPURef`: the dispatches hold
+    # its device address, and `showcase_frame!` writes the pending value with
+    # `ref[] = x`. `aoamb`/`aodirect` are the exception — they are never handed
+    # to a dispatch themselves, only read on the host to rebuild `aoref`, so they
+    # stay plain `Ref`s. `sunref` is read on the host too (`sunvpref` is derived
+    # from it every frame), so it also stays a plain `Ref`; `sundirref` is the
+    # `GPURef` mirror of it that `shade!` actually reads.
+    vp0 = first(camera(0f0, 62f0, 14f0))
+    vpref = M.GPURef(dev, vp0)
+    cullref = M.GPURef(dev, vp0)
+    invref = M.GPURef(dev, inv(vp0))
+    eyeref = M.GPURef(dev, Vec4f(0, 0, 0, 1))
+    timeref = M.GPURef(dev, 0f0)
+    lightref = M.GPURef(dev, Int32(NLIGHT))
+    exposure = M.GPURef(dev, 0.85f0)
+    fogref = M.GPURef(dev, 0.0035f0)
+    threshold = M.GPURef(dev, 1.6f0)
+    bloomamt = M.GPURef(dev, 0.30f0)
+    emitref = M.GPURef(dev, 9f0)
+    sunvp0 = sunmatrix(Vec3f(-0.62, 0.045, 0.35), SEXTENT, SDEPTH)
+    sunvpref = M.GPURef(dev, sunvp0)
+    sbiasref = M.GPURef(dev, 0.004f0)
+    aoradius = M.GPURef(dev, 4.5f0)
+    aobias = M.GPURef(dev, 0.05f0)
     aoamb = Ref(2.6f0)     # how hard occlusion presses on the ambient
     aodirect = Ref(0.6f0)  # and how much of that reaches the point lights
     # The two above are the knobs; this is what the kernel reads, rebuilt from
     # them every frame so setting either still takes effect.
-    aoref = Ref(AOParams(Int32(AOW), Int32(AOH), aoamb[], aodirect[]))
+    aoref = M.GPURef(dev, AOParams(Int32(AOW), Int32(AOH), aoamb[], aodirect[]))
     sunref = Ref(Vec4f(normalize(Vec3f(-0.62, 0.22, 0.35))..., 0))
-    suncolref = Ref(Vec4f(1.0, 0.55, 0.28, 6.5))
+    sundirref = M.GPURef(dev, sunref[])
+    suncolref = M.GPURef(dev, Vec4f(1.0, 0.55, 0.28, 6.5))
 
     graph = M.Graph(dev)
     screen = screenof(graph)
@@ -783,6 +821,7 @@ function showcase_plan(dev, screenof; profile::Bool = false)
         M.dispatch!(p, reset_counter!, (M.use(p, suncounter; write = true),), 1)
     end
     M.compute!(graph, "lights") do p
+        M.use(p, timeref; read = true)
         M.dispatch!(p, move_lights!, (M.use(p, lightpos; write = true),
                                       M.use(p, centers; read = true, write = true),
                                       M.use(p, params; read = true, write = true),
@@ -791,11 +830,13 @@ function showcase_plan(dev, screenof; profile::Bool = false)
                                       timeref, Int32(NSHARD)), NLIGHT)
     end
     M.compute!(graph, "cull") do p
+        M.use(p, cullref; read = true)
         M.dispatch!(p, cull!, (M.use(p, visible; write = true),
                                M.use(p, counter; read = true, write = true),
                                M.use(p, centers; read = true), cullref), NINST)
     end
     M.compute!(graph, "sun cull") do p
+        M.use(p, sunvpref; read = true)
         M.dispatch!(p, cull!, (M.use(p, sunvisible; write = true),
                                M.use(p, suncounter; read = true, write = true),
                                M.use(p, centers; read = true), sunvpref), NINST)
@@ -807,6 +848,7 @@ function showcase_plan(dev, screenof; profile::Bool = false)
                                      M.use(p, suncounter; read = true), UInt32(VPB)), 1)
     end
     M.render!(graph, "shadow", shadow => M.Clear(1f0)) do p
+        M.use(p, sunvpref; read = true)
         args = (M.Attribute(p, pp), M.Attribute(p, sunvisible), M.Attribute(p, centers),
                 M.Attribute(p, sizes), sunvpref)
         M.draw!(p, SHADOW, args, sundrawcmd)
@@ -815,6 +857,7 @@ function showcase_plan(dev, screenof; profile::Bool = false)
     M.render!(graph, "gbuffer", albedo => M.Clear((0f0, 0f0, 0f0, 1f0)),
                                 matter => M.Discard, normal => M.Discard,
                                 zbuf => M.Clear(1f0)) do p
+        M.use(p, vpref; read = true)
         args = (M.Attribute(p, pp), M.Attribute(p, pn), M.Attribute(p, visible),
                 M.Attribute(p, centers), M.Attribute(p, sizes), M.Attribute(p, colors),
                 M.Attribute(p, params), vpref)
@@ -825,6 +868,8 @@ function showcase_plan(dev, screenof; profile::Bool = false)
     M.copy!(graph, "read normal", normal_px, normal)
     M.copy!(graph, "read depth", depth_px, zbuf)
     M.compute!(graph, "tiles") do p
+        M.use(p, invref; read = true)
+        M.use(p, lightref; read = true)
         M.dispatch!(p, tile_lights!, (M.use(p, tilelights; write = true),
                                       M.use(p, tilecount; write = true),
                                       M.use(p, depth_px; read = true),
@@ -833,6 +878,11 @@ function showcase_plan(dev, screenof; profile::Bool = false)
                                       lightref, Int32(PERTILE)), (NTX, NTY); group = (8, 8))
     end
     M.compute!(graph, "ssao") do p
+        M.use(p, vpref; read = true)
+        M.use(p, invref; read = true)
+        M.use(p, eyeref; read = true)
+        M.use(p, aoradius; read = true)
+        M.use(p, aobias; read = true)
         M.dispatch!(p, ssao!, (M.use(p, aoraw; write = true), M.use(p, depth_px; read = true),
                                M.use(p, normal_px; read = true), vpref, invref, eyeref,
                                Int32(W), Int32(H), Int32(AOW), Int32(AOH),
@@ -843,19 +893,29 @@ function showcase_plan(dev, screenof; profile::Bool = false)
                                   Int32(AOW), Int32(AOH), 900f0), (AOW, AOH); group = (16, 16))
     end
     M.compute!(graph, "light") do p
+        M.use(p, invref; read = true)
+        M.use(p, eyeref; read = true)
+        M.use(p, sundirref; read = true)
+        M.use(p, suncolref; read = true)
+        M.use(p, sunvpref; read = true)
+        M.use(p, fogref; read = true)
+        M.use(p, emitref; read = true)
+        M.use(p, sbiasref; read = true)
+        M.use(p, aoref; read = true)
         args = (M.use(p, hdr; write = true),
                 M.use(p, albedo_px; read = true), M.use(p, matter_px; read = true),
                 M.use(p, normal_px; read = true), M.use(p, depth_px; read = true),
                 M.use(p, lightpos; read = true), M.use(p, lightcol; read = true),
                 M.use(p, tilelights; read = true), M.use(p, tilecount; read = true),
                 M.use(p, shadow_px; read = true), M.use(p, aomap; read = true),
-                invref, eyeref, sunref, suncolref, sunvpref,
+                invref, eyeref, sundirref, suncolref, sunvpref,
                 Int32(W), Int32(H), Int32(TILE), Int32(NTX), Int32(PERTILE), fogref, emitref,
                 Int32(SMAP), 2f0 * SEXTENT / Float32(SMAP), sbiasref,
                 aoref)
         M.dispatch!(p, shade!, args, (W, H); group = (TILE, TILE))
     end
     M.compute!(graph, "bright") do p
+        M.use(p, threshold; read = true)
         M.dispatch!(p, bright!, (M.use(p, bloomA; write = true), M.use(p, hdr; read = true),
                                  Int32(W), Int32(H), Int32(BW), Int32(BSHIFT), threshold),
                     (BW, BH); group = (16, 16))
@@ -869,21 +929,25 @@ function showcase_plan(dev, screenof; profile::Bool = false)
                                Int32(BW), Int32(BH), Int32(0), Int32(1)), (BW, BH); group = (16, 16))
     end
     M.render!(graph, "composite", screen => M.Discard) do p
+        M.use(p, exposure; read = true)
+        M.use(p, bloomamt; read = true)
         M.draw!(p, COMPOSITE, (), 3;
                 frag_args = (M.use(p, hdr; read = true), M.use(p, bloomA; read = true),
                              Int32(W), Int32(H), Int32(BW), Int32(BH), Int32(BSHIFT),
                              exposure, bloomamt))
     end
 
-    plan = M.Plan(graph; profile)
+    plan = M.record!(M.Plan(graph; profile))
     return (; plan, graph, screen, counter, suncounter, drawcmd, sundrawcmd,
               vpref, cullref, invref, eyeref, timeref, lightref, exposure, fogref,
               threshold, bloomamt, emitref, sunvpref, sbiasref, aoradius, aobias,
-              aoamb, aodirect, aoref, sunref, suncolref)
+              aoamb, aodirect, aoref, sunref, sundirref, suncolref)
 end
 
 """
-Advance every `Ref` the frame reads, then run the plan.
+Advance every per-frame value the passes read, then run the plan: a `GPURef`
+with `ref[] = x`, or (`aoamb`, `aodirect`, `sunref`) a plain host `Ref` read to
+derive one.
 
 The camera matrix and its inverse, the sun and the matrix derived FROM it — a
 shadow matrix that disagrees with the sun direction is shadows falling the wrong
@@ -893,6 +957,7 @@ function showcase_frame!(s, t, radius, height, freeze)
     vp, eye = camera(t, radius, height)
     s.vpref[] = vp
     sun = s.sunref[]
+    s.sundirref[] = sun
     s.sunvpref[] = sunmatrix(Vec3f(sun[1], sun[2], sun[3]), SEXTENT, SDEPTH)
     freeze || (s.cullref[] = vp)
     s.invref[] = inv(vp)

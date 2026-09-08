@@ -20,120 +20,192 @@ struct RTPipelineProperties
     max_ray_hit_attribute_size::UInt32
 end
 
+# ── What the queue is handed ─────────────────────────────────────────────────
+#
+# Two kinds of GPU work, and both are CLOSED: a command buffer is never open
+# when a Mantle call returns. A `Recording` is a plan's, written once at
+# `record!`, owned by the plan and submitted every run; a `OneShot` is written,
+# sealed and handed over inside one call by whoever needed it, owned by the
+# submission that carries it and given back to the queue's pool when the
+# timeline passes. `submit!(bq, closed...)` is the only way either reaches the
+# driver, and it goes the moment it is called.
+#
+# This replaces the command batch: one command buffer open across call boundaries
+# that anything could append to — an ad hoc launch, an upload, a readback, a
+# per-run store, a present transition — with a dispatch count deciding whether
+# the next launch needed a barrier, a segment count deciding when to cut the
+# buffer, a threshold deciding when to submit it, and three lists of command
+# buffers saying which of them it owned. What the open buffer contained
+# depended on every call since it was opened, from any package, in any order;
+# a plan is the opposite, and the batching the buffer bought is the graph's
+# job. See `oneshot!` in `command.jl`.
+
+abstract type Closed end
+
 """
-    CommandBatch
+    OneShot
 
-A single recording batch that may span multiple Vulkan command buffers.
-When the number of dispatches in the current CB segment exceeds `bq.cb_split_threshold`,
-the CB is sealed and a fresh one is started. At flush time, all sealed CBs + the
-active CB are submitted in a single `vkQueueSubmit` call.
+Work submitted once: an ad hoc launch, an upload, a readback, a run's host
+stores and pointer patches, a frame. Written and sealed inside one call
+(`oneshot`), owned by the [`Submission`](@ref) that carries it, and returned to
+the queue's pool by the sweep once the timeline has passed it — which is when
+its pins, its retained `DataRef`s and its scratch regions go back too.
 
-This avoids NVIDIA driver crashes from enormous command buffers (30k+ dispatches)
-while keeping submission count minimal (single submit per flush).
+`bq` is the `VulkanBatchQueue{VkContext}` it was taken from; typed `Any`
+because the queue is declared below this, and asserted at every read
+(`queueof`) so the field is a static load and not a boxed one.
 """
-mutable struct CommandBatch
-    cmd_buf::VK.CommandBuffer       # Currently recording CB segment
-    recording::Bool
-    dispatch_count::Int                 # Total dispatches across all segments (for barriers)
-    segment_dispatches::Int             # Dispatches in current CB segment (for split threshold)
-    last_was_rt::Bool
-    # All objects this batch keeps alive until the fence is reached.  IdSet
-    # so each object is pinned (and sync-tracked) at most once per batch.
-    # Populated by `pin!` during arg packing and from dispatch entry points.
-    pinned::Base.IdSet{Any}
-    # Retained `GPUArrays.DataRef`s for every pinned LavaArray, taken via
-    # `copy(a.buf)` at `pin!` time.  `pinned` alone is not enough: it keeps the
-    # *wrapper* alive, but an explicit `unsafe_free!(a)` (HW-accel BLAS/HWTLAS
-    # teardown does exactly this) sets `a.buf.freed = true` on that DataRef, and
-    # `DataRef` throws on `freed` regardless of refcount — so `submit!` would
-    # later trip "Attempt to use a freed reference" dereferencing `a.buf`.
-    # A `copy` is an independent, non-freed handle onto the same RefCounted, so
-    # it both keeps the VkManagedBuffer alive and stays dereferenceable.
-    # Released in `reclaim_batch!` once the batch's timeline has been reached.
-    pinned_refs::Vector{Any}
-    dispatch_log::Vector{String}
-    sealed_cmd_bufs::Vector{VK.CommandBuffer}  # Completed CB segments awaiting submit
-    # Segments already handed to the queue, still being read by the GPU. They
-    # leave `sealed_cmd_bufs` at submit — a batch outlives a single frame, and a
-    # sealed segment left in that list would be submitted again by the next
-    # present — but they cannot go back to `free_cmd_bufs` there either, because
-    # only `reclaim_batch!` knows the fence has passed. So they wait here.
-    submitted_cmd_bufs::Vector{VK.CommandBuffer}
-    # Which of `sealed_cmd_bufs` belong to a [`Recording`](@ref) rather than to
-    # this batch, so `reclaim_batch!` returns the batch's own and leaves the
-    # recording's alone — a recording submits its buffer again on the next run.
-    #
-    # This was `replay_cmd_bufs`, a SEPARATE list submitted after everything the
-    # batch recorded. That made position stand for ownership and got the ORDER
-    # wrong: a readback recorded into the open batch after a plan ran executed
-    # BEFORE the plan, because `submit!` built its list as sealed-then-open-then-
-    # replay. It read zeros from a buffer the plan had just filled, and it read
-    # them silently. `submit!(bq, ::Recording)` seals the open segment and
-    # appends the recording behind it, so the one list is in submission order and
-    # this says only who may hand a buffer back.
-    borrowed::Vector{VK.CommandBuffer}
-
-    # The [`Unified`](@ref) regions the dispatches recorded here read their
-    # arguments and workgroup counts from, released when the batch is reclaimed.
-    #
-    # A batch is the OWNER because an address handed to `get_arg_buffer` is baked
-    # into a push constant of a dispatch in this batch and read until the batch
-    # completes — no earlier, and no later, since nothing else names it. That is
-    # exactly what an owner is, and it is what the queue's argument slab ring was
-    # trying to express with a bump pointer, a high-water mark and a handout
-    # counter: three pieces of state to work out when bytes were safe to hand
-    # over again, where the fence already says it.
-    regions::Vector{Region}
-    # Timeline value this batch will signal on its queue's `timeline_sem`.
-    # Assigned at record time so `sync_access!` can store it into `buf.last_write`.
-    signal_value::UInt64
-    # Cross-queue dependencies, built up by `sync_access!(::VkManagedBuffer)` at submit.
-    wait_semaphores::Vector{Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}}
-    # Back-reference to the owning VulkanBatchQueue.  Set post-construction (chicken/
-    # egg: init_batch runs inside VulkanBatchQueue's constructor).  Always non-nothing
-    # after the VulkanBatchQueue is fully built; checked via `batch.bq`.
-    # Loose type because VulkanBatchQueue is declared above but the reverse dep still
-    # makes `CommandBatch.bq::VulkanBatchQueue` fragile in the struct body.
+mutable struct OneShot <: Closed
     bq::Any
+    cmd::VK.CommandBuffer
+    # Everything the commands name, kept alive until the submission that
+    # carries this one-shot has passed. `pinned_refs` are the retained
+    # `DataRef`s of every pinned `LavaArray` — see `pin!(::LavaArray)`.
+    pinned::Base.IdSet{Any}
+    pinned_refs::Vector{Any}
+    # The `Unified` regions the commands read their arguments and workgroup
+    # counts from. Owned here, so an address handed to `get_arg_buffer` is
+    # valid for exactly as long as these commands can run.
+    regions::Vector{Region}
+    open::Bool
 end
+
+"""
+    Recording
+
+A plan's work, written into ONE command buffer once and handed to the queue
+every time the plan runs. Nothing here is heuristic: the graph decided the pass
+order, the barriers and where the arguments live, and [`Emitter`](@ref) writes
+exactly that. There is no threshold to cut the buffer on, because a recording
+is not being submitted while it is being written.
+
+What a recording OWNS is the whole of its lifetime rule. The command buffer,
+the argument regions its dispatches read, the descriptor sets they bind and a
+strong reference to every resource they name stay alive until `release!`,
+because until then the recording may be submitted again.
+
+This replaced `CapturedSequence`, which held a LIST of command buffers because
+the thing that produced it was the open batch's `submit!`: a capture ran the
+ordinary recorder and collected whatever segments the queue's split and submit
+thresholds happened to cut. Measured on Hikari's fused sample:
+five command buffers per recording, decided by a threshold about when to
+submit, applied while nothing was being submitted.
+"""
+mutable struct Recording <: Closed
+    bq::Any
+    cmd::VK.CommandBuffer
+    pinned::Base.IdSet{Any}
+    pinned_refs::Vector{Any}
+    # The `Unified` regions the emitted commands read. A plan's arguments live in
+    # its own `ArgMemory`, so this is usually empty — it is here because "who may
+    # hand these bytes out again" has to have exactly one answer per owner.
+    regions::Vector{Region}
+    # Descriptor sets the emitted commands bind, one per (pipeline layout,
+    # acceleration structure) pair rather than one per dispatch — see
+    # [`tlasset!`](@ref).
+    sets::Vector{Any}
+    # What covers the last submission of this recording, or 0 if it has never
+    # been handed over. `release!` waits on it, which is the whole reason it is
+    # kept: the command buffer goes back to the device there, and freeing one
+    # the device is still reading is undefined behaviour that presents as a
+    # driver-side abort with no Julia frame. UInt64, not Any — the assignment
+    # is on the `run!` path, which allocates nothing, and an `Any` field boxes
+    # the timeline value it is handed. 0 is safe as "never": the first signal
+    # a queue emits is 1.
+    token::UInt64
+    open::Bool
+    # Where each device address the pack wrote landed: (address, host pointer).
+    # The pointer is into the plan's argument memory or into one of this
+    # recording's own scratch regions (`emitkernel!` packs a prepare kernel's
+    # arguments there) — `record!` sorts out which when it builds the patch
+    # table (`patchtarget`). Filled by `recpatch!` while the commands are
+    # emitted, read once by `record!`. A one-shot never needs it — its commands
+    # run once — so the hook is a no-op there.
+    patches::Vector{Tuple{UInt64,Ptr{UInt8}}}
+    # The VkManagedBuffers a submission of this recording has to `sync_access!`,
+    # snapshotted once at `record!` from `pinned` and `pinned_refs`. A run
+    # iterates THIS — a concrete vector — rather than the `IdSet{Any}` of pins,
+    # which boxed on every element: ~640 bytes a submission on a plan that pins
+    # a ray-tracing acceleration structure's two dozen handles. The set of
+    # buffers is fixed for the recording's life (pins happen during `emit!`),
+    # so the snapshot cannot drift the way a per-run walk of `pinned` could not
+    # either — it is the same buffers, un-boxed.
+    sync::Vector{VkManagedBuffer}
+end
+
+"""
+    Submission
+
+What one `vkQueueSubmit2` carried: the one-shots it OWNS, given back to the
+queue's pool when the timeline passes `signal_value`; the recordings it PINNED,
+a plan's, submitted again on the next run, of which the sweep only drops the
+reference; the cross-queue waits `sync_access!` collected over their pins; and
+the refill storage the raw submit call reads, so a submission allocates
+nothing.
+
+The batch with the open command buffer and everything that existed to manage
+it deleted, and the name saying what is left.
+"""
+mutable struct Submission
+    signal_value::UInt64
+    oneshots::Vector{OneShot}
+    recordings::Vector{Recording}
+    # Cross-queue dependencies, built up by `sync_access!(::VkManagedBuffer)` at
+    # submit.
+    wait_semaphores::Vector{Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}}
+    bq::Any
+    # Raw VulkanCore structs: Vulkan.jl's `_`-level wrappers each box a `deps`
+    # vector for GC rooting — right once at setup, wrong fifty times a frame.
+    # `raw_submits[1]` points into these vectors' data, so a refill resizes only
+    # within capacity and the `vkQueueSubmit2` ccall runs under GC.@preserve.
+    raw_cb_infos::Vector{VK.vk.VkCommandBufferSubmitInfo}
+    raw_wait_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
+    raw_signal_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
+    raw_submits::Vector{VK.vk.VkSubmitInfo2}               # always length 1
+end
+
+Submission(bq) = Submission(UInt64(0), OneShot[], Recording[],
+                            Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}[], bq,
+                            sizehint!(VK.vk.VkCommandBufferSubmitInfo[], 8),
+                            sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
+                            sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
+                            Vector{VK.vk.VkSubmitInfo2}(undef, 1))
 
 # `BatchQueue` is Mantle's — see `src/graph/queue.jl`. This alias pins the ten
 # driver parameters to Vulkan's types so every existing `VulkanBatchQueue{VkContext}`
 # still names exactly what it did.
 const VulkanBatchQueue{C} = BatchQueue{VK.Device, VK.Queue, VK.CommandPool,
-                                       CommandBatch, VK.CommandBuffer, VK.Fence,
-                                       VK.Semaphore, C}
+                                       Submission, OneShot, VK.Semaphore, C, UInt64}
+
+"""The queue a closed command buffer was taken from, as the concrete type — the
+field is `Any` only because the queue is declared after the closed types."""
+@inline queueof(c::Closed) = c.bq::VulkanBatchQueue{VkContext}
 
 
-function init_batch(cb::VK.CommandBuffer)
-    pinned = Base.IdSet{Any}()
-    sizehint!(pinned, 128)
-    waits = Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}[]
-    return CommandBatch(cb, false, 0, 0, false, pinned, Any[], String[],
-        VK.CommandBuffer[],          # sealed segments, in submission order
-        VK.CommandBuffer[],          # already submitted, waiting on the fence
-        VK.CommandBuffer[],          # of the sealed ones, which belong elsewhere
-        Region[],                        # argument regions, released at reclaim
-        UInt64(0),                       # signal_value (assigned at record time)
-        waits,
-        nothing,                         # bq (set after VulkanBatchQueue is fully built)
-    )
+"""
+Per-queue scratch for the wait and timeline-query fast paths: one semaphore
+slot, one value slot, one packed wait info and one counter cell, refilled per
+call. A fresh `Vector` + wrapper + `Ref` per wait cost ~300 bytes of every
+`waitfor!`; these cost nothing after construction. A heap object (mutable) so
+the `Any`-typed `BatchQueue.slots` field hands out a REFERENCE — an isbits
+bundle would box on every read.
+"""
+mutable struct QueueSlots
+    wait_sems::Vector{VK.vk.VkSemaphore}
+    wait_values::Vector{UInt64}
+    wait_info::Base.RefValue{VK.vk.VkSemaphoreWaitInfo}
+    counter::Base.RefValue{UInt64}
 end
+QueueSlots() = QueueSlots(Vector{VK.vk.VkSemaphore}(undef, 1), Vector{UInt64}(undef, 1),
+                          Ref(VK.vk.VkSemaphoreWaitInfo(VK.vk.VkStructureType(0), C_NULL,
+                                                        VK.vk.VkSemaphoreWaitFlags(0),
+                                                        UInt32(0), C_NULL, C_NULL)),
+                          Ref(UInt64(0)))
 
 function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
-                    n_initial_batches::Int=2, queue_index::Int=-1)
+                    queue_index::Int=-1)
     cmd_pool = VK.CommandPool(device, qf_idx;
         flags=VK.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
-    batches = CommandBatch[]
-    for _ in 1:n_initial_batches
-        alloc_info = VK.CommandBufferAllocateInfo(cmd_pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)
-        cb = unwrap(VK.allocate_command_buffers(device, alloc_info))[1]
-        push!(batches, init_batch(cb))
-    end
-    # Dedicated AS-build command buffer + fence (same pool as this bq).
-    as_alloc = VK.CommandBufferAllocateInfo(cmd_pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)
-    as_cmd_buf = unwrap(VK.allocate_command_buffers(device, as_alloc))[1]
-    as_fence = VK.Fence(device)
     # Per-queue timeline semaphore for cross-queue ordering.
     type_info = VK.SemaphoreTypeCreateInfo(VK.SEMAPHORE_TYPE_TIMELINE, UInt64(0))
     timeline_sem = unwrap(VK.create_semaphore(device,
@@ -145,27 +217,18 @@ function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ct
     # parameters given, never for a partial application, so the unparameterised
     # call this was landed on the four-argument method above and raised a
     # `MethodError` listing forty-one arguments.
-    bq = VulkanBatchQueue{typeof(ctx)}(device, queue, qf_idx, cmd_pool, nothing,
-                    CommandBatch[], batches, VK.CommandBuffer[],
-                    as_cmd_buf, as_fence,
+    bq = VulkanBatchQueue{typeof(ctx)}(device, queue, qf_idx, cmd_pool,
+                    Submission[], OneShot[],                # the two pools
                     timeline_sem, UInt64(0),
                     Any[], Any[],    # deferred_frees, deferred_as_frees
                     Base.Threads.SpinLock(),  # deferred_frees_lock
-                    nothing,         # staging (lazy)
                     ctx,             # owning VkContext (required)
                     Threads.threadid(),  # owning_thread
-                    64, 3000, UInt64(120) * 1_000_000_000,  # auto-submit, CB split, flush timeout
-                    :memory, false, false,                  # barrier mode / elision / one-shot skip
-                    false, UInt64[], UInt64[],              # ranges_declared + elision tracker
-                    nothing, Outstanding[],                 # deferred indirect, outstanding submissions
+                    UInt64(120) * 1_000_000_000,            # flush timeout
+                    Outstanding{UInt64,Submission}[],       # outstanding submissions
                     "", "",                                 # last / prev dispatch info
-                    queue_index)
-    # Plug the back-reference into every pre-allocated batch so `batch.bq`
-    # is non-nothing as soon as the bq is returned.  Future batches allocated
-    # lazily (alloc_cmd_buf → init_batch) must set .bq themselves.
-    for b in batches
-        b.bq = bq
-    end
+                    queue_index,
+                    QueueSlots())                           # fast-path scratch
     return bq
 end
 
@@ -930,14 +993,6 @@ function reset_device!(; select = pick_physical_device,
     return nothing
 end
 
-"""
-    has_active_recording(bq::VulkanBatchQueue) -> Bool
-
-Whether `bq` has an open/recording CommandBatch.  Used by transfer paths
-to decide "should I flush `bq` before doing my own submit/CPU write?"
-Always takes the queue explicitly — no implicit default_bq lookup.
-"""
-has_active_recording(bq::VulkanBatchQueue) = bq.active_batch !== nothing
 
 """
     VkContext(; select = pick_physical_device, debug = DebugConfig()) -> VkContext

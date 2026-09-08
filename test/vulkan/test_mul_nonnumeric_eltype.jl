@@ -14,7 +14,11 @@ these types. The two assertions below are the two halves of that: the fallback
 actually computes the right answer, and the numeric path is still Lava's own.
 """
 
-using Test, Lava, LinearAlgebra, GPUArrays
+using Test, Lava, Mantle, LinearAlgebra, GPUArrays
+
+# Bound by the suite's preamble for every file; standalone, bind them here.
+@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
+@isdefined(LavaArray) || (LavaArray = MVE.LavaArray)
 
 # Everything `GPUArrays.generic_matmatmul!`'s kernel asks of an element type.
 # `zero` is needed for an INSTANCE, not just the type: the kernel seeds its
@@ -48,7 +52,10 @@ Base.:(*)(x::Number, y::Pair2) = Pair2(x * y.a, x * y.b)
         numeric = Base.which(LinearAlgebra.mul!,
                              Tuple{LavaArray{Float32,2}, LavaArray{Float32,2},
                                    LavaArray{Float32,2}, Bool, Bool})
-        @test parentmodule(numeric) === Mantle
+        # MantleVulkanExt, not Mantle core: the array type and its GEMM moved
+        # to the Vulkan extension in the runtime split — the assertion is that
+        # the method belongs to the module that owns the type.
+        @test parentmodule(numeric) === MVE
 
         generic = Base.which(LinearAlgebra.mul!,
                              Tuple{LavaArray{Pair2{Float32},2}, LavaArray{Pair2{Float32},2},

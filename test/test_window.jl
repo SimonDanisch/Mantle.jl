@@ -49,6 +49,10 @@ if isempty(get(ENV, "DISPLAY", ""))
 else
     using GLFW, Lava, GeometryBasics, LinearAlgebra, ColorTypes
     GLFW.Init() || error("DISPLAY=$(ENV["DISPLAY"]) is set but GLFW.Init failed")
+    # The backend's window type, for the tests that drive a window without a
+    # graph. `runtests.jl` runs this file in a process of its own with only
+    # `Mantle` and `Test` loaded, so nothing else puts the name in `Main`.
+    const MVE = Base.get_extension(Mantle, :MantleVulkanExt)
     include(joinpath(@__DIR__, "..", "bench", "two_scatters.jl"))
 
     # Reads along rows and writes down columns, which is the shape of anything
@@ -103,8 +107,8 @@ else
                        varyings = (color = Vec4f,), topology = TriangleList(),
                        blend = Opaque(), cull = NoCull(), depth = DepthOff())
 
-    @kernel function set_draw!(cmds, k::UInt32)
-        @inbounds cmds[1] = DrawIndirectCommand(UInt32(6) * k, UInt32(1), UInt32(0), UInt32(0))
+    @kernel function set_draw!(cmds, k::AbstractVector{UInt32})
+        @inbounds cmds[1] = DrawIndirectCommand(UInt32(6) * k[1], UInt32(1), UInt32(0), UInt32(0))
     end
 
     @kernel function frombytes!(dst, @Const(src))
@@ -210,30 +214,31 @@ else
         M.compute!(g, "advect") do p
             x = M.use(p, pos; read = true, write = true)
             v = M.use(p, vel; read = true, write = true)
-            M.dispatch!(p, advect!, (x, v, Ref(1f0 / 60), 1.4f0), n)
+            M.dispatch!(p, advect!, (x, v, 1f0 / 60, 1.4f0), n)
         end
-        (plan = M.Plan(g), pos = pos)
+        (plan = M.record!(M.Plan(g)), pos = pos)
     end
 
-    @testset "a headless plan runs past its argument slots" begin
+    @testset "a headless plan runs many times without a submit between" begin
         # A plan with a surface submits every frame inside `present_frame!`. One
-        # without submits when something asks it to, so `ARG_SLOTS` frames all
-        # land in the same recording batch — and the frame that first reuses a
-        # slot then waited for a timeline value the queue had never been given.
-        # `vkWaitSemaphores` is a foreign call, so that wait cannot be
-        # interrupted, profiled, or garbage collected: the process is simply
-        # gone. Found by running a compute-only graph 30 times.
-        ext = Mantle
+        # without submits when something asks it to, so several frames land in
+        # the same batch. That used to be where the argument ring deadlocked:
+        # the frame that first reused a slot waited for a timeline value the
+        # queue had never been given, and `vkWaitSemaphores` is a foreign call,
+        # so the wait could not be interrupted, profiled or garbage collected —
+        # the process was simply gone. Found by running a compute-only graph 30
+        # times. There is no ring and no wait now; what this pins is that the
+        # runs still accumulate correctly and nothing is left unsubmitted.
         dev = M.Device(M.VulkanAPI())
         s = Base.invokelatest(advect_plan, dev, 20_000)
         before = copy(Array(M.storage(s.pos)))
-        for _ in 1:(3 * ext.ARG_SLOTS)
+        for _ in 1:9
             M.run!(s.plan)
         end
         KernelAbstractions.synchronize(M.backend(dev))
 
         # Nothing a later frame could wait for is still sitting unsubmitted.
-        @test all(<=(dev.bq.next_timeline), s.plan.args.signal)
+        @test Mantle.argtoken(s.plan.args) <= dev.bq.next_timeline
         after = Array(M.storage(s.pos))
         moved = [norm(after[i] - before[i]) for i in eachindex(before)]
         @test count(<(1e-6), moved) == 0
@@ -291,7 +296,7 @@ else
         # A Lava window, not a Mantle one: this test drives acquire/blit/present
         # by hand because the chain ends in a compute pass and Mantle has no blit.
         # Anything that renders through a plan uses `M.Window`.
-        win = VulkanWindow(W, H; title = "chain", vsync = false)
+        win = MVE.VulkanWindow(W, H; title = "chain", vsync = false)
         s = Base.invokelatest(build_chain, dev, win, 20_000)
 
         peak = M.peakbytes(s.plan)
@@ -302,9 +307,11 @@ else
         for _ in 1:20
             acquire_next_image!(win)
             M.run!(s.plan)
-            copy_framebuffer!(M.storage(s.raw), s.fb)
+            MVE.copy_framebuffer!(M.storage(s.raw), s.fb)
             blit!(dev.bq, WindowTarget(win), M.storage(s.out))
-            present_frame!(dev.bq, win)
+            present_frame!(dev.bq, win, MVE.oneshot(dev.bq) do e
+                MVE.presentready!(e, win)
+            end)
         end
         KernelAbstractions.synchronize(M.backend(dev))
         img = readback_window(win)
@@ -385,26 +392,22 @@ else
         Atomix.@atomic c[1] += UInt32(1)
     end
 
-    @testset "a frame that splits its command buffer still runs every pass" begin
-        # `maybe_split_cb!` ends the current command buffer mid-frame and starts a
-        # fresh one, leaving the first half in `sealed_cmd_bufs`. `present_frame!`
-        # submitted only `batch.cmd_buf`, so for a windowed plan everything before
-        # the split was recorded, never submitted, and silently did not run — no
-        # validation error, because nothing about it is invalid.
-        #
-        # It showed up once every `cb_split_threshold` dispatches: a frame that did
-        # nothing. For this graph — clear a counter in the first pass, accumulate
-        # into it later — a lost clear means the counter never restarts, and the
-        # showcase's cull then indexed past the end of its visible list into the
-        # buffers behind it.
-        #
-        # The threshold is dropped so the split happens every frame instead of
-        # every few thousand; `tally` is monotonic on purpose, because the counter
-        # itself cannot detect this. A skipped frame leaves a cleared-then-refilled
-        # counter at exactly its previous correct value.
+    @testset "a windowed frame runs every pass, every frame" begin
+        # A windowed plan is emitted per frame into a one-shot the present
+        # submits. It used to be emitted into the open batch, whose command
+        # buffer the recorder split mid-frame every few thousand
+        # dispatches, and `present_frame!` submitted only the last segment: a
+        # frame that did nothing, once every threshold, with no validation
+        # error because nothing about it was invalid. The split and the
+        # threshold are gone with the open batch; what this pins is what it
+        # always pinned — every pass of every frame reaches the device. For
+        # this graph — clear a counter in the first pass, accumulate into it
+        # later — a lost clear means the counter never restarts. `tally` is
+        # monotonic on purpose, because the counter itself cannot detect a
+        # skipped frame: a cleared-then-refilled counter sits at exactly its
+        # previous correct value.
         dev = M.Device(M.VulkanAPI())
-        dev.bq.cb_split_threshold = 3          # every frame, several times over
-        win = M.Window(64, 64; title = "split", vsync = false)
+        win = M.Window(64, 64; title = "every frame", vsync = false)
         g = M.Graph(dev)
         cnt, tally = M.Buffer(dev, UInt32[0]), M.Buffer(dev, UInt32[0])
         M.compute!(g, "clear") do p
@@ -460,9 +463,16 @@ else
                              M.use(p, b; write = true)
                 M.dispatch!(p, fill_span!, (w, Int32(128), 2f0), 128)
             end
-            (; b, plan = M.Plan(g))
+            (; b, plan = M.record!(M.Plan(g)))
         end
-        touched(pl) = unique(t.resource for pp in pl.passes for t in pp.pre)
+        # The update pass every plan with a declared buffer has is excluded — it
+        # touches the same resources the compute passes do, so it changes no
+        # count, but excluding it keeps the comparison about the passes' own
+        # hazards. What distinguishes whole from sliced is the number of
+        # DISTINCT resources that appear in any transition: one buffer, or two
+        # disjoint slices.
+        touched(pl) = unique(t.resource for pp in pl.passes if pp.pass.kind !== :update
+                             for t in pp.pre)
 
         whole = build(false)
         @test length(touched(whole.plan)) == 1      # one resource: ordered, needlessly
@@ -484,11 +494,13 @@ else
         # reader), so RAW and WAR go down a different path than the case above.
         #
         # Counting resources does not say it here: a slice this graph only ever
-        # reads is seeded from its own last use, so it needs no transition at all
-        # and never appears in the emitted set. What distinguishes the two
-        # spellings is whether the *reader* waits — whole-buffer gives it a
-        # WriteOnly -> ReadOnly against the writer, and disjoint slices give it
-        # nothing to wait for.
+        # reads is seeded from its own last use, so it needs no transition of
+        # its own. What distinguishes the two spellings is whether the *reader*
+        # waits on the WRITER — whole-buffer gives it a WriteOnly -> ReadOnly
+        # against the writer, and disjoint slices give it nothing of the
+        # writer's to wait for. (It always waits on the host store the update
+        # pass may land, which is the same transition either way.)
+        SW = M.Storage{M.BufferKind,M.WriteOnly}
         readerwaits(ranged) = begin
             g = M.Graph(dev)
             b = M.Buffer(dev, zeros(Float32, n))
@@ -502,10 +514,11 @@ else
                              M.use(p, b; read = true)
                 M.dispatch!(p, fill_span!, (r, Int32(128), 4f0), 128)
             end
-            length(M.Plan(g).passes[2].pre)
+            reader = only(pp for pp in M.Plan(g).passes if pp.pass.name == "read high")
+            any(t -> t.from === SW, reader.pre)
         end
-        @test readerwaits(false) == 1      # whole buffer: RAW against the writer
-        @test readerwaits(true) == 0       # disjoint slices: nothing to wait for
+        @test readerwaits(false)           # whole buffer: RAW against the writer
+        @test !readerwaits(true)           # disjoint slices: nothing of the writer's to wait for
 
         # The control, and the failure mode that matters: naming a range must not
         # make everything independent. Identical ranges are the same resource and
@@ -540,19 +553,20 @@ else
                                         Int32(200), 8f0), 56)
         end
         pp = M.Plan(gp)
+        segs(name) = Set(t.resource for p in pp.passes if p.pass.name == name
+                         for t in p.pre)
         # `mid` overlaps `low`, so it waits; `tail` overlaps neither and does not.
-        @test !isempty(pp.passes[2].pre)
-        lowseg = Set(t.resource for t in pp.passes[1].pre)
-        midseg = Set(t.resource for t in pp.passes[2].pre)
-        tailseg = Set(t.resource for t in pp.passes[3].pre)
+        @test !isempty(segs("mid"))
+        lowseg, midseg, tailseg = segs("low"), segs("mid"), segs("tail")
         @test !isempty(intersect(lowseg, midseg))    # they share the 64:128 segment
         @test isempty(intersect(lowseg, tailseg))    # and share nothing with the tail
 
         # Slicing a buffer partitions it, and a later whole-buffer usage then
-        # stands for every segment. Those are contiguous and ask for the same
-        # thing, so they lower to one barrier rather than one per segment —
-        # otherwise naming a range anywhere makes every whole use of that buffer
-        # cost a barrier per cut.
+        # stands for every segment: four transitions, one per segment. They are
+        # the same hazard, so they lower to one memory barrier rather than one
+        # per segment — otherwise naming a range anywhere makes every whole use
+        # of that buffer cost a barrier per cut. And no buffer barrier at all: a
+        # recording names no `VkBuffer`.
         gm = M.Graph(dev)
         bm = M.Buffer(dev, zeros(Float32, n))
         for (k, r) in enumerate((1:64, 65:128, 129:192, 193:256))
@@ -566,9 +580,10 @@ else
                                         Int32(0), 9f0), n)
         end
         pm = M.Plan(gm)
-        whole = pm.passes[5]
+        whole = only(pp for pp in pm.passes if pp.pass.name == "whole")
         @test length(whole.pre) == 4                                   # four segments
-        @test Int(whole.barrier.vks.bufferMemoryBarrierCount) == 1      # merged to one
+        @test Int(whole.barrier.vks.memoryBarrierCount) == 1            # merged to one
+        @test Int(whole.barrier.vks.bufferMemoryBarrierCount) == 0      # and nothing named
 
         # Out of bounds is still a mistake worth naming.
         g2 = M.Graph(dev)
@@ -667,7 +682,7 @@ else
         @test issubset(got, required)
     end
 
-    @testset "the hazard set is lowered to scoped barriers, not one catch-all" begin
+    @testset "the hazard set is lowered to mask tuples, not per-buffer barriers" begin
         # Everything above asserts the *derived* set. Nothing in it looks at what
         # is handed to Vulkan, and the two can disagree: a pass could carry ten
         # correct transitions and still lower them to one `VkMemoryBarrier2` with
@@ -675,10 +690,15 @@ else
         # thing being removed. The derivation would look perfect and the barrier
         # would still be a global one.
         #
-        # So this reads the emitted `VkDependencyInfo`: one buffer barrier per
-        # transition, scoped to that buffer's own range, and no global memory
-        # barrier at all. A handover names two resources and no single buffer, so
-        # it stays global — hence aliasing off here, and its own test elsewhere.
+        # So this reads the emitted `VkDependencyInfo`. Since the mask tuples of
+        # step 0 of `docs/submission-refactor.md`, a pass lowers its transitions
+        # to one memory barrier per DISTINCT (stage, access) tuple and to no
+        # buffer barrier at all: a recording names no `VkBuffer`, which is what
+        # lets a buffer move under a recorded plan without invalidating it. Two
+        # transitions that are the same hazard collapse into one barrier; two
+        # that are not stay two, never ORed. A handover names two resources and
+        # no single buffer, so it was global anyway — hence aliasing off here,
+        # and its own test elsewhere.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
         dev = M.Device(M.VulkanAPI())
         s = Base.invokelatest(build_interleaved, dev, 1 << 10, 2, 3; alias = false)
@@ -686,12 +706,17 @@ else
         for pp in s.plan.passes
             ntrans += length(pp.pre)
             pp.barrier === nothing && continue
-            nbuf += Int(pp.barrier.vks.bufferMemoryBarrierCount)
-            nmem += Int(pp.barrier.vks.memoryBarrierCount)
+            v = pp.barrier.vks
+            nbuf += Int(v.bufferMemoryBarrierCount)
+            nmem += Int(v.memoryBarrierCount)
+            # Every tuple a pass emits is distinct — dedupe, never union.
+            mb = unsafe_wrap(Array, v.pMemoryBarriers, Int(v.memoryBarrierCount))
+            @test allunique((m.srcStageMask, m.srcAccessMask, m.dstStageMask, m.dstAccessMask)
+                            for m in mb)
+            @test Int(v.memoryBarrierCount) <= length(pp.pre)
         end
-        @test ntrans == 10                # the hand-derived set, above
-        @test nbuf == ntrans              # each one lowered, scoped to its buffer
-        @test nmem == 0                   # and nothing ordering all of memory
+        @test nbuf == 0                   # nothing names a buffer
+        @test 1 <= nmem <= ntrans         # tuples, one per distinct hazard, never one for all
     end
 
     @testset "the local hazard set holds over a corpus, not one topology" begin
@@ -814,8 +839,10 @@ else
         order(pl) = [pp.pass.name for pp in pl.passes]
 
         fast, small = mk(M.Overlap()), mk(M.Compact())
-        @test order(fast) == vcat(["draw$i" for i in 0:5], ["blt$i" for i in 0:5])
-        @test order(small) == vcat([["draw$i", "blt$i"] for i in 0:5]...)
+        # First the update pass every plan with a declared buffer has (the
+        # host-written `out`), then RPS's sequence.
+        @test order(fast) == vcat(["updates"], ["draw$i" for i in 0:5], ["blt$i" for i in 0:5])
+        @test order(small) == vcat(["updates"], [["draw$i", "blt$i"] for i in 0:5]...)
         # And the reason the second order exists: one transient alive at a time
         # instead of six.
         @test M.peakbytes(small) * 6 == M.peakbytes(fast)
@@ -942,10 +969,10 @@ else
             dev = M.Device(M.VulkanAPI())
             win = M.Window(W, H; title = "t")
             sa, sb = cloud(50_000), cloud(20_000)
-            a = Scatter(M.Buffer(dev, sa), M.Buffer(dev, tint.(sa)), M.Scalar(dev, 2.0f0))
-            b = Scatter(M.Buffer(dev, sb), M.Scalar(dev, Vec4f(0.10, 0.04, 0.01, 1)),
+            a = Scatter(M.Buffer(dev, sa), M.Buffer(dev, tint.(sa)), M.GPURef(dev, 2.0f0))
+            b = Scatter(M.Buffer(dev, sb), M.GPURef(dev, Vec4f(0.10, 0.04, 0.01, 1)),
                         M.Buffer(dev, 1.0f0 .+ 3.0f0 .* rand(Float32, 20_000)))
-            mvp = Ref(camera(0.7f0))
+            mvp = M.GPURef(dev, camera(0.7f0))
             g = M.Graph(dev); screen = M.Surface(g, win)
             picked = which === :a ? (a,) : which === :b ? (b,) : (a, b)
             M.render!(g, "s", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
@@ -977,18 +1004,24 @@ else
         loose = Base.invokelatest(build_targets, dev, 20_000; points = pts, alias = false)
 
         E = Mantle
-        imgbytes(p) = only(length(s) for s in p.slabs
-                           if any(t -> t isa E.TransientImage && t.memory === M.memoryof(s),
-                                  p.graph.transients))
-        one = E.nbytes(first(t for t in tight.plan.graph.transients if t isa E.TransientImage))
+        imgtrans(pl) = [i for (i, t) in enumerate(pl.graph.transients) if t isa E.TransientImage]
 
-        # Exactly one target's worth when they share, and two when they do not.
-        # Not `tight * 2 == loose`: these images want 64 kB alignment and one
-        # target is not a multiple of it, so the unaliased arena carries padding
-        # between them that the aliased arena never pays.
-        @test imgbytes(tight.plan) == one
-        @test 2 * one <= imgbytes(loose.plan) < 2 * one + E.alignment(
-            first(t for t in loose.plan.graph.transients if t isa E.TransientImage))
+        # Placed and aliased means the two targets land at the SAME offset in
+        # their arena — that is what sharing bytes is — and unaliased means they
+        # do not. Asserted on the placement rather than on a slab size, because
+        # the slab is a physical VkImage requirement (tiling included) and the
+        # logical `nbytes` is not the same number.
+        ti, li = imgtrans(tight.plan), imgtrans(loose.plan)
+        @test length(ti) == 2
+        @test allequal(tight.plan.offsets[i] for i in ti)     # both share the bytes
+        @test !allequal(loose.plan.offsets[i] for i in li)    # kept apart
+
+        # And the peak is exactly one target's physical size less when they
+        # share it: the second target's offset in the unaliased plan IS that
+        # size, and the aliased plan gives it back.
+        onephys = maximum(loose.plan.offsets[i] for i in li)
+        @test onephys > 0
+        @test loose.plan.peak - tight.plan.peak == onephys
 
         got = map((tight, loose)) do s
             M.run!(s.plan)
@@ -1062,8 +1095,8 @@ else
         screen = M.Surface(g, win)
         z = M.Transient.Image(g, Float32, screen)
         pts = cloud(20_000)
-        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 4f0))
-        mvp = Ref(camera(0f0))
+        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 4f0))
+        mvp = M.GPURef(dev, camera(0f0))
         M.render!(g, "depth", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0)),
                   z => M.Clear(1f0)) do p
             M.draw!(p, zpipe, bind(p, sc, mvp), sc.positions)
@@ -1106,8 +1139,8 @@ else
         screen = M.Surface(g, win)
         z = M.Transient.Image(g, Float32, size(win))
         pts = cloud(2_000)
-        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 3f0))
-        mvp = Ref(camera(0f0))
+        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 3f0))
+        mvp = M.GPURef(dev, camera(0f0))
         M.render!(g, "depth", screen => M.Clear((0f0, 0f0, 0f0, 1f0)), z => M.Clear(1f0)) do p
             M.draw!(p, zpipe, bind(p, sc, mvp), sc.positions)
         end
@@ -1121,6 +1154,62 @@ else
         close(win)
     end
 
+    @testset "a resize the acquire notices is refit before the frame is recorded" begin
+        # `GLFW.GetFramebufferSize` asks X directly, so a resize can land between
+        # `beginframe!`'s sync and the acquire. The acquire's own sync then
+        # rebuilt the swapchain UNDER a frame whose attachments were already
+        # refit for the old size: a 1200x900 colour target beside an 800x600
+        # depth target, which is VUID-VkRenderingInfo-pNext-06079 and, on
+        # NVIDIA, a lost device two frames later. Measured 2026-09-07 with
+        # `out/resize_race_mwe.jl`: about one resize cycle in three. The acquire
+        # is in `beforeframe!` now, ahead of `refit!`, so whatever the acquire
+        # notices is what the frame is refit for.
+        #
+        # Forced rather than raced: the window is resized between the two steps
+        # `run!` takes, with X asked until it reports the new size. The first
+        # assertion is structural — the image is acquired before the refit — and
+        # gates the rest, because the behaviour it guards is a lost device.
+        zfrag(inputs) = inputs.color
+        zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
+                           varyings = (color = Vec4f,), topology = PointList(),
+                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
+        dev = M.Device(M.VulkanAPI())
+        win = M.Window(800, 600; title = "resize at acquire")
+        g = M.Graph(dev)
+        screen = M.Surface(g, win)
+        z = M.Transient.Image(g, Float32, screen)
+        pts = cloud(2_000)
+        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 3f0))
+        mvp = M.GPURef(dev, camera(0f0))
+        M.render!(g, "depth", screen => M.Clear((0f0, 0f0, 0f0, 1f0)), z => M.Clear(1f0)) do p
+            M.draw!(p, zpipe, bind(p, sc, mvp), sc.positions)
+        end
+        plan = M.Plan(g)
+        for _ in 1:3; M.run!(plan); end
+        M.waitidle(dev)
+
+        M.beforeframe!(dev, plan)                  # poll, sync at 800x600, acquire
+        acquired = win.win.acquired
+        @test acquired
+        if acquired
+            GLFW.SetWindowSize(win.win.handle, 1200, 900)
+            t0 = time()
+            fbsize() = (fb = GLFW.GetFramebufferSize(win.win.handle); (Int(fb[1]), Int(fb[2])))
+            while fbsize() != (1200, 900) && time() - t0 < 5; sleep(0.01); end
+            @test fbsize() == (1200, 900)          # X has applied it; the swapchain has not
+            M.refit!(plan)
+            M.checkextents(plan)
+            @test size(z) == (800, 600)            # sized for the image the frame acquired
+            M.execute!(dev, plan)                  # must record at that size, not rebuild
+            M.waitidle(dev)                        # a mismatched frame loses the device here
+            M.run!(plan)
+            M.waitidle(dev)
+            @test size(win) == (1200, 900)         # the next frame follows the resize
+            @test size(z) == (1200, 900)           # and its attachments with it
+        end
+        close(win)
+    end
+
     @testset "a readback returns the image it acquired" begin
         # `readback_window` acquires an image when no frame is in flight. Leaving
         # it outstanding is invisible once and a deadlock in a loop: a swapchain
@@ -1130,7 +1219,7 @@ else
         #
         # The assertion is on the state rather than on not hanging, so a
         # regression fails on the first iteration instead of stopping the suite.
-        win = VulkanWindow(256, 256; title = "readback pairing", vsync = false)
+        win = MVE.VulkanWindow(256, 256; title = "readback pairing", vsync = false)
         for _ in 1:6
             readback_window(win)
             @test !win.acquired
@@ -1151,7 +1240,7 @@ else
         # Found by measuring a running demo from the REPL, which wedged the whole
         # session. A regression here hangs the suite rather than failing it —
         # that is exactly what the check is for.
-        win = VulkanWindow(256, 256; title = "one frame at a time", vsync = false)
+        win = MVE.VulkanWindow(256, 256; title = "one frame at a time", vsync = false)
         acquire_next_image!(win)
         @test win.acquired
         @test win.acquirer === current_task()
@@ -1167,13 +1256,11 @@ else
         # The refused acquires changed nothing, so the frame that owns the image
         # can still finish, and the window is usable afterwards.
         bq = win.ctx.default_bq
-        Mantle.ensure_active_batch!(bq)
-        present_frame!(bq, win)
+        present_frame!(bq, win, MVE.oneshot(bq) do e; MVE.presentready!(e, win); end)
         @test !win.acquired
         @test win.acquirer === nothing
         acquire_next_image!(win)
-        Mantle.ensure_active_batch!(bq)
-        present_frame!(bq, win)
+        present_frame!(bq, win, MVE.oneshot(bq) do e; MVE.presentready!(e, win); end)
         @test !win.acquired
         close(win)
     end
@@ -1188,7 +1275,7 @@ else
         # The surface needs destroying by name rather than by `finalize`: Lava
         # wraps it around the pointer GLFW returns without going through
         # Vulkan.jl's `init_handle!`, so it has no destructor and no finalizer.
-        win = VulkanWindow(64, 64; title = "close test", vsync = false)
+        win = MVE.VulkanWindow(64, 64; title = "close test", vsync = false)
         @test !isempty(win.views)
         @test win.swapchain !== nothing
         @test win.surface.destructor isa UndefInitializer   # why finalize cannot work
@@ -1205,11 +1292,11 @@ else
         # clear colour was given can only ever pick CLEAR or LOAD, so a pass that
         # covers every pixel used to pay for a load it discards.
         E = Mantle
-        @test E.loadop(M.Keep) == MVE.VK.ATTACHMENT_LOAD_OP_LOAD
-        @test E.loadop(M.Discard) == MVE.VK.ATTACHMENT_LOAD_OP_DONT_CARE
-        @test E.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == MVE.VK.ATTACHMENT_LOAD_OP_CLEAR
-        @test E.clearvalue(M.Keep) === nothing
-        @test E.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
+        @test MVE.loadop(M.Keep) == MVE.VK.ATTACHMENT_LOAD_OP_LOAD
+        @test MVE.loadop(M.Discard) == MVE.VK.ATTACHMENT_LOAD_OP_DONT_CARE
+        @test MVE.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == MVE.VK.ATTACHMENT_LOAD_OP_CLEAR
+        @test MVE.clearvalue(M.Keep) === nothing
+        @test MVE.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
 
         # And all three actually render. The target is a transient, so its state
         # before the pass is Undefined and the barrier into it comes from there.
@@ -1221,15 +1308,19 @@ else
             g = M.Graph(dev)
             img = M.Transient.Image(g, BGRA{ColorTypes.FixedPointNumbers.N0f8}, (256, 256))
             raw = M.Transient.Buffer(g, UInt8, 256 * 256 * 4)
-            mvp = Ref(camera(0f0))
-            pos = M.Buffer(dev, pts); col = M.Buffer(dev, tint.(pts)); siz = M.Scalar(dev, 3f0)
+            mvp = M.GPURef(dev, camera(0f0))
+            pos = M.Buffer(dev, pts); col = M.Buffer(dev, tint.(pts)); siz = M.GPURef(dev, 3f0)
             M.render!(g, "p", img => op) do p
+                M.use(p, mvp; read = true)
                 M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
                                      M.Attribute(p, siz), mvp, Int32(1), Int32(0)), pos)
             end
             M.copy!(g, "read", raw, img)
-            plan = M.Plan(g)
-            @test last(first(plan.graph.passes[1].usages)) === want
+            plan = M.record!(M.Plan(g))
+            # The render pass, not the update pass every plan with a buffer
+            # puts first.
+            rp = first(p for p in plan.graph.passes if p.kind === :render)
+            @test last(first(rp.usages)) === want
             M.run!(plan)
             KernelAbstractions.synchronize(M.backend(dev))
             px = reshape(Array(M.storage(raw)), 4, :)
@@ -1253,12 +1344,12 @@ else
         N = 64
         dev = M.Device(M.VulkanAPI())
         ident = Mat4f(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
-        mvp = Ref(ident)
+        mvp = M.GPURef(dev, ident)
         # z is NDC depth here, so 0.3 is nearer than 0.7.
         near = Scatter(M.Buffer(dev, [Vec3f(0, 0, 0.3)]),
-                       M.Scalar(dev, Vec4f(0, 0, 1, 1)), M.Scalar(dev, 40f0))
+                       M.GPURef(dev, Vec4f(0, 0, 1, 1)), M.GPURef(dev, 40f0))
         far = Scatter(M.Buffer(dev, [Vec3f(0, 0, 0.7)]),
-                      M.Scalar(dev, Vec4f(1, 0, 0, 1)), M.Scalar(dev, 40f0))
+                      M.GPURef(dev, Vec4f(1, 0, 0, 1)), M.GPURef(dev, 40f0))
 
         function shot(order, pipe; withdepth = true)
             g = M.Graph(dev)
@@ -1273,7 +1364,7 @@ else
                 end
             end
             M.copy!(g, "read", raw, img)
-            plan = M.Plan(g)
+            plan = M.record!(M.Plan(g))
             M.run!(plan)
             KernelAbstractions.synchronize(M.backend(dev))
             px = reshape(Array(M.storage(raw)), 4, N, N)
@@ -1284,12 +1375,12 @@ else
         # discards, so its barrier comes from UNDEFINED like any other transient.
         probe = shot((near, far), ZPIPE)
         @test any(last(u) === M.Depth{M.ReadWrite,M.NoAccess,true}
-                  for u in probe.plan.graph.passes[1].usages)
+                  for u in first(p for p in probe.plan.graph.passes if p.kind === :render).usages)
         E = Mantle
         zt = only(t for t in probe.plan.graph.transients
                   if t isa E.TransientImage && eltype(t) === Float32)
         @test zt.format == MVE.VK.FORMAT_D32_SFLOAT
-        @test E.aspect(zt) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT
+        @test MVE.aspect(zt) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT
 
         for order in ((near, far), (far, near))
             got = shot(order, ZPIPE)
@@ -1316,7 +1407,7 @@ else
             end
         end
         M.copy!(g, "read z", raw, z)
-        plan = M.Plan(g)
+        plan = M.record!(M.Plan(g))
         M.run!(plan)
         KernelAbstractions.synchronize(M.backend(dev))
         zs = reshape(Array(M.storage(raw)), N, N)
@@ -1335,9 +1426,9 @@ else
 
         N = 64
         dev = M.Device(M.VulkanAPI())
-        mvp = Ref(Mat4f(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
+        mvp = M.GPURef(dev, Mat4f(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1))
         blue = Scatter(M.Buffer(dev, [Vec3f(0, 0, 0.5)]),
-                       M.Scalar(dev, Vec4f(0, 0, 1, 1)), M.Scalar(dev, 40f0))
+                       M.GPURef(dev, Vec4f(0, 0, 1, 1)), M.GPURef(dev, 40f0))
 
         g = M.Graph(dev)
         T = BGRA{ColorTypes.FixedPointNumbers.N0f8}
@@ -1356,10 +1447,11 @@ else
         # they do not overlap, and the placer is right to give them the same bytes
         # — at which point both readbacks return whichever copy ran last. That is
         # aliasing working, not MRT failing, and it cost a debugging detour.
-        plan = M.Plan(g; alias = false)
+        plan = M.record!(M.Plan(g; alias = false))
 
         # Both attachments are declared, so both get a derived barrier.
-        @test count(u -> last(u) <: M.ColorAttachment, plan.graph.passes[1].usages) == 2
+        @test count(u -> last(u) <: M.ColorAttachment,
+                    first(p for p in plan.graph.passes if p.kind === :render).usages) == 2
 
         # And each copy transitions its own source. A layout change is per image,
         # so the barrier the first copy emitted cannot have put the second target
@@ -1400,8 +1492,8 @@ else
     function three_plots(dev, win, n; profile = false)
         g = M.Graph(dev)
         screen = M.Surface(g, win)
-        dt = Ref(1f0 / 60)
-        mk(c) = Scatter(M.Buffer(dev, c), M.Buffer(dev, tint.(c)), M.Scalar(dev, 2f0))
+        dt = 1f0 / 60
+        mk(c) = Scatter(M.Buffer(dev, c), M.Buffer(dev, tint.(c)), M.GPURef(dev, 2f0))
         a, b, c = cloud(n), cloud(n), cloud(n)
         sim, gpu, cpu = mk(a), mk(b), mk(c)
 
@@ -1411,34 +1503,35 @@ else
             v = M.use(p, simvel; read = true, write = true)
             M.dispatch!(p, advect!, (x, v, dt, 1.4f0), n)
         end
-        from_gpu = M.Update(g, gpu.positions)
-        from_cpu = M.Update(g, cpu.positions)
 
-        gpupos, gpuvel = M.Buffer(dev, copy(b)), M.Buffer(dev, drift(n))
+        gpuvel = M.Buffer(dev, drift(n))
         cpupos, cpuvel = copy(c), drift(n)
-        mvp = Ref(camera(0f0))
+        mvp = M.GPURef(dev, camera(0f0))
         M.render!(g, "three", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
             for s in (sim, gpu, cpu)
                 M.draw!(p, SCATTER, bind(p, s, mvp), s.positions)
             end
         end
         (; plan = M.Plan(g; profile), dev, dt, n, sim, gpu, cpu,
-           from_gpu, from_cpu, gpupos, gpuvel, cpupos, cpuvel)
+           gpuvel, cpupos, cpuvel)
     end
 
     function three_step!(s)
-        advect!(M.backend(s.dev))(M.storage(s.gpupos), M.storage(s.gpuvel), s.dt[], 1.4f0;
+        # An unmodelled launch writing the plot's buffer directly: nothing in
+        # the graph knows it happened, and the next run reads what it wrote.
+        advect!(M.backend(s.dev))(M.storage(s.gpu.positions), M.storage(s.gpuvel), s.dt, 1.4f0;
                                   ndrange = s.n)
-        s.from_gpu(M.storage(s.gpupos))         # device array: device to device
-        advect!(CPU())(s.cpupos, s.cpuvel, s.dt[], 1.4f0; ndrange = s.n)
+        advect!(CPU())(s.cpupos, s.cpuvel, s.dt, 1.4f0; ndrange = s.n)
         KernelAbstractions.synchronize(CPU())
-        s.from_cpu(s.cpupos)                    # host array: staged
+        # A host array, stored: a copy, because the store retains what it is
+        # given and the CPU simulation mutates `cpupos` before the next frame.
+        s.cpu.positions[:] = copy(s.cpupos)
     end
 
     @testset "three sources of new positions in one graph" begin
-        # A compute pass in the graph, a device array produced outside it, and a
-        # host array. The three differ only in where the bytes come from, and the
-        # same handover takes whichever route the data calls for.
+        # A compute pass in the graph, an unmodelled launch outside it writing
+        # the plot's buffer, and a host array stored through the buffer. The
+        # three differ only in where the bytes come from.
         dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "three updates")
         s = Base.invokelatest(three_plots, dev, win, 5_000)
@@ -1457,16 +1550,13 @@ else
             @test count(<(1e-6), [norm(a[i] - b[i]) for i in eachindex(b)]) == 0
             @test maximum(norm, a) <= 1.4f0 + 1e-4      # each stayed in its shell
         end
-        # The device route copies device to device: what the plot holds is what
-        # the user's buffer holds, bit for bit, and the host never saw it.
-        @test Array(s.gpu.positions) == Array(M.storage(s.gpupos))
         # And the three are genuinely separate simulations.
         @test after[1] != after[2] && after[2] != after[3]
 
-        # A handover from another task reaches the next frame: it stores a
-        # reference and touches no Vulkan, so where it is called from is free.
+        # A store from another task reaches the next frame: it retains a
+        # reference and touches no Vulkan, so where it is made from is free.
         fresh = cloud(5_000)
-        fetch(Threads.@spawn s.from_cpu(fresh))
+        fetch(Threads.@spawn (s.cpu.positions[:] = fresh))
         M.run!(s.plan)
         KernelAbstractions.synchronize(M.backend(dev))
         @test Array(s.cpu.positions) == fresh
@@ -1496,6 +1586,10 @@ else
         # zeros: a query pool that is never reset, or read with the wrong stride,
         # gives exactly zeros.
         for t in ts
+            # The update pass lands its stores as a transfer the profiler does
+            # not bracket, so it carries no GPU or host sample; the passes that
+            # run kernels do.
+            t.kind === :update && continue
             @test t.samples > 0
             @test 0 < t.gpu_ms < 100
             @test 0 < t.host_ms < 100
@@ -1522,16 +1616,16 @@ else
         img = M.Transient.Image(g, T, (64, 64))
         z = M.Transient.Image(g, Float32, (64, 64))
         pts = cloud(500)
-        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 2f0))
-        mvp = Ref(camera(0f0))
+        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 2f0))
+        mvp = M.GPURef(dev, camera(0f0))
         M.render!(g, "scene", img => M.Clear((0f0, 0f0, 0f0, 1f0)), z => M.Clear(1f0)) do p
             M.draw!(p, zpipe, bind(p, sc, mvp), sc.positions)
         end
         plan = M.Plan(g)
 
         E = Mantle
-        depth = only(b for b in plan.passes[1].images
-                     if E.aspect(b.resource) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT)
+        depth = only(b for b in first(pp for pp in plan.passes if pp.pass.kind === :render).images
+                     if MVE.aspect(b.resource) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT)
         # The layout still comes from UNDEFINED — the clear discards — but the
         # barrier has to wait for the previous frame's depth write all the same.
         @test depth.old == MVE.VK.IMAGE_LAYOUT_UNDEFINED
@@ -1548,91 +1642,80 @@ else
         dev = M.Device(M.VulkanAPI())
         win = M.Window(W, H; title = "scalar update")
         pts = cloud(1_000)
-        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 2f0))
-        mvp = Ref(camera(0f0))
+        sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 2f0))
+        mvp = M.GPURef(dev, camera(0f0))
         g = M.Graph(dev)
         screen = M.Surface(g, win)
-        marker = M.Update(g, sc.markersize)
         M.render!(g, "plot", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
             M.draw!(p, SCATTER, bind(p, sc, mvp), sc.positions)
         end
         plan = M.Plan(g)
-        store = M.storage(sc.markersize)
+        store = sc.markersize.store
 
-        M.run!(plan)                                  # nothing set
+        M.run!(plan)                                  # nothing stored
         KernelAbstractions.synchronize(M.backend(dev))
-        @test Array(store)[1] == 2f0
+        @test Array(M.storage(sc.markersize))[1] == 2f0
 
-        marker(9f0)
+        sc.markersize[] = 9f0
         M.run!(plan)
         KernelAbstractions.synchronize(M.backend(dev))
-        @test Array(store)[1] == 9f0                  # the new value arrived
-        @test M.storage(sc.markersize) === store      # in the same buffer
+        @test Array(M.storage(sc.markersize))[1] == 9f0   # the new value arrived
+        @test sc.markersize.store === store               # in the same buffer
         close(win)
     end
 
-    @testset "Update writes at the reserved position, by two routes" begin
-        # The call decides the route, not a flag: a whole-buffer replacement
-        # renames (nothing reads the fresh store, so there is no hazard), and a
-        # partial write goes in place inline in the command buffer.
+    @testset "a store writes at the reserved position, whole or ranged" begin
+        # Both write in place, inline in the command buffer, at the update pass
+        # the graph placed ahead of the render that reads them. A whole-buffer
+        # store used to RENAME into a fresh store, which a recording cannot
+        # follow; nothing renames now, and a ranged store moves only its range.
         dev = M.Device(M.VulkanAPI())
-        win = M.Window(W, H; title = "update")
+        win = M.Window(W, H; title = "store")
 
-        function scene(n; range = nothing)
+        function scene(n)
             pts = cloud(n)
-            sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 2f0))
-            mvp = Ref(camera(0f0))
+            sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 2f0))
+            mvp = M.GPURef(dev, camera(0f0))
             g = M.Graph(dev)
             screen = M.Surface(g, win)
-            ref = M.Update(g, sc.positions; range)
             M.render!(g, "plot", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
                 M.draw!(p, SCATTER, bind(p, sc, mvp), sc.positions)
             end
-            (; sc, ref, g, plan = M.Plan(g), before = copy(pts))
+            (; sc, g, plan = M.Plan(g), before = copy(pts))
         end
 
-        # The reserved position is a pass, ahead of the render that reads it.
+        # The reserved position is a pass, ahead of the render that reads it,
+        # and every buffer the draw binds is what a store can be waiting on.
         w = Base.invokelatest(scene, 5_000)
         @test [pp.pass.name for pp in w.plan.passes] == ["updates", "plot"]
+        @test any(r -> r === w.sc.positions, w.plan.hostwritten)
 
-        # A clean frame renames nothing: the barrier is derived as if it fired,
+        # A clean frame stores nothing: the barrier is derived as if it fired,
         # but nothing is emitted when the source access never happened.
-        store0 = M.storage(w.sc.positions)
+        store0 = w.sc.positions.store
         M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
-        @test M.storage(w.sc.positions) === store0
+        @test w.sc.positions.store === store0
 
         fresh = cloud(5_000)
-        w.ref(fresh)
+        w.sc.positions[:] = fresh
         M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
-        @test M.storage(w.sc.positions) !== store0        # renamed
+        @test w.sc.positions.store === store0             # in place
         @test Array(w.sc.positions) == fresh
 
-        # Renaming recycles rather than allocating: the store count is bounded
-        # and does not grow with the number of updates. The exact count is two to
-        # four depending on whether the timeline has passed the retiring store by
-        # the time the next take asks for it, which varies run to run — so what is
-        # pinned is the bound, not equality between the two loops. A leak shows up
-        # as a count that tracks the loop: 8 and 24.
-        rename_stores(k) = begin
-            seen = Any[]
-            for _ in 1:k
-                w.ref(cloud(5_000))
-                M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
-                push!(seen, objectid(M.storage(w.sc.positions)))
-            end
-            length(unique(seen))
+        # And it stays that store, however many stores land in it.
+        for _ in 1:8
+            w.sc.positions[:] = cloud(5_000)
+            M.run!(w.plan); KernelAbstractions.synchronize(M.backend(dev))
+            @test w.sc.positions.store === store0
         end
-        few, many = rename_stores(8), rename_stores(24)
-        @test few <= 4           # reuse is happening at all
-        @test many <= 4          # and the count does not track the loop
 
-        # Partial: in place, and only the declared range moves.
-        v = Base.invokelatest(scene, 5_000; range = 1:100)
-        s0 = M.storage(v.sc.positions)
-        v.ref([Vec3f(9, 9, 9) for _ in 1:100])
+        # Ranged: only the declared range moves.
+        v = Base.invokelatest(scene, 5_000)
+        s0 = v.sc.positions.store
+        v.sc.positions[1:100] = [Vec3f(9, 9, 9) for _ in 1:100]
         M.run!(v.plan); KernelAbstractions.synchronize(M.backend(dev))
         got = Array(v.sc.positions)
-        @test M.storage(v.sc.positions) === s0            # no rename
+        @test v.sc.positions.store === s0
         @test all(got[1:100] .== Ref(Vec3f(9, 9, 9)))
         @test got[101:end] == v.before[101:end]
         close(win)
@@ -1695,7 +1778,7 @@ else
                             (M.use(p, out; write = true), M.use(p, a; read = true),
                              Int32(w), Int32(h), 2.0f0), (w, h); group)
             end
-            M.run!(M.Plan(g))
+            M.run!(M.record!(M.Plan(g)))
             KernelAbstractions.synchronize(M.backend(dev))
             Array(out)
         end
@@ -1723,7 +1806,7 @@ else
                     frag_args = (M.use(p, src; read = true), Int32(N), Int32(N)))
         end
         M.copy!(g, "read", out, img)
-        plan = M.Plan(g)
+        plan = M.record!(M.Plan(g))
         M.run!(plan)
         KernelAbstractions.synchronize(M.backend(dev))
 
@@ -1758,19 +1841,20 @@ else
         # way from the allocation.
         N, NB = 64, 8
         dev = M.Device(M.VulkanAPI())
-        kref = Ref(UInt32(3))
+        kref = M.GPURef(dev, UInt32(3))
         g = M.Graph(dev)
         cmds = M.Buffer(dev, Mantle.DrawIndirectCommand, 1)
         img = M.Transient.Image(g, RGBA{N0f8}, (N, N))
         out = M.Transient.Buffer(g, UInt32, N * N)
         M.compute!(g, "count") do p
+            M.use(p, kref; read = true)
             M.dispatch!(p, set_draw!, (M.use(p, cmds; write = true), kref), 1)
         end
         M.render!(g, "bands", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
             M.draw!(p, BANDS, (Int32(NB),), cmds)
         end
         M.copy!(g, "read", out, img)
-        plan = M.Plan(g)
+        plan = M.record!(M.Plan(g))
 
         # The draw declares `Indirect` on it, so the compute write is ordered
         # against DRAW_INDIRECT and not against the vertex stage.
@@ -1829,7 +1913,7 @@ else
                 M.dispatch!(p, scaleby!, (M.use(p, out; write = true),
                                           M.use(p, later; read = true), 1f0), N * N)
             end
-            (; plan = M.Plan(g), out)
+            (; plan = M.record!(M.Plan(g)), out)
         end
 
         # (b) the vacating transient was last *written by a copy* and never read
@@ -1850,20 +1934,28 @@ else
                 M.dispatch!(p, scaleby!, (M.use(p, out; write = true),
                                           M.use(p, later; read = true), 1f0), N * N)
             end
-            (; plan = M.Plan(g), out)
+            (; plan = M.record!(M.Plan(g)), out)
         end
 
         E = Mantle
-        handover(plan) = first(passmasks(pp) for pp in plan.passes if pp.pass.name == "fill")
+        # The alias handover is the transition that names no resource: `later`
+        # taking `raw`'s bytes. Its `from` is what the vacating transient last
+        # did. Read from the transition, not the lowered barrier masks, because
+        # both graphs also carry the transfer barrier of a host-written buffer's
+        # store (`seed`/`mid`), which now puts the copy stage in a fill-pass
+        # barrier in EITHER case — so the masks no longer tell the two apart.
+        aliashandover(plan) = only(t for pp in plan.passes if pp.pass.name == "fill"
+                                   for t in pp.pre if t.resource == 0)
 
         a = Base.invokelatest(shaderlast, dev)
         b = Base.invokelatest(copylast, dev)
         @test M.peakbytes(a.plan) < M.naivebytes(a.plan)   # they really do share bytes
         @test M.peakbytes(b.plan) < M.naivebytes(b.plan)
 
-        # The barrier tracks the old tenant: a copy in one, not in the other.
-        @test (first(handover(b.plan)) & copybit) != zero(copybit)
-        @test (first(handover(a.plan)) & copybit) == zero(copybit)
+        # The handover tracks the old tenant: a copy wrote it in one, a shader
+        # read it in the other.
+        @test aliashandover(b.plan).from === M.CopyDst
+        @test aliashandover(a.plan).from !== M.CopyDst
 
         # And neither of them, nor any other barrier in either frame, says
         # "wait for everything" — which is what both used to say.
@@ -1914,7 +2006,7 @@ else
             M.draw!(p, DEPTHONLY, (0.35f0,), 6)
         end
         M.copy!(g, "read z", out, z)
-        plan = M.Plan(g)
+        plan = M.record!(M.Plan(g))
 
         pass = only(pp for pp in plan.passes if pp.pass.name == "depth only")
         @test isempty(pass.pass.targets)          # no colour attachment at all

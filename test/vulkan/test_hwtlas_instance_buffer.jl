@@ -2,6 +2,8 @@ using Test, Lava, Raycore
 using Mantle: build_accel!
 using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f
+using GeometryBasics: Mat4f
+using LinearAlgebra: I
 
 @testset "instance_buffer returns the buffer behind a batch handle" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
@@ -9,6 +11,16 @@ using GeometryBasics: Point3f
 
     n = 8
     instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
+
+        # `undef` is recycled memory: when the bytes happen to hold a stale-but-valid
+        # BLAS address the AS build "works", and zeros or garbage fault it (GPU-AV:
+        # "accelerationStructureReference is an invalid address"). Write real
+        # records — identity transform at this test's BLAS.
+        for _buf in (instance_buf,)
+            copyto!(_buf, [VulkanInstanceRecord(MVE.mat4_to_vk_transform(Mat4f(I)),
+                                                blas.address)
+                           for _ in 1:length(_buf)])
+        end
     backend = MVE.LavaBackend()
     tlas = MVE.VulkanTLAS(backend)
 

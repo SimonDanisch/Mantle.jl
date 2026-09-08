@@ -14,6 +14,18 @@ using Lava, Mantle
 using Vulkan
 using Test
 
+# The hand-written pipeline's dispatch, as the unmodelled path spells it today:
+# one one-shot holding the trace, the acceleration structures it reads pinned
+# by core's `pintrace!`, submitted when it closes. `rt_dispatch!` was the name
+# of the open-batch version.
+function rt_dispatch!(bq, pipeline, tlas, push_bda, W, H)
+    MVE.oneshot!(bq; tag = :trace) do e
+        Mantle.pintrace!(e, tlas)
+        MVE.emit_trace!(e, pipeline, tlas, push_bda, W, H, 1)
+    end
+    return nothing
+end
+
 # The shaders come from that file. Guarded so this stays runnable on its own
 # while `runtests.jl`, which already includes it, does not run its testsets twice.
 isdefined(@__MODULE__, :build_raygen_shader) ||
@@ -43,7 +55,7 @@ isdefined(@__MODULE__, :build_raygen_shader) ||
         # Centre ray: (0.25, 0.25) is comfortably inside the triangle for any
         # edge rule, so it is the sample to trust.
         function trace_center()
-            MVE.rt_dispatch!(ctx.default_bq, pipeline, tlas, output_buf.address, W, H)
+            rt_dispatch!(ctx.default_bq, pipeline, tlas, output_buf.address, W, H)
             bytes = Vector{UInt8}(undef, W * H * sizeof(Float32))
             MVE.download!(bytes, output_buf)
             vals = reinterpret(Float32, bytes)

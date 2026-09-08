@@ -1,26 +1,44 @@
 """
-A buffer freed while a batch is recording must be deferred, not destroyed.
+A buffer named by a submission still in flight must be honoured, not raced.
 
 This is the intermittent `vkWaitSemaphores` hang — six occurrences over two
 months, recorded as "not reproducible" — and it was one missing case in
-`vk_free!`. Destruction is deferred while a batch is open, but that check sat
-inside `if last_write !== nothing`, and `last_write` is only written by
-`sync_access!` **at submit**. So a buffer the *currently recording* batch
-references, which has never been through a submit, read as `nothing` and fell
-through to immediate destruction with an open command buffer still naming it.
+`vk_free!`: a buffer the open batch had recorded against but never submitted
+read as idle and was destroyed under the batch. There is no open batch now;
+every launch pins what it names into its own closed command buffer and submits
+it at once, and the pin is what holds the buffer: a free that arrives while
+the submission is in flight is OWED to the pin (`free_requested`), the buffer
+stays ALIVE and syncable, and the owed free is performed when the sweep
+releases the pin after the submission has passed. A buffer nothing in flight
+names is destroyed at once. (A raw `vk_free!` of a pinned buffer, the path a
+teardown that owns the buffer takes, is owed to the pin instead —
+`test_pinned_buffer_lifetime.jl`.)
 
 Asserted directly rather than by trying to provoke the hang. Reproducing it takes
-a Julia GC landing inside a recording — 60 SAM 2 decodes with the collector live
+a Julia GC landing mid-flight — 60 SAM 2 decodes with the collector live
 did it within 15, and with collections confined to safe points never did — which
 is a fine way to *find* a bug and a terrible way to guard one. The state machine
-is deterministic: `ALIVE -> DEFERRED` and onto `bq.deferred_frees`, or
-`ALIVE -> DEAD`. Check which.
+is deterministic: pinned and owed, then `ALIVE -> DEAD` once the pin drops; or
+`ALIVE -> DEAD` at once. Check which.
 """
 
 using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 
-@testset "free during recording is deferred" begin
+# Keeps the GPU busy for tens of milliseconds, so the launch's submission is
+# still in flight while the host issues the free right behind it — that
+# in-flight-ness is what holds the hazard window open. Same pattern as
+# `heavy_fill_kernel!` in test_argument_memory_isolation.jl.
+@kernel function slow_touch_kernel!(arr)
+    i = @index(Global)
+    acc = Float32(i)
+    for _ in 1:20_000
+        acc = muladd(acc, 1.0000001f0, 0.5f0)
+    end
+    @inbounds arr[i] += (acc > 0f0 ? 0.0f0 : 1.0f0)
+end
+
+@testset "a free while the buffer is in flight is honoured, not raced" begin
     backend = LavaBackend()
     bq = MVE.vk_context().default_bq
 
@@ -28,43 +46,45 @@ const KA = KernelAbstractions
     KA.synchronize(backend)
     MVE.drain_deferred_frees!(bq)
 
-    @testset "never submitted, batch open" begin
-        # Open a batch and leave it recording.
-        Mantle.ensure_active_batch!(bq)
-        @test bq.active_batch !== nothing
-        @test bq.active_batch.recording
-
+    @testset "named by a submission still in flight: owed to the pin, freed when it passes" begin
         a = KA.allocate(backend, Float32, 64)
         buf = a.buf[]
-        # The case the bug turned on: allocated, never dispatched against, so
-        # `sync_access!` has never run and there is no timeline value to test.
-        @test (@atomic :acquire buf.last_write) === nothing
         @test (@atomic :acquire buf.state) == MVE.BUF_STATE_ALIVE
+        @test (@atomic :acquire buf.pins) == 0
+
+        # Slow launch: its submission is still outstanding when the free below
+        # lands. The launch pinned the array into its one-shot — a retained
+        # `DataRef` and a buffer pin — and that is what holds the buffer: the
+        # array's free is a refcount decrement that never reaches `vk_free!`
+        # while the retained ref exists, and the buffer stays ALIVE and
+        # syncable until the submission has passed and the sweep releases it.
+        slow_touch_kernel!(backend, 64)(a; ndrange=64)
+        @test (@atomic :acquire buf.pins) == 1
 
         before = length(bq.deferred_frees)
         Mantle.unsafe_free!(a)
 
-        # Deferred, and on the list — not destroyed under the open batch.
-        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEFERRED
-        @test length(bq.deferred_frees) == before + 1
-        @test any(x -> x === buf, bq.deferred_frees)
+        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_ALIVE
+        @test (@atomic :acquire buf.pins) == 1
+        @test length(bq.deferred_frees) == before
 
-        # And the deferral is honoured, not leaked: the drain at the next
-        # submit boundary is what finally destroys it.
+        # And nothing leaks: once the submission has passed, the sweep drops the
+        # retained ref, the refcount reaches zero and the buffer is destroyed.
         KA.synchronize(backend)
         MVE.drain_deferred_frees!(bq)
+        @test (@atomic :acquire buf.pins) == 0
         @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEAD
     end
 
-    @testset "no batch recording: freed immediately" begin
+    @testset "nothing in flight names it: freed immediately" begin
         # The other side, so the guard cannot be satisfied by deferring
         # everything forever — which would leak instead of hanging.
         KA.synchronize(backend)
         MVE.drain_deferred_frees!(bq)
         b = KA.allocate(backend, Float32, 64)
         buf = b.buf[]
-        KA.synchronize(backend)          # closes the batch opened by `allocate`
-        @test bq.active_batch === nothing || !bq.active_batch.recording
+        KA.synchronize(backend)          # nothing left in flight naming it
+        @test isempty(bq.outstanding) || all(o -> o.token <= MVE.query_timeline(bq), bq.outstanding)
         Mantle.unsafe_free!(b)
         @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEAD
     end

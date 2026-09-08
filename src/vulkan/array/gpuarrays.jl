@@ -649,24 +649,21 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     # catches it as `sync_access!: buffer is not ALIVE`.
     #
     # `pin!(::LavaArray)` is the level that does both halves: it retains the
-    # `DataRef` into `batch.pinned_refs` and takes a buffer pin, and
-    # `release_pinned_refs!` drops both when the batch completes or its submit
+    # `DataRef` into the one-shot's `pinned_refs` and takes a buffer pin, and
+    # `release_pinned_refs!` drops both when the submission completes or
     # fails. Nothing new is needed — every kernel argument already gets exactly
     # this lifetime through `LavaAdaptor`; only the copy path was pinning a
     # level too low.
-    #
-    # `ensure_active_batch!` asserts the owning thread before it touches any
-    # state, so hoisting it here keeps the single-writer check ahead of the
-    # driver rather than moving it after.
-    batch = ensure_active_batch!(bq)
-    pin!(batch, src)
-    pin!(batch, dest)
-    cmd_copy_buffer!(bq, src.buf[], dest.buf[], nbytes;
-                     src_off=src_offset, dst_off=dst_offset)
-    # No flush: this is device→device, so nothing on the host needs the result.
-    # `cmd_copy_buffer!` records the transfer-write→shader-read barrier itself,
-    # which is all the ordering a later dispatch in this batch needs. The flush
-    # that used to be here drained the whole GPU on every `copy(::LavaArray)`.
+    oneshot!(bq; tag = :copy) do e
+        pin!(e.owner, src)
+        pin!(e.owner, dest)
+        cmd_copy_buffer!(e, src.buf[], dest.buf[], nbytes;
+                         src_off=src_offset, dst_off=dst_offset)
+    end
+    # No wait: this is device→device, so nothing on the host needs the result,
+    # and the next closed buffer on this queue opens with the barrier that
+    # orders it behind the copy. The flush that used to be here drained the
+    # whole GPU on every `copy(::LavaArray)`.
     return dest
 end
 
@@ -728,19 +725,15 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
     if old_len > 0 && new_len > 0
         copy_len = min(old_len, new_len) * sizeof(T)
         src_off = pool_offset(buf) + a.offset
-        cmd_copy_buffer!(bq, buf, new_buf, copy_len;
-                         src_off=src_off, dst_off=pool_offset(new_buf))
-        # The copy pinned `buf` into the currently-recording batch. `vk_free!`
-        # decides whether to defer destruction by inspecting `buf.last_write`,
-        # but `last_write` is only populated by `sync_access!` at submit time
-        # — between record-pin and submit it reads stale, so `vk_free!` would
-        # free-immediately and the DEAD buffer would trip `sync_access!`'s
-        # ALIVE assertion when the batch eventually submits.  Flushing here
-        # closes that window: the copy submits + completes, `last_write` is
-        # set, then `unsafe_free!` below correctly sees the buffer as in-use
-        # and routes through `deferred_frees`.  Only fires in the slow grow
-        # path (capacity exceeded) — within-capacity resizes are zero-sync.
-        flush!(bq, bq.device)
+        oneshot!(bq; tag = :copy) do e
+            cmd_copy_buffer!(e, buf, new_buf, copy_len;
+                             src_off=src_off, dst_off=pool_offset(new_buf))
+        end
+        # The copy pinned `buf` and stamped its `last_write` at the submit that
+        # closed the one-shot, so the `unsafe_free!` below sees the buffer as in
+        # use and routes through `deferred_frees`. The flush that stood here
+        # closed a window the open batch had, between a recorded pin and a
+        # submit that had not happened yet.
     end
     new_ref = GPUArrays.DataRef(new_buf) do b
         vk_free!(b)
@@ -827,7 +820,11 @@ end
 function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     RT = typeof(float(LinearAlgebra.norm(zero(T))))
     isempty(v) && return zero(RT)
-    p == 0 && return convert(RT, count(!iszero, v))
+    # `Base.count`, spelled out: this module imports Mantle's `count` (a
+    # resource's element count, for `Buffer`, `GPURef` and `Attr`), so the bare
+    # name here was Mantle's and the 0-norm of every `LavaArray` was a
+    # `MethodError` — the GPUArrays testsuite's `0-norm` cases, 60 of them.
+    p == 0 && return convert(RT, Base.count(!iszero, v))
     p == Inf && return convert(RT, maximum(abs, v))
     p == -Inf && return convert(RT, minimum(abs, v))
     # Non-trivial p-norms rely on transcendental math in the reduction path.

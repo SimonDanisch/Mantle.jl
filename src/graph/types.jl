@@ -58,7 +58,7 @@ inside the recorded buffer, so each run re-executes it and rewrites its own
 region.)
 
 Modelled, the arguments live at a fixed offset in the plan's `ArgMemory` exactly
-as a dispatch's do and `rebind!` rewrites them — so a hardware ray-tracing plan
+as a dispatch's do, written once at `record!` — so a hardware ray-tracing plan
 can be recorded at all.
 """
 struct Trace
@@ -181,64 +181,37 @@ has to guess when the device is finished.
 struct Unified end
 
 """
-Buffers by byte size, so renaming one is a recycle rather than an allocation.
+Bytes the HOST reads after the device wrote them: a download's staging.
 
-Renaming — write a fresh buffer and swap it in, rather than overwrite the one the
-GPU is reading — only pays off if getting the fresh buffer is cheap. It is,
-because the sizes repeat exactly: the same resource updated every frame asks for
-the same size every time, so the free list hits from the second update onward.
-
-`retire!` does not free. The device may still be reading the outgoing buffer for
-as long as the run that bound it is in flight, so it goes back on the free list
-only once the device has passed that run — one completion token per retiring
-buffer, opaque here and asked about with `passed`. It was a raw `UInt64` Vulkan
-timeline value, in a core type, which is what made `recycle!` a backend function.
+Its own kind, and not `Unified`, because of what the host does with the bytes.
+`Unified` is BAR memory — device-local and host-visible — which the host WRITES
+well and READS at write-combined speed: 29 MB/s on an RTX 4000 Ada and about
+the same on a RADV RX 7900 XTX, measured 2026-09-05, against a few GB/s from
+cached memory. A download that staged through it took 330 ms for one
+1368x1026 RGBA{Float32} frame, a third of a 32-sample render. A backend
+answers `rawalloc` for this kind with host-cached memory where the device has
+it, and plain host-visible memory where it does not.
 """
-struct Recycler
-    free::Dict{Int,Vector{Any}}
-    retiring::Vector{Tuple{Int,Any,Any}}
-end
+struct Readback end
 
-"""
-One argument a run has to write, and where it goes.
+# `Recycler` is gone with renaming. It held retired buffers by byte size and
+# handed them back once a completion token said the device was past the run that
+# read them — the free list an `Update` took its fresh store from. An update
+# writes its target IN PLACE now, so there is no outgoing store to hold and
+# nothing to recycle.
 
-The whole of what `record!` learns about arguments and a run needs to act on.
-`offset` is bytes from the start of an argument slot, so it is slot-independent
-and the same write serves every recording in the ring; `byval` is the slot's
-by-value size, which `pack_arg!` wants.
-
-This is the thing that was missing. `record!` packs every argument — it must, to
-capture — and then threw away the layout, the offsets and the adaptation it had
-just computed, keeping only a count. A run therefore had no way to write "the
-sample index at byte 4128" and had to rediscover everything by re-running the
-RECORD-time packing path, which re-adapts the entire argument tree of every
-entry. Measured on Hikari's chunk plan: 1193 microseconds a run to move one
-`Int32`, against 0.19 for the whole rest of a recorded run.
-
-Held per plan rather than per entry so a run is one flat loop, and built at the
-one moment when the layout, the adapted values and the offsets are all in hand.
-"""
-struct ArgWrite{R}
-    ref::R
-    # Bytes from the start of a slot to the start of this ENTRY's argument
-    # region, and then from there to the argument's own slot. Kept apart because
-    # the packer takes them apart: it is handed the entry's base pointer and adds
-    # the per-argument offset itself, and a by-value argument's `inline` position
-    # is relative to that same base.
-    entryoff::Int
-    slotoff::Int
-    byval::Int
-    # Where a by-value argument's bytes go, past the end of the slot's fixed
-    # area. Zero for everything else, which is the case that needs no inline
-    # area at all.
-    #
-    # It depends on every by-value argument BEFORE this one, which is why it has
-    # to be recorded at `record!` rather than derived at run: the packer threads a
-    # running offset through the whole tuple, and one argument alone cannot know
-    # where it landed. Recording it is what lets a `Ref` to an aggregate — a
-    # camera, a filter parameter block — be rewritten at all.
-    inline::Int
-end
+# `ArgWrite` is gone, and with it the whole idea of a per-run host write into
+# argument memory. It held "this `Ref`'s bytes go at offset N of this entry's
+# argument region", one per (entry, `Ref`) pair — 602 of them on Hikari's fused
+# sample, to move the 268 bytes that actually changed, because every dispatch
+# carries its own COPY of every argument it is given.
+#
+# A [`GPURef`](@ref) removes the copies rather than making them cheaper to
+# rewrite: the argument each dispatch is packed with is the ref's device
+# ADDRESS, written once at `record!` and never again, and the value behind it is
+# one buffer that one store (`ref[] = x`) writes. 602 becomes 1, and it becomes a command
+# in the stream rather than a host store into memory a submission may still be
+# reading — which is what let the argument ring go.
 
 mutable struct Graph{D}
     dev::D
@@ -247,8 +220,6 @@ mutable struct Graph{D}
     transients::Vector{TransientResource}
     transient_by_id::Dict{Int,TransientResource}
     ids::IdTable          # both directions; see `IdTable`
-    updates::Vector{Any}
-    recycler::Recycler
     # Interning for `use(...; range = ...)`. `ids` is an IdDict, so two `use`
     # calls naming the same slice would otherwise be two objects and two ids —
     # and a resource that is not the same resource in two passes has no hazards
@@ -263,7 +234,7 @@ struct PassHandle
 end
 
 """
-The binding a pass gets from an attribute. A `Buffer` and a `Scalar` of the same
+The binding a pass gets from an attribute. A `Buffer` and a `GPURef` of the same
 element type both erase to `Attr{T}`, differing only in `stride`, which is a
 field rather than a type parameter.
 
@@ -366,10 +337,9 @@ the argument layout the raygen shader was compiled for. Core reads exactly one
 thing out of this type, `argsize`, which is what lets `ArgMemory` reserve a slot
 for the trace's arguments the same way it does for a dispatch's.
 
-`accel` and `args` are held as GIVEN, not as resolved: `rawargs` runs `argvalue`
-over them at every record and rebind, so a `Ref` is re-read each time. That is
-what lets a sample index or a rebuilt acceleration structure reach a plan that
-was compiled once.
+`accel` and `args` are held as GIVEN, not as resolved: `rawargs` resolves them
+to their storage at `record!`, once. A value that changes between runs — a
+sample index — is a [`GPURef`](@ref), and what is packed is its address.
 """
 struct CompiledTrace{P,C,A<:Tuple,R}
     compiled::P
@@ -382,56 +352,66 @@ struct CompiledTrace{P,C,A<:Tuple,R}
 end
 
 """
-Argument memory owned by the plan, in slots — one per frame that can be in
-flight.
+Argument memory owned by the plan: every draw's and dispatch's arguments, laid
+out once, and the indirect commands beside them.
 
-The plan knows its draws and their argument sizes at compile time, so it can lay
-them out once and write only values into them per frame. That removes the whole
-question the argument pool exists to answer: nothing is allocated per draw, so
-nothing has to work out when it may be reused. The slot is what the GPU is still
-reading, and a slot is reused only after the device has passed the run that used
-it — the same rule as everything else here, and the only rule.
+The plan knows its draws and their argument sizes at compile time, so it lays
+them out once and never allocates per frame. **Written once, at `record!`, and
+never again** — which is what makes one copy enough. A value that has to change
+between runs is a [`GPURef`](@ref): the bytes here are its device address, fixed
+for the ref's life, and the value behind that address is written by an `Update`,
+as a command in the stream rather than a host store into memory a submission may
+still be reading.
 
-`slot_token[i]` is what covers the run that last used slot `i`, and `nothing`
-means the slot has never been used. Opaque here and handed straight back to
-`passed`/`waitfor`: it was `signal::Vector{UInt64}`, a raw Vulkan timeline value,
-which made the ring a Vulkan concept and left [`nextslot!`](@ref) reading
-`bq.timeline_sem` and `bq.next_timeline` directly.
+`token` is what covers the last run of this plan, or `nothing` before the first.
+Opaque here and handed straight back to `passed`/`waitfor` — it was a raw Vulkan
+timeline value, which made a plan's pipelining a Vulkan concept.
 
 `store` is the [`Unified`](@ref) region the plan owns. It was a device array from
 the backend's own allocator, which put the plan's arguments outside the one pool
 that is supposed to see every workload.
 
-**The indirect commands are in here too**, past the arguments and inside the same
-slot, one 256-byte block per device-sized dispatch. They belong to the plan for
-exactly the reason the arguments do — the plan knows at compile how many it has,
-and a recording bakes the address of each into a `vkCmdDispatchIndirect` — and
-putting them anywhere else is what the queue's third bump allocator was. Being
-per SLOT is not incidental: two runs in flight would otherwise write each other's
-workgroup counts, which is the hazard the argument ring already exists to stop.
+**The indirect commands are in here too**, past the arguments, one 256-byte block
+per device-sized dispatch. They belong to the plan for exactly the reason the
+arguments do — the plan knows at compile how many it has, and a recording bakes
+the address of each into a `vkCmdDispatchIndirect` — and putting them anywhere
+else is what the queue's third bump allocator was.
 
-`indirect[slot][k]` is dispatch `k`'s view, built once here because building one
-per record is an allocation on the recording path and the offsets never move.
+`indirect[k]` is dispatch `k`'s view, built once here because building one per
+record is an allocation on the recording path and the offsets never move.
+
+This was a RING, `ARG_SLOTS` deep, with a `slot_token` per slot and a
+`nextslot!` that waited when the host got three runs ahead. It existed for one
+reason: a run wrote argument bytes on the HOST while an earlier run's submission
+could still be reading them. Nothing writes these bytes after `record!` any
+more, so there is nothing to race and nothing to rotate — and a plan's argument
+memory is a third of the size it was.
 """
 mutable struct ArgMemory{S}
     store::S
     address::UInt64
     ptr::Ptr{UInt8}
-    stride::Int
-    slot_token::Vector{Any}     # `nothing` = never used
-    slot::Int
-    indirect::Vector{Vector{Any}}   # [slot][k] — one indirect command each
+    # A `RefValue`, not a bare UInt64: `ArgMemory` is parametric and a plan's
+    # `args` field names the UnionAll, so a bare value field reads and writes
+    # through the DYNAMIC get-/setproperty path, which boxes the UInt64 — 8
+    # bytes each way of a `run!` that allocates nothing. The cell is a
+    # reference (no box) and the deref is on the concrete `RefValue`.
+    # 0 = never run (the first real timeline signal is 1).
+    token::Base.RefValue{UInt64}
+    indirect::Vector{Any}       # [k] — one indirect command each
 end
 
-"""
-How many frames of arguments may be in flight.
+# Accessed through these, never as `am.token` on a value typed
+# `Union{Nothing,ArgMemory}`: the field is a UnionAll, and get-/setproperty on
+# it goes through the dynamic path, which boxes the UInt64 — 8 bytes on both
+# sides of every `run!`. A method specializes on the concrete `ArgMemory{S}`
+# and the field access inside it is static.
+"""The token covering `am`'s last run; 0 if it never ran or has no memory."""
+argtoken(am::ArgMemory) = am.token[]
+argtoken(::Nothing) = UInt64(0)
 
-Core's, because it is a pipelining decision: it says how far the host may run
-ahead of the device, which is the graph's business and not the driver's. It was
-`const ARG_SLOTS = 3` in the Vulkan backend, so the depth of a Mantle plan was a
-Vulkan constant.
-"""
-const ARG_SLOTS = 3
+"""Record the token covering `am`'s next submission."""
+setargtoken!(am::ArgMemory, v::UInt64) = (am.token[] = v; nothing)
 
 """
 One pass, its compiled draws, and the barriers that have to run before it.
@@ -479,7 +459,11 @@ mutable struct Profiler{Q}
     pending::Bool
 end
 
-mutable struct Plan{D}
+"""The emitter of a backend without recordings: every primitive of the pass walk
+does its work on the spot. See `graph/kalaunch.jl`."""
+struct Immediate end
+
+mutable struct Plan{D,H<:Tuple}
     graph::Graph{D}
     transitions::Vector{Transition}
     passes::Vector{PassPlan}
@@ -497,28 +481,42 @@ mutable struct Plan{D}
     # RECORDED launch reads its arguments from a buffer the host wrote. A
     # backend driving KernelAbstractions passes them directly — see
     # `makeargmemory`.
-    args::Union{Nothing,ArgMemory}      # laid out at compile, written per frame
-    # One recording per argument slot, or `nothing` before `record!`. The slot's
-    # base offset is folded into every address a recording holds, so a recording
-    # belongs to the slot it was written for and to no other — `recordings[i]` is
-    # slot `i`'s, and `run!` rotates through them with `nextslot!`.
+    args::Union{Nothing,ArgMemory}      # laid out at compile, written at record!
+    # The plan's commands, written once, or `nothing` before `record!`.
     #
-    # One recording would have been simpler and is what this held first. It also
-    # meant a recorded plan pinned a single slot for life, so `rebind!` wrote the
-    # bytes a submission still in flight was reading: the ring is the mechanism
-    # that stops the host running ahead of the device, and the plan had opted out
-    # of it. Measured as an accumulator reading 36 where an interpreted run read
-    # 21.
-    recordings::Any
-    # The [`ArgWrite`](@ref)s a run performs, or `nothing` before `record!`. One
-    # per (entry, `Ref` argument) pair, and nothing else.
-    #
-    # `argvalue` says which arguments can move: a `Ref` is read fresh every run
-    # and everything else is resolved once. So the per-run host work of a plan is
-    # exactly the entries holding one, and a plan with none does no host work at
-    # all between `run!` and the queue — everything else is fixed by the plan's
-    # own precondition, since `run!` throws if a transient moved.
-    writes::Any
+    # ONE. It was a vector, one per argument slot, because a run rewrote argument
+    # bytes on the host and had to write them somewhere the device was not
+    # reading — so a recording belonged to the slot whose base offset was folded
+    # into every address it held. Nothing rewrites those bytes now (see
+    # [`ArgMemory`](@ref) and [`GPURef`](@ref)), so there is one set of addresses
+    # and one command buffer holding them.
+    recording::Any
+    # Where every device address the recording's arguments hold was written:
+    # recorded address → the (region, offset inside it) of its eight bytes.
+    # The region is usually the plan's `ArgMemory` store, but a prepare kernel
+    # emitted into the recording packs into a recording-OWNED scratch region
+    # (`get_arg_buffer(recording, …)`), so the target is a region, not a blob
+    # offset. Baked at `record!` — the graph knows the args and the layout, and
+    # this is derived from them ONCE, during the one pack — and consulted only
+    # when a resource MOVES (`resize!`, an arena growing): the move appends to
+    # `pending_patches`, and the next `run!` writes the new addresses as
+    # commands in the run's own submission. Neither is ever walked per run.
+    # See `notify_move!`.
+    patchtab::Dict{UInt64,Vector{Tuple{Region,Int}}}
+    pending_patches::Vector{Tuple{Region,Int,UInt64}}
+    # Every `Buffer` and `GPURef` a pass declares, as a tuple typed by its
+    # elements: what a host store (`ref[] = x`, `buf[r] = data`) can be waiting
+    # on. `run!` walks it before submitting — a dirty one lands as a command in
+    # front of the recording, a clean one costs a flag read. Built once at
+    # `Plan` by `hostwritten!`, which also registers each as a `CopyDst` of the
+    # update pass so the barriers derive; a `refit!` recompiles against the same
+    # registrations and the same tuple.
+    hostwritten::H
+    # A recording was thrown away by something that was not this plan's doing —
+    # an images arena growing under it, a refit — and `run!` writes it again
+    # before it submits. Never set for a plan that was not recorded: `run!`
+    # refuses those rather than recording on the way past.
+    stale::Bool
 end
 
 """

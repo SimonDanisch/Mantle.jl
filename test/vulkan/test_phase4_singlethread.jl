@@ -12,7 +12,7 @@ end
     if Threads.nthreads() > 1
         bq = MVE.vk_context().default_bq
         result = Ref{Any}(nothing)
-        # Run ensure_active_batch! from a different thread.
+        # Open a one-shot from a different thread.
         #
         # `Threads.@spawn begin ... end |> wait` does NOT wait: a macro consumes
         # as much of the expression as it can, so that parses as
@@ -21,7 +21,7 @@ end
         # came back `nothing`, failing against a Lava that behaves correctly.
         task = Threads.@spawn begin
             try
-                Mantle.ensure_active_batch!(bq)
+                MVE.oneshot(bq) do e end
                 result[] = :no_assert   # should not happen
             catch e
                 result[] = e

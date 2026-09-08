@@ -50,7 +50,7 @@ function build_interleaved(dev, n, chains, stages; coalesce = true, alias = true
             M.dispatch!(p, stir!, (dst, src, 1.001f0), n)
         end
     end
-    (; g, bufs, plan = M.Plan(g; coalesce, alias))
+    (; g, bufs, plan = M.record!(M.Plan(g; coalesce, alias)))
 end
 
 nbarriers(plan) = count(pp -> !isempty(pp.pre), plan.passes)

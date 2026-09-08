@@ -33,7 +33,10 @@
 # LAVA_SPIRV_DUMP_DIR, and assert on that. Verified to fail with the fix
 # disabled.
 
-using Test, Lava, KernelAbstractions
+using Test, Lava, Mantle, KernelAbstractions
+
+# Bound by the suite's preamble for every file; standalone, bind them here.
+@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
 const KA = KernelAbstractions
 
 """
@@ -78,6 +81,26 @@ end
     dumpdir = mktempdir()
     prev = get(ENV, "LAVA_SPIRV_DUMP_DIR", nothing)
     ENV["LAVA_SPIRV_DUMP_DIR"] = dumpdir
+    # The dump is written at COMPILE, and the disk cache answers from a prior
+    # process without compiling — so on a warm cache `dumpdir` stays empty and
+    # the test asserts nothing. Point the cache at a scratch dir of its own so
+    # every kernel below compiles and dumps.
+    cachedir = mktempdir()
+    prevcache = MVE.LAVA_DISK_CACHE_DIR[]
+    MVE.LAVA_DISK_CACHE_DIR[] = cachedir
+    # …and the FROZEN cache is consulted before either, and never dumps.
+    # Redirect all three so every kernel below really compiles and really
+    # writes to `dumpdir` — the assert used to go vacuously green the moment
+    # any cache answered.
+    frozendir = mktempdir()
+    prevfrozen = Lava.FROZEN_CACHE_DIR[]
+    Lava.FROZEN_CACHE_DIR[] = frozendir
+    # In-memory too: a kernel compiled earlier in this process answers from
+    # `ctx.caches` without compiling — and without dumping. They rebuild on
+    # demand, so clearing costs the next kernels a recompile and nothing else.
+    caches = MVE.vk_context().caches
+    empty!(caches.linked)
+    empty!(caches.pipelines)
     try
         out = MVE.LavaArray(zeros(Float32, M))
         lpb_clamped_ternary!(MVE.LavaBackend())(out; ndrange = M, workgroupsize = M)
@@ -113,7 +136,11 @@ end
         end
     finally
         prev === nothing ? delete!(ENV, "LAVA_SPIRV_DUMP_DIR") : (ENV["LAVA_SPIRV_DUMP_DIR"] = prev)
+        MVE.LAVA_DISK_CACHE_DIR[] = prevcache
+        Lava.FROZEN_CACHE_DIR[] = prevfrozen
         rm(dumpdir; recursive = true, force = true)
+        rm(cachedir; recursive = true, force = true)
+        rm(frozendir; recursive = true, force = true)
     end
 end
 
@@ -141,6 +168,26 @@ end
     dumpdir = mktempdir()
     prev = get(ENV, "LAVA_SPIRV_DUMP_DIR", nothing)
     ENV["LAVA_SPIRV_DUMP_DIR"] = dumpdir
+    # The dump is written at COMPILE, and the disk cache answers from a prior
+    # process without compiling — so on a warm cache `dumpdir` stays empty and
+    # the test asserts nothing. Point the cache at a scratch dir of its own so
+    # every kernel below compiles and dumps.
+    cachedir = mktempdir()
+    prevcache = MVE.LAVA_DISK_CACHE_DIR[]
+    MVE.LAVA_DISK_CACHE_DIR[] = cachedir
+    # …and the FROZEN cache is consulted before either, and never dumps.
+    # Redirect all three so every kernel below really compiles and really
+    # writes to `dumpdir` — the assert used to go vacuously green the moment
+    # any cache answered.
+    frozendir = mktempdir()
+    prevfrozen = Lava.FROZEN_CACHE_DIR[]
+    Lava.FROZEN_CACHE_DIR[] = frozendir
+    # In-memory too: a kernel compiled earlier in this process answers from
+    # `ctx.caches` without compiling — and without dumping. They rebuild on
+    # demand, so clearing costs the next kernels a recompile and nothing else.
+    caches = MVE.vk_context().caches
+    empty!(caches.linked)
+    empty!(caches.pipelines)
     try
         for T in types
             xc = zeros(T, (2, 3, 4))
@@ -161,6 +208,10 @@ end
         @test isempty(lpb_ptr_bitcasts(dumpdir))
     finally
         prev === nothing ? delete!(ENV, "LAVA_SPIRV_DUMP_DIR") : (ENV["LAVA_SPIRV_DUMP_DIR"] = prev)
+        MVE.LAVA_DISK_CACHE_DIR[] = prevcache
+        Lava.FROZEN_CACHE_DIR[] = prevfrozen
         rm(dumpdir; recursive = true, force = true)
+        rm(cachedir; recursive = true, force = true)
+        rm(frozendir; recursive = true, force = true)
     end
 end

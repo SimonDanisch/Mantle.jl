@@ -141,7 +141,7 @@ const C = Vk.VkCore
 # order, so they can be imported outright.
 import ..VideoImage, ..LavaArray, ..pool_offset,
        ..record_luma_copy!, ..record_chroma_copy!,
-       ..ensure_active_batch!, ..flush!
+       ..oneshot!, ..waitfor!
 
 # `alloc_image_memory` cannot be, and the reason is include order rather than
 # anything about the name: it lives in `graphics/framebuffer.jl`, which comes
@@ -565,19 +565,20 @@ CONCURRENT across both families, so no ownership transfer is needed.
 """
 function drain_copies!(dec::VideoDecoder)
     isempty(dec.copyq) && return nothing
-    Lava = parentmodule(@__MODULE__)
     ctx = dec.w.ctx
-    cb = ensure_active_batch!(ctx).cmd_buf
-    for (vimg, y, uv) in dec.copyq
-        yb = y.buf[]
-        record_luma_copy!(cb, vimg, yb.buffer, pool_offset(yb) + y.offset)
-        if uv !== nothing
-            ub = uv.buf[]
-            record_chroma_copy!(cb, vimg, ub.buffer, pool_offset(ub) + uv.offset)
+    tok = oneshot!(ctx.default_bq; tag = :video) do e
+        cb = e.cmd
+        for (vimg, y, uv) in dec.copyq
+            yb = y.buf[]
+            record_luma_copy!(cb, vimg, yb.buffer, pool_offset(yb) + y.offset)
+            if uv !== nothing
+                ub = uv.buf[]
+                record_chroma_copy!(cb, vimg, ub.buffer, pool_offset(ub) + uv.offset)
+            end
         end
     end
     empty!(dec.copyq)
-    flush!(ctx.default_bq, ctx.device)
+    waitfor!(ctx.default_bq, tok)
     return nothing
 end
 

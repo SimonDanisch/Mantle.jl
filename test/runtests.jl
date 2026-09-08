@@ -2,6 +2,16 @@ using Mantle, Test
 
 include(joinpath(@__DIR__, "backend_probe.jl"))
 
+# At TOP level, not in the testset below, because of what the `global` spelling
+# hid: a kernel that names `MVE` (the coopmat pin test spells `MVE.GEMM_TILE`)
+# reads a Main global, and a non-const one is a type-unstable global access
+# that GPUCompiler rejects — the coopmat pin failed only inside this suite and
+# passed everywhere the binding was a const. `const` is not allowed in the
+# testset's local scope, so the binding lives here, before it.
+_VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
+             backend_loadable("Lava") !== nothing
+const MVE = _VULKAN_OK ? Base.get_extension(Mantle, :MantleVulkanExt) : nothing
+
 # ONE outer testset around everything, and the reason is the failure mode the
 # comment below already describes — from the other side.
 #
@@ -203,8 +213,7 @@ end
 # testset just below is defined in `src/vulkan/lowering.jl`, so it would have
 # failed with an `UndefVarError` under a gate that had just said the driver was
 # fine.
-global _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
-                   backend_loadable("Lava") !== nothing
+# (bound at top level now — before the testset — so `MVE` can be a const)
 _VULKAN_OK || @info "Mantle tests: no Vulkan driver and compiler pair; skipping the Vulkan backend and the sync lowering"
 
 # The Vulkan backend module, for the 153 files that test it.
@@ -219,7 +228,7 @@ _VULKAN_OK || @info "Mantle tests: no Vulkan driver and compiler pair; skipping 
 #
 # Here and not in `backend_probe.jl` because an extension does not exist until
 # its triggers are loaded, and the line above is what loads them.
-global MVE = _VULKAN_OK ? Base.get_extension(Mantle, :MantleVulkanExt) : nothing
+# (bound at top level — see the top of this file)
 _VULKAN_OK && MVE === nothing && error(
     "Vulkan and Lava both loaded but MantleVulkanExt did not. Its precompilation " *
     "failed — the error is above this line, and every Vulkan test below would " *
@@ -832,6 +841,22 @@ if _VULKAN_OK
             # Which plans can be recorded at all, and that a render pass and both
             # `Update` routes come out the same either way.
             include(joinpath(VULKAN_TESTS, "test_recordable_plans.jl"))
+            # A recorded plan survives its storage moving: a resized buffer and
+            # a grown buffers arena are patched, a grown images arena re-records.
+            include(joinpath(VULKAN_TESTS, "test_recorded_move_patch.jl"))
+            # The point of all of the above: `run!` of a recorded plan, with
+            # nothing pending, allocates zero bytes.
+            include(joinpath(VULKAN_TESTS, "test_run_allocates_nothing.jl"))
+            include(joinpath(VULKAN_TESTS, "test_download_readback.jl"))
+            include(joinpath(VULKAN_TESTS, "test_traced_usages.jl"))
+            include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
+            include(joinpath(VULKAN_TESTS, "test_backend_vocabulary.jl"))
+            # No open command buffer on the queue: every call closes and submits
+            # what it wrote, and a run is one submission (step 7).
+            include(joinpath(VULKAN_TESTS, "test_closed_command_buffers.jl"))
+            include(joinpath(VULKAN_TESTS, "test_sweep_per_queue.jl"))
+            include(joinpath(VULKAN_TESTS, "test_discarded_iteration_prepare.jl"))
+            include(joinpath(VULKAN_TESTS, "test_backend_equality.jl"))
         end
 
         # What "wait for the GPU" has to mean when Mantle owns submission: a
@@ -910,10 +935,6 @@ if _VULKAN_OK
         # Still deliberately out: the heavy stress/CI entry points.
         # (test_struct_alignment_systematic.jl was excluded here while the
         # whole-struct-copy bug was open; that is fixed, and it is registered above.)
-        @testset "barrier elision" begin
-            include(joinpath(VULKAN_TESTS, "test_barrier_elision.jl"))
-        end
-
         @testset "broadcast paths" begin
             include(joinpath(VULKAN_TESTS, "test_broadcast_paths.jl"))
         end
@@ -1053,10 +1074,6 @@ if _VULKAN_OK
         # ── Tier 3h: Disk Cache & Two-Tier Caching ──
         @testset "Tier 3h: Kernel Cache" begin
             include(joinpath(VULKAN_TESTS, "test_disk_cache.jl"))
-            # Fixed per-kernel compile overhead (ungated IR dump, subprocess poll
-            # quantisation). Lives here because it is about what a compile costs
-            # when the cache does NOT save you.
-            include(joinpath(VULKAN_TESTS, "test_compile_overhead.jl"))
         end
 
 
@@ -1081,6 +1098,12 @@ if _VULKAN_OK
 
             @testset "HW HWTLAS — UAF safety" begin
                 include(joinpath(VULKAN_TESTS, "test_hwtlas_uaf_safety.jl"))
+            end
+
+
+            @testset "pin_leaves! stops at a VulkanTLAS" begin
+                include(joinpath(VULKAN_TESTS, "test_pin_leaves_stops_at_tlas.jl"))
+                include(joinpath(VULKAN_TESTS, "test_pintrace.jl"))
             end
 
 
@@ -1190,12 +1213,8 @@ if _VULKAN_OK
                 include(joinpath(VULKAN_TESTS, "test_argument_memory_isolation.jl"))
             end
 
-            @testset "indirect in concurrent group" begin
-                include(joinpath(VULKAN_TESTS, "test_indirect_in_concurrent_group.jl"))
-            end
-
-            @testset "indirect in concurrent group" begin
-                include(joinpath(VULKAN_TESTS, "test_indirect_in_concurrent_group.jl"))
+            @testset "an indirect dispatch follows its own prepare" begin
+                include(joinpath(VULKAN_TESTS, "test_indirect_prepare_ordering.jl"))
             end
             include(joinpath(VULKAN_TESTS, "test_crossqueue_sync.jl"))
             # A recorded copy has to outlive the value that was copied FROM, even

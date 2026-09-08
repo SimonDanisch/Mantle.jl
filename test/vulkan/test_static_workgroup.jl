@@ -31,7 +31,11 @@ The API rule still holds and is still worth following:
     kernel(backend, wg, ndrange)(args...)                      # both-static
 """
 
-using Test, Lava, KernelAbstractions
+using Test, Mantle, Lava, KernelAbstractions
+
+# Bound by the suite's preamble for every file; standalone, bind them here.
+@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
+@isdefined(LavaBackend) || (LavaBackend = MVE.LavaBackend)
 const KA = KernelAbstractions
 
 @kernel function wgmark!(d)
@@ -104,61 +108,51 @@ end
         @test coverage((8, 8, 8, 8, 8), (8, 1, 1, 1, 1), :typed) == 1.0
     end
 
-    # ── the fault itself, with the guard OFF ──────────────────────────────────
+    # ── the fault itself, with the guard OFF — REPAIRED ───────────────────────
     #
-    # These three testsets asserted, with the guard off, that the codegen fault
-    # had gone away — "was the trigger; no longer", "Full now". **It has not.**
-    # Re-measured 2026-07-31, every shape still loses exactly the documented
-    # fraction, and `min(1, b3/b2)` reproduces on all five cells of the grid.
+    # These three testsets pinned the codegen fault precisely so a repair would
+    # turn them red, and on 2026-09-04 they went red: every shape below covers
+    # its full ndrange with the guard OFF (RADV, this tree — the submission
+    # arc's emitter work, not a driver update; the same tree pinned the fault
+    # on 2026-07-31). They now pin the REPAIRED behaviour.
     #
-    # They are written as assertions of the fault rather than `@test_broken` so
-    # they say something a fix must contradict: if a driver or LLVM update
-    # repairs the block decode, these go red, and that is the signal to delete
-    # `trailing_unit_ndrange`, `interior_unit_workgroup` and the fallback with
-    # them. `@test_broken` would go quietly green and tell nobody.
+    # What that buys: `trailing_unit_ndrange`, `interior_unit_workgroup` and the
+    # `WORKGROUP_FALLBACK` guard in `ka_backend.jl` are now deletable — a day
+    # of the failure law holding would have been the reason to keep them, and
+    # the law is gone. The deletion is left for a driver-matrix pass: the guard
+    # on costs nothing and the repair is so far proven on one driver.
     #
-    # Lava is *correct* through all of this — the guard is on by default, and
-    # "WORKGROUP_FALLBACK makes the typed form correct everywhere" below is what
-    # covers the shipped behaviour.
+    # Lava was *correct* through all of this — the guard was on by default, and
+    # "WORKGROUP_FALLBACK makes the typed form correct everywhere" below covered
+    # the shipped behaviour.
 
-    @testset "workitems[3] == 1 is still the trigger" begin
-        # Sharpest form of the bug. At rank 4 the typed spelling is wrong IFF the
-        # THIRD workgroup extent is 1; `wg[4]` is irrelevant. With `wg[3] > 1`
-        # every block grid is correct, so a unit interior workitem extent is what
-        # breaks the block decode — consistent with LLVM folding away that
-        # dimension's `(g-1)*1 + 1` term and taking dimension 2's divisor with it.
+    @testset "workitems[3] == 1 was the trigger; no longer" begin
+        # Sharpest form of the bug, repaired. At rank 4 the typed spelling was
+        # wrong IFF the THIRD workgroup extent was 1; `wg[4]` was irrelevant.
         ND = (64, 256, 8, 2)
         for wg in ((32, 4, 2, 1), (32, 4, 4, 1))
             # 512 threads for the second: past the limit, and deliberately so.
             @test coverage(ND, wg, :typed; fallback = false, limit = 512) == 1.0
         end
         for wg in ((32, 4, 1, 1), (32, 4, 1, 2), (32, 1, 1, 1), (32, 8, 1, 1))
-            @test coverage(ND, wg, :typed; fallback = false) < 1.0
+            @test coverage(ND, wg, :typed; fallback = false) == 1.0
         end
     end
 
-    @testset "an INTERIOR unit extent is still the trigger" begin
-        # Generalises past rank 4 and explains the whole pattern: ranks 1-3 look
-        # clean because `(32,4,1)`'s unit extent is trailing, and the rank-5 case
-        # that passed did so because it satisfied b2 <= b3, not because rank 5 is
-        # immune.
+    @testset "an INTERIOR unit extent was the trigger; no longer" begin
+        # The same repair, generalised past rank 4.
         ND5 = (32, 128, 8, 4, 2)
-        @test coverage(ND5, (16, 4, 1, 1, 1), :typed; fallback = false) < 1.0  # dims 3,4 unit, interior
-        @test coverage(ND5, (16, 4, 2, 1, 1), :typed; fallback = false) < 1.0  # dim 4 unit, interior
-        @test coverage(ND5, (16, 4, 2, 2, 1), :typed) == 1.0  # only dim 5, trailing
+        @test coverage(ND5, (16, 4, 1, 1, 1), :typed; fallback = false) == 1.0
+        @test coverage(ND5, (16, 4, 2, 1, 1), :typed; fallback = false) == 1.0
+        @test coverage(ND5, (16, 4, 2, 2, 1), :typed) == 1.0
     end
 
-    @testset "the failure law is exactly min(1, b3/b2)" begin
-        # The sharpest statement of the bug and the thing a fix has to explain.
-        # Dimension 2 of the BLOCK grid is decoded with dimension 3's extent as
-        # its divisor, so its component ranges over `0:b3-1` instead of `0:b2-1`
-        # and exactly `b3/b2` of the output is written.
+    @testset "the failure law no longer fires" begin
+        # Was `min(1, b3/b2)` exactly — dimension 2 of the block grid decoded
+        # with dimension 3's extent as its divisor. Now every cell is whole.
         law(b2, b3) = coverage((64, 4b2, b3, 2), (32, 4, 1, 1), :typed; fallback = false)
-        for (b2, b3) in ((2, 1), (4, 2), (8, 1), (16, 4), (64, 8))
-            @test law(b2, b3) == min(1, b3 / b2)
-        end
-        # …and it is correct exactly when b2 <= b3.
-        for (b2, b3) in ((2, 2), (4, 4), (8, 16), (2, 8))
+        for (b2, b3) in ((2, 1), (4, 2), (8, 1), (16, 4), (64, 8),
+                         (2, 2), (4, 4), (8, 16), (2, 8))
             @test law(b2, b3) == 1.0
         end
     end
@@ -280,15 +274,17 @@ end
         end
     end
 
-    @testset "the fault is still there underneath" begin
-        # The guard is load-bearing, not decorative: with it off, the same launch
-        # loses data. If this ever stops failing, the codegen fault is fixed and
-        # `trailing_unit_ndrange` can go.
+    @testset "the fault is repaired underneath" begin
+        # The guard was load-bearing, not decorative: with it off, the same
+        # launch lost data. On 2026-09-04 (RADV, this tree) it stopped failing
+        # — the codegen fault is fixed, and `trailing_unit_ndrange` can go the
+        # day the driver matrix says so (see "the fault itself — REPAIRED"
+        # above). This pins the repair: full coverage with the guard OFF.
         prev = MVE.WORKGROUP_FALLBACK[]
         try
             MVE.WORKGROUP_FALLBACK[] = false
-            @test written((576, 16, 16, 4, 4, 1), (16, 2, 2, 2, 2, 1)) < 1.0
-            @test written((64, 4, 4, 4, 1), (16, 2, 2, 2, 1)) < 1.0
+            @test written((576, 16, 16, 4, 4, 1), (16, 2, 2, 2, 2, 1)) == 1.0
+            @test written((64, 4, 4, 4, 1), (16, 2, 2, 2, 1)) == 1.0
         finally
             MVE.WORKGROUP_FALLBACK[] = prev
         end

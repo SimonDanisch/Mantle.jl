@@ -182,7 +182,7 @@ end
 # 2. Per-dispatch GPU timing via Vulkan timestamp queries
 # ============================================================================
 #
-# Strategy: when `with_dispatch_timing(f)` is active, every `vk_dispatch!` writes
+# Strategy: when `with_dispatch_timing(f)` is active, every `emit_dispatch!` writes
 # a TOP_OF_PIPE timestamp before the dispatch and a BOTTOM_OF_PIPE timestamp
 # after.  Pairs of timestamps are read back after `f` returns (after the
 # implicit `KA.synchronize`), converted to ns via the device's
@@ -192,7 +192,7 @@ end
 # If a render exceeds that budget we ring back to slot 0 and the late records
 # overwrite the early ones — caller is warned.
 
-"""Per-dispatch timing record. One entry per `vk_dispatch!` call while timing is on."""
+"""Per-dispatch timing record. One entry per `emit_dispatch!` call while timing is on."""
 struct DispatchTiming
     kernel_name::String        # from `bq.last_dispatch_info` at dispatch time
     slot::Int                  # query pool slot of the START timestamp
@@ -211,11 +211,11 @@ const TIMESTAMP_POOL_SIZE = Ref(MAX_DISPATCH_LOG * 2)
     enable_dispatch_timing!(enable::Bool=true)
 
 Toggle the recording of Vulkan timestamp queries around every dispatch. When
-on, each `vk_dispatch!` writes two timestamps; when off, the dispatch hot
+on, each `emit_dispatch!` writes two timestamps; when off, the dispatch hot
 path is unchanged. Equivalent to (and used by) `with_dispatch_timing(f)`.
 
 If timing is being turned ON for the first time in this session, the
-timestamp query pool is created lazily inside `vk_dispatch!`.
+timestamp query pool is created lazily inside `emit_dispatch!`.
 """
 function enable_dispatch_timing!(enable::Bool=true, ctx::VkContext = vk_context())
     ctx.diag.dispatch_timing = enable
@@ -343,7 +343,7 @@ function with_dispatch_timing(f, ctx::VkContext = vk_context())
     end
 end
 
-# Internal: ensure the timestamp pool exists. Called from `vk_dispatch!`.
+# Internal: ensure the timestamp pool exists. Called from `emit_dispatch!`.
 #
 # Takes the context rather than asking `vk_context()` for it. A query pool is a
 # device-owned handle, and this runs per dispatch: reaching for the global here
@@ -361,7 +361,7 @@ function ensure_timestamp_pool!(ctx::VkContext)
 end
 
 # Internal: reset the pool between captures (must happen on a command buffer).
-# Called from `vk_dispatch!` when slot index hits 0.
+# Called from `emit_dispatch!` when slot index hits 0.
 function reset_timestamp_pool_on_cb!(ctx::VkContext, cb::VK.CommandBuffer)
     pool = ctx.caches.timestamp_pool
     pool === nothing && return

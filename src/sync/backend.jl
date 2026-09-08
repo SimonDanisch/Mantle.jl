@@ -47,8 +47,8 @@ the scheduled order IS the synchronisation and there is nothing to emit between
 two passes.
 
 This is not the same claim as "ordering does not matter here". `Barriers` still
-runs and still derives which passes wait for which; the Host backend simply
-lowers that to nothing, the way Vulkan lowers it to a pipeline barrier. If host
-passes are ever run concurrently, this is where the join goes.
+runs on the host, asking this; answering `false` derives nothing, which is what
+a backend whose `passbarriers` would lower every transition to nothing should
+say. If host passes are ever run concurrently, this is where the join goes.
 """
 needs_transition(::HostAPI, ::ResourceKind, before::Type, after::Type) = false

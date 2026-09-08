@@ -27,7 +27,8 @@ built and cannot be switched on afterwards — which is also why the seven `LAVA
 environment variables this file used to ask for are gone. **Every `LavaArray`
 alive becomes invalid**, so this goes first, before any of the builders below.
 """
-syncdevice!() = vk_reset_device!(debug = DebugConfig(sync_val = true))
+const MVE = Base.get_extension(Mantle, :MantleVulkanExt)
+syncdevice!() = MVE.reset_device!(debug = MVE.DebugConfig(sync_val = true))
 
 """
 Refuse to report a clean run out of a device that is not instrumented.
@@ -107,8 +108,8 @@ The update path under sync validation.
 
 This is where a missing barrier would be: the update pass writes a buffer the
 render pass reads as an attribute, so `CopyDst -> Vertices` has to be derived and
-emitted. Both routes are exercised — a rename writes a fresh store and a partial
-write goes in place.
+emitted. Both routes are exercised — a whole-buffer store and a ranged store,
+both writing in place.
 
 "Attribute" and not "vertex attribute": this backend binds no vertex buffers, so
 the read is a storage load in the vertex shader and `Vertices` lowers to that.
@@ -120,12 +121,10 @@ function validate_updates(frames = 20; n = 20_000)
     win = RenderWindow(W, H; title = "validate updates", vsync = false)
 
     pts = cloud(n)
-    sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 2f0))
-    mvp = Ref(camera(0f0))
+    sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 2f0))
+    mvp = M.GPURef(dev, camera(0f0))
     g = M.Graph(dev)
     screen = M.Surface(g, win)
-    whole = M.Update(g, sc.positions)                    # rename route
-    part  = M.Update(g, sc.color; range = 1:100)         # in-place route
     M.render!(g, "plot", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
         M.draw!(p, SCATTER, bind(p, sc, mvp), sc.positions)
     end
@@ -140,9 +139,9 @@ function validate_updates(frames = 20; n = 20_000)
         # and whole-buffer from a device array, which copies device to device and
         # never stages.
         r = mod1(k, 3)
-        r == 1 ? whole(cloud(n)) :
-        r == 2 ? part(tinted) :
-                 whole(M.storage(ondevice))
+        r == 1 ? (sc.positions[:] = cloud(n)) :
+        r == 2 ? (sc.color[1:100] = tinted) :
+                 (sc.positions[:] = M.storage(ondevice))
         M.run!(plan)
         Mantle.flush!(dev.bq, dev.ctx.device)
     end
@@ -172,8 +171,8 @@ function validate_depth(frames = 20; n = 20_000)
                        blend = Opaque(), cull = NoCull(), depth = DepthLess())
 
     pts = cloud(n)
-    sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 4f0))
-    mvp = Ref(camera(0f0))
+    sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 4f0))
+    mvp = M.GPURef(dev, camera(0f0))
     g = M.Graph(dev)
     screen = M.Surface(g, win)
     z = M.Transient.Image(g, Float32, (W, H))
@@ -214,8 +213,8 @@ function validate_mrt(frames = 20; n = 20_000)
                      blend = Opaque(), cull = NoCull(), depth = DepthLess())
 
     pts = cloud(n)
-    sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.Scalar(dev, 4f0))
-    mvp = Ref(camera(0f0))
+    sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 4f0))
+    mvp = M.GPURef(dev, camera(0f0))
     g = M.Graph(dev)
     screen = M.Surface(g, win)
     second = M.Transient.Image(g, BGRA{N0f8}, (W, H))

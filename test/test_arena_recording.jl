@@ -35,7 +35,7 @@ function chainplan(dev, n, nstage)
         s = M.use(p, t[end]; read = true); d = M.use(p, out; write = true)
         M.dispatch!(p, bump!, (d, s), n)
     end
-    (; g, out, seed, plan = M.Plan(g), keep = (seed, t))
+    (; g, out, seed, plan = M.record!(M.Plan(g)), keep = (seed, t))
 end
 
 """Two transients whose lifetimes overlap, so they cannot share bytes. The
@@ -54,7 +54,7 @@ function fatplan(dev, n)
         s = M.use(p, t1; read = true); d = M.use(p, t2; write = true)
         M.dispatch!(p, bump!, (d, s), 16)
     end
-    (; plan = M.Plan(g), keep = (seed, t1, t2))
+    (; plan = M.record!(M.Plan(g)), keep = (seed, t1, t2))
 end
 
 @kernel function add2!(d, @Const(x), @Const(y))
@@ -62,9 +62,9 @@ end
     @inbounds d[i] = x[i] + y[i]
 end
 
-# The Vulkan backend module. `handover!` and `pool_offset` below are the
-# BACKEND's — they name a `VkBuffer` and an offset inside one — and since the
-# runtime moved into `MantleVulkanExt` they are not Mantle's to reach.
+# The Vulkan backend module. `pool_offset` below is the BACKEND's — it names
+# an offset inside a `VkBuffer` — and since the runtime moved into
+# `MantleVulkanExt` it is not Mantle's to reach.
 const E = MVE
 
 @testset "two plans in one process commit the max, not the sum" begin
@@ -89,17 +89,19 @@ const E = MVE
     @test length(M.tenants!(arena)) == 2
     @test M.sharing(M.pool(dev), E.Buffers())
 
-    for _ in 1:3
+    # Interleaved, a hundred times: two plans alternating on one arena, each
+    # run's recording opening with the global barrier that orders it behind
+    # whatever ran last. The arena no longer remembers who that was — the
+    # handover used to be decided at record time from its memory of the last
+    # runner, so of two recorded plans alternating the first never got one.
+    for _ in 1:100
         M.run!(small.plan)
-        M.run!(big.plan)          # interleaved, so the handover barrier is exercised
+        M.run!(big.plan)
     end
     KernelAbstractions.synchronize(M.backend(dev))
     @test all(==(5f0), Array(M.storage(small.out)))
     @test all(==(5f0), Array(M.storage(big.out)))
-    # Two live tenants, so a plan taking the arena over emits a barrier. Asked
-    # through an emitter, which is what `emit!` hands it: `handover!` used to
-    # take the queue and reach for its active batch.
-    @test E.handover!(small.plan, E.emitter(dev.bq))
+    @test !hasfield(M.Arena, :lastrun)
 end
 
 @testset "over budget fails at compile, with numbers" begin
@@ -135,19 +137,17 @@ end
     # `VkMemoryBarrier2` per distinct `(waits, to)` tuple and no buffer barriers
     # at all. `barrierspan`, `barrierbuffer` and the special case are gone.
     #
-    # Two things are worth pinning here and both survive the change. The
-    # `renameable` DISCRIMINATION is still real — it decides whether an `Update`
-    # writes in place or through a fresh store — it just no longer reaches the
-    # barrier. And the tuples are `unique`, never unioned: `a` and `b` are the
-    # same hazard and collapse into one barrier, which is why three transitions
-    # produce two.
+    # `renameable` itself is gone with renaming: `a` and `b` are read by the pass
+    # below, so `Plan` registers both as `CopyDst` of the update pass and writes
+    # them in place, and neither can move its target — the distinction has
+    # nothing left to decide. What is worth pinning is the tuples being `unique`
+    # and never unioned: `a` and `b` are the same hazard and collapse into one
+    # barrier, which is why three transitions produce two.
     dev = M.Device(M.VulkanAPI())
     g = M.Graph(dev)
     a   = M.Buffer(dev, zeros(Float32, 1024))
     b   = M.Buffer(dev, zeros(Float32, 1024))
     out = M.Buffer(dev, zeros(Float32, 1024))
-    M.Update(g, a)                   # whole buffer -> may rename
-    M.Update(g, b; range = 1:10)     # ranged -> always in place
     M.compute!(g, "read") do p
         sa = M.use(p, a; read = true); sb = M.use(p, b; read = true)
         d  = M.use(p, out; write = true)
@@ -155,13 +155,9 @@ end
     end
     plan = Base.invokelatest(M.Plan, g)
 
-    @test E.renameable(g, a)
-    @test !E.renameable(g, b)
-    @test !E.renameable(g, out)
-
     pp = only(p for p in plan.passes if p.pass.name == "read")
     # Three transitions: `a` and `b` are both a copy made visible to a shader
-    # read, `out` is a shader write ordered against the last one.
+    # read, and `out`'s is the store's copy made visible to a shader write.
     @test length(pp.pre) == 3
     v = pp.barrier.vks
     # Two of them, because the first two are the same tuple. A union of all three
@@ -179,14 +175,12 @@ end
 
 @testset "a recorded plan runs bit-exact, and records nothing" begin
     dev = M.Device(M.VulkanAPI())
-    s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes
-    @test !M.recorded(s.plan)
-    M.record!(s.plan)
+    s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes, recorded at build
     @test M.recorded(s.plan)
     @test M.record!(s.plan) === s.plan                     # idempotent
-    # No argument here is a `Ref`, so nothing can change between runs and the
-    # host-side update plan is empty: a run writes no argument bytes either.
-    @test isempty(s.plan.writes)
+    # ONE recording, not one per argument slot: nothing rewrites a plan's
+    # argument memory after `record!`, so there is nothing for a ring to protect.
+    @test s.plan.recording isa MVE.Recording
 
     M.run!(s.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -197,11 +191,13 @@ end
     # be three times faster than unbaked over thirty runs.
     #
     # That measurement stopped meaning what it said the day `run!` started
-    # rotating argument slots for a baked plan too. A recorded run submits every
-    # run and waits when the host is `ARG_SLOTS` runs ahead of the device, which
-    # is the same backpressure the interpreted path always had — so both medians
-    # were GPU throughput for this graph (0.73 ms against 0.64 ms measured).
-    # Nothing regressed; the clock was simply no longer measuring host work.
+    # rotating argument slots for a baked plan too: a recorded run submitted
+    # every run and waited when the host got `ARG_SLOTS` ahead of the device,
+    # which is the same backpressure the interpreted path always had — so both
+    # medians were GPU throughput for this graph (0.73 ms against 0.64 ms
+    # measured). Nothing regressed; the clock was simply no longer measuring
+    # host work. (The ring is gone now and so is the wait, but the point about
+    # what a wall-clock ratio measures here stands.)
     #
     # Counting is better than timing anyway: it is exactly the claim in the name
     # of this testset, it is not a ratio anybody has to keep generous, and it does
@@ -248,28 +244,35 @@ end
     end
 end
 
-@testset "growing the arena under a recorded plan is refused" begin
-    # The one way M1 and M5 interact badly. Plans share the device's arena, so a
-    # later, larger plan grows it and remaps every tenant — but a recorded tenant
-    # cannot be remapped: its command buffer holds the addresses the old
-    # allocation had. Silently re-materialising underneath it gives a run that
-    # reads freed storage, deterministically and quietly. It has to be an error,
-    # and the error has to name the order that avoids it.
+@testset "growing the arena under a recorded plan patches it" begin
+    # The one way M1 and M5 interact. Plans share the device's arena, so a
+    # later, larger plan grows it and remaps every tenant. A recorded tenant
+    # used to make that an error: its command buffer held the addresses the old
+    # allocation had, and re-materialising underneath it gave a run that read
+    # freed storage, deterministically and quietly.
+    #
+    # Those addresses are not IN the command buffer — they are in the plan's
+    # argument memory, at offsets the one pack recorded (`recpatch!`). So the
+    # growth announces itself (`arena_moved!` → `notify_move!`) and the next
+    # run writes the new addresses as commands in its own submission: the same
+    # recording answers, with the right numbers.
     dev = M.Device(M.VulkanAPI())
     small = Base.invokelatest(chainplan, dev, 100_000, 3)
     M.run!(small.plan)
     KernelAbstractions.synchronize(M.backend(dev))
     M.record!(small.plan)
+    rec = small.plan.recording
 
-    err = try
-        Base.invokelatest(chainplan, dev, 4_000_000, 3)   # needs a much bigger arena
-        nothing
-    catch e
-        e
-    end
-    @test err isa ArgumentError
-    @test occursin("recorded", sprint(showerror, err))
-    @test occursin("before recording", sprint(showerror, err))
+    big = Base.invokelatest(chainplan, dev, 4_000_000, 3)   # needs a much bigger arena
+    M.run!(big.plan)
+    KernelAbstractions.synchronize(M.backend(dev))
+
+    M.run!(small.plan)
+    KernelAbstractions.synchronize(M.backend(dev))
+    @test small.plan.recording === rec
+    @test Array(M.storage(small.out)) == fill(Float32(3 + 2), 100_000)
+    M.free!(small.plan)
+    M.free!(big.plan)
 end
 
 @testset "a profiled plan reports both halves of a recorded run" begin
@@ -295,34 +298,33 @@ end
     end
     KernelAbstractions.synchronize(M.backend(dev))
     t = M.timings(profiled)
-    @test length(t) == 1
-    @test t[1].name == "only"
-    @test t[1].host_ms > 0                 # the one recording
-    @test t[1].samples >= 1                # …and at least one frame of GPU time
+    # Two passes: the update pass every plan with a declared buffer has, which
+    # was never written (nothing was stored, so it has no host time and no
+    # frame of GPU time), and the one that was.
+    @test [x.name for x in t] == ["updates", "only"]
+    @test t[2].host_ms > 0                 # the one recording
+    @test t[2].samples >= 1                # …and at least one frame of GPU time
     M.free!(profiled)
 end
 
-@testset "a recorded run still claims the arena it writes" begin
-    # `run!` on a recorded plan emits nothing, and emitting is where `takeover!`
-    # used to live. Skipping the claim leaves the arena naming whoever RECORDED
-    # last — so the next tenant sees itself there and emits no barrier, a
-    # handover away from a recorded plan with nothing ordering it. A run writes
-    # those bytes like any other and has to say so.
+@testset "two recorded plans alternating on one arena stay bit-exact" begin
+    # Both recorded up front, so neither run emits anything: what orders b's
+    # writes behind a's reads of the same bytes is the barrier each recording
+    # opens with, and nothing else. The arena's record of who ran last,
+    # consulted at record time, is gone; a run has nothing to claim.
     dev = M.Device(M.VulkanAPI())
     a = Base.invokelatest(chainplan, dev, 50_000, 2)
     b = Base.invokelatest(chainplan, dev, 50_000, 2)
-    M.run!(a.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
     M.record!(a.plan)
-    M.run!(a.plan)
+    M.record!(b.plan)
+    for _ in 1:100
+        M.run!(a.plan)
+        M.run!(b.plan)
+    end
     KernelAbstractions.synchronize(M.backend(dev))
-    arena = M.pool(dev).arenas[E.Buffers()]
-    @test arena.lastrun === a.plan                  # the run claimed it
-    @test all(==(4f0), Array(M.storage(a.out)))     # and still produced its answer
-    @test M.takeover!(M.pool(dev), E.Buffers(), b.plan)  # so b sees a real handover
-    M.run!(b.plan)
-    KernelAbstractions.synchronize(M.backend(dev))
+    @test all(==(4f0), Array(M.storage(a.out)))
     @test all(==(4f0), Array(M.storage(b.out)))
+    @test !isdefined(M, :takeover!)
 end
 
 @testset "an N-dimensional buffer reaches the GPU with its shape" begin
@@ -338,6 +340,17 @@ end
     @test size(M.storage(b)) == (3, 4)
     @test Array(b) == want
     M.free!(b)
+end
+
+# Slow enough that a submission is still in flight when the next line runs:
+# every element spins, and the total is far past what a fence poll sees pass.
+@kernel function arena_slow!(a)
+    i = @index(Global)
+    acc = 0f0
+    for k in 1:2_000_000
+        acc += sin(Float32(k) * 1f-3)
+    end
+    @inbounds a[i] = acc
 end
 
 @testset "a retired region waits for the device, then comes back" begin
@@ -357,15 +370,16 @@ end
     # are about `b` and `b3` rather than about the order of the testsets.
     while M.reclaim!(pool, dev; wait = true) > 0 end
 
-    # Retire with a batch OPEN, which is the case that must wait: a command
-    # already recorded into it can name these bytes.
+    # Retire with a submission IN FLIGHT, which is the case that must wait: a
+    # command the device is still running can name these bytes. A slow kernel
+    # keeps the timeline behind the value the region is stamped with.
     scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
-    KernelAbstractions.fill!(scratch, 1f0)          # opens a batch
-    @test MVE.has_active_recording(dev.bq)
+    arena_slow!(M.backend(dev), 16)(scratch; ndrange = 16)
+    @test !isempty(dev.bq.outstanding)
     M.free!(b)
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 
-    # Submit it and wait, so the fence it was stamped with has passed.
+    # Wait, so the fence it was stamped with has passed.
     MVE.vk_flush!(dev.ctx)
     KernelAbstractions.synchronize(M.backend(dev))
     @test M.reclaim!(pool, dev) == 1        # now
@@ -381,7 +395,7 @@ end
     # application that then submits nothing more waited for a signal nobody
     # would ever raise — the same leak this path removes, wearing a hat.
     KernelAbstractions.synchronize(M.backend(dev))
-    @test !MVE.has_active_recording(dev.bq)
+    @test M.idle(dev.bq)
     b3 = M.Buffer(dev, fill(3f0, 4096))
     while M.reclaim!(pool, dev; wait = true) > 0 end
     M.free!(b3)

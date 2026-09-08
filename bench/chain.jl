@@ -12,6 +12,8 @@
 import Mantle
 using Lava, GeometryBasics, LinearAlgebra, KernelAbstractions
 const M = Mantle
+# The backend, for the framebuffer readback this bench measures with.
+const MVE = Base.get_extension(Mantle, :MantleVulkanExt)
 
 const W, H = 1000, 750
 const NPX = W * H
@@ -43,14 +45,17 @@ function build_chain(dev, win, n)
     seed = cloud(n)
     pos = M.Buffer(dev, seed)
     col = M.Buffer(dev, tint.(seed))
-    siz = M.Scalar(dev, 2.0f0)
-    mvp = Ref(camera(0.0f0))
+    siz = M.GPURef(dev, 2.0f0)
+    # Read again every frame (`measure_chain` stores a new camera into it each
+    # loop), so a `GPURef`: the draw holds its device address.
+    mvp = M.GPURef(dev, camera(0.0f0))
 
-    fb = LavaFramebuffer(W, H; depth = false)
+    fb = M.Framebuffer(M.backend(dev), W, H; depth = false)   # the portable spelling; the type is the backend's
 
     g = M.Graph(dev)
 
     M.render!(g, "points", fb => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
+        M.use(p, mvp; read = true)
         M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
                              M.Attribute(p, siz), mvp,
                              Int32(1), Int32(0)), pos)
@@ -73,7 +78,7 @@ function build_chain(dev, win, n)
         end
     end
 
-    (; g, fb, raw, out = stage[end], mvp, plan = M.Plan(g))
+    (; g, fb, raw, out = stage[end], mvp, plan = M.record!(M.Plan(g)))
 end
 
 function measure_chain(frames = 300; n = 200_000)
@@ -91,9 +96,11 @@ function measure_chain(frames = 300; n = 200_000)
         s.mvp[] = camera(0.4f0 * Float32(time() - t0))
         acquire_next_image!(win)
         M.run!(s.plan)                               # render + compute chain
-        copy_framebuffer!(M.storage(s.raw), s.fb)     # ColorAttachment -> CopySrc
+        MVE.copy_framebuffer!(M.storage(s.raw), s.fb) # ColorAttachment -> CopySrc
         blit!(bq, WindowTarget(win), M.storage(s.out))
-        present_frame!(bq, win)
+        present_frame!(bq, win, MVE.oneshot(bq) do e
+            MVE.presentready!(e, win)
+        end)
         Mantle.flush!(bq, dev.ctx.device)
         push!(times, time() - tf)
     end

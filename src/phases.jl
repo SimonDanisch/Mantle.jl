@@ -501,6 +501,145 @@ precede Barriers, which has to emit for the hazard it finds.
 const PHASES = (Dag(), Schedule(), Liveness(), Place(), Aliasing(), Barriers(), Pipelines())
 
 """Run the whole pipeline, or a prefix of it when testing one phase in isolation."""
+const EMPTY_HANDOVER = Tuple{Int,Int}[]
+
+"""
+Walk the passes in order carrying per-resource state. What a pass needs before it
+runs is what `transition!` appends while its usages are replayed, so a pass
+touching only resources nobody else touched needs nothing and can overlap
+whatever ran before it.
+
+Nothing is coalesced across resources: a scoped barrier orders one resource's
+memory and nothing else, so a barrier emitted for A never stands in for a hazard
+on B however wide its masks. What a pass needs IS its local hazard set, and the
+backend lowers it (`passbarriers`) — this phase is the same on every backend,
+asking `needs_transition` of the device's [`syncbackend`](@ref).
+"""
+function run!(::Barriers, c)
+    g = c.graph
+    be = syncbackend(g.dev)
+    states = Dict{Int,ResourceState}()
+
+    # A resource's state at the start of a replay is not "unknown" for anything
+    # that outlives the frame: the window comes back from present, an offscreen
+    # target from whatever last read it, and every other resource from whatever
+    # this same plan did to it last time round.
+    #
+    # That last one has to be seeded from the *end* of the schedule, because a
+    # plan is replayed: frame N+1's first use of a resource follows frame N's last
+    # use of it, and with frames in flight the two overlap on the GPU. Seeding
+    # `Undefined` instead left the first barrier of a frame with no source scope —
+    # nothing to wait for — which synchronization validation reports as a
+    # write-after-write against the previous frame's store op, and which is a race
+    # the moment the frame loop stops flushing.
+    #
+    # The layout is unaffected: a discarding destination still transitions from
+    # UNDEFINED (see `ImageBarrier`). This is only about what the barrier waits on.
+    # Atomic segments, so a partial overlap is tracked rather than refused.
+    #
+    # This is what VVL's `AccessMap` does incrementally (`layers/sync/sync_access_map.h`:
+    # `Split` at each range bound, then `InfillGaps`), done once instead: by the
+    # time a plan compiles, every range that will ever be declared is known, so
+    # the cuts can be taken up front and the walk left alone. Each usage then
+    # stands for the segments its range covers, and a whole-resource usage stands
+    # for all of them — after which two usages either name the same segment or do
+    # not, which is the only question the per-resource walk knows how to answer.
+    slices = sliceindex(g)
+    segs = Dict{Int,Vector{Int}}()
+    let byparent = Dict{Int,Vector{UnitRange{Int}}}()
+        for ((pid, r), _) in g.views
+            push!(get!(byparent, pid, UnitRange{Int}[]), r)
+        end
+        for (pid, ranges) in byparent
+            parent = g.ids.by_id[pid]
+            n = length(parent)
+            cuts = sort!(unique!(vcat([1, n + 1], first.(ranges), last.(ranges) .+ 1)))
+            spans = [cuts[k]:(cuts[k + 1] - 1) for k in 1:(length(cuts) - 1)]
+            filter!(!isempty, spans)
+            ids = map(spans) do s
+                resourceid(g, get!(() -> BufferRange(parent, s), g.views, (pid, s)))
+            end
+            segs[pid] = ids                      # the whole buffer is every segment
+            for r in ranges
+                sid = resourceid(g, g.views[(pid, r)])
+                segs[sid] = [ids[k] for (k, s) in enumerate(spans) if first(s) >= first(r) &&
+                                                                      last(s) <= last(r)]
+            end
+        end
+    end
+    segments_of(id) = get(segs, id, (id,))
+
+    final = Dict{Int,Type}()
+    for p in ordered(c), (id, U) in p.usages, sid in segments_of(id)
+        final[sid] = U
+    end
+
+    state(id) = get!(states, id) do
+        r = g.ids.by_id[id]
+        u = get(final, id, nothing)
+        u === nothing && (u = initial_state(r))
+        u === nothing ? ResourceState(resourcekind(r)) :
+                        ResourceState(resourcekind(r), u)
+    end
+
+    for (i, p) in enumerate(ordered(c))
+        pre = Transition[]
+        for (id, U) in p.usages, sid in segments_of(id)
+            transition!(pre, be, sid, state(sid), U)
+        end
+
+        # A layout change is per image, so no barrier on another resource can have
+        # performed it however wide its masks were. Only the memory dependency is
+        # coalescable; an image transition dropped here never becomes an
+        # `ImageBarrier` below, and the copy after a second colour attachment then
+        # reads it in COLOR_ATTACHMENT_OPTIMAL.
+        # Coalescing across resources is what a global barrier bought, and it is
+        # exactly what a scoped one cannot: a buffer barrier orders that buffer's
+        # memory and nothing else, so a barrier emitted for resource A never
+        # stands in for a hazard on B however wide its masks are. Dropping one on
+        # that reasoning is a race — it is how the showcase's `sun cull` lost the
+        # barrier between the clear of its counter and the atomic that reads it.
+        #
+        # Nothing is left to remove per resource either: `transition!` emits only
+        # where a resource's own state actually changes, so the walk is already
+        # minimal and `pre` *is* the local hazard set. Kept as a flag because
+        # `bench/` still compiles both ways to measure what the old strategy did.
+        needed = copy(pre)
+
+        # The barrier where bytes change hands, derived like every other one.
+        #
+        # It is the one transition not produced by `transition!`, because the
+        # hazard is between two resources that never mention each other: no
+        # per-resource sequence can see that a different transient was living in
+        # this memory. What the compiler *does* know is which ones vacated it —
+        # the placer worked that out — and what each was last doing, which is the
+        # state the walk above is carrying right now. So it waits for exactly
+        # those usages, at exactly the new tenant's first one.
+        #
+        # It used to name every stage and both access directions instead. That is
+        # correct and says nothing: a barrier that waits for everything cannot be
+        # wrong, and cannot be checked either.
+        handovers = get(analysis(c).alias_begins, i, EMPTY_HANDOVER)
+        for newi in unique(first(h) for h in handovers)
+            to = usage_of(p, resourceid(g, c.graph.transients[newi]), g)
+            to === nothing && continue
+            waits = Type[]
+            for (a, o) in handovers
+                a == newi || continue
+                for u in lastuses(states, slices, resourceid(g, c.graph.transients[o]))
+                    u in waits || push!(waits, u)
+                end
+            end
+            isempty(waits) && continue
+            push!(needed, Transition(0, first(waits), waits, to))
+        end
+
+        c.prepass[p] = needed
+        append!(c.transitions, pre)
+    end
+    c
+end
+
 function compile!(ctx, phases = PHASES)
     for p in phases
         run!(p, ctx)

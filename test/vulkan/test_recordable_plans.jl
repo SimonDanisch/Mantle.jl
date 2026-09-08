@@ -1,19 +1,15 @@
 # Which plans can be recorded, and that both answers are right.
 #
 # `run!` records on the first run of any plan it can record, so "can it" has to be
-# decided somewhere and be right. Two things say no today, and each is a step of
-# this refactor that has not happened yet:
+# decided somewhere and be right. ONE thing says no now — a SURFACE, since a
+# swapchain image is a different image every frame and a recording names one, and
+# step 4 renders into a fixed offscreen target instead.
 #
-#   * a SURFACE — a swapchain image is a different image every frame and a
-#     recording names one (step 4 renders into a fixed offscreen target instead);
-#   * a whole-buffer `Update` — it lands by RENAMING, because writing the contents
-#     in place would overwrite bytes the previous run may still be reading, and a
-#     recording holds the address it was written with (step 3 puts a per-run value
-#     inline in the command buffer, so nothing has to move).
-#
-# A RANGED update always writes in place, so its plan records. That difference is
-# the whole of `renameable`, and it is worth pinning from the outside: the two
-# routes produce the same numbers and differ only in whether a store moves.
+# There were two. A whole-buffer `Update` used to land by RENAMING, which a
+# recording cannot follow because it holds the address it was written with, so a
+# ranged update recorded and a whole-buffer one did not. Both write in place now,
+# and the two testsets below pin that from the outside: same numbers, same
+# recording, and the store the plan was compiled against is still the store.
 #
 # The render pass here is also the only coverage the emitter's `begin_pass!` /
 # `set_viewport!` / `draw_in_pass!` / `end_pass!` have. `test_window.jl` is where
@@ -25,11 +21,16 @@ using Test, Mantle, KernelAbstractions
 import Lava, Vulkan   # the extension trigger; `import`, since Lava exports names Mantle does
 using GeometryBasics: Vec4f
 using ColorTypes: RGBA
-# `runtests.jl` binds these too, to the same values — a `const` re-bound to what
-# it already holds is not a redefinition.
+# `KA` and `M` are `const` in whichever test file gets there first, and a `const`
+# re-bound to what it already holds is not a redefinition.
+#
+# `MVE` is bound by `runtests.jl` — a `const` now, because kernels read through
+# it (`MVE.GEMM_TILE`) and a non-const Main global is a type-unstable global
+# access that GPUCompiler rejects. Files bind it themselves only when the
+# harness has not, which is what lets them work standalone too.
 const KA = KernelAbstractions
 const M = Mantle
-const MVE = Base.get_extension(Mantle, :MantleVulkanExt)
+@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
 
 function tri_vertex()
     v = Mantle.vertex_index() - Int32(1)
@@ -75,38 +76,45 @@ end
     M.free!(pl)
 end
 
-@testset "a renaming Update keeps its plan out of a recording" begin
+# A whole-buffer store used to RENAME: the contents landed in a fresh store
+# and the resource was pointed at it, which a recording cannot follow, because it
+# holds the address it was written with. That made this plan unrecordable, and it
+# was one of the two reasons `record!` could refuse one.
+#
+# Both routes are in place now — see `emitstore!` — so the plan records and
+# every value reaches the recording that reads it.
+@testset "a whole-buffer store writes in place, so its plan records" begin
     dev = M.Device(M.VulkanAPI())
     n = 128
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
     dst = M.Buffer(dev, zeros(Float32, n))
-    ref = M.Update(g, src)
     M.compute!(g, "copy") do p
         M.dispatch!(p, s2g_copy!, (M.use(p, dst; write = true),
                                    M.use(p, src; read = true)), n)
     end
-    pl = M.Plan(g)
-    # A whole-buffer Update renames, so this plan cannot be recorded — and says so.
-    @test !MVE.recordable(pl)
-    @test_throws ArgumentError M.record!(pl)
+    pl = M.record!(M.Plan(g))
+    @test MVE.recordable(pl)
+    # The store the plan was compiled against, so a rename would show up as a
+    # different object rather than as a wrong number.
+    store = src.store
     for v in (3f0, 7f0, 11f0, 13f0)
-        ref(fill(v, n))
+        src[:] = fill(v, n)
         M.run!(pl)
         KA.synchronize(M.backend(dev))
         @test all(==(v), Array(M.storage(dst)))
     end
-    @test !M.recorded(pl)
+    @test M.recorded(pl)
+    @test src.store === store
     M.free!(pl)
 end
 
-@testset "a ranged Update writes in place, so its plan records" begin
+@testset "a ranged store writes in place, so its plan records" begin
     dev = M.Device(M.VulkanAPI())
     n = 128
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
     dst = M.Buffer(dev, zeros(Float32, n))
-    ref = M.Update(g, src; range = 1:n)
     M.compute!(g, "copy") do p
         M.dispatch!(p, s2g_copy!, (M.use(p, dst; write = true),
                                    M.use(p, src; read = true)), n)
@@ -115,11 +123,39 @@ end
     @test MVE.recordable(pl)
     M.record!(pl)
     for v in (3f0, 7f0, 11f0, 13f0)
-        ref(fill(v, n))
+        src[1:n] = fill(v, n)
         M.run!(pl)
         KA.synchronize(M.backend(dev))
         @test all(==(v), Array(M.storage(dst)))
     end
+    M.free!(pl)
+end
+
+# Two stores to different ranges before one run are two writes, in order: a
+# `Buffer` keeps a LIST of what is waiting, where a `GPURef` keeps the last
+# value. The second range overlaps the first, so the order is visible.
+@testset "two ranged stores before one run both land, in order" begin
+    dev = M.Device(M.VulkanAPI())
+    n = 128
+    g = M.Graph(dev)
+    src = M.Buffer(dev, zeros(Float32, n))
+    dst = M.Buffer(dev, zeros(Float32, n))
+    M.compute!(g, "copy") do p
+        M.dispatch!(p, s2g_copy!, (M.use(p, dst; write = true),
+                                   M.use(p, src; read = true)), n)
+    end
+    pl = M.Plan(g)
+    M.record!(pl)
+    src[1:64] = fill(3f0, 64)
+    src[33:96] = fill(7f0, 64)
+    @test M.isdirty(src)
+    M.run!(pl)
+    KA.synchronize(M.backend(dev))
+    got = Array(M.storage(dst))
+    @test all(==(3f0), got[1:32])
+    @test all(==(7f0), got[33:96])
+    @test all(==(0f0), got[97:end])
+    @test !M.isdirty(src)
     M.free!(pl)
 end
 

@@ -1,5 +1,5 @@
 using Test, Lava, Mantle
-@testset "Phase 6 — graphics dispatch routed through record_dispatch!" begin
+@testset "Phase 6 — a draw emits into the frame's command buffer" begin
 
 @testset "vk_draw! no longer hand-rolls its dispatch barrier" begin
     # Static check: vk_draw!'s source should not contain the manual
@@ -12,17 +12,18 @@ using Test, Lava, Mantle
     src = read(joinpath(dirname(pathof(Mantle)),
                         "vulkan", "graphics", "pipeline.jl"), String)
 
-    # Extract the vk_draw! body (from the function header to its matching end)
-    m = match(r"function vk_draw!\(bq::VulkanBatchQueue,(.*?)(?=\nfunction )"s, src)
+    # Extract the vk_draw! body (from the function header to the next function).
+    # It takes the frame's emitter: the one-shot or recording it writes into
+    # opened with the global head barrier that orders it behind earlier work,
+    # so there is nothing for the draw to synchronise by hand.
+    m = match(r"function vk_draw!\(e::Emitter,(.*?)(?=\nfunction )"s, src)
     @test m !== nothing
     vk_draw_body = m.captures[1]
 
     # Old pattern: a standalone MemoryBarrier(C_NULL, ...) for dispatch sync.
-    # New code only uses ImageMemoryBarrier (for image layout transitions).
+    # Only ImageMemoryBarrier (a depth attachment's layout transition) remains.
     @test !occursin(r"Vulkan\.MemoryBarrier\(C_NULL", vk_draw_body)
-
-    # vk_draw! must go through record_dispatch!
-    @test occursin("record_dispatch!(bq", vk_draw_body)
+    @test !occursin(r"VK\.MemoryBarrier\(C_NULL", vk_draw_body)
 end
 
 end  # @testset

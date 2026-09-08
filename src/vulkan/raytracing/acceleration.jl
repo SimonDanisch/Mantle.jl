@@ -90,13 +90,17 @@ end
 # finalizer calls `vk_free!`, which defers via the BQ's timeline semaphore if
 # the buffer is still in flight.  So we just need to:
 #   1. Destroy the Vulkan AccelerationStructureKHR handle (gated on the
-#      storage buffer's last_write — same GPU memory backs the accel).
+#      storage buffer's last write — same GPU memory backs the accel).
 #   2. Drop refs to the LavaArrays; their finalizers handle the rest.
-# If the storage's last_write hasn't been signalled yet, the whole AS object
+# If the storage's last write hasn't been signalled yet, the whole AS object
 # is resurrected onto bq.deferred_as_frees and destroyed on the next drain.
-
-storage_last_write(blas::LavaBLAS) = blas.storage.buf[].last_write
-storage_last_write(tlas::LavaTLAS) = tlas.storage.buf[].last_write
+#
+# Same shape as `vk_free!`, for the same reason: the last-write stamp is the
+# owning thread's alone. A finalizer on any other thread hands the AS to the
+# default queue's deferred list WITHOUT reading it, and the owning thread's
+# drain asks the stamp. It used to read the stamp from the finalizer thread and
+# destroy the AS right there when the device was done — the one reader that
+# made the stamp an atomic tuple, boxed at every submit.
 
 function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
     # Idempotent: if `destroy_now!` already released `as.storage`'s DataRef
@@ -105,25 +109,30 @@ function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
     # finalizer trips `storage.buf[]` → `ArgumentError("Attempt to use a
     # freed reference.")` from GPUArrays.
     as.storage.buf.freed && return
-    lw = storage_last_write(as)
-    if lw !== nothing
-        bq = lw[1]::VulkanBatchQueue
-        val = lw[2]::UInt64
-        ctx = bq.ctx::VkContext
-        if device_lost(ctx)
-            destroy_now!(as)
-            return
+    buf = as.storage.buf[]::VkManagedBuffer
+    ctx = buf.ctx::VkContext
+    if device_lost(ctx)
+        destroy_now!(as)
+        return
+    end
+    bq = ctx.default_bq
+    if Threads.threadid() != bq.owning_thread
+        lock(bq.deferred_frees_lock) do
+            push!(bq.deferred_as_frees, as)   # resurrect + defer, unread
         end
-        # query_timeline throws on healthy-device failure.  In finalizer
-        # context Julia logs and moves on; device_lost is checked fresh on
-        # the next call.
-        if !passed(bq, val)
-            # Finalizer-thread push — guard with the deferred_frees_lock so
-            # the main thread's drain doesn't race.
-            lock(bq.deferred_frees_lock) do
-                push!(bq.deferred_as_frees, as)   # resurrect + defer
+        return
+    end
+    let wbq = buf.last_write_bq
+        if wbq !== nothing
+            w = wbq::VulkanBatchQueue
+            # query_timeline throws on healthy-device failure; device_lost is
+            # checked fresh on the next call.
+            if !queue_released(w) && !passed(w, buf.last_write_val)
+                lock(w.deferred_frees_lock) do
+                    push!(w.deferred_as_frees, as)   # resurrect + defer
+                end
+                return
             end
-            return
         end
     end
     destroy_now!(as)
@@ -164,18 +173,27 @@ function destroy_now!(as::Union{LavaBLAS, LavaTLAS})
     as isa LavaTLAS && empty!(as.blases)
 end
 
-# Back-compat shim for existing callers.
-destroy!(x::Union{LavaBLAS, LavaTLAS}) = unsafe_free!(x)
 
-# No-op for `nothing` so VulkanTLAS sync! cleanup paths can `unsafe_free!` old
-# backings uniformly without per-call nothing checks.
-unsafe_free!(::Nothing) = nothing
+# The AS is done with when its storage is: `lastwritepassed` on the buffer, and
+# a storage already released explicitly has nothing left in flight.
+function lastwritepassed(as::Union{LavaBLAS, LavaTLAS}, bq::VulkanBatchQueue, current::UInt64)
+    as.storage.buf.freed && return true
+    return lastwritepassed(as.storage.buf[]::VkManagedBuffer, bq, current)
+end
+
+# What a trace reads of each level: the handle, and the storage it lives in.
+# The handle is a `VK.AccelerationStructureKHR` (generic pin), the storage a
+# `LavaArray` (retained ref plus buffer pin). Core's `pintrace!` walks the
+# levels; these say what holding one level means here.
+pin!(o::Closed, t::LavaTLAS) = (pin!(o, t.accel); pin!(o, t.storage); nothing)
+pin!(o::Closed, b::LavaBLAS) = (pin!(o, b.accel); pin!(o, b.storage); nothing)
+blases(t::LavaTLAS) = t.blases
 
 """
     drain_deferred_as_frees!(bq::VulkanBatchQueue)
 
 Destroy any LavaBLAS/LavaTLAS in `bq.deferred_as_frees` whose storage
-buffer's `last_write` timeline has been reached.  Called at flush sync points.
+buffer's last write has been reached.  Called at flush sync points.
 """
 function drain_deferred_as_frees!(bq::VulkanBatchQueue)
     isempty(bq.deferred_as_frees) && return
@@ -193,8 +211,7 @@ function drain_deferred_as_frees!(bq::VulkanBatchQueue)
         i = 1
         while i <= length(bq.deferred_as_frees)
             as = bq.deferred_as_frees[i]
-            lw = storage_last_write(as)
-            if lw === nothing || (lw[1]::VulkanBatchQueue === bq && lw[2]::UInt64 <= current)
+            if lastwritepassed(as, bq, current)
                 destroy_now!(as)
                 deleteat!(bq.deferred_as_frees, i)
             else
@@ -218,8 +235,7 @@ as a required parameter. Created by `build_accel!()` which manages the lifecycle
 const VulkanAccelBuildContext = AccelBuildContext{VulkanBatchQueue{VkContext}}
 
 # Derived accessors so call sites stay readable.
-@inline as_cmd_buf(ctx::VulkanAccelBuildContext) = ctx.bq.as_cmd_buf
-@inline as_fence(ctx::VulkanAccelBuildContext)   = ctx.bq.as_fence
+@inline buildcmd(ctx::VulkanAccelBuildContext)   = ctx.into.cmd
 @inline as_queue(ctx::VulkanAccelBuildContext)   = ctx.bq.queue
 @inline as_device(ctx::VulkanAccelBuildContext)  = ctx.bq.device
 @inline as_vkctx(ctx::VulkanAccelBuildContext)   = ctx.bq.ctx::VkContext
@@ -287,7 +303,8 @@ function build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Floa
     addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
     as_addr = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
     if (ctx.bq.ctx::VkContext).diag.alloc_debug
-        push!(ALLOC_DEBUG_LOG, (kind=:blas_as, addr=as_addr, size=0, pool=false))
+        push!((ctx.bq.ctx::VkContext).diag.alloc_log,
+              (kind=:blas_as, addr=as_addr, size=0, pool=false, mtype=-1, unified=false, usage=UInt32(0)))
     end
     blas = LavaBLAS(accel, storage, as_addr, blas_preserves,
                     allow_update,
@@ -359,7 +376,7 @@ function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
     # Same barrier reasoning as refit_tlas!: the vertex rewrite above is a
     # transfer write that the AS build has to see, and a previous build/refit of
     # this same AS has to have finished.
-    cmd = as_cmd_buf(ctx)
+    cmd = buildcmd(ctx)
     pre_barrier = VK.MemoryBarrier(
         C_NULL,
         VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
@@ -447,7 +464,8 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaq
     addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
     as_addr   = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
     if (ctx.bq.ctx::VkContext).diag.alloc_debug
-        push!(ALLOC_DEBUG_LOG, (kind=:blas_aabb_as, addr=as_addr, size=0, pool=false))
+        push!((ctx.bq.ctx::VkContext).diag.alloc_log,
+              (kind=:blas_aabb_as, addr=as_addr, size=0, pool=false, mtype=-1, unified=false, usage=UInt32(0)))
     end
     blas = LavaBLAS(accel, storage, as_addr, blas_preserves)
     finalizer(unsafe_free!, blas)
@@ -533,13 +551,16 @@ refit via `refit_tlas!`.
 driver can read it as an AS build input; omitting that flag will cause Vulkan
 validation errors at build time.
 
-The caller is responsible for keeping all BLASes referenced by `instance_buf`
-alive for the lifetime of the returned HWTLAS. The instance records store BLASes
-only by device address, and the HWTLAS holds no Julia-side references to them.
-(VulkanTLAS pins them at the higher level when used through `push!(hwtlas, blas, instance_buf)`.)
+The instance records name their BLASes only by device address, so the caller
+passes the ones `instance_buf` references as `blases`: a trace of the returned
+TLAS holds every one of them (`pintrace!`) for as long as it runs, and that is
+what keeps a BLAS the owner drops from being destroyed under a trace still
+walking it. Ownership stays with the caller — releasing the TLAS drops the
+references and destroys nothing below it. Left empty, the TLAS pins only itself,
+which is right only for a caller that never frees a BLAS while a trace is out.
 """
 function build_tlas(ctx::VulkanAccelBuildContext, instance_buf::LavaArray{VulkanInstanceRecord, 1},
-                    n::Integer; allow_update::Bool=false)
+                    n::Integer; allow_update::Bool=false, blases::Vector{LavaBLAS}=LavaBLAS[])
     bq = ctx.bq
     dev = as_device(ctx)
     n_instances = Int(n)
@@ -575,10 +596,12 @@ function build_tlas(ctx::VulkanAccelBuildContext, instance_buf::LavaArray{Vulkan
         instance_addr=inst_addr,
         primitive_count=UInt32(n_instances))
 
-    # No referenced BLASes known at this layer -- the instance buffer carries them
-    # by device address. Pinning is the caller's responsibility (VulkanTLAS pins them
-    # on the higher-level handle).
-    tlas = LavaTLAS(accel, storage, LavaBLAS[], tlas_preserves,
+    # The BLASes the instance buffer names, so a trace pins them. This was
+    # `LavaBLAS[]` with a comment saying the VulkanTLAS pinned them "at the
+    # higher level" — it did not: every trace path pinned `tlas.blases`, which
+    # was this empty list, so a BLAS `sync!` dropped could be destroyed under a
+    # trace still walking it. `test_pintrace.jl` pins the count.
+    tlas = LavaTLAS(accel, storage, unique(blases), tlas_preserves,
                     allow_update, sizes.update_scratch_size, instance_buf,
                     Dict{UInt64, Tuple{VK.DescriptorPool, VK.DescriptorSet}}())
     finalizer(unsafe_free!, tlas)
@@ -633,7 +656,7 @@ function refit_tlas!(ctx::VulkanAccelBuildContext, tlas::LavaTLAS,
     c_range = VkBRI(UInt32(n_instances), UInt32(0), UInt32(0), UInt32(0))
 
     fptr = VK.function_pointer(dev, "vkCmdBuildAccelerationStructuresKHR")
-    cmd = as_cmd_buf(ctx)
+    cmd = buildcmd(ctx)
 
     # Pre-barrier: cover both prior AS builds AND prior compute/transfer writes
     # to instance_buf. The latter is the per-frame hot path where a compute
@@ -765,8 +788,8 @@ function create_as_input_pool(ctx::VkContext, nbytes::UInt64)
     # from device-local pool), to correlate with cross-scene cascade fault
     # addresses in the 0x8000_xxxx_xxxx range.
     if ctx.diag.alloc_debug
-        push!(ALLOC_DEBUG_LOG,
-              (kind=:as_input_pool, addr=addr, size=Int(nbytes), pool=false))
+        push!(ctx.diag.alloc_log,
+              (kind=:as_input_pool, addr=addr, size=Int(nbytes), pool=false, mtype=-1, unified=false, usage=UInt32(0)))
     end
 
     return buf, memory, addr
@@ -992,72 +1015,56 @@ BLAS device addresses are available immediately after `build_blas` returns
 (even before the GPU build executes), so `build_tlas` can reference them.
 """
 function build_accel!(f; bq::VulkanBatchQueue=vk_context().default_bq)
-    # Flush any pending compute dispatches before AS builds (the AS build
-    # reads vertex/index/instance buffers that prior dispatches may have
-    # written to).
-    if has_active_recording(bq)
-        flush!(bq, bq.device)
+    # The builds go into a one-shot of their own, on the timeline like every
+    # other submission — it used to be a dedicated command buffer and a fence
+    # beside the queue, submitted by a second route. The one-shot opens with
+    # the global barrier, so the vertex, index and instance buffers prior
+    # dispatches wrote are visible to the build without the flush that stood
+    # here.
+    preserves = Any[]
+    result = Ref{Any}(nothing)
+    tok = oneshot!(bq; tag = :accel) do e
+        result[] = f(AccelBuildContext(bq, e, preserves))
+        # Final barrier: make all AS writes visible to RT shader reads
+        post_barrier = VK.MemoryBarrier(
+            C_NULL,
+            VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+            VK.ACCESS_SHADER_READ_BIT,
+        )
+        VK.cmd_pipeline_barrier(
+            e.cmd, [post_barrier], [], [];
+            src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                           VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        )
     end
-
-    cmd = bq.as_cmd_buf
-    throw_if_error(bq, "vkBeginCommandBuffer",
-        VK.begin_command_buffer(cmd, VK.CommandBufferBeginInfo(
-            flags=VK.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        )))
-
-    ctx = VulkanAccelBuildContext(bq, Any[])
-    result = try
-        f(ctx)
-    catch
-        # Reset command buffer so it's reusable
-        throw_if_error(bq, "vkEndCommandBuffer", VK.end_command_buffer(cmd))
-        empty!(ctx.preserves)
-        rethrow()
-    end
-
-    # Final barrier: make all AS writes visible to RT shader reads
-    post_barrier = VK.MemoryBarrier(
-        C_NULL,
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-        VK.ACCESS_SHADER_READ_BIT,
-    )
-    VK.cmd_pipeline_barrier(
-        cmd, [post_barrier], [], [];
-        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                       VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-    )
-
-    throw_if_error(bq, "vkEndCommandBuffer", VK.end_command_buffer(cmd))
-
-    fence = bq.as_fence
-    submit_info = VK.SubmitInfo([], [], [cmd], [])
-    queue_submit!(bq, [submit_info]; fence=fence)
-    wait_for_fences!(bq, [fence])
-    unwrap(VK.reset_fences(bq.device, [fence]))
+    # Callers used to wait on the fence, so the build is complete when this
+    # returns: the token is what they wait for now — on `bq`'s timeline, which
+    # is the caller's queue and need not be the device's primary one.
+    waitfor!(bq, tok)
 
     # Inputs that must outlive the GPU submit (vertex/index for BLAS, instance
     # buffer for HWTLAS) are owned by LavaBLAS/LavaTLAS via their preserves.
-    # Scratch buffers in `ctx.preserves` are submit-scoped and have been
-    # through the fence wait above, so eagerly release them here via the
-    # DataRef refcount path (LavaArray itself has no finalizer; lifetime is
-    # the DataRef's sole responsibility after the Phase 3 refactor).
-    # Without this explicit release, each build_accel! leaks ~hundreds of MB of
-    # scratch per call — multi-frame renders (dolphin HQ video) hit VRAM OOM.
-    for p in ctx.preserves
+    # Scratch buffers in `preserves` are submit-scoped and have been through
+    # the wait above, so eagerly release them here via the DataRef refcount
+    # path (LavaArray itself has no finalizer; lifetime is the DataRef's sole
+    # responsibility after the Phase 3 refactor). Without this explicit
+    # release, each build_accel! leaks ~hundreds of MB of scratch per call —
+    # multi-frame renders (dolphin HQ video) hit VRAM OOM.
+    for p in preserves
         if p isa LavaArray
             unsafe_free!(p)
         end
     end
-    empty!(ctx.preserves)
-    return result
+    empty!(preserves)
+    return result[]
 end
 
 """Record an acceleration structure build into an VulkanAccelBuildContext's command buffer.
 
-Always records into `ctx.cmd_buf`. The VulkanAccelBuildContext (created by `build_accel!()`)
-manages the full lifecycle: begin CB, record builds, submit, wait.
+Always records into the one-shot `build_accel!()` opened (`buildcmd(ctx)`),
+which manages the full lifecycle: open, record builds, submit, wait.
 """
 function build_as_on_gpu(ctx::VulkanAccelBuildContext, accel::VK.AccelerationStructureKHR,
                          scratch_addr::UInt64, geom::GeometryType;
@@ -1091,7 +1098,7 @@ function build_as_on_gpu_impl(ctx::VulkanAccelBuildContext, accel::VK.Accelerati
                                as_type::UInt32, build_flags::UInt32, primitive_count::UInt32,
                                mode::UInt32=UInt32(0),
                                src_as::Union{Nothing, VK.AccelerationStructureKHR}=nothing)
-    cmd = as_cmd_buf(ctx)
+    cmd = buildcmd(ctx)
 
     # packed by caller so typed and legacy dispatch paths share this body
 
@@ -1249,7 +1256,8 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
         addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
         as_addr = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
         if (bq.ctx::VkContext).diag.alloc_debug
-            push!(ALLOC_DEBUG_LOG, (kind=:blas_as_pool, addr=as_addr, size=0, pool=true))
+            push!((bq.ctx::VkContext).diag.alloc_log,
+                  (kind=:blas_as_pool, addr=as_addr, size=0, pool=true, mtype=-1, unified=false, usage=UInt32(0)))
         end
         # All pooled BLASes share `as_pool_arr` as their storage. They
         # reference the same LavaArray so its VkManagedBuffer's last_write
@@ -1286,7 +1294,7 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
                         VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
                     )
                     VK.cmd_pipeline_barrier(
-                        as_cmd_buf(as_ctx), [scratch_barrier], [], [];
+                        buildcmd(as_ctx), [scratch_barrier], [], [];
                         src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                         dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                     )
@@ -1511,7 +1519,8 @@ function build_hw_accel_from_tlas(tlas;
         addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
         as_addr = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
         if ctx.diag.alloc_debug
-            push!(ALLOC_DEBUG_LOG, (kind=:blas_as_pool2, addr=as_addr, size=0, pool=true))
+            push!(ctx.diag.alloc_log,
+                  (kind=:blas_as_pool2, addr=as_addr, size=0, pool=true, mtype=-1, unified=false, usage=UInt32(0)))
         end
         blas = LavaBLAS(accel, as_pool_arr, as_addr, LavaArray[])
         # No finalizer: each pooled BLAS shares `as_pool_arr` as storage.
@@ -1545,7 +1554,7 @@ function build_hw_accel_from_tlas(tlas;
                         VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
                     )
                     VK.cmd_pipeline_barrier(
-                        as_cmd_buf(as_ctx), [scratch_barrier], [], [];
+                        buildcmd(as_ctx), [scratch_barrier], [], [];
                         src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                         dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                     )

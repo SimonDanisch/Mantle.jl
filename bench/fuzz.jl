@@ -5,8 +5,8 @@
 #
 #   1. synchronization validation reports nothing, which is what actually
 #      detects a missing barrier
-#   2. the results match the same graph run with the backend's unconditional
-#      per-dispatch barrier
+#   2. the results match the same graph compiled with coalescing off — every
+#      transition the per-resource walk produced, lowered without dropping any
 #
 # Graphs are random DAGs by construction: pass i writes resource i and reads only
 # resources written earlier, so nothing is ever read before it is written and the
@@ -61,7 +61,7 @@ function random_graph(dev, rng, n, passes; policy = M.Overlap(), coalesce = true
         M.dispatch!(p, keep!, (M.use(p, out; write = true),
                                M.use(p, bufs[end]; read = true)), n)
     end
-    (; g, seed, out, bufs, plan = M.Plan(g; policy, coalesce))
+    (; g, seed, out, bufs, plan = M.record!(M.Plan(g; policy, coalesce)))
 end
 
 """
@@ -85,23 +85,23 @@ end
 emitted(plan) = count(pp -> !isempty(pp.pre), plan.passes)
 
 """
-Run one random graph both ways and compare, and check both against the CPU
-replay. Returns the barrier counts, whether the two agreed, and whether either
-was right.
+Run one random graph compiled both ways — coalesced and not — and compare, and
+check both against the CPU replay. Returns the barrier counts, whether the two
+agreed, and whether either was right.
 """
 function check(dev, seed; n = 4096, passes = 12, policy = M.Overlap())
-    rng = MersenneTwister(seed)
-    s = random_graph(dev, rng, n, passes; policy)
+    s = random_graph(dev, MersenneTwister(seed), n, passes; policy)
+    u = random_graph(dev, MersenneTwister(seed), n, passes; policy, coalesce = false)
     want = expected(MersenneTwister(seed), passes)
 
-    function once(mode)
-        M.update!(s.seed, fill(1.0f0, n))
-        M.run!(s.plan; barriers = mode)
+    function once(graph)
+        M.update!(graph.seed, fill(1.0f0, n))
+        M.run!(graph.plan)
         Mantle.flush!(dev.bq, dev.ctx.device)
-        Array(M.storage(s.out))
+        Array(M.storage(graph.out))
     end
-    reference = once(:backend)
-    got = once(:derived)
+    reference = once(u)
+    got = once(s)
 
     # What coalescing removed, measured rather than guessed at. `passes - 1` was
     # the old proxy for "every barrier there could be", and it undercounts: a plan
@@ -110,8 +110,7 @@ function check(dev, seed; n = 4096, passes = 12, policy = M.Overlap())
     # question the number is for, and does not move when a mask gets wider.
     (seed = seed,
      emitted = emitted(s.plan),
-     uncoalesced = emitted(random_graph(dev, MersenneTwister(seed), n, passes;
-                                        policy, coalesce = false).plan),
+     uncoalesced = emitted(u.plan),
      possible = length(s.plan.passes) - 1,
      agree = got == reference,
      correct = all(==(want), got) && all(==(want), reference))

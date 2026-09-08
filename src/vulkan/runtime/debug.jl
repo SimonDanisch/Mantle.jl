@@ -94,8 +94,7 @@ function verify_gpu_av(; timeout::Float64=30.0)
     # signals.  The async callback only copies bytes into a ring, so neither the
     # wait nor the drain can hang; we drain + scan after each short wait.
     submit!(bq)
-    target = isempty(bq.in_flight) ? UInt64(0) :
-             maximum(b.signal_value for b in bq.in_flight)
+    target = something(newest(bq), UInt64(0))
     matches(s) = occursin("Out of bounds access", s) || occursin("device address", s)
     caught_msg = ""
     deadline = time() + timeout

@@ -9,14 +9,15 @@ const M = Mantle
 const W, H = 1000, 750
 
 function scatter_vertex(pos::AbstractVector{Vec3f}, col::AbstractVector{Vec4f},
-                        siz::AbstractVector{Float32}, mvp::Mat4f,
+                        siz::AbstractVector{Float32}, mvp::AbstractVector{Mat4f},
                         scol::Int32, ssiz::Int32)
     i = vertex_index()
     @inbounds p = pos[i]
     @inbounds c = col[1 + scol * (i - Int32(1))]
     @inbounds s = siz[1 + ssiz * (i - Int32(1))]
+    @inbounds m = mvp[1]
     set_point_size!(s)
-    return (position = mvp * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
+    return (position = m * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
 end
 
 const SCATTER = Rasterizer(
@@ -43,11 +44,11 @@ end
 
 drift(n) = [0.35f0 * Vec3f(randn(Float32), randn(Float32), randn(Float32)) for _ in 1:n]
 
-@kernel function advect!(pos, vel, dt::Float32, radius::Float32)
+@kernel function advect!(pos, vel, dt, radius::Float32)
     i = @index(Global)
     @inbounds begin
         v = vel[i]
-        p = pos[i] + v * dt
+        p = pos[i] + v * dt[1]
         r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
         # Reflect rather than clamp: clamping piles every escapee onto the shell
         # and the cloud slowly collapses into a sphere of stationary points.
@@ -68,6 +69,7 @@ struct Scatter{P,C,S}
 end
 
 function bind(p, s::Scatter, mvp)
+    M.use(p, mvp; read = true)
     pos = M.Attribute(p, s.positions)
     col = M.Attribute(p, s.color)
     siz = M.Attribute(p, s.markersize)
@@ -78,20 +80,24 @@ function build(dev, win, na, nb)
     seed_a, seed_b = cloud(na), cloud(nb)
 
     # A: per-point colour, one shared size.
-    a = Scatter(M.Buffer(dev, seed_a), M.Buffer(dev, tint.(seed_a)), M.Scalar(dev, 2.0f0))
+    a = Scatter(M.Buffer(dev, seed_a), M.Buffer(dev, tint.(seed_a)), M.GPURef(dev, 2.0f0))
     # B: one shared colour, per-point size.
-    b = Scatter(M.Buffer(dev, seed_b), M.Scalar(dev, Vec4f(0.10, 0.04, 0.01, 1)),
+    b = Scatter(M.Buffer(dev, seed_b), M.GPURef(dev, Vec4f(0.10, 0.04, 0.01, 1)),
                 M.Buffer(dev, 1.0f0 .+ 3.0f0 .* rand(Float32, nb)))
 
     a_vel = M.Buffer(dev, drift(na))
     b_vel = M.Buffer(dev, drift(nb))
 
-    mvp = Ref(camera(0.0f0))
-    dt = Ref(1.0f0 / 60)
+    # Both are read again every frame (`demo` stores a new camera and frame
+    # dt into them each loop), so both are `GPURef`s: the dispatches hold their
+    # device address, and one store writes the pending value in place.
+    mvp = M.GPURef(dev, camera(0.0f0))
+    dt = M.GPURef(dev, 1.0f0 / 60)
     g = M.Graph(dev)
     screen = M.Surface(g, win)
 
     M.compute!(g, "advect") do p
+        M.use(p, dt; read = true)
         for (s, vel) in ((a, a_vel), (b, b_vel))
             x = M.use(p, s.positions; read = true, write = true)
             v = M.use(p, vel; read = true, write = true)

@@ -1,42 +1,45 @@
 # The submission queue.
 #
-# 41 fields, of which TEN name a driver object and thirty-one do not. The thirty-one
-# are an argument-slab ring allocator, a deferred-free list, barrier elision
-# state, capture/replay watermarks and submission thresholds — machinery every
-# backend needs and none of it Vulkan's. It was `VulkanBatchQueue`, so a Metal
-# backend would have written all of it again.
+# It was 41 fields, of which TEN name a driver object and thirty-one did not. The
+# thirty-one were an argument-slab ring allocator, a deferred-free list, barrier
+# elision state, capture/replay watermarks and submission thresholds — machinery
+# every backend needs and none of it Vulkan's. It was `VulkanBatchQueue`, so a
+# Metal backend would have written all of it again. Sixteen of them are gone
+# outright rather than shared: they existed because something recorded GPU work
+# without a plan, and a plan says what they were guessing. The last of those —
+# the open command buffer itself, with its pools of batches and segments, its
+# split and submit thresholds, its dedicated acceleration-structure buffer and
+# fence, and its staging buffer — went with it: nothing is open on a queue
+# between calls, and what a caller closed is submitted when it is closed.
 #
-# The ten are type parameters, and the field NAMES are unchanged, so the 115
-# places that say `bq.device` or `bq.timeline_sem` still read the same. The
+# The driver objects are type parameters, and the field NAMES are unchanged, so
+# the places that say `bq.device` or `bq.timeline_sem` still read the same. The
 # Vulkan backend keeps `const VulkanBatchQueue{C} = BatchQueue{VK.Device, …, C}`
 # so even its own spelling survives.
 
 """
     BatchQueue
 
-An independent command submission channel owning a Vulkan queue, command pool,
-and batch state. Multiple `BatchQueue`s can record and submit independently
-(e.g., primary queue for graphics/present, compute queue for async RT).
+An independent command submission channel owning a Vulkan queue, a command pool
+and what it has in flight. Multiple `BatchQueue`s can record and submit
+independently (e.g., primary queue for graphics/present, compute queue for
+async RT).
 
 Create with `BatchQueue(device, queue, queue_family_index)`.
 """
-mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
+# `T` is the backend's submission-token type (Vulkan: a UInt64 timeline value)
+# and `B` its submission, what the sweep hands to `recycle!` once the token has
+# passed. Parameters rather than an abstract `Outstanding` eltype because the
+# latter boxes every token a sweep reads — 80 bytes of every submission.
+mutable struct BatchQueue{D,Q,P,B,O,S,C,T}
     device::D
     queue::Q
     family_index::UInt32
     cmd_pool::P
-    active_batch::Union{Nothing,B}
-    in_flight::Vector{B}
-    free_batches::Vector{B}
-    free_cmd_bufs::Vector{CB}
-    # Dedicated AS-build command buffer + fence — allocated from this BQ's
-    # own cmd_pool and submitted on this BQ's queue.  Keeping them on the
-    # BQ (not the VkContext) means AS build, submit and queue are locked
-    # together by construction.
-    as_cmd_buf::CB
-    as_fence::F
-
-    # ── Explicit-queue refactor additions ────────────────────────────────
+    # Pooled, so a submission and the one-shot an ad hoc launch takes allocate
+    # nothing beyond the scratch region the launch acquires.
+    free_submissions::Vector{B}
+    free_oneshots::Vector{O}
     # One timeline semaphore per queue.  Each submit signals next_timeline+1.
     timeline_sem::S
     next_timeline::UInt64
@@ -57,32 +60,13 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     # Guards `deferred_frees` AND `deferred_as_frees`.  Acquired on every
     # push from finalizer threads and on every drain from the main thread.
     deferred_frees_lock::Base.Threads.SpinLock
-    # Seven fields are gone from here: an argument-slab ring (`arg_slabs`,
-    # `arg_slab_idx`, `arg_slab_offset`, `arg_alloc_count`, `arg_pool_frontier`)
-    # and an indirect-slab ring beside it (`indirect_slabs`, `indirect_slab_idx`,
-    # `indirect_slab_offset`).
-    #
-    # They were two hand-rolled bump allocators, and every one of those fields
-    # existed to answer "when may these bytes be handed out again" — a question
-    # the pool answers with a `Region` and an owner. A recording's arguments now
-    # belong to whoever owns the recording: to the plan when the plan laid them
-    # out, to the batch when an ad-hoc launch took them, to the capture when one
-    # is open. None of those has to guess, because a fence says when its work is
-    # done and `release!` is what "done" means.
-    #
-    # The rewind was also a live bug wearing a performance hat: it fired whenever
-    # the queue drained, while a recording holds its addresses for ever.
-    # Per-BQ staging buffer for CPU↔GPU transfers. A single VkManagedBuffer
-    # that grows as needed via get_staging!. Reused across transfers.
-    # Loose type — VkManagedBuffer is declared later in memory.jl.
-    staging::Union{Nothing, Any}
     # Back-reference to owning VkContext.
     #
-    # `::C`, a TYPE PARAMETER, not `::Any`. `VkContext` is declared ~280 lines
-    # below this struct, so the field cannot name it directly — that ordering is
-    # the only reason it was ever untyped. A parameter closes the cycle without
-    # needing the name: `VkContext` holds a `BatchQueue{VkContext}`, exactly the
-    # shape `struct Node; next::Vector{Node}; end` already uses.
+    # `::C`, a TYPE PARAMETER, not `::Any`. `VkContext` is declared after this
+    # struct, so the field cannot name it directly — that ordering is the only
+    # reason it was ever untyped. A parameter closes the cycle without needing
+    # the name: `VkContext` holds a `BatchQueue{VkContext}`, exactly the shape
+    # `struct Node; next::Vector{Node}; end` already uses.
     #
     # Untyped, `bq.ctx.caches.<anything>` inferred as `Any`, which made the
     # launch-plan lookup a dynamic dispatch and its loop a dynamic ITERATION:
@@ -90,82 +74,28 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     # nothing. The workaround was `bq.ctx::VkContext` written at eight separate
     # call sites, and the ninth (the plan lookup) simply forgot it. A parameter
     # makes it structural — there is no site left that can forget.
-    #
-    # The previous comment claimed this could be `nothing` "during the brief
-    # window of default_bq construction". It cannot: `VkContext`'s inner
-    # constructor is two-phase via `new()` precisely so a live `ctx` exists
-    # before `BatchQueue(...)` is called, and every call site passes one.
     ctx::C
     # Single-writer invariant: only this thread may record into or submit
     # from this BatchQueue.  Captured at construction from `Threads.threadid()`.
-    # Every dispatch-recording / sweep / slab-alloc entry point asserts that
-    # it is running on this thread — an accidental cross-thread call trips
-    # the assert immediately instead of silently corrupting state.
+    # Every submit / sweep / scratch-alloc entry point asserts that it is
+    # running on this thread — an accidental cross-thread call trips the assert
+    # immediately instead of silently corrupting state.
     owning_thread::Int
-
-    # ── Recording policy. These were six module-level `Ref`s, which made them
-    # process-wide settings for something that is per queue: two BatchQueues on
-    # one device already disagree about how much work to batch before submitting,
-    # and a second device made it worse. They are still mutable defaults — that
-    # is what they are for — but they are now this queue's.
-    #
-    # `auto_submit_threshold` at 64 rather than 0 is the +44% measured in
-    # `perf-plan.md`: at 0, recording and execution never overlapped.
-    auto_submit_threshold::Int
-    cb_split_threshold::Int
+    # How long `flush!` waits before it decides a dispatch is not completing.
+    # The submit and split thresholds stood beside it and are gone with the
+    # open command buffer they paced: what is handed to the driver is what a
+    # caller closed, whole, and it goes at once.
     flush_timeout_ns::UInt64
-    barrier_mode::Symbol
-    barrier_elision::Bool
-    # One-shot, consumed by exactly the next dispatch on THIS queue.
-    next_skip_barrier::Bool
-    # `scope_depth` is gone from here. It counted open "do not end this command
-    # buffer" scopes, because a conditional-rendering scope's begin and end have
-    # to be in ONE command buffer and `auto_submit_threshold` would cut between
-    # them. Only `repeat!` opens one, and a plan's passes are emitted into the
-    # plan's own command buffer now — which nothing splits and nothing submits
-    # while it is being written. The heuristic it suppressed is not reachable
-    # from there at all, which is what makes deleting the counter the fix rather
-    # than moving it.
-    # Set by the KA launch path for the dispatch it is about to record: "this
-    # dispatch enumerated its buffers, so the elision tracker saw everything it
-    # touches". Same one-shot shape as `next_skip_barrier`, and it was a global
-    # for the same reason — the hand-off is launch → `record_dispatch!` and both
-    # already have the queue.
-    ranges_declared::Bool
-    # The elision tracker itself. `touched_ranges` accumulates what recent
-    # dispatches in the current batch wrote; `dispatch_ranges` is scratch for the
-    # dispatch being recorded. Reused, never reallocated — and per queue, because
-    # two queues recording concurrently into their own command buffers were
-    # sharing one tracker, so a range written on one could elide a barrier on the
-    # other.
-    touched_ranges::Vector{UInt64}
-    dispatch_ranges::Vector{UInt64}
-    # Non-`nothing` inside `concurrent_indirect_group`: dispatches append here
-    # instead of recording, and the group's flush fuses them.
-    deferred_indirect::Union{Nothing,Vector{Any}}
-    # `capturing` is gone from here. It held the `CapturedSequence` open on this
-    # queue, and four separate places asked it what to do: which flags to begin a
-    # command buffer with, whether `submit!` should seal instead of submit,
-    # whether `flush!` was legal, who owned a scratch region. All four are
-    # questions about ONE recording, and a recording is now a value with an
-    # owner — so each of them is answered by the argument rather than by a field
-    # that any code anywhere could be looking at.
     # Everything handed to the device from this queue and not yet known finished,
-    # oldest first. See `graph/submission.jl`.
-    #
-    # This was `replay_watermark::UInt64` — "highest timeline value signalled by a
-    # replay" — which existed because a replay puts no `CommandBatch` in
-    # `in_flight`, so `flush!` scanning `in_flight` alone returned before the GPU
-    # had run any of it. That is one record of outstanding work per SUBMISSION
-    # PATH, and there were two paths, so there were two records and every consumer
-    # had to remember both.
-    #
-    # One list, and a token per entry that the backend understands. `flush!` waits
-    # for `newest`; `nextslot!` asks whether the token that last used its slot has
-    # `passed`; a replay is a submission like any other. Nothing folds over two
-    # lists looking for a maximum any more, and a third submission path would be
-    # recorded here without touching a single consumer.
-    outstanding::Vector{Outstanding}
+    # oldest first: the token, and the submission it covers — the one-shots it
+    # owns and the recordings it pinned — which the sweep gives back in order.
+    # See `graph/submission.jl`: `flush!` waits for `newest`; `waitfor!(plan)`
+    # asks whether the token covering its last run has `passed`; a recording is
+    # a submission like any other. Nothing else sits on the queue between calls:
+    # there is no open command buffer, no list of closed-but-unsubmitted work
+    # and no threshold deciding the fate of either; `submit!` hands over what it
+    # is given, the moment it is called.
+    outstanding::Vector{Outstanding{T,B}}
     # What the last dispatch on this queue was, for the dispatch log and for
     # DEVICE_LOST diagnostics. Process-wide, these attributed one queue's crash
     # to another queue's kernel.
@@ -175,6 +105,12 @@ mutable struct BatchQueue{D,Q,P,B,CB,F,S,C}
     # `release_batch_queue!` can hand the slot back. -1 for the primary queue and
     # for any queue that had to share it because the family ran out.
     queue_index::Int
+    # Per-queue scratch a backend's fast paths refill rather than allocate:
+    # Vulkan hangs a `QueueSlots` here (semaphore / wait-info / counter cells
+    # for the wait and query calls a sweep makes). `Any` because the type is
+    # the backend's and declared later; it is a heap object, so reading the
+    # field hands out a reference, not a box.
+    slots::Any
 end
 
 # ── The queue's lifecycle verbs ──────────────────────────────────────────────
@@ -248,28 +184,29 @@ backend must refuse to release the device's primary queue.
 function release_batch_queue! end
 
 """
-    ensure_active_batch!(bq) -> batch
+    submit!(bq, closed...) -> token
 
-Open a batch on `bq` if none is recording, and return it.
+Hand closed command buffers to the device, in one submission, in the order
+given, and answer with the token that covers them.
 
-A backend must refuse to open one on a lost device: without that gate, work
-keeps being recorded into batches that will never run, and the resource leak
-plus the flood of follow-on failures hides whatever killed the device.
+The one way GPU work reaches the driver, and it goes the moment it is called:
+there is nothing on a queue between calls but what is in flight. A backend's
+queue implements it — the Vulkan one takes a plan's `Recording` and the
+`OneShot`s every other path closes inside one call, plus the semaphores and
+fence a present needs. It replaced the `submit!(device)` hook, "send whatever
+the backend has recorded but not yet submitted", which had nothing left to
+send once nothing was ever left recorded.
 """
-function ensure_active_batch! end
+function submit! end
 
 """
     flush!(bq, device)
 
-Submit everything `bq` has recorded, and wait until the device has finished it.
+Wait until the device has finished everything submitted on `bq`.
 
-The docstring said "does not wait — use `waitidle` for that", and the only
-implementation has always waited: it submits and then blocks on the timeline
-until the newest submitted value is signalled. Believing the docstring is how
-`waitidle(::LavaDevice)` came to be `vkDeviceWaitIdle` alone, which waits for
-submitted work and therefore not for the batch the caller was still holding.
-
-To submit without waiting, `submit!(bq)`.
+It used to submit first, because a queue held an open batch that nothing had
+handed over; there is nothing to hand over now, so this is `waitfor!` on the
+newest submission and nothing else.
 """
 function flush! end
 
@@ -285,19 +222,11 @@ outstanding(bq::BatchQueue) = bq.outstanding
 """
     waitidle(device)
 
-Hand over everything this device's queue is still holding, then block until it
-has finished all of it.
-
-"Everything SUBMITTED to it" is what this said, and it is the weaker contract
-that made the Vulkan method wrong: a headless plan submits when something asks
-it to, so a `run!` sits in an open batch, and a wait that skips it returns
-before the device has been told the work exists. The caller cannot tell from the
-outside — the readback that usually follows flushes on its own — so what broke
-was the caller who wanted the handover itself, to keep one submission from
-growing past the driver's timeout.
+Block until this device has finished everything it has been given.
 
 The blunt instrument, for teardown and for reading back a resource whose
 producer was submitted on a queue the reader does not track. To wait for ONE
-plan's last run, [`waitfor!`](@ref).
+plan's last run, [`waitfor!`](@ref). Everything a caller records is submitted
+the moment it is closed, so there is nothing to hand over first.
 """
 function waitidle end

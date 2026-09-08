@@ -79,7 +79,7 @@ Mantle.waitidle(::HostDevice) = nothing
 
 # ── persistent resources ──────────────────────────────────────────────────────
 #
-# `HostBuffer`/`HostScalar` are gone: `Mantle.Buffer` and `Mantle.Scalar` are core
+# `HostBuffer`/`HostScalar` are gone: `Mantle.Buffer` and `Mantle.GPURef` are core
 # types over pool regions, so a backend supplies four primitives and no type.
 
 Mantle.rawalloc(::HostDevice, ::Mantle.Persistent, bytes::Int, c) = zeros(UInt8, max(bytes, 1))
@@ -238,3 +238,13 @@ earlier step wrote is already visible. Overriding this is what keeps the shared
 `ndrangeof` free here while it synchronises on a GPU — see `graph/kalaunch.jl`.
 """
 Mantle.awaitwrites(::HostDevice) = nothing
+
+"""
+Yes, trivially: nothing here is recorded. A GPU discards a predicated iteration
+with conditional rendering because its commands are already written; this
+backend interprets the plan on every run, so "discard" is `withpredicate`
+reading the flag and not calling the body — which it can do because the flag is a host
+array the gate kernel just wrote on this very thread.
+"""
+Mantle.supportspredicate(::HostDevice) = true
+Mantle.syncbackend(::HostDevice) = Mantle.HostAPI()

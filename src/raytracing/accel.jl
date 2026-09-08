@@ -57,8 +57,11 @@ once [`BatchQueue`](@ref) stopped being per-backend. Building is the expensive
 part of ray tracing and every backend wants to amortise it, so the context is
 API rather than an implementation detail one of them happens to have.
 """
-mutable struct AccelBuildContext{Q}
+mutable struct AccelBuildContext{Q,E}
     bq::Q
+    # Where the builds are written: the backend's emitter over the closed
+    # command buffer `build_accel!` opened for them, submitted on the way out.
+    into::E
     preserves::Vector{Any}
 end
-AccelBuildContext(bq) = AccelBuildContext(bq, Any[])
+AccelBuildContext(bq, into) = AccelBuildContext(bq, into, Any[])

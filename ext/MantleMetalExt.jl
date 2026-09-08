@@ -29,7 +29,7 @@ import Mantle: Device, backend, pool,
 import Mantle: caps
 # The graph's execution path is core's (`graph/kalaunch.jl`); this backend
 # supplies `resolve` and says that barriers are a no-op.
-import Mantle: resolve, run!, materialize!, alignment
+import Mantle: resolve, syncbackend, materialize!, alignment
 # Hardware ray tracing — the verbs Mantle declares in `raytracing/api.jl`.
 import Mantle: build_accel!, refit_tlas!, trace_closest_hits!
 # Device-wide sync, the graphics capability answer, and the queue verb that
@@ -58,7 +58,7 @@ import Adapt
 # wrapped. The Vulkan extension imports Raycore for the same reason.
 import Raycore
 using Metal.ObjectiveC: NSArray
-using Mantle: Compile, Barriers, TransientBuffer
+using Mantle: TransientBuffer
 # Read, not extended.
 using Mantle: Pool, DeviceArray, Persistent, Buffers, Images, region, memoryof, offset
 

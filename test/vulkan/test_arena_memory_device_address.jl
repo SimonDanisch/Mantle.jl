@@ -45,7 +45,7 @@ function _arenaplan(dev, out, n)
         s = Mantle.use(p, t; read = true); d = Mantle.use(p, out; write = true)
         Mantle.dispatch!(p, arena_copy!, (d, s), n)
     end
-    (Mantle.Plan(g), seed)
+    (Mantle.record!(Mantle.Plan(g)), seed)
 end
 
 @testset "arena memory is allocated for device addresses" begin

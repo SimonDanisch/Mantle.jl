@@ -1,7 +1,8 @@
 using Test, Lava, Raycore
 using Mantle: build_accel!
 using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE, write_grain_instances_kernel
-using GeometryBasics: Point3f, Vec3f, Vec4f
+using GeometryBasics: Point3f, Vec3f, Vec4f, Mat4f
+using LinearAlgebra: I
 
 @testset "VulkanTLAS sync! with instance batch" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
@@ -41,6 +42,15 @@ end
     n_a = 4; n_b = 6
     instance_buf1 = MVE.LavaArray{VulkanInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)
     instance_buf2 = MVE.LavaArray{VulkanInstanceRecord}(undef, n_b; extra_usage=AS_INPUT_USAGE)
+    # `undef` is recycled memory: when the bytes happen to hold a stale-but-valid
+    # BLAS address the build "works", and when they hold zeros or garbage it
+    # faults (GPU-AV: "accelerationStructureReference is an invalid address").
+    # Write real records — an identity transform at this test's BLAS.
+    for buf in (instance_buf1, instance_buf2)
+        copyto!(buf, [VulkanInstanceRecord(MVE.mat4_to_vk_transform(Mat4f(I)),
+                                           blas.address)
+                      for _ in 1:length(buf)])
+    end
 
     backend = MVE.LavaBackend()
     tlas = MVE.VulkanTLAS(backend)

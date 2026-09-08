@@ -268,9 +268,8 @@ mutable struct Arena
     bytes::Int
     constraint::Any        # what every tenant placed here needs, merged
     tenants::Vector{WeakRef}
-    lastrun::Any           # who wrote these bytes most recently
 end
-Arena() = Arena(nothing, 0, nothing, WeakRef[], nothing)
+Arena() = Arena(nothing, 0, nothing, WeakRef[])
 
 """Live tenants, pruning collected ones on the way past."""
 function tenants!(a::Arena)
@@ -331,10 +330,16 @@ struct Pool
     # the same regions once stamped with a fence. See `retire!` / `reclaim!`.
     pending::Vector{Region}
     retiring::Vector{Tuple{Region,Any}}
+    # The plans whose recordings hold device addresses, so a resource that
+    # MOVES (`resize!`, an arena growing) can patch their argument memory
+    # instead of invalidating them — see `notify_move!`. Registered by
+    # `record!`, dropped by `free!` and by the recording going away. Weak, like
+    # an arena's tenants: a plan nobody holds cannot run.
+    movelisteners::Vector{WeakRef}
     lock::ReentrantLock
 end
 Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
-              Region[], Tuple{Region,Any}[], ReentrantLock())
+              Region[], Tuple{Region,Any}[], WeakRef[], ReentrantLock())
 
 arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 
@@ -656,7 +661,11 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
     # unlocked on the assumption that only the owning thread gets here, and
     # `acquire!` — which is now on every allocating thread — calls this.
     # Re-entrant, so `acquire!` already holding it costs nothing.
-    lock(p.lock) do
+    #
+    # Explicit lock/try/unlock rather than `lock do`: the closure cost 224
+    # bytes per call, and this runs in `run!` — which allocates nothing.
+    lock(p.lock)
+    try
         if !isempty(p.pending)
             f = fence(dev)
             for r in p.pending
@@ -676,6 +685,8 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
         end
         resize!(p.retiring, keep)
         return freed
+    finally
+        unlock(p.lock)
     end
 end
 
@@ -732,7 +743,7 @@ largest of them rather than their total.
 
 **Which of the two you get is decided by what you are allocating, never by an
 argument.** `Place` reserves, because a transient is scratch scoped to one run;
-`allocate` — and so every `Buffer` and `Scalar` — acquires, because a persistent
+`allocate` — and so every `Buffer` and `GPURef` — acquires, because a persistent
 resource holds data between runs and sharing its bytes would be silent
 corruption. There is deliberately no flag here to get that wrong with.
 
@@ -767,15 +778,25 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
         a.constraint = want
         return a.region
     end
-    # Ask before allocating anything: a refusal must leave the arena exactly as it
-    # was, not half-grown with a region nobody is placed in.
+    # A recorded plan's commands hold the region's addresses. For a buffers
+    # arena every one of those is a BDA in the plan's argument memory, which
+    # `arena_moved!` patches below — the recording survives the growth. For an
+    # IMAGES arena the commands name the image handles themselves and there is
+    # nothing to patch: the recording is invalidated, and the next `run!`
+    # writes it again before it submits. A tenant that is not a plan has no patch table, so it still
+    # refuses — a refusal leaves the arena exactly as it was.
     for wr in tenants!(a)
-        remappable(wr.value) || throw(ArgumentError(
-            "a plan placed in arena $kind cannot be moved — it has been recorded, " *
-            "and its command buffer holds the addresses the current region has. " *
-            "Another plan now needs $(humanbytes(bytes)) there, which would grow the " *
-            "arena and leave that recording pointing at freed storage. Build every " *
-            "plan that shares a device before recording any of them."))
+        t = wr.value
+        (t === nothing || remappable(t)) && continue
+        if t isa Plan
+            kind isa Images && invalidate!(t)
+        else
+            throw(ArgumentError(
+                "a tenant of arena $kind cannot be moved — it has been recorded, " *
+                "and its commands hold the addresses the current region has. " *
+                "Another plan now needs $(humanbytes(bytes)) there, which would grow the " *
+                "arena and leave that recording pointing at freed storage."))
+        end
     end
     fresh = acquire!(pool, dev, kind, transients, max(bytes, a.bytes);
                      align, blocksize, constraint = want)
@@ -787,9 +808,19 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     # Retired, not released: the tenants were just copied OUT of these bytes by
     # a device copy, which has been recorded rather than run.
     old === nothing || retire!(pool, old)
+    # The recordings follow the move. Range-keyed: every address a tenant
+    # packed out of the old region shifts by the same delta. Images have no
+    # addresses to patch — their recordings were dropped above. A backend
+    # without BDA patching answers `nothing` here.
+    old === nothing || kind isa Images || arena_moved!(dev, kind, old, fresh)
     return fresh
     end
 end
+
+"""An arena's shared region moved from `old` to `fresh`; a backend with
+recorded plans patches their argument memory (see `notify_move!`). `nothing`
+where there are no device addresses to patch."""
+arena_moved!(dev, kind, old, fresh) = nothing
 
 """
     tenant!(pool, kind, x) -> x
@@ -827,35 +858,10 @@ function untenant!(pool::Pool, kind, x)
         # its final `run!` is the ordinary case, and its recording is still in
         # flight. This is why `free!(::Plan)` needs no precondition either.
         retire!(pool, a.region)
-        a.region, a.bytes, a.constraint, a.lastrun = nothing, 0, nothing, nothing
+        a.region, a.bytes, a.constraint = nothing, 0, nothing
     end
     return nothing
     end
-end
-
-"""
-    takeover!(pool, kind, x) -> Bool
-
-Record `x` as the tenant about to write this arena, and say whether it is taking
-the bytes over from a DIFFERENT one.
-
-What a backend asks before emitting the handover barrier. `sharing` is the wrong
-question on its own: it says the arena has more than one tenant, which is true
-for every run once two plans exist — so a plan run repeatedly, which is the
-common case (playing one clip, running a recorded model), paid a full memory
-barrier per frame to be ordered against itself. Its own hazards are its
-schedule's business and already handled.
-
-Recording and asking are one call because they must not drift: a backend that
-asked without recording would emit forever, and one that recorded without asking
-would emit never.
-"""
-function takeover!(p::Pool, kind, x)
-    a = get(p.arenas, kind, nothing)
-    a === nothing && return false
-    prev = a.lastrun
-    a.lastrun = x
-    return prev !== nothing && prev !== x
 end
 
 """
@@ -863,8 +869,78 @@ end
 
 Whether more than one live plan is placed in this arena.
 
-What a backend asks before emitting the handover barrier: with one tenant there
-is nothing to hand over from, and the barrier is pure cost.
+Nothing emits on the strength of it any more: a recording opens with a global
+barrier whoever ran last, because a cross-plan hazard cannot be derived and a
+barrier decided at record time from who ran last was wrong the moment two
+plans alternated. The arena's memory of who ran last went with that.
 """
 sharing(pool::Pool, kind) =
     (a = get(pool.arenas, kind, nothing); a === nothing ? false : length(tenants!(a)) > 1)
+
+# ── Moves ────────────────────────────────────────────────────────────────────
+#
+# A resource that moves — a `resize!`d buffer, an arena that grew — changes a
+# device address that recorded plans have already packed into their argument
+# memory (or into a scratch region the recording owns, for the prepare kernels
+# emitted alongside the plan's dispatches). The recording itself is never
+# rewritten: the new address is written by a `cmd_update_buffer` in the next
+# run's own submission, ahead of the recording — the same route a `GPURef`
+# update takes.
+#
+# The table that makes it a lookup rather than a walk — which addresses a plan
+# holds, and at which (region, offset) — is baked at `record!` from the pack
+# itself, so a move is: find the entries in range, queue the writes, re-key.
+# Nothing is derived again and nothing is walked per run.
+
+"""Register `pl` for move notification. Called by `record!`; idempotent."""
+function listen_moves!(pool::Pool, pl)
+    lock(pool.lock) do
+        filter!(wr -> wr.value !== nothing, pool.movelisteners)
+        any(wr -> wr.value === pl, pool.movelisteners) ||
+            push!(pool.movelisteners, WeakRef(pl))
+    end
+    return nothing
+end
+
+"""Drop `pl` from move notification. Called by `free!` and when a recording is
+dropped; a plan with no recording holds no addresses worth patching."""
+function unlisten_moves!(pool::Pool, pl)
+    lock(pool.lock) do
+        filter!(wr -> wr.value !== nothing && wr.value !== pl, pool.movelisteners)
+    end
+    return nothing
+end
+
+"""
+    notify_move!(pool, old_base, new_base, nbytes)
+
+The bytes `[old_base, old_base + nbytes)` moved to `new_base`. For every
+recorded plan holding an address in that range, queue a patch of each
+(region, offset) that holds it to `address + (new_base - old_base)`, and
+re-key the table so the NEXT move of the same storage still finds it.
+
+Called where the move happens — `resize!`, `reserve!` growing an arena — never
+at run time. A run only applies what this queued.
+"""
+function notify_move!(pool::Pool, old_base::UInt64, new_base::UInt64, nbytes::Int)
+    old_base == new_base && return nothing
+    lock(pool.lock) do
+        filter!(wr -> wr.value !== nothing, pool.movelisteners)
+        for wr in pool.movelisteners
+            pl = wr.value
+            tab = pl.patchtab
+            isempty(tab) && continue
+            moved = [a for a in keys(tab) if old_base <= a < old_base + nbytes]
+            for a in moved
+                offs = pop!(tab, a)
+                na = a - old_base + new_base
+                for (r, off) in offs
+                    push!(pl.pending_patches, (r, off, na))
+                end
+                tab[na] = offs
+            end
+        end
+        nothing
+    end
+    return nothing
+end

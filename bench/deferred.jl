@@ -100,13 +100,14 @@ end
     p / sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
 end
 
-@kernel function cull!(visible, counter, @Const(centers), vp::Mat4f)
+@kernel function cull!(visible, counter, @Const(centers), vp::AbstractVector{Mat4f})
     i = @index(Global)
     @inbounds begin
         c = centers[i]
+        m = vp[1]
         keep = true
         for k in Int32(1):Int32(6)
-            p = frustum_plane(vp, k)
+            p = frustum_plane(m, k)
             keep &= (p[1] * c[1] + p[2] * c[2] + p[3] * c[3] + p[4]) >= -c[4]
         end
         if keep
@@ -121,19 +122,20 @@ end
     @inbounds cmds[1] = DrawIndirectCommand(counter[1] * vpb, UInt32(1), UInt32(0), UInt32(0))
 end
 
-@kernel function move_lights!(pos, @Const(home), t::Float32)
+@kernel function move_lights!(pos, @Const(home), t::AbstractVector{Float32})
     i = @index(Global)
     @inbounds begin
         h = home[i]
+        tv = t[1]
         ph = 0.7f0 * Float32(i)
-        pos[i] = Vec4f(h[1] + 6f0 * sin(0.5f0 * t + ph), h[2] + 1.5f0 * sin(0.9f0 * t + ph),
-                       h[3] + 6f0 * cos(0.4f0 * t + ph), h[4])
+        pos[i] = Vec4f(h[1] + 6f0 * sin(0.5f0 * tv + ph), h[2] + 1.5f0 * sin(0.9f0 * tv + ph),
+                       h[3] + 6f0 * cos(0.4f0 * tv + ph), h[4])
     end
 end
 
 # Every invocation belongs to a box that survived: the draw covers the visible
 # count and nothing else, so there is no culled instance to collapse.
-function gbuffer_vertex(cubepos, cubenrm, visible, centers, sizes, colors, vp::Mat4f)
+function gbuffer_vertex(cubepos, cubenrm, visible, centers, sizes, colors, vp::AbstractVector{Mat4f})
     v = vertex_index() - Int32(1)
     inst = v ÷ Int32(36)
     k = v - inst * Int32(36)
@@ -142,7 +144,8 @@ function gbuffer_vertex(cubepos, cubenrm, visible, centers, sizes, colors, vp::M
         c = centers[o]; s = sizes[o]
         lp = cubepos[k + Int32(1)]; n = cubenrm[k + Int32(1)]
         p = Vec4f(c[1] + lp[1] * s[1], c[2] + lp[2] * s[2], c[3] + lp[3] * s[3], 1f0)
-        (position = vp * p, albedo = colors[o], normal = Vec3f(n[1], n[2], n[3]))
+        m = vp[1]
+        (position = m * p, albedo = colors[o], normal = Vec3f(n[1], n[2], n[3]))
     end
 end
 
@@ -165,9 +168,9 @@ end
 
 # one work item per screen tile: the depth range it covers becomes a world box,
 # and a light whose sphere misses that box cannot reach any pixel in the tile
-@kernel function tile_lights!(tilelights, tilecount, @Const(dep), @Const(lpos), invvp::Mat4f,
-                              w::Int32, h::Int32, tile::Int32, ntx::Int32,
-                              nlight::Int32, pertile::Int32)
+@kernel function tile_lights!(tilelights, tilecount, @Const(dep), @Const(lpos),
+                              invvp::AbstractVector{Mat4f}, w::Int32, h::Int32, tile::Int32,
+                              ntx::Int32, nlight::AbstractVector{Int32}, pertile::Int32)
     tx0, ty0 = @index(Global, NTuple)
     @inbounds begin
         ti = (Int32(ty0) - Int32(1)) * ntx + Int32(tx0)
@@ -184,14 +187,15 @@ end
         if dmax > 0f0                       # a tile that is all sky needs no light
             lo = Vec3f(1f30, 1f30, 1f30)
             hi = Vec3f(-1f30, -1f30, -1f30)
+            m = invvp[1]
             for c in Int32(0):Int32(7)
-                p = unproject(invvp, Float32((c & Int32(1)) == 0 ? x0 : x1),
+                p = unproject(m, Float32((c & Int32(1)) == 0 ? x0 : x1),
                               Float32((c & Int32(2)) == 0 ? y0 : y1),
                               (c & Int32(4)) == 0 ? dmin : dmax, w, h)
                 lo = Vec3f(min(lo[1], p[1]), min(lo[2], p[2]), min(lo[3], p[3]))
                 hi = Vec3f(max(hi[1], p[1]), max(hi[2], p[2]), max(hi[3], p[3]))
             end
-            for l in Int32(1):nlight
+            for l in Int32(1):nlight[1]
                 lp = lpos[l]
                 dx = max(0f0, max(lo[1] - lp[1], lp[1] - hi[1]))
                 dy = max(0f0, max(lo[2] - lp[2], lp[2] - hi[2]))
@@ -215,8 +219,8 @@ end
 
 # and the fragment stage is the deferred pass: one pixel, its tile's lights
 function light_fragment(inputs, alb, nrm, dep, lpos, lcol, tilelights, tilecount,
-                        invvp::Mat4f, eye::Vec4f, w::Int32, h::Int32, tile::Int32,
-                        ntx::Int32, pertile::Int32, exposure::Float32)
+                        invvp::AbstractVector{Mat4f}, eye::AbstractVector{Vec4f}, w::Int32, h::Int32,
+                        tile::Int32, ntx::Int32, pertile::Int32, exposure::AbstractVector{Float32})
     px = unsafe_trunc(Int32, frag_coord_x())
     py = unsafe_trunc(Int32, frag_coord_y())
     @inbounds begin
@@ -229,8 +233,9 @@ function light_fragment(inputs, alb, nrm, dep, lpos, lcol, tilelights, tilecount
             albedo = Vec3f(unpack8(a, UInt32(0)), unpack8(a, UInt32(8)), unpack8(a, UInt32(16)))
             n = Vec3f(2f0 * unpack8(nn, UInt32(0)) - 1f0, 2f0 * unpack8(nn, UInt32(8)) - 1f0,
                       2f0 * unpack8(nn, UInt32(16)) - 1f0)
-            world = unproject(invvp, Float32(px) + 0.5f0, Float32(py) + 0.5f0, d, w, h)
-            view = normalize(Vec3f(eye[1] - world[1], eye[2] - world[2], eye[3] - world[3]))
+            world = unproject(invvp[1], Float32(px) + 0.5f0, Float32(py) + 0.5f0, d, w, h)
+            ev = eye[1]
+            view = normalize(Vec3f(ev[1] - world[1], ev[2] - world[2], ev[3] - world[3]))
             acc = albedo * Vec3f(0.05f0, 0.06f0, 0.10f0)
             ti = (py ÷ tile) * ntx + (px ÷ tile) + Int32(1)
             for k in Int32(1):Int32(tilecount[ti])
@@ -251,7 +256,7 @@ function light_fragment(inputs, alb, nrm, dep, lpos, lcol, tilelights, tilecount
             out = acc
         end
         # linear out: the swapchain is an sRGB format and the hardware encodes on write
-        e = out * exposure
+        e = out * exposure[1]
         Vec4f(e[1] / (1f0 + e[1]), e[2] / (1f0 + e[2]), e[3] / (1f0 + e[3]), 1f0)
     end
 end
@@ -285,14 +290,16 @@ lighthome = M.Buffer(dev, [Vec4f(150f0 * (rand(Float32) - 0.5f0), 3f0 + 11f0 * r
 lightpos = M.Buffer(dev, zeros(Vec4f, NLIGHT))
 lightcol = M.Buffer(dev, [Vec4f(tint(0.85f0)..., 2.5f0) for _ in 1:NLIGHT])
 
-# every per-frame value the passes read is a Ref, read where the frame is recorded
-vpref = Ref(first(camera(0f0, 46f0, 13f0)))
-cullref = Ref(vpref[])
-invref = Ref(inv(vpref[]))
-eyeref = Ref(Vec4f(0, 0, 0, 1))
-timeref = Ref(0f0)
-lightref = Ref(Int32(NLIGHT))
-exposure = Ref(1f0)
+# every per-frame value the passes read is a GPURef: the dispatches hold its
+# device address, and `frame!` below writes the pending value with `ref[] = x`
+vp0 = first(camera(0f0, 46f0, 13f0))
+vpref = M.GPURef(dev, vp0)
+cullref = M.GPURef(dev, vp0)
+invref = M.GPURef(dev, inv(vp0))
+eyeref = M.GPURef(dev, Vec4f(0, 0, 0, 1))
+timeref = M.GPURef(dev, 0f0)
+lightref = M.GPURef(dev, Int32(NLIGHT))
+exposure = M.GPURef(dev, 1f0)
 
 graph = M.Graph(dev)
 screen = M.Surface(graph, win)
@@ -309,6 +316,7 @@ M.compute!(graph, "clear count") do p
     M.dispatch!(p, reset_counter!, (M.use(p, counter; write = true),), 1)
 end
 M.compute!(graph, "cull") do p
+    M.use(p, cullref; read = true)
     M.dispatch!(p, cull!, (M.use(p, visible; write = true),
                            M.use(p, counter; read = true, write = true),
                            M.use(p, centers; read = true), cullref), NBOX)
@@ -318,11 +326,13 @@ M.compute!(graph, "draw count") do p
                                  M.use(p, counter; read = true), UInt32(VPB)), 1)
 end
 M.compute!(graph, "lights") do p
+    M.use(p, timeref; read = true)
     M.dispatch!(p, move_lights!, (M.use(p, lightpos; write = true),
                                   M.use(p, lighthome; read = true), timeref), NLIGHT)
 end
 M.render!(graph, "gbuffer", albedo => M.Clear((0f0, 0f0, 0f0, 1f0)),
                             normal => M.Discard, zbuf => M.Clear(1f0)) do p
+    M.use(p, vpref; read = true)
     args = (M.Attribute(p, cubepos), M.Attribute(p, cubenrm), M.Attribute(p, visible),
             M.Attribute(p, centers), M.Attribute(p, sizes), M.Attribute(p, colors), vpref)
     M.draw!(p, GBUFFER, args, drawcmd)
@@ -331,6 +341,8 @@ M.copy!(graph, "read albedo", albedo_px, albedo)
 M.copy!(graph, "read normal", normal_px, normal)
 M.copy!(graph, "read depth", depth_px, zbuf)
 M.compute!(graph, "tiles") do p
+    M.use(p, invref; read = true)
+    M.use(p, lightref; read = true)
     M.dispatch!(p, tile_lights!, (M.use(p, tilelights; write = true),
                                   M.use(p, tilecount; write = true),
                                   M.use(p, depth_px; read = true),
@@ -341,6 +353,9 @@ end
 # Discard, not Clear: the triangle covers every pixel, so loading the old
 # contents is work with nothing to show for it.
 M.render!(graph, "light", screen => M.Discard) do p
+    M.use(p, invref; read = true)
+    M.use(p, eyeref; read = true)
+    M.use(p, exposure; read = true)
     M.draw!(p, LIGHTING, (), 3;
             frag_args = (M.use(p, albedo_px; read = true), M.use(p, normal_px; read = true),
                          M.use(p, depth_px; read = true), M.use(p, lightpos; read = true),

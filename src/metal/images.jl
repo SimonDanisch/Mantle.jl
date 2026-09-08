@@ -138,7 +138,7 @@ function Mantle.readback_target(t::MetalTransientImage{T}) where {T}
         MTL.append_copy!(enc, buf, 0, row, 0, tex,
                          MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(t.width, t.height, 1))
     end
-    submitwait!(dev.dev)
+    submitwait!(cmd)
     out = Matrix{T}(undef, t.width, t.height)
     unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
     return out
@@ -168,8 +168,9 @@ function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}) w
         MTL.append_copy!(enc, buf, byteoffset(dst), src.width * sizeof(T), 0, tex,
                          MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(src.width, src.height, 1))
     end
-    # Left open, like a render pass: four consecutive copies share one command
-    # buffer. See `framebuffer!`.
+    # Committed, like a render pass: one command buffer per copy, nothing left
+    # open. See `framebuffer!`.
+    commit!(cmd)
     return nothing
 end
 

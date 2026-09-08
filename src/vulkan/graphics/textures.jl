@@ -110,16 +110,16 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
     bq = ctx.default_bq
     dev = ctx.device
 
-    # Use staging buffer for upload
     bytes = reinterpret(UInt8, vec(collect(data)))
     nbytes = length(bytes)
-    staging_buf, _, mapped_ptr, _ = get_staging(bq, nbytes)
-    unsafe_copyto!(Ptr{UInt8}(mapped_ptr), pointer(bytes), nbytes)
-
-    # Record image upload into the active batch.  Staging buffer is owned
-    # by `bq.staging`; no pin required (the field holds a strong ref).
-    batch = ensure_active_batch!(bq)
-    cmd = batch.cmd_buf
+    # The upload is a one-shot of its own: the bytes go into scratch the
+    # one-shot owns, and the sweep gives them back once the copy has passed.
+    oneshot!(bq; tag = :upload) do e
+    cmd = e.cmd
+    r = scratch!(e.owner, nbytes)
+    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
+    staging_buf = mb.buffer
+    GC.@preserve bytes unsafe_copyto!(mb.mapped_ptr + offset(r), pointer(bytes), nbytes)
 
     transition_image!(cmd, tex.image,
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -127,7 +127,7 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
         VK.AccessFlag(0), VK.ACCESS_TRANSFER_WRITE_BIT)
 
     region = VK.BufferImageCopy(
-        UInt64(0), UInt32(0), UInt32(0),
+        UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
         VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
             UInt32(0), UInt32(0), UInt32(1)),
         VK.Offset3D(0, 0, 0),
@@ -141,11 +141,13 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
         VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK.ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_SHADER_READ_BIT)
 
-    # Pin the texture so the batch keeps it alive until the fence.
-    pin!(batch, tex)
-    # Flush now — upload!(tex) is a synchronous API (caller expects the texture
-    # to be ready on return).
-    flush!(bq, dev)
+    # Pin the texture so the submission keeps it alive until it has passed.
+    pin!(e.owner, tex)
+    end
+    # No wait: a draw that samples the texture on this queue is ordered behind
+    # the copy, and the host bytes were copied into the scratch before the
+    # submit, so the caller's array is free the moment this returns.
+    return nothing
 end
 
 # ── Format Mapping ──

@@ -12,19 +12,14 @@
 # genuinely this backend's is how a graph resource becomes a kernel argument,
 # and whether barriers have to be emitted.
 
-"""
-Nothing to emit.
-
-Metal orders work within a command queue by submission, and every pooled
-allocation here is `Shared` on unified memory — so the scheduled order the graph
-computed IS the synchronisation, exactly as on the host backend. A discrete GPU
-reached through Metal would need this to become real; an Apple one does not.
-
-Said explicitly rather than left to a fallback: a backend silently not emitting
-barriers it needed is a data race that shows up as wrong pixels three passes
-later.
-"""
-run!(::Barriers, c::Compile{MetalDevice}) = c
+# The `Barriers` phase is core's and runs here too; what it derives is lowered
+# by `passbarriers`, whose default emits nothing. That is right on this device:
+# Metal orders work within a command queue by submission, and every pooled
+# allocation here is `Shared` on unified memory — so the scheduled order the
+# graph computed IS the synchronisation, exactly as on the host backend. A
+# discrete GPU reached through Metal would need `passbarriers` to become real;
+# an Apple one does not.
+syncbackend(::MetalDevice) = MetalAPI()
 
 # `resolve` is NOT overridden here. Core's default is `storage(x)`, and that is
 # already right: a `Buffer`'s storage is `deviceview(dev, store)` — the borrowed

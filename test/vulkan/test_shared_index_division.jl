@@ -222,7 +222,9 @@ end
         @testset "the plain division form still drops stores" begin
             @test sid_survivors(backend, sid_udiv_16!, 32) == total   # one trip is fine
             for K in (64, 128, 256)
-                @test_broken sid_survivors(backend, sid_udiv_16!, K) == total
+                # Was `@test_broken` waiting on a driver fix; the fix announced
+                # itself on 2026-09-04 (RADV, this tree), so it is `@test` now.
+                @test sid_survivors(backend, sid_udiv_16!, K) == total
             end
         end
     end

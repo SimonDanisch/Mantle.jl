@@ -40,12 +40,16 @@ end
     @test bq.deferred_frees_lock isa Base.Threads.SpinLock
 end
 
-@testset "last_write is atomic (no raw field access)" begin
+@testset "last_write is two plain fields, empty until a submit stamps them" begin
+    # It was one `@atomic Union{Nothing,Tuple}` field, boxing 48 B per synced
+    # buffer per submit. It is `last_write_bq`/`last_write_val` now, written
+    # and read on the owning thread only; a finalizer on another thread defers
+    # to the queue's list without reading it (see `vk_free!`).
     a = LavaArray{Float32,1}(undef, (4,))
     buf = a.buf[]
-    # Must use @atomic form; raw access would error or warn on atomic fields.
-    @test (@atomic :acquire buf.last_write) === nothing ||
-          (@atomic :acquire buf.last_write) isa Tuple
+    @test !hasfield(typeof(buf), :last_write)
+    @test buf.last_write_bq === nothing
+    @test buf.last_write_val == 0
 end
 
 end  # @testset

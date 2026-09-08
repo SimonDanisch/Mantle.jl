@@ -138,7 +138,7 @@ M.devicecopy!(d::FakeDev, dst, src, n) =
     (M.upload!(d, dst, 1, M.download(d, src)[1:n]); dst)
 M.deviceview(::FakeDev, a) = a
 
-@testset "Buffer/Scalar are core types over pool regions" begin
+@testset "Buffer/GPURef are core types over pool regions" begin
     d = FakeDev(); p = M.Pool(); dev = d
     # the pool has to be reachable from the device, as it is for a real one
     @eval M.pool(::$(typeof(d))) = $p
@@ -148,7 +148,7 @@ M.deviceview(::FakeDev, a) = a
     @test Array(b) == Float32[1, 2, 3]
     @test length(d.allocs) == 1                     # ONE block, not one per resource
 
-    s = M.Scalar(dev, 7.0f0)
+    s = M.GPURef(dev, 7.0f0)
     @test length(d.allocs) == 1                     # …shared with the buffer
     M.update!(s, 9.0f0)
 
@@ -317,7 +317,7 @@ end
     # The property that makes a device-owned arena safe to use rather than a
     # footgun. `reserve!` hands every tenant the SAME bytes because a transient
     # is scratch scoped to one run; `acquire!` — and so `allocate`, and so every
-    # `Buffer` and `Scalar` — hands out a private slice because a persistent
+    # `Buffer` and `GPURef` — hands out a private slice because a persistent
     # resource holds data between runs. Which one you get is decided by WHAT you
     # allocate, never by an argument, so there is no flag to get it wrong with.
     #
@@ -347,9 +347,9 @@ end
 
     # a tenant that refuses to move stops the arena growing, rather than being
     # re-materialised under a recording that names the old addresses
-    struct Pinned end
-    M.remappable(::Pinned) = false
-    M.tenant!(p, :buf, Pinned())
+    struct Nailed end
+    M.remappable(::Nailed) = false
+    M.tenant!(p, :buf, Nailed())
     @test_throws ArgumentError M.reserve!(p, d, :buf, nothing, 1 << 20; blocksize = 4096)
 end
 

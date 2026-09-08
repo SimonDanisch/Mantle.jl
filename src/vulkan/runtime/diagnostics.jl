@@ -63,9 +63,8 @@ function dump_state(; io::IO=stdout)
     end
     if ctx !== nothing
         bq = ctx.default_bq
-        println(io, "Free batches: $(length(bq.free_batches))")
-        println(io, "Free cmd bufs: $(length(bq.free_cmd_bufs))")
-        ctx === nothing || println(io, "CB split threshold: $(ctx.default_bq.cb_split_threshold)")
+        println(io, "Outstanding: $(length(bq.outstanding)) submission(s)")
+        println(io, "Pooled one-shots: $(length(bq.free_oneshots))")
     end
     println(io, "Flushes: $(ctx === nothing ? 0 : ctx.diag.flush_counter[])")
     println(io, "Total dispatches: $(ctx === nothing ? 0 : ctx.diag.total_dispatches[])")

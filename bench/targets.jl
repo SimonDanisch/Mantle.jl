@@ -34,13 +34,18 @@ function build_targets(dev, n; alias = true, points = cloud(n))
     seed = points
     pos = M.Buffer(dev, seed)
     col = M.Buffer(dev, tint.(seed))
-    siz = M.Scalar(dev, 2.0f0)
-    mvp = Ref(camera(0.0f0))
+    siz = M.GPURef(dev, 2.0f0)
+    # Read again every frame (`measure_targets` stores a new camera into it each
+    # loop), so a `GPURef`: the draw holds its device address.
+    mvp = M.GPURef(dev, camera(0.0f0))
 
     g = M.Graph(dev)
-    scatter(p) = M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
-                                      M.Attribute(p, siz), mvp,
-                                      Int32(1), Int32(0)), pos)
+    scatter(p) = begin
+        M.use(p, mvp; read = true)
+        M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
+                             M.Attribute(p, siz), mvp,
+                             Int32(1), Int32(0)), pos)
+    end
 
     a = M.Transient.Image(g, BGRA{N0f8}, (W, H))
     b = M.Transient.Image(g, BGRA{N0f8}, (W, H))
@@ -58,7 +63,7 @@ function build_targets(dev, n; alias = true, points = cloud(n))
                                   M.use(p, rb; read = true),
                                   Int32(W), Int32(H)), (W, H); group = (16, 16))
     end
-    (; g, a, b, out, mvp, plan = M.Plan(g; alias))
+    (; g, a, b, out, mvp, plan = M.record!(M.Plan(g; alias)))
 end
 
 """Bytes an arena holds, per arena, so the image saving is visible on its own."""

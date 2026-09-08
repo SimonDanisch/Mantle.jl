@@ -244,38 +244,41 @@ Returns a width x height matrix with element type matching the framebuffer forma
 function readback_framebuffer(fb::VulkanFramebuffer)
     ctx = fb.ctx
     bq = ctx.default_bq
-    dev = ctx.device
 
     bpp = format_pixel_size(fb.color_format)
     T = format_element_type(fb.color_format)
     nbytes = fb.width * fb.height * bpp
-    staging_buf, _, mapped_ptr, _ = get_staging(bq, nbytes)
+    # The caller's region: acquired here, read after the copy has passed, and
+    # released here. `Readback`, host-cached: the host reads these bytes, and a
+    # read from the BAR-backed `Unified` arena runs at write-combined speed.
+    dev = lavadevice(ctx)
+    r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
+                 align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
+    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
 
-    # Record image→buffer copy into the active batch.  flush! at the end
-    # blocks until the GPU finishes, then we read the mapped staging bytes.
-    batch = ensure_active_batch!(bq)
-    cmd = batch.cmd_buf
+    tok = oneshot!(bq; tag = :readback) do e
+        cmd = e.cmd
+        transition_image!(cmd, fb.color_image,
+            VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+            VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
 
-    transition_image!(cmd, fb.color_image,
-        VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
-        VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
-
-    region = VK.BufferImageCopy(
-        UInt64(0), UInt32(0), UInt32(0),
-        VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
-            UInt32(0), UInt32(0), UInt32(1)),
-        VK.Offset3D(0, 0, 0),
-        VK.Extent3D(UInt32(fb.width), UInt32(fb.height), UInt32(1)),
-    )
-    VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_buf, [region])
-
-    pin!(batch, fb)
-    flush!(bq, dev)
+        region = VK.BufferImageCopy(
+            UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
+            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
+                UInt32(0), UInt32(0), UInt32(1)),
+            VK.Offset3D(0, 0, 0),
+            VK.Extent3D(UInt32(fb.width), UInt32(fb.height), UInt32(1)),
+        )
+        VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
+        pin!(e, fb)
+    end
+    waitfor!(bq, tok)
 
     pixels = Matrix{T}(undef, fb.width, fb.height)
-    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), Ptr{UInt8}(mapped_ptr), nbytes)
+    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
+    release!(r)
     return pixels
 end
 
@@ -302,27 +305,27 @@ function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
     length(dst) >= nbytes ||
         error("destination holds $(length(dst)) bytes, need $nbytes")
 
-    batch = ensure_active_batch!(bq)
-    cmd = batch.cmd_buf
+    oneshot!(bq; tag = :copy) do e
+        cmd = e.cmd
+        transition_image!(cmd, fb.color_image,
+            VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+            VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
 
-    transition_image!(cmd, fb.color_image,
-        VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
-        VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
+        managed = dst.buf[]
+        region = VK.BufferImageCopy(
+            UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
+            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
+                UInt32(0), UInt32(0), UInt32(1)),
+            VK.Offset3D(0, 0, 0),
+            VK.Extent3D(UInt32(fb.width), UInt32(fb.height), UInt32(1)),
+        )
+        VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
 
-    managed = dst.buf[]
-    region = VK.BufferImageCopy(
-        UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
-        VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
-            UInt32(0), UInt32(0), UInt32(1)),
-        VK.Offset3D(0, 0, 0),
-        VK.Extent3D(UInt32(fb.width), UInt32(fb.height), UInt32(1)),
-    )
-    VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
-
-    pin!(batch, fb)
-    pin!(batch, dst)
+        pin!(e, fb)
+        pin!(e, dst)
+    end
     return dst
 end
 
@@ -340,10 +343,6 @@ copied in one region.
 convenient standalone and wrong under a graph, which knows what the image was
 doing before and what it will do next and can often need no barrier at all.
 """
-copy_image_to_buffer!(bq::VulkanBatchQueue, dst::LavaArray, image::VK.Image,
-                      width::Integer, height::Integer, format::VK.Format; kw...) =
-    copy_image_to_buffer!(emitter(bq), dst, image, width, height, format; kw...)
-
 function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image,
                                width::Integer, height::Integer, format::VK.Format;
                                aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT) where {T}
@@ -384,7 +383,6 @@ function readback_window(win::VulkanWindow)
     bpp = format_pixel_size(win.format)
     T = format_element_type(win.format)
     nbytes = w * h * bpp
-    staging_buf, _, mapped_ptr, _ = get_staging(bq, nbytes)
 
     # A presentable image may only be touched between acquire and present. Called
     # after a present, this used to transition an image it did not own, which
@@ -392,58 +390,55 @@ function readback_window(win::VulkanWindow)
     # driver happens to tolerate: the pixels came back looking right for as long
     # as nobody turned validation on.
     #
-    # When the caller is mid-frame the image is already acquired and sits in
-    # COLOR_ATTACHMENT_OPTIMAL. Otherwise acquire one first, and note that it
-    # then holds an EARLIER frame's contents, since acquire returns whichever
-    # image the presentation engine has freed.
-    fresh = !win.acquired
-    fresh && acquire_next_image!(win)
+    # So an image is acquired here, and note that it then holds an EARLIER
+    # frame's contents, since acquire returns whichever image the presentation
+    # engine has freed. A caller mid-frame — an image acquired and not yet
+    # presented — has no command buffer to add a copy to: the frame's one-shot
+    # is `run!`'s, and it was submitted with the present. Read back after the
+    # frame is presented.
+    win.acquired && error("readback_window: the window holds an acquired image; " *
+                          "read back after the frame that owns it has been presented")
+    acquire_next_image!(win)
     image = win.images[win.current_image_idx + 1]
 
-    # Record image→buffer copy into the active batch, blocking flush at end.
-    batch = ensure_active_batch!(bq)
-    cmd = batch.cmd_buf
+    # The caller's region: acquired here, read after the copy has passed, and
+    # released here. `Readback`, host-cached: the host reads these bytes, and a
+    # read from the BAR-backed `Unified` arena runs at write-combined speed.
+    dev = lavadevice(ctx)
+    r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
+                 align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
+    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
 
-    # A freshly acquired image is still being read by the presentation engine
-    # until its acquire semaphore signals, so the submit that transitions it has
-    # to wait on that semaphore, at COLOR_ATTACHMENT_OUTPUT to match what the
-    # acquire signals. Without that the transition races the present, which
-    # synchronization validation calls WRITE_AFTER_PRESENT.
-    #
-    # The wait is not added here: `present_frame!` below is the submit, and it
-    # adds exactly this wait itself (api.jl:401). Adding it in both places makes
-    # one submit wait twice on one binary semaphore, which signals once — the
-    # submit then never runs and the next `vkWaitSemaphores` blocks forever, in
-    # the kernel, where no Julia interrupt reaches it.
+    frame = oneshot(bq) do e
+        cmd = e.cmd
+        # A freshly acquired image is still being read by the presentation engine
+        # until its acquire semaphore signals, so the submit that transitions it
+        # has to wait on that semaphore, at COLOR_ATTACHMENT_OUTPUT to match what
+        # the acquire signals — `present_frame!` adds exactly that wait. srcStage
+        # is COLOR_ATTACHMENT_OUTPUT, never TOP_OF_PIPE: a barrier from
+        # TOP_OF_PIPE would create no dependency with it.
+        transition_image!(cmd, image,
+            VK.IMAGE_LAYOUT_PRESENT_SRC_KHR, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+            VK.AccessFlag(0), VK.ACCESS_TRANSFER_READ_BIT)
 
-    # srcStage is COLOR_ATTACHMENT_OUTPUT, never TOP_OF_PIPE: on a freshly
-    # acquired image the submit waits on the acquire semaphore at that stage, and
-    # a barrier from TOP_OF_PIPE would create no dependency with it.
-    transition_image!(cmd, image,
-        fresh ? VK.IMAGE_LAYOUT_PRESENT_SRC_KHR : VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
-        fresh ? VK.AccessFlag(0) : VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK.ACCESS_TRANSFER_READ_BIT)
+        region = VK.BufferImageCopy(
+            UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
+            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
+                UInt32(0), UInt32(0), UInt32(1)),
+            VK.Offset3D(0, 0, 0),
+            VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)),
+        )
+        VK.cmd_copy_image_to_buffer(cmd, image,
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
 
-    region = VK.BufferImageCopy(
-        UInt64(0), UInt32(0), UInt32(0),
-        VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
-            UInt32(0), UInt32(0), UInt32(1)),
-        VK.Offset3D(0, 0, 0),
-        VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)),
-    )
-    VK.cmd_copy_image_to_buffer(cmd, image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging_buf, [region])
-
-    # Transition back to COLOR_ATTACHMENT_OPTIMAL so present_frame! can transition to PRESENT_SRC
-    transition_image!(cmd, image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))
-
-    pin!(batch, win)
-
+        # Back to COLOR_ATTACHMENT_OPTIMAL, which is what `presentready!` expects.
+        transition_image!(cmd, image,
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))
+        presentready!(e, win)
+    end
     # An acquire this function made is an acquire this function returns. Leaving
     # it outstanding is invisible once — the program usually closes the window
     # next — and a deadlock in a loop: a swapchain has two or three images, so
@@ -451,21 +446,16 @@ function readback_window(win::VulkanWindow)
     # vkAcquireNextImageKHR for an image that is never handed back.
     #
     # The present has to be the submit that carries this copy, not one after it:
-    # it waits on the acquire semaphore, which is binary, and a `flush!` here
-    # would consume that wait first and leave the present waiting on a semaphore
+    # it waits on the acquire semaphore, which is binary, and a wait here would
+    # consume that wait first and leave the present waiting on a semaphore
     # nothing will signal again. So submit through `present_frame!` and wait on
-    # the timeline value it signals. When the caller was mid-frame the acquire was
-    # theirs and so is the present, and this is an ordinary flush.
-    if fresh
-        signal = batch.signal_value
-        present_frame!(bq, win)
-        wait_semaphores!(bq, VK.SemaphoreWaitInfo([bq.timeline_sem], [signal]))
-    else
-        flush!(bq, dev)
-    end
+    # the token it answers with.
+    tok = present_frame!(bq, win, frame)
+    waitfor!(bq, tok)
 
     pixels = Matrix{T}(undef, w, h)
-    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), Ptr{UInt8}(mapped_ptr), nbytes)
+    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
+    release!(r)
     return pixels
 end
 

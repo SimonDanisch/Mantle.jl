@@ -140,9 +140,10 @@ keeps handing out the size it was made with and the display scales it up.
 
 Only the surface moves here. Every attachment that FOLLOWS the surface moves
 when `refit!` asks it to, and the plan is recompiled because the placement it
-had was for the old size — which is why `run!` refits between `beginframe!` and
-`acquire_next_image!` and not at some later point where a half-recorded frame
-holding the old offsets.
+had was for the old size — which is why `run!` refits right after
+`beforeframe!` has polled, resized and acquired, and before anything is
+recorded: a half-recorded frame holding the old offsets is what that order
+rules out.
 """
 function Base.resize!(w::MetalWindow, width::Integer, height::Integer)
     (width, height) == (w.width, w.height) && return false
@@ -199,12 +200,12 @@ is still writing is a torn one.
 function Mantle.present_frame!(d::MetalDevice, w::MetalWindow)
     dr = w.drawable
     dr === nothing && return nothing
-    # On the frame's own command buffer, so the present is ordered behind the
-    # drawing rather than racing it — and committed here, because a frame that
+    # On a command buffer of its own, committed behind the frame's passes — on
+    # one queue that is the ordering — and committed here, because a frame that
     # has been presented is over.
     cb = framebuffer!(d.dev)
     MTLm.present_drawable!(cb, dr)
-    submitopen!(d.dev)
+    commit!(cb)
     w.drawable = nothing
     return nothing
 end
@@ -230,8 +231,18 @@ function Mantle.readback_window(w::MetalWindow{T}) where {T}
         MTLm.append_copy!(enc, buf, 0, row, 0, tex,
                           MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w.width, w.height, 1))
     end
-    submitwait!(dev.dev)
+    submitwait!(cmd)
     out = Matrix{T}(undef, w.width, w.height)
     unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
     return out
+end
+
+# A frame that failed after its drawable was taken: dropping the reference is
+# all Metal needs — a `CAMetalDrawable` that is never presented is simply
+# released, and the next `nextDrawable` hands out another.
+function Mantle.abandonframe!(::MetalDevice, pl)
+    for s in pl.graph.surfaces
+        s.win.drawable = nothing
+    end
+    return nothing
 end

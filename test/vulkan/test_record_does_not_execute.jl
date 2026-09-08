@@ -22,7 +22,7 @@ say something about bookkeeping, and the question is whether the GPU did the
 work.
 
 The plan below is deliberately more than one dispatch. Under `bake!` a recording
-could span several submit boundaries (`auto_submit_threshold` split a long one),
+could span several submit boundaries (the submit threshold split a long one),
 so an implementation that sealed only the LAST batch would pass a single-dispatch
 test and execute everything before it. There is one command buffer now, which is
 what makes that unreachable rather than merely untriggered — and this asserts it
@@ -79,12 +79,14 @@ end
     @test Array(Mantle.storage(counter)) == zeros(Int32, n)
     @test Mantle.recorded(pl)
 
-    # ONE command buffer per slot, which is what makes the paragraph above
-    # structural. `bake!` produced a LIST, cut by `auto_submit_threshold` firing
-    # mid-capture — measured at five per recording on Hikari's fused sample, a
-    # threshold about when to submit applied while nothing was being submitted.
-    @test length(pl.recordings) == Mantle.ARG_SLOTS
-    @test all(r -> r isa MVE.Recording && !r.open, pl.recordings)
+    # ONE command buffer, which is what makes the paragraph above structural.
+    # `bake!` produced a LIST, cut by the submit threshold firing mid-capture
+    # — measured at five per recording on Hikari's fused sample, a threshold
+    # about when to submit applied while nothing was being submitted. It was
+    # then one per argument slot, and now it is one, because nothing rewrites a
+    # plan's argument memory between runs.
+    @test pl.recording isa MVE.Recording
+    @test !pl.recording.open
 
     # …and the recording is real: running it does the work.
     Mantle.run!(pl)
@@ -98,10 +100,12 @@ end
     Mantle.free!(pl)
 end
 
-@testset "run! records the first time, and only the first time" begin
-    # `record!` is not something a caller has to remember. A plan that has never
-    # been recorded records on its first `run!` and every run after that submits
-    # the same command buffers — which is the whole of "run! never records".
+@testset "run! never records: an unrecorded plan is refused, record! records once" begin
+    # `record!` IS something a caller has to do, once, after building the plan:
+    # `run!` submits that recording and never records for itself, so a plan
+    # that was never recorded is refused rather than recorded on the owning
+    # thread's first frame. Every run after the one `record!` submits the same
+    # command buffer.
     dev = Mantle.Device(Mantle.VulkanAPI())
     be = Mantle.defaultbackend()
     n = 64
@@ -109,15 +113,18 @@ end
     pl = Base.invokelatest(_bumpplan, dev, counter, n)
 
     @test !Mantle.recorded(pl)
-    Mantle.run!(pl)
+    @test_throws ArgumentError Mantle.run!(pl)
+    @test !Mantle.recorded(pl)
+    Mantle.record!(pl)
     @test Mantle.recorded(pl)
-    firsts = copy(pl.recordings)
+    Mantle.run!(pl)
+    first = pl.recording
     for _ in 1:5
         Mantle.run!(pl)
     end
     KA.synchronize(be)
-    # Same objects, so nothing was recorded again.
-    @test all(firsts[i] === pl.recordings[i] for i in eachindex(firsts))
+    # Same object, so nothing was recorded again.
+    @test pl.recording === first
     @test Array(Mantle.storage(counter)) == fill(Int32(24), n)
 
     Mantle.free!(pl)

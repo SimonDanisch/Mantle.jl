@@ -97,9 +97,12 @@ function present_frame! end
 
 Take the image the next frame renders into.
 
-After [`beginframe!`](@ref) and before any recording: on both backends this can
-BLOCK — it is where the frame rate comes from — and blocking with a
-half-recorded frame in hand is how a resize turns into a fault two frames later.
+After [`beginframe!`](@ref) and before `refit!`, both from `beforeframe!`: on
+both backends this can BLOCK — it is where the frame rate comes from — and it is
+the last place a resize is noticed, so the attachments that follow the surface
+are refit after it. Acquiring later, with the frame already refit, rebuilt a
+swapchain under a depth target sized for the old one: a lost device two frames
+later, on NVIDIA, one resize in three.
 """
 function acquire_next_image! end
 
@@ -250,22 +253,6 @@ function record_draw! end
 # window, which until now it could not: the shared `run!` walked passes and
 # nothing else, so a `Surface` in the graph was an attachment nobody acquired.
 
-"""
-    submit!(device)
-
-Send whatever the backend has recorded but not yet submitted.
-
-Called by `run!` before a pass that DISPATCHES, and once at the end of the
-frame. The graph knows which passes those are and the backend does not, which
-is the whole reason this is a verb: a backend is free to keep one command
-buffer open across consecutive render and copy passes — that is seven
-submissions saved in `bench/showcase.jl`'s twenty — but it must not hold one
-across a dispatch, because the dispatch would then be submitted first and run
-before the drawing it depends on.
-
-Doing nothing is a correct implementation, and the default.
-"""
-submit!(::Any) = nothing
 
 """
     beginframe!(window)

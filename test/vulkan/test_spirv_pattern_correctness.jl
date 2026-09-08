@@ -450,132 +450,32 @@ end
 end
 
 # ═══════════════════════════════════════════════════════════════════════
-# Fix 10: Multi-CB auto-split for large command buffers
+# Fix 10: large dispatch counts submit correctly
 #
-# Symptom: DEVICE_LOST at vkQueueSubmit when a single command buffer
-# accumulated 30k+ dispatches (e.g. Hikari volpath 10spp: 50 bounces ×
+# Symptom (historical): DEVICE_LOST at vkQueueSubmit when a single command
+# buffer accumulated 30k+ dispatches (e.g. Hikari volpath 10spp: 50 bounces ×
 # 60 dispatches/bounce × 10 samples = 30,000). NVIDIA driver's internal
-# command buffer processing fails on very large CBs.
+# command buffer processing failed on very large CBs.
 #
-# Fix: Automatically seal the current CB and start a fresh one when
-# dispatches per segment reach `bq.cb_split_threshold`. All segments are
-# submitted in a single vkQueueSubmit call, preserving barrier semantics.
+# There is no long-lived open command buffer to overflow now: every launch is
+# its own one-shot, sealed and submitted immediately, so this checks the
+# vendor-neutral property that survives — many dispatches in a row, each its
+# own submission, still produce correct results.
 # ═══════════════════════════════════════════════════════════════════════
 
-@testset "Fix 10: Multi-CB auto-split" begin
+@testset "5000 dispatches, one submission each" begin
     @kernel function cb_split_inc!(a)
         i = @index(Global)
         @inbounds a[i] += 1.0f0
     end
 
     backend = MVE.LavaBackend()
-
-    # These assert what a *batch* accumulates, so they have to hold the batch
-    # open: `bq.auto_submit_threshold` defaults to 64 and submits the batch out
-    # from under the assertions long before 350 dispatches (it was 0 when this
-    # was written; overlapping recording with execution measured +44%). Pinned
-    # to 0 for the duration rather than the assertions being relaxed — CB
-    # splitting is a DEVICE_LOST fix and worth keeping covered.
-    bq = MVE.vk_context().default_bq
-    old_auto = bq.auto_submit_threshold
-    bq.auto_submit_threshold = 0
-    try
-
-    # Test 1: Splitting occurs at threshold
-    @testset "Split at threshold" begin
-        old_threshold = bq.cb_split_threshold
-        bq.cb_split_threshold = 100  # Low threshold for fast test
-
-        a = MVE.LavaArray(zeros(Float32, 64))
-        kernel = cb_split_inc!(backend)
-        for _ in 1:350
-            kernel(a; ndrange=64)
-        end
-
-        ctx = MVE.vk_context()
-        batch = ctx.default_bq.active_batch
-        @test batch !== nothing
-        @test batch.dispatch_count == 350
-        @test length(batch.sealed_cmd_bufs) == 3  # 100+100+100 sealed, 50 active
-        @test batch.segment_dispatches == 50
-
-        MVE.vk_flush!(MVE.vk_context())
-        @test Array(a) == fill(350.0f0, 64)
-        # Sealed CBs returned to free pool
-        @test length(batch.sealed_cmd_bufs) == 0
-
-        bq.cb_split_threshold = old_threshold
+    a = MVE.LavaArray(zeros(Float32, 256))
+    kernel = cb_split_inc!(backend)
+    for _ in 1:5000
+        kernel(a; ndrange=256)
     end
 
-    # Test 2: Splitting disabled (threshold=0)
-    @testset "Splitting disabled" begin
-        old_threshold = bq.cb_split_threshold
-        bq.cb_split_threshold = 0
-
-        a = MVE.LavaArray(zeros(Float32, 64))
-        kernel = cb_split_inc!(backend)
-        for _ in 1:500
-            kernel(a; ndrange=64)
-        end
-
-        ctx = MVE.vk_context()
-        batch = ctx.default_bq.active_batch
-        @test batch.dispatch_count == 500
-        @test length(batch.sealed_cmd_bufs) == 0  # No splitting
-
-        MVE.vk_flush!(MVE.vk_context())
-        @test Array(a) == fill(500.0f0, 64)
-
-        bq.cb_split_threshold = old_threshold
-    end
-
-    # Test 3: Multiple flushes with splitting produce correct results
-    @testset "Multiple flushes with splitting" begin
-        old_threshold = bq.cb_split_threshold
-        bq.cb_split_threshold = 50
-
-        a = MVE.LavaArray(zeros(Float32, 64))
-        kernel = cb_split_inc!(backend)
-
-        # First pass: 200 dispatches → 3 sealed + 1 active
-        for _ in 1:200
-            kernel(a; ndrange=64)
-        end
-        MVE.vk_flush!(MVE.vk_context())
-        @test Array(a) == fill(200.0f0, 64)
-
-        # Second pass: reuses CB pool, another 200 dispatches
-        for _ in 1:200
-            kernel(a; ndrange=64)
-        end
-        MVE.vk_flush!(MVE.vk_context())
-        @test Array(a) == fill(400.0f0, 64)
-
-        bq.cb_split_threshold = old_threshold
-    end
-
-    # Test 4: Large dispatch count (simulating Hikari-scale workload)
-    @testset "5000 dispatches" begin
-        a = MVE.LavaArray(zeros(Float32, 256))
-        kernel = cb_split_inc!(backend)
-        for _ in 1:5000
-            kernel(a; ndrange=256)
-        end
-
-        ctx = MVE.vk_context()
-        batch = ctx.default_bq.active_batch
-        @test batch.dispatch_count == 5000
-        threshold = bq.cb_split_threshold
-        if threshold > 0
-            expected_sealed = div(5000, threshold) - (5000 % threshold == 0 ? 1 : 0)
-            @test length(batch.sealed_cmd_bufs) >= 1
-        end
-
-        MVE.vk_flush!(MVE.vk_context())
-        @test Array(a) == fill(5000.0f0, 256)
-    end
-
-    finally
-        bq.auto_submit_threshold = old_auto
-    end
+    MVE.vk_flush!(MVE.vk_context())
+    @test Array(a) == fill(5000.0f0, 256)
 end

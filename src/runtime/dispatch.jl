@@ -44,7 +44,7 @@ read.
 `max` is an optional upper bound on the count, for backends that must compile
 against a static ndrange; `nothing` means the backend picks its own ceiling.
 
-    n = Scalar(g, Int32)                       # written by an earlier pass
+    n = GPURef(g, Int32)                       # written by an earlier pass
     dispatch!(p, compact!, (queue, n), DeviceRange(n))
 
 # The tail
@@ -79,27 +79,46 @@ countresource(r::DeviceRange) = r.count
 countresource(::Any) = nothing
 
 """
-    argvalue(x)
+    refuserefs(args)
 
-What a dispatch argument IS, at the moment the work is recorded.
+Throw if a `Ref` is anywhere in a dispatch's, draw's or trace's arguments —
+nested in a tuple or a struct as much as at the top, because a `Ref` inside a
+camera struct is the case a renderer actually had.
 
-For everything else that is `storage(x)`. The case worth stating is the `Ref`: it
-is read **here**, per run, rather than when the plan was compiled. A plan
-resolves its arguments once and is then run many times, so a value that changes
-between runs — a sample index, a camera, a scene re-adapted every frame — has
-nowhere else to live. Giving it as a `Ref` is how a caller says "read this again
-each time"; giving it by value is how they say the opposite.
+A `Ref` used to mean "read this again every run", and honouring that cost the
+argument ring: 602 host stores per run on Hikari's fused sample to move 268
+bytes, into memory an in-flight submission could still be reading. Nothing
+rewrites argument memory after `record!` now, so there is nothing left for a
+`Ref` to mean: a value that changes between runs is a [`GPURef`](@ref), stored
+with `ref[] = x`, and a value that does not is passed as itself. Refusing it at
+the declaration is what keeps one from silently freezing at whatever it held
+when the plan recorded.
 
-In core because it is a promise about the API rather than a conversion: what a
-backend hands the shader afterwards is its own business, and both of them make
-that promise or neither can be relied on.
-
-The type behind the `Ref` has to stay put, because the argument layout was
-computed from it. That is the caller's to guarantee — a `Ref{Any}` would pack
-whatever it happened to hold against a layout built for something else.
+Walks the argument tree the way the Vulkan backend's `pin_leaves!` does — per
+concrete type, unrolled at compile time — through tuples, NamedTuples and
+immutable structs, which is the value tree a packer flattens. It stops at a
+resource, an array, and any other MUTABLE struct: those are handles that own
+their insides (an acceleration structure holds the driver's objects, which
+reference each other in cycles), and the one mutable cell this refuses is the
+`Ref` itself.
 """
-argvalue(x) = storage(x)
-argvalue(r::Base.RefValue) = storage(r[])
+refuserefs(::Base.RefValue) = throw(ArgumentError(
+    "a Ref is not a dispatch argument. It would be read once, at record!, and never " *
+    "again, which is not what a Ref is for: a value that changes between runs is a " *
+    "GPURef (`r = GPURef(dev, x)`, then `r[] = x′` before a run), and a value that " *
+    "does not is passed as itself."))
+refuserefs(::Resource) = nothing
+refuserefs(::AbstractArray) = nothing
+@generated function refuserefs(x::T) where {T}
+    isbitstype(T) && return :(nothing)
+    (T <: Tuple || T <: NamedTuple) && return Expr(
+        :block, Expr[:(refuserefs(x[$i])) for i in 1:fieldcount(T)]..., :(nothing))
+    (T <: Type || T <: Symbol || T <: AbstractString || T <: Module ||
+     T === Nothing || T <: Ptr || ismutabletype(T)) && return :(nothing)
+    n = fieldcount(T)
+    n == 0 && return :(nothing)
+    Expr(:block, Expr[:(refuserefs(getfield(x, $i))) for i in 1:n]..., :(nothing))
+end
 
 """
     passof(handle) -> pass
@@ -154,6 +173,7 @@ the device. The dispatch is then ordered after whatever wrote that count, and
 the caller never sees a workgroup division or a barrier.
 """
 function dispatch!(p, kernel, args, ndrange; group = nothing)
+    refuserefs(args)
     n = countresource(ndrange)
     n === nothing || indirectcount!(p, n)
     push!(dispatches(passof(p)), Dispatch(kernel, args, ndrange, group))

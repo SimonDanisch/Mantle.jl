@@ -103,11 +103,11 @@ end
     @test all(≈(12.0f0), Array(out))      # 5*2 + 2, not 0 + 2
 end
 
-# ── an Update lands, on the GPU side too ──────────────────────────────────────
+# ── a store lands, on the GPU side too ────────────────────────────────────────
 #
 # `run!(::Plan)` in `graph/kalaunch.jl` walked `pp.dispatches` and nothing else,
-# and the update pass HAS no dispatches — landing the writes an `Update` ref is
-# holding is its entire body. So every `Update` was silently dropped on every
+# and the update pass HAS no dispatches — landing the writes a store is holding
+# is its entire body. So every store was silently dropped on every
 # KernelAbstractions backend, Metal included. Only the Vulkan route, which
 # records its passes itself, ever applied one.
 #
@@ -115,14 +115,13 @@ end
 # the side where the write goes through mapped device memory instead of a plain
 # `Vector` — and where a kernel, not a closure, is the thing that must observe
 # it in the position the graph reserved.
-@testset "Metal: an Update lands before the pass that reads it" begin
+@testset "Metal: a store lands before the pass that reads it" begin
     dev = Mantle.Device(Mantle.MetalAPI())
     g = Mantle.Graph(dev)
     n = 256
 
     src = Mantle.Buffer(dev, zeros(Float32, n))
     dst = Mantle.Buffer(dev, zeros(Float32, n))
-    ref = Mantle.Update(g, src)
     Mantle.compute!(g, "copy") do p
         Mantle.use(p, src; read = true)
         Mantle.use(p, dst; write = true)
@@ -141,16 +140,16 @@ end
     Metal.synchronize()
     @test all(iszero, Array(dst))
 
-    # Fired: the write lands before the dispatch that declared the read. This is
-    # the assertion the bug failed — `dst` stayed zero.
-    ref(fill(3.0f0, n))
+    # Written: the store lands before the dispatch that declared the read. This
+    # is the assertion the bug failed — `dst` stayed zero.
+    src[:] = fill(3.0f0, n)
     Mantle.run!(plan)
     Metal.synchronize()
     @test Array(dst) == fill(3.0f0, n)
 
-    # Consumed: a ref that is not fired again writes nothing next frame, so the
+    # Consumed: a store that is not made again writes nothing next frame, so the
     # reader keeps seeing the last value rather than a stale one reappearing.
-    ref(fill(7.0f0, n))
+    src[:] = fill(7.0f0, n)
     Mantle.run!(plan)
     Metal.synchronize()
     @test Array(dst) == fill(7.0f0, n)
@@ -159,9 +158,9 @@ end
     @test Array(dst) == fill(7.0f0, n)
 
     # Unified memory, so the write is in place and the resource keeps its store
-    # — where the Vulkan route renames into a fresh one.
+    # — the same as every backend, now that nothing renames.
     store = src.store
-    ref(fill(2.0f0, n))
+    src[:] = fill(2.0f0, n)
     Mantle.run!(plan)
     Metal.synchronize()
     @test src.store === store

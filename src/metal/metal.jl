@@ -58,5 +58,5 @@ include("graphics.jl")
 # Transient render targets. After graphics.jl: needs `mtlformat`.
 include("images.jl")
 # The presentation surface. After graphics.jl: needs `mtlformat` and the
-# submission helpers (`framebuffer!`, `submitopen!`).
+# submission helpers (`framebuffer!`, `commit!`).
 include("window.jl")

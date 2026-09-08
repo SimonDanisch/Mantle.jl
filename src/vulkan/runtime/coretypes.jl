@@ -70,20 +70,31 @@ mutable struct VkManagedBuffer
     # a slice of one, which is still how a mapped, unified or unusually-flagged
     # buffer is served. That case is what `pool_offset` returning 0 says.
     region::Union{Nothing, Region}
-    # Cross-queue synchronization: records which VulkanBatchQueue last wrote to
-    # this buffer, at which timeline value. Consumed by sync_access! to
-    # auto-insert semaphore waits when a dispatch on a different queue
-    # takes this buffer as an argument. Nothing = never written.
-    # Typed as Any so VulkanBatchQueue (defined later) doesn't force a cyclic include.
-    # @atomic so the finalizer thread (vk_free!) and main thread (record /
-    # sync_access!) can read/write it safely.
-    @atomic last_write::Union{Nothing, Tuple{Any, UInt64}}
+    # Cross-queue synchronization: which VulkanBatchQueue last wrote to this
+    # buffer (`nothing` = never written), and at which timeline value. Consumed
+    # by `sync_access!` to insert a semaphore wait when a submission on a
+    # different queue takes this buffer, and by the frees to know when the
+    # device is done with it. `Any` because VulkanBatchQueue is defined later.
+    #
+    # **The owning thread's, and nobody else's.** Two plain fields, not one
+    # atomic tuple: the tuple was `Union{Nothing, Tuple{Any, UInt64}}`, and
+    # storing one boxed 48 bytes per buffer per submission — on a ray-tracing
+    # plan that syncs 48 buffers a sample, that was every byte a run allocated.
+    # The atomic existed for the finalizer thread, which read the pair to ask
+    # whether the device was done; it does not read it any more. A free that
+    # starts off the owning thread hands the buffer to the owning thread's
+    # deferred list WITHOUT looking (`vk_free!`, `unsafe_free!(::LavaBLAS)`),
+    # and the owning thread reads the pair when it drains. A finalizer that
+    # runs ON the owning thread cannot interleave the two stores in
+    # `sync_access!` either: nothing between them is a safepoint.
+    last_write_bq::Any
+    last_write_val::UInt64
     # Lifecycle state — see BUF_STATE_* constants above.  @atomic CAS is the
     # single point where double-free / use-after-free is ruled out.
     @atomic state::UInt8
-    # Number of live CommandBatches that have `pin!`ed an array backed by this
-    # buffer.  Incremented at pin time, decremented when the batch releases its
-    # pins (`release_pinned_refs!`, i.e. the batch completed or its submit
+    # Number of live closed command buffers that have `pin!`ed an array backed
+    # by this buffer.  Incremented at pin time, decremented when the owner
+    # releases its pins (`release_pinned_refs!`, i.e. the submission completed or
     # failed).  A buffer with pins > 0 is REACHABLE BY A BATCH THAT CAN STILL
     # SUBMIT, so `vk_free!` must not touch it — not even to mark it DEFERRED,
     # because `sync_access!` asserts the buffer is ALIVE at submit.
@@ -215,20 +226,10 @@ struct LaunchPlan
     ray_query::Bool
 end
 
-"""
-The compiled prepare-indirect kernel for one device.
-
-It owns a `VkPipeline`, so it is per device (`GUARDRAILS.md` §8) — four separate
-`Ref`s before, which meant four things that had to be reset together and were
-reachable from the wrong device in exactly the same way. Bundling them makes the
-per-device dict hold one value instead of four parallel ones.
-"""
-struct PrepareIndirect
-    pipeline::LavaComputePipeline
-    offsets::Vector{Int}
-    byval_sizes::Vector{Int}
-    arg_buffer_size::Int
-end
+# `PrepareIndirect` is gone with `fast_prepare_indirect!` — it held one
+# hand-cached compiled kernel, its offsets and its argument size, so that one
+# specific launch could skip the ordinary kernel-cache lookup. See
+# `ka_backend.jl` for why that launch is not on an inner loop any more.
 
 """
     VulkanCompiledGraphicsPipeline
@@ -331,6 +332,10 @@ mutable struct Diagnostics
     # Lifetime dispatch counters. Atomics: `submit!` may run off the main thread.
     flush_counter::Threads.Atomic{Int}
     total_dispatches::Threads.Atomic{Int}
+    # How many closed command buffers opened with the global barrier — one
+    # per one-shot and per recording — so a test can say that a launch began
+    # with it. See `headbarrier!`.
+    head_barriers::Threads.Atomic{Int}
 end
 
 Diagnostics() = Diagnostics(false, false, false, true, false, false, false, false, UInt64(0),
@@ -340,7 +345,8 @@ Diagnostics() = Diagnostics(false, false, false, true, false, false, false, fals
                             Dict{Symbol,Tuple{Int,Int}}(), ReentrantLock(),
                             String[], Float64[], String[], Int[],
                             String[], 0,
-                            Threads.Atomic{Int}(0), Threads.Atomic{Int}(0))
+                            Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
+                            Threads.Atomic{Int}(0))
 
 # ── Per-device state ─────────────────────────────────────────────────────────
 
@@ -680,7 +686,6 @@ mutable struct DeviceCaches
     # keeps the struct immutable and pays a `::LaunchPlan` typeassert on read,
     # which is free. See `launch_plan`.
     launchplans::IdDict{DataType,Vector{Any}}
-    prepare_indirect::Union{Nothing,PrepareIndirect}
     pool::MemoryPolicy
     # 0 means "not yet queried" — the device never reports 0.
     subgroup_size::Int
@@ -752,7 +757,7 @@ end
 DeviceCaches() = DeviceCaches(
     Dict{UInt64,LavaComputePipeline}(), UInt64[],
     Dict{Any,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
-    nothing, MemoryPolicy(), 0, nothing, nothing, false,
+    MemoryPolicy(), 0, nothing, nothing, false,
     Dict{UInt64,VulkanCompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
     Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     nothing, nothing, 0, 1.0, Any[],

@@ -45,34 +45,40 @@ end
     # `MatrixA`, `MatrixB`, `Accumulator`, `DeviceCaps`, `caps` are
     # `KernelInterface`'s, re-exported by each so a kernel library needs one
     # import. So the check is on identity, not on the name.
-    #
-    # The SHADER BUILTINS are the deliberate exception, and they arrived after
-    # this testset did. `vertex_index`, `instance_index` and the `frag_coord`
-    # family are DECLARED by Mantle (`function vertex_index end`, no methods) so
-    # that a shader can write `Mantle.vertex_index()` and have the compiler that
-    # is running decide what it means — Lava's version on Vulkan, Metal's on
-    # Metal, through `@lava_device_override` / `@device_override`. Lava exports
-    # its own implementation under the same name, on purpose. So here the two
-    # SHOULD differ, and requiring identity would be requiring the portable
-    # builtin not to exist.
     shared = [n for n in intersect(Set(names(Lava)), Set(names(Mantle)))
-              if n !== :Lava && n !== :Mantle && !(n in Mantle.SHADER_BUILTINS)]
+              if n !== :Lava && n !== :Mantle]
     conflicting = sort([String(n) for n in shared
                         if getproperty(Lava, n) !== getproperty(Mantle, n)])
     @test conflicting == String[]
-    # The exemption is not a hole: each builtin Mantle declares must have a Lava
-    # counterpart to be overridden WITH, or the override above binds nothing.
-    @test all(n -> isdefined(Lava, n), Mantle.SHADER_BUILTINS)
     # …and the benign overlap is exactly the vocabulary, not something that drifted
     # into being defined twice.
     @test all(n -> parentmodule(getproperty(Mantle, n)) !== Mantle ||
                    getproperty(Lava, n) === getproperty(Mantle, n), shared)
-    # `frag_coord` is why the builtins are exempt AND why they are still checked:
-    # `graphics/api.jl` wrote the override's right-hand side unqualified, which
-    # resolved to Mantle's own declaration and made the method call itself. This
-    # asserts the direction the bridge has to run in.
-    @test parentmodule(Mantle.frag_coord) === Mantle
-    @test parentmodule(Lava.frag_coord) === Lava
+end
+
+@testset "the shader builtins are Mantle's names, implemented by Lava" begin
+    # `vertex_index`, `instance_index` and the `frag_coord` family are DECLARED
+    # by Mantle (`function vertex_index end`, no methods) so that a shader can
+    # write `vertex_index()` and have the compiler that is running decide what
+    # it means — Lava's implementation on Vulkan, Metal's on Metal, through
+    # `@lava_device_override` / `@device_override`.
+    #
+    # Lava used to EXPORT its implementations under the same names, and this
+    # testset exempted them from the identity check above as "on purpose". It
+    # was not: two modules exporting one name that resolves to two functions
+    # leaves the bare name unbound in any scope that loads both, so a shader
+    # naming `vertex_index()` in a file with `using Mantle, Lava` inferred `Any`
+    # and failed to compile — `test_window.jl` had not compiled a vertex shader
+    # since the split. Mantle exports the name; Lava defines the implementation
+    # and does not export it; the backend reaches it qualified.
+    for n in Mantle.SHADER_BUILTINS
+        @test n in names(Mantle)
+        @test !(n in names(Lava))
+        # …but it must still be DEFINED there, or the override binds nothing.
+        @test isdefined(Lava, n)
+        @test parentmodule(getproperty(Mantle, n)) === Mantle
+        @test parentmodule(getproperty(Lava, n)) === Lava
+    end
 end
 
 @testset "every name a test imports from Lava is still Lava's" begin

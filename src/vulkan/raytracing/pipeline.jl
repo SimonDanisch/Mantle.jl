@@ -260,7 +260,8 @@ end
 Write one ray-tracing dispatch, and nothing else. The descriptor set comes from
 `get_rt_descriptor_set`, which has always cached per (TLAS, layout) on the TLAS
 itself — so unlike the compute HWTLAS path there was never a per-dispatch pool
-here.
+here. The unmodelled forms (`trace_rays!`, `trace_rays_indirect!`) write these
+into a one-shot of their own; a plan's `trace!` writes them into its recording.
 """
 function emit_trace!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
                      push_bda::UInt64, width::Integer, height::Integer,
@@ -271,8 +272,8 @@ function emit_trace!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
     pin!(e, pipeline)
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-    pin!(e, tlas.accel)
-    pin!(e, tlas.storage)
+    # The TLAS and every BLAS it instances are held by the caller's `pintrace!`;
+    # the two top-level pins that stood here were a partial copy of it.
     push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
     # Same optional GPU timestamps as the compute paths.  Without these the
     # profiler is blind to hardware ray tracing — on an hw_accel=true frame
@@ -301,8 +302,8 @@ function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTL
     pin!(e, pipeline)
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-    pin!(e, tlas.accel)
-    pin!(e, tlas.storage)
+    # The TLAS and every BLAS it instances are held by the caller's `pintrace!`;
+    # the two top-level pins that stood here were a partial copy of it.
     push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
     # bda_address(indirect) includes the view's element offset, so the address
     # passed to Vulkan points exactly at the 3-UInt32 command.
@@ -318,47 +319,6 @@ function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTL
     pin!(e, indirect)
     emitted!(e, name)
     return nothing
-end
-
-"""
-    rt_dispatch!(bq, pipeline, tlas, push_bda, width, height; depth=1)
-
-The unmodelled form: `record_dispatch!`'s barrier, then the same commands.
-"""
-function rt_dispatch!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
-                      push_bda::UInt64, width::Integer, height::Integer;
-                      depth::Integer=1)
-    bq.last_dispatch_info = "rt_trace w=$width h=$height"
-    record_dispatch!(bq;
-        dst_stage=VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        extra_dst_access=VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-        is_rt=true,
-    ) do batch
-        emit_trace!(Emitter(batch, nothing, 0), pipeline, tlas, push_bda,
-                    width, height, depth, bq.last_dispatch_info)
-    end
-end
-
-"""
-    rt_dispatch_indirect!(bq, pipeline, tlas, push_bda, indirect::LavaArray{UInt32,1})
-
-Record an indirect RT trace dispatch. `indirect` must contain a
-VkTraceRaysIndirectCommandKHR (3×UInt32), written by a previous GPU kernel.
-"""
-function rt_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaRTPipeline, tlas::LavaTLAS,
-                               push_bda::UInt64, indirect::LavaArray{UInt32,1})
-    bq.last_dispatch_info = "rt_indirect"
-    record_dispatch!(bq;
-        dst_stage=VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-        extra_dst_access=VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK.ACCESS_INDIRECT_COMMAND_READ_BIT,
-        is_rt=true,
-        # Indirect-args read depends on the preceding prepare write — never
-        # elide this barrier (see record_dispatch! docs).
-        force_pre_barrier=true,
-    ) do batch
-        emit_trace_indirect!(Emitter(batch, nothing, 0), pipeline, tlas, push_bda,
-                             indirect, bq.last_dispatch_info)
-    end
 end
 
 # ── Internal helpers ──

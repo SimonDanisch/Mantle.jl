@@ -30,8 +30,8 @@ ruled out, so the next person does not re-run it: buffer lifetime (of the
 BDA changes), memory returning to the driver (`gpu_live_bytes` is identical
 across the GC), command-buffer recycling, and pool size.
 
-The interleaving case is a real bug this pins. `ensure_active_batch!` hands a new
-batch `bq.next_timeline + 1` as its signal value, reserving it, and `submit!`
+The interleaving case is a real bug this pins. Opening the old batch handed it
+`bq.next_timeline + 1` as its signal value, reserving it, and `submit!`
 later asserts the reservation still holds; a submission path that bumped the same
 counter left any open batch with a stale reservation and the next `submit!` died
 with `AssertionError: batch signal desync: 859 vs 860`, naming neither. The shape
@@ -95,8 +95,10 @@ end
     @test all(==(120.0f0), Array(Mantle.storage(a)))
     @test all(==(240.0f0), Array(Mantle.storage(d)))
 
-    # Repeated runs accumulate, and across more than `ARG_SLOTS` of them, so the
-    # ring wraps and a slot is reused while an earlier run is still in flight.
+    # Repeated runs accumulate, and several of them are in flight at once —
+    # which is what makes `SIMULTANEOUS_USE` on the recording load-bearing: the
+    # same command buffer is submitted again before the device has finished the
+    # previous submission of it.
     fill!(Mantle.storage(a), 0.0f0)
     KA.synchronize(be)
     for _ in 1:5
@@ -126,6 +128,11 @@ end
     Mantle.record!(pl)
 
     scratch = KA.allocate(be, Float32, n)
+    # Not zeroed by the allocator: on a pristine pool fresh pages read 0 and
+    # this test passes by luck, but once earlier work has recycled bytes
+    # through the pool, `scratch` starts at whatever they last held. The
+    # interleave below asserts +3 four times and +5 once, so it must start at 0.
+    KA.fill!(scratch, 0f0)
     bump = reclife_add!(be, 256)
 
     # No `synchronize` between the two: this is the case that desynced. The ad

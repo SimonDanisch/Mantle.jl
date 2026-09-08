@@ -10,14 +10,15 @@ begin # ── packages: their own block, so the macros below are expandable ─
     # A scalar attribute is stride 0, so it reads element 1 for every point —
     # scalar and per-element colour are one shader, not two.
     function scatter_vertex(pos::AbstractVector{Vec3f}, col::AbstractVector{Vec4f},
-                            siz::AbstractVector{Float32}, mvp::Mat4f,
+                            siz::AbstractVector{Float32}, mvp::AbstractVector{Mat4f},
                             scol::Int32, ssiz::Int32)
         i = vertex_index()
         @inbounds p = pos[i]
         @inbounds c = col[1 + scol * (i - Int32(1))]
         @inbounds s = siz[1 + ssiz * (i - Int32(1))]
+        @inbounds m = mvp[1]
         set_point_size!(s)
-        return (position = mvp * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
+        return (position = m * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
     end
     scatter_fragment(inputs) = inputs.color
 
@@ -26,11 +27,11 @@ begin # ── packages: their own block, so the macros below are expandable ─
                         blend = Additive(), cull = NoCull(), depth = DepthOff())
 
     # One step of the simulation, run on three different backends below.
-    @kernel function advect!(pos, vel, dt::Float32, radius::Float32)
+    @kernel function advect!(pos, vel, dt, radius::Float32)
         i = @index(Global)
         @inbounds begin
             v = vel[i]
-            p = pos[i] + v * dt
+            p = pos[i] + v * dt[1]
             r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
             if r > radius
                 n = p / r
@@ -62,15 +63,15 @@ begin # ── packages: their own block, so the macros below are expandable ─
     # GLMakie holds a RenderObject per plot; here the device side is buffers plus
     # the positions in the schedule where new data for them lands.
     device_attribute(dev, v::AbstractVector) = M.Buffer(dev, v)
-    device_attribute(dev, x) = M.Scalar(dev, x)
+    device_attribute(dev, x) = M.GPURef(dev, x)
+    # The write side of the same choice: a per-element attribute is a
+    # whole-buffer store, a scalar one lands through the ref.
+    landvalue!(b::M.Buffer, data) = (b[:] = data)
+    landvalue!(r::M.GPURef, data) = (r[] = data)
 
     function build_plot(dev, g, args)
         buffers = Dict(k => device_attribute(dev, v) for (k, v) in pairs(args))
-        # A reserved position, not an upload: handing data over touches no Vulkan.
-        # Every attribute gets one — a per-element array is renamed, a scalar is a
-        # four-byte write riding along inside the command buffer.
-        updates = Dict(k => M.Update(g, buffers[k]) for k in keys(args))
-        (; buffers, updates, fired = Dict(k => 0 for k in keys(updates)))
+        (; buffers, fired = Dict(k => 0 for k in keys(args)))
     end
 
     # This is GLMakie's update_robjs!: walk the args, skip what did not change.
@@ -80,7 +81,7 @@ begin # ── packages: their own block, so the macros below are expandable ─
             # A host array is staged and copied, a device array is copied device
             # to device and never sees the host, a scalar goes in place. The value
             # decides, not a flag.
-            plot.updates[name](args[name])
+            landvalue!(plot.buffers[name], args[name])
             plot.fired[name] += 1
         end
         return plot
@@ -105,6 +106,7 @@ begin # ── packages: their own block, so the macros below are expandable ─
     handover!(attr) = (attr[:plot][]; nothing)
 
     function draw_scatter!(p, attr, mvp)
+        M.use(p, mvp; read = true)
         b = buffers(attr)
         col, siz = M.Attribute(p, b[:color]), M.Attribute(p, b[:markersize])
         args = (M.Attribute(p, b[:positions]), col, siz, mvp, M.stride(col), M.stride(siz))
@@ -115,7 +117,12 @@ begin # ── packages: their own block, so the macros below are expandable ─
     win = M.Window(W, H; title = "mantle: three ways to update")
     graph = M.Graph(dev)
     screen = M.Surface(graph, win)
+    # `dt` stays a plain host `Ref`: the raw launches below read it directly with
+    # `dt[]`, which a `GPURef` cannot do (there is no `getindex` — reading a
+    # device value is a download). `dtref` is what the in-graph sim's dispatch
+    # holds instead, since a dispatch argument may not be a `Ref`.
     dt = Ref(1.0f0 / 60)
+    dtref = M.GPURef(dev, dt[])
 
     a, b, c = cloud(n), cloud(n), cloud(n)
     mk(x) = scatter(dev, graph; positions = x, color = tint.(x), markersize = 2.0f0)
@@ -126,7 +133,8 @@ begin # ── packages: their own block, so the macros below are expandable ─
     M.compute!(graph, "advect") do p
         x = M.use(p, buffers(sim)[:positions]; read = true, write = true)
         v = M.use(p, simvel; read = true, write = true)
-        M.dispatch!(p, advect!, (x, v, dt, 1.4f0), n)
+        M.use(p, dtref; read = true)
+        M.dispatch!(p, advect!, (x, v, dtref, 1.4f0), n)
     end
 
     # middle: the same kernel on the device, outside the graph
@@ -134,7 +142,8 @@ begin # ── packages: their own block, so the macros below are expandable ─
     # right: the same kernel again, on the CPU backend over plain arrays
     cpupos, cpuvel = copy(c), drift(n)
 
-    mvps = (Ref(camera(0.0f0, -2.2f0)), Ref(camera(0.0f0, 0.0f0)), Ref(camera(0.0f0, 2.2f0)))
+    mvps = (M.GPURef(dev, camera(0.0f0, -2.2f0)), M.GPURef(dev, camera(0.0f0, 0.0f0)),
+            M.GPURef(dev, camera(0.0f0, 2.2f0)))
     M.render!(graph, "three", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1.0f0))) do p
         for (plt, mvp) in zip((sim, gpu, cpu), mvps)
             draw_scatter!(p, plt, mvp)
@@ -186,7 +195,7 @@ update!(cpu; positions = cloud(n))                          # a new host cloud
 
 update!(gpu; positions = M.storage(M.Buffer(dev, cloud(n))))  # a new device cloud
 
-dt[] = 1.0f0 / 240                                          # the in-graph sim reads this
+dt[] = 1.0f0 / 240; dtref[] = dt[]           # dtref is what the in-graph sim reads
 
 fired(cpu)      # per attribute, how often it was handed over: colour once, positions per frame
 

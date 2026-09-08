@@ -1,4 +1,6 @@
 # A constant lookup table indexed by a runtime value.
+
+using StaticArrays: SVector   # the kernels below say `SVector` unqualified
 #
 # Julia writes `kern[i]` on a constant `SVector` as a pointer one element BEFORE
 # the table plus the index — the 1-based fold — and when the table is hoisted to

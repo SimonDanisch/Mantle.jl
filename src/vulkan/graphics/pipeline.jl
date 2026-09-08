@@ -314,7 +314,7 @@ end
 
 Record a draw command using dynamic rendering.
 """
-function vk_draw!(bq::VulkanBatchQueue,
+function vk_draw!(e::Emitter,
                    pipeline::VulkanCompiledGraphicsPipeline,
                    color_view::VK.ImageView,
                    color_image::VK.Image,
@@ -330,18 +330,11 @@ function vk_draw!(bq::VulkanBatchQueue,
                    indices_buffer::Union{Nothing, VK.Buffer}=nothing,
                    index_count::Integer=0,
                    descriptor_set::Union{Nothing, VK.DescriptorSet}=nothing)
-    # Route through record_dispatch! so the prior-dispatch → draw barrier,
-    # dispatch_count bookkeeping, CB-split logic, and dispatch-log accounting
-    # all come from the single shared helper.  The do-block handles the
-    # graphics-specific work (image transitions, dynamic rendering scope,
-    # bind + draw + end_rendering).
-    record_dispatch!(bq;
-        dst_stage = VK.PIPELINE_STAGE_VERTEX_SHADER_BIT |
-                    VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        extra_dst_access = VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        info = "draw vtx=$vertex_count",
-    ) do batch
-        cmd = batch.cmd_buf
+    # Into whatever the emitter is writing — a one-shot the caller opened for
+    # this draw, which begins with the global barrier that orders it behind
+    # every dispatch before it. Image transitions, the dynamic rendering scope,
+    # bind + draw + end_rendering follow.
+    let batch = e.owner, cmd = e.cmd
 
         # Transition color image to COLOR_ATTACHMENT_OPTIMAL.
         #
@@ -530,20 +523,6 @@ DONT_CARE.
 begin_pass!(target, color_view::VK.ImageView, color_image::VK.Image,
                extent::VK.Extent2D; kw...) =
     begin_pass!(target, [color_view], [color_image], extent; kw...)
-
-# The four render-pass verbs take an EMITTER. A queue is accepted too and means
-# "whatever batch is open", which is what every caller outside a plan wants —
-# RayMakie's overlay, `blit!`, a test drawing a triangle. One line each, so
-# there is one implementation and the queue form cannot drift from it.
-begin_pass!(bq::VulkanBatchQueue, views::AbstractVector{<:VK.ImageView},
-            images::AbstractVector{<:VK.Image}, extent::VK.Extent2D; kw...) =
-    begin_pass!(emitter(bq), views, images, extent; kw...)
-end_pass!(bq::VulkanBatchQueue) = end_pass!(emitter(bq))
-set_viewport!(bq::VulkanBatchQueue, args...) = set_viewport!(emitter(bq), args...)
-draw_in_pass!(bq::VulkanBatchQueue, pipeline, n::Integer; kw...) =
-    draw_in_pass!(emitter(bq), pipeline, n; kw...)
-draw_indirect_in_pass!(bq::VulkanBatchQueue, pipeline, commands; kw...) =
-    draw_indirect_in_pass!(emitter(bq), pipeline, commands; kw...)
 
 """One value for every attachment, or one value each. Anything else is a mistake
 worth naming rather than a silent recycle."""
@@ -736,7 +715,6 @@ function draw_in_pass!(e::Emitter,
     end
 
     VK.cmd_draw(cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
-    drawn!(e.owner)
     # Pin the pipeline — prevents GC from destroying it while the command buffer references it
     pin && pin!(e, pipeline)
 end
@@ -792,7 +770,6 @@ function draw_indirect_in_pass!(e::Emitter,
              (first - 1) * sizeof(DrawIndirectCommand)
     VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
                              UInt32(count), UInt32(sizeof(DrawIndirectCommand)))
-    drawn!(e.owner)
     pin && pin!(e, pipeline)
     pin!(e, commands)
 end
@@ -803,15 +780,13 @@ end
 Draw indexed geometry inside an active render pass (between begin_pass!/end_pass!).
 Uses the provided index buffer for indexed drawing.
 """
-function draw_indexed_in_pass!(bq::VulkanBatchQueue,
+function draw_indexed_in_pass!(e::Emitter,
                                    pipeline::VulkanCompiledGraphicsPipeline,
                                    index_count::Integer;
                                    push_data::Vector{UInt8}=UInt8[],
                                    indices_buffer::VK.Buffer,
                                    instances::Integer=1)
-    batch = bq.active_batch
-    batch === nothing && error("draw_indexed_in_pass! called without an active rendering pass")
-    cmd = batch.cmd_buf
+    cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
 
@@ -826,9 +801,7 @@ function draw_indexed_in_pass!(bq::VulkanBatchQueue,
     VK.cmd_bind_index_buffer(cmd, indices_buffer, UInt64(0), VK.INDEX_TYPE_UINT32)
     VK.cmd_draw_indexed(cmd, UInt32(index_count), UInt32(instances),
                              UInt32(0), Int32(0), UInt32(0))
-    batch.dispatch_count += 1
-    batch.last_was_rt = false
-    pin!(batch, pipeline)
+    pin!(e, pipeline)
 end
 
 """
@@ -888,17 +861,16 @@ function set_viewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
 end
 
 """Select a prepared descriptor set for the next draw. See `use_bindings!`."""
-function use_bindings!(bq::VulkanBatchQueue, compiled, bindings)
-    batch = bq.active_batch
-    VK.cmd_bind_descriptor_sets(batch.cmd_buf, VK.PIPELINE_BIND_POINT_GRAPHICS,
+function use_bindings!(e::Emitter, compiled, bindings)
+    VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_GRAPHICS,
                                 compiled.pipeline_layout, UInt32(0),
                                 [bindings.set], UInt32[])
-    pin!(batch, bindings)
+    pin!(e, bindings)
     return nothing
 end
 
 # Portable spelling: a pass is opened over a WxH area, not over a
 # `VK.Extent2D`. The views and images stay backend-typed — they come from a
 # `Framebuffer` or `Window` the backend made — but the size does not have to.
-begin_pass!(bq::VulkanBatchQueue, view, image, w::Integer, h::Integer; kw...) =
-    begin_pass!(bq, view, image, VK.Extent2D(UInt32(w), UInt32(h)); kw...)
+begin_pass!(e::Emitter, view, image, w::Integer, h::Integer; kw...) =
+    begin_pass!(e, view, image, VK.Extent2D(UInt32(w), UInt32(h)); kw...)

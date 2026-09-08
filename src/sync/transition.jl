@@ -37,7 +37,7 @@ say which caches to make available and visible.
 So the resource is used and then forgotten, which is what lets a recording
 outlive the placement it was recorded against: nothing in the command stream
 names a buffer, so a buffer moving in the pool cannot invalidate it. The code
-already reached this conclusion for renameable resources — "a handle cannot be
+already reached this conclusion for resources that could be renamed — "a handle cannot be
 baked for something that moves" — and baking makes every resource one of those.
 
 DISTINCT tuples, never unioned into one. Union would make shader writes visible

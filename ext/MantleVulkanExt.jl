@@ -39,14 +39,14 @@ module MantleVulkanExt
 using Mantle
 
 # Extended here — see the note above on why `import`.
-import Mantle: Attribute, Device, Graph, Plan, Surface, Transient, Update,
+import Mantle: Attribute, Device, Graph, Plan, Surface, Transient,
     Window, access, alignment, arena, backend, bufferusage,
     capacity, compatible, constraintof, copy!, count, describe, devicecopy!,
     deviceview, dispatches, download, draw!, fence, free!, handle,
     indirectcount!, layout, materialize!, maxalloc, mergeconstraints, nbytes,
     needs_transition, newpass, npipelines, overlapping, passed, passes, pool,
-    rawalloc, rawfree, rebind!, recorded, release!, remap!, remappable,
-    render!, retire!, run!, screenshot, stages, storage, stride, timings,
+    rawalloc, rawfree, recorded, release!, remap!, remappable,
+    render!, retire!, screenshot, stages, storage, stride, syncbackend,
     touch!, upload!, usages, use, vkformat, waitfor
 
 # The API verbs. Every one of these is declared in `graphics/commands.jl` or
@@ -58,12 +58,12 @@ import Mantle: Attribute, Device, Graph, Plan, Surface, Transient, Update,
 # `src/graph/queue.jl` beside the shared `BatchQueue` struct; the methods below
 # are Vulkan's. `import`, so `Mantle.flush!` resolves for a caller like RayMakie
 # rather than being a separate `MantleVulkanExt.flush!` nothing can reach.
-import Mantle: allocate_batch_queue!, release_batch_queue!, ensure_active_batch!,
+import Mantle: allocate_batch_queue!, release_batch_queue!, waitfor!,
     flush!, waitidle, supports_graphics, use_bindings!, devicearray, supports_rt_pipeline,
     supports_batch_queue, submit!, batchqueue,
     # The submission record — `graph/submission.jl`. One list of what the device
     # has been given, replacing the five separate records this backend kept.
-    Outstanding, submitted!, newest, sweep!, idle, outstanding
+    Outstanding, submitted!, newest, sweep!, idle, outstanding, recycle!
 
 import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
     draw_indirect_in_pass!, set_viewport!, reset_device!, blit!, present_frame!,
@@ -71,22 +71,31 @@ import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
     readback_window, bind_textures
 import Mantle: build_accel!, refit_tlas!, set_anyhit_pipeline!, trace_rays!,
     trace_rays_indirect!, trace_closest_hits!, trace_closest_hits_indirect!,
-    trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
+    trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!,
+    # What a trace holds while it runs: `pintrace!` is core's walk over these two.
+    pin!, blases
 
 # The graph's backend interface — `src/graph/backend.jl` is the whole of what
 # Mantle asks of a backend, and these are this backend's answers. `isdepth` is
 # in the list because a `TransientImage` wraps its element type, which the core
 # fallback cannot see through; `aspect` is NOT, because it is Vulkan's own
 # spelling and nothing outside this module says it.
-import Mantle: isdepth, target_extent, checkextents, refit!, record!,
-    rename!, inplace!, nextslot!, collect!,
-    # The two plan pieces a backend supplies. NOT imported, they became
-    # `MantleVulkanExt.makeargmemory` and core kept its `nothing` default — so
-    # every `Plan` was built with no argument memory and the first `run!` was
-    # `MethodError: no method matching nextslot!(::Nothing, ::BatchQueue)`. That
-    # is every render on this backend, which is how far "it precompiles" is from
-    # "it works".
-    makeargmemory, makeprofiler
+import Mantle: isdepth, target_extent, checkextents, region_bda,
+    recordsplans, openrun, closerun!, abandonrun!, abandonframe!, emitinline!, beginframe!,
+    # The pass walk is core's (`emit!`, in `graph/kalaunch.jl`); these are the
+    # primitives it speaks, answered here with commands.
+    compiledraw, compile_dispatch, passbarriers,
+    emit!, recordable, openrecording, closerecording!, emithead!, emitbarriers!, withpredicate,
+    emitupdate!, emitkernel!, emitpreparebarrier!, workgroupsize, emitdispatch!,
+    emitcopy!, beginrender!, emitdraw!,
+    endrender!, profiled!,
+    storebytes!, StoreEmitter, collect!,
+    # What backs a plan's argument memory and its profiler. NOT imported, these
+    # became `MantleVulkanExt.makeargmemory`/`makeprofiler` once and core kept
+    # its defaults — every `Plan` was built with no argument memory and the
+    # first `run!` threw a `MethodError` on a `nothing`. That is every render on
+    # this backend, which is how far "it precompiles" is from "it works".
+    argbytes, indirectslot, makeprofiler
 
 # The abstract resource types whose concretes are defined below. Imported rather
 # than reached through `using Mantle` because `VulkanTexture2D <: Texture2D`
@@ -108,17 +117,19 @@ import Mantle: AdaptedAccel
 # what the graph produced, so it needs the names, and it adds methods to a good
 # many of them: `import`, for the reason at the top of this file.
 #
-# Seven names that WERE in this list are not: `emit_draw!`, `packdispatch!`,
-# `record_updates!`, `recordlaunch!`, `recycle!`, `takehost!` and
-# `write_update!`. They came over with the runtime and Mantle never declared
-# them, so each one imported a binding that did not exist — legal, and Julia
-# creates it in Mantle with a warning, which made seven of Vulkan's private
-# recording helpers into Mantle API that neither core nor the Metal backend can
-# call. They are defined and used only in `src/vulkan/graph.jl`, so they are
-# this module's, and `test_ext_imports_are_declared.jl` keeps the list honest.
+# Six names that WERE in this list are not: `emit_draw!`, `packdispatch!`,
+# `record_updates!`, `recordlaunch!`, `takehost!` and `write_update!`. They
+# came over with the runtime and Mantle never declared them, so each one
+# imported a binding that did not exist — legal, and Julia creates it in Mantle
+# with a warning, which made Vulkan's private recording helpers into Mantle API
+# that neither core nor the Metal backend can call. They are defined and used
+# only in `src/vulkan/graph.jl`, so they are this module's, and
+# `test_ext_imports_are_declared.jl` keeps the list honest. `recycle!` was the
+# seventh and is imported again above, because it IS declared now: core's
+# `sweep!` hands every passed submission to it (`graph/submission.jl`).
 import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
     Compile, CompiledDispatch, CompiledDraw, DrawCall, Images, Pass,
-    PassHandle, PassPlan, Profiler, Recycler, TransientBuffer,
+    PassHandle, PassPlan, Profiler, TransientBuffer,
     TransientImage, TransientResource, WindowSurface, argalign,
     clearvalue, depthclear, devargs, dispatchrange, drawover, elapsed,
     extrausage, first_target, imageusage, initial_state,
@@ -128,31 +139,27 @@ import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
     Predicate, supportspredicate,
     initial_usage, kernelfor, lastuses, lp_of, makeimage,
     rawargs, remakeimage!,
-    record_draw!, renameable,
-    # The argument ring, all of it core's now: how deep a plan pipelines
-    # (`ARG_SLOTS`), which entries a baked run has to write again
-    # (`rebinding`), and what advancing a slot means (`nextslot!`, above).
-    ARG_SLOTS, rebinding,
-    # The baked plan's argument update plan: what `bake!` records and `rebind!`
-    # performs. Core's type; this backend fills it in, because only it knows the
-    # push-constant layout an offset refers to.
-    ArgWrite, argvalue,
-    # Giving a renamed buffer back once the device has passed the run that bound
-    # it. Core's since it stopped comparing timeline values by hand.
-    recycle!,
+    record_draw!,
     # The modelled trace pass: the declaration this backend compiles, and the
     # compiled form it records. `Trace` is exported and would arrive through
     # `using Mantle`; it is listed because `CompiledTrace` is not, and a pair
     # split across two mechanisms is how one of them goes missing.
     Trace, CompiledTrace,
-    resourcekind, rootresource, sample!, slice, sliceindex, slotbase,
-    target_format, target_image, target_view, updates_pass!,
+    resource_moved!, arena_moved!,
+    resourcekind, rootresource, sample!, slice, sliceindex,
+    target_format, target_image, target_view,
     usage_of, writes_it
 
 # Read but not exported by Mantle, so `using Mantle` alone would not bind them.
 # `RayTracingPipeline` is a concrete Mantle type the backend consumes rather
-# than subtypes, and `_normalise_chit` is its unexported helper.
-using Mantle: _normalise_chit
+# than subtypes, and `_normalise_chit` is its unexported helper. The move
+# notifications are pool mechanics defined in core, only CALLED here.
+using Mantle: _normalise_chit, listen_moves!, unlisten_moves!, notify_move!,
+    argtoken, setargtoken!,
+    # A run's host stores: whether any are waiting, and the walk that lands them.
+    anydirty, landstores!,
+    # The acceleration structures a trace reads, pinned: core's walk, called here.
+    pintrace!
 # `mat4_to_vk_transform` moved to `geometry/transform.jl` — it is arithmetic on
 # `Mat3x4f`, which both backends' instance descriptors start with.
 using Mantle: mat4_to_vk_transform
@@ -176,12 +183,12 @@ using Mantle: Analysis, Compilation, DiscardOp, KeepOp, alias, allocate,
 #
 # It bites at the first USE and not at the import, which is why these surfaced
 # one at a time and in load order rather than together: `DrawIndirectCommand` in
-# `graphics/pipeline.jl`, then `Buffer` in four `rename!` signatures in
-# `graph.jl`, then `Backend` — inside a function body, so not until the sync
-# lowering actually RAN, in the test suite.
+# `graphics/pipeline.jl`, then `Buffer` in the `inplace!`
+# signatures in `graph.jl`, then `Backend` — inside a function body, so not
+# until the sync lowering actually RAN, in the test suite.
 #
-# `Scalar` (Mantle's, vs StaticArrays') is the same collision and is not here,
-# because this backend names it only in comments. Add it the day that changes.
+# `GPURef` is the same collision risk and is not here, because this backend
+# names it only in comments. Add it the day that changes.
 using Mantle: Buffer, DrawIndirectCommand, Backend
 
 # The device vocabulary. `caps` in particular is one function with a `Device`
@@ -204,6 +211,10 @@ using LLVM
 using LLVM: API
 using GPUArrays
 using GPUArraysCore
+# `import`, so the methods below for an acceleration structure EXTEND GPUArrays'
+# `unsafe_free!` — the function `Mantle.unsafe_free!` is — rather than defining a
+# second one under the same name that only this module can reach.
+import GPUArrays: unsafe_free!
 using KernelAbstractions
 using Adapt
 using Atomix

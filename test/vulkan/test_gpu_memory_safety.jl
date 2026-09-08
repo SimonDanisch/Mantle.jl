@@ -27,7 +27,7 @@ const BQ  = CTX.default_bq
 function drain!()
     MVE.vk_flush!(BQ)
     GC.gc(true); GC.gc(true)
-    MVE.sweep_retired_batches!(BQ)
+    MVE.drain!(BQ)
 end
 
 @testset "GPU Memory Safety" begin
@@ -276,7 +276,7 @@ end
         end
         drain!()
 
-        @test length(BQ.in_flight)         == 0
+        @test length(BQ.outstanding)       == 0
         @test length(BQ.deferred_frees)    == 0
         @test length(BQ.deferred_as_frees) == 0
         # And the argument memory those 500 dispatches read is back: every

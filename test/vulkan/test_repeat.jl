@@ -52,7 +52,7 @@ function _repeatplan(dev, x, count, src, maxiters, n)
             Mantle.dispatch!(p, repeat_step!, (x,), n)
         end
     end
-    Mantle.Plan(g)
+    Mantle.record!(Mantle.Plan(g))
 end
 
 @testset "repeat!: the device decides the trip count" begin
@@ -146,7 +146,7 @@ end
             Mantle.dispatch!(p, repeat_drain!, (x, budget), n)
         end
     end
-    pl = Mantle.Plan(g)
+    pl = Mantle.record!(Mantle.Plan(g))
 
     for start in (0, 1, 3, maxiters, maxiters + 4)
         copyto!(Mantle.storage(x), zeros(Int32, n))
@@ -166,26 +166,26 @@ end
 
 # A loop long enough to cross the queue's own submission threshold.
 #
-# `record_dispatch!` ends the command buffer whenever a dispatch takes the batch
-# past `cb_split_threshold` or `auto_submit_threshold`. A conditional-rendering
-# scope spans a pass, so an end landing between its `begin` and its `end` leaves
-# an unmatched begin in the batch that goes and an unmatched end in the next —
-# and the GPU hangs on it.
+# The open batch's recorder used to end the command buffer whenever a dispatch
+# took it past its split or submit threshold. A conditional-rendering scope
+# spans a pass, so an end landing between its `begin` and its `end` left an
+# unmatched begin in the buffer that went and an unmatched end in the next —
+# and the GPU hung on it.
 #
 # Hikari found this before this test did: the fused sample ran at `max_depth` 8
-# (47 dispatches) and hung at 16 (~95), with `auto_submit_threshold` at 64 in
-# between. The loop below is sized off the queue's OWN threshold rather than a
-# literal, so it keeps testing the boundary if the default moves.
+# (47 dispatches) and hung at 16 (~95), with the submit threshold at 64 in
+# between. The thresholds are gone with the open batch — a plan's recording is
+# one command buffer, whole, and nothing cuts it — and the loop below is sized
+# past where they used to sit, so this keeps pinning the same boundary.
 #
 # **A regression here HANGS rather than fails.** The wait is a foreign call that
 # does not return and cannot be interrupted, so there is no error to catch and
 # nothing useful in a stack trace. That is what makes it worth pinning.
-@testset "repeat! survives the submission threshold" begin
+@testset "repeat! survives a loop longer than any submission threshold was" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
-    bq = Mantle.batchqueue(dev)
-    # Comfortably past both thresholds, so the recording is guaranteed to want
-    # to end mid-scope at least once.
-    maxiters = 2 * max(bq.auto_submit_threshold, 1) + 8
+    # Comfortably past both of the old thresholds (64 dispatches to submit,
+    # 3000 to split), where the recording used to want to end mid-scope.
+    maxiters = 2 * 64 + 8
     n = 32
     x = Mantle.Buffer(dev, zeros(Int32, n))
     budget = Mantle.Buffer(dev, zeros(Int32, 1))
@@ -198,8 +198,8 @@ end
             Mantle.dispatch!(p, repeat_drain!, (x, budget), n)
         end
     end
-    pl = Mantle.Plan(g)
-    @test length(pl.passes) > bq.auto_submit_threshold   # the boundary is crossed
+    pl = Mantle.record!(Mantle.Plan(g))
+    @test length(pl.passes) > 64          # the old boundary is crossed
 
     for start in (3, maxiters - 1)
         copyto!(Mantle.storage(x), zeros(Int32, n))
@@ -216,13 +216,27 @@ end
 # recorded iteration instead is the one wrong answer that still produces output,
 # and on a bounce loop it would be a slower render rather than a broken one —
 # invisible until someone measured it.
-@testset "repeat! refuses a device that cannot predicate" begin
+#
+# The host backend is not such a device: it never records, so it predicates by
+# reading the flag between passes — and that read must GATE, not just exist.
+@testset "repeat! on the host predicates by reading the flag" begin
     host = Mantle.Device(Mantle.HostAPI())
-    @test !Mantle.supportspredicate(host)
-    g = Mantle.Graph(host)
-    cnt = Mantle.Buffer(host, zeros(Int32, 1))
-    @test_throws ArgumentError Mantle.repeat!(_ -> nothing, g, 4, cnt)
-    # …and exactly one gate: neither both nor neither.
+    @test Mantle.supportspredicate(host)
+    n = 8
+    x = Mantle.Buffer(host, zeros(Int32, n))
+    count = Mantle.Buffer(host, zeros(Int32, 1))
+    src = Mantle.Buffer(host, Int32[3])
+    pl = _repeatplan(host, x, count, src, 7, n)
+    Mantle.run!(pl)
+    # Three iterations of `2x + 1` from 0 give 2^3 - 1. Ungated it would be
+    # 2^7 - 1, so a flag nobody reads is a different order of magnitude, not a
+    # rounding error.
+    @test all(==(Int32(7)), Array(Mantle.storage(x)))
+    Mantle.free!(pl)
+end
+
+@testset "repeat! wants exactly one gate and at least one iteration" begin
+    # Neither both gates nor neither.
     dev0 = Mantle.Device(Mantle.VulkanAPI())
     g0 = Mantle.Graph(dev0); c0 = Mantle.Buffer(dev0, zeros(Int32, 1))
     @test_throws ArgumentError Mantle.repeat!(_ -> nothing, g0, 4)
@@ -232,4 +246,57 @@ end
     g2 = Mantle.Graph(dev)
     c2 = Mantle.Buffer(dev, zeros(Int32, 1))
     @test_throws ArgumentError Mantle.repeat!(_ -> nothing, g2, 0, c2)
+end
+
+# The gate is folded into the prepare: a discarded iteration writes zero groups
+# for every device-sized dispatch of its pass, so a backend with no way to
+# discard recorded commands still runs nothing. Pinned by switching Vulkan's
+# conditional rendering off for the duration — `withpredicate` then emits no
+# scope and the prepare's zero is the whole answer — and by the refusal that
+# guards what the fold cannot cover: fixed-size work in a gated pass.
+@kernel function repeat_step_sized!(x, n)
+    i = @index(Global)
+    @inbounds if i <= Int(n[1])
+        x[i] = x[i] * Int32(2) + Int32(1)
+    end
+end
+
+@testset "repeat!: the fold discards without conditional rendering" begin
+    dev = Mantle.Device(Mantle.VulkanAPI())
+    ctx = MVE.vk_context()
+    had = ctx.conditional_rendering_available
+    ctx.conditional_rendering_available = false
+    try
+        @test !Mantle.supportspredicate(dev)
+        n, maxiters = 64, 8
+        x = Mantle.Buffer(dev, zeros(Int32, n))
+        nbuf = Mantle.Buffer(dev, Int32[n])
+        count = Mantle.Buffer(dev, zeros(Int32, 1))
+        src = Mantle.Buffer(dev, Int32[3])
+        g = Mantle.Graph(dev)
+        Mantle.compute!(g, "decide") do p
+            Mantle.use(p, src; read = true)
+            Mantle.use(p, count; write = true)
+            Mantle.dispatch!(p, repeat_decide!, (count, src), 1)
+        end
+        Mantle.repeat!(g, maxiters, count) do i
+            Mantle.compute!(g, "step-$i") do p
+                Mantle.use(p, x; read = true, write = true)
+                Mantle.use(p, nbuf; read = true)
+                Mantle.dispatch!(p, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf))
+            end
+        end
+        pl = Mantle.record!(Mantle.Plan(g))
+        Mantle.run!(pl)
+        Mantle.waitfor!(pl)
+        # Three iterations of `2x + 1` from 0 give 7; all eight would give 255.
+        @test all(==(Int32(7)), Array(Mantle.storage(x)))
+        Mantle.free!(pl)
+
+        # A gated pass with a host-sized dispatch cannot be discarded by the fold,
+        # and this backend can no longer discard it either: refused at build.
+        @test_throws ArgumentError _repeatplan(dev, x, count, src, maxiters, n)
+    finally
+        ctx.conditional_rendering_available = had
+    end
 end

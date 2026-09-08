@@ -74,14 +74,14 @@ function markplan(dev, cap::Int, want::Int, nmark::Int)
                         M.DeviceRange(n; max = cap))
         end
     end
-    (plan = M.Plan(g), outs = ts, count = n, src = src)
+    (plan = M.record!(M.Plan(g)), outs = ts, count = n, src = src)
 end
 
-"""Every byte range this plan's indirect commands occupy, over every slot."""
+"""Every byte range this plan's indirect commands occupy."""
 function indirectranges(pl)
     am = pl.args
     rs = Tuple{UInt64,UInt64}[]
-    for slot in am.indirect, v in slot
+    for v in am.indirect
         base = (v.buf[]::Any).address + UInt64(v.offset)
         push!(rs, (base, base + UInt64(3 * sizeof(UInt32))))
     end
@@ -92,10 +92,9 @@ end
     dev = M.Device(M.VulkanAPI())
     cap, nmark = 4096, 3
     p = markplan(dev, cap, 1000, nmark)
-    # One per device-sized dispatch, per slot — and NOT one per direct dispatch:
-    # the `zero` passes take a host ndrange and reserve nothing.
-    @test length(p.plan.args.indirect) == M.ARG_SLOTS
-    @test all(length(s) == nmark for s in p.plan.args.indirect)
+    # One per device-sized dispatch — and NOT one per direct dispatch: the
+    # `zero` passes take a host ndrange and reserve nothing.
+    @test length(p.plan.args.indirect) == nmark
     dispatches = collect(Iterators.flatten(pp.dispatches for pp in p.plan.passes))
     @test count(d -> d.indirect != 0, dispatches) == nmark
     @test sort(filter(!=(0), [d.indirect for d in dispatches])) == collect(1:nmark)
@@ -141,11 +140,16 @@ end
     M.run!(p.plan); M.waitidle(dev)
     held = length(p.plan.args.store)
     @test held > 0
-    before = M.largestfree(sp, M.Unified())
+    # Live bytes over every block of the arena, not the largest free span: with
+    # a second, empty block already in the pool — any earlier plan in the
+    # session leaves one — the largest span is that whole block before and
+    # after, and says nothing about this plan's region coming back.
+    live(kind) = sum((sum(values(b.live); init = 0) for b in M.blocksof(sp, kind)); init = 0)
+    before = live(M.Unified())
     M.free!(p.plan)
     M.reclaim!(sp, dev)
-    # The region is back, so the largest free span in the arena grew by at least
-    # what the plan was holding. `free!` retires rather than releases, which is
-    # why the `reclaim!` above is part of the test rather than an aside.
-    @test M.largestfree(sp, M.Unified()) >= before + held
+    # The region is back, so the arena holds at least `held` fewer live bytes.
+    # `free!` retires rather than releases, which is why the `reclaim!` above is
+    # part of the test rather than an aside.
+    @test live(M.Unified()) <= before - held
 end

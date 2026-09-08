@@ -90,9 +90,10 @@ using KernelAbstractions
         end
     end
 
-    # ── 3. Command batch data_refs lifecycle ──
-    # Post-refactor: `active_batch` lives on the VulkanBatchQueue, not VkContext.
-    @testset "command batch data_refs" begin
+    # ── 3. One-shot data_refs lifecycle ──
+    # Post-refactor: there is no open command buffer on the VulkanBatchQueue;
+    # every launch is its own one-shot, submitted immediately.
+    @testset "one-shot data_refs" begin
         @testset "data_refs cleared after flush" begin
             a = MVE.LavaArray(Float32[1, 2, 3])
             @kernel function noop_cb!(x)
@@ -102,10 +103,9 @@ using KernelAbstractions
 
             ctx = MVE.vk_context()
             MVE.vk_flush!(ctx)
-            batch = ctx.default_bq.active_batch
-            if batch !== nothing
-                @test isempty(batch.pinned)
-            end
+            bq = ctx.default_bq
+            @test isempty(bq.outstanding)
+            @test all(o -> isempty(o.pinned), bq.free_oneshots)
 
             Mantle.unsafe_free!(a)
         end

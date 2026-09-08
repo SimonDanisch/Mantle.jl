@@ -49,7 +49,11 @@ const NO_ACCESS = acc(0)
 stages(::VulkanAPI, ::Type{Vertices}, _) = stage(VK.PIPELINE_STAGE_2_VERTEX_SHADER_BIT)
 stages(::VulkanAPI, ::Type{Indices}, _) = stage(VK.PIPELINE_STAGE_2_INDEX_INPUT_BIT)
 stages(::VulkanAPI, ::Type{Indirect}, _) = stage(VK.PIPELINE_STAGE_2_DRAW_INDIRECT_BIT)
-stages(::VulkanAPI, ::Type{Predicated}, _) = stage(VK.PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT)
+# Read twice: by the conditional-rendering unit that discards the iteration,
+# and by the fused prepare's compute kernel, which folds the same flag into
+# the counts it writes. Both stages, or the gate's write is visible to one.
+stages(::VulkanAPI, ::Type{Predicated}, _) =
+    stage(VK.PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT) | stage(VK.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
 # Shader reads, both of them, so they name the shader stages like `Storage` does.
 # No Mantle API produces either yet — there is no uniform binding and no
 # sampled-image binding — but a vocabulary entry that lowers to "everything" is
@@ -104,7 +108,8 @@ stages(::VulkanAPI, ::Type{<:Depth}, ::Dst) =
 access(::VulkanAPI, ::Type{Vertices}, _) = acc(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
 access(::VulkanAPI, ::Type{Indices}, _) = acc(VK.ACCESS_2_INDEX_READ_BIT)
 access(::VulkanAPI, ::Type{Indirect}, _) = acc(VK.ACCESS_2_INDIRECT_COMMAND_READ_BIT)
-access(::VulkanAPI, ::Type{Predicated}, _) = acc(VK.ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT)
+access(::VulkanAPI, ::Type{Predicated}, _) =
+    acc(VK.ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT) | acc(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
 access(::VulkanAPI, ::Type{Uniform}, _) = acc(VK.ACCESS_2_UNIFORM_READ_BIT)
 access(::VulkanAPI, ::Type{Sampled}, _) = acc(VK.ACCESS_2_SHADER_SAMPLED_READ_BIT)
 access(::VulkanAPI, ::Type{CopySrc}, _) = acc(VK.ACCESS_2_TRANSFER_READ_BIT)
@@ -135,6 +140,15 @@ end
 stages(be::VulkanAPI, ::Type{Unordered{U}}, d) where {U} = stages(be, U, d)
 access(be::VulkanAPI, ::Type{Unordered{U}}, d) where {U} = access(be, U, d)
 layout(be::VulkanAPI, ::Type{Unordered{U}}, d) where {U} = layout(be, U, d)
+
+# ── traced ────────────────────────────────────────────────────────────────────
+# The one thing `Traced` changes is the stage: a ray-tracing pipeline's shader
+# access happens at RAY_TRACING_SHADER, not at any of `SHADER_STAGES`. The access
+# mask and the layout are the inner usage's.
+stages(::VulkanAPI, ::Type{Traced{U}}, _) where {U} =
+    stage(VK.PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR)
+access(be::VulkanAPI, ::Type{Traced{U}}, d) where {U} = access(be, U, d)
+layout(be::VulkanAPI, ::Type{Traced{U}}, d) where {U} = layout(be, U, d)
 
 # A discarding load op means nothing is read back, so the read bit is dropped.
 # RPS derives the same from DISCARD_DATA_BEFORE (rps_vk_runtime_backend.cpp:143);

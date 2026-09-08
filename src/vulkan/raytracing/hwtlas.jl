@@ -18,8 +18,9 @@ const KA = KernelAbstractions
 
 const Mat4f = SMatrix{4, 4, Float32, 16}
 
-# `unsafe_free!(::Nothing)` lives in `raytracing/acceleration.jl` alongside
-# the other `unsafe_free!` methods so the method table is easy to audit.
+# `unsafe_free!` here is GPUArrays' (imported in the extension), extended for
+# the acceleration structures in `raytracing/acceleration.jl`; a backing that
+# may be `nothing` is checked at the call, there is no method for `nothing`.
 
 # ============================================================================
 # InstanceBatch struct
@@ -204,7 +205,15 @@ end
 # are already directly exposed as fields on AdaptedAccel, so the walker pins
 # them via that path.  Without this stop, the @generated walker recurses into
 # VulkanTLAS → VulkanBatchQueue → ctx → VulkanBatchQueue → … and blows the stack.
-@inline pin_leaves!(::CommandBatch, ::VulkanTLAS) = nothing
+#
+# `::Closed`, not one concrete owner. It was the batch alone, from when a batch
+# was the only thing that could own a pin — so a `Recording` fell through to
+# the generic walker and a hardware-RT plan blew the stack the first time it
+# was RECORDED rather than launched. The stack was 53 320 frames of
+# `pin_leaves!(::Recording, ::VK.Instance)`, whose `destructor` field is a
+# closure over the instance itself. Every owner has to stop here, which is what
+# the abstract type is for.
+@inline pin_leaves!(::Closed, ::VulkanTLAS) = nothing
 
 # ============================================================================
 # Adapt.adapt_structure
@@ -698,8 +707,10 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     hwtlas.combined_instance_buf = nothing
     combined, total_n = _concat_batch_instances!(hwtlas)
 
+    # After the compaction above, `blas_list` is exactly what the instances
+    # reference; the TLAS carries the list so a trace can pin every one.
     hw_tlas = build_accel!() do ctx
-        build_tlas(ctx, combined, total_n; allow_update=true)
+        build_tlas(ctx, combined, total_n; allow_update=true, blases=hwtlas.blas_list)
     end
 
     # Concatenate triangle metadata across batches.  Each batch's instances all
@@ -766,9 +777,9 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
         hwtlas.transforms_dirty = false
         empty!(hwtlas.pending_updates)
         hwtlas.static_tlas = AdaptedAccel(hwtlas)
-        unsafe_free!(old_hw_tlas)
-        unsafe_free!(old_tri_gpu)
-        unsafe_free!(old_off_gpu)
+        old_hw_tlas === nothing || unsafe_free!(old_hw_tlas)
+        old_tri_gpu === nothing || unsafe_free!(old_tri_gpu)
+        old_off_gpu === nothing || unsafe_free!(old_off_gpu)
         for blas in dropped_blases
             unsafe_free!(blas)
         end
@@ -811,9 +822,9 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
         hwtlas.dirty            = false
         hwtlas.transforms_dirty = false
         hwtlas.static_tlas = AdaptedAccel(hwtlas)
-        unsafe_free!(old_hw_tlas)
-        unsafe_free!(old_tri_gpu)
-        unsafe_free!(old_off_gpu)
+        old_hw_tlas === nothing || unsafe_free!(old_hw_tlas)
+        old_tri_gpu === nothing || unsafe_free!(old_tri_gpu)
+        old_off_gpu === nothing || unsafe_free!(old_off_gpu)
         for blas in dropped_blases
             unsafe_free!(blas)
         end
@@ -898,45 +909,6 @@ end
     return _hw_rq_collect(accel)
 end
 
-# ── VulkanTLAS-bound compute dispatch overloads (specialized on `tlas` type) ──
-#
-# These are the type-dispatched counterparts to the no-HWTLAS paths in
-# runtime/command.jl. Splitting on `tlas` type at the method level removes the
-# `extra_dst_access` ternary from every pure-compute record. The lava_launch!
-# HWTLAS-vs-no-HWTLAS safety check still runs before getting here, so we know
-# `pipeline` agrees with `tlas`.
-
-function vk_dispatch!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline, push_bda::UInt64,
-                      groups::NTuple{3, Integer}, tlas::VulkanTLAS)
-    g = (Int(groups[1]), Int(groups[2]), Int(groups[3]))
-    info = dispatchinfo(bq, " g=", g)
-    record_dispatch!(bq;
-        dst_stage=VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        extra_dst_access=VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-    ) do batch
-        emit_dispatch!(Emitter(batch, nothing, 0), pipeline, push_bda, g, tlas, info)
-    end
-end
-
-function vk_dispatch_indirect!(bq::VulkanBatchQueue, pipeline::LavaComputePipeline,
-                               push_bda::UInt64, indirect, tlas::VulkanTLAS;
-                               first_in_group::Bool=true)
-    info = dispatchinfo(bq, " (indirect)")
-    record_dispatch!(bq;
-        dst_stage=VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-        extra_dst_access=VK.ACCESS_INDIRECT_COMMAND_READ_BIT |
-                          VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-        # Indirect-args read depends on the preceding prepare write — never
-        # elide this barrier (see record_dispatch! docs), except behind a
-        # deferred group's shared barrier.
-        force_pre_barrier=first_in_group,
-        skip_pre_barrier=!first_in_group,
-    ) do batch
-        emit_dispatch_indirect!(Emitter(batch, nothing, 0), pipeline, push_bda,
-                                indirect, tlas, info)
-    end
-end
-
 """
     tlasset!(owner, dev, pipeline, tlas) -> VkDescriptorSet
 
@@ -944,8 +916,8 @@ The descriptor set binding `tlas` for `pipeline`'s layout, owned by whoever owns
 the commands that bind it.
 
 A [`Recording`](@ref) keeps ONE per (layout, acceleration structure) pair and
-holds its pool for as long as it can be submitted. A batch allocates a fresh one
-per dispatch and pins it, which is what both used to do.
+holds its pool for as long as it can be submitted. A one-shot allocates a fresh
+one per dispatch and pins it, which is what both used to do.
 
 Per-dispatch allocation was defended as removing a class of bug, and the bug was
 real: a cache keyed by `(layout, objectid(LavaTLAS))` grew without bound because
@@ -969,9 +941,9 @@ function tlasset!(rec::Recording, dev::VK.Device, pipeline::LavaComputePipeline,
     return desc_set
 end
 
-function tlasset!(batch::CommandBatch, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
+function tlasset!(o::OneShot, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
     desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, tlas)
-    pin!(batch, desc_pool)
+    pin!(o, desc_pool)
     return desc_set
 end
 
@@ -980,16 +952,9 @@ function bindtlas!(e::Emitter, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
     set = tlasset!(e.owner, e.ctx.device, pipeline, lava_tlas)
     VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_COMPUTE,
         pipeline.pipeline_layout, UInt32(0), [set], UInt32[])
-    pin!(e, lava_tlas.accel)
-    pin!(e, lava_tlas.storage)
-    # Pin every BLAS the HWTLAS references — rayQuery walks the HWTLAS into its
-    # BLASes and reads their storage; without pinning each BLAS storage,
-    # `Raycore.sync!`-driven BLAS swaps can free a BLAS whose GPU memory the
-    # GPU is still using through this dispatch.
-    for blas in lava_tlas.blases
-        pin!(e, blas.accel)
-        pin!(e, blas.storage)
-    end
+    # A ray query walks the HWTLAS into its BLASes and reads their storage, so
+    # every one of them is held — `pintrace!` is core's statement of that.
+    pintrace!(e, lava_tlas)
     return nothing
 end
 

@@ -24,7 +24,11 @@
 # per-device `Dict`s keyed by `ctx.id`, so a test can state the device's answer
 # without a second device and without touching the emitter.
 
-using Test, Lava, KernelAbstractions
+using Test, Mantle, Lava, KernelAbstractions
+
+# Bound by the suite's preamble for every file; standalone, bind them here.
+@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
+@isdefined(LavaBackend) || (LavaBackend = MVE.LavaBackend)
 const KA = KernelAbstractions
 
 # Exists only to make the module declare CooperativeMatrixKHR, which is the
