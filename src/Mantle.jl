@@ -146,6 +146,10 @@ include("phases.jl")
 include("graph/types.jl")
 # Before `queue.jl`: a `BatchQueue` holds the outstanding list this declares.
 include("graph/submission.jl")
+# After it: `SubmitChannel` holds the `Outstanding` list that file declares, and
+# `oneshot!` goes through `submitted!`. Phases 2.2 and 2.3 of
+# docs/mantle-owns-it.md — the hold list and the recording pool, in core.
+include("graph/lifetime.jl")
 include("graph/queue.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
@@ -178,6 +182,10 @@ include("graphics/stages.jl")      # needs Topology and the KI configs above
 include("graphics/pipeline.jl")    # needs the state vocabulary above
 include("graphics/mesh.jl")        # needs the same state vocabulary
 include("graphics/commands.jl")
+# Recording a pass by hand, over the same three primitives the graph uses. The
+# imperative verb family this replaces existed only on Vulkan, which is why
+# RayMakie's overlay could not composite on Metal at all.
+include("graphics/record.jl")
 include("graphics/builtins.jl")
 
 include("geometry/transform.jl")
@@ -257,6 +265,9 @@ export RenderTarget
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
+# A submission channel and what a submission holds — 2.2 and 2.3. `hold!` is what
+# `pin!` meant, with the lifetime owned by core instead of by a backend.
+export SubmitChannel, channelof, hold!, oneshot!, acquire!, Submission
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export batchqueue
@@ -285,6 +296,9 @@ export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
     smoothoutputs, outputtype
 # What the fragment stage reads, which depends on which stages a pipeline has.
 export lastgeometrystage, fragmentinputs, fragmentinputtype
+# Recording a pass by hand. Shaped like the graph's `render!`/`draw!` on purpose.
+export pass!, viewport!, bindings!, PassRecorder
+export setviewport!, colorimage, depthimage, currentimage
 export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
 export DrawIndirectCommand
 # The mesh pipeline. Described here, run by a backend that answers

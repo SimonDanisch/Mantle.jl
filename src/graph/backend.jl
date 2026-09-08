@@ -570,7 +570,13 @@ const BACKEND_VOCABULARY = (
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
     :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
-    :indexbuffer,                             # Vulkan needs a usage bit at allocation, Metal does not
+    :indexbuffer,
+    # The recording primitives a submission channel needs — 2.3. Core owns the
+    # free list and when a recording may be reused; these are the driver half.
+    :makerecording, :resetrecording!, :destroyrecording!, :retire!, :recorder,
+    # What a hand-recorded pass needs beyond the graph's three — see
+    # `graphics/record.jl`. `setviewport!` is the only genuinely new one.
+    :setviewport!, :colorimage, :depthimage, :currentimage,                             # Vulkan needs a usage bit at allocation, Metal does not
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,

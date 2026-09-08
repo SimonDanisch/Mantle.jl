@@ -266,7 +266,7 @@ is passed straight back to `record_draw!` and `end_render_pass!`.
 function begin_render_pass! end
 
 """
-    record_draw!(handle, compiled, args, count)
+    record_draw!(handle, compiled, args, count; instances = 1, indices = nothing)
 
 Record one draw into an open pass.
 
@@ -275,6 +275,12 @@ Record one draw into an open pass.
 INDIRECT draw, because the whole point of that form is that the host never
 learns the count.
 """
+# `instances` and `indices` are keywords with defaults, so the graph — which never
+# uses either — calls this exactly as it did. They are here because a
+# hand-recorded pass does: RayMakie's overlay draws instanced sprites and indexed
+# line strips, and those were `draw_in_pass!`/`draw_indexed_in_pass!`, a second
+# verb family only one backend implemented. One primitive with two options beats
+# two primitives, and beats a family.
 function record_draw! end
 
 # ── The frame, for a graph that reaches a window ─────────────────────────────

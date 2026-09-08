@@ -917,7 +917,8 @@ function bind_arg!(setbytes!, enc, arg::T, i::Int) where {T}
     return nothing
 end
 
-function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count)
+function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count;
+                             instances::Integer = 1, indices = nothing)
     # `args` is what Mantle resolved; this backend baked their device form at
     # compile time (see `StageArgs`), so what gets bound comes from `d`.
     c = d.pipeline
@@ -937,9 +938,41 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
     # wasted work — Metal rejects a fragment binding on a pipeline that has none.
     c.has_fragment &&
         bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
-    draw_with_count!(h.encoder, c, count)
+    draw_with_count!(h.encoder, c, count, instances, indices)
     return nothing
 end
+
+"""
+    setviewport!(handle, x, y, width, height)
+
+The rectangle the following draws land in, and the scissor derived from it.
+
+`abs(height)`, and that is deliberate. Vulkan expresses "clip-space +y at the
+top" as a NEGATIVE viewport height; Metal has no such thing — this backend
+mirrors y in the vertex stage instead (`flip_clip`, and the matching
+`MTLWindingCounterClockwise`, see `mantle-clip-space-is-vulkans`). So the sign
+carries no extra instruction here: honouring it would flip a second time and
+undo the shader's.
+
+NOT verified against Vulkan side by side. A mirrored scene still looks like a
+scene, which is exactly how the clip flip got in unnoticed in the first place;
+the check is two renders of the same overlay, one per backend, diffed.
+"""
+function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
+    ah = abs(hgt)
+    MTLm.set_viewport!(h.encoder,
+        MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(ah), 0.0, 1.0))
+    MTLm.set_scissor!(h.encoder,
+        MTLm.MTLScissorRect(UInt(max(0, floor(Int, x))), UInt(max(0, floor(Int, y))),
+                            UInt(max(1, ceil(Int, w))), UInt(max(1, ceil(Int, ah)))))
+    return nothing
+end
+
+# What a hand-recorded pass reads off a framebuffer and a window. Both are one
+# field; they are verbs rather than field access so that core never names a
+# backend's struct.
+Mantle.colorimage(fb::MetalFramebuffer) = fb.color
+Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
 
 """
 End the encoder and commit the pass's command buffer.
@@ -956,9 +989,32 @@ function Mantle.end_render_pass!(h::MetalPassHandle)
 end
 
 """A plain count draws directly; a `Commands` buffer draws INDIRECTLY."""
-draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer) =
-    MTLm.draw_primitives!(enc, c.primitive, 0, n, 1)
-function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands)
+# `instances` and `indices` reach here from a HAND-RECORDED pass; the graph passes
+# neither. An indexed draw needs the buffer resident for the same reason an
+# indirect one does — the command processor reads it, not a stage, so nothing in
+# the shader names it and the encoder still has to be told.
+function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
+                          instances::Integer = 1, indices = nothing)
+    if indices === nothing
+        MTLm.draw_primitives!(enc, c.primitive, 0, n, instances)
+    else
+        ibuf = metal_buffer(indices)
+        ibuf === nothing &&
+            error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
+        MTLm.use!(enc, ibuf, MTLm.ReadUsage,
+                  MTLm.MTLRenderStages(MTLm.MTLRenderStageVertex))
+        MTLm.draw_indexed_primitives!(enc, c.primitive, n,
+                                      MTLm.MTLIndexTypeUInt32, ibuf,
+                                      byteoffset(indices), instances)
+    end
+    return nothing
+end
+
+draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands,
+                 ::Integer = 1, ::Nothing = nothing) =
+    draw_indirect_with!(enc, c, n)
+
+function draw_indirect_with!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands)
     # The whole point of this form is that the host never learns the count, so
     # reading it here to call the direct form would defeat it.
     buf = metal_buffer(n.resource)
