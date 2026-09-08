@@ -163,6 +163,9 @@ include("graph/backend.jl")
 
 # ── Ray tracing ───────────────────────────────────────────────────────────────
 include("raytracing/pipeline.jl")
+# The instances a top-level structure holds: the order, the handles, the
+# reindex on delete. Portable; a backend supplies only the batch type.
+include("raytracing/batches.jl")
 include("raytracing/accel.jl")
 include("raytracing/api.jl")
 
@@ -239,6 +242,7 @@ export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
 export isdepth, target_extent, checkextents, refit!,
        collect!
 export blit!, present_frame!, acquire_next_image!, transition_image!
+export InstanceBatches, register!, batchof, ninstances
 export readback_framebuffer, readback_window, readback_target
 
 # Pipeline descriptions and the indirect draw record.
