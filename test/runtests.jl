@@ -462,6 +462,10 @@ include(joinpath(@__DIR__, "test_host.jl"))
 # on a Linux box and the Vulkan one on a Mac. Gating it on a loaded backend
 # would confine each half to the machine that cannot be the one to catch it.
 include(joinpath(@__DIR__, "test_ext_imports_are_declared.jl"))
+# The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
+# written before the refactor deletes anything, so each one fails today and
+# turns into an "Unexpectedly Pass" the moment its phase lands.
+include(joinpath(@__DIR__, "test_mantle_owns_it.jl"))
 
 if _VULKAN_OK
 # Needs a GPU but no display — every graph in it is headless, which is also the
