@@ -570,6 +570,7 @@ const BACKEND_VOCABULARY = (
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
     :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
+    :indexbuffer,                             # Vulkan needs a usage bit at allocation, Metal does not
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,

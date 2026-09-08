@@ -229,6 +229,23 @@ function Buffer(dev, ::Type{T}, dims::Dims{N}) where {T,N}
 end
 Buffer(dev, ::Type{T}, n::Integer) where {T} = Buffer(dev, T, (Int(n),))
 
+"""
+    indexbuffer(dev, indices::AbstractVector{UInt32}) -> Buffer
+
+`indices` on the device, usable as an indexed draw's index buffer.
+
+Its own name and not `Buffer`, because the two APIs genuinely differ: Vulkan
+requires `BUFFER_USAGE_INDEX_BUFFER_BIT` at allocation and refuses a buffer that
+lacks it, while Metal's `drawIndexedPrimitives` takes any buffer. So the default
+here is what Metal needs and the Vulkan backend overrides it.
+
+Not expressed through `extrausage`, which dispatches on the ELEMENT type: an
+index happens to be a `UInt32` and so is half the data in a renderer, so giving
+every `UInt32` buffer the bit would be granting a capability to answer a question
+nobody asked.
+"""
+indexbuffer(dev, indices::AbstractVector{UInt32}) = Buffer(dev, indices)
+
 "`data`'s shape and contents on the device. The `N > 1` counterpart of the
 vector constructor; the upload is linear, because a region is."
 function Buffer(dev, data::AbstractArray{T,N}) where {T,N}

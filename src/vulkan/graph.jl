@@ -175,6 +175,20 @@ extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT
 supportspredicate(d::LavaDevice) = (d.ctx::VkContext).conditional_rendering_available
 bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
+# Vulkan refuses an index buffer that was not allocated as one, so this backend
+# has to say so at allocation; Metal's `drawIndexedPrimitives` takes any buffer,
+# which is why the core default is a plain `Buffer`.
+#
+# Delegating to `alloc_index_buffer` rather than reimplementing it: that function
+# already sets `BUFFER_USAGE_INDEX_BUFFER_BIT` through `LavaArray`'s
+# `extra_usage`, and threading the same bit through `Mantle.Buffer` would mean
+# giving `persistentarray` a per-allocation usage argument it does not have. What
+# this replaces is the REACH: RayMakie called `alloc_index_buffer` through
+# `Base.get_extension` at five sites, which is a backend name in a package that
+# must not have one.
+Mantle.indexbuffer(::LavaDevice, indices::AbstractVector{UInt32}) =
+    alloc_index_buffer(indices)
+
 rawalloc(dev::LavaDevice, ::Persistent, bytes::Int, usage) =
     rawalloc(dev, Buffers(), bytes, usage)
 constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
