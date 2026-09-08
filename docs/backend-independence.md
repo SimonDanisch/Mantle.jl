@@ -364,3 +364,166 @@ touched was green; what failed and what became of it:
   coverage 0.125 of 1.0). Their headers attribute the fault to NVIDIA's
   compiler; whether the `WORKGROUP_FALLBACK` repair regressed is a Lava
   question, to be bisected on its own.
+
+## Multi-device: a device is an explicit argument (2026-09-08)
+
+Backend independence made the graph, the walk and the submission core's. This
+step made **which device** explicit everywhere, so a second GPU is a first-class
+argument rather than something reachable only through the process global. The
+two-device probe already showed the caches were per device; what was still
+global was every path that did not name one.
+
+**The rule.** The only ambient device is `Device(api)` — the process default,
+chosen once. Every other constructor takes a device, a backend or a queue:
+`Device(api; select)` builds one of your own and never installs it,
+`Device(backend)` is the device a backend already belongs to, and `Graph`,
+`Buffer`, `Framebuffer(backend, …)`, `Window(backend, …)`,
+`allocate_batch_queue!(device)`, `build_accel!(f, bq)` all name theirs. The one
+allocation convenience that still reads the default is `LavaArray(data)` /
+`LavaArray{T}(undef, n)`, the family every array package has;
+`test_device_identity.jl` holds the rest of `src/` to the line, on lavapipe
+beside the RTX.
+
+**What was silently wrong, each now fixed with an assertion in that file:**
+`Device(::LavaBackend)` dropped its argument and returned the default;
+`backend(dev)` was unpinned; `Window`/`Framebuffer`/`Texture2D`/`Sampler` fell
+through to a `vk_context()` default; `adapt_storage(::LavaBackend, ::Array)`,
+`similar`, the broadcast-output `similar` and `devicearray` allocated on the
+default; the transient-image `materialize!`/`remakeimage!` bound an image on the
+graph's device through the global's handle; `build_accel!`, `build_blas_pooled`,
+`HardwareAccel`, the HWTLAS builds and `VulkanExternalImage` read the global.
+RayMakie allocated its graphics and present queues and its index buffers on the
+default rather than the screen's device.
+
+**The unpinned backend is gone.** `LavaBackend` stores a concrete
+`VulkanBatchQueue` (no `Union{…,Nothing}`, no `getproperty` that resolved the
+global), so every spelling — `LavaBackend()` included — pins its device when it
+is built. A backend built before a `reset_device!` is dead after it, like the
+arrays it allocated. `==` is now "the same device", which is the question both
+callers ask (Raycore's cross-backend adapt guard, RayMakie's "is this array
+mine"); a backend on a second queue of the same device is equal to the primary.
+
+**The compiler emits for the device it compiles for, not the bound one.** The
+two feature booleans (SER, ray query) were a process global the runtime pushed
+on `bind_context!`; a kernel compiled for a second device was shaped by whichever
+device was bound, and the frozen SPIR-V key knew nothing about them. They are a
+`Lava.TargetFeatures` field of `LavaCompilerParams` now — part of the compile
+job, part of every frozen key — filled from `ctx.features`. `targetfeatures()`
+and `TARGET_FEATURES` are deleted; `test_target_features.jl` compiles the same
+raygen with `ser=true` and `ser=false` and gets two modules and two frozen
+entries with no cache clear between them.
+
+**Selection replaces the ICD pin.** `Mantle.devices(api)` lists physical devices
+(name, kind, driver); `selectdevice(select, infos)` turns `nothing`, a name
+substring, an index or a predicate into one index, discrete-first. The process
+default is `MANTLE_DEVICE` when set and the ranking otherwise — so a session
+picks the RTX by name instead of hiding the 7900 XTX and lavapipe with
+`VK_DRIVER_FILES`, and the two-device tests can enumerate lavapipe. `Device(api;
+select)` and `VkContext(; select)` take the same vocabulary; `defaultdevice!(dev)`
+switches the default without tearing the old one down.
+
+**Cross-device copies stage through the host.** `copyto!` between two
+`LavaArray`s on different contexts downloads and re-uploads instead of recording
+a `vkCmdCopyBuffer` that names a foreign buffer (a driver fault). Same device is
+the direct GPU-to-GPU path, unchanged.
+
+**Metal.** The contract is backend-neutral, so Metal satisfies it: `Device(::
+MetalAPI; select)`, `devices(::MetalAPI)` and `defaultdevice!` exist, the second
+`MetalDevice` global (`_DEVICE` in `caps.jl`, a pool beside the real one) is
+gone, `caps(::MetalBackend)` and the graphics/image constructors take the device
+they are given. Written without a Mac; the Mac session runs and fixes the Metal
+internals. No Metal tests were added here.
+
+**Verified on the RTX with lavapipe beside it (2026-09-08):**
+`test_device_identity.jl` (19), `test_device_selection.jl` (9),
+`test_backend_equality.jl`, `test_backend_context.jl`, `test_target_features.jl`,
+`test_target_features_push.jl`, `test_frozen_rt_cache.jl`, `twodevice_probe.jl`,
+`test_graphics_pipeline.jl` (27), `test_gemm_batched.jl`, `test_handwritten_rt.jl`
+(269), `test_blas_refit.jl`, `test_frozen_cache.jl`, `test_ext_imports_are_declared.jl`,
+`test_backend_vocabulary.jl`. Hikari `test_plan_invalidation.jl` (11, full
+renders), `test_sample_is_one_run.jl`, `test_mantle_device.jl`. RayMakie a
+headless render and `test_overlay_compositing.jl` (20, the two-queue path).
+`test_render_allocates_nothing.jl`'s per-sample count is 0 over 80 warm samples
+(4×20) — the one 2080-byte sample in a cold run is the finalizer drain the test
+documents, not a regression.
+
+**Full Mantle suite (2026-09-08, RTX + lavapipe, ~25 min): 36454 passed.** Three
+regressions this multi-device pass introduced were caught by it and fixed, each
+re-verified:
+* `materialize!` grew a device argument (a transient's storage is the graph's
+  device's); two call sites in `phases.jl` and `build.jl` and the host/Vulkan
+  methods were updated, but the phase-time placement call was missed — every
+  host and arena plan errored until it was passed `device(c)`.
+* the `build_accel!(f)` no-arg convenience was deleted in favour of
+  `build_accel!(f, bq)`; eleven RT/HWTLAS test files still used the old form.
+* the broadcast-output `similar` now finds its device by walking the argument
+  tree, and errored on a wrapper it did not know — GPUArrays' own broadcasting
+  suite exercises ad-hoc wrappers. It falls back to the default device when the
+  walk finds nothing (the pre-multi-device behaviour), so an unknown wrapper
+  costs correctness only across devices; the broadcasting group is 460/460.
+
+Everything else that failed is pre-existing or environmental, unchanged by this
+work: the Lava-codegen-on-NVIDIA files (`test_static_workgroup`,
+`test_int32_cartesian_miscompile`, `test_shared_index_division`,
+`test_psb_chain_fold`, `test_loop_unswitch_miscompile`, `test_workgroup_zero_init`);
+`test_gemm_staged` (DNNKernels) and `test_bar_memcpy_sync` (AcceleratedKernels)
+not in the env; and `test_window.jl` in its subprocess, which hangs creating a
+visible GLFW window on this XWayland session — the runner's own note says so.
+
+## Multi-GPU in one process: the HWTLAS leak (2026-09-08)
+
+The identity tests above passed while a full RayMakie render on a non-default GPU
+still failed, because they exercised the constructors one at a time and a render
+threads through more. Rendering on a second device threw the cross-context error
+(`sync_access!: buffer was last written on a VulkanBatchQueue from a DIFFERENT
+VkContext`) and, on lavapipe, segfaulted.
+
+Instrumenting the bare `vk_context()` global to record its callers during a
+render on a second context found a single culprit: the HWTLAS mesh-push path
+allocated `LavaArray`s through the bare constructor, whose queue defaults to the
+process global. Five sites in `raytracing/hwtlas.jl` — `_register_batch!`'s
+per-batch instance buffer, `_concat_batch_instances!`'s combined buffer,
+`_reuse_or_alloc`'s triangle and offset arrays, and the two CPU-array
+`update_transforms!`/`update_transform!` overloads — now take the TLAS's own
+`bq` (the `_reuse_or_alloc` helper grew a `bq` parameter its two callers pass
+`hwtlas.bq`). `test_hwtlas_device.jl` builds a TLAS on lavapipe beside the real
+GPU and asserts every buffer stays on it; it fails before the fix (the instance
+buffer lands on the default) and passes after.
+
+**With that closed, two different GPUs render in one process.** The default RTX
+and lavapipe, interleaved four renders deep, each produce a correct image with
+no cross-context error and no segfault, and the default stays put. Rendering on a
+single GPU chosen as the session default works on the RTX and the 7900 XTX
+(`MANTLE_DEVICE=NAVI31`, or `defaultdevice!`). The integrated Raphael APU is the
+remaining gap: `VkContext` requests a fixed feature set (subgroup rotate among
+them) it does not advertise, so `vkCreateDevice` returns `ERROR_FEATURE_NOT_PRESENT`
+— device creation needs to probe features per device rather than demand the
+discrete-GPU set, which is separate from this work.
+
+## Making the leak class impossible, not the five sites (2026-09-08)
+
+Fixing the five HWTLAS allocations by hand does not stop the sixth from being
+written — the root cause is that a device-less `LavaArray{T}(undef, n)` /
+`LavaArray(data)` falls back to the process-global context at all. So the backend
+is now held to naming a device for every allocation, the way the vocabulary and
+compiler-split lines are held: `test_no_ambient_allocation.jl` scans `src/vulkan/`
+and fails on any device-less `LavaArray` allocation. A buffer's device is passed
+as `bq` or carried by the `DataRef`/`copy` the constructor wraps, never taken
+from the global. Two sites are device-less BY CONSTRUCTION and tagged
+`ambient-allocation-ok`: the type-based `adapt(LavaArray, x)` (names a type, not a
+device — the process-default analogue of `defaultbackend()`) and the
+single-context video download (`VideoImage` carries no device and there is one
+hardware video queue).
+
+Writing that test surfaced four more leaks the HWTLAS hunt had not: the GEMM
+`densify` scratch, the multi-block reduction's `temp` in `mapreduce.jl`,
+`indirect_buffer`, and the gpuav probe — each now takes its device from the array
+or context already in scope. The reduction one mattered: a `sum` over a
+second-device array put its scratch on the default; it now lands on the array's
+device (verified on lavapipe).
+
+The consumers are deliberately NOT scanned, because they never name `LavaArray`:
+Hikari, Raycore and RayMakie allocate through `KA.allocate(backend, …)`,
+`Adapt.adapt(backend, …)` and `Mantle.Buffer(dev, …)`, which carry the device by
+construction. That is what the portable API is for, and this test guards the one
+layer allowed to reach past it.

@@ -24,7 +24,7 @@ function rt_kernel!(buf::LavaDeviceArray{Float32, 1})
 end
 
 backend = LavaBackend()
-bq = backend.bq
+bq = backend.dispatch_bq
 N = 32
 
 # Run 1: cold compile, capture the LavaGPUKernel from the in-memory cache

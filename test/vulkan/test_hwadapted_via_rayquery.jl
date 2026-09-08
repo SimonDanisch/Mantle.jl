@@ -26,7 +26,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # Two triangles at z=2 and z=5 (same xy footprint).  Same scene as the
     # any_hit test in test_closesthit_via_rayquery.jl, but exercising the
@@ -138,7 +138,7 @@ end
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     verts = [
         Point3f(-1, -1, 5), Point3f(1, -1, 5), Point3f(0, 1, 5),

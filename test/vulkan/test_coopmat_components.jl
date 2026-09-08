@@ -54,7 +54,7 @@ end
 end
 
 @testset "cooperative-matrix component access" begin
-    if !MVE.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
         @info "no cooperative-matrix support on this device; skipping"
     else
         back = LavaBackend()
@@ -105,7 +105,7 @@ end
 end
 
 @testset "GEMM epilogue" begin
-    if !MVE.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
         @info "no cooperative-matrix support on this device; skipping"
     else
         back = LavaBackend()

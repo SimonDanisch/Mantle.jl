@@ -10,7 +10,7 @@ const Tri = Raycore.Triangle{UInt32}
 
 @testset "push!(hwtlas, blas, instance_buf) triangles kwarg -- batch path populates tri_gpu/off_gpu" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
     instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
@@ -52,7 +52,7 @@ end
 
 @testset "push!(hwtlas, blas, instance_buf) default triangles kwarg -- off_gpu sized, tri_gpu empty" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)

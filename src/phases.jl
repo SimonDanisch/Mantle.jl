@@ -160,9 +160,11 @@ function arena end
 function describe end
 
 """
-    materialize!(transient, slab, offset)
+    materialize!(device, transient, slab, offset)
 
-Give a placed transient its storage, at `offset` in `slab`.
+Give a placed transient its storage, at `offset` in `slab`. The device is the
+graph's — a transient's driver storage belongs to the device that made it, and
+on more than one device the process default is not necessarily that device.
 """
 function materialize! end
 
@@ -420,7 +422,7 @@ function run!(::Place, c)
             # The transient's offset is relative to the REGION; the region's is
             # relative to the block. Adding them is where a suballocated plan
             # differs from one that owns its allocation outright.
-            materialize!(ts[i], memoryof(reg), offset(reg) + a.offsets[i])
+            materialize!(device(c), ts[i], memoryof(reg), offset(reg) + a.offsets[i])
         end
     end
     return c

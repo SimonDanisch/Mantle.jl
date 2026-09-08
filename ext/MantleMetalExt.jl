@@ -21,7 +21,7 @@ using Mantle
 
 # Extended here — the eleven pool primitives, the four transfer verbs, and the
 # device itself.
-import Mantle: Device, backend, pool,
+import Mantle: Device, backend, pool, devices, defaultdevice!,
     rawalloc, rawfree, constraintof, compatible, mergeconstraints,
     fence, passed, waitfor, maxalloc, capacity, blocksize,
     upload!, download, devicecopy!, deviceview, bufferusage
@@ -59,6 +59,7 @@ import Adapt
 import Raycore
 using Metal.ObjectiveC: NSArray
 using Mantle: TransientBuffer
+using Mantle: DeviceInfo, selectdevice
 # Read, not extended.
 using Mantle: Pool, DeviceArray, Persistent, Buffers, Images, region, memoryof, offset
 

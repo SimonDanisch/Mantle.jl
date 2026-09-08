@@ -389,6 +389,10 @@ mutable struct VkContext
     # capability and the raygen can use `lava_rt_hit_object_*` /
     # `lava_rt_reorder_thread_*` intrinsics.  NVIDIA-only.
     ser_available::Bool
+    # The two flags above as the record the compiler takes: what a module
+    # compiled FOR THIS DEVICE may declare. Every compile this context runs
+    # passes it, and every frozen key it reads mixes it in.
+    features::TargetFeatures
     # Whether VK_EXT_conditional_rendering is enabled. `repeat!` needs it — it is
     # how a device-written count decides which iterations of a recorded loop
     # actually run — and a graph that asks for one on a device without it has to
@@ -559,6 +563,7 @@ mutable struct VkContext
         ctx.as_scratch_align = as_scratch_align
         ctx.ray_query_available = ray_query_available
         ctx.ser_available = ser_available
+        ctx.features = TargetFeatures(; ser = ser_available, ray_query = ray_query_available)
         ctx.conditional_rendering_available = conditional_rendering_available
         ctx.coopmat_available = coopmat_available
         ctx.coopmat_shapes = coopmat_shapes === nothing ?
@@ -601,7 +606,7 @@ mutable struct VkContext
 end
 
 """
-    caps(ctx = vk_context()) -> DeviceCaps
+    caps(ctx) -> DeviceCaps
 
 What kernels ask this device. Queried on first call and cached on the context.
 
@@ -615,7 +620,7 @@ modified copy: `ctx.caches.caps = DeviceCaps(caps(ctx); workgrouplimit = 512)`.
 Per context, so it cannot leak into another device the way the module-level
 `WORKGROUP_LIMIT` it replaces did.
 """
-function caps(ctx::VkContext = vk_context())
+function caps(ctx::VkContext)
     c = ctx.caches.caps
     c === nothing || return c
     limits = VK.get_physical_device_properties(ctx.physical_device).limits
@@ -666,7 +671,7 @@ faster at 128 than at 256 for exactly that reason.
 fp16 x fp16 -> fp32 only, because that is what every kernel here multiplies.
 Widen it when something needs bf16 or int8; the query returns those rows too.
 """
-function workgroup_matrix_granularity(ctx::VkContext = vk_context())
+function workgroup_matrix_granularity(ctx::VkContext)
     rows = NTuple{4,Int}[]
     ctx.coopmat2.workgroup_scope || return rows
     props = unwrap(VK.get_physical_device_cooperative_matrix_flexible_dimensions_properties_nv(
@@ -685,7 +690,7 @@ function workgroup_matrix_granularity(ctx::VkContext = vk_context())
 end
 
 """
-    shader_core_count(ctx = vk_context()) -> Union{Nothing,Int}
+    shader_core_count(ctx) -> Union{Nothing,Int}
 
 Streaming multiprocessors (NVIDIA) or active compute units (AMD), or `nothing`
 when the device does not report it.
@@ -698,28 +703,28 @@ silently, which is a wrong launch that still produces a plausible-looking answer
 
 Supply the fallback explicitly:
 
-    cores = something(shader_core_count(), 16)
+    cores = something(shader_core_count(ctx), 16)
 """
-shader_core_count(ctx::VkContext = vk_context()) =
+shader_core_count(ctx::VkContext) =
     (c = caps(ctx).cores) == 0 ? nothing : c
 
 """
-    shader_warps_per_sm(ctx = vk_context()) -> Union{Nothing,Int}
+    shader_warps_per_sm(ctx) -> Union{Nothing,Int}
 
 Maximum resident subgroups per SM — the denominator for an occupancy figure.
 `nothing` when unreported; NVIDIA-only in practice (`VK_NV_shader_sm_builtins`).
 """
-shader_warps_per_sm(ctx::VkContext = vk_context()) =
+shader_warps_per_sm(ctx::VkContext) =
     (w = caps(ctx).warps) == 0 ? nothing : w
 
 """
-    max_shared_memory(ctx = vk_context()) -> Int
+    max_shared_memory(ctx) -> Int
 
 `maxComputeSharedMemorySize`: the per-workgroup shared-memory ceiling, in bytes.
 Core Vulkan, so this one is always a real number — a kernel that sizes its
 `@localmem` against a budget should read it here rather than assume 48 KB.
 """
-max_shared_memory(ctx::VkContext = vk_context()) = caps(ctx).sharedbudget
+max_shared_memory(ctx::VkContext) = caps(ctx).sharedbudget
 
 # ── Async-safe validation message capture ──────────────────────────────────
 #
@@ -788,25 +793,15 @@ function mark_all_devices_lost!()
 end
 
 """
-Bind the process-wide context, and tell the emitter what this device allows.
+Bind the process-wide default context.
 
-The two go together and must not be settable apart: the emitter reads
-`targetfeatures()` to decide whether a module may declare
-`ShaderInvocationReorderNV` or the ray-query capabilities, and declaring one the
-device lacks is a validation error rather than a slow path. It used to read
-`VK_CONTEXT_REF[]` and reach into the context for those flags, which is what made
-`compiler/` depend on the Vulkan runtime; now the runtime pushes them, and the
-compiler names no Vulkan type at all.
-
-`nothing` resets the features too, which is what makes an emitter test that runs
-after a device was released emit the portable module rather than one shaped by a
-device that is gone.
+What the emitter may declare for a device is NOT pushed from here any more: it
+used to be a process global the compiler read, so a kernel compiled for a second
+device was shaped by whichever device was bound. The record travels with the
+context (`ctx.features`) and with every compile job the context runs.
 """
 function bind_context!(ctx::Union{Nothing, VkContext})
     VK_CONTEXT_REF[] = ctx
-    targetfeatures!(ctx === nothing ? TargetFeatures() :
-                    TargetFeatures(; ser = ctx.ser_available,
-                                     ray_query = ctx.ray_query_available))
     # The frozen cache's miss logging, for the same reason: the half of that
     # cache the compiler consults is `compiler/frozen_spirv.jl`, and it was
     # reading `ctx.diag.frozen_log_misses` through `VK_CONTEXT_REF[]` for a
@@ -892,7 +887,7 @@ function vk_context()
         # method), and it cost 50 506 Lava MethodInstances and ~41 s of
         # re-inference on the first GPU call afterwards. The dynamic dispatch is
         # paid once, on the single call that creates the context.
-        ctx = Base.invokelatest(VkContext)::VkContext
+        ctx = Base.invokelatest(VkContext; select = defaultselector())::VkContext
         bind_context!(ctx)
         return ctx::VkContext
     finally
@@ -903,7 +898,7 @@ end
 vk_device() = vk_context().device
 
 """
-    reset_device!(; select = pick_physical_device,
+    reset_device!(; select = <MANTLE_DEVICE, or the ranking>,
                        debug = <the outgoing device's config>)
 
 Replace the process-default Vulkan device. Destroys the old context and creates a
@@ -931,7 +926,7 @@ Two reasons to call it.
 **WARNING**: All existing `LavaArray`s become INVALID after reset — their backing
 GPU buffers no longer exist. You must reallocate all GPU data.
 """
-function reset_device!(; select = pick_physical_device,
+function reset_device!(; select = defaultselector(),
                             debug::Union{Nothing,DebugConfig} = nothing)
     cfg = debug !== nothing ? debug :
           let old = VK_CONTEXT_REF[]
@@ -995,7 +990,7 @@ end
 
 
 """
-    VkContext(; select = pick_physical_device, debug = DebugConfig()) -> VkContext
+    VkContext(; select = nothing, debug = DebugConfig()) -> VkContext
 
 Build a device. **Does not install it** as the process default — `vk_context()`
 is what does that, and it is the only caller that should.
@@ -1012,20 +1007,19 @@ were read here, two of whose failure modes were silent.
 
     ctx = VkContext(debug = DebugConfig(gpu_av = true, gpu_av_shaders = ["step_kernel"]))
 
-`select` receives the enumerated physical devices and returns one, so a caller
-can ask for a device other than the one `pick_physical_device` prefers. That is
-what makes a two-device test possible on a single-GPU machine: the loader
-enumerates the real GPU *and* lavapipe from one instance, so
+`select` names the physical device the way `Device(VulkanAPI(); select)` does
+(`Mantle.selectdevice`): `nothing` for the ranking, a name substring, an index
+into `devices(VulkanAPI())`, or a predicate over `DeviceInfo`. That is what makes
+a two-device test possible on a single-GPU machine: the loader enumerates the
+real GPU *and* lavapipe from one instance, so
 
     gpu = vk_context()
-    cpu = VkContext(select = devs -> only(filter(islavapipe, devs)))
+    cpu = VkContext(select = "llvmpipe")
 
 gives two live contexts with two distinct `id`s, which is the pair every
-per-device cache key has to be checked against (`GUARDRAILS.md` §8). Before this
-there was no way to ask for the second device at all, so the acceptance test the
-briefs describe could not be written.
+per-device cache key has to be checked against.
 """
-function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugConfig())
+function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # Create instance — target Vulkan 1.4 (device supports 1.4.335 on RADV).
     # Bumping API version unlocks 1.3/1.4 core features we enable below.
     app_info = VK.ApplicationInfo(
@@ -1174,7 +1168,7 @@ function VkContext(; select = pick_physical_device, debug::DebugConfig = DebugCo
         "No Vulkan-capable GPU found",
         "Ensure Vulkan drivers are installed"))
 
-    phys_dev = select(phys_devs)
+    phys_dev = phys_devs[selectdevice(select, deviceinfos(phys_devs))]
     props = VK.get_physical_device_properties(phys_dev)
     dev_name = String(filter(!=('\0'), collect(props.device_name)))
 
@@ -1767,7 +1761,7 @@ end
 supports_batch_queue(::VulkanAPI) = true
 
 """
-    allocate_batch_queue!() -> VulkanBatchQueue
+    allocate_batch_queue!(ctx) -> VulkanBatchQueue
 
 Create a new independent VulkanBatchQueue on a separate Vulkan queue (if available).
 Falls back to a separate command pool on the primary queue if all queues are taken.
@@ -1777,11 +1771,6 @@ The context holds the returned queue until [`release_batch_queue!`](@ref) gives
 it back. Call that when done — a caller that just drops the reference keeps the
 command pool, semaphore and slabs alive for the life of the device.
 """
-function allocate_batch_queue!()
-    ctx = vk_context()
-    allocate_batch_queue!(ctx)
-end
-
 function allocate_batch_queue!(ctx::VkContext)
     idx = isempty(ctx.free_queue_indices) ? ctx.next_queue_index : pop!(ctx.free_queue_indices)
     if idx < ctx.max_queue_count
@@ -1859,21 +1848,58 @@ function queue_released(bq::VulkanBatchQueue)
     return findfirst(q -> q === bq, ctx.extra_queues) === nothing
 end
 
-"""Whether this is Mesa's software rasteriser, which every machine here has."""
-islavapipe(dev) = occursin("llvmpipe",
-    String(filter(!=('\0'), collect(VK.get_physical_device_properties(dev).device_name))))
+"""
+    deviceinfos(phys_devs) -> Vector{DeviceInfo}
 
-function pick_physical_device(devs)
-    # Prefer discrete GPU
-    for dev in devs
-        props = VK.get_physical_device_properties(dev)
-        if props.device_type == VK.PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
-            return dev
+What `devices(VulkanAPI())` answers, from an enumeration: index, name, kind and
+driver, so a selector is resolved in core without naming a `VkPhysicalDevice`.
+"""
+function deviceinfos(phys_devs)
+    infos = DeviceInfo[]
+    for (i, pd) in enumerate(phys_devs)
+        props = VK.get_physical_device_properties(pd)
+        name = String(filter(!=('\0'), collect(props.device_name)))
+        t = props.device_type
+        kind = t == VK.PHYSICAL_DEVICE_TYPE_DISCRETE_GPU   ? :discrete :
+               t == VK.PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? :integrated :
+               t == VK.PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU    ? :virtual :
+               t == VK.PHYSICAL_DEVICE_TYPE_CPU            ? :cpu : :other
+        # `VK_KHR_driver_properties` is core since 1.2, which every device here is.
+        driver = if props.api_version >= v"1.2"
+            d = VK.get_physical_device_properties_2(pd, VK.PhysicalDeviceDriverProperties).next
+            strip(String(filter(!=('\0'), collect(d.driver_name))) * " " *
+                  String(filter(!=('\0'), collect(d.driver_info))))
+        else
+            "unknown"
         end
+        push!(infos, DeviceInfo(i, name, kind, driver))
     end
-    # Fall back to first available
-    return first(devs)
+    return infos
 end
+
+"""
+    devices(VulkanAPI()) -> Vector{DeviceInfo}
+
+Every physical device the loader enumerates, in the order `select` indexes.
+Through the bound instance when there is one, through a throwaway instance when
+this is asked before any device exists.
+"""
+function devices(::VulkanAPI)
+    bound = VK_CONTEXT_REF[]
+    bound === nothing || return deviceinfos(unwrap(VK.enumerate_physical_devices(bound.instance)))
+    # A throwaway instance at API 1.2 so `VK_KHR_driver_properties` (core since
+    # 1.2) answers; a 1.0 instance reports a blank driver for every device.
+    app = VK.ApplicationInfo(v"0.0.0", v"0.0.0", v"1.2.0")
+    instance = VK.Instance(String[], String[]; application_info = app)
+    return deviceinfos(unwrap(VK.enumerate_physical_devices(instance)))
+end
+
+# The process default is chosen by `MANTLE_DEVICE` when it is set (a name
+# substring, the same selector `Device(VulkanAPI(); select)` takes) and by the
+# kind ranking in `selectdevice` otherwise: the best GPU there is. This replaces
+# pinning the loader to one ICD through `VK_DRIVER_FILES`, which also hid every
+# other device from the two-device tests.
+defaultselector() = get(ENV, "MANTLE_DEVICE", nothing)
 
 function find_graphics_compute_queue_family(phys_dev)
     qf_props = VK.get_physical_device_queue_family_properties(phys_dev)

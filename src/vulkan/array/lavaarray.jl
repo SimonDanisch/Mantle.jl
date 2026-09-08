@@ -45,6 +45,10 @@ mutable struct LavaArray{T,N} <: AbstractGPUArray{T,N}
     end
 end
 
+# `bq` defaults to the process default device. This is the ONE allocation
+# convenience that reads the default (`LavaArray(data)`, `LavaArray{T}(undef, n)`,
+# the family every array package has); every path inside the backend that holds
+# a device passes its queue, and `test_no_ambient_device.jl` holds it to that.
 function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
                         bq::VulkanBatchQueue=vk_context().default_bq,
                         extra_usage::UInt32=UInt32(0),
@@ -87,14 +91,6 @@ end
 LavaArray{T,N}(::UndefInitializer, dims::Int...; kw...) where {T,N} = LavaArray{T,N}(undef, dims; kw...)
 LavaArray{T,N}(::UndefInitializer, dims::Integer...; kw...) where {T,N} = LavaArray{T,N}(undef, Int.(dims); kw...)
 LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Integer}; kw...) where {T,N} = LavaArray{T,N}(undef, Int.(dims); kw...)
-
-"""Allocate a LavaArray with INDEX_BUFFER_BIT for use as Vulkan index buffer."""
-alloc_index_buffer(data::AbstractVector{UInt32}) = begin
-    arr = LavaArray{UInt32,1}(undef, (length(data),);
-        extra_usage=UInt32(VK.BUFFER_USAGE_INDEX_BUFFER_BIT))
-    upload!(arr, data)
-    return arr
-end
 
 # Empty vector constructor (matches Array{T,1}() behavior)
 LavaArray{T,1}() where {T} = LavaArray{T,1}(undef, (0,))
@@ -163,9 +159,13 @@ end
 
 # ── similar ──
 
-Base.similar(a::LavaArray{T,N}) where {T,N} = LavaArray{T,N}(undef, a.dims)
-Base.similar(a::LavaArray{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims)
-Base.similar(a::LavaArray, ::Type{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims)
+# On the array's own device. `similar` of an array on a second device used to
+# allocate on the process default, so every broadcast result, `copy` and `map`
+# over a second-device array landed on the first device.
+queueof(a::LavaArray) = (a.buf[].ctx::VkContext).default_bq
+Base.similar(a::LavaArray{T,N}) where {T,N} = LavaArray{T,N}(undef, a.dims; bq = queueof(a))
+Base.similar(a::LavaArray{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))
+Base.similar(a::LavaArray, ::Type{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))
 
 # ── Base interface ──
 

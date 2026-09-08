@@ -107,15 +107,15 @@ function Base.show(io::IO, ::MIME"text/plain", s::KernelStats)
 end
 
 """
-    kernel_stats(linked::LavaLinkedKernel) -> KernelStats
+    kernel_stats(ctx, linked::LavaLinkedKernel) -> KernelStats
 
 Stats for a single compiled+linked kernel. Use this from a debugger or
 test when you already have a `LavaLinkedKernel` in hand.
 """
-function kernel_stats(linked::LavaLinkedKernel; source::AbstractString = "")
+function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel; source::AbstractString = "")
     c = linked.compiled
     spirv = spirv_op_stats(c.spirv_bytes)
-    exec = pipeline_exec_stats(linked)
+    exec = pipeline_exec_stats(ctx, linked)
     regs = exec === nothing ? nothing : get(exec, :registers, nothing)
     scratch = exec === nothing ? nothing : get(exec, :scratch_bytes, nothing)
     # `source` given by the caller wins: a FROZEN entry has no IR to recover the
@@ -165,7 +165,7 @@ function list_compiled_kernels(ctx::VkContext = vk_context())
     seen = Set{UInt64}()
     for (_, linked) in ctx.caches.linked
         push!(seen, objectid(linked))
-        push!(stats, kernel_stats(linked))
+        push!(stats, kernel_stats(ctx, linked))
     end
     for (key, linked) in ctx.caches.frozen_mem
         # `Any`-valued, and one kernel can land in both caches across a session.
@@ -173,7 +173,7 @@ function list_compiled_kernels(ctx::VkContext = vk_context())
         push!(seen, objectid(linked))
         # The frozen entry has no IR to recover a name from — `frozen_store`
         # writes `ir = ""` on purpose — but its KEY is `(typeof(f), tt, wg)`.
-        push!(stats, kernel_stats(linked; source = frozen_key_source_name(key)))
+        push!(stats, kernel_stats(ctx, linked; source = frozen_key_source_name(key)))
     end
     return stats
 end
@@ -497,7 +497,7 @@ function enable_pipeline_executable_properties!(enable::Bool=true)
 end
 
 """
-    pipeline_exec_stats(linked::LavaLinkedKernel) -> NamedTuple or Nothing
+    pipeline_exec_stats(ctx, linked::LavaLinkedKernel) -> NamedTuple or Nothing
 
 Query `VK_KHR_pipeline_executable_properties` for a linked compute pipeline.
 Returns a NamedTuple `(registers, scratch_bytes, raw_stats)` where:
@@ -512,14 +512,13 @@ Returns a NamedTuple `(registers, scratch_bytes, raw_stats)` where:
 Returns `nothing` if the extension wasn't enabled at device creation, or
 if the driver doesn't expose anything for this pipeline.
 """
-pipeline_exec_stats(linked::LavaLinkedKernel) = pipeline_exec_stats(linked.pipeline)
+pipeline_exec_stats(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_stats(ctx, linked.pipeline)
 
 # Takes the pipeline, not the linked kernel: the KA launch path keeps
 # `LaunchPlan.pipeline` and drops the `LavaLinkedKernel`, so the linked-kernel
 # method was unreachable from the only place that launches anything.
-function pipeline_exec_stats(pipeline::LavaComputePipeline)
+function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
     PIPELINE_EXEC_PROPERTIES_REQUESTED[] || return nothing
-    ctx = vk_context()
     pipe = pipeline.pipeline
     # Discover the pipeline's executables.
     # NO try/catch around either query, and that is the point.

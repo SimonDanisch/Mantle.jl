@@ -108,7 +108,7 @@ the one thing a chooser must not return. So it asks `gemm_cm2_fits` for the
 measured preference first and walks the reported workgroup sizes if that does not
 apply, largest first.
 """
-function gemm_cm2_tiling(dev = caps())
+function gemm_cm2_tiling(dev::DeviceCaps)
     isempty(dev.wggran) && return nothing
     # The measured winner, if this device admits it.
     gemm_cm2_fits(dev, 64, 64, 32, 256) && return (64, 64, 32, 256)
@@ -313,7 +313,7 @@ function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
     isempty(dev.wggran) && return nothing
     # The tiles are `GEMM_TILE` squares at subgroup scope, so the device's own
     # KHR shape list is the authority rather than the workgroup-scope table.
-    coopmat_shape(vk_context(), Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) ||
+    coopmat_shape(vk_context(backend), Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) ||
         return nothing
     nw * 32 <= dev.workgrouplimit ||
         throw(ArgumentError("nw=$nw wants $(nw * 32) invocations, past this " *

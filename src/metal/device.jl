@@ -65,11 +65,25 @@ end
 # One device per process, cached: a second `MetalDevice` would mean a second
 # `Pool` over the same `MTLDevice`, which is two allocators over one memory.
 const METAL_DEVICE = Ref{Union{Nothing,MetalDevice}}(nothing)
-function Device(::MetalAPI)
-    d = METAL_DEVICE[]
-    d === nothing || return d
-    return METAL_DEVICE[] = MetalDevice()
+function Device(::MetalAPI; select = nothing)
+    if select === nothing
+        d = METAL_DEVICE[]
+        d === nothing || return d
+        # `MANTLE_DEVICE` names the default the way it does on Vulkan; without
+        # it Metal.jl's own choice stands.
+        s = get(ENV, "MANTLE_DEVICE", nothing)
+        mtl = s === nothing ? Metal.device() :
+              Metal.devices()[selectdevice(s, devices(MetalAPI()))]
+        return METAL_DEVICE[] = MetalDevice(mtl)
+    end
+    return MetalDevice(Metal.devices()[selectdevice(select, devices(MetalAPI()))])
 end
+# One entry per `MTLDevice`. Apple silicon reports unified memory, which is what
+# `:integrated` means here; a discrete part (an Intel Mac with a Radeon, an
+# eGPU) does not.
+devices(::MetalAPI) = [DeviceInfo(i, String(d.name), d.hasUnifiedMemory ? :integrated : :discrete, "Metal")
+                       for (i, d) in enumerate(Metal.devices())]
+defaultdevice!(d::MetalDevice) = (METAL_DEVICE[] = d; d)
 
 # `Device(backend)` — how a caller holding a KernelAbstractions backend gets the
 # Mantle device for it, without naming an API marker.

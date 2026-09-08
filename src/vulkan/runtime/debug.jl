@@ -57,8 +57,7 @@ worker task and the main task polls `ctx.validation.messages` until either the
 expected message appears or the timeout expires. On success, the function
 calls `reset_device!` to clear the half-flushed batch state.
 """
-function verify_gpu_av(; timeout::Float64=30.0)
-    ctx = vk_context()
+function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     if !ctx.gpu_assisted
         throw(LavaError("verify_gpu_av",
             "GPU-AV is not enabled (gpu_assisted=false)",
@@ -68,7 +67,7 @@ function verify_gpu_av(; timeout::Float64=30.0)
     bq  = ctx.default_bq
     dev = ctx.device
     clear_validation_messages!()
-    arr = LavaArray{Int32,1}(undef, (16,))
+    arr = LavaArray{Int32,1}(undef, (16,); bq)
     @kernel inbounds = true function _lava_gpuav_check_kernel!(out, bad_idx::Int)
         i = @index(Global)
         if i == 1

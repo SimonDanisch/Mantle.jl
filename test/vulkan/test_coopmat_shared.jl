@@ -166,7 +166,7 @@ end
 
 @testset "cooperative matrix from a vec2-typed @localmem" begin
     backend = LavaBackend()
-    if !MVE.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
         @info "skipping: no cooperative-matrix support on this device"
     else
         h = Float16.(reshape(1:256, 16, 16))
@@ -209,7 +209,7 @@ end
 
 @testset "cooperative matrix from a vec4-typed @localmem" begin
     backend = LavaBackend()
-    if !MVE.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
         @info "skipping: no cooperative-matrix support on this device"
     else
         h = Float16.(reshape(1:256, 16, 16))
@@ -264,7 +264,7 @@ end
 
 @testset "row-major cooperative-matrix store into @localmem" begin
     backend = LavaBackend()
-    if !MVE.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
         @info "skipping: no cooperative-matrix support on this device"
     else
         h = Float16.(reshape(1:256, 16, 16))

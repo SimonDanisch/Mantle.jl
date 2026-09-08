@@ -272,7 +272,7 @@ function multi_dim_reduce!(f::F, op::OP, R::LavaArray{T}, A::LavaArray,
                 AK.mapreduce(map_fn, op, current, KA.get_backend(R);
                              init=init_val, neutral=init_val, dims=d, temp=R, block_size=64)
             else
-                temp = LavaArray{T}(undef, new_sz)
+                temp = LavaArray{T}(undef, new_sz; bq = KernelAbstractions.get_backend(R).dispatch_bq)
                 fill!(temp, init_val)
                 AK.mapreduce(map_fn, op, current, KA.get_backend(temp);
                              init=init_val, neutral=init_val, dims=d, temp=temp, block_size=64)

@@ -187,7 +187,7 @@ function compile_rt_pipeline(ctx::VkContext, pipeline::RayTracingPipeline, rayge
 
     # Compile raygen
     raygen_compiled = lava_compile_rt_shader(pipeline.raygen_func, raygen_tt;
-        stage=:raygen, push_constant_size=8, payload_type=pt, validate=true)
+        stage=:raygen, push_constant_size=8, payload_type=pt, validate=true, features=ctx.features)
 
     # Compile closesthits & miss.  When `chit_miss_take_args` is set the chit
     # and miss receive the raygen's BDA arg signature (same push-constant
@@ -198,20 +198,20 @@ function compile_rt_pipeline(ctx::VkContext, pipeline::RayTracingPipeline, rayge
     chit_spirvs = Vector{UInt8}[]
     for chit in pipeline.closesthit_funcs
         c = lava_compile_rt_shader(chit, chit_tt;
-            stage=:closesthit, push_constant_size=chit_push, payload_type=pt, validate=true)
+            stage=:closesthit, push_constant_size=chit_push, payload_type=pt, validate=true, features=ctx.features)
         push!(chit_spirvs, c.spirv_bytes)
     end
 
     miss_tt, miss_push = pipeline.chit_miss_take_args ? (raygen_tt, 8) : (Tuple{}, 0)
     miss_compiled = lava_compile_rt_shader(pipeline.miss_func, miss_tt;
-        stage=:miss, push_constant_size=miss_push, payload_type=pt, validate=true)
+        stage=:miss, push_constant_size=miss_push, payload_type=pt, validate=true, features=ctx.features)
 
     # Compile any-hit (optional)
     anyhit_spirv = nothing
     if pipeline.anyhit_func !== nothing
         # Any-hit gets same args as raygen (shares BDA arg buffer via push constant)
         anyhit_compiled = lava_compile_rt_shader(pipeline.anyhit_func, raygen_tt;
-            stage=:anyhit, push_constant_size=8, payload_type=pt, validate=true)
+            stage=:anyhit, push_constant_size=8, payload_type=pt, validate=true, features=ctx.features)
         anyhit_spirv = anyhit_compiled.spirv_bytes
     end
 

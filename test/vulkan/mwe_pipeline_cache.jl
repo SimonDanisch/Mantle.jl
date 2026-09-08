@@ -55,7 +55,7 @@ println("         file exists post-init: $(isfile(path))  (expected: false)")
 println("\n[step 2] compile + dispatch trivial kernel")
 N = 64
 buf = MVE.LavaArray(zeros(Float32, N))
-bq = MVE.LavaBackend().bq
+bq = MVE.LavaBackend().dispatch_bq
 MVE.lava_launch!(bq, trivial_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
 MVE.vk_flush!(bq)
 result = Array(buf)
@@ -98,7 +98,7 @@ println("         post-reset file size: $sz2 bytes  (was: $sz)")
 # ── Step 5: compile + dispatch on the reloaded device ─────────────────────
 println("\n[step 5] re-dispatch trivial kernel on fresh device w/ loaded cache")
 buf2 = MVE.LavaArray(zeros(Float32, N))
-bq2 = MVE.LavaBackend().bq
+bq2 = MVE.LavaBackend().dispatch_bq
 MVE.lava_launch!(bq2, trivial_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
 MVE.vk_flush!(bq2)
 result2 = Array(buf2)
@@ -111,7 +111,7 @@ for iter in 1:5
     Mantle.reset_device!()
     ctx = MVE.vk_context()
     buf_i = MVE.LavaArray(zeros(Float32, N))
-    bq_i = MVE.LavaBackend().bq
+    bq_i = MVE.LavaBackend().dispatch_bq
     MVE.lava_launch!(bq_i, trivial_kernel!, buf_i; ndrange=N, workgroup_size=(64, 1, 1))
     MVE.vk_flush!(bq_i)
     r = Array(buf_i)

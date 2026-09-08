@@ -154,7 +154,7 @@ function (k::KI.Kernel{LavaBackend})(args...;
     prod(wg) <= limit ||
         throw(ArgumentError("workgroupsize $wg exceeds the device limit of $limit workitems"))
 
-    bq = k.backend.bq
+    bq = k.backend.dispatch_bq
     # `find_tlas_in_args` BEFORE Adapt, which strips the hwtlas — same ordering
     # the KA entry point depends on.
     tlas    = find_tlas_in_args(args)

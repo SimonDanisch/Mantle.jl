@@ -17,8 +17,8 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 @testset "write_grain_instances_kernel -- 4 grains, identity rotations" begin
     # Build two trivial BLASes so we have non-zero device addresses.
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     positions_cpu = [Point3f(Float32(i), 0f0, 0f0) for i in 1:n]

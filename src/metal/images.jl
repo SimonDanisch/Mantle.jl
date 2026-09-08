@@ -83,8 +83,7 @@ function Mantle.makeimage(dev::MetalDevice, ::Type{T}, width::Int, height::Int,
                                   typemax(Int), 0, nothing, nothing, source)
 end
 
-function Mantle.remakeimage!(t::MetalTransientImage{T}) where {T}
-    dev = Mantle.Device(MetalAPI())
+function Mantle.remakeimage!(dev::MetalDevice, t::MetalTransientImage{T}) where {T}
     desc = image_descriptor(T, t.width, t.height, false, t.usage)
     # `srgb` is not re-derived: `t.format` already carries the answer the first
     # call reached, and asking again from a flag the transient does not keep
@@ -104,7 +103,7 @@ them because a `VkImage` is bound by barriers and a `VkImageView` by draws; a
 `MTLTexture` is both, and giving `target_view` an answer is what lets the shared
 render-pass code bind it without asking which backend it came from.
 """
-function Mantle.materialize!(t::MetalTransientImage, heap::MTL.MTLHeap, offset::Int)
+function Mantle.materialize!(::MetalDevice, t::MetalTransientImage, heap::MTL.MTLHeap, offset::Int)
     t.memory = heap                     # the texture outlives the call; the heap must too
     tex = MTL.MTLTexture(heap, t.req.desc, offset)
     tex === nothing && throw(OutOfMemoryError())

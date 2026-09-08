@@ -795,6 +795,40 @@ if _VULKAN_OK
         end
 
 
+        # Choosing a device: the listing, the selector vocabulary (name, index,
+        # predicate, ranking) and the default. No second card needed.
+        @testset "device selection" begin
+            include(joinpath(VULKAN_TESTS, "test_device_selection.jl"))
+        end
+
+
+        # The whole point of backend independence, checked on two live devices:
+        # a graph, an array, a framebuffer and an Adapt asked of the SECOND
+        # device's backend land THERE, not on the default. Skips loudly without
+        # a software rasterizer.
+        @testset "a device is an explicit argument" begin
+            include(joinpath(VULKAN_TESTS, "test_device_identity.jl"))
+        end
+
+
+        # The leak a full render on a non-default GPU hit that the isolated
+        # primitives did not: the HWTLAS mesh-push path allocated instance and
+        # triangle buffers on the process default. Builds one on lavapipe beside
+        # the real GPU and asserts every buffer stays there.
+        @testset "an HWTLAS built on a second device stays on it" begin
+            include(joinpath(VULKAN_TESTS, "test_hwtlas_device.jl"))
+        end
+
+
+        # The backend cannot allocate a device buffer without naming its device:
+        # a source scan forbidding the device-less `LavaArray` that reaches the
+        # process global. This is the structural guard the HWTLAS leak needed —
+        # fixing the sites by hand does not stop the next one being written.
+        @testset "no device-less allocation in the backend" begin
+            include(joinpath(VULKAN_TESTS, "test_no_ambient_allocation.jl"))
+        end
+
+
         # Two live devices in one process — the real GPU and lavapipe, which the
         # loader enumerates together, so this needs no second card. Asserts both
         # compute correctly AND that one kernel compiles twice: a shared pipeline

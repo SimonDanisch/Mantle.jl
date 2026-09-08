@@ -16,7 +16,7 @@
 # the GL import side.
 
 """
-    VulkanExternalImage(width, height; format = VK.FORMAT_R8G8B8A8_UNORM)
+    VulkanExternalImage(ctx, width, height; format = VK.FORMAT_R8G8B8A8_UNORM)
 
 A GPU image whose memory can be exported to other APIs (see [`memoryfd`](@ref)).
 OPTIMAL tiling, `TRANSFER_DST | SAMPLED` usage. Fill it from a `LavaArray`
@@ -31,11 +31,11 @@ mutable struct VulkanExternalImage <: ExternalImage
     height::Int
     allocation_size::Int   # importers must import exactly this many bytes
     layout_initialized::Bool
+    ctx::VkContext         # the device that owns the image and exports its memory
 end
 
-function VulkanExternalImage(width::Integer, height::Integer;
+function VulkanExternalImage(ctx::VkContext, width::Integer, height::Integer;
                        format::VK.Format = VK.FORMAT_R8G8B8A8_UNORM)
-    ctx = vk_context()
     ctx.external_memory_available ||
         error("this device was created without VK_KHR_external_memory_fd support")
     handle_types = VK.EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
@@ -57,7 +57,7 @@ function VulkanExternalImage(width::Integer, height::Integer;
             next = VK.MemoryDedicatedAllocateInfo(; image),
             handle_types))
     @vk_checked "external_image_bind" VK.bind_image_memory(ctx.device, image, memory, 0)
-    return VulkanExternalImage(image, memory, Int(width), Int(height), Int(req.size), false)
+    return VulkanExternalImage(image, memory, Int(width), Int(height), Int(req.size), false, ctx)
 end
 
 """
@@ -70,7 +70,7 @@ it). Importers must import exactly `img.allocation_size` bytes and, for
 GL, mark the memory object dedicated and the texture OPTIMAL-tiled.
 """
 function memoryfd(img::VulkanExternalImage)
-    ctx = vk_context()
+    ctx = img.ctx
     # VK.jl's high-level get_memory_fd_khr passes a Ref{Int64} where the
     # C signature wants int*, so call the low-level entry point directly.
     fptr = VK.function_pointer(ctx.device, "vkGetMemoryFdKHR")

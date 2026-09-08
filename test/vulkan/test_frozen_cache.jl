@@ -41,15 +41,15 @@ end
 
     @testset "key is stable and identifies the defining module" begin
         Lava.FROZEN_VERSION[] = version
-        k1 = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out), typeof(a), Float32}, (64,))
-        k2 = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out), typeof(a), Float32}, (64,))
+        k1 = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out), typeof(a), Float32}, (64,), Lava.TargetFeatures())
+        k2 = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out), typeof(a), Float32}, (64,), Lava.TargetFeatures())
         @test k1 == k2                                   # same inputs, same key
         # A different signature must not collide with it.
-        k3 = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out), typeof(a), Float64}, (64,))
+        k3 = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out), typeof(a), Float64}, (64,), Lava.TargetFeatures())
         @test k1 != k3
         # …and neither must a different workgroup size.
         @test k1 != Lava.frozen_key(frozentest_scale!,
-                                    Tuple{typeof(out), typeof(a), Float32}, (128,))
+                                    Tuple{typeof(out), typeof(a), Float32}, (128,), Lava.TargetFeatures())
         # A different kernel is a different name, not just a different digest.
         @test occursin("frozentest_scale", k1)
         @test occursin("_v" * version, k1)
@@ -128,9 +128,9 @@ end
         # The version is part of the filename, so an entry written under one is
         # simply not found under another — the whole invalidation story.
         Lava.FROZEN_VERSION[] = version
-        k_old = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out)}, (64,))
+        k_old = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out)}, (64,), Lava.TargetFeatures())
         Lava.FROZEN_VERSION[] = version * "-next"
-        k_new = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out)}, (64,))
+        k_new = Lava.frozen_key(frozentest_scale!, Tuple{typeof(out)}, (64,), Lava.TargetFeatures())
         @test k_old != k_new
         @test !isfile(Lava.frozen_path(k_new))
         Lava.FROZEN_VERSION[] = ""

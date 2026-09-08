@@ -78,7 +78,7 @@ end
 function run_once(label::String)
     println("\n=== $label ===")
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     tri_v0 = Point3f(-1f0, -1f0, 5f0)
     tri_v1 = Point3f( 1f0, -1f0, 5f0)

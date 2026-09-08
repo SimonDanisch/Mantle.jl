@@ -409,8 +409,8 @@ intersection); accordingly, this function errors loudly if the device does
 not support `VK_KHR_ray_query`.
 """
 function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque::Bool=true)
-    vk_context().ray_query_available || error(
-        "build_blas_aabb: the active Vulkan device does not support " *
+    (ctx.bq.ctx::VkContext).ray_query_available || error(
+        "build_blas_aabb: this Vulkan device does not support " *
         "VK_KHR_ray_query. Procedural-AABB BLASes are only useful with " *
         "ray_query in this codebase. Build on a device that supports it.")
 
@@ -997,14 +997,14 @@ end
 # ── AS Build ──
 
 """
-    build_accel!(f)
+    build_accel!(f, bq)
 
 Build acceleration structures in a single GPU submission. The callback
 receives an `VulkanAccelBuildContext` that must be passed to `build_blas`/`build_tlas`.
 
 # Example
 ```julia
-blases, tlas = build_accel!() do ctx
+blases, tlas = build_accel!(bq) do ctx
     bs = [build_blas(ctx, verts, idxs) for (verts, idxs) in meshes]
     tlas = build_tlas(ctx, bs)
     return (bs, tlas)
@@ -1014,7 +1014,7 @@ end
 BLAS device addresses are available immediately after `build_blas` returns
 (even before the GPU build executes), so `build_tlas` can reference them.
 """
-function build_accel!(f; bq::VulkanBatchQueue=vk_context().default_bq)
+function build_accel!(f, bq::VulkanBatchQueue)
     # The builds go into a one-shot of their own, on the timeline like every
     # other submission — it used to be a dedicated command buffer and a fence
     # beside the queue, submitted by a second route. The one-shot opens with
@@ -1165,7 +1165,7 @@ provide per-BLAS geometry. Returns one `LavaBLAS` per input.
 """
 function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
                            all_indices::Vector{Vector{UInt32}};
-                           bq::VulkanBatchQueue=vk_context().default_bq)
+                           bq::VulkanBatchQueue)
     n_blas = length(all_vertices)
     n_blas == 0 && return LavaBLAS[]
     @assert length(all_indices) == n_blas
@@ -1272,7 +1272,7 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
     end
 
     GC.@preserve input_buf input_mem scratch_arr as_pool_arr begin
-        build_accel!() do as_ctx
+        build_accel!(bq) do as_ctx
             for i in 1:n_blas
                 n_tris = UInt32(length(all_indices[i]) ÷ 3)
                 max_vertex = UInt32(length(all_vertices[i]) - 1)
@@ -1321,7 +1321,7 @@ end
 # ── Raycore-compatible bridge functions ──
 
 """
-    build_blas_from_primitives(primitives) -> LavaBLAS
+    build_blas_from_primitives(bq, primitives) -> LavaBLAS
 
 Build a hardware BLAS from an array of triangle primitives.
 Each primitive must have a `.vertices` field with 3 vertex positions
@@ -1329,7 +1329,7 @@ Each primitive must have a `.vertices` field with 3 vertex positions
 
 Primitives on GPU (LavaArray, etc.) are downloaded to CPU automatically.
 """
-function build_blas_from_primitives(primitives; opaque::Bool=true)
+function build_blas_from_primitives(bq::VulkanBatchQueue, primitives; opaque::Bool=true)
     cpu_prims = to_cpu_vector(primitives)
     n_tris = length(cpu_prims)
 
@@ -1349,13 +1349,13 @@ function build_blas_from_primitives(primitives; opaque::Bool=true)
         indices[i+1] = UInt32(i)
     end
 
-    return build_accel!() do ctx
+    return build_accel!(bq) do ctx
         build_blas(ctx, vertices, indices; opaque)
     end
 end
 
 """
-    build_hw_accel_from_tlas(tlas; ctx=vk_context())
+    build_hw_accel_from_tlas(tlas; ctx, bq = ctx.default_bq)
         -> (hw_tlas, triangle_data, blas_offsets, per_instance_tri_offsets)
 
 Build hardware acceleration structures from a Raycore-compatible HWTLAS.
@@ -1382,7 +1382,7 @@ tri = triangle_data[blas_offsets[instance_custom_index + 1] + primitive_id + 1]
 where `instance_custom_index` = BLAS index (0-based) set by this function.
 """
 function build_hw_accel_from_tlas(tlas;
-                                  ctx::VkContext=vk_context(),
+                                  ctx::VkContext,
                                   bq::VulkanBatchQueue=ctx.default_bq)
     instances = to_cpu_vector(tlas.instances)
     blas_array = to_cpu_vector(tlas.blas_array)
@@ -1531,7 +1531,7 @@ function build_hw_accel_from_tlas(tlas;
 
     # Batch all BLAS + HWTLAS builds into a single GPU submission
     hw_tlas = GC.@preserve input_buf input_mem scratch_arr as_pool_arr begin
-        build_accel!() do as_ctx
+        build_accel!(bq) do as_ctx
             for i in 1:n_blas
                 n_tris = UInt32(length(all_indices[i]) ÷ 3)
                 max_vertex = UInt32(length(all_vertices[i]) - 1)

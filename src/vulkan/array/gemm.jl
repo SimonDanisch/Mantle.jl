@@ -466,7 +466,7 @@ const GEMM_SUBGROUP = COOPMAT_SUBGROUP
 # correct at any width — slower, but not wrong. Making the kernel itself
 # wave-size agnostic would mean retuning GEMM_WORKGROUP and the block factors
 # together, and those were measured at 32.
-function coopmat_gemm_available(ctx::VkContext = vk_context())
+function coopmat_gemm_available(ctx::VkContext)
     coopmat_shape(ctx, Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) &&
         (device_subgroup_size(ctx) == GEMM_SUBGROUP ||
          can_require_subgroup_size(ctx, GEMM_SUBGROUP))
@@ -1888,7 +1888,7 @@ gemmstrides(::AbstractArray) = nothing
 # This copy is not free, and a graph that hits it every call should be
 # materialising the tensor as an explicit op instead of leaving the wrapper for
 # `mul!` to trip over.
-densify(a::AbstractArray) = (d = LavaArray{eltype(a)}(undef, size(a)...); d .= a; d)
+densify(a::AbstractArray) = (d = LavaArray{eltype(a)}(undef, size(a)...; bq = KernelAbstractions.get_backend(a).dispatch_bq); d .= a; d)
 
 """
     mul!(C, A, B, α, β) -> C

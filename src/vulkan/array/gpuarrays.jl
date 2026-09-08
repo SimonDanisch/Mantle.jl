@@ -575,10 +575,35 @@ function Base.repeat(x::NestedLavaWrapper; inner=nothing, outer=nothing)
     repeat(dense; inner, outer)
 end
 
-# Allocate broadcast output
+# Allocate broadcast output, on the device the inputs live on. The style carries
+# no device, so the first device array in the argument tree decides: a broadcast
+# over arrays on a second device used to allocate its result on the default
+# device and then record the kernel reading the inputs on the result's queue.
+firstdevicearray(x::LavaArray) = x
+firstdevicearray(bc::Base.Broadcast.Broadcasted) = firstdevicearray(bc.args)
+firstdevicearray(x::Base.Broadcast.Extruded) = firstdevicearray(x.x)
+firstdevicearray(::Tuple{}) = nothing
+function firstdevicearray(t::Tuple)
+    a = firstdevicearray(first(t))
+    return a === nothing ? firstdevicearray(Base.tail(t)) : a
+end
+firstdevicearray(x::SubArray) = firstdevicearray(parent(x))
+firstdevicearray(x::Base.ReshapedArray) = firstdevicearray(parent(x))
+firstdevicearray(x::PermutedDimsArray) = firstdevicearray(parent(x))
+firstdevicearray(x::LinearAlgebra.Transpose) = firstdevicearray(parent(x))
+firstdevicearray(x::LinearAlgebra.Adjoint) = firstdevicearray(parent(x))
+# A wrapper this walk does not know is not an error: GPUArrays' own suite
+# broadcasts over ad-hoc wrapper types, and the walk cannot enumerate every one.
+# When no device array is found the result lands on the default device — exactly
+# what this did before it grew device awareness — so a wrapper we cannot see
+# through costs correctness only across devices, which is where the caller should
+# be unwrapping anyway.
+firstdevicearray(::Any) = nothing
 function Base.similar(bc::Base.Broadcast.Broadcasted{LavaArrayStyle{N}}, ::Type{T}, dims) where {T,N}
+    a = firstdevicearray(bc)
+    bq = a === nothing ? vk_context().default_bq : queueof(a)
     # dims can be axes (OneTo) or plain integers
-    LavaArray{T}(undef, map(Base.to_dim, dims))
+    LavaArray{T}(undef, map(Base.to_dim, dims); bq)
 end
 
 # Let GPUArrays choose between linear (1D) and cartesian (multi-D) broadcast kernels.
@@ -628,6 +653,16 @@ end
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
+    # Two devices: there is no path between their memories, and a buffer from
+    # one named in a command on the other is a handle the driver takes as a
+    # fault. Staged through the host instead, synchronously; a caller that wants
+    # the transfer off the critical path keeps the data on one device.
+    if (src.buf[].ctx::VkContext) !== (dest.buf[].ctx::VkContext)
+        staging = Vector{T}(undef, n)
+        copyto!(staging, 1, src, soffs, n)
+        copyto!(dest, doffs, staging, 1, n)
+        return dest
+    end
     # Direct GPU→GPU copy via vkCmdCopyBuffer (no CPU staging roundtrip).
     src_offset = pool_offset(src.buf[]) + src.offset + (Int(soffs) - 1) * sizeof(T)
     dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)

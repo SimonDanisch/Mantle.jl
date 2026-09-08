@@ -144,7 +144,7 @@ copies of a dictionary lookup.
     memkey = (typeof(f), tt, workgroup_size)
     hit = get(ctx.caches.frozen_mem, memkey, nothing)
     hit === nothing || return hit
-    key = frozen_key(f, tt, workgroup_size)
+    key = frozen_key(f, tt, workgroup_size, ctx.features)
     path = frozen_path(key)
     if !isfile(path)
         frozen_logging() && println("frozen MISS: ", key, " || ", typestring(tt))
@@ -182,7 +182,7 @@ was being inferred a thousand times.
     frozen_prune_once!(ctx)
     dir = frozen_cache_dir()
     mkpath(dir)
-    key = frozen_key(f, tt, workgroup_size)
+    key = frozen_key(f, tt, workgroup_size, ctx.features)
     path = frozen_path(key)
     # The LLVM IR string is session-specific and large; the frozen entry is the
     # SPIR-V and what it takes to build a pipeline from it, nothing else.

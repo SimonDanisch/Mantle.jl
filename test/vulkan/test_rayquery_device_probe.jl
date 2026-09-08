@@ -2,7 +2,7 @@
 Does this driver actually expose VK_KHR_ray_query?
 
 Split out of Lava's `spirv/test_rayquery.jl` on 2026-08-27. Everything else in
-that file asks `Lava.targetfeatures()` — a record with no Vulkan in it — and so
+that file reads `ctx.features` — a record with no Vulkan in it — and so
 runs on a machine with no driver at all. This testset reads a `VkContext` field,
 which is exactly what could not come along.
 
@@ -25,5 +25,5 @@ using Test, Mantle, Lava
 
     # And what the probe found is what the emitter was told. `bind_context!` sets
     # both together; this is the join between the two files.
-    @test Lava.targetfeatures().ray_query === ctx.ray_query_available
+    @test ctx.features.ray_query === ctx.ray_query_available
 end

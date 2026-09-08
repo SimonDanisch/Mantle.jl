@@ -14,7 +14,7 @@ function draw_and_readback(pipeline, vertex_count;
         clear_color=(0f0, 0f0, 0f0, 1f0),
         color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT,
         depth=false, instances=1)
-    fb = VulkanFramebuffer(width, height; depth, color_format)
+    fb = VulkanFramebuffer(width, height; ctx = MVE.vk_context(), depth, color_format)
     target = OffscreenTarget(fb)
     ctx = MVE.vk_context()
     bq = ctx.default_bq
@@ -190,7 +190,7 @@ end
         pip = GraphicsPipeline(; vertex=depth_vert, fragment=depth_frag,
             blend=Opaque(), cull=NoCull(), depth=DepthLess())
 
-        fb = VulkanFramebuffer(8, 8; depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
+        fb = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         ctx = MVE.vk_context()
         bq = ctx.default_bq
@@ -213,7 +213,7 @@ end
 
         # The other order is the half that a per-draw depth clear could not fail:
         # near first, far second, and the far one must be rejected.
-        fb2 = VulkanFramebuffer(8, 8; depth=true,
+        fb2 = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         t2 = OffscreenTarget(fb2)
         draw!(bq, pip, t2, 3;
@@ -260,7 +260,7 @@ end
         # opaque blending.
         @test draw_and_readback(opaque, 3)[4, 4][1] ≈ 0.25f0 atol=0.01
 
-        fb = VulkanFramebuffer(8, 8; depth=false,
+        fb = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         draw!(bq, additive, target, 3; clear_color=(0f0, 0f0, 0f0, 1f0))
@@ -300,7 +300,7 @@ end
         pip = GraphicsPipeline(; vertex=zvert, fragment=zfrag,
             blend=Opaque(), cull=NoCull(), depth=DepthOff())
 
-        fb = VulkanFramebuffer(8, 8; depth=true,
+        fb = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         ctx = MVE.vk_context()
@@ -365,6 +365,7 @@ end
             blend=Opaque(), cull=NoCull(), depth=DepthOff())
         vfn, vtt, ffn, ftt = MVE.resolve_shader_pair(pipe, Tuple{}, Tuple{})
         _, compiled = MVE.ensure_compiled_with_shader!(pipe, vfn, ffn, vtt, ftt;
+            ctx = MVE.vk_context(),
             color_format=Vulkan.Format[Vulkan.FORMAT_R8G8B8A8_UNORM,
                                        Vulkan.FORMAT_R8G8B8A8_UNORM],
             depth_format=Vulkan.FORMAT_UNDEFINED)
@@ -378,7 +379,7 @@ end
         # shears the picture rather than breaking it, which is how it survived in
         # two benches; a matrix source now says so instead.
         w, h = 32, 16
-        fb = VulkanFramebuffer(w, h; depth=false,
+        fb = VulkanFramebuffer(w, h; ctx = MVE.vk_context(), depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         bq = MVE.vk_context().default_bq
         right = LavaArray(reshape([Vec4f(0, 1, 0, 1) for _ in 1:(w * h)], h, w))

@@ -372,7 +372,7 @@ end
         # Build triangle: (0,0,0), (1,0,0), (0,1,0)
         vertices = [(0f0, 0f0, 0f0), (1f0, 0f0, 0f0), (0f0, 1f0, 0f0)]
         indices = UInt32[0, 1, 2]
-        blas, tlas = Mantle.build_accel!() do ctx
+        blas, tlas = Mantle.build_accel!(MVE.vk_context().default_bq) do ctx
             b = MVE.build_blas(ctx, vertices, indices)
             t = MVE.build_tlas(ctx, [b])
             (b, t)

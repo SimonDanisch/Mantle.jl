@@ -7,7 +7,7 @@ using LinearAlgebra: I
 
 @testset "Raycore.sync!(VulkanTLAS) refit cycles" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0

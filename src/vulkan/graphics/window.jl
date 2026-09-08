@@ -52,7 +52,7 @@ mutable struct VulkanWindow <: Window
 end
 
 """
-    VulkanWindow(width, height; title="Lava", vsync=true, color_format=FORMAT_B8G8R8A8_SRGB)
+    VulkanWindow(width, height; ctx, title="Lava", vsync=true, color_format=FORMAT_B8G8R8A8_SRGB)
 
 Create a new window with Vulkan surface and swapchain.
 
@@ -64,7 +64,7 @@ gamma-encoded, or they get encoded a second time. The surface may not offer the
 requested format, in which case its first advertised one is used.
 """
 function VulkanWindow(width::Integer, height::Integer;
-                      ctx::VkContext=vk_context(),
+                      ctx::VkContext,
                       title::String="Lava", vsync::Bool=true,
                       color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
                       srgb::Bool=false)

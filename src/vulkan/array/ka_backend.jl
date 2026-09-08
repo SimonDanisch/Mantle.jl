@@ -30,7 +30,7 @@ end
 """
     LavaBackend <: KA.GPU
 
-Lava's GPU compute backend. Carries the Vulkan context and batch queues explicitly.
+Lava's GPU compute backend: a device and the two queues its work goes out on.
 
   * `dispatch_bq`: where KA kernel dispatches are recorded.
   * `upload_bq`:   where CPU→GPU transfers (upload!, download!, staging)
@@ -38,29 +38,26 @@ Lava's GPU compute backend. Carries the Vulkan context and batch queues explicit
                    (single-queue mode) or a separate async queue for true
                    upload/compute overlap.
 
-    LavaBackend()                      # default: dispatch + upload both on default_bq
-    LavaBackend(bq)                    # single queue for both
-    LavaBackend(dispatch_bq, upload_bq)  # split — enables pipelining
+    LavaBackend()                        # the process default device, both queues its primary one
+    LavaBackend(ctx)                     # a specific device
+    LavaBackend(bq)                      # single queue for both
+    LavaBackend(dispatch_bq, upload_bq)  # split: enables pipelining
 
-`LavaBackend()` with no arguments resolves `dispatch_bq` / `upload_bq`
-lazily via `vk_context().default_bq` at every property access.  Pinning
-would break after `reset_device!()`: a `const BACKEND = LavaBackend()`
-created at module-load would keep a stale `VulkanBatchQueue` tied to the old
-`VkDevice`, and every subsequent buffer created via that backend would end
-up allocated on the dead device — later triggering
-`VUID-vkCmdCopyBuffer-commonparent` and a page-aligned GPUVM fault.
-Explicit queues passed to `LavaBackend(bq)` / `LavaBackend(d, u)` are
-pinned on purpose (the caller wants those exact queues, e.g. an async
-upload queue).
+Every spelling PINS its queues when it is constructed, `LavaBackend()` included:
+it reads the default device once, at the call, and never again. It used to store
+`nothing` and resolve the default at every property access, so that a
+`const BACKEND = LavaBackend()` survived `reset_device!`; the price was that
+"which device" was answered by a global on every launch, and a backend handed to
+code that also held a second device dispatched on whichever one was current. A
+backend built before a `reset_device!` is dead after it, like every array it
+allocated, and is rebuilt the same way they are.
 """
 struct LavaBackend <: KA.GPU
-    # nothing = "use vk_context().default_bq at each access" (survives resets)
-    # non-nothing = caller pinned this specific queue
-    dispatch_bq::Union{VulkanBatchQueue, Nothing}
-    upload_bq::Union{VulkanBatchQueue, Nothing}
+    dispatch_bq::VulkanBatchQueue{VkContext}
+    upload_bq::VulkanBatchQueue{VkContext}
 end
 
-LavaBackend() = LavaBackend(nothing, nothing)
+LavaBackend() = LavaBackend(vk_context())
 LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
 LavaBackend(bq::VulkanBatchQueue) = LavaBackend(bq, bq)
 
@@ -98,9 +95,6 @@ reading the first half of `VulkanBatchQueue`'s field list, where `ctx::Any` sits
 sixty-odd lines down. A second copy of a fact the queue already holds can only
 ever disagree with it, so this derives instead.
 
-`b.dispatch_bq` resolves through `vk_context()` when the backend is unpinned, so
-an unpinned backend answers "whichever device is current" — which is the correct
-answer for it, and the reason the queue-only constructors need nothing extra.
 """
 vk_context(b::LavaBackend) = (b.dispatch_bq.ctx)::VkContext
 vk_context(a::LavaArray) = (a.buf[].ctx)::VkContext
@@ -130,33 +124,14 @@ vk_context(a::Base.PermutedDimsArray) = vk_context(parent(a))
 vk_context(a::LinearAlgebra.Transpose) = vk_context(parent(a))
 vk_context(a::LinearAlgebra.Adjoint) = vk_context(parent(a))
 
-# Property access resolves a `nothing`-pinned queue through the live
-# `vk_context()` so a module-level `const BACKEND = LavaBackend()` keeps
-# working across `reset_device!()`. `:bq` stays a back-compat alias for
-# `:dispatch_bq`.
-function Base.getproperty(b::LavaBackend, s::Symbol)
-    if s === :dispatch_bq
-        f = getfield(b, :dispatch_bq)
-        return f === nothing ? vk_context().default_bq : f
-    elseif s === :upload_bq
-        f = getfield(b, :upload_bq)
-        return f === nothing ? vk_context().default_bq : f
-    elseif s === :bq
-        return getproperty(b, :dispatch_bq)
-    end
-    return getfield(b, s)
-end
-
-# Two backends are the same backend when they drive the same queues, however
-# they were spelled: `LavaBackend()` resolves to the device's default queue at
-# each access, `LavaBackend(ctx)` and `KA.get_backend(array)` pin that same
-# queue, and the default `==` compared the unresolved fields — `nothing` against
-# a queue — so `KA.get_backend(a) == Mantle.defaultbackend()` was false for an
-# array the default backend had just allocated (RayMakie's meshscatter tests).
-Base.:(==)(a::LavaBackend, b::LavaBackend) =
-    a.dispatch_bq === b.dispatch_bq && a.upload_bq === b.upload_bq
-Base.hash(b::LavaBackend, h::UInt) =
-    hash(objectid(b.dispatch_bq), hash(objectid(b.upload_bq), hash(:LavaBackend, h)))
+# Two backends are the same backend when they drive the same DEVICE. Raycore
+# compares a TLAS's backend against the one a kernel is launched on to refuse a
+# cross-backend adapt, and RayMakie asks whether an array's backend is the
+# screen's; both are questions about the device, and a backend on a second
+# queue of the same device answers them the same way as the primary one does.
+# Which queue a backend uses is a scheduling choice, not an identity.
+Base.:(==)(a::LavaBackend, b::LavaBackend) = vk_context(a) === vk_context(b)
+Base.hash(b::LavaBackend, h::UInt) = hash(objectid(vk_context(b)), hash(:LavaBackend, h))
 
 # ── Backend queries ──
 
@@ -194,10 +169,20 @@ function KA.copyto!(::LavaBackend, A, B)
     return
 end
 
-# Adapt: convert Array ↔ LavaArray
-# Use Adapt.adapt(LavaArray, a) for recursive element adaptation (like AMDGPU does).
-# This handles non-isbits element types by recursively adapting struct fields.
-Adapt.adapt_storage(::LavaBackend, a::Array) = Adapt.adapt(LavaArray, a)
+# Adapt: convert Array ↔ LavaArray, ON THIS BACKEND'S DEVICE. `Adapt.adapt(backend, x)`
+# is how RayMakie uploads a scene and Hikari its adapted accel; it used to go
+# through the type-based `Adapt.adapt(LavaArray, a)`, which allocates on the
+# process default device whatever backend was asked.
+Adapt.adapt_storage(b::LavaBackend, a::Array) = LavaArray(a; bq = b.dispatch_bq)
+
+"""Allocate a LavaArray with INDEX_BUFFER_BIT for use as a Vulkan index buffer,
+on `b`'s device."""
+function alloc_index_buffer(b::LavaBackend, data::AbstractVector{UInt32})
+    arr = LavaArray{UInt32,1}(undef, (length(data),); bq = b.dispatch_bq,
+        extra_usage=UInt32(VK.BUFFER_USAGE_INDEX_BUFFER_BIT))
+    upload!(arr, data)
+    return arr
+end
 Adapt.adapt_storage(::LavaBackend, a::LavaArray) = a
 Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 
@@ -213,7 +198,9 @@ Adapt.adapt_storage(::KA.ConstAdaptor, a::LavaDeviceArray) = a
 # constructor with its throwing string interpolation path on GPU).
 Adapt.adapt_structure(::KA.ConstAdaptor, A::Base.ReshapedArray) = A
 
-# Type-based adapt_storage for Adapt.adapt(LavaArray, x) dispatch
+# Type-based adapt_storage for Adapt.adapt(LavaArray, x) dispatch. `adapt(LavaArray, x)`
+# names a TYPE, not a device, so this is the one device-less allocation there can
+# be — the process-default analogue of `defaultbackend()`. ambient-allocation-ok
 Adapt.adapt_storage(::Type{<:LavaArray}, a::Array) = LavaArray(a)
 Adapt.adapt_storage(::Type{<:LavaArray}, a::LavaArray) = a
 
@@ -262,7 +249,7 @@ wrong-results bug for any pair of kernel instantiations that differ in a literal
 See [`DeviceCaps`](@ref), which is where it lives now — the limit differs between
 devices, so a process-wide `Ref` answered one device's question for all of them.
 """
-workgroup_limit(ctx::VkContext = vk_context()) = caps(ctx).workgrouplimit
+workgroup_limit(ctx::VkContext) = caps(ctx).workgrouplimit
 
 "The extents behind a KA size parameter, or `nothing` when they are dynamic."
 @inline statictuple(::Type{<:KA.NDIteration.StaticSize{S}}) where {S} = S
@@ -558,7 +545,7 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
             return relaunch_dynamic(obj, args, ndrange)
         end
     end
-    bq = obj.backend.bq
+    bq = obj.backend.dispatch_bq
 
     # Auto-discover HWTLAS for ray-query kernels — extract BEFORE Adapt strips
     # hwtlas (kernel form has hwtlas=nothing).
@@ -631,10 +618,10 @@ holder, e.g. `struct MyOp{KK}; kern::KK; end`.
 struct LavaKernel{K,P,Q}
     inner::K
     plan::P
-    # The queue, RESOLVED. `LavaBackend` stores `dispatch_bq::Union{VulkanBatchQueue,
-    # Nothing}` and has no `bq` field, so `backend.bq` goes through an accessor
-    # that does not infer concretely — and leaving it abstract made this whole
-    # idea BACKFIRE: the call below stayed dynamic, and a dynamic call has to box
+    # The queue. `LavaBackend` now stores a concrete `dispatch_bq::VulkanBatchQueue`
+    # (it pins its device at construction), so `backend.dispatch_bq` is a plain
+    # field load — no accessor, no abstract union. Typing the plan was worthless
+    # while this stayed dynamic: a dynamic call has to box
     # its arguments, so a concrete `IterPlan{Ctx}` (a large isbits struct) got
     # copied into a fresh box on every launch. Measured 144 B/dispatch, i.e.
     # THREE TIMES the abstract-plan barrier it was meant to beat. Typing the plan
@@ -643,7 +630,7 @@ struct LavaKernel{K,P,Q}
 end
 
 function compiled(obj::KA.Kernel{LavaBackend}, ndrange; workgroupsize = nothing)
-    bq = obj.backend.bq
+    bq = obj.backend.dispatch_bq
     plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, bq.ctx::VkContext)
     # `P` and `Q` come from the runtime types here, once, off the hot path.
     return LavaKernel(obj, plan, bq)

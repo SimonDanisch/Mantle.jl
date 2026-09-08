@@ -38,7 +38,7 @@ end
 
 # ── Sampler Construction ──
 
-function VulkanSampler(; ctx::VkContext=vk_context(), filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
+function VulkanSampler(; ctx::VkContext, filter::Symbol=:linear, wrap::Symbol=:repeat, anisotropy::Real=0.0f0)
     dev = ctx.device
 
     vk_filter = filter == :nearest ? VK.FILTER_NEAREST :
@@ -70,7 +70,7 @@ end
 # ── Texture Construction ──
 
 """Create a 2D texture from a matrix of data."""
-function VulkanTexture2D(data::Matrix{T}; ctx::VkContext=vk_context(), filter=:linear, wrap=:repeat) where T
+function VulkanTexture2D(data::Matrix{T}; ctx::VkContext, filter=:linear, wrap=:repeat) where T
     dev = ctx.device
 
     h, w = size(data)

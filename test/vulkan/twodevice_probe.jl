@@ -14,7 +14,7 @@ real GPU and lavapipe from one instance, so every machine here has a two-device
 pair with no second card:
 
     gpu = vk_context()
-    cpu = VkContext(select = devs -> only(filter(islavapipe, devs)))
+    cpu = VkContext(select = "llvmpipe")
 
 ## What it is for
 
@@ -131,7 +131,7 @@ end
 
 function probe()
     gpu = MVE.vk_context()
-    cpu = MVE.VkContext(select = devs -> only(filter(MVE.islavapipe, devs)))
+    cpu = MVE.VkContext(select = "llvmpipe")
 
     println("gpu id=$(gpu.id)  $(gpu.device_name)")
     println("cpu id=$(cpu.id)  $(cpu.device_name)")

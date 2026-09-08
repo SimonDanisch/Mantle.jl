@@ -296,7 +296,7 @@ else
         # A Lava window, not a Mantle one: this test drives acquire/blit/present
         # by hand because the chain ends in a compute pass and Mantle has no blit.
         # Anything that renders through a plan uses `M.Window`.
-        win = MVE.VulkanWindow(W, H; title = "chain", vsync = false)
+        win = MVE.VulkanWindow(W, H; ctx = MVE.vk_context(), title = "chain", vsync = false)
         s = Base.invokelatest(build_chain, dev, win, 20_000)
 
         peak = M.peakbytes(s.plan)
@@ -1219,7 +1219,7 @@ else
         #
         # The assertion is on the state rather than on not hanging, so a
         # regression fails on the first iteration instead of stopping the suite.
-        win = MVE.VulkanWindow(256, 256; title = "readback pairing", vsync = false)
+        win = MVE.VulkanWindow(256, 256; ctx = MVE.vk_context(), title = "readback pairing", vsync = false)
         for _ in 1:6
             readback_window(win)
             @test !win.acquired
@@ -1240,7 +1240,7 @@ else
         # Found by measuring a running demo from the REPL, which wedged the whole
         # session. A regression here hangs the suite rather than failing it —
         # that is exactly what the check is for.
-        win = MVE.VulkanWindow(256, 256; title = "one frame at a time", vsync = false)
+        win = MVE.VulkanWindow(256, 256; ctx = MVE.vk_context(), title = "one frame at a time", vsync = false)
         acquire_next_image!(win)
         @test win.acquired
         @test win.acquirer === current_task()
@@ -1275,7 +1275,7 @@ else
         # The surface needs destroying by name rather than by `finalize`: Lava
         # wraps it around the pointer GLFW returns without going through
         # Vulkan.jl's `init_handle!`, so it has no destructor and no finalizer.
-        win = MVE.VulkanWindow(64, 64; title = "close test", vsync = false)
+        win = MVE.VulkanWindow(64, 64; ctx = MVE.vk_context(), title = "close test", vsync = false)
         @test !isempty(win.views)
         @test win.swapchain !== nothing
         @test win.surface.destructor isa UndefInitializer   # why finalize cannot work

@@ -67,23 +67,40 @@ const DEVICES = IdDict{Any,LavaDevice}()
 # selector meant something while Lava was the backend package; the backend is
 # this package now, and the marker is what names an API — the same spelling
 # `Device(HostAPI())` uses.
-Device(::VulkanAPI) = get!(DEVICES, vk_context()) do
-    ctx = vk_context()
-    LavaDevice(ctx, ctx.default_bq)
+function Device(::VulkanAPI; select = nothing, debug::Union{Nothing,DebugConfig} = nothing)
+    # No selector and no debug configuration: the process default, cached per
+    # context. Anything else is a device of the caller's own, built now and
+    # never installed; `defaultdevice!` is how one becomes the default.
+    select === nothing && debug === nothing && return lavadevice(vk_context())
+    return lavadevice(VkContext(; select, debug = something(debug, DebugConfig())))
 end
 
-"""
-    Device(LavaBackend())
+"""Make `d` the process default: what `Device(VulkanAPI())`, `LavaBackend()`
+and `defaultbackend()` answer from now on. The previous default stays alive;
+its arrays and backends are still its own."""
+defaultdevice!(d::LavaDevice) = (bind_context!(d.ctx); d)
 
-The Mantle device for a KA backend.
+"""
+    Device(backend::LavaBackend)
+
+The Mantle device for a KA backend: the one on the backend's OWN context.
 
 The missing link for a KA workload that wants the pool: `DNNKernels` holds a
 `LavaBackend`, not a module, and allocating through `KA.allocate` puts its slab
 somewhere Mantle cannot see. This maps the backend it does have onto the cached
-device — same VkContext, same pool, so a model's scratch and an editor's
-transients land in one allocator.
+device of its context, same pool, so a model's scratch and an editor's
+transients land in one allocator. It used to ignore the backend and answer the
+process default, which handed Hikari on a second device the first device's pool.
 """
-Device(::LavaBackend) = Device(VulkanAPI())
+Device(b::LavaBackend) = lavadevice(vk_context(b))
+
+# The queue and build verbs a caller holding a device or a backend spells
+# portably. The context methods are the implementation; these name the device
+# the caller HAS instead of the process default.
+allocate_batch_queue!(d::LavaDevice) = allocate_batch_queue!(d.ctx)
+allocate_batch_queue!(b::LavaBackend) = allocate_batch_queue!(vk_context(b))
+build_accel!(f, d::LavaDevice) = build_accel!(f, d.bq)
+build_accel!(f, b::LavaBackend) = build_accel!(f, b.dispatch_bq)
 
 # ↑ moved to src/graph/build.jl
 
@@ -112,8 +129,10 @@ function capacity(dev::LavaDevice)
     total
 end
 
-"""The KernelAbstractions backend, for kernels the graph does not own."""
-backend(::LavaDevice) = LavaBackend()
+"""The KernelAbstractions backend, for kernels the graph does not own. Pinned
+to this device's queue: a graph on a second device hands out a backend that
+dispatches there, not on whichever device is the default."""
+backend(d::LavaDevice) = LavaBackend(d.bq, d.bq)
 
 """
 What this device can do.
@@ -141,8 +160,10 @@ struct LavaWindow <: Window
     win::VulkanWindow
 end
 
+# The no-backend spelling opens on the process default device; it is the
+# window-shaped member of the same convenience family as `LavaBackend()`.
 Window(width::Integer, height::Integer; title::AbstractString = "", vsync::Bool = false) =
-    LavaWindow(VulkanWindow(width, height; title = String(title), vsync))
+    LavaWindow(VulkanWindow(width, height; ctx = vk_context(), title = String(title), vsync))
 
 Base.isopen(w::LavaWindow) = isopen(w.win)
 Base.close(w::LavaWindow) = close(w.win)
@@ -439,8 +460,8 @@ function makeimage(dev::LavaDevice, ::Type{T}, width::Int, height::Int,
                                    typemax(Int), 0, nothing, nothing, source)
 end
 
-function remakeimage!(t::VulkanTransientImage)
-    ctx = vk_context()
+function remakeimage!(dev::LavaDevice, t::VulkanTransientImage)
+    ctx = dev.ctx
     t.image = image_2d(ctx, t.width, t.height, t.format, t.usage)
     t.req = image_requirements(ctx, t.image)
     return t
@@ -914,14 +935,16 @@ compatible(::LavaDevice, blk, req) = blk == req
 
 # ↑ moved to src/graph/build.jl
 
-function materialize!(t::VulkanTransientImage{T}, slab, offset) where {T}
+function materialize!(dev::LavaDevice, t::VulkanTransientImage{T}, slab, offset) where {T}
     # A VkImage binds memory exactly once, so re-materialising — the arena moved
     # out from under this image — means a NEW image, never a rebind. The old
     # handle is what a dropped recording named; the RAII finalizer destroys it.
-    t.memory === nothing || remakeimage!(t)
+    t.memory === nothing || remakeimage!(dev, t)
     t.memory = slab                       # the image outlives the call; the slab must too
-    bind_image!(vk_context(), t.image, slab, offset)
-    t.view = image_view(vk_context(), t.image, t.format, aspect(T))
+    # `dev.ctx`, never the process default: the image was made on the graph's
+    # device, and binding it through another device's handle is undefined.
+    bind_image!(dev.ctx, t.image, slab, offset)
+    t.view = image_view(dev.ctx, t.image, t.format, aspect(T))
 end
 
 """`VK_KHR_maintenance3`'s `maxMemoryAllocationSize`. See `maxalloc`."""
@@ -968,6 +991,7 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # rendering the pipeline has to declare the same thing: a pipeline built for
     # one and drawn into a pass without it is invalid, and the reverse is too.
     shader, compiled = ensure_compiled_with_shader!(d.shader, vfn, ffn, vtt, ftt;
+                                                    ctx = c.graph.dev.ctx,
                                                     color_format = VK.Format[target_format(t) for t in p.targets],
                                                     depth_format = p.depth === nothing ?
                                                         VK.FORMAT_UNDEFINED :
@@ -976,7 +1000,7 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # `ensure_compiled_with_shader!` hands back the vertex shader because that
     # is the usual answer; a fullscreen pass whose vertex stage takes nothing
     # and whose fragment stage reads a g-buffer is the other one.
-    isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment))
+    isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment; ctx = c.graph.dev.ctx))
     packed = isempty(d.frag_args) ? d.args : d.frag_args
     info = shader.push_info
     nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes)
@@ -1503,16 +1527,19 @@ adaptor(::VulkanBatchQueue) = LavaAdaptor(nothing)
 # The portable constructors. A caller writes `Framebuffer(backend, w, h)` and
 # `Window(backend, w, h)` and never names a Vulkan type; these are where that
 # resolves on this backend.
-Framebuffer(::LavaBackend, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; kw...)
-Window(::LavaBackend, w::Integer, h::Integer; kw...) = VulkanWindow(w, h; kw...)
-Texture2D(::LavaBackend, data::AbstractArray; kw...) = VulkanTexture2D(data; kw...)
-Sampler(::LavaBackend; kw...) = VulkanSampler(; kw...)
+# On the backend's device: these used to drop the backend and fall through to a
+# `ctx = vk_context()` default, so a framebuffer asked of a second device's
+# backend was created on the first.
+Framebuffer(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; ctx = vk_context(b), kw...)
+Window(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanWindow(w, h; ctx = vk_context(b), kw...)
+Texture2D(b::LavaBackend, data::AbstractArray; kw...) = VulkanTexture2D(data; ctx = vk_context(b), kw...)
+Sampler(b::LavaBackend; kw...) = VulkanSampler(; ctx = vk_context(b), kw...)
 
 # `devicearray` on this backend is a `LavaArray`: pool-managed and capacity-aware
 # on `resize!`, which the generic fallback in `memory/array.jl` cannot be. A
 # caller that just wants "this data, on that device" gets the better one for
 # free by asking Mantle instead of naming the array type.
-devicearray(::LavaBackend, data::AbstractArray) = LavaArray(data)
+devicearray(b::LavaBackend, data::AbstractArray) = LavaArray(data; bq = b.dispatch_bq)
 
 
 # The two plan pieces that ARE this backend's: a timestamp query pool, and the

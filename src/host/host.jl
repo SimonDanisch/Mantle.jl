@@ -196,7 +196,7 @@ shared — see [`wrapbytes`](@ref) for why it is a wrapper and not a reinterpret
 The view goes in `block`, which is the field every backend keeps its placed
 storage in.
 """
-function Mantle.materialize!(t::Mantle.TransientBuffer{T}, slab::Vector{UInt8},
+function Mantle.materialize!(::HostDevice, t::Mantle.TransientBuffer{T}, slab::Vector{UInt8},
                              offset::Int) where {T}
     t.block = wrapbytes(T, slab, offset, (t.n,))
     t.offset = offset

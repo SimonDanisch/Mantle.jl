@@ -71,7 +71,7 @@ Create an offscreen framebuffer with color and optional depth attachments.
 # the only one a caller outside this backend can write. `vkformat` is the same
 # lowering the graph uses for transient images, so the two cannot disagree.
 function VulkanFramebuffer(width::Integer, height::Integer;
-                          ctx::VkContext=vk_context(),
+                          ctx::VkContext,
                           depth::Bool=true,
                           color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
                           srgb::Bool=false)

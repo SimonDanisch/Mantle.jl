@@ -60,7 +60,7 @@ import Mantle: Attribute, Device, Graph, Plan, Surface, Transient,
 # rather than being a separate `MantleVulkanExt.flush!` nothing can reach.
 import Mantle: allocate_batch_queue!, release_batch_queue!, waitfor!,
     flush!, waitidle, supports_graphics, use_bindings!, devicearray, supports_rt_pipeline,
-    supports_batch_queue, submit!, batchqueue,
+    supports_batch_queue, submit!, batchqueue, devices, defaultdevice!,
     # The submission record — `graph/submission.jl`. One list of what the device
     # has been given, replacing the five separate records this backend kept.
     Outstanding, submitted!, newest, sweep!, idle, outstanding, recycle!
@@ -190,6 +190,7 @@ using Mantle: Analysis, Compilation, DiscardOp, KeepOp, alias, allocate,
 # `GPURef` is the same collision risk and is not here, because this backend
 # names it only in comments. Add it the day that changes.
 using Mantle: Buffer, DrawIndirectCommand, Backend
+using Mantle: DeviceInfo, selectdevice
 
 # The device vocabulary. `caps` in particular is one function with a `Device`
 # method in Mantle and a `KI.Backend` method here.

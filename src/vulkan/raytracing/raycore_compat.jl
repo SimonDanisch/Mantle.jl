@@ -45,7 +45,7 @@ mutable struct HardwareAccel{TriVec <: AbstractVector}
 end
 
 """
-    HardwareAccel(tlas; bq=<derived from tlas storage>) -> HardwareAccel
+    HardwareAccel(tlas; ctx, bq = ctx.default_bq) -> HardwareAccel
 
 Build a HardwareAccel from a Raycore-compatible HWTLAS.
 The HWTLAS must have `.blas_array` and `.instances` fields.
@@ -55,7 +55,7 @@ object is used to find the ctx via the HW build path), so ray tracing runs
 on the same device the AS was allocated against.
 """
 function HardwareAccel(tlas;
-                       ctx::VkContext=vk_context(),
+                       ctx::VkContext,
                        bq::VulkanBatchQueue=ctx.default_bq)
     hw_tlas, tri_data, offsets, per_inst_offsets = build_hw_accel_from_tlas(tlas; ctx)
     HardwareAccel(hw_tlas, tri_data, offsets, per_inst_offsets; bq)

@@ -6,7 +6,7 @@ using LinearAlgebra: I
 
 @testset "VulkanTLAS sync! with instance batch" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
     radius = 1f0
@@ -37,7 +37,7 @@ end
     # P3-fu4 lifted the single-batch guard.  Multiple batches concatenate into
     # a combined instance buffer and the HWTLAS spans them all.
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n_a = 4; n_b = 6
     instance_buf1 = MVE.LavaArray{VulkanInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)

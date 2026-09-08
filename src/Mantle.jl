@@ -256,6 +256,7 @@ export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_ker
 export pixelbytes, vkformat
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
+export DeviceInfo, devices, defaultdevice!
 export DeviceCaps, caps
 export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
 export CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope

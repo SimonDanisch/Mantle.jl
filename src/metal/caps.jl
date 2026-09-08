@@ -99,14 +99,7 @@ function caps(d::MetalDevice)
     return d.caps
 end
 
-caps(b::Metal.MetalBackend) = caps(_device_for(b))
-
-# One device per process for now, which is what `Metal.device()` gives. A second
-# `MTLDevice` means a second pool and a second timeline, and the Vulkan backend
-# already learned that a capability query is exactly as device-specific as the
-# handle caches are — so this indirection is here to be replaced, not kept.
-const _DEVICE = Ref{Union{Nothing,MetalDevice}}(nothing)
-function _device_for(::Metal.MetalBackend)
-    _DEVICE[] === nothing && (_DEVICE[] = MetalDevice())
-    return _DEVICE[]
-end
+# A `MetalBackend` carries no device (it is a singleton), so the backend's device
+# is the process default. This used to build a SECOND `MetalDevice` of its own,
+# with a second pool over the same `MTLDevice`.
+caps(b::Metal.MetalBackend) = caps(Device(b))

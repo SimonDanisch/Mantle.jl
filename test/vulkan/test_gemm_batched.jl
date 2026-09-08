@@ -43,8 +43,8 @@ function rungemm(M, N, K, nb)
 end
 
 @testset "batched coopmat GEMM" begin
-    if !MVE.coopmat_gemm_available()
-        @info "skipping: the coopmat GEMM needs a $(MVE.GEMM_SUBGROUP)-lane subgroup and needs the device to report a $(MVE.GEMM_TILE)^3 Float16 shape; this device has subgroup=$(MVE.device_subgroup_size()), shape=$(MVE.coopmat_shape(MVE.vk_context(), Float16, MVE.GEMM_TILE, MVE.GEMM_TILE, MVE.GEMM_TILE))"
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
+        @info "skipping: the coopmat GEMM needs a $(MVE.GEMM_SUBGROUP)-lane subgroup and needs the device to report a $(MVE.GEMM_TILE)^3 Float16 shape; this device has subgroup=$(MVE.device_subgroup_size(MVE.vk_context())), shape=$(MVE.coopmat_shape(MVE.vk_context(), Float16, MVE.GEMM_TILE, MVE.GEMM_TILE, MVE.GEMM_TILE))"
     else
         @testset "nbatch = 1 is unchanged" begin
             for (M, N, K) in ((64, 64, 32), (128, 256, 64), (256, 64, 80))

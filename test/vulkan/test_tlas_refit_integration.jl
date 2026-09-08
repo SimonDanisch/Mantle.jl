@@ -8,8 +8,8 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "HWTLAS refit cycle -- kernel-written instances, then refit" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0
@@ -29,7 +29,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            ndrange = n)
     MVE.vk_flush!(bq)
 
-    tlas = build_accel!() do ctx
+    tlas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_tlas(ctx, instances_gpu, 2 * n; allow_update=true)
     end
 
@@ -45,7 +45,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            ndrange = n)
     MVE.vk_flush!(bq)
 
-    build_accel!() do ctx
+    build_accel!(MVE.vk_context().default_bq) do ctx
         refit_tlas!(ctx, tlas, instances_gpu, 2 * n)
     end
 

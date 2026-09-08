@@ -7,7 +7,7 @@ using LinearAlgebra: I
 
 @testset "push!(hwtlas, blas, instance_buf) -- registration" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 100
     instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)

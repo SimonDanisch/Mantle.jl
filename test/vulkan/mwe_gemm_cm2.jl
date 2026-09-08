@@ -49,7 +49,7 @@ function run(M, N, K; tol = 3e-2)
 end
 
 ctx = MVE.vk_context()
-if isempty(Lava.caps().wggran)
+if isempty(MVE.caps(MVE.vk_context()).wggran)
     @info "no workgroup-scope cooperative matrices here — nothing to run"
 else
     ok = run(128, 192, 96)          # every extent divides its tile

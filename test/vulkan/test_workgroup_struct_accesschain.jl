@@ -71,7 +71,7 @@ end
     in_arr = MVE.LavaArray([bv for _ in 1:8])
     out_arr = MVE.LavaArray([bv for _ in 1:8])
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # Compile-only path is enough — emit + spirv-val happen inside.
     @test_nowarn _scatter_gather_kernel!(backend, 8)(in_arr, out_arr; ndrange=8)

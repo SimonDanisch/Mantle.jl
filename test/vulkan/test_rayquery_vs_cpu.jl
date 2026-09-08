@@ -26,7 +26,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # ----------------------------------------------------------------
     # Build a single-triangle HWTLAS. The triangle is at z=5 so rays fired

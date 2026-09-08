@@ -14,8 +14,8 @@ device-local `LavaArray{UInt8,2}` (cropped to the display size), never touching 
 memory. Feed these straight into Lava kernels / the motion tracker. Requires a device
 created with video decode support (`vk_context().video_decode_available`).
 """
-function decode_h264_gpu(annexb::Vector{UInt8}; kw...)
-    w, h, ys, _ = VideoDecode.decode_h264(vk_context(), annexb; kw...)
+function decode_h264_gpu(annexb::Vector{UInt8}; ctx::VkContext = vk_context(), kw...)
+    w, h, ys, _ = VideoDecode.decode_h264(ctx, annexb; kw...)
     return (w, h, ys)
 end
 
@@ -27,8 +27,8 @@ Like [`decode_h264_gpu`] but also returns the chroma plane: `ys` are the luma
 `LavaArray{UInt8,2}` (width×(height÷2)) for each frame — the two planes of NV12,
 GPU-resident. Convert to RGB on-GPU with GPUFiltering's `nv12torgb!`.
 """
-function decode_h264_nv12(annexb::Vector{UInt8}; kw...)
-    w, h, ys, uvs = VideoDecode.decode_h264(vk_context(), annexb; chroma=true, kw...)
+function decode_h264_nv12(annexb::Vector{UInt8}; ctx::VkContext = vk_context(), kw...)
+    w, h, ys, uvs = VideoDecode.decode_h264(ctx, annexb; chroma=true, kw...)
     return (w, h, ys, uvs)
 end
 

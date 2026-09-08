@@ -80,7 +80,7 @@ end
 @testset "AABB BLAS - build_blas_aabb smoke" begin
     aabbs = [AABB(Point3f(0, 0, 0), Point3f(1, 1, 1)),
              AABB(Point3f(2, 2, 2), Point3f(3, 3, 3))]
-    blas = Mantle.build_accel!() do ctx
+    blas = Mantle.build_accel!(MVE.vk_context().default_bq) do ctx
         MVE.build_blas_aabb(ctx, aabbs)
     end
     @test blas isa MVE.LavaBLAS
@@ -92,7 +92,7 @@ end
     saved = ctx.ray_query_available
     ctx.ray_query_available = false
     try
-        @test_throws ErrorException Mantle.build_accel!() do bc
+        @test_throws ErrorException Mantle.build_accel!(MVE.vk_context().default_bq) do bc
             MVE.build_blas_aabb(bc, [AABB(Point3f(0, 0, 0), Point3f(1, 1, 1))])
         end
     finally

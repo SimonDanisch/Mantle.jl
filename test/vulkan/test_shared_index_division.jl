@@ -206,7 +206,7 @@ end
 
 @testset "shared stores through a divided index" begin
     backend = LavaBackend()
-    if !MVE.coopmat_gemm_available()
+    if !MVE.coopmat_gemm_available(MVE.vk_context())
         @info "skipping: no cooperative-matrix support on this device"
     else
         total = SID_BM * SID_BK
@@ -236,7 +236,7 @@ end
 # — four 8x8x8 shapes — which is the fact this file previously got wrong.
 @testset "the same pattern on a second cooperative-matrix consumer" begin
     lp = try
-        MVE.VkContext(select = devs -> only(filter(MVE.islavapipe, devs)))
+        MVE.VkContext(select = "llvmpipe")
     catch e
         @info "no lavapipe device; skipping the second-consumer check" exception=e
         nothing

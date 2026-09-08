@@ -64,7 +64,7 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_workgroup_id_x, lava_workgroup_id_y, lava_workgroup_id_z,
             run_spirv_opt, set_position!, spirv_content_hash, subgroup_add,
             subgroup_elect, subgroup_shuffle, subgroup_size,
-            targetfeatures, targetfeatures!, tensor_layout, tensor_load,
+            tensor_layout, tensor_load,
             tensor_setdim, tensor_setstride, tensor_slice, tensor_store,
             typestring, unroll_loops!, validate_spirv, vertex_index,
             wg_compute_type_alignment, wg_compute_type_size

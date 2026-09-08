@@ -49,8 +49,7 @@ using Test, Mantle, Lava
     # Skipped rather than failed where the machine has no software rasterizer:
     # the assertion needs a second driver, and one is all some boxes offer.
     # Loud, because a quiet skip is how this went unnoticed for months.
-    have_lvp = any(MVE.islavapipe,
-                   MVE.VK.unwrap(MVE.VK.enumerate_physical_devices(MVE.vk_context().instance)))
+    have_lvp = any(i -> i.kind == :cpu, Mantle.devices(Mantle.VulkanAPI()))
     if !have_lvp
         @info "no lavapipe device here; the two-device shutdown check needs a second driver"
     else
@@ -58,7 +57,7 @@ using Test, Mantle, Lava
         using Mantle, Lava, Test
         MVE = Base.get_extension(Mantle, :MantleVulkanExt)
         gpu = MVE.vk_context()
-        cpu = MVE.VkContext(select = devs -> only(filter(MVE.islavapipe, devs)))
+        cpu = MVE.VkContext(select = "llvmpipe")
         # Distinct devices, or the test is one device asserted twice.
         gpu === cpu && error("expected two contexts, got one")
         MVE.device_lost(gpu) && error("gpu context was already marked lost")

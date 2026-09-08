@@ -115,6 +115,8 @@ Download the decoded frame's luma (Y) plane to the host as a `width × height`
 `Matrix{UInt8}` (grayscale = the NV12 Y plane).
 """
 function Base.Array(img::VideoImage)
+    # Video decode is single-context (one hardware video queue), and `VideoImage`
+    # carries no device, so this download uses the process default. ambient-allocation-ok
     dst = LavaArray{UInt8,2}(undef, (img.width, img.height);
                              extra_usage = UInt32(VK.BUFFER_USAGE_TRANSFER_DST_BIT))
     copyto!(dst, img)
@@ -894,9 +896,9 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
         # This frame's luma lands in its own device-local LavaArray (cropped to
         # the display size DW×DH), copied out through the high-level VideoImage
         # `record_luma_copy!` — a real image→buffer transfer, no raw copy FFI.
-        dst=LavaArray{UInt8,2}(undef,(DW,DH); extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
+        dst=LavaArray{UInt8,2}(undef,(DW,DH); bq=dec.w.ctx.default_bq, extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
         dstbuf=dst.buf[]
-        duv = chroma ? LavaArray{UInt8,2}(undef,(DW,DH÷2); extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
+        duv = chroma ? LavaArray{UInt8,2}(undef,(DW,DH÷2); bq=dec.w.ctx.default_bq, extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
         GC.@preserve PIN dst duv cbh outvimg dstvimg mb refpr refri refds decref begref outpr dstpr outri outds setup stdpic soff h264pi decinfo beginfo ctl endinfo imgs begin
             for (slot,_,_) in dpb; lay=imgs[slot][1].layout; if lay[]!=DPBLAYOUT; emit(CB,barrier(imgs[slot][1].image.vks,lay[],DPBLAYOUT)); lay[]=DPBLAYOUT; end; end
             emit(CB,barrier(outimg,outlay[],DPBLAYOUT)); outlay[]=DPBLAYOUT

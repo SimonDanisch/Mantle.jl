@@ -50,9 +50,11 @@ narrows.
 function makeimage end
 
 """
-    remakeimage!(t)
+    remakeimage!(device, t)
 
 Replace `t`'s driver image with one of `t`'s current size, and update `t.req`.
+The device is the graph's, passed rather than looked up: an image belongs to the
+device that made it, and the process default is not necessarily that device.
 
 Called by [`refit!`](@ref) after a tracking target's source has changed size.
 The format and usage are `t`'s own and are not recomputed: they came from the
@@ -574,6 +576,7 @@ const BACKEND_VOCABULARY = (
     :supports, :supports_graphics, :supports_batch_queue, :supports_rt_pipeline,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
+    :devices, :defaultdevice!,
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
     :waitfor, :waitfor!, :passed, :fence, :reset_device!,
     # sync lowering

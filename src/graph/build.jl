@@ -313,7 +313,7 @@ backend asked, since the constant only exists when the Vulkan extension loads.
 """
 function imageusage end
 
-refit!(::TransientResource) = false
+refit!(::Device, ::TransientResource) = false
 
 """
     refit!(plan) -> Bool
@@ -339,7 +339,7 @@ frame.
 function refit!(pl::Plan)
     moved = false
     for t in pl.graph.transients
-        moved |= refit!(t)
+        moved |= refit!(pl.graph.dev, t)
     end
     moved || return false
     # Dropped before the recompile — the commands name the old placement —
@@ -426,12 +426,12 @@ creation on every backend this runs on. That invalidates the placement — a
 different size needs different offsets — which is why the caller recompiles
 rather than patching the old plan.
 """
-function refit!(t::TransientImage)
+function refit!(dev::Device, t::TransientImage)
     t.source === nothing && return false
     w, h = target_extent(t.source)
     (w, h) == (t.width, t.height) && return false
     t.width, t.height = w, h
-    remakeimage!(t)
+    remakeimage!(dev, t)
     t.view = nothing
     t.memory = nothing
     return true
@@ -882,7 +882,7 @@ function overlapping(g::Graph, a::Int, b::Int)
 end
 
 """Give a placed transient its storage."""
-function materialize!(t::TransientBuffer, blk::BufferBlock, offset::Int)
+function materialize!(::Device, t::TransientBuffer, blk::BufferBlock, offset::Int)
     t.block, t.offset = blk, offset
     return t
 end
@@ -1168,7 +1168,7 @@ function remap!(pl::Plan, kind, region)
     ts = pl.graph.transients
     for (i, t) in enumerate(ts)
         arena(t) == kind || continue
-        materialize!(t, memoryof(region), offset(region) + pl.offsets[i])
+        materialize!(pl.graph.dev, t, memoryof(region), offset(region) + pl.offsets[i])
     end
     return pl
 end

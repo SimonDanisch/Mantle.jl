@@ -607,9 +607,9 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
     ctl = Ref(C.VkVideoCodingControlInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR, C_NULL, UInt32(C.VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR)))
     endinfo = Ref(C.VkVideoEndCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR, C_NULL, UInt32(0)))
     isfirst = dec.isfirst
-    dst = LavaArray{UInt8, 2}(undef, (DW, DH); extra_usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
+    dst = LavaArray{UInt8, 2}(undef, (DW, DH); bq = dec.w.ctx.default_bq, extra_usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
     dstbuf = dst.buf[]
-    duv = chroma ? LavaArray{UInt8, 2}(undef, (DW, DH ÷ 2); extra_usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
+    duv = chroma ? LavaArray{UInt8, 2}(undef, (DW, DH ÷ 2); bq = dec.w.ctx.default_bq, extra_usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
     GC.@preserve PIN dst duv cbh outvimg refpr refri refds decref begref outpr outri outds setup stdpic soff h265pi decinfo beginfo ctl endinfo imgs begin
         for (slot, _) in dpb; lay = imgs[slot][1].layout; if lay[] != DPBLAYOUT; emit(CB, barrier(imgs[slot][1].image.vks, lay[], DPBLAYOUT)); lay[] = DPBLAYOUT; end; end
         emit(CB, barrier(outimg, outlay[], DPBLAYOUT)); outlay[] = DPBLAYOUT

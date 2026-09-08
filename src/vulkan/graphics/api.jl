@@ -24,12 +24,13 @@ pipeline_state_key(p::GraphicsPipeline) = (typeof(p), p.varyings, p.geometry, p.
 """Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
                               vert_fn, frag_fn, tt_vertex, tt_fragment;
+                              ctx::VkContext,
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing)
-    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
+    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex; ctx)
     compiled = ensure_compiled!(pipeline, vert_fn, frag_fn, tt_vertex, tt_fragment;
-        color_format, depth_format, descriptor_set_layout)
+        ctx, color_format, depth_format, descriptor_set_layout)
     return vert, compiled
 end
 
@@ -37,7 +38,7 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
-                              ctx::VkContext = vk_context())
+                              ctx::VkContext)
     # Cache key includes type tuples — different arg types get different compiled
     # pipelines — and the pipeline state, which is the rest of what is baked in.
     cache_key = hash((vert_fn, frag_fn, tt_vertex, tt_fragment, color_format, depth_format,
@@ -46,17 +47,17 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
 
     # Compile vertex shader
-    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
+    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex; ctx)
 
     # Compile fragment shader
-    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment)
+    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment; ctx)
 
     # Optional stages
     geom_spirv = nothing
     geom_config = nothing
     if pipeline.geometry !== nothing
         geom_fn, geom_cfg = pipeline.geometry
-        geom = get_or_compile_gfx(geom_fn, tt_vertex, :geometry; config=geom_cfg)
+        geom = get_or_compile_gfx(geom_fn, tt_vertex, :geometry; config=geom_cfg, ctx)
         geom_spirv = geom.spirv_bytes
         geom_config = geom_cfg
     end
@@ -66,18 +67,18 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     tess_cfg = nothing
     if pipeline.tess_control !== nothing
         tc_fn, tc_cfg = pipeline.tess_control
-        tc = get_or_compile_gfx(tc_fn, tt_vertex, :tess_control; config=tc_cfg)
+        tc = get_or_compile_gfx(tc_fn, tt_vertex, :tess_control; config=tc_cfg, ctx)
         tc_spirv = tc.spirv_bytes
         tess_cfg = tc_cfg
     end
     if pipeline.tess_eval !== nothing
-        te = get_or_compile_gfx(pipeline.tess_eval, tt_vertex, :tess_eval;
+        te = get_or_compile_gfx(pipeline.tess_eval, tt_vertex, :tess_eval; ctx,
             config=tess_cfg)
         te_spirv = te.spirv_bytes
     end
 
     compiled = create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
-        blend=pipeline.blend, cull=pipeline.cull,
+        ctx, blend=pipeline.blend, cull=pipeline.cull,
         topology=pipeline.topology, depth=pipeline.depth,
         color_format=color_format, depth_format=depth_format,
         push_constant_size=max(vert.push_info.push_size, frag.push_info.push_size),
@@ -91,7 +92,7 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
 end
 
 function get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol;
-                            config=nothing, ctx::VkContext = vk_context())
+                            config=nothing, ctx::VkContext)
     key = hash((f, tt, stage, config))
     cached = get(ctx.caches.gfx_shaders, key, nothing)
     cached !== nothing && return cached
@@ -156,7 +157,7 @@ function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::WindowT
     # A window target has no depth attachment, so the pipeline must not declare one.
     vert_shader, compiled = ensure_compiled_with_shader!(pipeline,
         vert_fn, frag_fn, vert_tt, frag_tt;
-        color_format=win.format, depth_format=VK.FORMAT_UNDEFINED)
+        ctx = win.ctx, color_format=win.format, depth_format=VK.FORMAT_UNDEFINED)
 
     view = win.views[win.current_image_idx + 1]
     image = win.images[win.current_image_idx + 1]
@@ -186,7 +187,7 @@ function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::Offscre
 
     vert_shader, compiled = ensure_compiled_with_shader!(pipeline,
         vert_fn, frag_fn, vert_tt, frag_tt;
-        color_format=fb.color_format,
+        ctx = fb.ctx, color_format=fb.color_format,
         depth_format=fb.depth_view === nothing ? VK.FORMAT_UNDEFINED : fb.depth_format,
         descriptor_set_layout)
 
@@ -392,10 +393,10 @@ function blit!(e::Emitter, target::RenderTarget, source::LavaArray;
 
     _, compiled = ensure_compiled_with_shader!(pipeline,
         pipeline.vertex, pipeline.fragment, Tuple{}, frag_tt;
-        color_format=color_format)
+        ctx, color_format=color_format)
 
     # Pack fragment args via the fragment shader's push_info
-    frag_shader = get_or_compile_gfx(pipeline.fragment, frag_tt, :fragment)
+    frag_shader = get_or_compile_gfx(pipeline.fragment, frag_tt, :fragment; ctx)
     clear_color = clear ? (0.0f0, 0.0f0, 0.0f0, 1.0f0) : nothing
 
     push_data = pack_gfx_args(e.owner, frag_args, frag_shader.push_info)

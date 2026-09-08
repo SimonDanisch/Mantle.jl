@@ -19,7 +19,7 @@ end
 @testset "VulkanTLAS 1M instance refit stress" begin
     aabb = Mantle.AABB(Point3f(-0.005f0, -0.005f0, -0.005f0),
                      Point3f( 0.005f0,  0.005f0,  0.005f0))
-    blas = build_accel!() do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     N = 1_000_000
     radius = 0.005f0

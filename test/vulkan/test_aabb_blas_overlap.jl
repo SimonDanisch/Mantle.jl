@@ -30,7 +30,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # -------------------------------------------------------------------------
     # Build 1000 random AABBs of side ~1.0 in [-10, 10]^3.
@@ -49,7 +49,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     # -------------------------------------------------------------------------
     # Build AABB BLAS and wrap in VulkanTLAS.
     # -------------------------------------------------------------------------
-    blas = Mantle.build_accel!() do ctx_build
+    blas = Mantle.build_accel!(bq) do ctx_build
         MVE.build_blas_aabb(ctx_build, aabbs)
     end
 

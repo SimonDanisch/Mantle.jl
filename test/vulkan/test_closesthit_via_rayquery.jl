@@ -95,7 +95,7 @@ end
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # Single-triangle scene at z=5.  Rays from z=0 firing +z hit at t=5.
     tri_v0 = Point3f(-1f0, -1f0, 5f0)
@@ -211,7 +211,7 @@ end
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     near_v = [Point3f(-1, -1, 2), Point3f(1, -1, 2), Point3f(0, 1, 2)]
     far_v  = [Point3f(-1, -1, 5), Point3f(1, -1, 5), Point3f(0, 1, 5)]
@@ -313,7 +313,7 @@ end
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # Build a small two-triangle scene (one mesh with two faces).
     verts = [

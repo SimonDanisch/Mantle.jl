@@ -17,6 +17,77 @@ struct BackendProbe
     probe::Any
 end
 
+# ── Which device ──────────────────────────────────────────────────────────────
+#
+# `Device(api)` is the process default and the ONE ambient thing in Mantle. It is
+# chosen once, lazily, by the `MANTLE_DEVICE` environment variable when that is
+# set and by the backend's ranking otherwise, and changed with `defaultdevice!`.
+# Everything else names its device: `Device(api; select)` builds one the caller
+# holds, `Device(backend)` is the device a backend already belongs to, and every
+# constructor takes one of those. The selector vocabulary below is shared by the
+# backends so that "NVIDIA", `2` and `info -> info.kind == :cpu` mean the same
+# thing on each of them.
+
+"""
+    DeviceInfo
+
+One physical device a backend can build a [`Device`](@ref) on: its `index` in
+[`devices`](@ref)' answer, its `name`, its `kind` (`:discrete`, `:integrated`,
+`:virtual`, `:cpu` or `:other`) and the `driver` behind it.
+"""
+struct DeviceInfo
+    index::Int
+    name::String
+    kind::Symbol
+    driver::String
+end
+
+"""
+    devices(api) -> Vector{DeviceInfo}
+
+The physical devices `api` can build a device on, in enumeration order. What
+`Device(api; select)` and the `MANTLE_DEVICE` variable select from.
+"""
+function devices end
+
+"""
+    defaultdevice!(dev) -> dev
+
+Make `dev` the device its API answers `Device(api)` with from now on, and the
+one `defaultbackend()` reports. The previous default is not torn down: it stays
+a device of its own, and everything built on it keeps working.
+
+    dev = Device(VulkanAPI(); select = "NVIDIA")
+    defaultdevice!(dev)
+"""
+function defaultdevice! end
+
+"""
+    selectdevice(select, infos) -> Int
+
+The index in `infos` that `select` names. `nothing` admits every device, a
+string admits those whose name contains it (case-insensitive), an integer
+admits the device at that index, and anything else is called as a predicate over
+`DeviceInfo`. Among the admitted, the ranking is `:discrete` before
+`:integrated` before `:virtual` before `:cpu` before `:other`, enumeration order
+within a rank, and the first wins; so `"AMD"` on a box with a Radeon and an APU
+is the Radeon, and `nothing` is the best GPU there is. Throws naming every
+device when nothing is admitted.
+"""
+function selectdevice(select, infos::AbstractVector{DeviceInfo})
+    admitted = filter(i -> admits(select, i), infos)
+    if isempty(admitted)
+        listing = join(("  $(i.index): $(i.name) ($(i.kind), $(i.driver))" for i in infos), "\n")
+        throw(ArgumentError("Mantle: no device matches $(repr(select)). The devices are:\n" * listing))
+    end
+    rank = Dict(:discrete => 0, :integrated => 1, :virtual => 2, :cpu => 3, :other => 4)
+    return first(sort(admitted; by = i -> (rank[i.kind], i.index))).index
+end
+admits(::Nothing, ::DeviceInfo) = true
+admits(s::AbstractString, i::DeviceInfo) = occursin(lowercase(s), lowercase(i.name))
+admits(n::Integer, i::DeviceInfo) = i.index == n
+admits(f, i::DeviceInfo) = f(i)::Bool
+
 const BACKEND_PROBES = BackendProbe[]
 
 """

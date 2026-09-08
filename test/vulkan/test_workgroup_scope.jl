@@ -48,7 +48,7 @@ end
 
 @testset "workgroup-scope cooperative matrices" begin
     ctx = MVE.vk_context()
-    dev = Lava.caps()
+    dev = MVE.caps(MVE.vk_context())
 
     @testset "the device reports its shapes, and they pair with a workgroup size" begin
         # Empty means no workgroup-scope matrices at all, so `isempty` is the

@@ -155,7 +155,7 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
 end
 
 """
-    VulkanTLAS{Tri}(backend::LavaBackend; bq=backend.bq) -> VulkanTLAS{Tri}
+    VulkanTLAS{Tri}(backend::LavaBackend; bq=backend.dispatch_bq) -> VulkanTLAS{Tri}
 
 Construct an empty VulkanTLAS parametrised on triangle type `Tri`.
 """
@@ -164,7 +164,7 @@ Construct an empty VulkanTLAS parametrised on triangle type `Tri`.
 # backend answers with its own concrete type.
 HWTLAS{Tri}(backend::LavaBackend; kw...) where {Tri} = VulkanTLAS{Tri}(backend; kw...)
 
-function VulkanTLAS{Tri}(backend::LavaBackend; bq::VulkanBatchQueue=backend.bq) where {Tri}
+function VulkanTLAS{Tri}(backend::LavaBackend; bq::VulkanBatchQueue=backend.dispatch_bq) where {Tri}
     VulkanTLAS{Tri}(
         backend, bq,
         LavaBLAS[], Vector{Tri}[], UInt32[],
@@ -182,11 +182,11 @@ function VulkanTLAS{Tri}(backend::LavaBackend; bq::VulkanBatchQueue=backend.bq) 
 end
 
 """
-    VulkanTLAS(backend::LavaBackend; bq=backend.bq) -> VulkanTLAS{Triangle{UInt32}}
+    VulkanTLAS(backend::LavaBackend; bq=backend.dispatch_bq) -> VulkanTLAS{Triangle{UInt32}}
 
 Default constructor — narrows to `Triangle{UInt32}`.
 """
-VulkanTLAS(backend::LavaBackend; bq::VulkanBatchQueue=backend.bq) =
+VulkanTLAS(backend::LavaBackend; bq::VulkanBatchQueue=backend.dispatch_bq) =
     VulkanTLAS{Raycore.Triangle{UInt32}}(backend; bq)
 
 # ============================================================================
@@ -348,7 +348,7 @@ function hwtlas_add_geometry!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh
         blas_indices[i+1] = UInt32(i)
     end
 
-    hw_blas = build_accel!() do ctx
+    hw_blas = build_accel!(hwtlas.bq) do ctx
         build_blas(ctx, blas_vertices, blas_indices)
     end
 
@@ -378,7 +378,7 @@ function _register_batch!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS,
                           instance_mask::UInt8,
                           sbt_offset::UInt32) where {Tri}
     n = length(records)
-    instance_buf = LavaArray{VulkanInstanceRecord, 1}(undef, n; extra_usage=AS_INPUT_USAGE)
+    instance_buf = LavaArray{VulkanInstanceRecord, 1}(undef, n; bq=hwtlas.bq, extra_usage=AS_INPUT_USAGE)
     Base.copyto!(instance_buf, records)
     handle = Raycore.TLASHandle(hwtlas.next_handle_id)
     hwtlas.next_handle_id += UInt32(1)
@@ -560,7 +560,7 @@ end
 # CPU-array overload: upload to GPU then delegate.
 function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
                                     transforms::AbstractVector{Mat3x4f})
-    Raycore.update_transforms!(hwtlas, handle, LavaArray(collect(transforms)))
+    Raycore.update_transforms!(hwtlas, handle, LavaArray(collect(transforms); bq=hwtlas.bq))
 end
 
 # Mat4f convenience: mirrors Raycore's HWTLAS overloads — accept the natural
@@ -580,7 +580,7 @@ handle was valid.
 function Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat3x4f)
     haskey(hwtlas.handle_to_batch_idx, handle) || return false
     batch = hwtlas.instance_batches[hwtlas.handle_to_batch_idx[handle]]
-    Raycore.update_transforms!(hwtlas, handle, LavaArray(fill(transform, batch.n)))
+    Raycore.update_transforms!(hwtlas, handle, LavaArray(fill(transform, batch.n); bq=hwtlas.bq))
     return true
 end
 
@@ -620,13 +620,15 @@ end
 # ============================================================================
 
 # Try to reuse `prev` as the GPU sink for `data` via capacity-aware resize+copyto.
-function _reuse_or_alloc(prev, data::AbstractArray{T}) where T
+# `bq` is the device the fresh allocation lands on when `prev` cannot be reused —
+# the TLAS's own queue, never the process default.
+function _reuse_or_alloc(prev, data::AbstractArray{T}, bq) where T
     if prev isa LavaArray{T}
         resize!(prev, length(data))
         copyto!(prev, data)
         return prev
     end
-    return LavaArray(data)
+    return LavaArray(data; bq)
 end
 
 # Allocate-or-reuse a combined LavaArray{VulkanInstanceRecord} that fits all
@@ -640,7 +642,7 @@ function _concat_batch_instances!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     combined = hwtlas.combined_instance_buf
     if combined === nothing || length(combined) < total
         combined = LavaArray{VulkanInstanceRecord, 1}(undef, total;
-                                                       extra_usage=AS_INPUT_USAGE)
+                                                       bq=hwtlas.bq, extra_usage=AS_INPUT_USAGE)
         hwtlas.combined_instance_buf = combined
     end
     inst_offset = 0
@@ -709,7 +711,7 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
 
     # After the compaction above, `blas_list` is exactly what the instances
     # reference; the TLAS carries the list so a trace can pin every one.
-    hw_tlas = build_accel!() do ctx
+    hw_tlas = build_accel!(hwtlas.bq) do ctx
         build_tlas(ctx, combined, total_n; allow_update=true, blases=hwtlas.blas_list)
     end
 
@@ -740,8 +742,8 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         HardwareAccel(hw_tlas, all_tris, blas_offsets, per_inst_offsets; bq=hwtlas.bq)
     end
 
-    tri_gpu = _reuse_or_alloc(hwtlas.tri_gpu, all_tris)
-    off_gpu = _reuse_or_alloc(hwtlas.off_gpu, per_inst_offsets)
+    tri_gpu = _reuse_or_alloc(hwtlas.tri_gpu, all_tris, hwtlas.bq)
+    off_gpu = _reuse_or_alloc(hwtlas.off_gpu, per_inst_offsets, hwtlas.bq)
 
     return (hw_tlas, hw_accel, tri_gpu, off_gpu, dropped_blases)
 end
@@ -841,7 +843,7 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
             return Raycore.sync!(hwtlas)
         end
         combined, total_n = _concat_batch_instances!(hwtlas)
-        build_accel!() do ctx
+        build_accel!(hwtlas.bq) do ctx
             refit_tlas!(ctx, hwtlas.hw_tlas, combined, total_n)
         end
         hwtlas.transforms_dirty = false

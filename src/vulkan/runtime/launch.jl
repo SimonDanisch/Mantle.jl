@@ -649,7 +649,7 @@ and world-age tracking means Revise edits invalidate correctly.
     # and `Base.*`, `Unitful` pirates `Base.Colon` — so loading anything that
     # pulls them in invalidates `get_or_build_iter_plan` and every launch above
     # it. This runs once per kernel; the dispatch is free next to compiling one.
-    config = lava_compiler_config(; workgroup_size, enable_ray_query)
+    config = lava_compiler_config(; workgroup_size, enable_ray_query, features = ctx.features)
     source = GPUCompiler.methodinstance(typeof(f), tt)
     linked = Base.invokelatest(GPUCompiler.cached_compilation, linked_kernel_cache(ctx),
                                source, config, lava_kernel_compile, LavaLinker(ctx))::LavaLinkedKernel

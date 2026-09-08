@@ -20,7 +20,7 @@ Uses VK_KHR_dynamic_rendering — no VkRenderPass needed.
 """
 function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
                                     fragment_spirv::Vector{UInt8};
-                                    ctx::VkContext=vk_context(),
+                                    ctx::VkContext,
                                     blend::BlendMode=Opaque(),
                                     cull::CullFace=CullBack(),
                                     topology::Topology=TriangleList(),
@@ -199,7 +199,7 @@ function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
     )
 
     pipelines, _ = @vk_checked "vkCreateGraphicsPipelines" VK.create_graphics_pipelines(
-        dev, [ci]; pipeline_cache=vk_context().pipeline_cache)
+        dev, [ci]; pipeline_cache=ctx.pipeline_cache)
     pipeline = pipelines[1]
 
     return VulkanCompiledGraphicsPipeline(
@@ -720,7 +720,7 @@ function draw_in_pass!(e::Emitter,
 end
 
 """
-    indirect_buffer(n = 1) -> LavaArray{DrawIndirectCommand,1}
+    indirect_buffer(bq, n = 1) -> LavaArray{DrawIndirectCommand,1}
 
 Room for `n` draw commands, allocated so a draw may read them.
 
@@ -728,9 +728,9 @@ Room for `n` draw commands, allocated so a draw may read them.
 gets, and a buffer without it is a validation error at the draw rather than at
 the allocation, which is a long way from the mistake.
 """
-indirect_buffer(n::Integer=1) =
+indirect_buffer(bq::VulkanBatchQueue, n::Integer=1) =
     LavaArray{DrawIndirectCommand,1}(undef, (Int(n),);
-        extra_usage=UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT))
+        bq, extra_usage=UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT))
 
 """
     draw_indirect_in_pass!(bq, pipeline, commands; first, count, push_bda, pin)

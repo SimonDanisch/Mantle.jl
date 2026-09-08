@@ -221,6 +221,13 @@ const SHADOW_ALLOWED = Set([:eval, :include, :take!, :unsafe_free!])
         shadowed = Symbol[]
         for n in names(ext; all = true, imported = false)
             n in SHADOW_ALLOWED && continue
+            # A gensym binding (`#84#85`) is an anonymous function's own name, never
+            # an API name a backend could define instead of extend. Two modules
+            # mint them independently and their counters can land on the same
+            # number, which is a coincidence, not a shadow — skip them so the
+            # check stays about NAMED functions, which is the only kind that can
+            # be a core verb.
+            startswith(string(n), "#") && continue
             (isdefined(ext, n) && isdefined(Mantle, n)) || continue
             a, b = getglobal(ext, n), getglobal(Mantle, n)
             a === b && continue

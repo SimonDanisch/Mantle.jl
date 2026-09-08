@@ -1,42 +1,41 @@
 """
-The runtime tells the compiler what the device allows.
+The context carries the record the compiler takes.
 
 `Lava.TargetFeatures` is a record with no Vulkan in it, and the emitter reads it
 to decide whether a module may declare `ShaderInvocationReorderNV` or the
 ray-query capabilities. Declaring one the device lacks is a validation error, not
-a slow path — so what is ON that record has to be what the device actually said.
+a slow path, so what is ON that record has to be what the device actually said.
 
-`bind_context!` is the only thing that writes it, and it writes it together with
-the context, which is the invariant here: there is no third place the answer can
-come from and no window where the two disagree.
+It used to be a process global that `bind_context!` pushed, which answered for
+the BOUND device: a kernel compiled for a second device while the RTX was bound
+was shaped by the RTX. Now each `VkContext` carries its own `features`, every
+compile the context runs passes it in the job, and every frozen key it reads
+mixes it in. Nothing is pushed and nothing is reset on unbind, because there is
+nothing global to reset.
 
-The compiler's half — given a record, what does it emit — is
-`Lava/test/test_target_features.jl`, and it needs no device. This half is the
-inverse and needs one, which is why the two are in different packages.
+The compiler's half, given a record, what does it emit, is
+`Lava/test/test_target_features.jl` and needs no device.
 """
 
 using Test, Mantle, Lava
 
-@testset "the runtime pushes what the device reports" begin
+@testset "the context carries what the device reports" begin
     ctx = MVE.vk_context()
-
-    # Already bound by the time any test runs, so this reads what `bind_context!`
-    # left rather than arranging for it.
-    @test Lava.targetfeatures().ser === ctx.ser_available
-    @test Lava.targetfeatures().ray_query === ctx.ray_query_available
+    @test ctx.features.ser === ctx.ser_available
+    @test ctx.features.ray_query === ctx.ray_query_available
     @test Lava.FROZEN_LOG_MISSES[] === ctx.diag.frozen_log_misses
 
-    # Releasing the device resets the record. Without this an emitter test that
-    # ran afterwards would emit a module shaped by hardware that is gone — and it
-    # would look right, because the capability it declares is one this machine
-    # happens to have.
-    saved = Lava.targetfeatures()
-    try
-        MVE.bind_context!(nothing)
-        @test Lava.targetfeatures() == Lava.TargetFeatures()
-        @test Lava.FROZEN_LOG_MISSES[] === false
-    finally
-        MVE.bind_context!(ctx)
-    end
-    @test Lava.targetfeatures() == saved
+    # The global is gone, not merely unused.
+    @test !isdefined(Lava, :targetfeatures)
+    @test !isdefined(Lava, :targetfeatures!)
+    @test !isdefined(Lava, :TARGET_FEATURES)
+
+    # A compile this context runs is keyed on ITS record: the same kernel for a
+    # device with the opposite SER flag is a different frozen entry.
+    other = Lava.TargetFeatures(; ser = !ctx.features.ser, ray_query = ctx.features.ray_query)
+    tt = Tuple{Lava.LavaDeviceArray{Float32,1}}
+    @test Lava.frozen_key(identity, tt, (64, 1, 1), ctx.features) !=
+          Lava.frozen_key(identity, tt, (64, 1, 1), other)
+    @test Lava.frozen_rt_key(identity, tt, :raygen, :f32, 8, ctx.features) !=
+          Lava.frozen_rt_key(identity, tt, :raygen, :f32, 8, other)
 end

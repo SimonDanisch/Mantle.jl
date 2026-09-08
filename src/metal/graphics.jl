@@ -110,7 +110,7 @@ lowers it the way `vkformat` does on the other side.
 """
 function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
-    dev = Metal.device()
+    dev = Device(be).dev
     # `nothing` rather than a named default: BGRA8Unorm is what a window wants
     # and naming the Julia type here would need ColorTypes — see `mtlformat`.
     cfmt = color_format === nothing ? MTLm.MTLPixelFormatBGRA8Unorm :

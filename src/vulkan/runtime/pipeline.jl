@@ -142,14 +142,14 @@ Clears Lava's in-memory pipeline cache first, so only the `VkPipelineCache`
         run_the_workload()          # throws if anything would compile
     end
 """
-function no_pipeline_compilation(f)
+function no_pipeline_compilation(f; ctx::VkContext = vk_context())
     old = PIPELINE_NO_COMPILE[]
     old_refused = PIPELINE_COMPILES_REFUSED[]
     # Otherwise a hit on the Julia-side dict would mask a cold VkPipelineCache.
-    # `vk_context()` here rather than a parameter: this wrapper exists to prove a
+    # The default device unless told otherwise: this wrapper exists to prove a
     # cache is warm on the device the caller is already using, and every caller
     # is a test.
-    let c = vk_context().caches
+    let c = ctx.caches
         empty!(c.pipelines)
         empty!(c.pipeline_order)
     end
@@ -192,7 +192,7 @@ const COOPMAT_SUBGROUP = 32
 # PROPERTY just returns the wrong number. Every tiling decision keyed on the
 # subgroup width would then be silently made for the other device.
 
-function device_subgroup_size(ctx::VkContext = vk_context())
+function device_subgroup_size(ctx::VkContext)
     # 0 is the "not yet queried" sentinel; no device reports a 0-lane subgroup.
     ctx.caches.subgroup_size != 0 && return ctx.caches.subgroup_size
     props = VK.get_physical_device_properties_2(ctx.physical_device,
@@ -206,7 +206,7 @@ end
 The device's `VkPhysicalDeviceSubgroupSizeControlProperties`, queried once.
 `compute` says whether a compute pipeline may pin its own subgroup size.
 """
-function subgroup_size_control(ctx::VkContext = vk_context())
+function subgroup_size_control(ctx::VkContext)
     c = ctx.caches.subgroup_control
     c === nothing || return c
     p = VK.get_physical_device_properties_2(

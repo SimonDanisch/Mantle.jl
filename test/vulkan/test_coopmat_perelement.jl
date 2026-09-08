@@ -104,7 +104,7 @@ end
     a = Array(A)
 
     @testset "component-wise multiply with a stride-0 factor matrix" begin
-        if !MVE.coopmat_gemm_available()
+        if !MVE.coopmat_gemm_available(MVE.vk_context())
             @info "no cooperative-matrix support on this device; skipping"
         else
             for base in Int32.((0, TILEpe))

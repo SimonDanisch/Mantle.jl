@@ -11,7 +11,7 @@ end
 
 @testset "refit_tlas! moves geometry without rebuilding" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!() do ctx
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_blas_aabb(ctx, [aabb])
     end
 
@@ -22,7 +22,7 @@ end
                                   custom_index=UInt32(1), mask=UInt8(0xff))
     instance_buf = MVE.LavaArray([inst_a0, inst_b0]; extra_usage=AS_INPUT_USAGE)
 
-    tlas = build_accel!() do ctx
+    tlas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_tlas(ctx, instance_buf, 2; allow_update=true)
     end
 
@@ -32,7 +32,7 @@ end
                                   custom_index=UInt32(1), mask=UInt8(0xff))
     Mantle.copyto!(instance_buf, [inst_a1, inst_b1])
 
-    build_accel!() do ctx
+    build_accel!(MVE.vk_context().default_bq) do ctx
         refit_tlas!(ctx, tlas, instance_buf, 2)
     end
 
@@ -42,17 +42,17 @@ end
 
 @testset "refit_tlas! errors on non-allow_update HWTLAS" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!() do ctx
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_blas_aabb(ctx, [aabb])
     end
     inst = VulkanInstanceRecord(Mantle.identity_transform(), blas.address)
     instance_buf = MVE.LavaArray([inst]; extra_usage=AS_INPUT_USAGE)
 
-    tlas = build_accel!() do ctx
+    tlas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_tlas(ctx, instance_buf, 1; allow_update=false)
     end
 
-    @test_throws ErrorException build_accel!() do ctx
+    @test_throws ErrorException build_accel!(MVE.vk_context().default_bq) do ctx
         refit_tlas!(ctx, tlas, instance_buf, 1)
     end
 end

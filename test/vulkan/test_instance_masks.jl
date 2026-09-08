@@ -24,7 +24,7 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
     end
 
     backend = MVE.LavaBackend()
-    bq = backend.bq
+    bq = backend.dispatch_bq
 
     # Build two single-triangle meshes at different z-planes.
     function tri_mesh(z::Float32)

@@ -6,7 +6,7 @@ using GeometryBasics: Point3f
 @testset "build_tlas(LavaArray{VulkanInstanceRecord}, n; allow_update=true)" begin
     # Build a 1-AABB BLAS (unit cube) once.
     aabb = Mantle.AABB(GeometryBasics.Point3f(-1f0, -1f0, -1f0), GeometryBasics.Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!() do ctx
+    blas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_blas_aabb(ctx, [aabb])
     end
 
@@ -26,7 +26,7 @@ using GeometryBasics: Point3f
     instance_buf = LavaArray([inst_a, inst_b]; extra_usage=AS_INPUT_USAGE)
 
     # Build with allow_update=true.
-    tlas = build_accel!() do ctx
+    tlas = build_accel!(MVE.vk_context().default_bq) do ctx
         build_tlas(ctx, instance_buf, 2; allow_update=true)
     end
 
