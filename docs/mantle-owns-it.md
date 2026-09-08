@@ -270,14 +270,24 @@ geometry stage is the mesh pipeline, which Mantle does not describe).
 `compile_pipeline` asks instead of asserting, and its message now names the
 question a caller should have asked first.
 
-**2.8 Portable window and format.**
+**2.8 Portable window and format. — DONE 2026-09-08, less the file split**
 Add `using ColorTypes: RGBA, BGRA` to Mantle — the dependency is already
 declared and paid for — then `mtlformat` matches on types instead of on
 `nameof(T)`, and Metal answers `Mantle.Window(backend, w, h)`, which is in the
 vocabulary and which Lava already answers. The Retina sizing currently in
 `bench/showcase_metal.jl` belongs in that constructor.
-*Done when:* `bench/showcase.jl` is ONE file that picks a backend, and
-`showcase_metal.jl` is gone.
+`using ColorTypes: RGBA, BGRA` in Mantle — the dependency was always declared
+and three comments concluded otherwise. `mtlformat` matches on the types instead
+of `nameof(T)`, which had been accepting any foreign type called `RGBA`, and
+Metal answers `Window(backend, w, h)` with the Retina content-scale division in
+the constructor rather than in the demo.
+
+STILL OPEN, and it is the file split rather than the capability:
+`test_window.jl` is 2,000 lines with 26 MVE sites, 16 of them raw `VK.` enums
+for image layouts, load ops and aspects that belong under `test/vulkan/`. The
+portable half is out as `test_window_portable.jl` and runs per backend; the rest
+is Vulkan-gated and named in guard 0.7. Collapsing the two showcase drivers into
+one waits on that.
 
 **2.9 Downstream imports Mantle only.**
 Hikari and RayMakie drop `Lava` from `[deps]`. RayMakie's shaders move from
