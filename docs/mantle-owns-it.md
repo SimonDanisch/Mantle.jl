@@ -228,7 +228,7 @@ Metal's `_register_batch!` is one call to `register!`. Handles are monotone and
 never reused, which neither deleted copy said out loud.
 *Verified:* `test_hwtlas_metal.jl` green, whole suite 9335 passed 0 failed.
 
-**2.6 One barrier story, chosen by measurement.**
+**2.6 One barrier story, chosen by measurement. — DONE 2026-09-08**
 `needs_transition` for `MetalAPI` falls through to the generic `true`;
 `passbarriers` is core's empty default; so the plan carries no transitions and
 correctness rests on `MTLHazardTrackingModeTracked`. Host and WebGPU each state
@@ -236,8 +236,26 @@ their answer with a method and a reason, and `sync/backend.jl:49-52` says a
 backend whose lowering is empty should answer `false`. Metal must do one of two
 things and say which: answer `false` explicitly, or implement the lowering and
 make the heap `Untracked`. Measure both — a tracked heap serialises.
-*Done when:* `needs_transition(::MetalAPI, …)` has a method with a docstring
-giving the reason, and a benchmark records what the choice cost or saved.
+*Measured*, a chained graph (render A, copy A, render B, copy B) at 2048x2048,
+median of five runs of forty frames:
+
+    Tracked      0.364 ms/frame     4194304 pixels correct
+    Untracked    0.332 ms/frame     4194304 pixels correct
+
+Both correct, and hazard tracking costs about 9% rather than the order of
+magnitude "a tracked heap serialises" assumed. The reason ordering holds is
+neither comment's: it is COMMIT ORDER. Since phase 1.2 each render and copy pass
+opens its own command buffer and commits it before returning, all on one queue,
+and Metal runs a queue's buffers in commit order.
+
+So `needs_transition(::MetalAPI, …)` answers `false` explicitly, with that
+reason — and the heap stays `Tracked` on purpose. Untracked is safe only BECAUSE
+of one buffer per pass; if phase 2.3's object reuse ever batches two passes into
+one buffer again, commit order stops separating them and the 9% becomes a race.
+The flip is one line to make once 2.3 is settled.
+
+`test_compile_golden.jl`'s `all(r.barriered)` reads the answer now instead of
+assuming one, which is what made it portable rather than what silenced it.
 
 **2.7 Capabilities are queries, not exceptions.**
 `compile_pipeline` throws on geometry shaders and on tessellation;

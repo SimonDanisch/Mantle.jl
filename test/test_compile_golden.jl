@@ -92,7 +92,14 @@ compileresult(g, plan) = (
     # Every pass, including the two that share no data with anything — those are
     # ALIASING barriers. If a refactor drops them the peak stays right and the
     # picture goes wrong intermittently, which is the worst failure available.
-    @test all(r.barriered)
+    # Backend-aware, and only since the answer is measured (2.6). A backend
+    # whose passes each commit their own command buffer on one queue is ordered
+    # by commit order and derives nothing — it says so through
+    # `needs_transition`, and `sync/backend.jl` asks exactly that of it. Reading
+    # the answer here rather than assuming one is the difference between a
+    # portable assertion and one backend's.
+    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), Any, Any)
+    @test derives ? all(r.barriered) : !any(r.barriered)
 
     # Pass indices are 1-based over the schedule above, so the update pass at
     # position 1 shifts every transient's interval by one.

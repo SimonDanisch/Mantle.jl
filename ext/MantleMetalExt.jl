@@ -29,7 +29,7 @@ import Mantle: Device, backend, pool,
 import Mantle: caps
 # The graph's execution path is core's (`graph/kalaunch.jl`); this backend
 # supplies `resolve` and says that barriers are a no-op.
-import Mantle: resolve, syncbackend, materialize!, alignment
+import Mantle: resolve, syncbackend, needs_transition, materialize!, alignment
 # Hardware ray tracing — the verbs Mantle declares in `raytracing/api.jl`.
 import Mantle: build_accel!, refit_tlas!, trace_closest_hits!
 # Device-wide sync, the graphics capability answer, and the queue verb that
