@@ -99,14 +99,9 @@ function caps(d::MetalDevice)
     return d.caps
 end
 
-caps(b::Metal.MetalBackend) = caps(_device_for(b))
-
-# One device per process for now, which is what `Metal.device()` gives. A second
-# `MTLDevice` means a second pool and a second timeline, and the Vulkan backend
-# already learned that a capability query is exactly as device-specific as the
-# handle caches are — so this indirection is here to be replaced, not kept.
-const _DEVICE = Ref{Union{Nothing,MetalDevice}}(nothing)
-function _device_for(::Metal.MetalBackend)
-    _DEVICE[] === nothing && (_DEVICE[] = MetalDevice())
-    return _DEVICE[]
-end
+# DELETED in phase 1.6: `_DEVICE` and `_device_for`, a second cache for "one
+# device per process" beside `METAL_DEVICE` in `device.jl`. It built a second
+# `MetalDevice` — a second `Pool`, a second `MTLCommandQueue`, a second
+# `MTLSharedEvent` — from a capability query. `device.jl:65` forbids it and
+# `graphics.jl` records two Metal queues as the cause of a hang.
+caps(b::Metal.MetalBackend) = caps(Device(MetalAPI()))

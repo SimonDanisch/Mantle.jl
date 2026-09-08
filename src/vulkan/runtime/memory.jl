@@ -656,17 +656,7 @@ function pin_buffer!(buf::VkManagedBuffer)
     return nothing
 end
 
-function unpin_buffer!(buf::VkManagedBuffer)
-    remaining = @atomic buf.pins -= 1
-    @assert remaining >= 0 "unpin_buffer!: pins went negative ($remaining) — pin!/release_pinned_refs! are unbalanced"
-    # Last batch let go, and a free was owed while we held it: pay it now, at a
-    # point where no batch can reference the buffer any more.
-    if remaining == 0
-        _, owed = @atomicreplace buf.free_requested true => false
-        owed && vk_free!(buf)
-    end
-    return nothing
-end
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 
 """
     vk_free!(buf::VkManagedBuffer)

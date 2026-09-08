@@ -425,7 +425,7 @@ function presentready!(e::Emitter, win::VulkanWindow)
         VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.AccessFlag(0))
-    pin!(e, win)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     return nothing
 end
 
@@ -444,7 +444,7 @@ function presentuntouched!(e::Emitter, win::VulkanWindow)
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.AccessFlag(0), VK.AccessFlag(0))
-    pin!(e, win)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     return nothing
 end
 
@@ -488,25 +488,7 @@ end
 # what that means. `@lava_device_override` is Lava's wrapper around the same
 # method-table overlay `@device_override` is on the other side.
 #
-# Generated from `Mantle.SHADER_BUILTINS`, so a builtin added to that list and
 # forgotten here is a `MethodError` naming it rather than a shader that reads
 # the wrong thing.
 #
-# `Lava.$f`, QUALIFIED, and that is not tidiness. Written bare, the right-hand
-# side resolves through this module's bindings: for the builtins in the
-# `using Lava:` list at the top of `vulkan.jl` that happens to be Lava's, and for
-# `frag_coord` — which is not in that list — it is MANTLE's, the very function
-# being overridden. `Mantle.frag_coord(dim) = Mantle.frag_coord(dim)`: infinite
-# recursion in any fragment shader that reads its own position, and nothing says
-# so until such a shader is compiled.
-#
-# Found by `test_lava_import_completeness.jl`, which is exactly the question it
-# asks — "a Lava name this backend uses and did not import". Qualifying is the
-# fix rather than extending the import list, because `frag_coord` is exported by
-# both packages: importing it would make the bare name ambiguous and break the
-# other uses in this file, whereas the qualified form cannot be read two ways.
-for f in Mantle.SHADER_BUILTINS
-    f === :frag_coord && continue
-    @eval @lava_device_override Mantle.$f() = Lava.$f()
-end
-@lava_device_override Mantle.frag_coord(dim::Integer = 1) = Lava.frag_coord(dim)
+# DELETED in phase 1.4: see docs/mantle-owns-it.md

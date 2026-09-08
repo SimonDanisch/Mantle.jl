@@ -578,7 +578,8 @@ const BACKEND_VOCABULARY = (
     :waitfor, :waitfor!, :passed, :fence, :reset_device!,
     # sync lowering
     :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
-    :vkformat,
+    # DELETED in phase 1.7: `:vkformat`. A vendor-named entry in the list of
+    # names every backend may implement; Metal's counterpart is `mtlformat`.
     # compile: the phases are core's, a backend answers these
     :syncbackend,
     :compiledraw, :compile_dispatch, :passbarriers,
@@ -590,7 +591,9 @@ const BACKEND_VOCABULARY = (
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
-    :recordsplans, :recycle!, :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    :recordsplans, :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    # DELETED in phase 1.2: `:recycle!`. Its one implementation contained no
+    # driver call at all.
     :beginframe!,
     # graphics verbs, immediate and windowed
     :Framebuffer, :Window, :Surface, :Texture2D, :Sampler, :screenshot,
@@ -599,7 +602,7 @@ const BACKEND_VOCABULARY = (
     :use_bindings!, :bind_textures, :blit!, :transition_image!, :readback_framebuffer,
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
     # ray tracing
-    :pin!, :blases,
+    # DELETED in phase 1.1: `:pin!`, `:blases`. See raytracing/api.jl.
     :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,

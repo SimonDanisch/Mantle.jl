@@ -269,7 +269,7 @@ function emit_trace!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
     cmd = e.cmd
     desc_set = get_rt_descriptor_set(pipeline, tlas)
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-    pin!(e, pipeline)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
     # The TLAS and every BLAS it instances are held by the caller's `pintrace!`;
@@ -299,7 +299,7 @@ function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTL
     cmd = e.cmd
     desc_set = get_rt_descriptor_set(pipeline, tlas)
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-    pin!(e, pipeline)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
     # The TLAS and every BLAS it instances are held by the caller's `pintrace!`;
@@ -316,7 +316,7 @@ function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTL
     maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts_slot, e.ctx.cmd_pipeline_barrier_fptr;
         stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
-    pin!(e, indirect)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emitted!(e, name)
     return nothing
 end

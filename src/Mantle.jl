@@ -226,9 +226,7 @@ export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
 # The shader builtins. Exported because a shader is written against them and
 # nothing else; see `graphics/builtins.jl` for why they are overridden rather
 # than defined.
-export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
-       frag_coord_z, frag_coord_w, frag_coord_xy, clip_y
-export DrawIndirectCommand
+# DELETED in phase 1.4: see docs/mantle-owns-it.mdexport DrawIndirectCommand
 export RayTracingPipeline, AdaptedAccel
 
 # Hardware ray tracing.

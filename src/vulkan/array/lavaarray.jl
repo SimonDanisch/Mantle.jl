@@ -189,21 +189,7 @@ end
 # buffer — which `sync_access!` rightly asserts against.
 # `sync_access!(::LavaArray)` below forwards to the underlying VkManagedBuffer
 # so cross-queue last_write tracking still runs on the leaf.
-@inline pin!(batch::O, a::LavaArray) where {O<:Closed} = begin
-    a in batch.pinned && return
-    push!(batch.pinned, a)
-    # Two claims, and both are needed:
-    #   * the retained DataRef keeps `ref[]` dereferenceable after an explicit
-    #     `unsafe_free!(a)` drops the array's own ref (see pinned_refs), and
-    #   * the buffer pin stops `vk_free!` from marking the VkManagedBuffer
-    #     DEFERRED/DEAD underneath us, which `sync_access!` asserts against.
-    # Without the pin the DataRef would stay readable but describe a buffer
-    # already queued for destruction.
-    ref = copy(a.buf)
-    push!(batch.pinned_refs, ref)
-    pin_buffer!(ref[])
-    return nothing
-end
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 
 @inline sync_access!(sub::Submission, a::LavaArray) = sync_access!(sub, a.buf[])
 

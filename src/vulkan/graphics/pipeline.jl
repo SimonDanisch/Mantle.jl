@@ -444,7 +444,7 @@ function vk_draw!(e::Emitter,
 
         # Bind pipeline + pin for batch lifetime
         VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
-        pin!(batch, pipeline)
+        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
 
         # Bind descriptor set (for textures)
         if descriptor_set !== nothing
@@ -716,7 +716,7 @@ function draw_in_pass!(e::Emitter,
 
     VK.cmd_draw(cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
     # Pin the pipeline — prevents GC from destroying it while the command buffer references it
-    pin && pin!(e, pipeline)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
 end
 
 """
@@ -770,8 +770,8 @@ function draw_indirect_in_pass!(e::Emitter,
              (first - 1) * sizeof(DrawIndirectCommand)
     VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
                              UInt32(count), UInt32(sizeof(DrawIndirectCommand)))
-    pin && pin!(e, pipeline)
-    pin!(e, commands)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
 end
 
 """
@@ -801,7 +801,7 @@ function draw_indexed_in_pass!(e::Emitter,
     VK.cmd_bind_index_buffer(cmd, indices_buffer, UInt64(0), VK.INDEX_TYPE_UINT32)
     VK.cmd_draw_indexed(cmd, UInt32(index_count), UInt32(instances),
                              UInt32(0), Int32(0), UInt32(0))
-    pin!(e, pipeline)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
 end
 
 """
@@ -865,7 +865,7 @@ function use_bindings!(e::Emitter, compiled, bindings)
     VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_GRAPHICS,
                                 compiled.pipeline_layout, UInt32(0),
                                 [bindings.set], UInt32[])
-    pin!(e, bindings)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     return nothing
 end
 

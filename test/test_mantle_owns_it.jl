@@ -53,7 +53,8 @@ end
     bad = filter(n -> occursin(r"^(vk|mtl|lava|VK_|MTL)"i, String(n)),
                  collect(Mantle.BACKEND_VOCABULARY))
     isempty(bad) || @info "0.1 vendor-named vocabulary entries" bad
-    @test_broken isempty(bad)
+    # PROMOTED after phase 1.7 removed `:vkformat`. A ratchet from here on.
+    @test isempty(bad)
 end
 
 # ── 0.2 Every vocabulary name is answered by core, or by every backend ───────
@@ -199,10 +200,12 @@ end
     else
         d = Mantle.Device(Mantle.MetalAPI())
         Mantle.caps(Mantle.backend(d))          # the second entry point
-        second = getglobal(MX, :_DEVICE)[]
+        # A second cache not existing at all is the passing state.
+        second = isdefined(MX, :_DEVICE) ? getglobal(MX, :_DEVICE)[] : nothing
         second === nothing && (second = d)
         same = d === second
         same || @info "0.6 a second device exists" pools_differ = Mantle.pool(d) !== Mantle.pool(second)
-        @test_broken same
+        # PROMOTED after phase 1.6 removed the second cache. A ratchet from here.
+        @test same
     end
 end

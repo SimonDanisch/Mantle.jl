@@ -61,8 +61,8 @@ mutable struct OneShot <: Closed
     # Everything the commands name, kept alive until the submission that
     # carries this one-shot has passed. `pinned_refs` are the retained
     # `DataRef`s of every pinned `LavaArray` — see `pin!(::LavaArray)`.
-    pinned::Base.IdSet{Any}
-    pinned_refs::Vector{Any}
+    # DELETED in phase 1.1/1.2: field `pinned`
+    # DELETED in phase 1.1/1.2: field `pinned_refs`
     # The `Unified` regions the commands read their arguments and workgroup
     # counts from. Owned here, so an address handed to `get_arg_buffer` is
     # valid for exactly as long as these commands can run.
@@ -94,8 +94,8 @@ submit, applied while nothing was being submitted.
 mutable struct Recording <: Closed
     bq::Any
     cmd::VK.CommandBuffer
-    pinned::Base.IdSet{Any}
-    pinned_refs::Vector{Any}
+    # DELETED in phase 1.1/1.2: field `pinned`
+    # DELETED in phase 1.1/1.2: field `pinned_refs`
     # The `Unified` regions the emitted commands read. A plan's arguments live in
     # its own `ArgMemory`, so this is usually empty — it is here because "who may
     # hand these bytes out again" has to have exactly one answer per owner.

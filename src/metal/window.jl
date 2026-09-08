@@ -84,18 +84,10 @@ function attach!(w::MetalWindow, glfw_window)
     return w
 end
 
-# No `Mantle.Window(::MetalBackend, w, h)` on purpose.
-#
-# The portable spelling `Mantle.Window(w, h; title, vsync)` takes no element
-# type and no backend — it is a method the VULKAN backend adds to a core
-# generic, and it can default to `BGRA{N0f8}` because Lava's trigger package
-# re-exports ColorTypes. Mantle does not depend on it (see `mtlformat`, which
-# matches structurally for the same reason), so this backend cannot name that
-# default, and inventing one it cannot spell would be a window whose format is
-# decided by whichever package happened to be loaded.
-#
-# A caller names the type, the way it names one for every other Mantle
-# resource: `MetalWindow(BGRA{N0f8}, W, H)`.
+# DELETED in phase 1.7: the paragraph explaining why this backend does not
+# answer `Mantle.Window(backend, w, h)`. Its premise — "Mantle does not depend
+# on [ColorTypes]" — is false; it is in `[deps]`. `Window` is in the
+# BACKEND_VOCABULARY and Lava answers it. Phase 2.7 makes Metal answer it too.
 
 # ── What a render pass asks a window ─────────────────────────────────────────
 

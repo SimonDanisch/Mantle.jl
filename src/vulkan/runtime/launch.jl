@@ -295,7 +295,7 @@ end
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
                            batch::O) where {O<:Closed}
-    pin!(batch, buf)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     if (buf.ctx::VkContext).diag.pack_arg_assert_live
         st = @atomic :acquire buf.state
         if st != BUF_STATE_ALIVE

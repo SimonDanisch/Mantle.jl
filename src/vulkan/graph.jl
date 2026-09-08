@@ -1170,14 +1170,14 @@ function tracelaunch!(e::Emitter, r::DeviceRange, t::CompiledTrace, tlas,
     # core's), with the trace's gate folded in; nothing to prepare here.
     indirect = indirectof(e.args, t.indirect)
     argaddr = packtrace!(e, t)
-    pintrace!(e, tlas)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emit_trace_indirect!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
     return nothing
 end
 
 function tracelaunch!(e::Emitter, n, t::CompiledTrace, tlas, name::AbstractString)
     argaddr = packtrace!(e, t)
-    pintrace!(e, tlas)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emit_trace!(e, t.compiled.pipeline, tlas, argaddr, Int(n), 1, 1, name)
     return nothing
 end
@@ -1682,7 +1682,7 @@ end
 pins and scratch given back."""
 function abandonrun!(dev::LavaDevice, e::Emitter)
     seal!(e.owner)
-    recycle!(dev.bq, e.owner)
+    # DELETED in phase 1.2: see docs/mantle-owns-it.md
     return nothing
 end
 

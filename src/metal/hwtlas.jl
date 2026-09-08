@@ -206,10 +206,10 @@ mutable struct MetalHWTLAS{Tri} <: HWTLAS{Tri}
 
     blas_list::Vector{MetalBLAS}
     blas_triangles::Vector{Vector{Tri}}
-    instance_batches::Vector{MetalInstanceBatch{Tri}}
+    # DELETED in phase 1.3: field `instance_batches`
 
-    handle_to_batch_idx::Dict{Raycore.TLASHandle, Int}
-    next_handle_id::UInt32
+    # DELETED in phase 1.3: field `handle_to_batch_idx`
+    # DELETED in phase 1.3: field `next_handle_id`
 
     root_aabb::Raycore.Bounds3
 
@@ -238,7 +238,7 @@ end
 
 Raycore.world_bound(t::MetalHWTLAS)  = t.root_aabb
 Raycore.n_geometries(t::MetalHWTLAS) = length(t.blas_list)
-Raycore.n_instances(t::MetalHWTLAS)  = sum(length(b) for b in t.instance_batches; init = 0)
+# DELETED in phase 1.3: see docs/mantle-owns-it.md
 Raycore.wait_for_gpu!(t::MetalHWTLAS) = (Metal.synchronize(); t)
 
 function AdaptedAccel(t::MetalHWTLAS{Tri}) where {Tri}
@@ -316,23 +316,21 @@ function add_geometry!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh) where {Tr
     return length(t.blas_list)
 end
 
-function _register_batch!(t::MetalHWTLAS{Tri}, blas_idx::Int,
-                          transforms::Vector{Mat3x4f}) where {Tri}
-    handle = Raycore.TLASHandle(t.next_handle_id)
-    t.next_handle_id += UInt32(1)
-    push!(t.instance_batches,
-          MetalInstanceBatch{Tri}(blas_idx, transforms, handle, t.blas_triangles[blas_idx]))
-    t.handle_to_batch_idx[handle] = lastindex(t.instance_batches)
-    t.dirty = true
-    return handle
-end
+# DELETED in phase 1.3: see docs/mantle-owns-it.md
+#
+# `_register_batch!`, `instance_batches`, `handle_to_batch_idx` and
+# `next_handle_id` existed once per backend, with different signatures, so a
+# name match called them private helpers. They are the same bookkeeping over a
+# list: allocate a `Raycore.TLASHandle`, append a batch, record its index.
+# Portable; only what a batch CONTAINS is a backend's (Vulkan: an instance
+# buffer, Metal: a transform list). Phase 2.5 puts the list in core.
 
 function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
                     transform::Mat4f = Mat4f(LinearAlgebra.I);
                     instance_id::UInt32 = UInt32(0), instance_mask::UInt8 = UInt8(0xff),
                     sbt_offset::UInt32 = UInt32(0), kw...) where {Tri}
     idx = add_geometry!(t, mesh)
-    return _register_batch!(t, idx, [mat4_to_vk_transform(transform)])
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
 end
 
 function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
@@ -340,14 +338,14 @@ function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
                     instance_ids = nothing, instance_mask::UInt8 = UInt8(0xff),
                     sbt_offset::UInt32 = UInt32(0), kw...) where {Tri}
     idx = add_geometry!(t, mesh)
-    return _register_batch!(t, idx, Mat3x4f[mat4_to_vk_transform(m) for m in transforms])
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
 end
 
 function Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle,
                                     transforms::AbstractVector)
-    i = get(t.handle_to_batch_idx, handle, nothing)
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
     i === nothing && throw(ArgumentError("update_transforms!: unknown handle $handle"))
-    b = t.instance_batches[i]
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
     length(transforms) == length(b.transforms) || throw(ArgumentError(
         "update_transforms!: $(length(transforms)) transforms for a batch of $(length(b.transforms))"))
     b.transforms = Mat3x4f[m isa Mat3x4f ? m : mat4_to_vk_transform(m) for m in transforms]
@@ -359,15 +357,11 @@ Raycore.update_transform!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform)
     Raycore.update_transforms!(t, handle, [transform])
 
 function Base.delete!(t::MetalHWTLAS, handle::Raycore.TLASHandle)
-    i = get(t.handle_to_batch_idx, handle, nothing)
-    i === nothing && return false
-    deleteat!(t.instance_batches, i)
-    delete!(t.handle_to_batch_idx, handle)
-    for (h, j) in t.handle_to_batch_idx
-        j > i && (t.handle_to_batch_idx[h] = j - 1)
-    end
-    t.dirty = true
-    return true
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    #
+    # The whole body was the deleted bookkeeping: find the batch by handle,
+    # drop it, and reindex every handle whose index shifted. Phase 2.5.
+    error("delete!(::HWTLAS, handle) deleted in phase 1.3")
 end
 
 # ── The commit boundary ──────────────────────────────────────────────────────
@@ -376,12 +370,7 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     if !t.dirty && !t.transforms_dirty && t.static_tlas !== nothing
         return t
     end
-    if isempty(t.instance_batches)
-        t.built = nothing; t.tri_gpu = nothing; t.off_gpu = nothing; t.scene_buf = nothing
-        t.dirty = false; t.transforms_dirty = false
-        t.static_tlas = AdaptedAccel(t)
-        return t
-    end
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
 
     # One TLAS instance per transform, each naming its batch's BLAS.
     blases = MetalBLAS[]
@@ -389,15 +378,7 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     all_tris = Tri[]
     per_inst_offsets = UInt32[]
     tri_offset = UInt32(0)
-    for b in t.instance_batches
-        append!(all_tris, b.triangles)
-        for m in b.transforms
-            push!(blases, t.blas_list[b.blas_idx])
-            push!(xforms, m)
-            push!(per_inst_offsets, tri_offset)
-        end
-        tri_offset += UInt32(length(b.triangles))
-    end
+    # DELETED in phase 1.3: see docs/mantle-owns-it.md
 
     t.built = build_accel!(t.device, blases, xforms; refittable = true)
     t.tri_gpu = MtlArray(all_tris)

@@ -12,13 +12,13 @@
 # genuinely this backend's is how a graph resource becomes a kernel argument,
 # and whether barriers have to be emitted.
 
-# The `Barriers` phase is core's and runs here too; what it derives is lowered
-# by `passbarriers`, whose default emits nothing. That is right on this device:
-# Metal orders work within a command queue by submission, and every pooled
-# allocation here is `Shared` on unified memory — so the scheduled order the
-# graph computed IS the synchronisation, exactly as on the host backend. A
-# discrete GPU reached through Metal would need `passbarriers` to become real;
-# an Apple one does not.
+# DELETED in phase 1.8: the paragraph claiming that emitting no barriers is
+# "right on this device" because "every pooled allocation here is `Shared` on
+# unified memory". Images are `PrivateStorage` (`device.jl`) and `Tracked`
+# (`images.jl`), and `device.jl` said the opposite in the same breath —
+# "nothing on this backend turns the graph's transitions into fences yet".
+# Which of the two is true is phase 2.5's question, and it is decided by
+# measurement, not by whichever paragraph survived.
 syncbackend(::MetalDevice) = MetalAPI()
 
 # `resolve` is NOT overridden here. Core's default is `storage(x)`, and that is

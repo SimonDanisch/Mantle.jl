@@ -142,7 +142,7 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
         VK.ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_SHADER_READ_BIT)
 
     # Pin the texture so the submission keeps it alive until it has passed.
-    pin!(e.owner, tex)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     end
     # No wait: a draw that samples the texture on this queue is ordered behind
     # the copy, and the host bytes were copied into the scratch before the

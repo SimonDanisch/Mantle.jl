@@ -64,7 +64,7 @@ function dump_state(; io::IO=stdout)
     if ctx !== nothing
         bq = ctx.default_bq
         println(io, "Outstanding: $(length(bq.outstanding)) submission(s)")
-        println(io, "Pooled one-shots: $(length(bq.free_oneshots))")
+        # DELETED in phase 1.2: see docs/mantle-owns-it.md
     end
     println(io, "Flushes: $(ctx === nothing ? 0 : ctx.diag.flush_counter[])")
     println(io, "Total dispatches: $(ctx === nothing ? 0 : ctx.diag.total_dispatches[])")

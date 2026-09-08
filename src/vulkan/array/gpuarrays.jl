@@ -655,8 +655,8 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     # this lifetime through `LavaAdaptor`; only the copy path was pinning a
     # level too low.
     oneshot!(bq; tag = :copy) do e
-        pin!(e.owner, src)
-        pin!(e.owner, dest)
+        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
         cmd_copy_buffer!(e, src.buf[], dest.buf[], nbytes;
                          src_off=src_offset, dst_off=dst_offset)
     end

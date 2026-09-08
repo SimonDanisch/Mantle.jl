@@ -111,8 +111,9 @@ lowers it the way `vkformat` does on the other side.
 function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
     dev = Metal.device()
-    # `nothing` rather than a named default: BGRA8Unorm is what a window wants
-    # and naming the Julia type here would need ColorTypes — see `mtlformat`.
+    # DELETED in phase 1.7: "naming the Julia type here would need ColorTypes".
+    # ColorTypes is in Mantle's [deps]; it is simply never `using`-ed. What the
+    # default should be is phase 2.7's question.
     cfmt = color_format === nothing ? MTLm.MTLPixelFormatBGRA8Unorm :
                                       mtlformat(color_format)
     cdesc = MTLm.MTLTextureDescriptor(cfmt, width, height, false)
@@ -139,11 +140,13 @@ Metal's format for a Julia element type. The counterpart to `vkformat`, and the
 same table `runtime/format.jl` documents.
 
 Matched STRUCTURALLY — on the colour type's name and its element type — rather
-than by writing `BGRA{N0f8}`. Those names belong to ColorTypes, which is not a
-dependency of Mantle: the Vulkan extension only sees them because its trigger
-package re-exports them, and adding a dependency to name four types in one
-function is the wrong trade. The caller owns the types; a backend only has to
-recognise them.
+than by writing `BGRA{N0f8}`.
+
+DELETED in phase 1.7, the reason that was given for it: "those names belong to
+ColorTypes, which is not a dependency of Mantle". It is, in `[deps]`, and
+`runtime/format.jl` documents `BGRA{N0f8}` as the portable spelling. The
+structural match means any foreign type named `RGBA` with a `Normed{UInt8}`
+element is accepted. Phase 2.7 decides what this matches on.
 """
 function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # Depth, matching `vkformat`'s `D32_SFLOAT` and the table in
@@ -278,24 +281,12 @@ end
 """A vertex shader that returns `(position = …, varyings…)`."""
 struct MetalVertexStage{F, Out} end
 
-"""
-Put a clip position into Metal's convention.
-
-**Mantle's clip space is Vulkan's: +y is DOWN the screen.** Metal's is the other
-one — +y is UP — so the same `position` renders vertically MIRRORED there, and
-that is not a difference a portable shader can be asked to know about. Flipping
-here, in the one place every vertex stage passes through, is what makes one
-shader mean one image.
-
-Cheap in the wrong way to notice: a mirrored scene still looks like a scene, the
-shadow map is mirrored with it so the shadows still land on the geometry, and a
-test that compares two Metal renders to each other agrees perfectly. What gave
-it away was a person looking at the window.
-
-Vulkan gets there by a negative-height viewport (`VK_KHR_maintenance1`); Metal
-has no such thing, so it is a multiply.
-"""
-@inline flip_clip(p::NTuple{4,Float32}) = (p[1], Mantle.clip_y(p[2]), p[3], p[4])
+# DELETED in phase 1.4: see docs/mantle-owns-it.md
+#
+# `flip_clip` and the `Mantle.clip_y` it called. What replaces them is phase
+# 2.1's: the mirror has to happen, and a shader doing the viewport transform by
+# hand has to apply the same one, which is what `clip_y` was for.
+@inline flip_clip(p::NTuple{4,Float32}) = error("flip_clip deleted in phase 1.4")
 
 @generated function (::MetalVertexStage{F,Out})(args::Vararg{Any,N}) where {F,Out,N}
     call = Expr(:call, :(F.instance), (:(args[$i]) for i in 1:(N - 1))...)
@@ -948,33 +939,9 @@ mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTLm.MTLLoadActionDontCa
                                                         MTLm.MTLLoadActionLoad
 mtl_loadaction(::Nothing) = MTLm.MTLLoadActionDontCare
 
-# ── Mantle's shader builtins, on this backend ────────────────────────────────
+# DELETED in phase 1.4: see docs/mantle-owns-it.md
 #
-# `@device_override`, not a plain definition: `Mantle.vertex_index()` has a HOST
-# method that errors, and shadowing it would let a host-side call reach a GPU
-# instruction on the CPU. The overlay puts these in Metal's method table, so
-# they apply exactly when this compiler is running — which is the only thing
-# that can decide what a builtin means.
-#
-# Generated from `Mantle.SHADER_BUILTINS` so a name added to that list and
-# missed here is a `MethodError` naming it, not a shader that silently reads
-# the wrong builtin. `frag_coord` takes its dimension, the rest take nothing.
-for f in Mantle.SHADER_BUILTINS
-    f === :frag_coord && continue
-    @eval Metal.@device_override Mantle.$f() = Metal.$f()
-end
-Metal.@device_override Mantle.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
-
-# Metal's clip space is the other one: +y is UP where Mantle's (Vulkan's) is
-# down.
-#
-# `@device_override`, like the builtins above, and for a reason worth writing
-# down: a plain `Mantle.clip_y(y::Float32) = -y` here is not an override at all,
-# it REDEFINES core's method — which an extension may not do
-# ("Method overwriting is not permitted during Module precompilation") and which
-# would also change the answer on the host, where nothing is being rasterised.
-#
-# The overlay reaches compute as well as graphics: this backend compiles both
-# through the same Metal method table, so a COMPUTE shader reprojecting into a
-# shadow map gets the same transform the rasteriser applied.
-Metal.@device_override Mantle.clip_y(y::Float32) = -y
+# The Metal half of the same bridge, plus `clip_y`. Metal's clip space is the
+# other one (+y up where Mantle's, Vulkan's, is down) and that difference has to
+# live somewhere; phase 2.1 decides whether it is a KernelInterface name or a
+# property a backend declares.
