@@ -564,7 +564,11 @@ _VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership
 # Once per backend, like the portable files above — a window, a surface, a
 # resize and a presentation are the same question on every backend, and this
 # file asked it on Vulkan alone for 2,021 lines.
-@testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
+# The portable half runs everywhere, in process; the big file needs Vulkan
+# until phase 2.8 splits its twenty-six MVE sites out.
+foreachbackend(joinpath(@__DIR__, "test_window_portable.jl"))
+
+@testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in (_VULKAN_OK ? Mantle.eachbackend() : ())
     log = joinpath(mktempdir(), "window.log")
     # The child picks the backend by NAME and re-derives the object, because a
     # backend object does not survive being interpolated into a command line.

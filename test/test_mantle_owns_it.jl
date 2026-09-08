@@ -240,6 +240,12 @@ const BACKEND_NAMED_ALLOWED = Set([
     # spellings (`recordsplans`, `waitidle`); the third belongs in
     # `test/vulkan/`. Splitting it is the rest of 0.7 and this line goes then.
     "test_arena_recording.jl",
+    # 2,000 lines with 26 MVE sites, 16 of them raw `VK.` enums for image
+    # layouts, load ops and aspects — genuinely that backend's, and they belong
+    # under `test/vulkan/`. The portable half is already split out into
+    # `test_window_portable.jl`, which runs per backend; splitting the rest is
+    # the remainder of 2.8 and this line goes then.
+    "test_window.jl",
 ])
 
 @testset "0.7 the shared test layer names no backend" begin
