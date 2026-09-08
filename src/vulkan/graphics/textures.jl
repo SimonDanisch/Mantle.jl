@@ -172,7 +172,11 @@ struct VulkanTextureBindings <: TextureBindings
 end
 
 """Create a descriptor set binding combined image samplers."""
-function bind_textures(textures::Vector{<:SampledTexture})
+# On THIS backend's textures. The signature used to be
+# `Vector{<:SampledTexture}` with the context recovered from
+# `textures[1].texture.ctx`; now `SampledTexture` carries its concrete types and
+# a Metal method sits beside this one without ambiguity.
+function bind_textures(textures::Vector{<:SampledTexture{<:Any,<:Any,<:VulkanTexture2D}})
     isempty(textures) && error("bind_textures: cannot bind an empty texture list")
     ctx = textures[1].texture.ctx
     dev = ctx.device

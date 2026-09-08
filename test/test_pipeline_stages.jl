@@ -5,6 +5,10 @@
 # tested where it lives, in `KernelInterface`'s suite, over `HostMeshOutput`.
 
 const M = Mantle
+# `Vec4f` because that is what a clip position IS, and `outputtype` puts it in
+# front of every stage's declared list. Mantle uses GeometryBasics internally but
+# does not re-export it, so the name is taken from the source.
+using GeometryBasics: Vec2f, Vec3f, Vec4f
 # Not `import KernelInterface`: the assertion is that these names come from ONE
 # module below Mantle, so the reference is taken from where a name actually
 # lives rather than from a second import that could resolve elsewhere.

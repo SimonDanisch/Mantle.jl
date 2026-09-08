@@ -83,6 +83,76 @@ struct MetalSampler <: Mantle.Sampler
 end
 
 """
+The pixel format a SAMPLED texture of element type `T` has.
+
+Not `mtlformat`, and the difference is not cosmetic: that one answers for a
+RENDER TARGET, where `Float32` means `Depth32Float`. A single-channel float
+texture that is read by a shader — a signed-distance glyph atlas is exactly one —
+is `R32Float`, and creating it as depth is rejected by the sampler.
+
+Everything else defers, because for a colour format the two questions have the
+same answer.
+"""
+mtlsampledformat(::Type{Float32}) = MTLm.MTLPixelFormatR32Float
+mtlsampledformat(::Type{Float16}) = MTLm.MTLPixelFormatR16Float
+mtlsampledformat(@nospecialize(T::Type)) = mtlformat(T)
+
+"""
+    Texture2D(backend, data::Matrix)
+
+A sampled 2D texture holding `data`.
+
+Dispatches on the BACKEND, matching `Texture2D(::LavaBackend, …)` on the other
+side — with two backends loaded there is nothing else to tell them apart by. The
+element type names the format, as everywhere a caller names one in Mantle.
+
+`storageMode` is Shared and the upload goes through `replace_region!` rather than
+a buffer-backed texture: a linear texture cannot be sampled on an Apple GPU, and
+the same storage cannot be both a render target and a sampled source. This is
+the same reason `MetalFramebuffer` reads back through `getBytes!`.
+"""
+function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {T}
+    dev = Metal.device()
+    h, w = size(data)          # (row, col), which is (height, width)
+    desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, false)
+    desc.usage = MTLm.MTLTextureUsageShaderRead
+    desc.storageMode = MTLm.MTLStorageModeShared
+    tex = MTLm.MTLTexture(dev, desc)
+    # Metal wants rows contiguous, and a Julia matrix is COLUMN-major, so the
+    # transpose is what makes `bytesPerRow` mean what Metal reads it as. Copying
+    # rather than reinterpreting, because a lazy transpose has no pointer.
+    rows = collect(transpose(data))
+    GC.@preserve rows MTLm.replace_region!(
+        tex, MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1)), 0,
+        convert(Ptr{Cvoid}, pointer(rows)), w * sizeof(T))
+    return MetalTexture2D{T}(tex, w, h)
+end
+
+"""
+    Sampler(backend; filter = :linear, wrap = :repeat)
+
+How a texture is sampled. The same two keywords the Vulkan side takes, because a
+caller that had to know which backend it was on would be writing two renderers.
+"""
+function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
+                        wrap::Symbol = :repeat)
+    f = filter === :nearest ? MTLm.MTLSamplerMinMagFilterNearest :
+        filter === :linear  ? MTLm.MTLSamplerMinMagFilterLinear :
+        error("unknown filter :$filter; expected :nearest or :linear")
+    a = wrap === :repeat        ? MTLm.MTLSamplerAddressModeRepeat :
+        wrap === :clamp        ? MTLm.MTLSamplerAddressModeClampToEdge :
+        wrap === :mirror       ? MTLm.MTLSamplerAddressModeMirrorRepeat :
+        error("unknown wrap :$wrap; expected :repeat, :clamp or :mirror")
+    desc = MTLm.MTLSamplerDescriptor()
+    desc.minFilter = f
+    desc.magFilter = f
+    desc.sAddressMode = a
+    desc.tAddressMode = a
+    desc.normalizedCoordinates = true
+    return MetalSampler(MTLm.MTLSamplerState(Metal.device(), desc))
+end
+
+"""
 An offscreen render target: a colour texture and, optionally, a depth one.
 
 Buffer-backed textures are deliberately NOT used. A render target cannot be a
@@ -1001,3 +1071,53 @@ Metal.@device_override KI.clip_y(y::Float32) = -y
 
 @inline flip_clip(p::Vec4f) = Vec4f(p[1], KI.clip_y(p[2]), p[3], p[4])
 @inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])
+
+# ── the overlay's texture table ───────────────────────────────────────────────
+#
+# At the END of the file because it names `MetalPassHandle`, which the render-pass
+# verbs below define. A method signature is evaluated where it stands.
+
+"""
+The bound texture table on Metal.
+
+Metal has no descriptor set: a texture and its sampler go straight onto the
+encoder, in two separate slot namespaces. So this is the LIST, and
+`use_bindings!` is what puts it there — which is why the two verbs are separate
+in the first place, one to build a set and one to select it.
+"""
+struct MetalTextureBindings <: Mantle.TextureBindings
+    textures::Vector{MTLm.MTLTexture}
+    samplers::Vector{MTLm.MTLSamplerState}
+end
+
+Base.length(b::MetalTextureBindings) = length(b.textures)
+
+# On THIS backend's textures, which is what `SampledTexture` carrying its
+# concrete types makes possible: `bind_textures` takes no device argument, so
+# without them the Vulkan method would be the only one that could exist.
+function Mantle.bind_textures(
+        textures::Vector{<:Mantle.SampledTexture{<:Any,<:Any,<:MetalTexture2D}})
+    isempty(textures) && error("bind_textures: cannot bind an empty texture list")
+    return MetalTextureBindings([st.texture.tex for st in textures],
+                                [st.sampler.state for st in textures])
+end
+
+"""
+    use_bindings!(emitter, compiled, bindings)
+
+Put `bindings` on the encoder for the next draw.
+
+Slots count from one on Mantle's side and from zero on Metal's; the setters do
+the conversion, as everywhere else in this backend.
+"""
+function Mantle.use_bindings!(h::MetalPassHandle, _compiled,
+                              b::MetalTextureBindings)
+    enc = h.encoder
+    for (i, tex) in enumerate(b.textures)
+        MTLm.set_fragment_texture!(enc, tex, i)
+    end
+    for (i, st) in enumerate(b.samplers)
+        MTLm.set_fragment_sampler!(enc, st, i)
+    end
+    return nothing
+end
