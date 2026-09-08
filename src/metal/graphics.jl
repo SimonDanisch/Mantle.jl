@@ -281,12 +281,6 @@ end
 """A vertex shader that returns `(position = …, varyings…)`."""
 struct MetalVertexStage{F, Out} end
 
-# DELETED in phase 1.4: see docs/mantle-owns-it.md
-#
-# `flip_clip` and the `Mantle.clip_y` it called. What replaces them is phase
-# 2.1's: the mirror has to happen, and a shader doing the viewport transform by
-# hand has to apply the same one, which is what `clip_y` was for.
-@inline flip_clip(p::NTuple{4,Float32}) = error("flip_clip deleted in phase 1.4")
 
 @generated function (::MetalVertexStage{F,Out})(args::Vararg{Any,N}) where {F,Out,N}
     call = Expr(:call, :(F.instance), (:(args[$i]) for i in 1:(N - 1))...)
@@ -939,9 +933,61 @@ mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTLm.MTLLoadActionDontCa
                                                         MTLm.MTLLoadActionLoad
 mtl_loadaction(::Nothing) = MTLm.MTLLoadActionDontCare
 
-# DELETED in phase 1.4: see docs/mantle-owns-it.md
+# ── The shader vocabulary, on this backend ───────────────────────────────────
 #
-# The Metal half of the same bridge, plus `clip_y`. Metal's clip space is the
-# other one (+y up where Mantle's, Vulkan's, is down) and that difference has to
-# live somewhere; phase 2.1 decides whether it is a KernelInterface name or a
-# property a backend declares.
+# `@device_override`, not a plain definition: `KI.vertex_index()` has a HOST
+# method that errors, and shadowing it would let a host-side call reach a GPU
+# instruction on the CPU. The overlay puts these in Metal's method table, so
+# they apply exactly when this compiler is running — which is the only thing
+# that can decide what a builtin means.
+#
+# Overriding KernelInterface DIRECTLY, where the previous arrangement went
+# through Mantle and a bridge in each backend. Metal.jl can reach
+# KernelInterface; Lava can too; neither can reach the other's runtime. That is
+# the whole reason the names moved.
+
+# What Metal has. Generated from the list so a name added to KernelInterface and
+# missed here is a `MethodError` naming it, rather than a shader that silently
+# reads the wrong builtin.
+const METAL_BUILTINS = (:vertex_index, :instance_index, :frag_coord_x, :frag_coord_y,
+                        :frag_coord_z, :frag_coord_w, :frag_coord_xy)
+
+for f in METAL_BUILTINS
+    @eval Metal.@device_override KI.$f() = Metal.$f()
+end
+Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
+
+# What Metal does NOT have, and says so rather than leaving a MethodError for a
+# shader compile to find:
+#
+#   `dFdx`/`dFdy`          Metal.jl exposes no derivative intrinsic yet; MSL
+#                          has `dfdx`/`dfdy`, so this is a gap in the binding
+#                          rather than in the hardware.
+#   `set_point_size!`      needs `[[point_size]]` on the stage output struct,
+#                          which the AIR writer does not emit yet.
+#   `sample_texture_2d`    needs a bound-texture argument, which the graph's
+#                          argument ABI does not carry yet.
+#   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
+#   `end_primitive!`,      replacement is the mesh pipeline (object + mesh
+#   `primitive_id_in`      stages), which Mantle does not describe.
+#
+# The first three are unimplemented; the last three are absent from the
+# hardware. `caps` is where a caller asks which — see `supports_geometry`.
+
+# Metal's clip space is the other one: +y is UP where the portable convention's
+# (Vulkan's) is down.
+#
+# `@device_override`, like the builtins: a plain `KI.clip_y(y::Float32) = -y`
+# here is not an override at all, it REDEFINES the declaring package's method —
+# which an extension may not do, and which would also change the answer on the
+# host, where nothing is being rasterised.
+#
+# The overlay reaches compute as well as graphics: this backend compiles both
+# through the same Metal method table, so a COMPUTE shader reprojecting into a
+# shadow map gets the same transform the rasteriser applied. That symmetry is
+# the bug fixed in September 2026 — the vertex stage mirrored and the shadow
+# lookup did not, which no test saw because a mirrored scene still looks like a
+# scene and its shadow map is mirrored with it.
+Metal.@device_override KI.clip_y(y::Float32) = -y
+
+@inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])

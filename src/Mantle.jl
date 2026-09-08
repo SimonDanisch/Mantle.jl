@@ -29,6 +29,26 @@ using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
     coopmat_getcomp, coopmat_setcomp
 # Primitive topology: KI's, because a compiler emits execution modes from it and
 # every backend creates a pipeline from it. Re-exported below, same as `caps`.
+# The device-side shader vocabulary, re-exported so a downstream package writes
+# `using Mantle` and names no backend and no compiler. Declared in
+# KernelInterface because both Lava and Metal can reach it and neither can
+# reach the other's runtime — see the header of `KernelInterface/src/graphics.jl`.
+using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
+    frag_coord_y, frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy,
+    set_point_size!, sample_texture_2d, emit_vertex!, end_primitive!,
+    primitive_id_in, clip_y
+export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
+    frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
+    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y
+using KernelInterface: rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
+    rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
+    rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
+    rt_hit_bary_v
+export rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
+    rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
+    rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
+    rt_hit_bary_v
+
 using KernelInterface: Topology, TriangleList, TriangleStrip, LineList,
     LineStrip, PointList, PatchList, LineListAdjacency, LineStripAdjacency
 # `import`, not `using … :` — these get `Mantle.Device` methods below, and

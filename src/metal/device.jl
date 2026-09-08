@@ -264,5 +264,7 @@ waitidle(d::MetalDevice) = (Metal.synchronize(); nothing)
 # saying so. What a `BatchQueue` is, and whether Mantle needs the concept at
 # all, is phase 2.3's question.
 function allocate_batch_queue!(::Union{Metal.MetalBackend,MetalDevice})
-    error("Mantle: BatchQueue is being removed; see docs/mantle-owns-it.md 2.3")
+    throw(ArgumentError(
+        "Mantle: BatchQueue is being removed — object reuse and lifetime are " *
+        "core's, not a backend's. See docs/mantle-owns-it.md 2.2 and 2.3."))
 end
