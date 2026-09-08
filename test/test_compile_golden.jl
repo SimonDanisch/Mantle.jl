@@ -17,6 +17,13 @@
 using Test
 import Mantle
 const M = Mantle
+# The backend this run is for. `runtests.jl` includes this file once per
+# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
+# gets the default one. Nothing below names a backend, which is the point:
+# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
+    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+
 
 using KernelAbstractions: @kernel, @index, @Const
 
@@ -66,7 +73,7 @@ compileresult(g, plan) = (
 )
 
 @testset "compile output is pinned" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     n = 1 << 16
     g = buildprobe(dev, n)
     r = compileresult(g, M.Plan(g))
@@ -158,7 +165,7 @@ the context it writes into, which is what `compile!(ctx, prefix)` was built for.
 compilectx(g; kw...) = Mantle.Compile(g; kw...)
 
 @testset "Dag: the edges themselves" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     c = M.compile!(compilectx(buildtemptation(dev, 1 << 18, 1 << 4)), (M.Dag(),))
     # "drain" reads what "fill" wrote. One edge, and it points backwards.
     @test M.analysis(c).deps == [Int[], [1]]
@@ -186,7 +193,7 @@ end
 # schedule is guarding nothing.
 
 @testset "Schedule: the order itself, and that the policy decides it" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     prefix = (M.Dag(), M.Schedule())
     order(g; kw...) = M.analysis(M.compile!(compilectx(g; kw...), prefix)).order
 
@@ -203,7 +210,7 @@ end
 end
 
 @testset "alias = false gives every transient the whole timeline" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     g = buildprobe(dev, 1 << 16)
     plan = M.Plan(g; alias = false)
     # Nothing may share bytes, so the peak IS the naive sum — 5 x 65536 Float32.

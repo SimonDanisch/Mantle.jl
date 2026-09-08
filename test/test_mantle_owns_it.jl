@@ -209,3 +209,40 @@ end
         @test same
     end
 end
+
+# ── 0.7 The shared test layer names no backend ───────────────────────────────
+#
+# `test/*.jl` looks shared and was not: it hardcoded `VulkanAPI()` 57 times
+# against `MetalAPI()` once — `test_window.jl` 35 times in 2,021 lines,
+# `test_arena_recording.jl` 10, `test_compile_golden.jl` 4,
+# `test_devicerange.jl` 3. Windows, surfaces, resize, presentation, arena
+# recording and device ranges are portable behaviour, and they were checked
+# against exactly one backend. Both bugs a person found by looking at a window
+# were in that blind spot, and `test_window.jl` is the file that should have
+# caught them.
+#
+# Those four now take their device from `TESTBACKEND`, which `runtests.jl` sets
+# once per `Mantle.eachbackend()`.
+#
+# The exceptions are named, not waved through:
+#   * `runtests.jl` — the harness itself, which has to name the sections it
+#     guards on.
+#   * `test_host.jl` — its "Host and Vulkan devices coexist" testset is about
+#     two named backends being usable at once, which cannot be asked of one.
+#   * this file — 0.6 asks a Metal-specific question about a second device.
+
+const BACKEND_NAMED_ALLOWED = Set(["runtests.jl", "test_host.jl",
+                                   "test_mantle_owns_it.jl"])
+
+@testset "0.7 the shared test layer names no backend" begin
+    dir = joinpath(ROOT, "test")
+    hits = Tuple{String,Int}[]
+    for f in readdir(dir)
+        endswith(f, ".jl") && !(f in BACKEND_NAMED_ALLOWED) || continue
+        n = count(m -> true, eachmatch(r"\b(VulkanAPI|MetalAPI|WebGPUAPI)\(\)|\bimport +\w*, *Lava\b|\busing +\w*, *Lava\b",
+                                       codeonly(read(joinpath(dir, f), String))))
+        n == 0 || push!(hits, (f, n))
+    end
+    isempty(hits) || @info "0.7 backend named in the shared test layer" hits
+    @test isempty(hits)
+end

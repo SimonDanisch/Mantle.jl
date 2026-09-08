@@ -467,6 +467,34 @@ include(joinpath(@__DIR__, "test_ext_imports_are_declared.jl"))
 # turns into an "Unexpectedly Pass" the moment its phase lands.
 include(joinpath(@__DIR__, "test_mantle_owns_it.jl"))
 
+
+"""
+    foreachbackend(path)
+
+Run a portable test file once for every backend this machine can use.
+
+Each run gets a fresh module, so the file's own `const`s are defined once per
+backend instead of redefined; the file reads `Main.MANTLE_TEST_BACKEND`.
+
+This exists because the files it is called on hardcoded `VulkanAPI()` 57 times
+between them — `test_window.jl` 35 times — so windows, surfaces, resize,
+presentation, arena recording and device ranges were only ever checked against
+one backend. Both bugs a person found by looking at a window in September 2026
+were in that blind spot.
+"""
+function foreachbackend(path)
+    bes = Mantle.eachbackend()
+    isempty(bes) && @info "no usable backend, skipping" file = basename(path)
+    for be in bes
+        @eval Main MANTLE_TEST_BACKEND = $be
+        @info "portable tests" file = basename(path) backend = nameof(typeof(be))
+        @eval Main module $(gensym(:PortableRun))
+            using Test
+            include($path)
+        end
+    end
+end
+
 if _VULKAN_OK
 # Needs a GPU but no display — every graph in it is headless, which is also the
 # only kind `bake!` takes — so it runs before the window tests rather than inside
@@ -477,11 +505,11 @@ if _VULKAN_OK
 # shared arena, and `Device(VulkanAPI())` is cached per context, so any earlier file
 # that compiled a plan is still a tenant until a GC reaps it. Adding an include
 # above this line that touches the Lava device breaks it.
-include(joinpath(@__DIR__, "test_arena_recording.jl"))
-include(joinpath(@__DIR__, "test_compile_golden.jl"))
+foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
+foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
-include(joinpath(@__DIR__, "test_devicerange.jl"))
+foreachbackend(joinpath(@__DIR__, "test_devicerange.jl"))
 # And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.
@@ -503,10 +531,18 @@ include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
 # A subprocess with a deadline turns that into a reported failure, which is what
 # the file is worth: skipping it is how it rotted through the runtime move
 # unnoticed, and blocking on it is how the rest of the suite stops existing.
-@testset "windows (separate process)" begin
+# Once per backend, like the portable files above — a window, a surface, a
+# resize and a presentation are the same question on every backend, and this
+# file asked it on Vulkan alone for 2,021 lines.
+@testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
     log = joinpath(mktempdir(), "window.log")
+    # The child picks the backend by NAME and re-derives the object, because a
+    # backend object does not survive being interpolated into a command line.
+    bename = repr(nameof(typeof(WINDOW_BE)))
     cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e
-           "using Mantle, Test; include($(repr(joinpath(@__DIR__, "test_window.jl"))))"`
+           "using Mantle, Test;
+            Main.MANTLE_TEST_BACKEND = only(b for b in Mantle.eachbackend() if string(nameof(typeof(b))) == $bename);
+            include($(repr(joinpath(@__DIR__, "test_window.jl"))))"`
     proc = run(pipeline(cmd; stdout = log, stderr = log); wait = false)
     deadline = time() + 600
     while process_running(proc) && time() < deadline

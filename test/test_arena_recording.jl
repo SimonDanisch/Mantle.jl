@@ -3,6 +3,13 @@
 # today.
 using Mantle, Test, KernelAbstractions, Lava, Statistics
 const M = Mantle
+# The backend this run is for. `runtests.jl` includes this file once per
+# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
+# gets the default one. Nothing below names a backend, which is the point:
+# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
+    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+
 
 @kernel function bump!(dst, @Const(src))
     i = @index(Global)
@@ -76,7 +83,7 @@ const E = MVE
     # remap it. A correct answer from `small` afterwards is `remap!` having
     # re-materialised its transients into the new allocation — which is the half
     # of this that a test built in the other order would not reach.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     small = Base.invokelatest(chainplan, dev, 250_000, 3)
     big   = Base.invokelatest(chainplan, dev, 2_000_000, 3)
 
@@ -105,7 +112,7 @@ const E = MVE
 end
 
 @testset "over budget fails at compile, with numbers" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
     # this was written against and `typemax(Int)` — "no limit" — on NVIDIA, so a
     # test pinned to it passes on one machine and allocates 8 exabytes on the
@@ -143,7 +150,7 @@ end
     # nothing left to decide. What is worth pinning is the tuples being `unique`
     # and never unioned: `a` and `b` are the same hazard and collapse into one
     # barrier, which is why three transitions produce two.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     g = M.Graph(dev)
     a   = M.Buffer(dev, zeros(Float32, 1024))
     b   = M.Buffer(dev, zeros(Float32, 1024))
@@ -174,7 +181,7 @@ end
 end
 
 @testset "a recorded plan runs bit-exact, and records nothing" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes, recorded at build
     @test M.recorded(s.plan)
     @test M.record!(s.plan) === s.plan                     # idempotent
@@ -227,7 +234,7 @@ end
     # collection between two runs cannot free storage the command buffer points
     # at. `test_recording_lifecycle.jl` asserts the same thing on a smaller plan;
     # this is the 50 000-element chain.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     p = Base.invokelatest(chainplan, dev, 50_000, 8)
     M.run!(p.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -256,7 +263,7 @@ end
     # growth announces itself (`arena_moved!` → `notify_move!`) and the next
     # run writes the new addresses as commands in its own submission: the same
     # recording answers, with the right numbers.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     small = Base.invokelatest(chainplan, dev, 100_000, 3)
     M.run!(small.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -276,7 +283,7 @@ end
 end
 
 @testset "a profiled plan reports both halves of a recorded run" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     # `bake!` REFUSED a profiled plan, because `timings` measures host recording
     # per pass and a baked plan did not record — the numbers would have been the
     # capture's, reported forever. Recording is not a second mode any more: the
@@ -312,7 +319,7 @@ end
     # writes behind a's reads of the same bytes is the barrier each recording
     # opens with, and nothing else. The arena's record of who ran last,
     # consulted at record time, is gone; a run has nothing to claim.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     a = Base.invokelatest(chainplan, dev, 50_000, 2)
     b = Base.invokelatest(chainplan, dev, 50_000, 2)
     M.record!(a.plan)
@@ -332,7 +339,7 @@ end
     # `LavaArray{T,1}(…, (length(a),))`, so a 2-D region arrived at a kernel
     # flattened and every index had to be recomputed from a width the kernel had
     # to be told separately.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     want = reshape(collect(1f0:12f0), 3, 4)
     b = M.Buffer(dev, want)
     @test size(b) == (3, 4)
@@ -362,7 +369,7 @@ end
     # So the first `reclaim!` only stamps, and the release waits for the
     # timeline. That ordering is the whole safety argument, and asserting the
     # count alone would pass just as well if it released immediately.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     pool = M.pool(dev)
     b = M.Buffer(dev, fill(1f0, 4096))
     reserved = M.reserved(pool)

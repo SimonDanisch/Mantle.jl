@@ -206,7 +206,7 @@ export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export batchqueue
-export defaultbackend, availablebackends, register_backend!, register_kernel_recorder!
+export defaultbackend, availablebackends, eachbackend, register_backend!, register_kernel_recorder!
 export devicearray
 export bind_textures
 
