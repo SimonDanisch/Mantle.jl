@@ -142,5 +142,21 @@ end
                     M.DeviceRange(n; max = cap); group = group)
     end
     M.run!(M.record!(M.Plan(g)))
-    @test count(==(1.0f0), Array(M.storage(dst))) == cld(want, group) * group
+    # How many invocations ran, observed through a kernel that does NOT bound
+    # itself — which is the only way to see it, and why this kernel is named
+    # unguarded.
+    #
+    # The answer is a backend property and both answers are correct. A recording
+    # backend reads the count on the device and launches whole workgroups over
+    # it. A KernelAbstractions backend has no indirect dispatch and launches the
+    # CEILING, deliberately: resolving the range by reading the count on the
+    # host means synchronising before every such dispatch, which measured 320
+    # synchronises and 0.585 s of a 0.602 s frame on an M5. `test_host.jl`
+    # states that contract and the equivalence it rests on — the kernel must
+    # bound itself either way.
+    #
+    # Asked through `recordsplans`, which is the same distinction under the name
+    # the vocabulary already has, rather than by naming a backend.
+    launched = M.recordsplans(dev) ? cld(want, group) * group : cap
+    @test count(==(1.0f0), Array(M.storage(dst))) == launched
 end

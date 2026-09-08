@@ -303,11 +303,15 @@ fixed; three remain and each maps to a phase.
    assertion that phase 2.6 has to make true or make backend-aware, and it is
    the first hard evidence for which of the two deleted comments was right.
 
-2. **`test_devicerange.jl:145`, the tail.** `count(==(1f0), …)` is 4096 where
-   the test wants 832 — a device-sized dispatch on Metal runs the whole padded
-   ndrange rather than `cld(want, group) * group`. Either the guard belongs in
-   the kernel on this backend too, or the ceiling is computed differently; the
-   test says the first and Metal disagrees.
+2. **`test_devicerange.jl:145`, the tail — FIXED, and it was the test.** 4096
+   where it wanted 832, and both are right: a recording backend reads the count
+   on the device and launches whole workgroups over it, while a
+   KernelAbstractions backend has no indirect dispatch and launches the CEILING
+   on purpose — resolving the range by reading the count on the host means
+   synchronising before every such dispatch, measured at 320 synchronises and
+   0.585 s of a 0.602 s frame on an M5. `test_host.jl` states that contract and
+   the equivalence it rests on. The assertion asks `recordsplans(dev)` now,
+   which is the same distinction under a name the vocabulary already has.
 
 3. **The window subprocess on Metal.** It now runs (the DISPLAY guard was an
    X11 question, and the file skipped itself on macOS), and it fails — 26 of
@@ -321,6 +325,15 @@ fixed; three remain and each maps to a phase.
    0", "trim! leaves nothing reserved". They take a private `Pool` over the same
    real device now and hold in any order.
 
-Three remain: 1 is phase 2.6, 2 is a real behavioural difference that needs a
-decision, 3 is the rest of 2.8. The suite is red on three real differences
-instead of green on one backend, which is the trade 0.7 was for.
+Two remain, and neither is papered over:
+
+* **1 stays red on purpose.** Making it backend-aware would encode "Metal emits
+  no barriers" as correct, which is exactly the unsettled claim phase 1.8
+  deleted. It is the flag for 2.6 and it should stay visible until 2.6 measures.
+* **3 is the rest of 2.8**: 26 assertions in `test_window.jl` still reach for
+  `MVE` to drive a window without a graph, and `Window(backend, w, h)` is what
+  replaces them.
+
+Four of the six were fixed by making the test say what it meant. That ratio is
+worth remembering: most of what a second backend "breaks" is a test that was
+describing one backend and calling it a property.
