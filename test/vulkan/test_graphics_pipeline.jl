@@ -40,8 +40,11 @@ end
             Lava.gfx_output(0, Vec4f(0.0f0, 1.0f0, 0.0f0, 1.0f0))
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=solid_vert, fragment=solid_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(solid_vert),
+                                 fragment = FragmentShader(solid_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         pixels = draw_and_readback(pip, 3)
         @test all(p -> p[2] ≈ 1f0, pixels)  # all green
         @test all(p -> p[4] ≈ 1f0, pixels)  # alpha = 1
@@ -57,8 +60,11 @@ end
             Lava.gfx_output(0, Vec4f(0f0, 0f0, 0f0, 0f0))
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=noop_vert, fragment=noop_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(noop_vert),
+                                 fragment = FragmentShader(noop_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         pixels = draw_and_readback(pip, 0; clear_color=(0.25f0, 0.5f0, 0.75f0, 1f0))
         @test all(p -> p[1] ≈ 0.25f0 && p[2] ≈ 0.5f0 && p[3] ≈ 0.75f0, pixels)
     end
@@ -78,8 +84,11 @@ end
             Lava.gfx_output(0, c)
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=bda_vert, fragment=bda_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(bda_vert),
+                                 fragment = FragmentShader(bda_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         # Fullscreen triangle
         positions = LavaArray(Vec3f[Vec3f(-1,-1,0), Vec3f(3,-1,0), Vec3f(-1,3,0)])
         pixels = draw_and_readback(pip, 3; args=(positions,))
@@ -103,8 +112,11 @@ end
             Lava.gfx_output(0, Vec4f(uv[1], uv[2], 0f0, 1f0))
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=vary_vert, fragment=vary_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(vary_vert),
+                                 fragment = FragmentShader(vary_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         pixels = draw_and_readback(pip, 3; width=8, height=8)
         # Center pixel should have UV ≈ (0.5, 0.5)
         center = pixels[4, 4]
@@ -130,8 +142,11 @@ end
             Lava.gfx_output(0, Vec4f(fx / 16f0, fy / 16f0, 0f0, 1f0))
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=fc_vert, fragment=fc_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(fc_vert),
+                                 fragment = FragmentShader(fc_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         pixels = draw_and_readback(pip, 3)
         # Pixel at (8,8) should have frag_coord ≈ (8.5, 8.5) → normalized ≈ (0.53, 0.53)
         p = pixels[8, 8]
@@ -154,8 +169,11 @@ end
             Lava.gfx_output(0, Vec4f(1f0, 0f0, 0f0, 0.5f0))
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=ab_vert, fragment=ab_frag,
-            blend=AlphaBlend(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(ab_vert),
+                                 fragment = FragmentShader(ab_frag),
+                                 blend = AlphaBlend(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         # Clear to white, draw semi-transparent red
         pixels = draw_and_readback(pip, 3; clear_color=(1f0, 1f0, 1f0, 1f0))
         # Result should be blended: red = 0.5*1 + 0.5*1 = 1, green = 0.5*0 + 0.5*1 = 0.5
@@ -187,8 +205,11 @@ end
             Lava.gfx_output(0, c)
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=depth_vert, fragment=depth_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthLess())
+        pip = GraphicsPipeline(; vertex = VertexShader(depth_vert),
+                                 fragment = FragmentShader(depth_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthLess())
 
         fb = VulkanFramebuffer(8, 8; depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
@@ -249,10 +270,16 @@ end
     end
 
     @testset "pipeline state is part of the cache key" begin
-        opaque = GraphicsPipeline(; vertex=state_vert, fragment=state_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
-        additive = GraphicsPipeline(; vertex=state_vert, fragment=state_frag,
-            blend=Additive(), cull=NoCull(), depth=DepthOff())
+        opaque = GraphicsPipeline(; vertex = VertexShader(state_vert),
+                                    fragment = FragmentShader(state_frag),
+                                    blend = Opaque(),
+                                    cull = NoCull(),
+                                    depth = DepthOff())
+        additive = GraphicsPipeline(; vertex = VertexShader(state_vert),
+                                      fragment = FragmentShader(state_frag),
+                                      blend = Additive(),
+                                      cull = NoCull(),
+                                      depth = DepthOff())
 
         ctx = MVE.vk_context()
         bq = ctx.default_bq
@@ -276,8 +303,11 @@ end
     # and UNDEFINED when none is bound. Deriving it from the depth mode instead
     # made both mismatched combinations produce an invalid pipeline.
     @testset "depth testing needs a depth attachment" begin
-        pip = GraphicsPipeline(; vertex=state_vert, fragment=state_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthLess())
+        pip = GraphicsPipeline(; vertex = VertexShader(state_vert),
+                                 fragment = FragmentShader(state_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthLess())
         @test_throws ArgumentError draw_and_readback(pip, 3; depth=false)
     end
 
@@ -297,8 +327,11 @@ end
             Lava.gfx_output(0, Lava.gfx_input(Vec4f, 0))
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=zvert, fragment=zfrag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(zvert),
+                                 fragment = FragmentShader(zfrag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
 
         fb = VulkanFramebuffer(8, 8; depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
@@ -337,8 +370,11 @@ end
             Lava.gfx_output(0, c)
             return nothing
         end
-        pip = GraphicsPipeline(; vertex=inst_vert, fragment=inst_frag,
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pip = GraphicsPipeline(; vertex = VertexShader(inst_vert),
+                                 fragment = FragmentShader(inst_frag),
+                                 blend = Opaque(),
+                                 cull = NoCull(),
+                                 depth = DepthOff())
         pixels = draw_and_readback(pip, 3; instances=2, width=32, height=32)
         # Should have some non-black pixels from both instances
         has_red = any(p -> p[1] > 0.5f0, pixels)
@@ -360,9 +396,12 @@ end
                                  Vec4f(0.5f0 * inputs.normal[1] + 0.5f0,
                                        0.5f0 * inputs.normal[2] + 0.5f0,
                                        0.5f0 * inputs.normal[3] + 0.5f0, 1f0))
-        pipe = Rasterizer(vertex=gbuf_vertex, fragment=gbuf_fragment,
-            varyings=(albedo=Vec4f, normal=Vec3f), topology=TriangleList(),
-            blend=Opaque(), cull=NoCull(), depth=DepthOff())
+        pipe = Rasterizer(; vertex = VertexShader(gbuf_vertex; outputs = (albedo=Vec4f, normal=Vec3f)),
+                            fragment = FragmentShader(gbuf_fragment),
+                            topology = TriangleList(),
+                            blend = Opaque(),
+                            cull = NoCull(),
+                            depth = DepthOff())
         vfn, vtt, ffn, ftt = MVE.resolve_shader_pair(pipe, Tuple{}, Tuple{})
         _, compiled = MVE.ensure_compiled_with_shader!(pipe, vfn, ffn, vtt, ftt;
             color_format=Vulkan.Format[Vulkan.FORMAT_R8G8B8A8_UNORM,

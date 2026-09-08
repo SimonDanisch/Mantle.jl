@@ -32,9 +32,9 @@ rg_vertex(verts) = (position = verts[Int(vertex_index())], tint = (0f0, 1f0, 0f0
 rg_fragment(inputs) = inputs.tint
 
 const RG_DEV = M.Device(M.MetalAPI())
-const RG_PIPE = M.GraphicsPipeline(; vertex = rg_vertex, fragment = rg_fragment,
-                                     cull = M.NoCull(),
-                                     varyings = (tint = NTuple{4,Float32},))
+const RG_PIPE = M.GraphicsPipeline(; vertex = M.VertexShader(rg_vertex; outputs = (tint = NTuple{4,Float32},)),
+                                     fragment = M.FragmentShader(rg_fragment),
+                                     cull = M.NoCull())
 const RG_TRI = M.Buffer(RG_DEV, NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0f0,    0.9f0, 0f0, 1f0)])
@@ -173,9 +173,9 @@ mrt_fragment(inputs) = (inputs.albedo,
                         Vec4f(0f0, 0f0, 1f0, 1f0),
                         Vec4f(inputs.normal[1], inputs.normal[2], inputs.normal[3], 1f0))
 
-const RG_MRT = M.GraphicsPipeline(; vertex = mrt_vertex, fragment = mrt_fragment,
-                                    cull = M.NoCull(),
-                                    varyings = (albedo = Vec4f, normal = Vec3f))
+const RG_MRT = M.GraphicsPipeline(; vertex = M.VertexShader(mrt_vertex; outputs = (albedo = Vec4f, normal = Vec3f)),
+                                    fragment = M.FragmentShader(mrt_fragment),
+                                    cull = M.NoCull())
 
 @testset "a Vec4f varying manges the same as its tuple" begin
     # The two stages link by this string and nothing else, so `Vec4f` and
@@ -227,8 +227,9 @@ end
 rg_depth_only(verts) = (position = verts[Int(vertex_index())],)
 rg_no_colour(inputs) = nothing
 
-const RG_SHADOW = M.GraphicsPipeline(; vertex = rg_depth_only, fragment = rg_no_colour,
-                                       varyings = NamedTuple(), cull = M.NoCull(),
+const RG_SHADOW = M.GraphicsPipeline(; vertex = M.VertexShader(rg_depth_only),
+                                       fragment = M.FragmentShader(rg_no_colour),
+                                       cull = M.NoCull(),
                                        depth = M.DepthLess())
 
 @testset "a depth-only pass writes depth and a copy pass reads it back" begin
@@ -464,8 +465,9 @@ tinted_fragment(inputs) = inputs.tint
     # what reorders them — so a pipeline compiled for the wrong one swaps red
     # and blue, which looks like a plausible image and is why this compares
     # CHANNELS rather than eyeballing.
-    pipe = M.GraphicsPipeline(; vertex = tinted_vertex, fragment = tinted_fragment,
-                                cull = M.NoCull(), varyings = (tint = Vec4f,))
+    pipe = M.GraphicsPipeline(; vertex = M.VertexShader(tinted_vertex; outputs = (tint = Vec4f,)),
+                                fragment = M.FragmentShader(tinted_fragment),
+                                cull = M.NoCull())
 
     function draw_into(target_of)
         g = M.Graph(RG_DEV)

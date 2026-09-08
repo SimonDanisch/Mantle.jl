@@ -14,12 +14,15 @@
 Everything that changes the created `VkPipeline` but is not the shader pair.
 
 Blend, cull, topology and depth mode are singletons, so `typeof(pipeline)` carries
-them exactly; `varyings` and the geometry/tessellation configs are values, so they
-are hashed as values. Leaving state out of the key made two pipelines that differ
-only in, say, blend mode or depth mode share one compiled pipeline — whichever was
-compiled first won, and the second draw silently rendered with the wrong state.
+them exactly. The stages are hashed as values, because each one now carries its
+function, its configuration and its interface together — three things that used
+to be keyed separately and could disagree about which pipeline they belonged to.
+Leaving state out of the key made two pipelines that differ only in, say, blend
+mode or depth mode share one compiled pipeline — whichever was compiled first
+won, and the second draw silently rendered with the wrong state.
 """
-pipeline_state_key(p::GraphicsPipeline) = (typeof(p), p.varyings, p.geometry, p.tess_control)
+pipeline_state_key(p::GraphicsPipeline) =
+    (typeof(p), p.vertex, p.fragment, p.geometry, p.tess_control)
 
 """Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
@@ -55,7 +58,8 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     geom_spirv = nothing
     geom_config = nothing
     if pipeline.geometry !== nothing
-        geom_fn, geom_cfg = pipeline.geometry
+        geom_fn = Mantle.stagefunction(pipeline.geometry)
+        geom_cfg = Mantle.stageconfig(pipeline.geometry)
         geom = get_or_compile_gfx(geom_fn, tt_vertex, :geometry; config=geom_cfg)
         geom_spirv = geom.spirv_bytes
         geom_config = geom_cfg
@@ -107,30 +111,25 @@ convert_args(args::Tuple) = map(arg -> arg isa LavaArray ? LavaDeviceArray(arg) 
 convert_args(::Tuple{}) = ()
 
 """
-Build the full vertex output NamedTuple type from a varyings spec.
-E.g. `(normal=Vec3f, uv=Vec2f)` → `@NamedTuple{position::Vec4f, normal::Vec3f, uv::Vec2f}`
-"""
-function varyings_to_output_type(varyings::NamedTuple)
-    names = (:position, keys(varyings)...)
-    types = (Vec4f, values(varyings)...)
-    return NamedTuple{names, Tuple{types...}}
-end
+Resolve the vertex and fragment callables and their type tuples.
 
-"""
-Resolve vertex/fragment functions and type tuples, wrapping NamedTuple-returning
-shaders with VertexWrapper/FragmentWrapper as needed.
+Always wrapped, and there is no second path. `varyings_to_output_type` used to
+build this from a single `varyings` list, with an `else` branch for shaders that
+called `gfx_output`/`gfx_input` with numbered locations — two ways to declare one
+interface, and the numbered one could not express a pipeline with a geometry
+stage at all. `Mantle.outputtype` answers it from the stage that actually feeds
+the rasteriser, which is the geometry stage when there is one.
+
+An empty output list is a real answer: a shadow pass writes only its clip
+position, and that is a pipeline whose fragment stage reads nothing.
+
 Returns (vert_fn, vert_tt, frag_fn, frag_tt).
 """
 function resolve_shader_pair(pipeline, vert_tt::Type, frag_tt::Type)
-    if pipeline.varyings !== nothing
-        vout = varyings_to_output_type(pipeline.varyings)
-        wrapped_vert = VertexWrapper{typeof(pipeline.vertex)}()
-        wrapped_frag = FragmentWrapper{typeof(pipeline.fragment), vout}()
-        return wrapped_vert, vert_tt, wrapped_frag, frag_tt
-    else
-        # Legacy API: user calls gfx_output/gfx_input directly
-        return pipeline.vertex, vert_tt, pipeline.fragment, frag_tt
-    end
+    vout = Mantle.outputtype(Mantle.lastgeometrystage(pipeline))
+    wrapped_vert = VertexWrapper{typeof(Mantle.stagefunction(pipeline.vertex))}()
+    wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout}()
+    return wrapped_vert, vert_tt, wrapped_frag, frag_tt
 end
 
 """
@@ -274,12 +273,9 @@ function blit_vertex()
     # vid=0: (-1,-1), vid=1: (3,-1), vid=2: (-1,3)
     x = Float32(Int32(vid & Int32(1)) * 4 - 1)
     y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-    set_position!(Vec4f(x, y, 0.0f0, 1.0f0))
-    # Pass UV coordinates
     u = (x + 1.0f0) * 0.5f0
     v = (y + 1.0f0) * 0.5f0
-    gfx_output(0, Vec2f(u, v))
-    return nothing
+    return (position = Vec4f(x, clip_y(y), 0.0f0, 1.0f0), uv = Vec2f(u, v))
 end
 
 # Convert any RGBA-like color to Vec4f for fragment output
@@ -289,16 +285,14 @@ to_vec4f(c) = Vec4f(c.r, c.g, c.b, c.alpha)
 # Built-in fragment shader for blitting a GPU buffer to screen.
 # Buffer is in Julia column-major layout: element [row, col] is at linear index col * height + row + 1.
 # Screen coords: fx = column (x), fy = row (y, 0 = top in Vulkan).
-function blit_fragment(buffer, width::Int32, height::Int32)
+function blit_fragment(_inputs, buffer, width::Int32, height::Int32)
     fx = frag_coord_x()
     fy = frag_coord_y()
     ix = unsafe_trunc(Int32, fx)   # column (0-based)
     iy = unsafe_trunc(Int32, fy)   # row (0-based)
     # Column-major indexing: col * height + row + 1
     idx = ix * height + iy + Int32(1)
-    pixel = to_vec4f(buffer[idx])
-    gfx_output(0, pixel)
-    return nothing
+    return to_vec4f(buffer[idx])
 end
 
 
@@ -374,11 +368,11 @@ function blit!(e::Emitter, target::RenderTarget, source::LavaArray;
     ctx = e.ctx::VkContext
     if ctx.caches.blit === nothing
         ctx.caches.blit = GraphicsPipeline(;
-            vertex=blit_vertex,
-            fragment=blit_fragment,
-            blend=Opaque(),
-            cull=NoCull(),
-            depth=DepthOff(),
+            vertex = VertexShader(blit_vertex; outputs = (uv = Vec2f,)),
+            fragment = FragmentShader(blit_fragment),
+            blend = Opaque(),
+            cull = NoCull(),
+            depth = DepthOff(),
         )
     end
 
@@ -390,12 +384,13 @@ function blit!(e::Emitter, target::RenderTarget, source::LavaArray;
     converted_frag = convert_args(frag_args)
     frag_tt = typeof(converted_frag)
 
-    _, compiled = ensure_compiled_with_shader!(pipeline,
-        pipeline.vertex, pipeline.fragment, Tuple{}, frag_tt;
+    vfn = Mantle.stagefunction(pipeline.vertex)
+    ffn = Mantle.stagefunction(pipeline.fragment)
+    _, compiled = ensure_compiled_with_shader!(pipeline, vfn, ffn, Tuple{}, frag_tt;
         color_format=color_format)
 
     # Pack fragment args via the fragment shader's push_info
-    frag_shader = get_or_compile_gfx(pipeline.fragment, frag_tt, :fragment)
+    frag_shader = get_or_compile_gfx(ffn, frag_tt, :fragment)
     clear_color = clear ? (0.0f0, 0.0f0, 0.0f0, 1.0f0) : nothing
 
     push_data = pack_gfx_args(e.owner, frag_args, frag_shader.push_info)

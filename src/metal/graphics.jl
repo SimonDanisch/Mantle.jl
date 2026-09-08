@@ -187,23 +187,19 @@ end
 """
     stage_output_type(pipeline, stage) -> Type
 
-The struct a stage writes, built from Mantle's portable declaration.
+The struct a stage writes.
 
-`GraphicsPipeline.varyings` is a `NamedTuple` of types, and a `NamedTuple` TYPE
-already has `fieldnames` and `fieldtype` — which is exactly what Metal.jl's
+`Mantle.outputtype` builds it from the stage's own `outputs`, and a `NamedTuple`
+TYPE already has `fieldnames` and `fieldtype` — which is exactly what Metal.jl's
 `stage_outputs` reads. So the portable declaration lowers with no translation
-table: the vertex stage returns `(position, varyings...)`, the fragment stage
-returns one render target.
+table at all.
 
-The clip position is prepended rather than declared, because every vertex stage
-has one and a caller that had to remember to list it would eventually forget.
+The clip position is prepended there rather than declared, because every vertex
+stage has one and a caller that had to remember to list it would eventually
+forget.
 """
-function stage_output_type(p::Mantle.GraphicsPipeline, ::Val{:vertex}, ncolor::Int = 1)
-    v = p.varyings
-    names = v === nothing ? () : keys(v)
-    types = v === nothing ? () : Tuple(values(v))
-    return NamedTuple{(:position, names...), Tuple{NTuple{4,Float32}, types...}}
-end
+stage_output_type(p::Mantle.GraphicsPipeline, ::Val{:vertex}, ncolor::Int = 1) =
+    Mantle.outputtype(p.vertex)
 
 """
 One field per colour attachment, because that is what a fragment stage writes.
@@ -234,13 +230,18 @@ stage_output_type(::Mantle.GraphicsPipeline, ::Val{:fragment}, ncolor::Int = 1) 
 """
 Bring one value to the type the stage's output struct declares.
 
-A shader writes `Vec4f`; the struct declares `NTuple{4,Float32}`, because that
-is what the varying mangling and the AIR vector type are built from and having
-one canonical spelling keeps the two stages' strings identical. The two are the
-SAME bytes — a `Vec4f` is a one-field wrapper around exactly that tuple — so the
-bridge is a `getfield`, not a `convert`: `convert` has no method between them
-and the failure is a `MethodError` reached from device code, which surfaces as
+A shader is free to write `Vec2f` where the declaration says `NTuple{2,Float32}`
+or the other way round, and this is the bridge. The two are the SAME bytes — a
+`Vec` is a one-field wrapper around exactly that tuple — so it is a `getfield`,
+not a `convert`: `convert` has no method between them and the failure is a
+`MethodError` reached from device code, which surfaces as
 `jl_f_throw_methoderror` plus a `gc_pool_alloc` in a fragment shader.
+
+It is NOT what carries `position`. That field is `Vec4f` on both backends now,
+because a clip position is one; declaring it as the tuple here and converting
+was a second spelling for one thing, and nothing needed it — `mangle_varying`
+gives `Vec4f` and `NTuple{4,Float32}` the same string, which is all the two
+stages link by.
 """
 @generated function to_stage_field(::Type{T}, v) where {T}
     v === T && return :v
@@ -338,15 +339,15 @@ const GFX_CACHE = Dict{Any,Any}()
 const GFX_CACHE_LOCK = ReentrantLock()
 
 """
-The varyings a pipeline declares, as a `NamedTuple` type.
+What the fragment stage reads, as a `NamedTuple` type.
 
-`nothing` means none, not "unknown": a vertex stage that outputs only its clip
-position is a real pipeline (a shadow pass is exactly that), and the empty tuple
-is what says so.
+`Mantle.fragmentinputtype` answers it, because which stage feeds the rasteriser
+depends on which stages the pipeline HAS — the geometry stage when there is one,
+the vertex stage otherwise. An empty tuple is a real answer, not a missing one:
+a vertex stage that outputs only its clip position is a real pipeline and a
+shadow pass is exactly that.
 """
-varying_type(p::Mantle.GraphicsPipeline) =
-    p.varyings === nothing ? NamedTuple{(),Tuple{}} :
-                             NamedTuple{keys(p.varyings), Tuple{values(p.varyings)...}}
+varying_type(p::Mantle.GraphicsPipeline) = Mantle.fragmentinputtype(p)
 
 """
     stage_signatures(p, ncolor, vert_bufs, frag_bufs) -> (vfn, ffn, vert_tt, frag_tt)
@@ -362,7 +363,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
                           vert_bufs::Type, frag_bufs::Type)
     VIn  = varying_type(p)
     VOut = stage_output_type(p, Val(:vertex))
-    vfn = MetalVertexStage{typeof(p.vertex), VOut}()
+    vfn = MetalVertexStage{typeof(Mantle.stagefunction(p.vertex)), VOut}()
     vert_tt = Tuple{vert_bufs.parameters..., Core.LLVMPtr{VOut,1}}
     # No colour attachment means no fragment stage at all — a shadow pass writes
     # depth and nothing else, and its `fragment` returns `nothing`. Metal spells
@@ -370,7 +371,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     # returns an EMPTY struct instead is not a thing AIR has.
     ncolor == 0 && return vfn, nothing, vert_tt, nothing
     FOut = stage_output_type(p, Val(:fragment), ncolor)
-    ffn = MetalFragmentStage{typeof(p.fragment), VIn, FOut}()
+    ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
                     Core.LLVMPtr{FOut,1}}
     return vfn, ffn, vert_tt, frag_tt
@@ -408,9 +409,12 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
               "`supports_tessellation(backend)` before building a pipeline " *
               "with it.")
 
-    key = (p.vertex, p.fragment, vert_bufs, frag_bufs, color_formats, depth_format,
-           typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth),
-           p.varyings)
+    # The stages themselves, because each now carries its function, its config
+    # and its interface — three things that used to be keyed separately and
+    # could disagree about which pipeline they belonged to.
+    key = (p.vertex, p.fragment, p.geometry, vert_bufs, frag_bufs,
+           color_formats, depth_format,
+           typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth))
     Base.@lock GFX_CACHE_LOCK begin
         cached = get(GFX_CACHE, key, nothing)
         cached === nothing || return cached::MetalCompiledGraphicsPipeline
@@ -419,11 +423,11 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     dev = Metal.device()
     vfn, ffn, vert_tt, frag_tt =
         stage_signatures(p, length(color_formats), vert_bufs, frag_bufs)
-    vname = string(nameof(p.vertex)) * "_vs"
+    vname = string(nameof(Mantle.stagefunction(p.vertex))) * "_vs"
     vfun, vlib = compile_stage_function(vfn, vert_tt, :vertex, vname)
     ffun, flib = ffn === nothing ? (nothing, nothing) :
         compile_stage_function(ffn, frag_tt, :fragment,
-                               string(nameof(p.fragment)) * "_fs")
+                               string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
 
     desc = MTLm.MTLRenderPipelineDescriptor()
     desc.vertexFunction = vfun
@@ -995,4 +999,5 @@ Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 # scene and its shadow map is mirrored with it.
 Metal.@device_override KI.clip_y(y::Float32) = -y
 
+@inline flip_clip(p::Vec4f) = Vec4f(p[1], KI.clip_y(p[2]), p[3], p[4])
 @inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])

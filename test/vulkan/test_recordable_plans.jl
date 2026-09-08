@@ -42,9 +42,12 @@ tri_fragment(inputs) = inputs.color
 # `Mantle.vertex_index`, QUALIFIED: `runtests.jl` says `using Mantle` and this
 # file is included into the same Main, where Lava may also be `using`ed — and two
 # modules exporting one name leaves the bare form resolving to neither.
-const TRI = M.Rasterizer(vertex = tri_vertex, fragment = tri_fragment,
-                         varyings = (color = Vec4f,), topology = M.TriangleList(),
-                         blend = M.Opaque(), cull = M.NoCull(), depth = M.DepthOff())
+const TRI = M.Rasterizer(; vertex = M.VertexShader(tri_vertex; outputs = (color = Vec4f,)),
+                           fragment = M.FragmentShader(tri_fragment),
+                           topology = M.TriangleList(),
+                           blend = M.Opaque(),
+                           cull = M.NoCull(),
+                           depth = M.DepthOff())
 
 @kernel function s2g_copy!(dst, @Const(src))
     i = @index(Global)

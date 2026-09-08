@@ -58,10 +58,17 @@ using KernelInterface: MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter
     MeshEmitter, emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!,
     set_mesh_line!, set_mesh_point!, set_mesh_outputs!, set_mesh_groups!,
     mesh_thread_index, mesh_group_index
+# `Flat` and the interface-list accessors. `GeometryConfig` was Lava's, which
+# meant a portable pipeline description could not hold one without depending on
+# a SPIR-V compiler; it is beside `MeshConfig` now, for the reason both are
+# there — a compiler reads every field.
+using KernelInterface: Flat, isflat, unflat, flatnames, smoothnames, valuetypes,
+    GeometryConfig, inputvertices
 export MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter,
     emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!, set_mesh_line!,
     set_mesh_point!, set_mesh_outputs!, set_mesh_groups!, mesh_thread_index,
     mesh_group_index
+export Flat, isflat, unflat, GeometryConfig
 using KernelInterface: rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
     rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
     rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
@@ -167,6 +174,7 @@ include("array/fft.jl")
 # pieces came here, which went to KernelInterface, and why.
 include("graphics/state.jl")
 include("graphics/resources.jl")   # needs RenderTarget (state.jl) and Window (runtime/api.jl)
+include("graphics/stages.jl")      # needs Topology and the KI configs above
 include("graphics/pipeline.jl")    # needs the state vocabulary above
 include("graphics/mesh.jl")        # needs the same state vocabulary
 include("graphics/commands.jl")
@@ -269,6 +277,14 @@ export InstanceBatches, register!, batchof, ninstances
 export readback_framebuffer, readback_window, readback_target
 
 # Pipeline descriptions and the indirect draw record.
+# The stages a pipeline is made of. Each declares only what it PRODUCES: its
+# inputs are the previous stage's outputs, so no interface is written twice.
+export ShaderStage, VertexShader, FragmentShader, GeometryShader, MeshShader,
+    ObjectShader
+export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
+    smoothoutputs, outputtype
+# What the fragment stage reads, which depends on which stages a pipeline has.
+export lastgeometrystage, fragmentinputs, fragmentinputtype
 export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
 export DrawIndirectCommand
 # The mesh pipeline. Described here, run by a backend that answers

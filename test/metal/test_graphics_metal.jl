@@ -46,10 +46,9 @@ end
     @test fb isa Mantle.Framebuffer
     @test (fb.width, fb.height) == (64, 64)
 
-    pipe = Mantle.GraphicsPipeline(; vertex = mantle_gfx_vertex,
-                                     fragment = mantle_gfx_fragment,
-                                     cull = Mantle.NoCull(),
-                                     varyings = (tint = NTuple{4,Float32},))
+    pipe = Mantle.GraphicsPipeline(; vertex = Mantle.VertexShader(mantle_gfx_vertex; outputs = (tint = NTuple{4,Float32},)),
+                                     fragment = Mantle.FragmentShader(mantle_gfx_fragment),
+                                     cull = Mantle.NoCull())
 
     verts = NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0), (0.9f0, -0.9f0, 0f0, 1f0),
                               (0f0, 0.9f0, 0f0, 1f0)]
@@ -93,9 +92,10 @@ end
     # pipeline — so asking for one has to fail loudly rather than silently drop
     # the stage and render something plausible.
     @test_throws ErrorException MEXT.compile_pipeline(
-        Mantle.GraphicsPipeline(; vertex = mantle_gfx_vertex,
-                                  fragment = mantle_gfx_fragment,
-                                  geometry = (mantle_gfx_vertex, nothing)),
+        Mantle.GraphicsPipeline(;
+            vertex = Mantle.VertexShader(mantle_gfx_vertex),
+            fragment = Mantle.FragmentShader(mantle_gfx_fragment),
+            geometry = Mantle.GeometryShader(mantle_gfx_vertex; max_vertices = 3)),
         MTLg.MTLPixelFormat[MTLg.MTLPixelFormatBGRA8Unorm], nothing, Tuple{}, Tuple{})
 end
 

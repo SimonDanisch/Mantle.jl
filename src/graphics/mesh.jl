@@ -12,51 +12,41 @@
 # for why a mesh pipeline is portable vocabulary rather than a Metal workaround.
 
 """
-    MeshPipeline(; mesh, fragment, object = nothing, varyings = nothing,
+    MeshPipeline(; mesh, fragment, object = nothing,
                    blend = Opaque(), cull = CullBack(), depth = DepthLess())
 
 A pipeline whose primitives are written by a mesh stage rather than assembled
 from a vertex stream.
 
-# Fields
-- `mesh`: a `(func, MeshConfig)` tuple. Required: the stage that writes vertices
-  and primitives into the output object.
-- `object`: `nothing`, or a `(func, ObjectConfig)` tuple. The stage that decides
-  how many mesh threadgroups to dispatch.
-- `fragment`: the fragment stage, exactly as [`GraphicsPipeline`](@ref) takes it.
-- `varyings`: a NamedTuple of types, as `GraphicsPipeline` takes it. These are
-  the fields of the vertex the mesh stage writes, beside `position`.
+`mesh` is a [`MeshShader`](@ref) and `fragment` a [`FragmentShader`](@ref);
+`object` is an [`ObjectShader`](@ref) or nothing, in which case the host
+dispatches the mesh threadgroups.
 
-There is deliberately no `topology` field. In a `GraphicsPipeline` the topology
-describes the INPUT vertex stream that the fixed-function assembler groups into
-primitives; a mesh stage has no input stream and states what it EMITS, which is
-`MeshConfig`'s `topology`. Carrying a second one here would be a field with
-nothing to mean.
+There is no `topology` field. In a `GraphicsPipeline` the topology describes the
+INPUT vertex stream that the fixed-function assembler groups into primitives; a
+mesh stage has no input stream and states what it EMITS, which its
+`MeshShader`'s does. A second one here would be a field with nothing to mean.
 
 Ask [`supports_mesh_pipeline`](@ref) before building one. A backend that answers
 `false` cannot run it, and finding that out from a shader compile is the wrong
 place and the wrong time.
 """
-struct MeshPipeline{O, M, F, B<:BlendMode, C<:CullFace, D<:DepthMode, VY}
-    object::O     # Nothing or (func, ObjectConfig)
-    mesh::M       # (func, MeshConfig)
+struct MeshPipeline{O, M<:MeshShader, F<:FragmentShader,
+                    B<:BlendMode, C<:CullFace, D<:DepthMode}
+    object::O     # Nothing or ObjectShader
+    mesh::M
     fragment::F
     blend::B
     cull::C
     depth::D
-    varyings::VY  # Nothing or NamedTuple of types
 end
 
 function MeshPipeline(;
-        mesh, fragment, object = nothing,
+        mesh::MeshShader, fragment::FragmentShader,
+        object::Union{Nothing,ObjectShader} = nothing,
         blend::BlendMode = Opaque(), cull::CullFace = CullBack(),
-        depth::DepthMode = DepthLess(), varyings = nothing)
-    mesh isa Tuple{Any,MeshConfig} || throw(ArgumentError(
-        "MeshPipeline: `mesh` must be a (function, MeshConfig) tuple, got $(typeof(mesh))"))
-    object === nothing || object isa Tuple{Any,ObjectConfig} || throw(ArgumentError(
-        "MeshPipeline: `object` must be nothing or a (function, ObjectConfig) " *
-        "tuple, got $(typeof(object))"))
-    MeshPipeline(object, mesh, fragment, blend, cull, depth, varyings)
+        depth::DepthMode = DepthLess())
+    MeshPipeline(object, mesh, fragment, blend, cull, depth)
 end
 
 """
@@ -64,7 +54,7 @@ end
 
 What the mesh stage of `p` may produce.
 """
-meshconfig(p::MeshPipeline) = p.mesh[2]
+meshconfig(p::MeshPipeline) = stageconfig(p.mesh)
 
 """
     objectconfig(p::MeshPipeline) -> ObjectConfig or nothing
@@ -72,4 +62,18 @@ meshconfig(p::MeshPipeline) = p.mesh[2]
 The object stage's configuration, or `nothing` when `p` has no object stage and
 its mesh threadgroups are dispatched by the host.
 """
-objectconfig(p::MeshPipeline) = p.object === nothing ? nothing : p.object[2]
+objectconfig(p::MeshPipeline) = p.object === nothing ? nothing : stageconfig(p.object)
+
+"""
+    fragmentinputs(p::MeshPipeline) -> NamedTuple
+    fragmentinputtype(p::MeshPipeline) -> Type
+
+What the fragment stage receives: the mesh stage's outputs. Entries may be
+`Flat{T}`, and the type form has them removed.
+"""
+fragmentinputs(p::MeshPipeline) = stageoutputs(p.mesh)
+
+@doc (@doc fragmentinputs) function fragmentinputtype(p::MeshPipeline)
+    v = valuetypes(fragmentinputs(p))
+    return NamedTuple{keys(v), Tuple{values(v)...}}
+end

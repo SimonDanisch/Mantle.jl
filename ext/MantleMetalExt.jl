@@ -45,7 +45,9 @@ import Mantle: HWTLAS, AdaptedAccel, Mat4f, Mat3x4f, mat4_to_vk_transform
 import Raycore: closest_hit, any_hit, sync!, world_bound, n_geometries,
     n_instances, update_transforms!, update_transform!, wait_for_gpu!
 import GeometryBasics
-using GeometryBasics: decompose, Point3f, Point2f
+# `Vec4f` because a clip position IS one: the stage output struct declares the
+# vector, not the tuple it wraps, which is what the Vulkan side already did.
+using GeometryBasics: decompose, Point3f, Point2f, Vec2f, Vec3f, Vec4f
 using Metal: MtlArray
 using StaticArrays: SVector
 using Base: @propagate_inbounds

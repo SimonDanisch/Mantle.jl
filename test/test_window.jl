@@ -100,9 +100,12 @@ else
         @inbounds v = src[y * w + x + Int32(1)]
         Vec4f(v, 0.25f0, 1f0 - v, 1f0)
     end
-    RAMP = Rasterizer(vertex = fullscreen_vertex, fragment = ramp_fragment,
-                      varyings = NamedTuple(), topology = TriangleList(),
-                      blend = Opaque(), cull = NoCull(), depth = DepthOff())
+    RAMP = Rasterizer(; vertex = VertexShader(fullscreen_vertex),
+                        fragment = FragmentShader(ramp_fragment),
+                        topology = TriangleList(),
+                        blend = Opaque(),
+                        cull = NoCull(),
+                        depth = DepthOff())
 
     # Quads stacked up the image, six vertices each, so how many are drawn is
     # readable off the picture as how much of it is lit.
@@ -120,9 +123,12 @@ else
          color = Vec4f(1, 1, 1, 1))
     end
     band_fragment(inputs) = inputs.color
-    BANDS = Rasterizer(vertex = band_vertex, fragment = band_fragment,
-                       varyings = (color = Vec4f,), topology = TriangleList(),
-                       blend = Opaque(), cull = NoCull(), depth = DepthOff())
+    BANDS = Rasterizer(; vertex = VertexShader(band_vertex; outputs = (color = Vec4f,)),
+                         fragment = FragmentShader(band_fragment),
+                         topology = TriangleList(),
+                         blend = Opaque(),
+                         cull = NoCull(),
+                         depth = DepthOff())
 
     @kernel function set_draw!(cmds, k::AbstractVector{UInt32})
         @inbounds cmds[1] = DrawIndirectCommand(UInt32(6) * k[1], UInt32(1), UInt32(0), UInt32(0))
@@ -159,9 +165,12 @@ else
         (position = Vec4f(-1f0 + fx, -1f0 + 2f0 * fy, z, 1f0),)
     end
     depthonly_fragment(inputs) = nothing
-    DEPTHONLY = Rasterizer(vertex = depthonly_vertex, fragment = depthonly_fragment,
-                           varyings = NamedTuple(), topology = TriangleList(),
-                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
+    DEPTHONLY = Rasterizer(; vertex = VertexShader(depthonly_vertex),
+                             fragment = FragmentShader(depthonly_fragment),
+                             topology = TriangleList(),
+                             blend = Opaque(),
+                             cull = NoCull(),
+                             depth = DepthLess())
 
     @testset "two scatters share one pipeline" begin
         dev = M.Device(TESTBACKEND)
@@ -1103,9 +1112,12 @@ else
         # because a different size is different offsets, different aliasing and
         # therefore different barriers.
         zfrag(inputs) = inputs.color
-        zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
-                           varyings = (color = Vec4f,), topology = PointList(),
-                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
+        zpipe = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                             fragment = FragmentShader(zfrag),
+                             topology = PointList(),
+                             blend = Opaque(),
+                             cull = NoCull(),
+                             depth = DepthLess())
         dev = M.Device(TESTBACKEND)
         win = M.Window(800, 600; title = "tracking depth")
         g = M.Graph(dev)
@@ -1147,9 +1159,12 @@ else
         # VUID-VkRenderingInfo-pNext-06079, which RADV draws anyway — so it is a
         # wrong picture unless something says so.
         zfrag(inputs) = inputs.color
-        zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
-                           varyings = (color = Vec4f,), topology = PointList(),
-                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
+        zpipe = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                             fragment = FragmentShader(zfrag),
+                             topology = PointList(),
+                             blend = Opaque(),
+                             cull = NoCull(),
+                             depth = DepthLess())
         dev = M.Device(TESTBACKEND)
         win = M.Window(800, 600; title = "resize mismatch")
         g = M.Graph(dev)
@@ -1187,9 +1202,12 @@ else
         # assertion is structural — the image is acquired before the refit — and
         # gates the rest, because the behaviour it guards is a lost device.
         zfrag(inputs) = inputs.color
-        zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
-                           varyings = (color = Vec4f,), topology = PointList(),
-                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
+        zpipe = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                             fragment = FragmentShader(zfrag),
+                             topology = PointList(),
+                             blend = Opaque(),
+                             cull = NoCull(),
+                             depth = DepthLess())
         dev = M.Device(TESTBACKEND)
         win = M.Window(800, 600; title = "resize at acquire")
         g = M.Graph(dev)
@@ -1351,12 +1369,18 @@ else
         # later draw wins, which is why the order is the control: with a depth
         # attachment the near one has to win in *both* orders.
         opaque_frag(inputs) = inputs.color
-        ZPIPE = Rasterizer(vertex = scatter_vertex, fragment = opaque_frag,
-                           varyings = (color = Vec4f,), topology = PointList(),
-                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
-        FLAT = Rasterizer(vertex = scatter_vertex, fragment = opaque_frag,
-                          varyings = (color = Vec4f,), topology = PointList(),
-                          blend = Opaque(), cull = NoCull(), depth = DepthOff())
+        ZPIPE = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                             fragment = FragmentShader(opaque_frag),
+                             topology = PointList(),
+                             blend = Opaque(),
+                             cull = NoCull(),
+                             depth = DepthLess())
+        FLAT = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                            fragment = FragmentShader(opaque_frag),
+                            topology = PointList(),
+                            blend = Opaque(),
+                            cull = NoCull(),
+                            depth = DepthOff())
 
         N = 64
         dev = M.Device(TESTBACKEND)
@@ -1437,9 +1461,12 @@ else
         # targets that get different colours is the whole claim: one attachment
         # written twice would pass any test that only looked at one of them.
         two_frag(inputs) = (inputs.color, Vec4f(0, 1, 0, 1))
-        MRT = Rasterizer(vertex = scatter_vertex, fragment = two_frag,
-                         varyings = (color = Vec4f,), topology = PointList(),
-                         blend = Opaque(), cull = NoCull(), depth = DepthOff())
+        MRT = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                           fragment = FragmentShader(two_frag),
+                           topology = PointList(),
+                           blend = Opaque(),
+                           cull = NoCull(),
+                           depth = DepthOff())
 
         N = 64
         dev = M.Device(TESTBACKEND)
@@ -1624,9 +1651,12 @@ else
         # validation calls it a write-after-write against the previous frame's
         # store op, and it is a race the moment the loop stops flushing.
         zfrag(inputs) = inputs.color
-        zpipe = Rasterizer(vertex = scatter_vertex, fragment = zfrag,
-                           varyings = (color = Vec4f,), topology = PointList(),
-                           blend = Opaque(), cull = NoCull(), depth = DepthLess())
+        zpipe = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                             fragment = FragmentShader(zfrag),
+                             topology = PointList(),
+                             blend = Opaque(),
+                             cull = NoCull(),
+                             depth = DepthLess())
         dev = M.Device(TESTBACKEND)
         g = M.Graph(dev)
         T = BGRA{ColorTypes.FixedPointNumbers.N0f8}
