@@ -7,8 +7,9 @@ const M = Mantle
 # available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
 # gets the default one. Nothing below names a backend, which is the point:
 # these testsets check PORTABLE behaviour and used to check it on Vulkan only.
-const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
-    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+# Vulkan-gated until its three backend-specific assertions are split out; see
+# the note beside its include in `runtests.jl`.
+const TESTBACKEND = M.VulkanAPI()
 
 
 @kernel function bump!(dst, @Const(src))
@@ -343,7 +344,10 @@ end
     want = reshape(collect(1f0:12f0), 3, 4)
     b = M.Buffer(dev, want)
     @test size(b) == (3, 4)
-    @test M.storage(b) isa MVE.LavaArray{Float32,2}
+    # Was `MVE.LavaArray{Float32,2}`, which is one backend's array type in a
+    # file that runs against all of them. What the property IS: a Buffer's
+    # storage is the backend's own 2-D device array, whatever that is.
+    @test M.storage(b) isa AbstractArray{Float32,2}
     @test size(M.storage(b)) == (3, 4)
     @test Array(b) == want
     M.free!(b)

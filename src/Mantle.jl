@@ -12,6 +12,16 @@ module Mantle
 # `DeviceCaps` and the matrix types were each written twice, here and in Lava,
 # and bridged by a positional copy in `MantleLavaExt`. Both copies are deleted:
 # there is one type, and `caps` fills it in.
+# ColorTypes is a DEPENDENCY of Mantle, declared in Project.toml, and
+# `runtime/format.jl` documents `RGBA{N0f8}` and `BGRA{N0f8}` as the portable
+# way to name a pixel format. It was never `using`-ed, and three separate
+# comments concluded from that it was absent — which cost `mtlformat` a
+# structural match on `nameof(T)` (so any foreign type called `RGBA` was
+# accepted) and cost the Metal backend the portable `Window(backend, w, h)`
+# that is in the vocabulary and that Lava answers.
+using ColorTypes: RGBA, BGRA, Colorant
+export RGBA, BGRA
+
 using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
     MatrixScope, SubgroupScope, WorkgroupScope, MatrixShape, DeviceCaps
 # The one device intrinsic core reaches for. `gemv.jl`'s inner loop reduces

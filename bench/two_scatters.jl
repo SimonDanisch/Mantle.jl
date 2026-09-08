@@ -1,9 +1,15 @@
 import Mantle
-using Lava, GeometryBasics, LinearAlgebra, KernelAbstractions
+using GeometryBasics, LinearAlgebra, KernelAbstractions
 
-# Scalar, Buffer and draw! are each exported by more than one of Mantle, Lava and
-# StaticArrays, so Mantle's are qualified here. Worth revisiting: a name that
-# cannot be `using`-ed alongside the backend it drives is a poor name.
+# `using Lava` is gone (phase 2.8). This file is a benchmark scene: shaders, a
+# graph and a window, all of it portable — it named a backend only because the
+# shader intrinsics used to come from one, and they come from Mantle now.
+#
+# The note that stood here said Scalar, Buffer and draw! were each exported by
+# more than one of Mantle, Lava and StaticArrays and had to be qualified. With
+# the backend out of the picture that clash is gone too, and the observation it
+# ended on — "a name that cannot be `using`-ed alongside the backend it drives
+# is a poor name" — stopped being a problem rather than being solved.
 const M = Mantle
 
 const W, H = 1000, 750
@@ -123,7 +129,7 @@ one graph, one compiled plan, one pipeline between them.
 `measure` is the same frame loop with a frame count and a stopwatch.
 """
 function demo(; na = 200_000, nb = 100_000)
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(M.defaultbackend())
     win = M.Window(W, H; title = "mantle: two scatters")
     s = build(dev, win, na, nb)
     @assert M.npipelines(s.plan) == 1 "a scalar and a vector attribute must not fork the shader"
@@ -145,7 +151,7 @@ function demo(; na = 200_000, nb = 100_000)
 end
 
 function measure(frames = 600; na = 200_000, nb = 100_000, sync = true)
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(M.defaultbackend())
     win = M.Window(W, H; title = "mantle: two scatters")
     s = build(dev, win, na, nb)
 

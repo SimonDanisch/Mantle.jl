@@ -12,6 +12,26 @@ _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
              backend_loadable("Lava") !== nothing
 const MVE = _VULKAN_OK ? Base.get_extension(Mantle, :MantleVulkanExt) : nothing
 
+# BOTH backends are probed here, before anything runs.
+#
+# `_METAL_OK` used to be decided at line 580, three hundred lines below the
+# portable tests — so `Mantle.eachbackend()` was empty when they asked, and
+# `foreachbackend` skipped every one of them with "no usable backend" on a
+# machine whose backend was working fine. A probe that runs after the thing it
+# gates is not a gate.
+global _METAL_OK = let
+    M = backend_loadable("Metal")
+    # `functional()` on top of loadability, because Metal.jl imports fine on a
+    # machine with no usable device — which Vulkan does not, so only this side
+    # needs the second question.
+    #
+    # `invokelatest`, because `Base.require` defines `functional` in a world
+    # NEWER than this top-level statement, which was fixed when it began. A
+    # direct call is a `MethodError: the applicable method may be too new` on
+    # the very machine the gate exists to serve.
+    M === nothing ? false : Base.invokelatest(M.functional)::Bool
+end
+
 # ONE outer testset around everything, and the reason is the failure mode the
 # comment below already describes — from the other side.
 #
@@ -495,7 +515,11 @@ function foreachbackend(path)
     end
 end
 
-if _VULKAN_OK
+# NOT gated on `_VULKAN_OK` any more. Everything below runs once per backend
+# `Mantle.eachbackend()` reports, which on a machine with no Vulkan driver is
+# the whole point: these files check PORTABLE behaviour, and gating them on one
+# driver is how they came to hardcode `VulkanAPI()` 57 times between them.
+# The one Vulkan-specific include below keeps a guard of its own.
 # Needs a GPU but no display — every graph in it is headless, which is also the
 # only kind `bake!` takes — so it runs before the window tests rather than inside
 # their DISPLAY guard.
@@ -505,7 +529,13 @@ if _VULKAN_OK
 # shared arena, and `Device(VulkanAPI())` is cached per context, so any earlier file
 # that compiled a plan is still a tenant until a GC reaps it. Adding an include
 # above this line that touches the Lava device breaks it.
-foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
+# NOT per-backend yet. Three of its assertions are genuinely Vulkan's — a
+# `pool_offset` inside a VkBuffer, `plan.recording isa MVE.Recording`, and
+# `vk_flush!` — and two of those have portable spellings (`recordsplans(dev)`
+# and `waitidle(dev)`) while the third belongs in `test/vulkan/`. Splitting it
+# is the rest of 0.7; gating it is honest in the meantime, and the guard in
+# `test_mantle_owns_it.jl` still names the file.
+_VULKAN_OK && include(joinpath(@__DIR__, "test_arena_recording.jl"))
 foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
@@ -513,7 +543,7 @@ foreachbackend(joinpath(@__DIR__, "test_devicerange.jl"))
 # And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.
-include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #
@@ -559,7 +589,7 @@ include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
     ok = !blocked && success(proc)
     ok || println(read(log, String))
     @test ok
-end
+
 end  # if _VULKAN_OK
 
 # ── the Metal backend ─────────────────────────────────────────────────────────
@@ -573,18 +603,7 @@ end  # if _VULKAN_OK
 # before the note above. Two of them were failing when they were finally run.
 global METAL_TESTS = joinpath(@__DIR__, "metal")
 
-global _METAL_OK = let
-    M = backend_loadable("Metal")
-    # `functional()` on top of loadability, because Metal.jl imports fine on a
-    # machine with no usable device — which Vulkan does not, so only this side
-    # needs the second question.
-    #
-    # `invokelatest`, because `Base.require` defines `functional` in a world
-    # NEWER than this top-level statement, which was fixed when it began. A
-    # direct call is a `MethodError: the applicable method may be too new` on
-    # the very machine the gate exists to serve.
-    M === nothing ? false : Base.invokelatest(M.functional)::Bool
-end
+# `_METAL_OK` is decided at the top, beside `_VULKAN_OK`.
 
 if _METAL_OK
     @testset "Metal backend" begin

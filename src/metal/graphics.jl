@@ -139,36 +139,32 @@ end
 Metal's format for a Julia element type. The counterpart to `vkformat`, and the
 same table `runtime/format.jl` documents.
 
-Matched STRUCTURALLY — on the colour type's name and its element type — rather
-than by writing `BGRA{N0f8}`.
-
-DELETED in phase 1.7, the reason that was given for it: "those names belong to
-ColorTypes, which is not a dependency of Mantle". It is, in `[deps]`, and
-`runtime/format.jl` documents `BGRA{N0f8}` as the portable spelling. The
-structural match means any foreign type named `RGBA` with a `Normed{UInt8}`
-element is accepted. Phase 2.7 decides what this matches on.
+Matched on the element TYPE. It used to match on `nameof(T)` and the element's
+name, because three comments concluded that ColorTypes was not a Mantle
+dependency; it is, in `[deps]`, and `runtime/format.jl` documents
+`BGRA{N0f8}` as the portable spelling. The structural version accepted any
+foreign type that happened to be called `RGBA`.
 """
 function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # Depth, matching `vkformat`'s `D32_SFLOAT` and the table in
-    # `runtime/format.jl`. It said `R32Float` here, which is a colour format:
-    # the one caller hardcoded `Depth32Float` beside it and so never saw it, but
-    # a depth target reaching this by way of its element type would have been
-    # created as colour and rejected by the render pass.
+    # `runtime/format.jl`. It said `R32Float` here once, which is a colour
+    # format: the one caller hardcoded `Depth32Float` beside it and so never
+    # saw it, but a depth target reaching this by way of its element type would
+    # have been created as colour and rejected by the render pass.
     T === Float32 && return MTLm.MTLPixelFormatDepth32Float
     T <: Real && error("no Metal pixel format for the scalar $T")
-    nm = nameof(T)
-    el = eltype(T)
-    # `Normed{UInt8,8}` is `N0f8`; anything else 8-bit-normalised is not a
-    # format Metal spells the same way, so it is rejected rather than guessed.
-    isu8 = nameof(el) === :Normed && sizeof(el) == 1
-    nm === :BGRA && isu8            && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
-                                                     MTLm.MTLPixelFormatBGRA8Unorm
-    nm === :RGBA && isu8            && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
-                                                     MTLm.MTLPixelFormatRGBA8Unorm
+    # On the TYPES, not on `nameof(T)`. The structural match this replaces
+    # accepted any type named `RGBA` whose element was an 8-bit `Normed`,
+    # from any package, and it was there because three comments said ColorTypes
+    # was not a dependency. It is.
+    T === BGRA{N0f8}    && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
+                                         MTLm.MTLPixelFormatBGRA8Unorm
+    T === RGBA{N0f8}    && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
+                                         MTLm.MTLPixelFormatRGBA8Unorm
     # No sRGB variant exists for the float formats, and none is needed: sRGB is
     # an encoding for 8-bit channels, and a float target holds linear values.
-    nm === :RGBA && el === Float16  && return MTLm.MTLPixelFormatRGBA16Float
-    nm === :RGBA && el === Float32  && return MTLm.MTLPixelFormatRGBA32Float
+    T === RGBA{Float16} && return MTLm.MTLPixelFormatRGBA16Float
+    T === RGBA{Float32} && return MTLm.MTLPixelFormatRGBA32Float
     error("no Metal pixel format for $T — extend `mtlformat` in metal/graphics.jl")
 end
 

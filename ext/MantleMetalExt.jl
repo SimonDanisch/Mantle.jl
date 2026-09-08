@@ -36,7 +36,7 @@ import Mantle: build_accel!, refit_tlas!, trace_closest_hits!
 # refuses. Declared in `src/graph/queue.jl` and `src/graphics/commands.jl`.
 import Mantle: waitidle, supports_graphics, allocate_batch_queue!, supports_rt_pipeline
 # The rasterisation half (`src/metal/graphics.jl`).
-import Mantle: Framebuffer, draw!, readback_framebuffer
+import Mantle: Framebuffer, Window, draw!, readback_framebuffer
 # The graph's render-pass verbs, declared in `src/graphics/commands.jl`.
 import Mantle: compile_draw, begin_render_pass!, record_draw!, end_render_pass!
 # The incremental acceleration structure (`src/metal/hwtlas.jl`) implements
@@ -66,6 +66,13 @@ using Mantle: Pool, DeviceArray, Persistent, Buffers, Images, region, memoryof, 
 # function with a `Device` method in Mantle and a `KI.Backend` method here.
 using KernelInterface: DeviceCaps, MatrixShape, MatrixScope, SubgroupScope
 import KernelInterface
+# `N0f8` for `mtlformat`'s table: ColorTypes re-exports FixedPointNumbers'
+# normalised types, and Mantle re-exports `RGBA`/`BGRA`.
+# `N0f8` through ColorTypes, which re-exports FixedPointNumbers' normalised
+# types — FixedPointNumbers is not a direct dependency of Mantle and naming
+# four types is not a reason to make it one.
+using ColorTypes: RGBA, BGRA
+using ColorTypes.FixedPointNumbers: N0f8
 const KI = KernelInterface
 
 using GPUArrays

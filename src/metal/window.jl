@@ -84,10 +84,40 @@ function attach!(w::MetalWindow, glfw_window)
     return w
 end
 
-# DELETED in phase 1.7: the paragraph explaining why this backend does not
-# answer `Mantle.Window(backend, w, h)`. Its premise — "Mantle does not depend
-# on [ColorTypes]" — is false; it is in `[deps]`. `Window` is in the
-# BACKEND_VOCABULARY and Lava answers it. Phase 2.7 makes Metal answer it too.
+"""
+    Window(backend, width, height; title = "", vsync = false)
+
+The portable spelling, answered on this backend. `width` and `height` are
+PIXELS.
+
+`BGRA{N0f8}` is the element type, because that is what a display wants and
+what `runtime/format.jl` documents as the portable name for it. Naming it here
+was said to be impossible for three separate reasons, all of which read
+"ColorTypes is not a dependency of Mantle"; it is, and this method is what was
+missing because of that. A caller who wants another type reaches for
+`MetalWindow(T, w, h)`.
+
+The GLFW window is asked for in POINTS while the drawable is in PIXELS, so the
+request is divided by the display's content scale. Ask for 1600x900 on a Retina
+panel without it and the drawable is 3200x1800 — which is right for a renderer
+that follows its surface and wrong for one built at a fixed resolution, and in
+neither case what the caller asked for. It cost a smeared, distorted frame once,
+because the composite pass indexed `hdr[py * 1600 + px]` over a 2940-wide target.
+"""
+function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
+                       title::AbstractString = "", vsync::Bool = false)
+    GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
+    gw = GLFW.CreateWindow(Int(width), Int(height), String(title))
+    sx, sy = GLFW.GetWindowContentScale(gw)
+    GLFW.SetWindowSize(gw, round(Int, width / sx), round(Int, height / sy))
+    w = attach!(MetalWindow(BGRA{N0f8}, width, height; vsync), gw)
+    # `attach!` ADOPTS whatever the layer could be given, so this is a real
+    # check and not a restatement: a window that reports an extent its drawables
+    # do not have breaks every pass that strides a buffer by hand.
+    size(w) == (Int(width), Int(height)) || error(
+        "asked for a $((Int(width), Int(height))) drawable, the layer gave $(size(w))")
+    return w
+end
 
 # ── What a render pass asks a window ─────────────────────────────────────────
 

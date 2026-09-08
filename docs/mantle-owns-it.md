@@ -178,7 +178,7 @@ whichever paragraph survived.
 Each step: what it adds, where, and the test that says it is done. A step is
 not done because it runs; it is done when its test fails without it.
 
-**2.1 KernelInterface owns the device vocabulary.**
+**2.1 KernelInterface owns the device vocabulary. — DONE 2026-09-08**
 `lib/KernelInterface/src/graphics.jl` and `raytracing.jl`, beside the existing
 `device.jl` which already declares `get_global_id`, `barrier` and
 `sub_group_reduce_add`. Both Lava and Mantle depend on KernelInterface; Lava
@@ -221,7 +221,14 @@ replacement at all.
 *Done when:* `test_pintrace.jl`'s property — both levels held through either
 owner — is asserted through the graph, with no `pin!` in the tree.
 
-**2.5 One barrier story, chosen by measurement.**
+**2.5 The instances a TLAS holds. — DONE 2026-09-08**
+`InstanceBatches{B}` in `raytracing/batches.jl` owns the order, the handles,
+the lookup and the reindex on delete; a backend supplies only the batch type.
+Metal's `_register_batch!` is one call to `register!`. Handles are monotone and
+never reused, which neither deleted copy said out loud.
+*Verified:* `test_hwtlas_metal.jl` green, whole suite 9335 passed 0 failed.
+
+**2.6 One barrier story, chosen by measurement.**
 `needs_transition` for `MetalAPI` falls through to the generic `true`;
 `passbarriers` is core's empty default; so the plan carries no transitions and
 correctness rests on `MTLHazardTrackingModeTracked`. Host and WebGPU each state
@@ -232,7 +239,7 @@ make the heap `Untracked`. Measure both — a tracked heap serialises.
 *Done when:* `needs_transition(::MetalAPI, …)` has a method with a docstring
 giving the reason, and a benchmark records what the choice cost or saved.
 
-**2.6 Capabilities are queries, not exceptions.**
+**2.7 Capabilities are queries, not exceptions.**
 `compile_pipeline` throws on geometry shaders and on tessellation;
 `GraphicsPipeline` has both fields; `DeviceCaps` has no answer and
 `supports_graphics` is one Bool. A caller cannot ask. Add the queries, and let
@@ -240,7 +247,7 @@ giving the reason, and a benchmark records what the choice cost or saved.
 *Done when:* RayMakie can ask whether to take its geometry-shader path instead
 of finding out at compile time.
 
-**2.7 Portable window and format.**
+**2.8 Portable window and format.**
 Add `using ColorTypes: RGBA, BGRA` to Mantle — the dependency is already
 declared and paid for — then `mtlformat` matches on types instead of on
 `nameof(T)`, and Metal answers `Mantle.Window(backend, w, h)`, which is in the
@@ -249,7 +256,7 @@ vocabulary and which Lava already answers. The Retina sizing currently in
 *Done when:* `bench/showcase.jl` is ONE file that picks a backend, and
 `showcase_metal.jl` is gone.
 
-**2.8 Downstream imports Mantle only.**
+**2.9 Downstream imports Mantle only.**
 Hikari and RayMakie drop `Lava` from `[deps]`. RayMakie's shaders move from
 Lava's location-based `gfx_output`/`gfx_input`/`set_position!` to Mantle's
 declarative varyings — `varyings = (albedo = Vec4f, …)` and a vertex stage that
@@ -258,7 +265,7 @@ returns `(position = …, …)` — which both backends already support and whic
 than porting them.
 *Done when:* 0.5 passes, and Hikari's suite runs on Metal.
 
-**2.9 The array algorithms.**
+**2.10 The array algorithms.**
 `array/fft.jl` (893 lines) and `array/gemv.jl` (485) are core;
 `vulkan/array/gemm.jl` (2335) is not. One of those placements is wrong. Decide
 which, with the same question: does it name a driver type?
@@ -282,3 +289,35 @@ habits, written here because each was violated today:
 3. **When the question is "where does this belong", do not open the file that
    already implements it.** Answer from the rule at the top of this document,
    then open the file to see how far away it is.
+
+## What 0.7 found the moment the portable tests ran on a second backend
+
+`test_compile_golden.jl` and `test_devicerange.jl` had never executed against
+anything but Vulkan. Running them per backend cost nothing to arrange and
+immediately produced six failures, none of which is breakage — each is a
+portability gap that was there all along and had no way to be seen.
+
+1. **`test_compile_golden.jl:95`, `all(r.barriered)`.** Nothing is barriered on
+   Metal, because `passbarriers` is core's empty default there. This is the
+   assertion that phase 2.6 has to make true or make backend-aware, and it is
+   the first hard evidence for which of the two deleted comments was right.
+
+2. **`test_devicerange.jl:145`, the tail.** `count(==(1f0), …)` is 4096 where
+   the test wants 832 — a device-sized dispatch on Metal runs the whole padded
+   ndrange rather than `cld(want, group) * group`. Either the guard belongs in
+   the kernel on this backend too, or the ceiling is computed differently; the
+   test says the first and Metal disagrees.
+
+3. **The window subprocess on Metal.** It now runs (the DISPLAY guard was an
+   X11 question, and the file skipped itself on macOS), and it fails — 26 of
+   its assertions still reach for `MVE`, which phase 2.8 removes.
+
+4-6. **Three pool tests.** Not a regression: with 0.6's second device cache
+   gone there is genuinely ONE Metal device per process, so the portable tests
+   that now run before them leave the pool in a state their
+   `reserved(p) == before + 4096` no longer sees. They depended on running
+   early. The property they mean — a second acquire does not reach the device —
+   has to be asserted without leaning on pool history.
+
+The suite is red on six real differences instead of green on one backend. That
+is the trade 0.7 was for, and it is the right way round.
