@@ -26,11 +26,12 @@ function scatter_vertex(pos::AbstractVector{Vec3f}, col::AbstractVector{Vec4f},
     return (position = m * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
 end
 
-const SCATTER = Rasterizer(
-    vertex = scatter_vertex, fragment = inputs -> inputs.color,
-    varyings = (color = Vec4f,),
-    topology = PointList(), blend = Additive(), cull = NoCull(), depth = DepthOff(),
-)
+const SCATTER = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                             fragment = FragmentShader(inputs -> inputs.color),
+                             topology = PointList(),
+                             blend = Additive(),
+                             cull = NoCull(),
+                             depth = DepthOff())
 
 cloud(n) = [normalize(Vec3f(randn(Float32), randn(Float32), randn(Float32))) *
             (1.0f0 + 0.05f0 * randn(Float32)) for _ in 1:n]

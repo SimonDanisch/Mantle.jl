@@ -261,10 +261,12 @@ function gbuffer_fragment(inputs)
      Vec4f(0.5f0 * n[1] + 0.5f0, 0.5f0 * n[2] + 0.5f0, 0.5f0 * n[3] + 0.5f0, 1f0))
 end
 
-GBUFFER = Rasterizer(vertex = gbuffer_vertex, fragment = gbuffer_fragment,
-                     varyings = (albedo = Vec4f, surface = Vec4f, normal = Vec3f, wpos = Vec3f),
-                     topology = TriangleList(), blend = Opaque(),
-                     cull = CullBack(), depth = DepthLess())
+GBUFFER = Rasterizer(; vertex = VertexShader(gbuffer_vertex; outputs = (albedo = Vec4f, surface = Vec4f, normal = Vec3f, wpos = Vec3f)),
+                       fragment = FragmentShader(gbuffer_fragment),
+                       topology = TriangleList(),
+                       blend = Opaque(),
+                       cull = CullBack(),
+                       depth = DepthLess())
 
 # The same instancing as the g-buffer pass with nothing but the position kept:
 # a depth-only pass has no attachment to write, so its fragment returns nothing.
@@ -285,9 +287,12 @@ function shadow_vertex(protopos, visible, centers, sizes, vp::AbstractVector{Mat
 end
 shadow_fragment(inputs) = nothing
 
-SHADOW = Rasterizer(vertex = shadow_vertex, fragment = shadow_fragment,
-                    varyings = NamedTuple(), topology = TriangleList(),
-                    blend = Opaque(), cull = CullBack(), depth = DepthLess())
+SHADOW = Rasterizer(; vertex = VertexShader(shadow_vertex),
+                      fragment = FragmentShader(shadow_fragment),
+                      topology = TriangleList(),
+                      blend = Opaque(),
+                      cull = CullBack(),
+                      depth = DepthLess())
 
 @inline unpack8(px::UInt32, shift::UInt32) = Float32((px >> shift) & 0x000000ff) * (1f0 / 255f0)
 
@@ -691,9 +696,12 @@ function composite_fragment(inputs, hdr, bloom, w::Int32, h::Int32, bw::Int32, b
     end
 end
 
-COMPOSITE = Rasterizer(vertex = composite_vertex, fragment = composite_fragment,
-                       varyings = NamedTuple(), topology = TriangleList(),
-                       blend = Opaque(), cull = NoCull(), depth = DepthOff())
+COMPOSITE = Rasterizer(; vertex = VertexShader(composite_vertex),
+                         fragment = FragmentShader(composite_fragment),
+                         topology = TriangleList(),
+                         blend = Opaque(),
+                         cull = NoCull(),
+                         depth = DepthOff())
 
 Random.seed!(9)
 protopos, protonrm = shard_geometry()

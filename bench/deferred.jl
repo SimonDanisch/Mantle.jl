@@ -154,10 +154,12 @@ gbuffer_fragment(inputs) = (inputs.albedo,
                                   0.5f0 * inputs.normal[2] + 0.5f0,
                                   0.5f0 * inputs.normal[3] + 0.5f0, 1f0))
 
-GBUFFER = Rasterizer(vertex = gbuffer_vertex, fragment = gbuffer_fragment,
-                     varyings = (albedo = Vec4f, normal = Vec3f),
-                     topology = TriangleList(), blend = Opaque(),
-                     cull = CullBack(), depth = DepthLess())
+GBUFFER = Rasterizer(; vertex = VertexShader(gbuffer_vertex; outputs = (albedo = Vec4f, normal = Vec3f)),
+                       fragment = FragmentShader(gbuffer_fragment),
+                       topology = TriangleList(),
+                       blend = Opaque(),
+                       cull = CullBack(),
+                       depth = DepthLess())
 
 @inline unpack8(px::UInt32, shift::UInt32) = Float32((px >> shift) & 0x000000ff) * (1f0 / 255f0)
 
@@ -261,9 +263,12 @@ function light_fragment(inputs, alb, nrm, dep, lpos, lcol, tilelights, tilecount
     end
 end
 
-LIGHTING = Rasterizer(vertex = light_vertex, fragment = light_fragment,
-                      varyings = NamedTuple(), topology = TriangleList(),
-                      blend = Opaque(), cull = NoCull(), depth = DepthOff())
+LIGHTING = Rasterizer(; vertex = VertexShader(light_vertex),
+                        fragment = FragmentShader(light_fragment),
+                        topology = TriangleList(),
+                        blend = Opaque(),
+                        cull = NoCull(),
+                        depth = DepthOff())
 
 Random.seed!(7)
 cubes, normals = cube_geometry()

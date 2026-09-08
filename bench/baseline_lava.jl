@@ -15,11 +15,12 @@ function point_vertex(pos::AbstractVector{Vec3f}, col::AbstractVector{Vec4f},
     return (position = mvp * Vec4f(p[1], p[2], p[3], 1.0f0), color = c)
 end
 
-const POINTS = Rasterizer(
-    vertex = point_vertex, fragment = inputs -> inputs.color,
-    varyings = (color = Vec4f,),
-    topology = PointList(), blend = Additive(), cull = NoCull(), depth = DepthOff(),
-)
+const POINTS = Rasterizer(; vertex = VertexShader(point_vertex; outputs = (color = Vec4f,)),
+                            fragment = FragmentShader(inputs -> inputs.color),
+                            topology = PointList(),
+                            blend = Additive(),
+                            cull = NoCull(),
+                            depth = DepthOff())
 
 function camera(angle)
     eye = Vec3f(3.2f0 * cos(angle), 1.2f0, 3.2f0 * sin(angle))

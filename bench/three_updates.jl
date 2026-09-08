@@ -22,9 +22,12 @@ begin # ── packages: their own block, so the macros below are expandable ─
     end
     scatter_fragment(inputs) = inputs.color
 
-    SCATTER = Rasterizer(vertex = scatter_vertex, fragment = scatter_fragment,
-                        varyings = (color = Vec4f,), topology = PointList(),
-                        blend = Additive(), cull = NoCull(), depth = DepthOff())
+    SCATTER = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                           fragment = FragmentShader(scatter_fragment),
+                           topology = PointList(),
+                           blend = Additive(),
+                           cull = NoCull(),
+                           depth = DepthOff())
 
     # One step of the simulation, run on three different backends below.
     @kernel function advect!(pos, vel, dt, radius::Float32)
