@@ -576,7 +576,7 @@ const BACKEND_VOCABULARY = (
     :makerecording, :resetrecording!, :destroyrecording!, :retire!, :recorder,
     # What a hand-recorded pass needs beyond the graph's three — see
     # `graphics/record.jl`. `setviewport!` is the only genuinely new one.
-    :setviewport!, :colorimage, :depthimage, :currentimage,                             # Vulkan needs a usage bit at allocation, Metal does not
+    :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,                             # Vulkan needs a usage bit at allocation, Metal does not
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,

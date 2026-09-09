@@ -74,7 +74,8 @@ import KernelInterface
 # types — FixedPointNumbers is not a direct dependency of Mantle and naming
 # four types is not a reason to make it one.
 using ColorTypes: RGBA, BGRA
-using ColorTypes.FixedPointNumbers: N0f8
+using ColorTypes.FixedPointNumbers: N0f8, FixedPoint
+using ColorTypes: FixedPointNumbers
 const KI = KernelInterface
 
 using GPUArrays

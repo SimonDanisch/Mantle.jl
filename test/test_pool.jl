@@ -14,7 +14,12 @@ A device that allocates nothing and counts what it was asked for.
 `allocs` is the whole point of the fixture — the headline property is "a second
 acquire does not reach the device", and that is only observable by counting.
 """
-struct FakeDev
+# `<: M.Device`, because that is what it stands in for. It was a bare struct
+# while every verb it reached took `dev` untyped; `Buffer` now normalises its
+# device argument with `todevice`, which accepts a `Device` and a KA backend and
+# nothing else — deliberately, so a mistake fails where it is made. A test double
+# that plays a device has to be one.
+struct FakeDev <: M.Device
     allocs::Vector{Int}
 end
 FakeDev() = FakeDev(Int[])

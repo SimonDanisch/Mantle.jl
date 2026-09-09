@@ -469,10 +469,12 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     # compiling one and reading the error.
     be = Metal.MetalBackend()
     p.geometry === nothing || Mantle.supports_geometry_stage(be) ||
-        error("this backend has no geometry stage; ask " *
-              "`supports_geometry_stage(backend)` before building a pipeline " *
-              "with one. Apple's replacement is the mesh pipeline (object + " *
-              "mesh stages), which Mantle does not describe.")
+        error("this backend has no geometry stage. Apple's replacement is the " *
+              "mesh pipeline, which this backend DOES run — see " *
+              "`Mantle.MeshPipeline` and `supports_mesh_pipeline`. Lower the " *
+              "pipeline with `Mantle.lower_geometry_to_mesh` instead of asking " *
+              "for a geometry stage; ask `supports_geometry_stage(backend)` " *
+              "first if you need to know which you are on.")
     (p.tess_control === nothing && p.tess_eval === nothing) ||
         Mantle.supports_tessellation(be) ||
         error("this backend has no tessellation; ask " *
@@ -761,19 +763,56 @@ function Mantle.gpupasstime!(d::MetalDevice)
 end
 
 """
-    readback_framebuffer(fb) -> Matrix{UInt8}
+    readback_eltype(format) -> Type
 
-The colour attachment's bytes, four per pixel, row-major from the top left.
+The STORAGE type of one channel: `UInt8` for the 8-bit formats, `Float16`/
+`Float32` for the float ones.
+
+Not `eltype(eltypeof(format))`, which answers `N0f8` for a `BGRA{N0f8}` — a
+normalised type whose value is already in 0..1. A caller that then divides by 255
+gets a number 255 times too small, which is what turned a rendered frame into a
+nearly-black one with everything still in the right place.
+"""
+readback_eltype(f::MTLm.MTLPixelFormat) = storagetype(eltype(eltypeof(f)))
+storagetype(::Type{T}) where {T <: FixedPoint} = FixedPointNumbers.rawtype(T)
+storagetype(::Type{T}) where {T} = T
+
+"""
+    readback_framebuffer(fb) -> Matrix{NTuple{4,T}}
+
+The colour attachment on the host: `width` x `height`, one 4-component tuple per
+pixel, in the attachment's own channel order.
 
 Through `getBytes!` rather than shared memory: a render target cannot be a
 buffer-backed linear texture on an Apple GPU.
+
+The SHAPE is the contract and not this backend's convenience. It returned a
+`4 x width x height` `Array{UInt8,3}` while the Vulkan side returned exactly the
+matrix above, so `pixels[col, row]` — the one caller, RayMakie's compositor —
+read a `BoundsError` here and four correct bytes there. A hook whose two
+implementations disagree about the shape of their answer is the thing this
+package exists to remove; the divergence only surfaced once a Mac composited an
+overlay at all.
 """
 function Mantle.readback_framebuffer(fb::MetalFramebuffer)
-    px = Vector{UInt8}(undef, fb.width * fb.height * 4)
-    GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * 4,
+    # WAITS, because `readback_framebuffer`'s contract says it does: "there is no
+    # way to read pixels the device has not finished writing, so unlike the rest
+    # of the frame loop this one waits."
+    #
+    # It did not, and `getBytes!` is a HOST copy out of the texture — it does not
+    # join the queue and it does not block on it. So a readback taken straight
+    # after a pass read whatever the texture held, which for a freshly created
+    # one is zeros. It is a race, so it passed for a long time: RayMakie's
+    # compositor happens to synchronise elsewhere in the frame and the window is
+    # narrow. `blit!` followed immediately by a readback loses it every time, and
+    # the whole composited image came back transparent black.
+    Metal.synchronize()
+    T = readback_eltype(fb.color_format)
+    px = Matrix{NTuple{4,T}}(undef, fb.width, fb.height)
+    GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
                                    MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0),
                                                   MTLm.MTLSize(fb.width, fb.height, 1)))
-    return reshape(px, 4, fb.width, fb.height)
+    return px
 end
 
 # Metal.jl compiles graphics stages now, so the capability answer changes. It
@@ -971,8 +1010,47 @@ end
 # What a hand-recorded pass reads off a framebuffer and a window. Both are one
 # field; they are verbs rather than field access so that core never names a
 # backend's struct.
+"""
+    indexbuffer(::MetalDevice, indices) -> MtlVector{UInt32}
+
+An index buffer on Metal: an ordinary device array.
+
+Overridden rather than left to the core default, which answers a `Mantle.Buffer`
+— a pool region with a length, not an array. Both are drawable, but a caller
+that keeps its index buffer beside its vertex arrays keeps them in one container,
+and the Vulkan side already answers with an array (`alloc_index_buffer`). Two
+backends whose `indexbuffer` return different KINDS of thing is a difference a
+caller has to know about, which is the thing this package exists to remove.
+
+Nothing extra is asked of the allocation: `drawIndexedPrimitives` takes any
+buffer, which is why the usage bits Vulkan needs have no counterpart here.
+"""
+Mantle.indexbuffer(::MetalDevice, indices::AbstractVector{UInt32}) =
+    Metal.MtlVector{UInt32}(indices)
+
 Mantle.colorimage(fb::MetalFramebuffer) = fb.color
 Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
+
+Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
+Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
+Mantle.target_extent(t::Mantle.OffscreenTarget) = Mantle.target_extent(t.fb)
+Mantle.target_extent(t::Mantle.WindowTarget) = Mantle.target_extent(t.window)
+
+# The ELEMENT type of the attachment, which is what a pipeline is compiled
+# against. `MetalFramebuffer` keeps the MTL format it was created with and not the
+# Julia type behind it, so this is the reverse of `mtlformat` — and only over the
+# formats a blit target can have, because that is the one caller.
+Mantle.blittarget(t::Mantle.OffscreenTarget) = eltypeof(t.fb.color_format)
+Mantle.blittarget(t::Mantle.WindowTarget) = eltypeof(Mantle.target_format(t.window))
+
+eltypeof(f::MTLm.MTLPixelFormat) =
+    f === MTLm.MTLPixelFormatBGRA8Unorm      ? BGRA{N0f8} :
+    f === MTLm.MTLPixelFormatBGRA8Unorm_sRGB ? BGRA{N0f8} :
+    f === MTLm.MTLPixelFormatRGBA8Unorm      ? RGBA{N0f8} :
+    f === MTLm.MTLPixelFormatRGBA8Unorm_sRGB ? RGBA{N0f8} :
+    f === MTLm.MTLPixelFormatRGBA16Float     ? RGBA{Float16} :
+    f === MTLm.MTLPixelFormatRGBA32Float     ? RGBA{Float32} :
+    error("no Julia element type recorded for $f; add it beside `mtlformat`")
 
 """
 End the encoder and commit the pass's command buffer.

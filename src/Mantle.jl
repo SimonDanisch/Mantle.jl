@@ -181,6 +181,9 @@ include("graphics/resources.jl")   # needs RenderTarget (state.jl) and Window (r
 include("graphics/stages.jl")      # needs Topology and the KI configs above
 include("graphics/pipeline.jl")    # needs the state vocabulary above
 include("graphics/mesh.jl")        # needs the same state vocabulary
+# The geometry-to-mesh translation. After both pipelines: it reads one and
+# builds the other.
+include("graphics/lowering.jl")
 include("graphics/commands.jl")
 # Recording a pass by hand, over the same three primitives the graph uses. The
 # imperative verb family this replaces existed only on Vulkan, which is why
@@ -298,7 +301,8 @@ export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
 export lastgeometrystage, fragmentinputs, fragmentinputtype
 # Recording a pass by hand. Shaped like the graph's `render!`/`draw!` on purpose.
 export pass!, viewport!, bindings!, PassRecorder
-export setviewport!, colorimage, depthimage, currentimage
+export setviewport!, colorimage, depthimage, currentimage, blittarget, todevice
+export lower_geometry_to_mesh
 export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
 export DrawIndirectCommand
 # The mesh pipeline. Described here, run by a backend that answers

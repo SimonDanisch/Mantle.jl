@@ -34,6 +34,28 @@ abstract type Resource end
 # its own identical struct into it field by field. Both are gone.
 
 """
+    todevice(x) -> Device
+
+`x` if it already is one, and the device of a KA backend otherwise.
+
+Both handles name the same hardware and a caller may hold either: RayMakie's
+screen keeps the BACKEND its user asked for, because that is what
+`KernelAbstractions.synchronize` and `Adapt.adapt` take, while the graph holds a
+`Device`. Everything that needs a pool needs the second.
+
+`Device(backend)` is cached — one device per process, because a second one would
+be a second `Pool` over the same driver device — so normalising costs a lookup
+and no allocation. That is why the verbs below normalise rather than each taking
+both.
+
+Deliberately not a fallback over `Any`: exactly a device and a KA backend are
+accepted, so handing a verb something else fails where the mistake is instead of
+inside `pool`.
+"""
+todevice(d::Device) = d
+todevice(b::KernelAbstractions.Backend) = Device(b)
+
+"""
     Window(width, height; title = "", vsync = false)
 
 Something to render into, and the only reason a frame loop exists.

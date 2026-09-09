@@ -156,7 +156,8 @@ this replaces left that to the caller, and the one caller in tree did not do it:
 a shader that failed to compile mid-pass left the pass open, and the next frame's
 `begin_pass!` opened a second one on the same buffer.
 """
-function pass!(f, dev, target::RenderTarget; clear = nothing)
+function pass!(f, device, target::RenderTarget; clear = nothing)
+    dev = todevice(device)
     targets, loads, depth, depth_load = passtargets(target, clear)
     h = begin_render_pass!(dev, targets, loads, depth, depth_load)
     p = PassRecorder(h)
@@ -167,3 +168,84 @@ function pass!(f, dev, target::RenderTarget; clear = nothing)
     end
     return result
 end
+
+# ── blit: one device array onto a render target ──────────────────────────────
+#
+# A fullscreen triangle sampling `source` by fragment coordinate. It was 55 lines
+# in the Vulkan backend, and 50 of those were reaching into a target's fields
+# (`win.views[win.current_image_idx + 1]`, `fb.color_view`) and packing arguments
+# by hand. Over `pass!` the whole of it is the two shaders and one draw.
+
+"""Where in the source a fragment at (x, y) is: column-major, as Julia stores it."""
+@inline blitindex(x::Int32, y::Int32, height::Int32) = x * height + y + Int32(1)
+
+"""A fullscreen triangle in clip space. Three vertices, no buffer."""
+function blit_vertex()
+    vid = vertex_index() - Int32(1)
+    x = Float32(Int32(vid & Int32(1)) * 4 - 1)
+    y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
+    return (position = Vec4f(x, clip_y(y), 0f0, 1f0),)
+end
+
+"""One pixel of `source`, premultiplied as it is stored."""
+function blit_fragment(_inputs, source, width::Int32, height::Int32)
+    ix = unsafe_trunc(Int32, frag_coord_x())
+    iy = unsafe_trunc(Int32, frag_coord_y())
+    return blitcolor(source[blitindex(ix, iy, height)])
+end
+
+"""
+Whatever a blit source holds, as the four floats a colour attachment takes.
+
+A source may be `Vec4f`, an `RGBA`, or a `BGRA`; naming them all here rather than
+requiring one keeps the caller from converting a whole framebuffer to satisfy a
+blit.
+"""
+@inline blitcolor(v::Vec4f) = v
+@inline blitcolor(c) = Vec4f(c.r, c.g, c.b, c.alpha)
+
+const BLIT_PIPELINE = GraphicsPipeline(;
+    vertex = VertexShader(blit_vertex),
+    fragment = FragmentShader(blit_fragment),
+    blend = Opaque(), cull = NoCull(), depth = DepthOff())
+
+"""
+    blit!(dev, target, source; clear = true)
+
+Draw `source` — a device array holding one pixel per element, column-major — over
+the whole of `target`.
+
+`clear` is whether to clear first; a blit that covers every pixel does not need
+to, and the overlay compositor passes `false` because what is already there is
+the frame it is compositing onto.
+
+One implementation, in core. It was the Vulkan backend's, reached through
+`Base.get_extension` by RayMakie, and 50 of its 55 lines were the field access
+that `pass!` now does.
+"""
+function blit!(device, target::RenderTarget, source; clear::Bool = true)
+    dev = todevice(device)
+    w, h = target_extent(target)
+    n = length(source)
+    n == w * h || throw(ArgumentError(
+        "blit!: the source holds $n elements and the target is $(w)x$(h) = $(w*h)"))
+    args = (resolve(dev, source), Int32(w), Int32(h))
+    compiled = compile_draw(dev, BLIT_PIPELINE, (blittarget(target),), nothing, (), args)
+    pass!(dev, target; clear = clear ? (0f0, 0f0, 0f0, 1f0) : nothing) do p
+        viewport!(p, 0, 0, w, h)
+        draw!(p, compiled, args, 3)
+    end
+    return nothing
+end
+
+"""
+    blittarget(target) -> element type
+
+The element type of `target`'s colour attachment, which is what
+[`compile_draw`](@ref) is specialised on.
+
+Separate from [`target_format`](@ref), which answers with the DRIVER's format: a
+`VkFormat` or an `MTLPixelFormat`. A pipeline is compiled against the element
+type, as everywhere a caller names a format in Mantle.
+"""
+function blittarget end

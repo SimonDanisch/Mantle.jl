@@ -216,16 +216,21 @@ function bufferusage end
 a long-lived allocation does not fragment the space plans reuse every frame."""
 struct Persistent end
 
+# `todevice` on the way in, so a caller holding the KA backend it named — which
+# is what a downstream package has — gets a buffer whose stored device is a real
+# one. Without it the failure surfaced two calls deep as `no method pool(::MetalBackend)`.
 function Buffer(dev, data::AbstractVector{T}; capacity::Integer = length(data)) where {T}
+    d = todevice(dev)
     cap = max(Int(capacity), length(data))
-    b = Buffer{T,1}(persistentarray(dev, T, (cap,)), length(data), cap, dev)
-    isempty(data) || upload!(dev, b.store, 1, data)
+    b = Buffer{T,1}(persistentarray(d, T, (cap,)), length(data), cap, d)
+    isempty(data) || upload!(d, b.store, 1, data)
     return b
 end
 
 function Buffer(dev, ::Type{T}, dims::Dims{N}) where {T,N}
+    d = todevice(dev)
     n = prod(dims)
-    return Buffer{T,N}(persistentarray(dev, T, dims), n, n, dev)
+    return Buffer{T,N}(persistentarray(d, T, dims), n, n, d)
 end
 Buffer(dev, ::Type{T}, n::Integer) where {T} = Buffer(dev, T, (Int(n),))
 
@@ -244,18 +249,25 @@ index happens to be a `UInt32` and so is half the data in a renderer, so giving
 every `UInt32` buffer the bit would be granting a capability to answer a question
 nobody asked.
 """
-indexbuffer(dev, indices::AbstractVector{UInt32}) = Buffer(dev, indices)
+indexbuffer(dev::Device, indices::AbstractVector{UInt32}) = Buffer(dev, indices)
+# Normalised before dispatch and not inside, because the Vulkan device OVERRIDES
+# this: a backend handed in raw would have missed its own method and got the
+# generic buffer, which on Vulkan is a buffer without INDEX_BUFFER_BIT.
+indexbuffer(b::KernelAbstractions.Backend, indices::AbstractVector{UInt32}) =
+    indexbuffer(Device(b), indices)
 
 "`data`'s shape and contents on the device. The `N > 1` counterpart of the
 vector constructor; the upload is linear, because a region is."
 function Buffer(dev, data::AbstractArray{T,N}) where {T,N}
-    b = Buffer(dev, T, size(data))
-    isempty(data) || upload!(dev, b.store, 1, vec(collect(data)))
+    d = todevice(dev)
+    b = Buffer(d, T, size(data))
+    isempty(data) || upload!(d, b.store, 1, vec(collect(data)))
     return b
 end
 
 GPURef(dev, x::T) where {T} =
-    (s = GPURef{T}(persistentarray(dev, T, (1,)), dev); upload!(dev, s.store, 1, [x]); s)
+    (d = todevice(dev); s = GPURef{T}(persistentarray(d, T, (1,)), d);
+     upload!(d, s.store, 1, [x]); s)
 
 """A region of `dims` elements of `T`, from the device's pool.
 
