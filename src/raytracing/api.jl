@@ -132,40 +132,17 @@ callers that need to ask have one of those to hand and not always the same one.
 supports_rt_pipeline(::Any) = false
 supports_rt_pipeline(a::AdaptedAccel) = supports_rt_pipeline(a.hwtlas)
 
-"""
-    pin!(owner, x)
-
-Hold `x` for as long as `owner` — a closed command buffer, a recording, or the
-emitter writing into one — can still run. A backend implements it for what its
-commands can name: arrays, acceleration structures, descriptor pools.
-"""
-function pin! end
-
-"""
-    blases(tlas)
-
-The bottom-level acceleration structures `tlas` instances. A backend answers
-for its top-level type.
-"""
-function blases end
-
-"""
-    pintrace!(owner, tlas)
-
-The acceleration structures a trace reads, held for as long as it can run: the
-top level, and every bottom level it instances. A trace walks from the one into
-the others, so a BLAS swapped out underneath a running trace (`Raycore.sync!`
-does that) must stay alive until the trace has passed, and pinning the top
-level alone does not say so.
-
-Core over two backend answers, `pin!` and `blases`. It used to be written out
-four times in the Vulkan backend — once in the recorded walk and once in each
-unmodelled path — and a Metal backend would have written a fifth.
-"""
-function pintrace!(owner, tlas)
-    pin!(owner, tlas)
-    for blas in blases(tlas)
-        pin!(owner, blas)
-    end
-    return nothing
-end
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
+#
+# `pin!`, `blases` and `pintrace!` are gone with the mechanism they served.
+# 35 call sites, all in one backend, all of them "hold this Julia object until
+# a submission completes" — which core already models as
+# `Outstanding(token, payload, tag)` in `graph/submission.jl`, whose own
+# docstring says the payload holds "the closed command buffers the submission
+# carried, with their pins and scratch". A sixth register of one fact.
+#
+# `pintrace!` was the one that reached core, and only because an acceleration
+# structure travels as a kernel argument: `use(p, tlas)` does not exist, so the
+# graph never sees the TLAS -> BLAS edge and `Raycore.sync!` can swap a BLAS out
+# from under a running trace. Phase 2.4 declares them instead, and then there is
+# nothing left for a pin to guard.

@@ -206,8 +206,8 @@ function release!(rec::Recording)
         tok == 0 || waitfor!(bq, tok)
     end
     rec.token = 0
-    empty!(rec.pinned)
-    release_pinned_refs!(rec)
+    # DELETED in phase 1.1: see docs/mantle-owns-it.md
+    # DELETED in phase 1.1: see docs/mantle-owns-it.md
     let p = pool(dev)
         for r in rec.regions
             retire!(p, r)
@@ -218,7 +218,7 @@ function release!(rec::Recording)
     rec.open && seal!(rec)
     # The command buffer outlives the recording as a one-shot's: the pool of
     # those is where every command buffer this queue has allocated ends up.
-    push!(bq.free_oneshots, OneShot(bq, rec.cmd, Base.IdSet{Any}(), Any[], Region[], false))
+    # DELETED in phase 1.2: see docs/mantle-owns-it.md
     return nothing
 end
 
@@ -236,17 +236,7 @@ end
 # inside `Pool.acquire!`, which is a long way from the signature that caused
 # it. `test_dispatch_allocation.jl` is what catches this. `@inline` and
 # `@generated` methods are exempt: both specialise anyway.
-function release_pinned_refs!(owner::O) where {O<:Closed}
-    for ref in owner.pinned_refs
-        # Drop the buffer pin first: this is the point where a free that was
-        # requested mid-recording actually happens, and it must happen while the
-        # DataRef is still valid so `ref[]` can name the buffer.
-        unpin_buffer!(ref[])
-        GPUArrays.unsafe_free!(ref)
-    end
-    empty!(owner.pinned_refs)
-    return nothing
-end
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 
 """
 The one barrier that is never derived: everything before, against everything
@@ -320,7 +310,7 @@ function oneshot(f, bq::VulkanBatchQueue)
         # What was written goes with the buffer: sealed so it can be begun
         # again, its pins and scratch given back, and the error goes on.
         seal!(o)
-        recycle!(bq, o)
+        # DELETED in phase 1.2: see docs/mantle-owns-it.md
         rethrow()
     end
     seal!(o)
@@ -338,12 +328,13 @@ function openoneshot(bq::VulkanBatchQueue)
         "All existing LavaArrays are invalid after reset and must be re-allocated."))
     # Give back what the device has finished before taking from the pool.
     drain!(bq)
-    o = if isempty(bq.free_oneshots)
+    o = if true   # # DELETED in phase 1.2: see docs/mantle-owns-it.md
+            
         pinned = Base.IdSet{Any}()
         sizehint!(pinned, 32)
         OneShot(bq, allocate_cmd(bq), pinned, Any[], Region[], false)
     else
-        pop!(bq.free_oneshots)
+        # DELETED in phase 1.2: see docs/mantle-owns-it.md
     end
     throw_if_error(bq, "vkBeginCommandBuffer",
         VK._begin_command_buffer(o.cmd, BEGIN_INFO_ONE_TIME))
@@ -358,29 +349,12 @@ oneshot!(f, bq::VulkanBatchQueue; tag = :oneshot) = submit!(bq, oneshot(f, bq); 
 the pool. From the owning thread, and only once the timeline has passed the
 submission that carried it — or when it never reached the device — so the
 regions are released outright rather than retired."""
-function recycle!(bq::VulkanBatchQueue, o::OneShot)
-    empty!(o.pinned)
-    release_pinned_refs!(o)
-    for r in o.regions
-        release!(r)
-    end
-    empty!(o.regions)
-    push!(bq.free_oneshots, o)
-    return nothing
-end
-
-"""A completed submission: its one-shots go back, its recordings are merely
-dropped (they belong to their plans), and the submission itself is pooled."""
-function recycle!(bq::VulkanBatchQueue, sub::Submission)
-    for o in sub.oneshots
-        recycle!(bq, o)
-    end
-    empty!(sub.oneshots)
-    empty!(sub.recordings)
-    empty!(sub.wait_semaphores)
-    push!(bq.free_submissions, sub)
-    return nothing
-end
+# DELETED in phase 1.2: see docs/mantle-owns-it.md
+#
+# Both methods, and neither contained a driver call: no `vkDestroy`, no
+# `vkFree`. They dropped pins, released regions through Mantle's own
+# DELETED in phase 1.2: see docs/mantle-owns-it.md
+# two more pools in a backend. Phase 2.2 and 2.3 put all of it in core.
 
 adopt!(sub::Submission, o::OneShot) = (push!(sub.oneshots, o); nothing)
 adopt!(sub::Submission, r::Recording) =
@@ -391,20 +365,13 @@ Snapshot the VkManagedBuffers a submission of `rec` must `sync_access!`, from
 its pins. Called once at `record!`, so a run iterates a concrete vector and
 boxes nothing — see `Recording.sync`.
 """
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
+#
+# `collectsync!` read the pin list to find the buffers a submission had to
+# `sync_access!`. Which resources a run touches is the graph's, declared by
+# `use(p, x)`, and phase 2.2 takes it from there instead of from a side list.
 function collectsync!(rec::Recording)
-    empty!(rec.sync)
-    seen = Base.IdSet{Any}()
-    for obj in rec.pinned
-        obj isa LavaArray && continue            # handled via pinned_refs
-        if obj isa VkManagedBuffer && !(obj in seen)
-            push!(seen, obj); push!(rec.sync, obj)
-        end
-    end
-    for ref in rec.pinned_refs
-        buf = ref[]::VkManagedBuffer
-        buf in seen || (push!(seen, buf); push!(rec.sync, buf))
-    end
-    return rec
+    error("collectsync! deleted in phase 1.1")
 end
 
 """
@@ -419,19 +386,9 @@ function syncall!(sub::Submission, rec::Recording)
     end
     return nothing
 end
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 function syncall!(sub::Submission, o::OneShot)
-    for obj in o.pinned
-        # LavaArrays are handled via `pinned_refs` below. Between `pin!` and
-        # here, an explicit `unsafe_free!(a)` can have marked `a.buf` freed;
-        # `a.buf[]` would throw even though the VkManagedBuffer is still alive
-        # via our retained ref.
-        obj isa LavaArray && continue
-        sync_access!(sub, obj)
-    end
-    for ref in o.pinned_refs
-        sync_access!(sub, ref[])
-    end
-    return nothing
+    error("syncall! deleted in phase 1.1")
 end
 
 """
@@ -480,7 +437,7 @@ function submit!(bq::VulkanBatchQueue, closed::Closed...;
     # measured by `test_run_allocates_nothing.jl`.
     drain!(bq)
 
-    sub = isempty(bq.free_submissions) ? Submission(bq) : pop!(bq.free_submissions)
+    sub = Submission(bq)   # # DELETED in phase 1.2: see docs/mantle-owns-it.md
     # The value this submission signals; `sync_access!` writes it into every
     # pinned buffer's `last_write`.
     bq.next_timeline += 1
@@ -628,7 +585,7 @@ function drop!(bq::VulkanBatchQueue, sub::Submission)
     for r in sub.recordings
         r.token = 0
     end
-    recycle!(bq, sub)
+    # DELETED in phase 1.2: see docs/mantle-owns-it.md
     return nothing
 end
 
@@ -687,7 +644,7 @@ end
 
 Emitter(c::Closed, am) = Emitter(c.cmd, c, queueof(c).ctx::VkContext, am)
 
-@inline pin!(e::Emitter, obj) = pin!(e.owner, obj)
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 
 """The queue an emitter's commands will be submitted on."""
 queueof(e::Emitter{O}) where {O<:Closed} = queueof(e.owner)
@@ -715,7 +672,7 @@ emitter's owner rather than being allocated per dispatch; see [`tlasset!`](@ref)
                         name::AbstractString = "")
     cmd = e.cmd
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-    pin!(e, pipeline)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     bindtlas!(e, pipeline, tlas)
     push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
     ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
@@ -730,14 +687,14 @@ end
                                  name::AbstractString = "")
     cmd = e.cmd
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-    pin!(e, pipeline)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     bindtlas!(e, pipeline, tlas)
     push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
     mb = indirect.buf[]::VkManagedBuffer
     ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
     VK.cmd_dispatch_indirect(cmd, mb.buffer, UInt64(indirect.offset))
     maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
-    pin!(e, indirect)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emitted!(e, name)
     return nothing
 end
@@ -1218,18 +1175,7 @@ end
 # ::MyRes)` (optional; default no-op).  No edits to the pack walker or to
 # submit! required.
 
-"""
-    pin!(owner, obj) -> nothing
-
-Keep `obj` alive until the submission carrying `owner` signals.  Idempotent:
-repeated calls with the same `obj` (within one owner) are no-ops.
-`VkManagedBuffer` specialization additionally asserts the ctx invariant so
-cross-context use surfaces immediately.
-
-Called from `pack_args_direct!` at each buffer-typed leaf, and directly at
-dispatch entry points for objects not in the kernel arg tuple (pipelines,
-closures, RT AS handles, indirect buffers).
-"""
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 # `===` in an explicit loop rather than `obj in batch.pinned`, and the reason is
 # NOT the one an earlier version of this comment gave. It claimed `pinned` was a
 # `Vector{Any}` whose `in` fell back to a generic `==`. It is an `IdSet{Any}`,
@@ -1253,25 +1199,7 @@ closures, RT AS handles, indirect buffers).
 # A one-shot holds one launch's worth of pins, well under the crossover; a
 # plan's recording holds everything it names and is pinned ONCE, at record.
 # **If a recording ever pins thousands, this should go back to `in`.**
-@inline function pin!(batch::O, obj) where {O<:Closed}
-    for x in batch.pinned
-        x === obj && return nothing
-    end
-    push!(batch.pinned, obj)
-    return nothing
-end
-
-@inline function pin!(batch::O, buf::VkManagedBuffer) where {O<:Closed}
-    bq = queueof(batch)
-    @assert buf.ctx === bq.ctx  "cross-ctx buffer use forbidden"
-    # Same trade as the method above, for the same reason: `in` on this `IdSet`
-    # is identity too, so this is about the boxing, not about correctness.
-    for x in batch.pinned
-        x === buf && return nothing
-    end
-    push!(batch.pinned, buf)
-    return nothing
-end
+# DELETED in phase 1.1: see docs/mantle-owns-it.md
 
 """
     sync_access!(sub::Submission, obj) -> nothing
@@ -1387,8 +1315,8 @@ function cmd_copy_buffer!(e::Emitter, src, dst, nbytes::Integer;
     VK.cmd_copy_buffer(e.cmd, src_vkbuf, dst_vkbuf, [region])
     # Pin + sync-track the VkManagedBuffers so the transfer respects any
     # prior cross-queue writer via the submission's wait_semaphores.
-    src isa VkManagedBuffer && pin!(e, src)
-    dst isa VkManagedBuffer && pin!(e, dst)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     return nothing
 end
 

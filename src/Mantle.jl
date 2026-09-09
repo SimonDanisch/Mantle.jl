@@ -12,6 +12,16 @@ module Mantle
 # `DeviceCaps` and the matrix types were each written twice, here and in Lava,
 # and bridged by a positional copy in `MantleLavaExt`. Both copies are deleted:
 # there is one type, and `caps` fills it in.
+# ColorTypes is a DEPENDENCY of Mantle, declared in Project.toml, and
+# `runtime/format.jl` documents `RGBA{N0f8}` and `BGRA{N0f8}` as the portable
+# way to name a pixel format. It was never `using`-ed, and three separate
+# comments concluded from that it was absent — which cost `mtlformat` a
+# structural match on `nameof(T)` (so any foreign type called `RGBA` was
+# accepted) and cost the Metal backend the portable `Window(backend, w, h)`
+# that is in the vocabulary and that Lava answers.
+using ColorTypes: RGBA, BGRA, Colorant
+export RGBA, BGRA
+
 using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
     MatrixScope, SubgroupScope, WorkgroupScope, MatrixShape, DeviceCaps
 # The one device intrinsic core reaches for. `gemv.jl`'s inner loop reduces
@@ -29,6 +39,45 @@ using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
     coopmat_getcomp, coopmat_setcomp
 # Primitive topology: KI's, because a compiler emits execution modes from it and
 # every backend creates a pipeline from it. Re-exported below, same as `caps`.
+# The device-side shader vocabulary, re-exported so a downstream package writes
+# `using Mantle` and names no backend and no compiler. Declared in
+# KernelInterface because both Lava and Metal can reach it and neither can
+# reach the other's runtime — see the header of `KernelInterface/src/graphics.jl`.
+using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
+    frag_coord_y, frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy,
+    set_point_size!, sample_texture_2d, emit_vertex!, end_primitive!,
+    primitive_id_in, clip_y
+export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
+    frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
+    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y
+# The mesh pipeline's half of the same vocabulary. `emit!`/`endprimitive!` are
+# what a geometry body calls, and the emitter it is handed decides whether that
+# reaches a native geometry stage or a mesh stage — which is why the body needs
+# no backend name and no second version. See `KernelInterface/src/mesh.jl`.
+using KernelInterface: MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter,
+    MeshEmitter, emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!,
+    set_mesh_line!, set_mesh_point!, set_mesh_outputs!, set_mesh_groups!,
+    mesh_thread_index, mesh_group_index
+# `Flat` and the interface-list accessors. `GeometryConfig` was Lava's, which
+# meant a portable pipeline description could not hold one without depending on
+# a SPIR-V compiler; it is beside `MeshConfig` now, for the reason both are
+# there — a compiler reads every field.
+using KernelInterface: Flat, isflat, unflat, flatnames, smoothnames, valuetypes,
+    GeometryConfig, inputvertices
+export MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter,
+    emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!, set_mesh_line!,
+    set_mesh_point!, set_mesh_outputs!, set_mesh_groups!, mesh_thread_index,
+    mesh_group_index
+export Flat, isflat, unflat, GeometryConfig
+using KernelInterface: rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
+    rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
+    rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
+    rt_hit_bary_v
+export rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
+    rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
+    rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
+    rt_hit_bary_v
+
 using KernelInterface: Topology, TriangleList, TriangleStrip, LineList,
     LineStrip, PointList, PatchList, LineListAdjacency, LineStripAdjacency
 # `import`, not `using … :` — these get `Mantle.Device` methods below, and
@@ -97,6 +146,10 @@ include("phases.jl")
 include("graph/types.jl")
 # Before `queue.jl`: a `BatchQueue` holds the outstanding list this declares.
 include("graph/submission.jl")
+# After it: `SubmitChannel` holds the `Outstanding` list that file declares, and
+# `oneshot!` goes through `submitted!`. Phases 2.2 and 2.3 of
+# docs/mantle-owns-it.md — the hold list and the recording pool, in core.
+include("graph/lifetime.jl")
 include("graph/queue.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
 
@@ -125,8 +178,17 @@ include("array/fft.jl")
 # pieces came here, which went to KernelInterface, and why.
 include("graphics/state.jl")
 include("graphics/resources.jl")   # needs RenderTarget (state.jl) and Window (runtime/api.jl)
+include("graphics/stages.jl")      # needs Topology and the KI configs above
 include("graphics/pipeline.jl")    # needs the state vocabulary above
+include("graphics/mesh.jl")        # needs the same state vocabulary
+# The geometry-to-mesh translation. After both pipelines: it reads one and
+# builds the other.
+include("graphics/lowering.jl")
 include("graphics/commands.jl")
+# Recording a pass by hand, over the same three primitives the graph uses. The
+# imperative verb family this replaces existed only on Vulkan, which is why
+# RayMakie's overlay could not composite on Metal at all.
+include("graphics/record.jl")
 include("graphics/builtins.jl")
 
 include("geometry/transform.jl")
@@ -143,6 +205,9 @@ include("graph/backend.jl")
 
 # ── Ray tracing ───────────────────────────────────────────────────────────────
 include("raytracing/pipeline.jl")
+# The instances a top-level structure holds: the order, the handles, the
+# reindex on delete. Portable; a backend supplies only the batch type.
+include("raytracing/batches.jl")
 include("raytracing/accel.jl")
 include("raytracing/api.jl")
 
@@ -203,10 +268,13 @@ export RenderTarget
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
+# A submission channel and what a submission holds — 2.2 and 2.3. `hold!` is what
+# `pin!` meant, with the lifetime owned by core instead of by a backend.
+export SubmitChannel, channelof, hold!, oneshot!, acquire!, Submission
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
-export supports_graphics, supports_batch_queue, use_bindings!, supports_rt_pipeline
+export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export batchqueue
-export defaultbackend, availablebackends, register_backend!, register_kernel_recorder!
+export defaultbackend, availablebackends, eachbackend, register_backend!, register_kernel_recorder!
 export devicearray
 export bind_textures
 
@@ -219,16 +287,30 @@ export begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
 export isdepth, target_extent, checkextents, refit!,
        collect!
 export blit!, present_frame!, acquire_next_image!, transition_image!
+export InstanceBatches, register!, batchof, ninstances
 export readback_framebuffer, readback_window, readback_target
 
 # Pipeline descriptions and the indirect draw record.
+# The stages a pipeline is made of. Each declares only what it PRODUCES: its
+# inputs are the previous stage's outputs, so no interface is written twice.
+export ShaderStage, VertexShader, FragmentShader, GeometryShader, MeshShader,
+    ObjectShader
+export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
+    smoothoutputs, outputtype
+# What the fragment stage reads, which depends on which stages a pipeline has.
+export lastgeometrystage, fragmentinputs, fragmentinputtype
+# Recording a pass by hand. Shaped like the graph's `render!`/`draw!` on purpose.
+export pass!, viewport!, bindings!, PassRecorder
+export setviewport!, colorimage, depthimage, currentimage, blittarget, todevice
+export lower_geometry_to_mesh
 export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
-# The shader builtins. Exported because a shader is written against them and
-# nothing else; see `graphics/builtins.jl` for why they are overridden rather
-# than defined.
-export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
-       frag_coord_z, frag_coord_w, frag_coord_xy, clip_y
 export DrawIndirectCommand
+# The mesh pipeline. Described here, run by a backend that answers
+# `supports_mesh_pipeline`; see `graphics/mesh.jl`.
+export MeshPipeline, meshconfig, objectconfig
+export supports_mesh_pipeline
+# The shader builtins were declared here and are now KernelInterface's, imported
+# and re-exported above: phase 1.4 deleted the file, see docs/mantle-owns-it.md.
 export RayTracingPipeline, AdaptedAccel
 
 # Hardware ray tracing.
@@ -264,6 +346,8 @@ export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, GPURef, Surface, Attribute, draw!, dispatch!, render!, compute!
+# Its own verb because the two APIs differ at allocation; see `memory/resources.jl`.
+export indexbuffer
 # `repeat!` and its vocabulary: a loop recorded once, whose trip count the device
 # decides. `Predicate` is exported because a kernel writing predicates by hand
 # names the type; `supportspredicate` because a caller may want to pick between

@@ -17,6 +17,13 @@
 using Test
 import Mantle
 const M = Mantle
+# The backend this run is for. `runtests.jl` includes this file once per
+# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
+# gets the default one. Nothing below names a backend, which is the point:
+# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
+    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+
 
 using KernelAbstractions: @kernel, @index, @Const
 
@@ -66,7 +73,7 @@ compileresult(g, plan) = (
 )
 
 @testset "compile output is pinned" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     n = 1 << 16
     g = buildprobe(dev, n)
     r = compileresult(g, M.Plan(g))
@@ -85,7 +92,14 @@ compileresult(g, plan) = (
     # Every pass, including the two that share no data with anything — those are
     # ALIASING barriers. If a refactor drops them the peak stays right and the
     # picture goes wrong intermittently, which is the worst failure available.
-    @test all(r.barriered)
+    # Backend-aware, and only since the answer is measured (2.6). A backend
+    # whose passes each commit their own command buffer on one queue is ordered
+    # by commit order and derives nothing — it says so through
+    # `needs_transition`, and `sync/backend.jl` asks exactly that of it. Reading
+    # the answer here rather than assuming one is the difference between a
+    # portable assertion and one backend's.
+    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), Any, Any)
+    @test derives ? all(r.barriered) : !any(r.barriered)
 
     # Pass indices are 1-based over the schedule above, so the update pass at
     # position 1 shifts every transient's interval by one.
@@ -158,7 +172,7 @@ the context it writes into, which is what `compile!(ctx, prefix)` was built for.
 compilectx(g; kw...) = Mantle.Compile(g; kw...)
 
 @testset "Dag: the edges themselves" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     c = M.compile!(compilectx(buildtemptation(dev, 1 << 18, 1 << 4)), (M.Dag(),))
     # "drain" reads what "fill" wrote. One edge, and it points backwards.
     @test M.analysis(c).deps == [Int[], [1]]
@@ -186,7 +200,7 @@ end
 # schedule is guarding nothing.
 
 @testset "Schedule: the order itself, and that the policy decides it" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     prefix = (M.Dag(), M.Schedule())
     order(g; kw...) = M.analysis(M.compile!(compilectx(g; kw...), prefix)).order
 
@@ -203,7 +217,7 @@ end
 end
 
 @testset "alias = false gives every transient the whole timeline" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     g = buildprobe(dev, 1 << 16)
     plan = M.Plan(g; alias = false)
     # Nothing may share bytes, so the peak IS the naive sum — 5 x 65536 Float32.

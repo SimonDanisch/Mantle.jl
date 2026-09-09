@@ -60,11 +60,24 @@ Defined here rather than declared, and that is the whole payoff of the split
 above: this type does nothing but hold one [`Texture`](@ref) and one
 [`Sampler`](@ref), so once those are the API the pairing is portable and no
 backend needs its own.
+
+Parameterised on the CONCRETE texture and sampler types, and that is
+load-bearing. The fields were `::Texture{T,N}` and `::Sampler` — abstract — which
+meant no backend could dispatch [`bind_textures`](@ref) on its own texture, since
+that function takes no device argument. The Vulkan side worked around it by
+reaching into `textures[1].texture.ctx`: a backend recovering its own concrete
+type out of an abstract field, which is exactly the kind of reach a portable
+struct should make unnecessary. With the types visible each backend dispatches on
+its own and nothing is smuggled.
 """
-struct SampledTexture{T, N}
-    texture::Texture{T, N}
-    sampler::Sampler
+struct SampledTexture{T, N, TEX<:Texture{T, N}, SAM<:Sampler}
+    texture::TEX
+    sampler::SAM
 end
+
+# No outer constructor: Julia's generated one already solves `T` and `N` out of
+# `TEX <: Texture{T,N}`. Writing one by hand duplicated that exact signature,
+# which is a method overwrite and blocks precompilation outright.
 
 """
     TextureBindings

@@ -113,6 +113,93 @@ that hatch on CUDA and Metal; on a backend we control it is a view built by hand
 function deviceview end
 
 """
+    hostspan(dev, memory) -> (Ptr{UInt8}, nbytes)
+
+Where a block of this backend's memory begins in the HOST address space, and how
+many bytes there are.
+
+This is the whole difference between a backend the CPU can address directly and
+the host backend itself: Metal answers from a `Shared` `MTLBuffer`'s `contents`,
+the host backend from its slab's `pointer`. Everything over it — [`hostview`](@ref)
+and the three transfer verbs below — is then one implementation.
+
+A backend whose device memory is not mapped does not answer, and writes
+`upload!`, `download` and `devicecopy!` itself: Vulkan stages through a transfer
+queue, which is a different operation and not a longer version of this one.
+"""
+function hostspan end
+
+"""
+    hostview(T, base, nbytes, offset, dims) -> Array{T}
+    hostview(dev, a::DeviceArray)           -> Array{T}
+
+`dims` elements of `T` over host-addressable memory, starting at byte `offset`.
+No copy.
+
+A typed `unsafe_wrap`, NOT `reinterpret` over a byte view. `reinterpret` refuses
+a struct with padding — "Padding of type X is not compatible with type UInt8" —
+and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields, so every scene with
+a light BVH failed on that once, on each backend that wrote this separately.
+
+`own = false`: the `Block` owns the memory, as everywhere else in Mantle. It is
+reachable from whatever handed us this offset — a `DeviceArray` holds its region,
+which holds the block — so it outlives any wrapper a live handle can make.
+
+The bounds check is the reason this is one function rather than an `unsafe_wrap`
+at each call site: two regions the placer put at overlapping offsets corrupt each
+other here loudly and deterministically, instead of each quietly getting storage
+that runs off the end of the block.
+"""
+function hostview(::Type{T}, base::Ptr{UInt8}, nbytes::Integer, offset::Integer,
+                  dims::Dims) where {T}
+    need = prod(dims) * sizeof(T)
+    offset + need <= nbytes || throw(ArgumentError(
+        "$(join(dims, "x")) $T at offset $offset needs $need bytes, memory has $nbytes"))
+    return unsafe_wrap(Array, Ptr{T}(base + offset), dims; own = false)
+end
+
+function hostview(dev, a::DeviceArray{T}) where {T}
+    base, nbytes = hostspan(dev, memoryof(a))
+    return hostview(T, base, nbytes, offset(a), size(a))
+end
+
+"""
+    hostupload!(dev, a, first, data) -> a
+    hostdownload(dev, a)             -> Vector
+    hostdevicecopy!(dev, dst, src, n) -> dst
+
+`upload!`, `download` and `devicecopy!` for a backend the CPU addresses
+directly: a `copyto!` over [`hostview`](@ref), and on the two that READ device
+memory a wait first. A backend forwards its three vocabulary methods here.
+
+The wait is [`awaitwrites`](@ref) and it is not optional. Unified memory means
+the CPU and the GPU address the same bytes; it does NOT mean a kernel writing
+them has finished. Reading without waiting returns whatever was there before the
+launch — silently, and correctly often enough to look fine in a test that
+uploads and reads straight back. `upload!` does not wait: the graph orders a
+write against the passes that read it.
+
+The host backend answers `awaitwrites` with nothing, because its "device" writes
+happen on the calling thread, and so gets the same three at no cost.
+"""
+function hostupload!(dev, a::DeviceArray, first::Integer, data::AbstractVector)
+    copyto!(hostview(dev, a), first, data, 1, length(data))
+    return a
+end
+
+function hostdownload(dev, a::DeviceArray)
+    awaitwrites(dev)
+    return collect(hostview(dev, a))
+end
+
+function hostdevicecopy!(dev, dst::DeviceArray{T}, src::DeviceArray{T},
+                         n::Integer) where {T}
+    awaitwrites(dev)
+    copyto!(hostview(dev, dst), 1, hostview(dev, src), 1, Int(n))
+    return dst
+end
+
+"""
     bufferusage(dev, T) -> constraint
 
 What memory a persistent buffer of `T` needs, as whatever [`compatible`](@ref)
@@ -129,29 +216,58 @@ function bufferusage end
 a long-lived allocation does not fragment the space plans reuse every frame."""
 struct Persistent end
 
+# `todevice` on the way in, so a caller holding the KA backend it named — which
+# is what a downstream package has — gets a buffer whose stored device is a real
+# one. Without it the failure surfaced two calls deep as `no method pool(::MetalBackend)`.
 function Buffer(dev, data::AbstractVector{T}; capacity::Integer = length(data)) where {T}
+    d = todevice(dev)
     cap = max(Int(capacity), length(data))
-    b = Buffer{T,1}(persistentarray(dev, T, (cap,)), length(data), cap, dev)
-    isempty(data) || upload!(dev, b.store, 1, data)
+    b = Buffer{T,1}(persistentarray(d, T, (cap,)), length(data), cap, d)
+    isempty(data) || upload!(d, b.store, 1, data)
     return b
 end
 
 function Buffer(dev, ::Type{T}, dims::Dims{N}) where {T,N}
+    d = todevice(dev)
     n = prod(dims)
-    return Buffer{T,N}(persistentarray(dev, T, dims), n, n, dev)
+    return Buffer{T,N}(persistentarray(d, T, dims), n, n, d)
 end
 Buffer(dev, ::Type{T}, n::Integer) where {T} = Buffer(dev, T, (Int(n),))
+
+"""
+    indexbuffer(dev, indices::AbstractVector{UInt32}) -> Buffer
+
+`indices` on the device, usable as an indexed draw's index buffer.
+
+Its own name and not `Buffer`, because the two APIs genuinely differ: Vulkan
+requires `BUFFER_USAGE_INDEX_BUFFER_BIT` at allocation and refuses a buffer that
+lacks it, while Metal's `drawIndexedPrimitives` takes any buffer. So the default
+here is what Metal needs and the Vulkan backend overrides it.
+
+Not expressed through `extrausage`, which dispatches on the ELEMENT type: an
+index happens to be a `UInt32` and so is half the data in a renderer, so giving
+every `UInt32` buffer the bit would be granting a capability to answer a question
+nobody asked.
+"""
+indexbuffer(dev::Device, indices::AbstractVector{UInt32}) = Buffer(dev, indices)
+# Normalised before dispatch and not inside, because the Vulkan device OVERRIDES
+# this: a backend handed in raw would have missed its own method and got the
+# generic buffer, which on Vulkan is a buffer without INDEX_BUFFER_BIT.
+indexbuffer(b::KernelAbstractions.Backend, indices::AbstractVector{UInt32}) =
+    indexbuffer(Device(b), indices)
 
 "`data`'s shape and contents on the device. The `N > 1` counterpart of the
 vector constructor; the upload is linear, because a region is."
 function Buffer(dev, data::AbstractArray{T,N}) where {T,N}
-    b = Buffer(dev, T, size(data))
-    isempty(data) || upload!(dev, b.store, 1, vec(collect(data)))
+    d = todevice(dev)
+    b = Buffer(d, T, size(data))
+    isempty(data) || upload!(d, b.store, 1, vec(collect(data)))
     return b
 end
 
 GPURef(dev, x::T) where {T} =
-    (s = GPURef{T}(persistentarray(dev, T, (1,)), dev); upload!(dev, s.store, 1, [x]); s)
+    (d = todevice(dev); s = GPURef{T}(persistentarray(d, T, (1,)), d);
+     upload!(d, s.store, 1, [x]); s)
 
 """A region of `dims` elements of `T`, from the device's pool.
 

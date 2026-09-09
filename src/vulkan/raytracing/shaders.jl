@@ -69,7 +69,7 @@ function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::L
         pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
                           raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
         # HWTLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
-        pintrace!(owner, tlas)
+        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
         bq.last_dispatch_info = "rt_trace w=$width h=$height"
         emit_trace!(e, vk_pipeline, tlas, arg_buf.address, width, height, depth,
                     bq.last_dispatch_info)
@@ -154,7 +154,7 @@ function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline
         arg_buf = get_arg_buffer(owner, total_size)
         pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
                           raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
-        pintrace!(owner, tlas)
+        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
         bq.last_dispatch_info = "rt_indirect"
         emit_trace_indirect!(e, vk_pipeline, tlas, arg_buf.address, indirect_view,
                              bq.last_dispatch_info)

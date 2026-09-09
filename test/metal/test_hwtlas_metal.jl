@@ -23,7 +23,12 @@ assertion below:
 """
 
 using Test, Mantle, Metal, Raycore, GeometryBasics, KernelAbstractions
-using Adapt, StaticArrays, LinearAlgebra
+using Adapt, StaticArrays
+# QUALIFIED below, not `using LinearAlgebra`: these files are included into
+# `Main` one after another, and once some earlier one has touched an undefined
+# `Main.normalize` the binding is resolved and a later `using` cannot introduce
+# it — an `UndefVarError` whose cause is the ORDER of the includes.
+import LinearAlgebra
 const KA = KernelAbstractions
 const MEXT = Base.get_extension(Mantle, :MantleMetalExt)
 
@@ -39,7 +44,7 @@ end
 function _probe_dirs(n, O)
     s = Ref(987)
     nr() = (s[] = (1103515245 * s[] + 12345) % 2147483648; Float32(s[]) / 2147483648f0)
-    [Vec3f(normalize(Point3f(2*(nr()-0.5f0), 2*(nr()-0.5f0), 0) - O)) for _ in 1:n]
+    [Vec3f(LinearAlgebra.normalize(Point3f(2*(nr()-0.5f0), 2*(nr()-0.5f0), 0) - O)) for _ in 1:n]
 end
 
 @testset "Metal: the hit-record ABI matches the MSL it is shared with" begin
@@ -130,7 +135,7 @@ end
 
     # One ray at each sphere.
     O = Point3f(0, 0, 4)
-    dirs = [Vec3f(0, 0, -1), Vec3f(normalize(Point3f(1.5f0, 0, 0) - O))]
+    dirs = [Vec3f(0, 0, -1), Vec3f(LinearAlgebra.normalize(Point3f(1.5f0, 0, 0) - O))]
     n = length(dirs)
     d_d = KA.allocate(be, Vec3f, n); copyto!(d_d, dirs)
     h_d = KA.zeros(be, Int32, n); t_d = KA.zeros(be, Float32, n); i_d = KA.zeros(be, UInt32, n)

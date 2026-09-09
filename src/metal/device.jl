@@ -176,10 +176,7 @@ function rawalloc(d::MetalDevice, ::Images, bytes::Int, storage)
     desc.storageMode = storage === Metal.PrivateStorage ? MTL.MTLStorageModePrivate :
                                                           MTL.MTLStorageModeShared
     desc.type = MTL.MTLHeapTypePlacement
-    # Tracked, and the heap has to agree with its resources — see
-    # `image_descriptor` for why this is not untracked: nothing on this backend
-    # turns the graph's transitions into fences yet, so the driver's own
-    # tracking is the only thing keeping one pass behind the one that feeds it.
+    # DELETED in phase 1.8: the reason given for `Tracked`. See `metal/ka.jl`.
     desc.hazardTrackingMode = MTL.MTLHazardTrackingModeTracked
     heap = MTL.MTLHeap(d.dev, desc)
     heap === nothing && throw(OutOfMemoryError())
@@ -201,18 +198,10 @@ rawfree(::MetalDevice, heap::MTL.MTLHeap) = (Metal.ObjectiveC.release(heap); not
 
 # ── The timeline ──────────────────────────────────────────────────────────────
 
-"""
-What must complete before memory retired *now* may be handed out again.
-
-With a command buffer open that is the value the next submission will signal,
-because a command already encoded into it may name those bytes. With none open,
-everything ever recorded has been submitted and `next` is the last of it —
-waiting for one more would wait for a submission an idle application never
-makes, pinning the region for ever.
-
-Read, never forced: a reclaim must not go and submit a half-recorded command
-buffer to collect its own memory.
-"""
+# DELETED in phase 1.7: the docstring, which said "Read, never forced" of a
+# function whose first line is `d.next += 1`. Whether a fence is a read or an
+# allocation is phase 2.2's question, since it is the same question as what a
+# submission holds.
 function fence(d::MetalDevice)
     d.next += UInt64(1)
     return d.next
@@ -282,17 +271,14 @@ waitidle(d::MetalDevice) = (Metal.synchronize(); nothing)
 # compute kernels only — no vertex or fragment stage existed for a shader to
 # become. It compiles both now.
 
-# The queue lifecycle verbs are deliberately NOT implemented. `BatchQueue` is a
-# command-pool/fence/timeline arrangement, and Metal has neither: compute goes
-# through Metal.jl's own queue, `MetalDevice`'s `MTLSharedEvent` supplies the
-# timeline, and drawing shares that same queue (see `framebuffer!` in
-# `graphics.jl`). A caller reaching here wants Vulkan's shape, not a
-# capability Metal lacks, so it says so rather than handing back a stub queue
-# that silently records nothing.
-function allocate_batch_queue!(b::Union{Metal.MetalBackend,MetalDevice})
+# DELETED in phase 1.7: the body of `allocate_batch_queue!` and its message.
+# It told the caller "Metal.jl has no graphics pipeline, check
+# `supports_graphics` and take the compute path" on a backend where
+# `supports_graphics` measurably answers `true`, fifteen lines below a comment
+# saying so. What a `BatchQueue` is, and whether Mantle needs the concept at
+# all, is phase 2.3's question.
+function allocate_batch_queue!(::Union{Metal.MetalBackend,MetalDevice})
     throw(ArgumentError(
-        "Mantle: allocate_batch_queue! is not implemented on Metal, because a " *
-        "BatchQueue exists to drive render passes and presentation and Metal.jl " *
-        "has no graphics pipeline. Check `Mantle.supports_graphics(backend)` and " *
-        "take the compute path; compute dispatch does not need a BatchQueue."))
+        "Mantle: BatchQueue is being removed — object reuse and lifetime are " *
+        "core's, not a backend's. See docs/mantle-owns-it.md 2.2 and 2.3."))
 end

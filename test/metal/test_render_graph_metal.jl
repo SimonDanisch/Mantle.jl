@@ -32,9 +32,9 @@ rg_vertex(verts) = (position = verts[Int(vertex_index())], tint = (0f0, 1f0, 0f0
 rg_fragment(inputs) = inputs.tint
 
 const RG_DEV = M.Device(M.MetalAPI())
-const RG_PIPE = M.GraphicsPipeline(; vertex = rg_vertex, fragment = rg_fragment,
-                                     cull = M.NoCull(),
-                                     varyings = (tint = NTuple{4,Float32},))
+const RG_PIPE = M.GraphicsPipeline(; vertex = M.VertexShader(rg_vertex; outputs = (tint = NTuple{4,Float32},)),
+                                     fragment = M.FragmentShader(rg_fragment),
+                                     cull = M.NoCull())
 const RG_TRI = M.Buffer(RG_DEV, NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0f0,    0.9f0, 0f0, 1f0)])
@@ -173,9 +173,9 @@ mrt_fragment(inputs) = (inputs.albedo,
                         Vec4f(0f0, 0f0, 1f0, 1f0),
                         Vec4f(inputs.normal[1], inputs.normal[2], inputs.normal[3], 1f0))
 
-const RG_MRT = M.GraphicsPipeline(; vertex = mrt_vertex, fragment = mrt_fragment,
-                                    cull = M.NoCull(),
-                                    varyings = (albedo = Vec4f, normal = Vec3f))
+const RG_MRT = M.GraphicsPipeline(; vertex = M.VertexShader(mrt_vertex; outputs = (albedo = Vec4f, normal = Vec3f)),
+                                    fragment = M.FragmentShader(mrt_fragment),
+                                    cull = M.NoCull())
 
 @testset "a Vec4f varying manges the same as its tuple" begin
     # The two stages link by this string and nothing else, so `Vec4f` and
@@ -227,8 +227,9 @@ end
 rg_depth_only(verts) = (position = verts[Int(vertex_index())],)
 rg_no_colour(inputs) = nothing
 
-const RG_SHADOW = M.GraphicsPipeline(; vertex = rg_depth_only, fragment = rg_no_colour,
-                                       varyings = NamedTuple(), cull = M.NoCull(),
+const RG_SHADOW = M.GraphicsPipeline(; vertex = M.VertexShader(rg_depth_only),
+                                       fragment = M.FragmentShader(rg_no_colour),
+                                       cull = M.NoCull(),
                                        depth = M.DepthLess())
 
 @testset "a depth-only pass writes depth and a copy pass reads it back" begin
@@ -421,18 +422,19 @@ using ColorTypes: BGRA
     end
     plan = M.Plan(g)
 
-    # Hand-bracketed, because the readback has to happen BEFORE the present:
-    # after presenting, the drawable belongs to the compositor.
-    M.beginframe!(win)
-    M.acquire_next_image!(win)
+    # Hand-bracketed, because the readback has to happen BEFORE the present,
+    # and `closerun!` is what presents: after that the drawable belongs to the
+    # compositor. This is `run!`'s own sequence with the readback spliced in —
+    # `beforeframe!` acquires, `openrun`/`emitplan!` walk the passes, `closerun!`
+    # closes the run and presents — so it stays a frame and not a special path.
+    M.beforeframe!(RG_DEV, plan)
     @test M.target_view(win) isa Metal.MTL.MTLTexture
-    for pp in plan.passes
-        M.runpass!(plan, pp)
-    end
+    e = M.openrun(RG_DEV, plan)
+    M.emitplan!(e, plan)
     img = M.readback_window(win)
     @test size(img) == (64, 64)
     @test count(p -> ColorTypes.green(p) > 0.5, img) == 1682
-    M.present_frame!(RG_DEV, win)
+    M.closerun!(RG_DEV, plan, e)
     # …and the drawable is gone again once presented.
     @test_throws ErrorException M.target_view(win)
 
@@ -463,8 +465,9 @@ tinted_fragment(inputs) = inputs.tint
     # what reorders them — so a pipeline compiled for the wrong one swaps red
     # and blue, which looks like a plausible image and is why this compares
     # CHANNELS rather than eyeballing.
-    pipe = M.GraphicsPipeline(; vertex = tinted_vertex, fragment = tinted_fragment,
-                                cull = M.NoCull(), varyings = (tint = Vec4f,))
+    pipe = M.GraphicsPipeline(; vertex = M.VertexShader(tinted_vertex; outputs = (tint = Vec4f,)),
+                                fragment = M.FragmentShader(tinted_fragment),
+                                cull = M.NoCull())
 
     function draw_into(target_of)
         g = M.Graph(RG_DEV)
@@ -481,12 +484,11 @@ tinted_fragment(inputs) = inputs.tint
 
     win = MEXTr.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
     plan_win, _ = draw_into(g -> M.Surface(g, win))
-    M.beginframe!(win); M.acquire_next_image!(win)
-    for pp in plan_win.passes
-        M.runpass!(plan_win, pp)
-    end
+    M.beforeframe!(RG_DEV, plan_win)
+    e = M.openrun(RG_DEV, plan_win)
+    M.emitplan!(e, plan_win)
     b = M.readback_window(win)
-    M.present_frame!(RG_DEV, win)
+    M.closerun!(RG_DEV, plan_win, e)
 
     @test size(a) == size(b)
     for ch in (ColorTypes.red, ColorTypes.green, ColorTypes.blue, ColorTypes.alpha)
@@ -516,13 +518,17 @@ end
     end
     plan = M.Plan(g)
 
+    # `refit!` after the acquire and not before it: the acquire is the last
+    # place a resize is noticed, and a frame refit ahead of it is recorded for
+    # a surface the acquire then rebuilds. `run!` takes the same two steps in
+    # the same order; this splices the readback in before the present.
     function frame(w)
-        M.beginframe!(w); M.refit!(plan); M.acquire_next_image!(w)
-        for pp in plan.passes
-            M.runpass!(plan, pp)
-        end
+        M.beforeframe!(RG_DEV, plan)
+        M.refit!(plan)
+        e = M.openrun(RG_DEV, plan)
+        M.emitplan!(e, plan)
         img = M.readback_window(w)
-        M.present_frame!(RG_DEV, w)
+        M.closerun!(RG_DEV, plan, e)
         return img
     end
 
@@ -557,13 +563,21 @@ end
     @inbounds x[i] += 1f0
 end
 
-@testset "consecutive render and copy passes share one command buffer" begin
-    # A command buffer per pass is nine of them in the deferred demo, and a
-    # submission costs far more than the drawing in it — the whole frame's GPU
-    # work is 5 ms and the frame took ten times that. Encoders are cheap and a
-    # command buffer takes as many as you like in sequence, so only a DISPATCH
-    # forces one out: buffers on a queue run in COMMIT order, and drawing still
-    # open when a dispatch is committed would run after it.
+@testset "a pass leaves nothing open, and the frame is still correct" begin
+    # This used to assert the opposite, and the reversal is the point.
+    #
+    # The backend kept ONE command buffer open across consecutive render and
+    # copy passes and committed it only where the graph said a dispatch was
+    # about to follow, because a submission costs more than the drawing in it —
+    # the deferred demo's frame is ~3 ms of GPU work and paid ~20 submissions.
+    # That open buffer is gone by the same rule that removed Vulkan's: what is
+    # open depends on every call since it was opened, so nothing can be
+    # scheduled around it, and batching is the graph's job rather than the
+    # queue's. See the block above `framebuffer!` in `src/metal/graphics.jl`.
+    #
+    # What is testable now is the contract that replaced it: every call opens
+    # its own buffer and commits it before returning, so a readback needs no
+    # submit from the caller and nothing is left dangling between passes.
     g = M.Graph(RG_DEV)
     a = M.Transient.Image(g, RGBA{N0f8}, (64, 64))
     px = M.Transient.Buffer(g, RGBA{N0f8}, 64 * 64)
@@ -577,27 +591,25 @@ end
     end
     plan = M.Plan(g)
 
-    M.submit!(RG_DEV)                       # start from nothing open
-    @test MEXTr.OPEN_CB[] === nothing
-    seen = Any[]
-    for pp in plan.passes
-        M.runpass!(plan, pp)
-        push!(seen, MEXTr.OPEN_CB[])
-    end
-    # All three passes wrote into the SAME buffer, and it is still open.
-    @test all(cb -> cb === seen[1], seen)
-    @test seen[1] !== nothing
-    # `submit!` is what closes it, and it is idempotent.
-    M.submit!(RG_DEV)
-    @test MEXTr.OPEN_CB[] === nothing
-    M.submit!(RG_DEV)
-    @test MEXTr.OPEN_CB[] === nothing
-    # …and the frame is still correct.
+    # No global holding a half-written buffer between calls. Named rather than
+    # implied: reintroducing one without the graph deciding where it closes is
+    # the regression this file is here to catch, and it would land here.
+    @test !isdefined(MEXTr, :OPEN_CB)
+
+    M.run!(plan)
+    @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(b)) == 1682
+    # A second run over the same plan, with nothing submitted by hand in
+    # between, still lands: each pass closed what it opened.
+    M.run!(plan)
     @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(b)) == 1682
 end
 
-@testset "a dispatch forces the open command buffer out" begin
-    # The ordering that makes `submit!` necessary rather than an optimisation.
+@testset "a dispatch between two render passes keeps commit order" begin
+    # The ordering the deleted `submit!` existed to protect, asserted through
+    # the result instead of through what is open. Command buffers on one queue
+    # run in COMMIT order, so drawing that was still open when a dispatch was
+    # committed would have run AFTER it; with a buffer per call the order is
+    # the order the walk emitted, which is the order the graph derived.
     g = M.Graph(RG_DEV)
     a = M.Transient.Image(g, RGBA{N0f8}, (64, 64))
     scratch = M.Buffer(RG_DEV, zeros(Float32, 16))
@@ -612,20 +624,11 @@ end
     end
     plan = M.Plan(g)
 
-    M.submit!(RG_DEV)
-    M.runpass!(plan, plan.passes[1])
-    first_cb = MEXTr.OPEN_CB[]
-    @test first_cb !== nothing
-    M.runpass!(plan, plan.passes[2])        # the dispatch
-    # Closed by `run!`'s call to `submit!` before the dispatch — the drawing
-    # cannot still be open, or it would be committed after the work that
-    # follows it.
-    @test MEXTr.OPEN_CB[] === nothing
-    M.runpass!(plan, plan.passes[3])
-    @test MEXTr.OPEN_CB[] !== nothing
-    @test MEXTr.OPEN_CB[] !== first_cb
-    M.submit!(RG_DEV)
+    M.run!(plan)
     @test Array(scratch)[1] == 1f0
+    # `Keep` on the second pass: it drew over what the first left, so the count
+    # is one triangle and not two overlaid or a cleared target.
+    @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(a)) == 1682
 end
 
 @testset "an unprofiled frame holds no command buffers" begin

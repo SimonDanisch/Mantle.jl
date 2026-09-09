@@ -151,10 +151,28 @@ function free_names(path::AbstractString)
     bind(ex) = ex isa Symbol ? push!(bound, ex) :
                ex isa Expr && ex.head in (:(::), :(=), :tuple, :(...)) ?
                foreach(bind, ex.args[1:1]) : nothing
+    # A signature BINDS its parameters. Without this the extractor reported
+    # three whole syntactic classes as free references to backend names:
+    # `Item(id, live, size)`'s positional `id` (the backend has ObjectiveC's),
+    # `RayTracingPipeline(; raygen, closest_hit, …)`'s bare keywords (the
+    # backend has Raycore's `closest_hit` and `any_hit`), and the module path in
+    # `using KernelInterface: …`. All four offenders on 2026-09-08 were these.
+    # A call in expression position is untouched, which is the case that matters.
+    bindparam(a) = a isa Expr && a.head === :parameters ? foreach(bindparam, a.args) :
+                   a isa Expr && a.head === :kw ? (bind(a.args[1]); walk(a.args[2])) :
+                   bind(a)
+    function bindsig(ex)
+        ex isa Expr || return bind(ex)
+        ex.head === :where && return bindsig(ex.args[1])
+        ex.head === :call || return bind(ex)
+        foreach(bindparam, ex.args[2:end])
+        return
+    end
     function walk(ex)
         ex isa Symbol && return push!(used, ex)
         ex isa Expr || return
         ex.head === :quote && return
+        ex.head in (:using, :import) && return      # a module path is not a value
         ex.head === :. && return walk(ex.args[1])
         if ex.head === :struct                      # field names are not uses
             for f in ex.args[3].args
@@ -163,8 +181,10 @@ function free_names(path::AbstractString)
             return
         elseif ex.head === :function && length(ex.args) == 1
             return bind(ex.args[1])                 # `function f end` declares f
+        elseif ex.head === :function
+            bindsig(ex.args[1])
         elseif ex.head === :(=) || ex.head === :(::)
-            bind(ex.args[1])
+            bindsig(ex.args[1])
         elseif ex.head === :for || ex.head === :generator
             for a in ex.args
                 a isa Expr && a.head === :(=) && bind(a.args[1])

@@ -169,6 +169,42 @@ asks here and takes the readback path rather than failing on a Mac.
 supports_graphics(backend) = false
 
 """
+    supports_geometry_stage(backend) -> Bool
+    supports_tessellation(backend) -> Bool
+
+Whether this backend has the stage at all.
+
+`false` by default, so a backend opts in — and both defaults are the honest
+answer for Metal, which has no geometry stage (Apple's replacement is the mesh
+pipeline, which Mantle does not describe) and no tessellation through Mantle.
+
+They exist because `GraphicsPipeline` HAS a `geometry` field and a
+`tess_control`/`tess_eval` pair, so a caller can build one that a device cannot
+run — and the only way to find out was to compile it and read the error. A
+capability a caller cannot ask about is one they find out about from a shader
+compile, which is the wrong place and the wrong time. RayMakie's overlay is the
+caller that needs the answer: its scatter path emits geometry.
+"""
+supports_geometry_stage(backend) = false
+@doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
+
+"""
+    supports_mesh_pipeline(backend) -> Bool
+
+Whether this backend can run a [`MeshPipeline`](@ref).
+
+The pair to compare against [`supports_geometry_stage`](@ref), and the reason
+that one answering `false` is not the end of the sentence. Metal has no geometry
+stage, but Apple's replacement for it is the mesh pipeline, and Khronos arrived
+at the same two stages under different names in `VK_EXT_mesh_shader` — so this
+is the capability a caller with a geometry body actually wants to ask about. A
+geometry stage is expressible on a mesh pipeline; the reverse is not.
+
+`false` by default, so a backend opts in.
+"""
+supports_mesh_pipeline(backend) = false
+
+"""
     use_bindings!(bq, pipeline, bindings)
 
 Make `bindings` — the resource set built by [`bind_textures`](@ref) — the one
@@ -230,7 +266,7 @@ is passed straight back to `record_draw!` and `end_render_pass!`.
 function begin_render_pass! end
 
 """
-    record_draw!(handle, compiled, args, count)
+    record_draw!(handle, compiled, args, count; instances = 1, indices = nothing)
 
 Record one draw into an open pass.
 
@@ -239,6 +275,12 @@ Record one draw into an open pass.
 INDIRECT draw, because the whole point of that form is that the host never
 learns the count.
 """
+# `instances` and `indices` are keywords with defaults, so the graph — which never
+# uses either — calls this exactly as it did. They are here because a
+# hand-recorded pass does: RayMakie's overlay draws instanced sprites and indexed
+# line strips, and those were `draw_in_pass!`/`draw_indexed_in_pass!`, a second
+# verb family only one backend implemented. One primitive with two options beats
+# two primitives, and beats a family.
 function record_draw! end
 
 # ── The frame, for a graph that reaches a window ─────────────────────────────

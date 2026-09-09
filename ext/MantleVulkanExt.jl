@@ -71,9 +71,9 @@ import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
     readback_window, bind_textures
 import Mantle: build_accel!, refit_tlas!, set_anyhit_pipeline!, trace_rays!,
     trace_rays_indirect!, trace_closest_hits!, trace_closest_hits_indirect!,
-    trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!,
-    # What a trace holds while it runs: `pintrace!` is core's walk over these two.
-    pin!, blases
+    trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
+# DELETED in phase 1.1: `pin!` and `blases`. Lifetime is core's; see
+# docs/mantle-owns-it.md 2.2.
 
 # The graph's backend interface — `src/graph/backend.jl` is the whole of what
 # Mantle asks of a backend, and these are this backend's answers. `isdepth` is
@@ -157,9 +157,8 @@ import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
 using Mantle: _normalise_chit, listen_moves!, unlisten_moves!, notify_move!,
     argtoken, setargtoken!,
     # A run's host stores: whether any are waiting, and the walk that lands them.
-    anydirty, landstores!,
-    # The acceleration structures a trace reads, pinned: core's walk, called here.
-    pintrace!
+    anydirty, landstores!
+# DELETED in phase 1.1: `pintrace!`.
 # `mat4_to_vk_transform` moved to `geometry/transform.jl` — it is arithmetic on
 # `Mat3x4f`, which both backends' instance descriptors start with.
 using Mantle: mat4_to_vk_transform

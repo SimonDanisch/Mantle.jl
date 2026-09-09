@@ -29,14 +29,14 @@ import Mantle: Device, backend, pool, devices, defaultdevice!,
 import Mantle: caps
 # The graph's execution path is core's (`graph/kalaunch.jl`); this backend
 # supplies `resolve` and says that barriers are a no-op.
-import Mantle: resolve, syncbackend, materialize!, alignment
+import Mantle: resolve, syncbackend, needs_transition, materialize!, alignment
 # Hardware ray tracing — the verbs Mantle declares in `raytracing/api.jl`.
 import Mantle: build_accel!, refit_tlas!, trace_closest_hits!
 # Device-wide sync, the graphics capability answer, and the queue verb that
 # refuses. Declared in `src/graph/queue.jl` and `src/graphics/commands.jl`.
 import Mantle: waitidle, supports_graphics, allocate_batch_queue!, supports_rt_pipeline
 # The rasterisation half (`src/metal/graphics.jl`).
-import Mantle: Framebuffer, draw!, readback_framebuffer
+import Mantle: Framebuffer, Window, draw!, readback_framebuffer
 # The graph's render-pass verbs, declared in `src/graphics/commands.jl`.
 import Mantle: compile_draw, begin_render_pass!, record_draw!, end_render_pass!
 # The incremental acceleration structure (`src/metal/hwtlas.jl`) implements
@@ -45,7 +45,9 @@ import Mantle: HWTLAS, AdaptedAccel, Mat4f, Mat3x4f, mat4_to_vk_transform
 import Raycore: closest_hit, any_hit, sync!, world_bound, n_geometries,
     n_instances, update_transforms!, update_transform!, wait_for_gpu!
 import GeometryBasics
-using GeometryBasics: decompose, Point3f, Point2f
+# `Vec4f` because a clip position IS one: the stage output struct declares the
+# vector, not the tuple it wraps, which is what the Vulkan side already did.
+using GeometryBasics: decompose, Point3f, Point2f, Vec2f, Vec3f, Vec4f
 using Metal: MtlArray
 using StaticArrays: SVector
 using Base: @propagate_inbounds
@@ -67,6 +69,14 @@ using Mantle: Pool, DeviceArray, Persistent, Buffers, Images, region, memoryof, 
 # function with a `Device` method in Mantle and a `KI.Backend` method here.
 using KernelInterface: DeviceCaps, MatrixShape, MatrixScope, SubgroupScope
 import KernelInterface
+# `N0f8` for `mtlformat`'s table: ColorTypes re-exports FixedPointNumbers'
+# normalised types, and Mantle re-exports `RGBA`/`BGRA`.
+# `N0f8` through ColorTypes, which re-exports FixedPointNumbers' normalised
+# types — FixedPointNumbers is not a direct dependency of Mantle and naming
+# four types is not a reason to make it one.
+using ColorTypes: RGBA, BGRA
+using ColorTypes.FixedPointNumbers: N0f8, FixedPoint
+using ColorTypes: FixedPointNumbers
 const KI = KernelInterface
 
 using GPUArrays

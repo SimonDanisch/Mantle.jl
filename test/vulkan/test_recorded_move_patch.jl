@@ -93,10 +93,12 @@ function _movepatch_tri_vertex()
     (position = Vec4f(x, y, 0f0, 1f0), color = Vec4f(0.25f0, 0.5f0, 0.75f0, 1f0))
 end
 _movepatch_tri_fragment(inputs) = inputs.color
-const _MOVEPATCH_TRI = M.Rasterizer(vertex = _movepatch_tri_vertex,
-                                    fragment = _movepatch_tri_fragment,
-                                    varyings = (color = Vec4f,), topology = M.TriangleList(),
-                                    blend = M.Opaque(), cull = M.NoCull(), depth = M.DepthOff())
+const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_vertex; outputs = (color = Vec4f,)),
+                                      fragment = M.FragmentShader(_movepatch_tri_fragment),
+                                      topology = M.TriangleList(),
+                                      blend = M.Opaque(),
+                                      cull = M.NoCull(),
+                                      depth = M.DepthOff())
 
 @testset "a resize!d buffer under a recorded plan is patched, not re-recorded" begin
     dev = M.Device(M.VulkanAPI())

@@ -196,6 +196,20 @@ extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT
 supportspredicate(d::LavaDevice) = (d.ctx::VkContext).conditional_rendering_available
 bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
+# Vulkan refuses an index buffer that was not allocated as one, so this backend
+# has to say so at allocation; Metal's `drawIndexedPrimitives` takes any buffer,
+# which is why the core default is a plain `Buffer`.
+#
+# Delegating to `alloc_index_buffer` rather than reimplementing it: that function
+# already sets `BUFFER_USAGE_INDEX_BUFFER_BIT` through `LavaArray`'s
+# `extra_usage`, and threading the same bit through `Mantle.Buffer` would mean
+# giving `persistentarray` a per-allocation usage argument it does not have. What
+# this replaces is the REACH: RayMakie called `alloc_index_buffer` through
+# `Base.get_extension` at five sites, which is a backend name in a package that
+# must not have one.
+Mantle.indexbuffer(::LavaDevice, indices::AbstractVector{UInt32}) =
+    alloc_index_buffer(indices)
+
 rawalloc(dev::LavaDevice, ::Persistent, bytes::Int, usage) =
     rawalloc(dev, Buffers(), bytes, usage)
 constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
@@ -1194,14 +1208,14 @@ function tracelaunch!(e::Emitter, r::DeviceRange, t::CompiledTrace, tlas,
     # core's), with the trace's gate folded in; nothing to prepare here.
     indirect = indirectof(e.args, t.indirect)
     argaddr = packtrace!(e, t)
-    pintrace!(e, tlas)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emit_trace_indirect!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
     return nothing
 end
 
 function tracelaunch!(e::Emitter, n, t::CompiledTrace, tlas, name::AbstractString)
     argaddr = packtrace!(e, t)
-    pintrace!(e, tlas)
+    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emit_trace!(e, t.compiled.pipeline, tlas, argaddr, Int(n), 1, 1, name)
     return nothing
 end
@@ -1709,7 +1723,7 @@ end
 pins and scratch given back."""
 function abandonrun!(dev::LavaDevice, e::Emitter)
     seal!(e.owner)
-    recycle!(dev.bq, e.owner)
+    # DELETED in phase 1.2: see docs/mantle-owns-it.md
     return nothing
 end
 

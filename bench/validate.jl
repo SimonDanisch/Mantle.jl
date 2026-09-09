@@ -166,9 +166,12 @@ function validate_depth(frames = 20; n = 20_000)
     win = RenderWindow(W, H; title = "validate depth", vsync = false)
 
     depth_frag(inputs) = inputs.color
-    zpipe = Rasterizer(vertex = scatter_vertex, fragment = depth_frag,
-                       varyings = (color = Vec4f,), topology = PointList(),
-                       blend = Opaque(), cull = NoCull(), depth = DepthLess())
+    zpipe = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                         fragment = FragmentShader(depth_frag),
+                         topology = PointList(),
+                         blend = Opaque(),
+                         cull = NoCull(),
+                         depth = DepthLess())
 
     pts = cloud(n)
     sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 4f0))
@@ -208,9 +211,12 @@ function validate_mrt(frames = 20; n = 20_000)
     win = RenderWindow(W, H; title = "validate mrt", vsync = false)
 
     two_frag(inputs) = (inputs.color, Vec4f(0, 1, 0, 1))
-    mrt = Rasterizer(vertex = scatter_vertex, fragment = two_frag,
-                     varyings = (color = Vec4f,), topology = PointList(),
-                     blend = Opaque(), cull = NoCull(), depth = DepthLess())
+    mrt = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
+                       fragment = FragmentShader(two_frag),
+                       topology = PointList(),
+                       blend = Opaque(),
+                       cull = NoCull(),
+                       depth = DepthLess())
 
     pts = cloud(n)
     sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 4f0))

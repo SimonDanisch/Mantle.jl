@@ -1,7 +1,7 @@
 # The line between core and a backend, held by a test rather than by memory.
 #
 # Three things went wrong in the submission refactor and each is checked here:
-# the Vulkan backend grew its own `record!`, `emit!` and `execute!` (a backend
+# the Vulkan backend grew its own `record!`, `emitplan!` and `execute!` (a backend
 # implementing a sequence); an `import Mantle:` line was missed, so the backend
 # defined a NEW local function instead of extending core's; and a core name the
 # backend calls unqualified (`region_bda`, `recordable`) was not imported at all

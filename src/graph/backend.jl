@@ -87,7 +87,7 @@ function refit! end
 
 # ── The pass walk's primitives ───────────────────────────────────────────────
 #
-# The walk itself — what a pass is made of and in what order — is `emit!` in
+# The walk itself — what a pass is made of and in what order — is `emitplan!` in
 # `graph/kalaunch.jl`, and it is Mantle's. What each step DOES on a device is
 # answered here, once per backend. A backend that records (Vulkan) answers with
 # commands into an emitter it opened; one that does not (KernelAbstractions,
@@ -571,9 +571,18 @@ const BACKEND_VOCABULARY = (
     :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
-    :upload!, :download, :devicecopy!, :resource_moved!, :arena_moved!, :release!,
+    :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
+    :indexbuffer,
+    # The recording primitives a submission channel needs — 2.3. Core owns the
+    # free list and when a recording may be reused; these are the driver half.
+    :makerecording, :resetrecording!, :destroyrecording!, :retire!, :recorder,
+    # What a hand-recorded pass needs beyond the graph's three — see
+    # `graphics/record.jl`. `setviewport!` is the only genuinely new one.
+    :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,                             # Vulkan needs a usage bit at allocation, Metal does not
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
-    :supports, :supports_graphics, :supports_batch_queue, :supports_rt_pipeline,
+    :supports, :supports_graphics, :supports_geometry_stage,
+    :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
+    :supports_rt_pipeline,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
     :devices, :defaultdevice!,
@@ -581,7 +590,8 @@ const BACKEND_VOCABULARY = (
     :waitfor, :waitfor!, :passed, :fence, :reset_device!,
     # sync lowering
     :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
-    :vkformat,
+    # DELETED in phase 1.7: `:vkformat`. A vendor-named entry in the list of
+    # names every backend may implement; Metal's counterpart is `mtlformat`.
     # compile: the phases are core's, a backend answers these
     :syncbackend,
     :compiledraw, :compile_dispatch, :passbarriers,
@@ -593,7 +603,9 @@ const BACKEND_VOCABULARY = (
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
-    :recordsplans, :recycle!, :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    :recordsplans, :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    # DELETED in phase 1.2: `:recycle!`. Its one implementation contained no
+    # driver call at all.
     :beginframe!,
     # graphics verbs, immediate and windowed
     :Framebuffer, :Window, :Surface, :Texture2D, :Sampler, :screenshot,
@@ -602,7 +614,7 @@ const BACKEND_VOCABULARY = (
     :use_bindings!, :bind_textures, :blit!, :transition_image!, :readback_framebuffer,
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
     # ray tracing
-    :pin!, :blases,
+    # DELETED in phase 1.1: `:pin!`, `:blases`. See raytracing/api.jl.
     :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,

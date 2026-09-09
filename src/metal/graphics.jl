@@ -83,6 +83,76 @@ struct MetalSampler <: Mantle.Sampler
 end
 
 """
+The pixel format a SAMPLED texture of element type `T` has.
+
+Not `mtlformat`, and the difference is not cosmetic: that one answers for a
+RENDER TARGET, where `Float32` means `Depth32Float`. A single-channel float
+texture that is read by a shader — a signed-distance glyph atlas is exactly one —
+is `R32Float`, and creating it as depth is rejected by the sampler.
+
+Everything else defers, because for a colour format the two questions have the
+same answer.
+"""
+mtlsampledformat(::Type{Float32}) = MTLm.MTLPixelFormatR32Float
+mtlsampledformat(::Type{Float16}) = MTLm.MTLPixelFormatR16Float
+mtlsampledformat(@nospecialize(T::Type)) = mtlformat(T)
+
+"""
+    Texture2D(backend, data::Matrix)
+
+A sampled 2D texture holding `data`.
+
+Dispatches on the BACKEND, matching `Texture2D(::LavaBackend, …)` on the other
+side — with two backends loaded there is nothing else to tell them apart by. The
+element type names the format, as everywhere a caller names one in Mantle.
+
+`storageMode` is Shared and the upload goes through `replace_region!` rather than
+a buffer-backed texture: a linear texture cannot be sampled on an Apple GPU, and
+the same storage cannot be both a render target and a sampled source. This is
+the same reason `MetalFramebuffer` reads back through `getBytes!`.
+"""
+function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {T}
+    dev = Metal.device()
+    h, w = size(data)          # (row, col), which is (height, width)
+    desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, false)
+    desc.usage = MTLm.MTLTextureUsageShaderRead
+    desc.storageMode = MTLm.MTLStorageModeShared
+    tex = MTLm.MTLTexture(dev, desc)
+    # Metal wants rows contiguous, and a Julia matrix is COLUMN-major, so the
+    # transpose is what makes `bytesPerRow` mean what Metal reads it as. Copying
+    # rather than reinterpreting, because a lazy transpose has no pointer.
+    rows = collect(transpose(data))
+    GC.@preserve rows MTLm.replace_region!(
+        tex, MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1)), 0,
+        convert(Ptr{Cvoid}, pointer(rows)), w * sizeof(T))
+    return MetalTexture2D{T}(tex, w, h)
+end
+
+"""
+    Sampler(backend; filter = :linear, wrap = :repeat)
+
+How a texture is sampled. The same two keywords the Vulkan side takes, because a
+caller that had to know which backend it was on would be writing two renderers.
+"""
+function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
+                        wrap::Symbol = :repeat)
+    f = filter === :nearest ? MTLm.MTLSamplerMinMagFilterNearest :
+        filter === :linear  ? MTLm.MTLSamplerMinMagFilterLinear :
+        error("unknown filter :$filter; expected :nearest or :linear")
+    a = wrap === :repeat        ? MTLm.MTLSamplerAddressModeRepeat :
+        wrap === :clamp        ? MTLm.MTLSamplerAddressModeClampToEdge :
+        wrap === :mirror       ? MTLm.MTLSamplerAddressModeMirrorRepeat :
+        error("unknown wrap :$wrap; expected :repeat, :clamp or :mirror")
+    desc = MTLm.MTLSamplerDescriptor()
+    desc.minFilter = f
+    desc.magFilter = f
+    desc.sAddressMode = a
+    desc.tAddressMode = a
+    desc.normalizedCoordinates = true
+    return MetalSampler(MTLm.MTLSamplerState(Metal.device(), desc))
+end
+
+"""
 An offscreen render target: a colour texture and, optionally, a depth one.
 
 Buffer-backed textures are deliberately NOT used. A render target cannot be a
@@ -111,8 +181,9 @@ lowers it the way `vkformat` does on the other side.
 function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
     dev = Device(be).dev
-    # `nothing` rather than a named default: BGRA8Unorm is what a window wants
-    # and naming the Julia type here would need ColorTypes — see `mtlformat`.
+    # DELETED in phase 1.7: "naming the Julia type here would need ColorTypes".
+    # ColorTypes is in Mantle's [deps]; it is simply never `using`-ed. What the
+    # default should be is phase 2.7's question.
     cfmt = color_format === nothing ? MTLm.MTLPixelFormatBGRA8Unorm :
                                       mtlformat(color_format)
     cdesc = MTLm.MTLTextureDescriptor(cfmt, width, height, false)
@@ -138,34 +209,32 @@ end
 Metal's format for a Julia element type. The counterpart to `vkformat`, and the
 same table `runtime/format.jl` documents.
 
-Matched STRUCTURALLY — on the colour type's name and its element type — rather
-than by writing `BGRA{N0f8}`. Those names belong to ColorTypes, which is not a
-dependency of Mantle: the Vulkan extension only sees them because its trigger
-package re-exports them, and adding a dependency to name four types in one
-function is the wrong trade. The caller owns the types; a backend only has to
-recognise them.
+Matched on the element TYPE. It used to match on `nameof(T)` and the element's
+name, because three comments concluded that ColorTypes was not a Mantle
+dependency; it is, in `[deps]`, and `runtime/format.jl` documents
+`BGRA{N0f8}` as the portable spelling. The structural version accepted any
+foreign type that happened to be called `RGBA`.
 """
 function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # Depth, matching `vkformat`'s `D32_SFLOAT` and the table in
-    # `runtime/format.jl`. It said `R32Float` here, which is a colour format:
-    # the one caller hardcoded `Depth32Float` beside it and so never saw it, but
-    # a depth target reaching this by way of its element type would have been
-    # created as colour and rejected by the render pass.
+    # `runtime/format.jl`. It said `R32Float` here once, which is a colour
+    # format: the one caller hardcoded `Depth32Float` beside it and so never
+    # saw it, but a depth target reaching this by way of its element type would
+    # have been created as colour and rejected by the render pass.
     T === Float32 && return MTLm.MTLPixelFormatDepth32Float
     T <: Real && error("no Metal pixel format for the scalar $T")
-    nm = nameof(T)
-    el = eltype(T)
-    # `Normed{UInt8,8}` is `N0f8`; anything else 8-bit-normalised is not a
-    # format Metal spells the same way, so it is rejected rather than guessed.
-    isu8 = nameof(el) === :Normed && sizeof(el) == 1
-    nm === :BGRA && isu8            && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
-                                                     MTLm.MTLPixelFormatBGRA8Unorm
-    nm === :RGBA && isu8            && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
-                                                     MTLm.MTLPixelFormatRGBA8Unorm
+    # On the TYPES, not on `nameof(T)`. The structural match this replaces
+    # accepted any type named `RGBA` whose element was an 8-bit `Normed`,
+    # from any package, and it was there because three comments said ColorTypes
+    # was not a dependency. It is.
+    T === BGRA{N0f8}    && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
+                                         MTLm.MTLPixelFormatBGRA8Unorm
+    T === RGBA{N0f8}    && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
+                                         MTLm.MTLPixelFormatRGBA8Unorm
     # No sRGB variant exists for the float formats, and none is needed: sRGB is
     # an encoding for 8-bit channels, and a float target holds linear values.
-    nm === :RGBA && el === Float16  && return MTLm.MTLPixelFormatRGBA16Float
-    nm === :RGBA && el === Float32  && return MTLm.MTLPixelFormatRGBA32Float
+    T === RGBA{Float16} && return MTLm.MTLPixelFormatRGBA16Float
+    T === RGBA{Float32} && return MTLm.MTLPixelFormatRGBA32Float
     error("no Metal pixel format for $T — extend `mtlformat` in metal/graphics.jl")
 end
 
@@ -188,23 +257,19 @@ end
 """
     stage_output_type(pipeline, stage) -> Type
 
-The struct a stage writes, built from Mantle's portable declaration.
+The struct a stage writes.
 
-`GraphicsPipeline.varyings` is a `NamedTuple` of types, and a `NamedTuple` TYPE
-already has `fieldnames` and `fieldtype` — which is exactly what Metal.jl's
+`Mantle.outputtype` builds it from the stage's own `outputs`, and a `NamedTuple`
+TYPE already has `fieldnames` and `fieldtype` — which is exactly what Metal.jl's
 `stage_outputs` reads. So the portable declaration lowers with no translation
-table: the vertex stage returns `(position, varyings...)`, the fragment stage
-returns one render target.
+table at all.
 
-The clip position is prepended rather than declared, because every vertex stage
-has one and a caller that had to remember to list it would eventually forget.
+The clip position is prepended there rather than declared, because every vertex
+stage has one and a caller that had to remember to list it would eventually
+forget.
 """
-function stage_output_type(p::Mantle.GraphicsPipeline, ::Val{:vertex}, ncolor::Int = 1)
-    v = p.varyings
-    names = v === nothing ? () : keys(v)
-    types = v === nothing ? () : Tuple(values(v))
-    return NamedTuple{(:position, names...), Tuple{NTuple{4,Float32}, types...}}
-end
+stage_output_type(p::Mantle.GraphicsPipeline, ::Val{:vertex}, ncolor::Int = 1) =
+    Mantle.outputtype(p.vertex)
 
 """
 One field per colour attachment, because that is what a fragment stage writes.
@@ -235,13 +300,18 @@ stage_output_type(::Mantle.GraphicsPipeline, ::Val{:fragment}, ncolor::Int = 1) 
 """
 Bring one value to the type the stage's output struct declares.
 
-A shader writes `Vec4f`; the struct declares `NTuple{4,Float32}`, because that
-is what the varying mangling and the AIR vector type are built from and having
-one canonical spelling keeps the two stages' strings identical. The two are the
-SAME bytes — a `Vec4f` is a one-field wrapper around exactly that tuple — so the
-bridge is a `getfield`, not a `convert`: `convert` has no method between them
-and the failure is a `MethodError` reached from device code, which surfaces as
+A shader is free to write `Vec2f` where the declaration says `NTuple{2,Float32}`
+or the other way round, and this is the bridge. The two are the SAME bytes — a
+`Vec` is a one-field wrapper around exactly that tuple — so it is a `getfield`,
+not a `convert`: `convert` has no method between them and the failure is a
+`MethodError` reached from device code, which surfaces as
 `jl_f_throw_methoderror` plus a `gc_pool_alloc` in a fragment shader.
+
+It is NOT what carries `position`. That field is `Vec4f` on both backends now,
+because a clip position is one; declaring it as the tuple here and converting
+was a second spelling for one thing, and nothing needed it — `mangle_varying`
+gives `Vec4f` and `NTuple{4,Float32}` the same string, which is all the two
+stages link by.
 """
 @generated function to_stage_field(::Type{T}, v) where {T}
     v === T && return :v
@@ -278,24 +348,6 @@ end
 """A vertex shader that returns `(position = …, varyings…)`."""
 struct MetalVertexStage{F, Out} end
 
-"""
-Put a clip position into Metal's convention.
-
-**Mantle's clip space is Vulkan's: +y is DOWN the screen.** Metal's is the other
-one — +y is UP — so the same `position` renders vertically MIRRORED there, and
-that is not a difference a portable shader can be asked to know about. Flipping
-here, in the one place every vertex stage passes through, is what makes one
-shader mean one image.
-
-Cheap in the wrong way to notice: a mirrored scene still looks like a scene, the
-shadow map is mirrored with it so the shadows still land on the geometry, and a
-test that compares two Metal renders to each other agrees perfectly. What gave
-it away was a person looking at the window.
-
-Vulkan gets there by a negative-height viewport (`VK_KHR_maintenance1`); Metal
-has no such thing, so it is a multiply.
-"""
-@inline flip_clip(p::NTuple{4,Float32}) = (p[1], Mantle.clip_y(p[2]), p[3], p[4])
 
 @generated function (::MetalVertexStage{F,Out})(args::Vararg{Any,N}) where {F,Out,N}
     call = Expr(:call, :(F.instance), (:(args[$i]) for i in 1:(N - 1))...)
@@ -357,15 +409,15 @@ const GFX_CACHE = Dict{Any,Any}()
 const GFX_CACHE_LOCK = ReentrantLock()
 
 """
-The varyings a pipeline declares, as a `NamedTuple` type.
+What the fragment stage reads, as a `NamedTuple` type.
 
-`nothing` means none, not "unknown": a vertex stage that outputs only its clip
-position is a real pipeline (a shadow pass is exactly that), and the empty tuple
-is what says so.
+`Mantle.fragmentinputtype` answers it, because which stage feeds the rasteriser
+depends on which stages the pipeline HAS — the geometry stage when there is one,
+the vertex stage otherwise. An empty tuple is a real answer, not a missing one:
+a vertex stage that outputs only its clip position is a real pipeline and a
+shadow pass is exactly that.
 """
-varying_type(p::Mantle.GraphicsPipeline) =
-    p.varyings === nothing ? NamedTuple{(),Tuple{}} :
-                             NamedTuple{keys(p.varyings), Tuple{values(p.varyings)...}}
+varying_type(p::Mantle.GraphicsPipeline) = Mantle.fragmentinputtype(p)
 
 """
     stage_signatures(p, ncolor, vert_bufs, frag_bufs) -> (vfn, ffn, vert_tt, frag_tt)
@@ -381,7 +433,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
                           vert_bufs::Type, frag_bufs::Type)
     VIn  = varying_type(p)
     VOut = stage_output_type(p, Val(:vertex))
-    vfn = MetalVertexStage{typeof(p.vertex), VOut}()
+    vfn = MetalVertexStage{typeof(Mantle.stagefunction(p.vertex)), VOut}()
     vert_tt = Tuple{vert_bufs.parameters..., Core.LLVMPtr{VOut,1}}
     # No colour attachment means no fragment stage at all — a shadow pass writes
     # depth and nothing else, and its `fragment` returns `nothing`. Metal spells
@@ -389,7 +441,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     # returns an EMPTY struct instead is not a thing AIR has.
     ncolor == 0 && return vfn, nothing, vert_tt, nothing
     FOut = stage_output_type(p, Val(:fragment), ncolor)
-    ffn = MetalFragmentStage{typeof(p.fragment), VIn, FOut}()
+    ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
                     Core.LLVMPtr{FOut,1}}
     return vfn, ffn, vert_tt, frag_tt
@@ -411,16 +463,30 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
                           color_formats::Vector{MTLm.MTLPixelFormat},
                           depth_format::Union{Nothing,MTLm.MTLPixelFormat},
                           vert_bufs::Type, frag_bufs::Type)
-    p.geometry === nothing ||
-        error("Metal has no geometry shader stage; Apple's replacement is the " *
-              "mesh pipeline (object + mesh stages), which Mantle does not " *
-              "describe yet")
+    # Asked through the capability, not asserted here: a caller can now ask
+    # `supports_geometry_stage(backend)` BEFORE building a pipeline, which is
+    # the point of phase 2.7 — the answer used to be reachable only by
+    # compiling one and reading the error.
+    be = Metal.MetalBackend()
+    p.geometry === nothing || Mantle.supports_geometry_stage(be) ||
+        error("this backend has no geometry stage. Apple's replacement is the " *
+              "mesh pipeline, which this backend DOES run — see " *
+              "`Mantle.MeshPipeline` and `supports_mesh_pipeline`. Lower the " *
+              "pipeline with `Mantle.lower_geometry_to_mesh` instead of asking " *
+              "for a geometry stage; ask `supports_geometry_stage(backend)` " *
+              "first if you need to know which you are on.")
     (p.tess_control === nothing && p.tess_eval === nothing) ||
-        error("tessellation is not implemented on the Metal backend")
+        Mantle.supports_tessellation(be) ||
+        error("this backend has no tessellation; ask " *
+              "`supports_tessellation(backend)` before building a pipeline " *
+              "with it.")
 
-    key = (p.vertex, p.fragment, vert_bufs, frag_bufs, color_formats, depth_format,
-           typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth),
-           p.varyings)
+    # The stages themselves, because each now carries its function, its config
+    # and its interface — three things that used to be keyed separately and
+    # could disagree about which pipeline they belonged to.
+    key = (p.vertex, p.fragment, p.geometry, vert_bufs, frag_bufs,
+           color_formats, depth_format,
+           typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth))
     Base.@lock GFX_CACHE_LOCK begin
         cached = get(GFX_CACHE, key, nothing)
         cached === nothing || return cached::MetalCompiledGraphicsPipeline
@@ -429,11 +495,11 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     dev = Metal.device()
     vfn, ffn, vert_tt, frag_tt =
         stage_signatures(p, length(color_formats), vert_bufs, frag_bufs)
-    vname = string(nameof(p.vertex)) * "_vs"
+    vname = string(nameof(Mantle.stagefunction(p.vertex))) * "_vs"
     vfun, vlib = compile_stage_function(vfn, vert_tt, :vertex, vname)
     ffun, flib = ffn === nothing ? (nothing, nothing) :
         compile_stage_function(ffn, frag_tt, :fragment,
-                               string(nameof(p.fragment)) * "_fs")
+                               string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
 
     desc = MTLm.MTLRenderPipelineDescriptor()
     desc.vertexFunction = vfun
@@ -697,19 +763,56 @@ function Mantle.gpupasstime!(d::MetalDevice)
 end
 
 """
-    readback_framebuffer(fb) -> Matrix{UInt8}
+    readback_eltype(format) -> Type
 
-The colour attachment's bytes, four per pixel, row-major from the top left.
+The STORAGE type of one channel: `UInt8` for the 8-bit formats, `Float16`/
+`Float32` for the float ones.
+
+Not `eltype(eltypeof(format))`, which answers `N0f8` for a `BGRA{N0f8}` — a
+normalised type whose value is already in 0..1. A caller that then divides by 255
+gets a number 255 times too small, which is what turned a rendered frame into a
+nearly-black one with everything still in the right place.
+"""
+readback_eltype(f::MTLm.MTLPixelFormat) = storagetype(eltype(eltypeof(f)))
+storagetype(::Type{T}) where {T <: FixedPoint} = FixedPointNumbers.rawtype(T)
+storagetype(::Type{T}) where {T} = T
+
+"""
+    readback_framebuffer(fb) -> Matrix{NTuple{4,T}}
+
+The colour attachment on the host: `width` x `height`, one 4-component tuple per
+pixel, in the attachment's own channel order.
 
 Through `getBytes!` rather than shared memory: a render target cannot be a
 buffer-backed linear texture on an Apple GPU.
+
+The SHAPE is the contract and not this backend's convenience. It returned a
+`4 x width x height` `Array{UInt8,3}` while the Vulkan side returned exactly the
+matrix above, so `pixels[col, row]` — the one caller, RayMakie's compositor —
+read a `BoundsError` here and four correct bytes there. A hook whose two
+implementations disagree about the shape of their answer is the thing this
+package exists to remove; the divergence only surfaced once a Mac composited an
+overlay at all.
 """
 function Mantle.readback_framebuffer(fb::MetalFramebuffer)
-    px = Vector{UInt8}(undef, fb.width * fb.height * 4)
-    GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * 4,
+    # WAITS, because `readback_framebuffer`'s contract says it does: "there is no
+    # way to read pixels the device has not finished writing, so unlike the rest
+    # of the frame loop this one waits."
+    #
+    # It did not, and `getBytes!` is a HOST copy out of the texture — it does not
+    # join the queue and it does not block on it. So a readback taken straight
+    # after a pass read whatever the texture held, which for a freshly created
+    # one is zeros. It is a race, so it passed for a long time: RayMakie's
+    # compositor happens to synchronise elsewhere in the frame and the window is
+    # narrow. `blit!` followed immediately by a readback loses it every time, and
+    # the whole composited image came back transparent black.
+    Metal.synchronize()
+    T = readback_eltype(fb.color_format)
+    px = Matrix{NTuple{4,T}}(undef, fb.width, fb.height)
+    GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
                                    MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0),
                                                   MTLm.MTLSize(fb.width, fb.height, 1)))
-    return reshape(px, 4, fb.width, fb.height)
+    return px
 end
 
 # Metal.jl compiles graphics stages now, so the capability answer changes. It
@@ -853,7 +956,8 @@ function bind_arg!(setbytes!, enc, arg::T, i::Int) where {T}
     return nothing
 end
 
-function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count)
+function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count;
+                             instances::Integer = 1, indices = nothing)
     # `args` is what Mantle resolved; this backend baked their device form at
     # compile time (see `StageArgs`), so what gets bound comes from `d`.
     c = d.pipeline
@@ -873,9 +977,80 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
     # wasted work — Metal rejects a fragment binding on a pipeline that has none.
     c.has_fragment &&
         bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
-    draw_with_count!(h.encoder, c, count)
+    draw_with_count!(h.encoder, c, count, instances, indices)
     return nothing
 end
+
+"""
+    setviewport!(handle, x, y, width, height)
+
+The rectangle the following draws land in, and the scissor derived from it.
+
+`abs(height)`, and that is deliberate. Vulkan expresses "clip-space +y at the
+top" as a NEGATIVE viewport height; Metal has no such thing — this backend
+mirrors y in the vertex stage instead (`flip_clip`, and the matching
+`MTLWindingCounterClockwise`, see `mantle-clip-space-is-vulkans`). So the sign
+carries no extra instruction here: honouring it would flip a second time and
+undo the shader's.
+
+NOT verified against Vulkan side by side. A mirrored scene still looks like a
+scene, which is exactly how the clip flip got in unnoticed in the first place;
+the check is two renders of the same overlay, one per backend, diffed.
+"""
+function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
+    ah = abs(hgt)
+    MTLm.set_viewport!(h.encoder,
+        MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(ah), 0.0, 1.0))
+    MTLm.set_scissor!(h.encoder,
+        MTLm.MTLScissorRect(UInt(max(0, floor(Int, x))), UInt(max(0, floor(Int, y))),
+                            UInt(max(1, ceil(Int, w))), UInt(max(1, ceil(Int, ah)))))
+    return nothing
+end
+
+# What a hand-recorded pass reads off a framebuffer and a window. Both are one
+# field; they are verbs rather than field access so that core never names a
+# backend's struct.
+"""
+    indexbuffer(::MetalDevice, indices) -> MtlVector{UInt32}
+
+An index buffer on Metal: an ordinary device array.
+
+Overridden rather than left to the core default, which answers a `Mantle.Buffer`
+— a pool region with a length, not an array. Both are drawable, but a caller
+that keeps its index buffer beside its vertex arrays keeps them in one container,
+and the Vulkan side already answers with an array (`alloc_index_buffer`). Two
+backends whose `indexbuffer` return different KINDS of thing is a difference a
+caller has to know about, which is the thing this package exists to remove.
+
+Nothing extra is asked of the allocation: `drawIndexedPrimitives` takes any
+buffer, which is why the usage bits Vulkan needs have no counterpart here.
+"""
+Mantle.indexbuffer(::MetalDevice, indices::AbstractVector{UInt32}) =
+    Metal.MtlVector{UInt32}(indices)
+
+Mantle.colorimage(fb::MetalFramebuffer) = fb.color
+Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
+
+Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
+Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
+Mantle.target_extent(t::Mantle.OffscreenTarget) = Mantle.target_extent(t.fb)
+Mantle.target_extent(t::Mantle.WindowTarget) = Mantle.target_extent(t.window)
+
+# The ELEMENT type of the attachment, which is what a pipeline is compiled
+# against. `MetalFramebuffer` keeps the MTL format it was created with and not the
+# Julia type behind it, so this is the reverse of `mtlformat` — and only over the
+# formats a blit target can have, because that is the one caller.
+Mantle.blittarget(t::Mantle.OffscreenTarget) = eltypeof(t.fb.color_format)
+Mantle.blittarget(t::Mantle.WindowTarget) = eltypeof(Mantle.target_format(t.window))
+
+eltypeof(f::MTLm.MTLPixelFormat) =
+    f === MTLm.MTLPixelFormatBGRA8Unorm      ? BGRA{N0f8} :
+    f === MTLm.MTLPixelFormatBGRA8Unorm_sRGB ? BGRA{N0f8} :
+    f === MTLm.MTLPixelFormatRGBA8Unorm      ? RGBA{N0f8} :
+    f === MTLm.MTLPixelFormatRGBA8Unorm_sRGB ? RGBA{N0f8} :
+    f === MTLm.MTLPixelFormatRGBA16Float     ? RGBA{Float16} :
+    f === MTLm.MTLPixelFormatRGBA32Float     ? RGBA{Float32} :
+    error("no Julia element type recorded for $f; add it beside `mtlformat`")
 
 """
 End the encoder and commit the pass's command buffer.
@@ -892,9 +1067,32 @@ function Mantle.end_render_pass!(h::MetalPassHandle)
 end
 
 """A plain count draws directly; a `Commands` buffer draws INDIRECTLY."""
-draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer) =
-    MTLm.draw_primitives!(enc, c.primitive, 0, n, 1)
-function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands)
+# `instances` and `indices` reach here from a HAND-RECORDED pass; the graph passes
+# neither. An indexed draw needs the buffer resident for the same reason an
+# indirect one does — the command processor reads it, not a stage, so nothing in
+# the shader names it and the encoder still has to be told.
+function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
+                          instances::Integer = 1, indices = nothing)
+    if indices === nothing
+        MTLm.draw_primitives!(enc, c.primitive, 0, n, instances)
+    else
+        ibuf = metal_buffer(indices)
+        ibuf === nothing &&
+            error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
+        MTLm.use!(enc, ibuf, MTLm.ReadUsage,
+                  MTLm.MTLRenderStages(MTLm.MTLRenderStageVertex))
+        MTLm.draw_indexed_primitives!(enc, c.primitive, n,
+                                      MTLm.MTLIndexTypeUInt32, ibuf,
+                                      byteoffset(indices), instances)
+    end
+    return nothing
+end
+
+draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands,
+                 ::Integer = 1, ::Nothing = nothing) =
+    draw_indirect_with!(enc, c, n)
+
+function draw_indirect_with!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands)
     # The whole point of this form is that the host never learns the count, so
     # reading it here to call the direct form would defeat it.
     buf = metal_buffer(n.resource)
@@ -948,33 +1146,112 @@ mtl_loadaction(l::Mantle.LoadOp) = Mantle.discards(l) ? MTLm.MTLLoadActionDontCa
                                                         MTLm.MTLLoadActionLoad
 mtl_loadaction(::Nothing) = MTLm.MTLLoadActionDontCare
 
-# ── Mantle's shader builtins, on this backend ────────────────────────────────
+# ── The shader vocabulary, on this backend ───────────────────────────────────
 #
-# `@device_override`, not a plain definition: `Mantle.vertex_index()` has a HOST
+# `@device_override`, not a plain definition: `KI.vertex_index()` has a HOST
 # method that errors, and shadowing it would let a host-side call reach a GPU
 # instruction on the CPU. The overlay puts these in Metal's method table, so
 # they apply exactly when this compiler is running — which is the only thing
 # that can decide what a builtin means.
 #
-# Generated from `Mantle.SHADER_BUILTINS` so a name added to that list and
-# missed here is a `MethodError` naming it, not a shader that silently reads
-# the wrong builtin. `frag_coord` takes its dimension, the rest take nothing.
-for f in Mantle.SHADER_BUILTINS
-    f === :frag_coord && continue
-    @eval Metal.@device_override Mantle.$f() = Metal.$f()
-end
-Metal.@device_override Mantle.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
+# Overriding KernelInterface DIRECTLY, where the previous arrangement went
+# through Mantle and a bridge in each backend. Metal.jl can reach
+# KernelInterface; Lava can too; neither can reach the other's runtime. That is
+# the whole reason the names moved.
 
-# Metal's clip space is the other one: +y is UP where Mantle's (Vulkan's) is
-# down.
+# What Metal has. Generated from the list so a name added to KernelInterface and
+# missed here is a `MethodError` naming it, rather than a shader that silently
+# reads the wrong builtin.
+const METAL_BUILTINS = (:vertex_index, :instance_index, :frag_coord_x, :frag_coord_y,
+                        :frag_coord_z, :frag_coord_w, :frag_coord_xy)
+
+for f in METAL_BUILTINS
+    @eval Metal.@device_override KI.$f() = Metal.$f()
+end
+Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
+
+# What Metal does NOT have, and says so rather than leaving a MethodError for a
+# shader compile to find:
 #
-# `@device_override`, like the builtins above, and for a reason worth writing
-# down: a plain `Mantle.clip_y(y::Float32) = -y` here is not an override at all,
-# it REDEFINES core's method — which an extension may not do
-# ("Method overwriting is not permitted during Module precompilation") and which
-# would also change the answer on the host, where nothing is being rasterised.
+#   `dFdx`/`dFdy`          Metal.jl exposes no derivative intrinsic yet; MSL
+#                          has `dfdx`/`dfdy`, so this is a gap in the binding
+#                          rather than in the hardware.
+#   `set_point_size!`      needs `[[point_size]]` on the stage output struct,
+#                          which the AIR writer does not emit yet.
+#   `sample_texture_2d`    needs a bound-texture argument, which the graph's
+#                          argument ABI does not carry yet.
+#   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
+#   `end_primitive!`,      replacement is the mesh pipeline (object + mesh
+#   `primitive_id_in`      stages), which Mantle does not describe.
+#
+# The first three are unimplemented; the last three are absent from the
+# hardware. `caps` is where a caller asks which — see `supports_geometry`.
+
+# Metal's clip space is the other one: +y is UP where the portable convention's
+# (Vulkan's) is down.
+#
+# `@device_override`, like the builtins: a plain `KI.clip_y(y::Float32) = -y`
+# here is not an override at all, it REDEFINES the declaring package's method —
+# which an extension may not do, and which would also change the answer on the
+# host, where nothing is being rasterised.
 #
 # The overlay reaches compute as well as graphics: this backend compiles both
 # through the same Metal method table, so a COMPUTE shader reprojecting into a
-# shadow map gets the same transform the rasteriser applied.
-Metal.@device_override Mantle.clip_y(y::Float32) = -y
+# shadow map gets the same transform the rasteriser applied. That symmetry is
+# the bug fixed in September 2026 — the vertex stage mirrored and the shadow
+# lookup did not, which no test saw because a mirrored scene still looks like a
+# scene and its shadow map is mirrored with it.
+Metal.@device_override KI.clip_y(y::Float32) = -y
+
+@inline flip_clip(p::Vec4f) = Vec4f(p[1], KI.clip_y(p[2]), p[3], p[4])
+@inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])
+
+# ── the overlay's texture table ───────────────────────────────────────────────
+#
+# At the END of the file because it names `MetalPassHandle`, which the render-pass
+# verbs below define. A method signature is evaluated where it stands.
+
+"""
+The bound texture table on Metal.
+
+Metal has no descriptor set: a texture and its sampler go straight onto the
+encoder, in two separate slot namespaces. So this is the LIST, and
+`use_bindings!` is what puts it there — which is why the two verbs are separate
+in the first place, one to build a set and one to select it.
+"""
+struct MetalTextureBindings <: Mantle.TextureBindings
+    textures::Vector{MTLm.MTLTexture}
+    samplers::Vector{MTLm.MTLSamplerState}
+end
+
+Base.length(b::MetalTextureBindings) = length(b.textures)
+
+# On THIS backend's textures, which is what `SampledTexture` carrying its
+# concrete types makes possible: `bind_textures` takes no device argument, so
+# without them the Vulkan method would be the only one that could exist.
+function Mantle.bind_textures(
+        textures::Vector{<:Mantle.SampledTexture{<:Any,<:Any,<:MetalTexture2D}})
+    isempty(textures) && error("bind_textures: cannot bind an empty texture list")
+    return MetalTextureBindings([st.texture.tex for st in textures],
+                                [st.sampler.state for st in textures])
+end
+
+"""
+    use_bindings!(emitter, compiled, bindings)
+
+Put `bindings` on the encoder for the next draw.
+
+Slots count from one on Mantle's side and from zero on Metal's; the setters do
+the conversion, as everywhere else in this backend.
+"""
+function Mantle.use_bindings!(h::MetalPassHandle, _compiled,
+                              b::MetalTextureBindings)
+    enc = h.encoder
+    for (i, tex) in enumerate(b.textures)
+        MTLm.set_fragment_texture!(enc, tex, i)
+    end
+    for (i, st) in enumerate(b.samplers)
+        MTLm.set_fragment_sampler!(enc, st, i)
+    end
+    return nothing
+end

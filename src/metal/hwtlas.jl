@@ -206,10 +206,9 @@ mutable struct MetalHWTLAS{Tri} <: HWTLAS{Tri}
 
     blas_list::Vector{MetalBLAS}
     blas_triangles::Vector{Vector{Tri}}
-    instance_batches::Vector{MetalInstanceBatch{Tri}}
-
-    handle_to_batch_idx::Dict{Raycore.TLASHandle, Int}
-    next_handle_id::UInt32
+    # The order, the handles and the reindex on delete are core's
+    # (`raytracing/batches.jl`); this backend supplies only the batch type.
+    instances::Mantle.InstanceBatches{MetalInstanceBatch{Tri}}
 
     root_aabb::Raycore.Bounds3
 
@@ -229,8 +228,8 @@ function MetalHWTLAS{Tri}(backend::Metal.MetalBackend) where {Tri}
     d = Device(MetalAPI())
     ensure_traversal_linked!(d)
     MetalHWTLAS{Tri}(backend, d,
-        MetalBLAS[], Vector{Tri}[], MetalInstanceBatch{Tri}[],
-        Dict{Raycore.TLASHandle, Int}(), UInt32(1),
+        MetalBLAS[], Vector{Tri}[],
+        Mantle.InstanceBatches{MetalInstanceBatch{Tri}}(),
         Raycore.Bounds3(),
         nothing, nothing, nothing, nothing, nothing,
         true, false)
@@ -238,7 +237,7 @@ end
 
 Raycore.world_bound(t::MetalHWTLAS)  = t.root_aabb
 Raycore.n_geometries(t::MetalHWTLAS) = length(t.blas_list)
-Raycore.n_instances(t::MetalHWTLAS)  = sum(length(b) for b in t.instance_batches; init = 0)
+Raycore.n_instances(t::MetalHWTLAS)  = Mantle.ninstances(t.instances)
 Raycore.wait_for_gpu!(t::MetalHWTLAS) = (Metal.synchronize(); t)
 
 function AdaptedAccel(t::MetalHWTLAS{Tri}) where {Tri}
@@ -316,23 +315,19 @@ function add_geometry!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh) where {Tr
     return length(t.blas_list)
 end
 
-function _register_batch!(t::MetalHWTLAS{Tri}, blas_idx::Int,
-                          transforms::Vector{Mat3x4f}) where {Tri}
-    handle = Raycore.TLASHandle(t.next_handle_id)
-    t.next_handle_id += UInt32(1)
-    push!(t.instance_batches,
-          MetalInstanceBatch{Tri}(blas_idx, transforms, handle, t.blas_triangles[blas_idx]))
-    t.handle_to_batch_idx[handle] = lastindex(t.instance_batches)
-    t.dirty = true
-    return handle
-end
+# What a Metal instance batch IS. The list it goes into, the handle it gets and
+# the reindex when one is dropped are `Mantle.InstanceBatches`.
+_addbatch!(t::MetalHWTLAS{Tri}, blas_idx::Int, transforms::Vector{Mat3x4f}) where {Tri} =
+    Mantle.register!(t.instances, h ->
+        MetalInstanceBatch{Tri}(blas_idx, transforms, h, t.blas_triangles[blas_idx]))
 
 function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
                     transform::Mat4f = Mat4f(LinearAlgebra.I);
                     instance_id::UInt32 = UInt32(0), instance_mask::UInt8 = UInt8(0xff),
                     sbt_offset::UInt32 = UInt32(0), kw...) where {Tri}
     idx = add_geometry!(t, mesh)
-    return _register_batch!(t, idx, [mat4_to_vk_transform(transform)])
+    t.dirty = true
+    return _addbatch!(t, idx, [mat4_to_vk_transform(transform)])
 end
 
 function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
@@ -340,14 +335,14 @@ function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
                     instance_ids = nothing, instance_mask::UInt8 = UInt8(0xff),
                     sbt_offset::UInt32 = UInt32(0), kw...) where {Tri}
     idx = add_geometry!(t, mesh)
-    return _register_batch!(t, idx, Mat3x4f[mat4_to_vk_transform(m) for m in transforms])
+    t.dirty = true
+    return _addbatch!(t, idx, Mat3x4f[mat4_to_vk_transform(m) for m in transforms])
 end
 
 function Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle,
                                     transforms::AbstractVector)
-    i = get(t.handle_to_batch_idx, handle, nothing)
-    i === nothing && throw(ArgumentError("update_transforms!: unknown handle $handle"))
-    b = t.instance_batches[i]
+    b = Mantle.batchof(t.instances, handle)
+    b === nothing && throw(ArgumentError("update_transforms!: unknown handle $handle"))
     length(transforms) == length(b.transforms) || throw(ArgumentError(
         "update_transforms!: $(length(transforms)) transforms for a batch of $(length(b.transforms))"))
     b.transforms = Mat3x4f[m isa Mat3x4f ? m : mat4_to_vk_transform(m) for m in transforms]
@@ -359,13 +354,7 @@ Raycore.update_transform!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform)
     Raycore.update_transforms!(t, handle, [transform])
 
 function Base.delete!(t::MetalHWTLAS, handle::Raycore.TLASHandle)
-    i = get(t.handle_to_batch_idx, handle, nothing)
-    i === nothing && return false
-    deleteat!(t.instance_batches, i)
-    delete!(t.handle_to_batch_idx, handle)
-    for (h, j) in t.handle_to_batch_idx
-        j > i && (t.handle_to_batch_idx[h] = j - 1)
-    end
+    Mantle.delete!(t.instances, handle) || return false
     t.dirty = true
     return true
 end
@@ -376,20 +365,18 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     if !t.dirty && !t.transforms_dirty && t.static_tlas !== nothing
         return t
     end
-    if isempty(t.instance_batches)
-        t.built = nothing; t.tri_gpu = nothing; t.off_gpu = nothing; t.scene_buf = nothing
-        t.dirty = false; t.transforms_dirty = false
-        t.static_tlas = AdaptedAccel(t)
-        return t
-    end
-
+    # An EMPTY structure goes through the build like any other, and does not
+    # return early: `adapt_structure` asserts `static_tlas::AdaptedAccel`, so a
+    # sync that skips the build leaves a caller holding `nothing`. Empty means
+    # every ray misses, which is a result and not a special case.
+    #
     # One TLAS instance per transform, each naming its batch's BLAS.
     blases = MetalBLAS[]
     xforms = Mat3x4f[]
     all_tris = Tri[]
     per_inst_offsets = UInt32[]
     tri_offset = UInt32(0)
-    for b in t.instance_batches
+    for b in t.instances
         append!(all_tris, b.triangles)
         for m in b.transforms
             push!(blases, t.blas_list[b.blas_idx])

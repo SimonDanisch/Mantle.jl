@@ -185,8 +185,8 @@ end
 # The handle is a `VK.AccelerationStructureKHR` (generic pin), the storage a
 # `LavaArray` (retained ref plus buffer pin). Core's `pintrace!` walks the
 # levels; these say what holding one level means here.
-pin!(o::Closed, t::LavaTLAS) = (pin!(o, t.accel); pin!(o, t.storage); nothing)
-pin!(o::Closed, b::LavaBLAS) = (pin!(o, b.accel); pin!(o, b.storage); nothing)
+# DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+# DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
 blases(t::LavaTLAS) = t.blases
 
 """

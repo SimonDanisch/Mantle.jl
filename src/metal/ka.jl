@@ -12,13 +12,38 @@
 # genuinely this backend's is how a graph resource becomes a kernel argument,
 # and whether barriers have to be emitted.
 
-# The `Barriers` phase is core's and runs here too; what it derives is lowered
-# by `passbarriers`, whose default emits nothing. That is right on this device:
-# Metal orders work within a command queue by submission, and every pooled
-# allocation here is `Shared` on unified memory — so the scheduled order the
-# graph computed IS the synchronisation, exactly as on the host backend. A
-# discrete GPU reached through Metal would need `passbarriers` to become real;
-# an Apple one does not.
+# ── 2.6: why this backend emits no barriers, measured rather than assumed ────
+#
+# Two deleted comments gave opposite reasons for the same behaviour, and both
+# were wrong. It is not "every pooled allocation is `Shared`" (images are
+# `PrivateStorage`), and it is not the driver's hazard tracking standing in for
+# something unfinished.
+#
+# It is COMMIT ORDER. Since phase 1.2 every render and copy pass opens its own
+# `MTLCommandBuffer` and commits it before the call returns, all on one queue,
+# and Metal runs command buffers on a queue in the order they were committed.
+# The order the graph scheduled IS the order they execute, with nothing between
+# them to arrange.
+#
+# Measured 2026-09-08, a chained graph (render A, copy A, render B, copy B) at
+# 2048x2048, median of five runs of forty frames:
+#
+#     Tracked      0.364 ms/frame     4194304 pixels correct
+#     Untracked    0.332 ms/frame     4194304 pixels correct
+#
+# So hazard tracking costs about 9% and buys nothing here — but the heap stays
+# `Tracked` and that is deliberate. Untracked is only safe BECAUSE of the one
+# buffer per pass; if object reuse (phase 2.3) ever batches two passes into one
+# command buffer again, commit order stops separating them and the 9% becomes a
+# race. Flipping it is a one-line change to make once that question is settled,
+# and this note is what says so.
+#
+# `needs_transition` answers `false` EXPLICITLY, which is what
+# `sync/backend.jl:49-52` asks of a backend whose lowering emits nothing:
+# reaching the same place through a generic `true` and an empty default is the
+# absence of a decision rather than one.
+needs_transition(::MetalAPI, ::Mantle.ResourceKind, before::Type, after::Type) = false
+
 syncbackend(::MetalDevice) = MetalAPI()
 
 # `resolve` is NOT overridden here. Core's default is `storage(x)`, and that is

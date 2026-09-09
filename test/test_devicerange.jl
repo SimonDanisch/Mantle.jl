@@ -12,8 +12,15 @@
 # elements written IS the ndrange.
 
 using Test
-import Mantle, Lava
+import Mantle
 const M = Mantle
+# The backend this run is for. `runtests.jl` includes this file once per
+# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
+# gets the default one. Nothing below names a backend, which is the point:
+# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
+    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+
 using KernelAbstractions: @kernel, @index, @Const
 
 @kernel function dr_setcount!(n, @Const(src), thresh::Float32)
@@ -50,7 +57,7 @@ end
 end
 
 @testset "DeviceRange dispatches over a count the host never sees" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     cap = 4096
     for want in (1, 777, 4096)
         g = M.Graph(dev)
@@ -86,7 +93,7 @@ end
 end
 
 @testset "the count is ordered before the dispatch that reads it" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     g = M.Graph(dev)
     src = M.Buffer(dev, fill(1.0f0, 64))
     n = M.Buffer(dev, Int32[0])
@@ -117,7 +124,7 @@ end
     # 777 elements with a group of 64 launches 832 invocations. Unguarded, all
     # 832 write — which is why `DeviceRange`'s docstring says the kernel must
     # bound itself, and why every wavefront kernel in Hikari already does.
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     cap, want, group = 4096, 777, 64
     g = M.Graph(dev)
     src = M.Buffer(dev, Float32[k <= want ? 1.0f0 : 0.0f0 for k in 1:cap])
@@ -135,5 +142,21 @@ end
                     M.DeviceRange(n; max = cap); group = group)
     end
     M.run!(M.record!(M.Plan(g)))
-    @test count(==(1.0f0), Array(M.storage(dst))) == cld(want, group) * group
+    # How many invocations ran, observed through a kernel that does NOT bound
+    # itself — which is the only way to see it, and why this kernel is named
+    # unguarded.
+    #
+    # The answer is a backend property and both answers are correct. A recording
+    # backend reads the count on the device and launches whole workgroups over
+    # it. A KernelAbstractions backend has no indirect dispatch and launches the
+    # CEILING, deliberately: resolving the range by reading the count on the
+    # host means synchronising before every such dispatch, which measured 320
+    # synchronises and 0.585 s of a 0.602 s frame on an M5. `test_host.jl`
+    # states that contract and the equivalence it rests on — the kernel must
+    # bound itself either way.
+    #
+    # Asked through `recordsplans`, which is the same distinction under the name
+    # the vocabulary already has, rather than by naming a backend.
+    launched = M.recordsplans(dev) ? cld(want, group) * group : cap
+    @test count(==(1.0f0), Array(M.storage(dst))) == launched
 end

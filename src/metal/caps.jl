@@ -99,7 +99,11 @@ function caps(d::MetalDevice)
     return d.caps
 end
 
-# A `MetalBackend` carries no device (it is a singleton), so the backend's device
-# is the process default. This used to build a SECOND `MetalDevice` of its own,
-# with a second pool over the same `MTLDevice`.
+# DELETED in phase 1.6: `_DEVICE` and `_device_for`, a second cache for "one
+# device per process" beside `METAL_DEVICE` in `device.jl`. It built a second
+# `MetalDevice` — a second `Pool`, a second `MTLCommandQueue`, a second
+# `MTLSharedEvent` — from a capability query. `device.jl:65` forbids it and
+# `graphics.jl` records two Metal queues as the cause of a hang.
+#
+# `Device(b)` is the backend's device, which is the one device per process.
 caps(b::Metal.MetalBackend) = caps(Device(b))

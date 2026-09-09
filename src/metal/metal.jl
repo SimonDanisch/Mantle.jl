@@ -55,6 +55,10 @@ include("trace.jl")
 include("hwtlas.jl")
 
 include("graphics.jl")
+
+# After `graphics.jl`: the mesh vocabulary names `Metal.MeshPtr` and the AIR
+# intrinsics, and is a peer of the graphics hooks rather than part of them.
+include("mesh.jl")
 # Transient render targets. After graphics.jl: needs `mtlformat`.
 include("images.jl")
 # The presentation surface. After graphics.jl: needs `mtlformat` and the

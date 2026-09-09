@@ -5,30 +5,14 @@
 # GPU read. What does NOT change is who owns the memory — the pool does, and
 # everything here borrows.
 
-"""The bytes of a `Shared` buffer, as a host array. No copy."""
-hostbytes(buf::MTL.MTLBuffer) =
-    unsafe_wrap(Array, convert(Ptr{UInt8}, MTL.contents(buf)), Int(buf.length))
-
-"""
-    hostview(buf, ::Type{T}, offset, dims) -> Array{T}
-
-`dims` elements of `T` over `buf`, starting at byte `offset`. No copy.
-
-A typed `unsafe_wrap`, NOT `reinterpret` over a byte view. `reinterpret` refuses
-a struct with padding — "Padding of type X is not compatible with type UInt8" —
-and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields, so every scene with
-a light BVH failed on this. The host backend's `wrapbytes` avoids it the same
-way, for the same reason.
-
-`own = false`: the pool owns the buffer, as everywhere else in Mantle.
-"""
-function hostview(buf::MTL.MTLBuffer, ::Type{T}, offset::Integer, dims::Dims) where {T}
-    need = prod(dims) * sizeof(T)
-    offset + need <= Int(buf.length) || throw(ArgumentError(
-        "$(join(dims, "x")) $T at offset $offset needs $need bytes, buffer has $(buf.length)"))
-    return unsafe_wrap(Array, Ptr{T}(convert(Ptr{UInt8}, MTL.contents(buf)) + offset),
-                       dims; own = false)
-end
+# Where a `Shared` buffer is in the host address space. Core builds `hostview`
+# and the three transfer verbs over this — see `hostspan` in
+# `memory/resources.jl`. This backend used to carry its own copy of the checked
+# `unsafe_wrap`, character for character the host backend's, down to the reason
+# in the comment: `reinterpret` refuses a struct with padding, and Hikari's
+# `LightBVHNode` is 60 bytes holding 54 of fields.
+Mantle.hostspan(::MetalDevice, buf::MTL.MTLBuffer) =
+    (convert(Ptr{UInt8}, MTL.contents(buf)), Int(buf.length))
 
 """
     deviceview(dev, a) -> MtlArray
@@ -60,37 +44,22 @@ Write `data` into `a` starting at element `first`.
 
 A plain `copyto!` into the mapped bytes, because the storage is `Shared` and the
 CPU and GPU see the same memory. On a discrete part this would be a staging
-buffer and a blit; here the absence of one is the point.
+buffer and a blit; here the absence of one is the point, and the copy itself is
+core's over `hostspan`.
 """
-function upload!(d::MetalDevice, a::DeviceArray{T}, first::Integer,
-                 data::AbstractVector) where {T}
-    r = region(a)
-    buf = memoryof(r)::MTL.MTLBuffer
-    v = hostview(buf, T, offset(a), (length(a),))
-    copyto!(v, first, data, 1, length(data))
-    return a
-end
+upload!(d::MetalDevice, a::DeviceArray, first::Integer, data::AbstractVector) =
+    Mantle.hostupload!(d, a, first, data)
 
 """
     download(dev, a) -> Vector
 
 Read `a` back to the host.
 
-**Synchronises, and must.** Unified memory means the CPU and GPU address the
-same bytes; it does NOT mean a kernel writing them has finished. Reading without
-waiting returns whatever was there before the launch — silently, and correctly
-often enough to look fine in a test that uploads and reads straight back.
-`Mantle`'s own `Window` docstring states the rule for the frame loop: there is
-no `flush` in it, "a readback synchronises itself, because it must".
-
-This is the one place in the transfer path that waits. `upload!` does not: the
-graph orders a write against the passes that read it.
+**Synchronises, and must** — core's `hostdownload` waits on `awaitwrites` first.
+Unified memory means the CPU and GPU address the same bytes; it does NOT mean a
+kernel writing them has finished.
 """
-function download(d::MetalDevice, a::DeviceArray{T}) where {T}
-    Metal.synchronize()
-    buf = memoryof(region(a))::MTL.MTLBuffer
-    return collect(hostview(buf, T, offset(a), (length(a),)))
-end
+download(d::MetalDevice, a::DeviceArray) = Mantle.hostdownload(d, a)
 
 """
     devicecopy!(dev, dst, src, n) -> dst
@@ -98,23 +67,14 @@ end
 Copy `n` elements device-to-device.
 
 Through the mapped bytes rather than a blit encoder: both regions are `Shared`,
-so once outstanding work has landed this is a `memmove`. `resize!` on a `Buffer` is the caller
-that matters — it copies the old contents into a fresh region before releasing
-the old one, and a blit there would need a submission and a wait.
+so once outstanding work has landed this is a `memmove`. `resize!` on a `Buffer`
+is the caller that matters — it copies the old contents into a fresh region
+before releasing the old one, and a blit there would need a submission and a
+wait. Core's `hostdevicecopy!` does the waiting for the same reason `download`
+does.
 """
-function devicecopy!(d::MetalDevice, dst::DeviceArray{T}, src::DeviceArray{T},
-                     n::Integer) where {T}
-    # Same reason `download` waits: this reads `src`'s bytes on the CPU, and a
-    # kernel may still be writing them. `resize!` on a `Buffer` is the caller
-    # that matters, and it copies before releasing the old region.
-    Metal.synchronize()
-    sb = memoryof(region(src))::MTL.MTLBuffer
-    db = memoryof(region(dst))::MTL.MTLBuffer
-    s = hostview(sb, T, offset(src), (length(src),))
-    t = hostview(db, T, offset(dst), (length(dst),))
-    copyto!(t, 1, s, 1, Int(n))
-    return dst
-end
+devicecopy!(d::MetalDevice, dst::DeviceArray{T}, src::DeviceArray{T}, n::Integer) where {T} =
+    Mantle.hostdevicecopy!(d, dst, src, n)
 
 """
     bufferusage(dev, T) -> nothing

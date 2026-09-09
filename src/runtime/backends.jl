@@ -135,3 +135,29 @@ end
 The registered backends that report themselves usable here, best first.
 """
 availablebackends() = Symbol[e.name for e in BACKEND_PROBES if e.probe() !== nothing]
+
+"""
+    eachbackend() -> Vector
+
+Every backend usable here, as backend OBJECTS, best first — what
+[`availablebackends`](@ref) names, ready to hand to `Device`.
+
+For iterating: a test or a benchmark that checks portable behaviour runs the
+same body against each of them and names none.
+
+    for be in eachbackend()
+        dev = Device(be)
+        …
+    end
+
+That is not a nicety. Mantle's own suite hardcoded `VulkanAPI()` 57 times in
+the files that look backend-neutral — `test_window.jl` 35 times in 2,021 lines
+— so windows, surfaces, resize and presentation were only ever checked on one
+backend, and the clip-space flip and a wrong drawable extent both reached a
+person looking at a window instead of a failing test.
+
+Empty when nothing is usable. `defaultbackend()` throws in that case because a
+caller asking for THE device wants one; a caller iterating wants to run zero
+times.
+"""
+eachbackend() = [b for b in (e.probe() for e in BACKEND_PROBES) if b !== nothing]

@@ -14,7 +14,12 @@ A device that allocates nothing and counts what it was asked for.
 `allocs` is the whole point of the fixture — the headline property is "a second
 acquire does not reach the device", and that is only observable by counting.
 """
-struct FakeDev
+# `<: M.Device`, because that is what it stands in for. It was a bare struct
+# while every verb it reached took `dev` untyped; `Buffer` now normalises its
+# device argument with `todevice`, which accepts a `Device` and a KA backend and
+# nothing else — deliberately, so a mistake fails where it is made. A test double
+# that plays a device has to be one.
+struct FakeDev <: M.Device
     allocs::Vector{Int}
 end
 FakeDev() = FakeDev(Int[])
@@ -129,14 +134,58 @@ end
 
 M.rawalloc(d::FakeDev, ::M.Persistent, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
 M.blocksize(::FakeDev) = 1 << 16
-M.upload!(::FakeDev, a::M.DeviceArray{T}, first, data) where {T} =
-    (v = reinterpret(T, view(M.memoryof(a), (M.offset(a)+1):(M.offset(a)+sizeof(a))));
-     copyto!(v, first, data, 1, length(data)); a)
-M.download(::FakeDev, a::M.DeviceArray{T}) where {T} =
-    collect(reinterpret(T, view(M.memoryof(a), (M.offset(a)+1):(M.offset(a)+sizeof(a)))))
-M.devicecopy!(d::FakeDev, dst, src, n) =
-    (M.upload!(d, dst, 1, M.download(d, src)[1:n]); dst)
-M.deviceview(::FakeDev, a) = a
+# A slab is host memory, so the three transfer verbs are core's over one answer.
+# They used to be written out here with `reinterpret`, which is a fourth copy of
+# what the host and Metal backends each had — and the broken spelling of it:
+# `reinterpret` refuses any element type with padding, so this fixture could
+# only ever move `Float32`. The testset below is the one that would have caught
+# that, and it is here rather than beside a backend because it needs no device.
+M.hostspan(::FakeDev, slab::Vector{UInt8}) = (pointer(slab), length(slab))
+M.awaitwrites(::FakeDev) = nothing        # nothing is queued, so nothing to wait for
+M.upload!(d::FakeDev, a::M.DeviceArray, first, data) = M.hostupload!(d, a, first, data)
+M.download(d::FakeDev, a::M.DeviceArray) = M.hostdownload(d, a)
+M.devicecopy!(d::FakeDev, dst, src, n) = M.hostdevicecopy!(d, dst, src, n)
+M.deviceview(d::FakeDev, a) = a
+
+# One transfer path, and the element type it used to fail on.
+#
+# `hostview`, `upload!`, `download` and `devicecopy!` lived three times: in the
+# host backend as `wrapbytes`, in the Metal backend as its own `hostview`, and
+# here as a `reinterpret`. The Metal copy's own comment named the reason they
+# had to agree — `reinterpret` throws "Padding of type X is not compatible with
+# type UInt8", and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields, so
+# every scene with a light BVH failed on it. They are one function over
+# `hostspan` now, and this pins the property that made merging them safe.
+#
+# No device: a `FakeDev` is a slab and two one-line answers, which is the whole
+# interface a host-addressable backend implements.
+struct Padded
+    a::Int32
+    b::Int8
+end
+
+@testset "the shared transfer path moves a padded struct" begin
+    d = FakeDev(); p = M.Pool()
+    @eval M.pool(::$(typeof(d))) = $p
+    vals = [Padded(Int32(i), Int8(2i)) for i in 1:8]
+
+    b = M.Buffer(d, vals)
+    @test M.download(d, b.store) == vals            # reinterpret threw here
+
+    M.upload!(d, b.store, 3, [Padded(Int32(99), Int8(7))])
+    got = M.download(d, b.store)
+    @test got[3] == Padded(Int32(99), Int8(7))
+    @test got[[1, 2, 4, 5, 6, 7, 8]] == vals[[1, 2, 4, 5, 6, 7, 8]]
+
+    dst = M.Buffer(d, fill(Padded(Int32(0), Int8(0)), 8))
+    M.devicecopy!(d, dst.store, b.store, 8)
+    @test M.download(d, dst.store) == got
+
+    # The bounds check is why this is one function and not an `unsafe_wrap` per
+    # call site: a region the placer overlapped is caught, not silently read.
+    @test_throws ArgumentError M.hostview(Int64, pointer(zeros(UInt8, 8)), 8, 0, (100,))
+    @test_throws ArgumentError M.hostview(Int64, pointer(zeros(UInt8, 64)), 64, 8, (8,))
+end
 
 @testset "Buffer/GPURef are core types over pool regions" begin
     d = FakeDev(); p = M.Pool(); dev = d
