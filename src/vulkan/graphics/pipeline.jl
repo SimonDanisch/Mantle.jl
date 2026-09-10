@@ -442,9 +442,10 @@ function vk_draw!(e::Emitter,
 
         VK.cmd_begin_rendering(cmd, rendering_info)
 
-        # Bind pipeline + pin for batch lifetime
+        # Bind the pipeline, and hold it: these commands name it until the
+        # submission that carries them has passed.
         VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+        hold!(batch, pipeline)
 
         # Bind descriptor set (for textures)
         if descriptor_set !== nothing
@@ -681,10 +682,7 @@ function draw_in_pass!(e::Emitter,
                            push_bda::UInt64=UInt64(0),
                            instances::Integer=1,
                            viewport::Union{Nothing, VK.Viewport}=nothing,
-                           scissor::Union{Nothing, VK.Rect2D}=nothing,
-                           # A caller that owns the pipeline for longer than the
-                           # frame does not need it pinned into every batch.
-                           pin::Bool=true)
+                           scissor::Union{Nothing, VK.Rect2D}=nothing)
     cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
@@ -715,8 +713,8 @@ function draw_in_pass!(e::Emitter,
     end
 
     VK.cmd_draw(cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
-    # Pin the pipeline — prevents GC from destroying it while the command buffer references it
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # Hold the pipeline: the command buffer names it until its submission passes.
+    hold!(e, pipeline)
 end
 
 """
@@ -750,8 +748,7 @@ function draw_indirect_in_pass!(e::Emitter,
                                    commands::LavaArray{DrawIndirectCommand,1};
                                    first::Integer=1,
                                    count::Integer=1,
-                                   push_bda::UInt64=UInt64(0),
-                                   pin::Bool=true)
+                                   push_bda::UInt64=UInt64(0))
     cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
@@ -770,8 +767,10 @@ function draw_indirect_in_pass!(e::Emitter,
              (first - 1) * sizeof(DrawIndirectCommand)
     VK.cmd_draw_indirect(cmd, managed.buffer, UInt64(offset),
                              UInt32(count), UInt32(sizeof(DrawIndirectCommand)))
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    hold!(e, pipeline)
+    # The draw parameters are READ BY THE DEVICE from this array, so it has to
+    # outlive the draw exactly as a vertex buffer does.
+    hold!(e, commands)
 end
 
 """
@@ -784,13 +783,26 @@ function draw_indexed_in_pass!(e::Emitter,
                                    pipeline::VulkanCompiledGraphicsPipeline,
                                    index_count::Integer;
                                    push_data::Vector{UInt8}=UInt8[],
+                                   push_bda::UInt64=UInt64(0),
                                    indices_buffer::VK.Buffer,
+                                   # Where the indices START in that buffer. A
+                                   # `LavaArray` may be a slice of one, and a
+                                   # hard-coded zero draws someone else's
+                                   # triangles rather than failing.
+                                   indices_offset::UInt64=UInt64(0),
                                    instances::Integer=1)
     cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
 
-    if !isempty(push_data)
+    if push_bda != UInt64(0)
+        bda = Ref(push_bda)
+        GC.@preserve bda begin
+            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
+                pipeline.push_stage_flags, UInt32(0), UInt32(8),
+                Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
+        end
+    elseif !isempty(push_data)
         GC.@preserve push_data begin
             VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
                 pipeline.push_stage_flags, UInt32(0), UInt32(length(push_data)),
@@ -798,10 +810,10 @@ function draw_indexed_in_pass!(e::Emitter,
         end
     end
 
-    VK.cmd_bind_index_buffer(cmd, indices_buffer, UInt64(0), VK.INDEX_TYPE_UINT32)
+    VK.cmd_bind_index_buffer(cmd, indices_buffer, indices_offset, VK.INDEX_TYPE_UINT32)
     VK.cmd_draw_indexed(cmd, UInt32(index_count), UInt32(instances),
                              UInt32(0), Int32(0), UInt32(0))
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    hold!(e, pipeline)
 end
 
 """
@@ -865,7 +877,9 @@ function use_bindings!(e::Emitter, compiled, bindings)
     VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_GRAPHICS,
                                 compiled.pipeline_layout, UInt32(0),
                                 [bindings.set], UInt32[])
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # The set and everything it points at — the textures and their samplers —
+    # are named by every draw that follows until another set is bound.
+    hold!(e, bindings)
     return nothing
 end
 

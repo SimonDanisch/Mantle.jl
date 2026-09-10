@@ -16,12 +16,21 @@ one record of what is in flight (backend-independence step 7) moved the sweep
 into core and inherited the device-shaped question.
 
 Deterministic rather than raced: the second queue's submission WAITS on a
-timeline value the default queue has not reached, so it cannot complete until
-the host lets it; meanwhile the default queue runs past the second queue's
-token value, which is exactly the state the wrong comparison misreads.
+timeline the HOST signals, so it cannot complete until this file lets it;
+meanwhile the default queue runs past the second queue's token value, which is
+exactly the state the wrong comparison misreads.
+
+The gate is a semaphore of this test's own, and the gated submission is made
+LAST, because a second channel does not imply a second hardware queue: where
+the family exposes one queue, `allocate_batch_queue!` shares the primary
+`VkQueue` (`queue_index` -1), and a submission there waiting on work not yet
+submitted blocks everything behind it on that queue. Gating on the default
+queue's own future counter deadlocked such a device instead of failing on it —
+and the property under test is not affected, because every channel has its own
+timeline semaphore whether or not it has its own queue.
 """
 
-using Test, Mantle, Lava, KernelAbstractions
+using Test, Mantle, Lava, KernelAbstractions, Vulkan
 const KA = KernelAbstractions
 
 @kernel function spq_fill!(a, v)
@@ -34,43 +43,43 @@ end
     bq1 = ctx.default_bq
     b1 = LavaBackend()
     bq2 = Mantle.allocate_batch_queue!(ctx)
+    dev = MVE.vkdevice(bq1)
+    gatesem = Vulkan.unwrap(Vulkan.create_semaphore(dev, Vulkan.SemaphoreCreateInfo(;
+        next = Vulkan.SemaphoreTypeCreateInfo(Vulkan.SEMAPHORE_TYPE_TIMELINE, UInt64(0)))))
     try
-        # A submission on the second queue that the GPU cannot finish yet: it
-        # waits for the default queue's timeline to reach `gate`, five
-        # submissions away.
-        gate = bq1.next_timeline + 5
-        o = MVE.oneshot(bq2) do e end
-        tok2 = Mantle.submit!(bq2, o;
-            waits = ((bq1.timeline_sem, UInt64(gate), MVE.STAGE2_ALL_COMMANDS),), tag = :gated)
-        @test length(Mantle.outstanding(bq2)) == 1
-        @test !MVE.passed(bq2, tok2)
-
-        # Three submissions on the default queue: its counter runs past
-        # `tok2` (a small value on the OTHER timeline) and stays short of `gate`.
+        # Run the default queue ahead FIRST, so its counter is past any small
+        # token value on the second channel's fresh timeline.
         c = KA.allocate(b1, Float32, 64)
         for _ in 1:3
             spq_fill!(b1, 64)(c, 1f0; ndrange = 64)
         end
         KA.synchronize(b1)
+
+        # Then a submission on the second channel that the GPU cannot finish:
+        # it waits on `gatesem`, which only this file signals.
+        o = MVE.oneshot(bq2) do e end
+        tok2 = Mantle.submit!(bq2, o;
+            waits = ((gatesem, UInt64(1), MVE.STAGE2_ALL_COMMANDS),))
+        Mantle.handover!(bq2, tok2, o; tag = :gated)
+        @test length(Mantle.outstanding(bq2)) == 1
+        @test !MVE.passed(bq2, tok2)
         @test MVE.query_timeline(bq1) >= tok2      # the misreading's premise
-        @test MVE.query_timeline(bq1) < gate       # and the gate still holds
 
         # THE assertion: the sweep (`drain!` is what every path on this queue
         # calls before it opens or submits) gives nothing back, because on ITS
         # timeline nothing has passed. Before the fix the submission was swept,
-        # the one-shot went to the pool, and `free_oneshots` held a command
+        # the one-shot went to the pool, and core's free list held a command
         # buffer still in flight.
-        MVE.drain!(bq2)
+        Mantle.drain!(bq2)
         @test length(Mantle.outstanding(bq2)) == 1
-        @test !any(x -> x === o, bq2.free_oneshots)
+        @test !any(x -> x === o, bq2.free)
 
-        # Let it through: two more default submissions reach the gate.
-        for _ in 1:2
-            spq_fill!(b1, 64)(c, 2f0; ndrange = 64)
-        end
+        # Let it through.
+        Vulkan.unwrap(Vulkan.signal_semaphore(dev,
+            Vulkan.SemaphoreSignalInfo(gatesem, UInt64(1))))
         Mantle.flush!(bq2)
         @test isempty(Mantle.outstanding(bq2))
-        @test any(x -> x === o, bq2.free_oneshots)
+        @test any(x -> x === o, bq2.free)
     finally
         Mantle.release_batch_queue!(bq2)
     end

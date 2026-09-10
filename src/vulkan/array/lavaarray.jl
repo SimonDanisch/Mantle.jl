@@ -54,7 +54,7 @@ function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
                         extra_usage::UInt32=UInt32(0),
                         scratch::Bool=false,
                         unified::Bool=false) where {T,N}
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     nbytes = prod(dims) * sizeof(T)
 
     # AS-build scratch buffers need a specific BDA alignment
@@ -182,16 +182,26 @@ function bda_address(a::LavaArray{T}) where T
     a.buf[].address + a.offset
 end
 
-# pin! the LavaArray wrapper itself, NOT just its VkManagedBuffer. The wrapper
-# is what Julia's GC traces: pinning the raw VkManagedBuffer wouldn't keep the
-# LavaArray alive, so its GC finalizer could fire mid-batch, call `unsafe_free!`
-# on the underlying DataRef, and leave the wavefront using a DEFERRED/DEAD
-# buffer — which `sync_access!` rightly asserts against.
-# `sync_access!(::LavaArray)` below forwards to the underlying VkManagedBuffer
-# so cross-queue last_write tracking still runs on the leaf.
-# DELETED in phase 1.1: see docs/mantle-owns-it.md
+# `hold!(owner, a)` holds the LavaArray WRAPPER, not just its VkManagedBuffer.
+# The wrapper is what Julia's GC traces: holding the raw buffer would not keep
+# the array alive, so its finalizer could fire mid-recording, release the
+# DataRef and leave the commands naming a DEFERRED buffer. The generic
+# `hold!(::Closed, obj)` in `runtime/command.jl` does exactly that, so no method
+# is needed here — only the two questions core asks about the leaf.
 
-@inline sync_access!(sub::Submission, a::LavaArray) = sync_access!(sub, a.buf[])
+# Where the lifetime stamp lives for an array: on its buffer.
+#
+# `a.buf.rc.obj` and not `a.buf[]`, deliberately. `getindex` throws on a DataRef
+# whose owner has already called `unsafe_free!`, and that is precisely the
+# window this is asked in: a hold list being dropped after the array it names
+# was explicitly freed. The buffer object is still there — the refcount is what
+# reached zero — and asking about ITS lifetime is the whole point.
+@inline stampof(a::LavaArray) = stampof(a.buf.rc.obj::VkManagedBuffer)
+
+# The buffer these commands name, for ordering between channels. Through
+# `buf[]`, because a command that names a released array is a use-after-free
+# and the throw is the report.
+@inline syncbuf!(owner::Closed, a::LavaArray) = syncbuf!(owner, a.buf[])
 
 # LavaAdaptor: converts LavaArray → LavaDeviceArray (Ptr-wrapping) for GPU
 # kernel compilation, and pins every visited LavaArray into the current batch.
@@ -199,7 +209,7 @@ end
 # the `adapt_storage` / `adapt_structure` methods live in gpuarrays.jl.
 # PARAMETERISED on the owner, not `batch::Closed`. An abstract-typed field makes
 # the struct non-concrete, so `adaptor.batch` is a dynamic load and every
-# `pin_leaves!`/`pack_arg!` reached through it becomes a dynamic call — 835 bytes
+# `holdleaves!`/`pack_arg!` reached through it becomes a dynamic call — 835 bytes
 # per dispatch, measured by `test_dispatch_allocation.jl`, which exists for
 # exactly this class of regression.
 #

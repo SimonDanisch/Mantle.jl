@@ -36,7 +36,7 @@ const Tri = Raycore.Triangle{UInt32}
                    n=n, instance_mask=UInt8(0x04),
                    triangles=dummy_triangles)
     @test handle isa Raycore.TLASHandle
-    @test tlas.instance_batches[1].triangles === dummy_triangles
+    @test tlas.instances[1].triangles === dummy_triangles
 
     Raycore.sync!(tlas)
 
@@ -71,7 +71,7 @@ end
 
     # No triangles supplied -- rayQuery-only backward-compat path.
     push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x02))
-    @test isempty(tlas.instance_batches[1].triangles)
+    @test isempty(tlas.instances[1].triangles)
 
     Raycore.sync!(tlas)
 

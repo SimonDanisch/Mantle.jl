@@ -27,11 +27,11 @@ using LinearAlgebra: I
 
     handle = push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x02))
     @test handle isa Raycore.TLASHandle
-    @test length(tlas.instance_batches) == 1
-    @test tlas.instance_batches[1].n == n
-    @test tlas.instance_batches[1].instance_mask == UInt8(0x02)
-    @test tlas.instance_batches[1].blas === blas
-    @test tlas.instance_batches[1].instance_buf === instance_buf
+    @test length(tlas.instances) == 1
+    @test tlas.instances[1].n == n
+    @test tlas.instances[1].instance_mask == UInt8(0x02)
+    @test tlas.instances[1].blas === blas
+    @test tlas.instances[1].instance_buf === instance_buf
     @test tlas.dirty == true
 end
 

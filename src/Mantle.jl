@@ -78,7 +78,8 @@ export rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
     rt_instance_id, rt_instance_custom_index, rt_ray_tmax, rt_hit_bary_u,
     rt_hit_bary_v
 
-using KernelInterface: Topology, TriangleList, TriangleStrip, LineList,
+using KernelInterface: primitivevertices,
+    Topology, TriangleList, TriangleStrip, LineList,
     LineStrip, PointList, PatchList, LineListAdjacency, LineStripAdjacency
 # `import`, not `using … :` — these get `Mantle.Device` methods below, and
 # `caps` in particular becomes one function with a `Device` method here and a
@@ -144,7 +145,7 @@ include("runtime/dispatch.jl")
 include("phases.jl")
 # The graph itself: one set of data structures, shared by every backend.
 include("graph/types.jl")
-# Before `queue.jl`: a `BatchQueue` holds the outstanding list this declares.
+# Before `lifetime.jl`: a `SubmitChannel` holds the outstanding list this declares.
 include("graph/submission.jl")
 # After it: `SubmitChannel` holds the `Outstanding` list that file declares, and
 # `oneshot!` goes through `submitted!`. Phases 2.2 and 2.3 of
@@ -267,10 +268,11 @@ export RenderTarget
 # other, and which three turned out portable outright.
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
-export HWTLAS, AccelBuildContext, BatchQueue, ExternalImage
+export HWTLAS, AccelBuildContext, ExternalImage
 # A submission channel and what a submission holds — 2.2 and 2.3. `hold!` is what
 # `pin!` meant, with the lifetime owned by core instead of by a backend.
-export SubmitChannel, channelof, hold!, oneshot!, acquire!, Submission
+export SubmitChannel, channelof, deviceof, hold!, oneshot!, acquire!, Submission
+export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export batchqueue
@@ -322,6 +324,7 @@ export trace_rays!, trace_rays_indirect!
 export trace!, Trace
 export trace_closest_hits!, trace_closest_hits_indirect!
 export trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
+export primitivevertices
 export Topology, TriangleList, TriangleStrip, LineList, LineStrip, PointList,
        PatchList, LineListAdjacency, LineStripAdjacency
 
@@ -335,7 +338,7 @@ export ConvexShape, UnitCube, support
 export GJKResult, gjk, EPAResult, epa
 export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_kernel
 
-export pixelbytes, vkformat
+export pixelbytes
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
 export DeviceInfo, devices, defaultdevice!

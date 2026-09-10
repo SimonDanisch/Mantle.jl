@@ -32,26 +32,30 @@ end
     @inbounds out[i] += kref[1]
 end
 
-"""Every closed buffer the queue holds, in flight or pooled."""
+"""Every closed buffer the channel holds, in flight or pooled."""
 function allclosed(bq)
     cs = Any[]
     for o in bq.outstanding
         sub = o.payload
-        append!(cs, sub.oneshots)
-        append!(cs, sub.recordings)
+        sub.recording === nothing || push!(cs, sub.recording)
+        # A plan's recording is not the payload — it is submitted again next
+        # run — so it rides in the holds like anything else the commands name.
+        for h in sub.holds
+            h isa MVE.Closed && push!(cs, h)
+        end
     end
-    append!(cs, bq.free_oneshots)
+    append!(cs, bq.free)
     cs
 end
 
 """What one call left behind: how many submissions, head barriers and timeline
 values it produced, and whether anything is open afterwards."""
 function observe(f, bq)
-    d = bq.ctx.diag
-    f0, h0, t0 = d.flush_counter[], d.head_barriers[], bq.next_timeline
+    d = MVE.ctxof(bq).diag
+    f0, h0, t0 = d.flush_counter[], d.head_barriers[], MVE.driver(bq).next_timeline
     f()
     (submits = d.flush_counter[] - f0, barriers = d.head_barriers[] - h0,
-     tokens = Int(bq.next_timeline - t0), open = any(c -> c.open, allclosed(bq)))
+     tokens = Int(MVE.driver(bq).next_timeline - t0), open = any(c -> c.open, allclosed(bq)))
 end
 
 @testset "the queue has nowhere to keep an open command buffer" begin
@@ -66,8 +70,9 @@ end
     # counter by a second function.
     @test !hasfield(typeof(bq), :in_flight)
     @test hasfield(typeof(bq), :outstanding)
-    @test eltype(bq.outstanding) == Mantle.Outstanding{UInt64, MVE.Submission}
-    @test hasfield(typeof(bq), :free_oneshots)
+    @test eltype(bq.outstanding) ==
+          Mantle.Outstanding{UInt64, Mantle.Submission{Union{Nothing,MVE.OneShot}}}
+    @test hasfield(typeof(bq), :free)
 end
 
 @testset "every call closes and submits what it wrote" begin
@@ -84,7 +89,7 @@ end
     end
     @test r == (submits = 1, barriers = 1, tokens = 1, open = false)
     sub = last(bq.outstanding).payload
-    @test length(sub.oneshots) == 1 && isempty(sub.recordings)
+    @test sub.recording isa MVE.OneShot
 
     # An upload and a download.
     b = Mantle.Buffer(dev, zeros(Float32, n))
@@ -117,8 +122,8 @@ end
     end
     @test r == (submits = 1, barriers = 0, tokens = 1, open = false)
     sub = last(bq.outstanding).payload
-    @test isempty(sub.oneshots) && length(sub.recordings) == 1
-    @test only(sub.recordings) === pl.recording
+    @test sub.recording === nothing
+    @test isempty(sub.holds)
 
     # With a store pending: the store's one-shot in front of the recording, in
     # ONE submission.
@@ -128,7 +133,8 @@ end
     end
     @test r == (submits = 1, barriers = 1, tokens = 1, open = false)
     sub = last(bq.outstanding).payload
-    @test length(sub.oneshots) == 1 && length(sub.recordings) == 1
+    @test sub.recording isa MVE.OneShot
+    @test any(x -> x === pl.recording, sub.holds)
     Mantle.waitfor!(pl)
     @test Array(out) == fill(Int32(7), n)
 
@@ -136,7 +142,7 @@ end
     # every pooled one-shot clean.
     Mantle.flush!(bq)
     @test isempty(bq.outstanding)
-    @test all(o -> !o.open && isempty(o.pinned) && isempty(o.regions), bq.free_oneshots)
+    @test all(o -> !o.open && isempty(o.sync) && isempty(o.regions), bq.free)
     Mantle.free!(pl)
 end
 
@@ -166,5 +172,5 @@ end
 @testset "a token beyond the timeline is refused, not waited for" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
     bq = Mantle.batchqueue(dev)
-    @test_throws MVE.LavaError Mantle.waitfor!(dev, bq.next_timeline + 1)
+    @test_throws MVE.LavaError Mantle.waitfor!(dev, MVE.driver(bq).next_timeline + 1)
 end

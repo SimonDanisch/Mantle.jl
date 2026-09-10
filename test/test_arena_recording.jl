@@ -211,7 +211,7 @@ end
     # of this testset, it is not a ratio anybody has to keep generous, and it does
     # not move on a shared machine. `test_recording_lifecycle.jl` owns the
     # host-cost comparison, where the two sides genuinely differ.
-    diag = M.batchqueue(dev).ctx.diag
+    diag = MVE.ctxof(M.batchqueue(dev)).diag
     function batchrecorded(f, n)
         f()                                  # warm, and outside the count
         KernelAbstractions.synchronize(M.backend(dev))

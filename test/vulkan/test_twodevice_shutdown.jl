@@ -3,7 +3,7 @@ The shutdown hook marks EVERY device lost, not just the bound one.
 
 `atexit` runs before Julia's final finalizer sweep, and `MantleVulkanExt.__init__`
 uses that: it marks the device lost so a `LavaArray` finalizer running afterwards
-takes the `device_lost(bq.ctx)` branch in `vk_free!` and skips `query_timeline`,
+takes the `device_lost(MVE.ctxof(bq))` branch in `vk_free!` and skips `query_timeline`,
 instead of calling `vkGetSemaphoreCounterValue` on a driver that has already been
 torn down.
 

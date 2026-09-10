@@ -20,14 +20,14 @@ import Adapt
     adapt_storage(::LavaAdaptor, ::LavaArray) → LavaDeviceArray
 
 Pure strip: wrap the GPU buffer address in a device-visible struct. **No pin
-side effect**. Callers must separately invoke `pin_leaves!(batch, args...)`
+side effect**. Callers must separately invoke `holdleaves!(batch, args...)`
 before submitting a command buffer that uses the stripped result — otherwise
 the underlying `VkManagedBuffer` can be GC'd before the GPU reads from it.
 
 (AMDGPU's adapt is also pure; they get away without an explicit pin pass
 because `@roc` uses `GC.@preserve vars...` lexically around a synchronous
 dispatch. Lava's dispatches are batched and submitted later, so `@preserve`
-isn't enough — hence the explicit `pin_leaves!` step.)
+isn't enough — hence the explicit `holdleaves!` step.)
 """
 function Adapt.adapt_storage(::LavaAdaptor, a::LavaArray{T,N}) where {T,N}
     return LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
@@ -631,8 +631,8 @@ end
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::Array{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
-    # Records into the active batch and flushes; `sync_access!` takes care of any
-    # prior cross-queue writer to `dest.buf[]` via timeline semaphore.
+    # One copy in a one-shot of its own; holding `dest.buf[]` is what makes core
+    # wait for a prior writer on another channel.
     GC.@preserve src copy_buffer!(:upload, dest.buf[],
                                   Ptr{UInt8}(pointer(src, soffs)), n * sizeof(T);
                                   offset = dest.offset + (Int(doffs) - 1) * sizeof(T))
@@ -642,8 +642,8 @@ end
 function Base.copyto!(dest::Array{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
-    # Records a copy into the active batch of whichever queue last wrote
-    # `src.buf[]` and flushes — `sync_access!` inserts any cross-queue wait.
+    # The copy is recorded on whichever channel last named `src.buf[]`, so the
+    # host waits on one timeline instead of two.
     GC.@preserve dest copy_buffer!(:download, src.buf[],
                                    Ptr{UInt8}(pointer(dest, doffs)), n * sizeof(T);
                                    offset = src.offset + (Int(soffs) - 1) * sizeof(T))
@@ -668,11 +668,10 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)
     nbytes = n * sizeof(T)
     bq = (dest.buf[].ctx::VkContext).default_bq
-    # Pin the ARRAYS, not the `VkManagedBuffer`s that `cmd_copy_buffer!` sees.
+    # Hold the ARRAYS, not the `VkManagedBuffer`s that `cmd_copy_buffer!` sees.
     #
-    # It pins what it is given, and it is given `src.buf[]` — so it can only
-    # reach `pin!(::VkManagedBuffer)`, which pushes the object into
-    # `batch.pinned` and makes it REACHABLE. Reachability is not what decides
+    # It holds what it is given, and it is given `src.buf[]` — a buffer, which
+    # the submission then makes REACHABLE. Reachability is not what decides
     # whether the memory is still ours: the `DataRef` refcount is, and the
     # array's finalizer releases that. So for
     #
@@ -680,18 +679,15 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     #
     # — no reference to the source survives the call — the GC collects the
     # source, its ref releases, the pooled block goes back, and the recorded
-    # `vkCmdCopyBuffer` names memory the pool has handed onward. `submit!`
-    # catches it as `sync_access!: buffer is not ALIVE`.
+    # `vkCmdCopyBuffer` names memory the pool has handed onward.
     #
-    # `pin!(::LavaArray)` is the level that does both halves: it retains the
-    # `DataRef` into the one-shot's `pinned_refs` and takes a buffer pin, and
-    # `release_pinned_refs!` drops both when the submission completes or
-    # fails. Nothing new is needed — every kernel argument already gets exactly
-    # this lifetime through `LavaAdaptor`; only the copy path was pinning a
-    # level too low.
+    # Holding the array is the level that keeps the refcount up, which is why
+    # both are held here as well as inside the copy. Every kernel argument
+    # already gets exactly this lifetime through `LavaAdaptor`; only the copy
+    # path was holding a level too low.
     oneshot!(bq; tag = :copy) do e
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+        hold!(e, src)
+        hold!(e, dest)
         cmd_copy_buffer!(e, src.buf[], dest.buf[], nbytes;
                          src_off=src_offset, dst_off=dst_offset)
     end
@@ -714,8 +710,8 @@ function Base.fill!(a::LavaArray{T}, val) where T
     # From the array, not the global context. `fill!` on an array belonging to a
     # second device was dispatching on whichever context was global: the write
     # landed on the wrong queue, the array read back as zeros, and Lava's own
-    # `sync_access!` guard caught it later as "buffer was last written on a
-    # VulkanBatchQueue from a DIFFERENT VkContext" — a long way from the cause.
+    # cross-context guard caught it later as "a buffer was last used on a channel
+    # from a DIFFERENT VkContext" — a long way from the cause.
     k = fill_kernel!(KernelAbstractions.get_backend(a))
     k(a, v; ndrange=length(a))
     return a
@@ -733,8 +729,9 @@ end
 #   `Base.resize!(::Vector, n)` semantics.
 # * On genuine growth, allocate a fresh pool chunk, copy the first min(old,new)
 #   elements, and retire the old DataRef via `GPUArrays.unsafe_free!`.  The
-#   retirement enters `bq.deferred_frees` gated on the batch timeline — the
-#   caller does NOT need a `synchronize` to make it safe w.r.t. in-flight work.
+#   retirement is RECORDED (core's `retire!`) and run once the submission that
+#   named the old bytes has passed — the caller does NOT need a `synchronize` to
+#   make it safe w.r.t. in-flight work.
 # * Throws on a freed DataRef (surfaces caller bugs; no self-heal).
 
 function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
@@ -766,7 +763,7 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
         end
         # The copy pinned `buf` and stamped its `last_write` at the submit that
         # closed the one-shot, so the `unsafe_free!` below sees the buffer as in
-        # use and routes through `deferred_frees`. The flush that stood here
+        # use and records the destroy with `retire!`. The flush that stood here
         # closed a window the open batch had, between a recorded pin and a
         # submit that had not happened yet.
     end

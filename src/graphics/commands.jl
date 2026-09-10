@@ -71,18 +71,11 @@ whether re-creating it is the right response.
 function reset_device! end
 
 """
-    blit!(dst, src)
-
-Copy an image to another, converting format and scaling as needed.
-"""
-function blit! end
-
-"""
     present_frame!(submitter, window)
 
 Show what was drawn, once the work behind it completes.
 
-`submitter` is whatever this backend submits through — a [`BatchQueue`](@ref) on
+`submitter` is whatever this backend submits through — a [`SubmitChannel`](@ref) on
 one, the device itself on the other. That is the only part that differs, and it
 differs because the two have genuinely different submission machinery; the verb,
 the ordering and the moment are the same.
@@ -231,12 +224,13 @@ function use_bindings! end
 # this side of the line, which is why `begin_render_pass!` takes the attachments
 # already resolved rather than the `Pass`.
 #
-# The Vulkan backend does NOT go through these: it records whole frames into a
-# `BatchQueue` and has its own path in `src/vulkan/graph.jl`. These exist for
-# backends that have no batch queue — see `supports_batch_queue`.
+# The Vulkan backend does NOT go through these: it records whole frames onto its
+# own channel and has its own path in `src/vulkan/graph.jl`. These exist for
+# backends that have no submission channel — see `supports_batch_queue`.
 
 """
-    compile_draw(device, pipeline, color_formats, depth_format, vert_args, frag_args)
+    compile_draw(device, pipeline, color_formats, depth_format, vert_args, frag_args;
+                 bindings = nothing)
 
 Compile a [`GraphicsPipeline`](@ref) for the attachments it will be drawn into.
 
@@ -250,6 +244,13 @@ format. `vert_args`/`frag_args` are the RESOLVED arguments — the values, not
 their types — because what a stage's device signature is differs per backend:
 one derives it by adapting each value the way a kernel launch would, and only
 the value can answer that.
+
+`bindings` is the texture table the draws will sample from — what
+[`bind_textures`](@ref) answered — or `nothing`. It is here rather than only at
+[`bindings!`](@ref) because on one backend a pipeline that samples is COMPILED
+differently: Vulkan builds the pipeline layout around the descriptor set layout,
+and a set bound against a pipeline that was not built for it is invalid. Metal
+binds a texture to an argument slot and ignores this.
 """
 function compile_draw end
 

@@ -96,7 +96,7 @@ sixty-odd lines down. A second copy of a fact the queue already holds can only
 ever disagree with it, so this derives instead.
 
 """
-vk_context(b::LavaBackend) = (b.dispatch_bq.ctx)::VkContext
+vk_context(b::LavaBackend) = (ctxof(b.dispatch_bq))::VkContext
 vk_context(a::LavaArray) = (a.buf[].ctx)::VkContext
 # What a kernel library asks: `caps(backend)`, so a downstream package never has
 # to hold a `VkContext` to find out what the device it is launching on offers.
@@ -144,10 +144,10 @@ KA.get_backend(a::LavaArray) = LavaBackend((a.buf[].ctx)::VkContext)
 # the barrier every closed command buffer opens with, so synchronize() is only needed when the CPU
 # must observe GPU results (or at natural batch boundaries like end-of-sample).
 function KA.synchronize(backend::LavaBackend)
-    flush!(backend.dispatch_bq, backend.dispatch_bq.device)
+    flush!(backend.dispatch_bq)
     # If split, the upload queue may have pending transfers worth flushing too.
     if backend.upload_bq !== backend.dispatch_bq
-        flush!(backend.upload_bq, backend.upload_bq.device)
+        flush!(backend.upload_bq)
     end
     return
 end
@@ -176,9 +176,16 @@ end
 Adapt.adapt_storage(b::LavaBackend, a::Array) = LavaArray(a; bq = b.dispatch_bq)
 
 """Allocate a LavaArray with INDEX_BUFFER_BIT for use as a Vulkan index buffer,
-on `b`'s device."""
-function alloc_index_buffer(b::LavaBackend, data::AbstractVector{UInt32})
-    arr = LavaArray{UInt32,1}(undef, (length(data),); bq = b.dispatch_bq,
+on `bq`'s device.
+
+Takes the CHANNEL and not a backend, because its one caller is
+`Mantle.indexbuffer(::LavaDevice, …)` and a device holds a channel. It took a
+`LavaBackend` while RayMakie called it directly through `Base.get_extension`;
+the portable spelling normalises to a device before it dispatches, so the
+backend form had no caller left and the mismatch was a `MethodError` on every
+indexed draw."""
+function alloc_index_buffer(bq::VulkanBatchQueue, data::AbstractVector{UInt32})
+    arr = LavaArray{UInt32,1}(undef, (length(data),); bq,
         extra_usage=UInt32(VK.BUFFER_USAGE_INDEX_BUFFER_BIT))
     upload!(arr, data)
     return arr
@@ -454,7 +461,7 @@ end
 # `use(p, x; read/write)`, and the graph derives the same answer where it can be
 # checked.
 #
-# `range_leaves!` in `pin_leaves.jl` went with it — it was the walk that
+# `range_leaves!` in `graph/lifetime.jl` went with it — it was the walk that
 # collected the ranges.
 
 """
@@ -555,8 +562,8 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
     if ndrange isa LavaArray
         oneshot!(bq; tag = :launch) do e
             owner = e.owner
-            pin_leaves!(owner, obj.f)
-            pin_leaves!(owner, args)
+            holdleaves!(owner, obj.f)
+            holdleaves!(owner, args)
             adaptor = LavaAdaptor(owner)
             converted_args = map(a -> Adapt.adapt(adaptor, a), args)
             ka_launch_indirect!(e, obj, converted_args, ndrange, workgroupsize, args, adaptor, tlas)
@@ -569,7 +576,7 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
     # depend on (typeof(obj), ndrange, workgroupsize) — typeof(obj) carries the
     # static NDRange/WG-size and F type parameters. Cache the whole plan so the
     # second-and-later launch with the same shape is one Dict lookup.
-    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, bq.ctx::VkContext)
+    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, ctxof(bq))
     # NOTE the `nblocks == 0` check lives inside the barrier, not here. Reading
     # any field off `plan` at this point is a dynamic `getfield` on an abstract
     # value, which boxes — the very cost the barrier exists to remove.
@@ -631,7 +638,7 @@ end
 
 function compiled(obj::KA.Kernel{LavaBackend}, ndrange; workgroupsize = nothing)
     bq = obj.backend.dispatch_bq
-    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, bq.ctx::VkContext)
+    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, ctxof(bq))
     # `P` and `Q` come from the runtime types here, once, off the hot path.
     return LavaKernel(obj, plan, bq)
 end
@@ -654,8 +661,8 @@ end
         # Side-effect pass: pin every LavaArray leaf in the closure + args into
         # the one-shot's `pinned`, once, via @generated walker (zero alloc,
         # straight-line code).  `Adapt.adapt` below is pure — it only strips.
-        pin_leaves!(owner, obj.f)
-        pin_leaves!(owner, args)
+        holdleaves!(owner, obj.f)
+        holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         converted_f = Adapt.adapt(adaptor, obj.f)
         converted_args = map(a -> Adapt.adapt(adaptor, a), args)
@@ -674,7 +681,7 @@ end
 # without bounds checks — phantom workgroups cause out-of-bounds GPU memory writes.
 
 # Per-dimension workgroup count limits live on `VkContext.max_wg_dims` — queried
-# once at device creation. `pad_to_3d` and friends reach them via `bq.ctx`.
+# once at device creation. `pad_to_3d` and friends reach them via `ctxof(bq)`.
 
 # Find exact factor of n that is ≤ max_dim, for splitting workgroup counts.
 # Returns the largest factor ≤ max_dim, or max_dim if none found (over-dispatch).
@@ -761,14 +768,14 @@ Internal launch function for KA kernels. Compiles and dispatches the GPU functio
                              wg::NTuple{3,Int}, ray_query::Bool)
     key = typeof(all_args)
     world = Base.get_world_counter()
-    # `bq.ctx::VkContext`, and the assert is the whole point: `VulkanBatchQueue.ctx` is
+    # `ctxof(bq)`, and the assert is the whole point: `VulkanBatchQueue.ctx` is
     # declared `::Any` (it must be — `VkContext` owns the queue, so one direction
     # of the cycle is untyped). Without the assert `ctx.caches.launchplans` infers
     # as `Any`, which makes the `get` below a dynamic dispatch and the loop over
     # `v` a fully dynamic iteration — measured at **464 bytes per dispatch**, on a
-    # warm cache that builds nothing. Every other `bq.ctx` in this file already
+    # warm cache that builds nothing. Every other `ctxof(bq)` in this file already
     # carries the assert; this one did not.
-    cache = launch_plan_cache(bq.ctx::VkContext)
+    cache = launch_plan_cache(ctxof(bq))
     v = get(cache, key, nothing)
     if v !== nothing
         for q in v
@@ -845,12 +852,12 @@ and what follows is a SPIR-V compile. On the hit path nothing here runs."""
     tt = ttbox[]
     key = keybox[]::DataType
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
-        bq.ctx::VkContext, f, tt, wg; enable_ray_query=ray_query)
+        ctxof(bq), f, tt, wg; enable_ray_query=ray_query)
     base = compiled.push_info.arg_buffer_size
     p = LaunchPlan(compiled, pipeline, offsets, byval_sizes, base,
                    base + compute_inline_extra_from_byval(byval_sizes),
                    world, wg, ray_query)
-    v = get!(() -> Any[], launch_plan_cache(bq.ctx), key)
+    v = get!(() -> Any[], launch_plan_cache(ctxof(bq)), key)
     filter!(q -> (q::LaunchPlan).world === world, v)  # superseded worlds are dead
     push!(v, p)
     p
@@ -881,10 +888,10 @@ function ka_launch!(e::Emitter, @nospecialize(f), all_args::Tuple,
                        plan.arg_buffer_size, plan.byval_sizes, all_args)
 
     name = ""
-    if (bq.ctx::VkContext).diag.dispatch_logging
+    if (ctxof(bq)).diag.dispatch_logging
         name = Base.invokelatest(dispatch_log_string, "ka f=",
                                  dispatch_name(f, all_args), " groups=", block_dims)::String
-        bq.last_dispatch_info = name
+        driver(bq).last_dispatch_info = name
     end
     # Dispatch with N-D block grid (preserves KA's block dimensions).
     emit_dispatch!(e, plan.pipeline, arg_buf.address, block_dims, tlas, name)
@@ -946,7 +953,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     else
         (256,)
     end
-    ws_3d = pad_to_3d(bq.ctx::VkContext, ws)
+    ws_3d = pad_to_3d(ctxof(bq), ws)
     ws_prod = prod(ws)
 
     # We need to compile the kernel with a static ndrange for __validindex.
@@ -962,10 +969,10 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     iterspace, dynamic = KA.partition(obj, ndrange_tuple, ws)
     ctx = KA.mkcontext(obj, ndrange_tuple, iterspace)
 
-    # Caller already pinned the original args via `pin_leaves!`; pin the
+    # Caller already pinned the original args via `holdleaves!`; pin the
     # closure's captures here. `Adapt.adapt` is pure now (strip only).
     batch = adaptor.batch
-    pin_leaves!(batch, obj.f)
+    holdleaves!(batch, obj.f)
     converted_f = Adapt.adapt(adaptor, obj.f)
     all_args = (converted_f, ctx, args...)
 
@@ -973,7 +980,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     tt = Tuple{map(arg_sigtype, Base.tail(all_args))...}
     enable_ray_query = tlas !== nothing
     compiled, pipeline, offsets, byval_sizes = get_compiled_kernel_and_pipeline(
-        bq.ctx::VkContext, converted_f, tt, ws_3d; enable_ray_query)
+        ctxof(bq), converted_f, tt, ws_3d; enable_ray_query)
 
     inline_extra = compute_inline_extra_from_byval(byval_sizes)
     total_size = compiled.push_info.arg_buffer_size + inline_extra
@@ -989,10 +996,10 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     indirect_view = indirect_command!(batch)
 
     name = ""
-    if (bq.ctx::VkContext).diag.dispatch_logging
+    if (ctxof(bq)).diag.dispatch_logging
         name = Base.invokelatest(dispatch_log_string, "indirect f=",
                                  dispatch_name(obj.f, all_args))::String
-        bq.last_dispatch_info = name
+        driver(bq).last_dispatch_info = name
     end
     # The prepare, the barrier that makes its write visible to the command
     # processor, then the dispatch that reads it. `bq.deferred_indirect` used to

@@ -56,7 +56,7 @@ end
 # nothing is destroyed at all: `vk_free!` takes its `pins > 0` branch, sets
 # `free_requested` and returns, and the block keeps its `live_count` until the
 # flush inside `quiesce_before_reclaim!` releases the pin. (A buffer with
-# in-flight work takes a third branch onto `deferred_frees`, released by the
+# in-flight work takes a third branch onto core's retired list, released by the
 # drain in the same call.)
 #
 # `trim_gpu_pool!` used to gate on `any(b -> isempty(b.live), blocks)` *before*

@@ -275,10 +275,13 @@ waitidle(d::MetalDevice) = (Metal.synchronize(); nothing)
 # It told the caller "Metal.jl has no graphics pipeline, check
 # `supports_graphics` and take the compute path" on a backend where
 # `supports_graphics` measurably answers `true`, fifteen lines below a comment
-# saying so. What a `BatchQueue` is, and whether Mantle needs the concept at
-# all, is phase 2.3's question.
+# saying so.
+#
+# A second channel is a driver fact — Vulkan takes another `VkQueue` from the
+# family — and this backend has one queue, which `supports_batch_queue` is the
+# question for. Throwing is the answer to asking anyway.
 function allocate_batch_queue!(::Union{Metal.MetalBackend,MetalDevice})
     throw(ArgumentError(
-        "Mantle: BatchQueue is being removed — object reuse and lifetime are " *
-        "core's, not a backend's. See docs/mantle-owns-it.md 2.2 and 2.3."))
+        "Mantle: this backend has one submission channel. Ask " *
+        "`supports_batch_queue(device)` before allocating a second one."))
 end

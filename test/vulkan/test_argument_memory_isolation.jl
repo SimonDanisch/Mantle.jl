@@ -68,7 +68,7 @@ end
     # 1. Launch A (slow — keeps the GPU busy). It submits itself immediately;
     #    its one-shot owns its own argument region until ITS submission passes.
     heavy!(a, Int32(1); ndrange=n)
-    target = bq.next_timeline
+    target = MVE.driver(bq).next_timeline
 
     # 2. Launch B — a separate submission with its own region, taken out
     #    while A is still in flight.
@@ -127,7 +127,7 @@ end
     k! = fill_value_kernel!(backend, 256)
     e0 = KA.allocate(backend, Int32, 4)
     k!(e0, Int32(0); ndrange=4)
-    target = bq.next_timeline
+    target = MVE.driver(bq).next_timeline
     while MVE.query_timeline(bq) < target; end   # polling does not sweep
 
     # `get_arg_buffer` takes the OWNER of the bytes, not the queue: what decides
@@ -144,5 +144,6 @@ end
     # has, so the second handout is under no obligation to be above the first.
     @test b[].address >= a[].address + a[].size || a[].address >= b[].address + b[].size
 
-    MVE.recycle!(bq, o)
+    # Never submitted: core gives the one-shot back and the scratch with it.
+    Mantle.release!(bq, o)
 end

@@ -50,7 +50,7 @@ This device's compiled-kernel cache, created on first use.
 # ── Launch argument validation ──
 
 """
-    validate_launch_args(bq.ctx::VkContext, args)
+    validate_launch_args(ctxof(bq), args)
 
 Check that buffer arguments are valid (not freed, not poisoned).
 Runs by default; disable with `ctx.diag.launch_arg_validation = false`.
@@ -162,7 +162,7 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int}, tlas) where {O<:Closed}
     bq = queueof(owner)
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     validate_launch_args(ctx, args)
     if ndrange isa Integer
         ndrange_3d = (Int(ndrange), 1, 1)
@@ -180,8 +180,8 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
     # the last submission that names them.
     # Strip pass (pure): Adapt.jl rewrites LavaArray → LavaDeviceArray via the
     # side-effect-free `adapt_storage(::LavaAdaptor, ::LavaArray)`.
-    pin_leaves!(owner, f)
-    pin_leaves!(owner, args)
+    holdleaves!(owner, f)
+    holdleaves!(owner, args)
     adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, f)
     converted_args = map(a -> Adapt.adapt(adaptor, a), args)
@@ -295,7 +295,9 @@ end
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
                            offset::Int, byval_size::Int, inline_offset::Int,
                            batch::O) where {O<:Closed}
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # The kernel reads through this address, so the submission must outlive the
+    # buffer and be ordered against whoever wrote it last.
+    hold!(batch, buf)
     if (buf.ctx::VkContext).diag.pack_arg_assert_live
         st = @atomic :acquire buf.state
         if st != BUF_STATE_ALIVE
@@ -717,8 +719,8 @@ the address. A modelled plan does not come through here at all.
 """
 @inline function scratch!(owner::O, nbytes::Integer) where {O<:Closed}
     bq = queueof(owner)
-    @assert Threads.threadid() == bq.owning_thread  "VulkanBatchQueue is single-writer; cross-thread scratch alloc forbidden"
-    dev = lavadevice(bq.ctx::VkContext)
+    @assert Threads.threadid() == bq.thread  "VulkanBatchQueue is single-writer; cross-thread scratch alloc forbidden"
+    dev = lavadevice(ctxof(bq))
     r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE)
     push!(owner.regions, r)

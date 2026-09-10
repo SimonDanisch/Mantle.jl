@@ -72,10 +72,10 @@ end
                     Mantle.dispatch!(p, di_bump!, (out, cnt), Mantle.DeviceRange(cnt); group = 64)
                 end
                 pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))
-                before_gpu = gpu.default_bq.next_timeline
+                before_gpu = MVE.driver(gpu.default_bq).next_timeline
                 Mantle.run!(pl); Mantle.waitfor!(pl)
                 @test Array(Mantle.storage(out)) == fill(Int32(1), n)
-                @test gpu.default_bq.next_timeline == before_gpu   # nothing ran on the default
+                @test MVE.driver(gpu.default_bq).next_timeline == before_gpu   # nothing ran on the default
                 Mantle.free!(pl)
             end
 

@@ -59,9 +59,16 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     geom_spirv = nothing
     geom_config = nothing
     if pipeline.geometry !== nothing
-        geom_fn = Mantle.stagefunction(pipeline.geometry)
+        # WRAPPED, like the other two stages: a geometry body takes
+        # `(emitter, primitive, args...)` and emits through `emit!`, and the
+        # wrapper is what reads the arrayed inputs into `primitive` and turns an
+        # emit into "write the outputs, then `emit_vertex!`". Compiling the bare
+        # function reaches it with the vertex stage's argument tuple and no
+        # method — `lines_geometry` has two leading parameters that nothing
+        # supplies.
         geom_cfg = Mantle.stageconfig(pipeline.geometry)
-        geom = get_or_compile_gfx(geom_fn, tt_vertex, :geometry; config=geom_cfg, ctx)
+        geom = get_or_compile_gfx(geometrystage(pipeline, geom_cfg), tt_vertex,
+                                  :geometry; config=geom_cfg, ctx)
         geom_spirv = geom.spirv_bytes
         geom_config = geom_cfg
     end
@@ -127,10 +134,36 @@ position, and that is a pipeline whose fragment stage reads nothing.
 Returns (vert_fn, vert_tt, frag_fn, frag_tt).
 """
 function resolve_shader_pair(pipeline, vert_tt::Type, frag_tt::Type)
-    vout = Mantle.outputtype(Mantle.lastgeometrystage(pipeline))
-    wrapped_vert = VertexWrapper{typeof(Mantle.stagefunction(pipeline.vertex))}()
-    wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout}()
+    last = Mantle.lastgeometrystage(pipeline)
+    vout = Mantle.outputtype(last)
+    # Which names the declaration marked `Flat`. Both wrappers get the same
+    # tuple, because Vulkan requires the producing and consuming stage to agree
+    # on the interpolation of every location: a disagreement is a link failure
+    # rather than a wrong picture, and an integer varying has no other legal
+    # form. `outputtype` strips the marker — flatness says WHERE a value is
+    # delivered, never what it is — so it has to travel beside the type.
+    flats = Mantle.flatoutputs(last)
+    wrapped_vert = VertexWrapper{typeof(Mantle.stagefunction(pipeline.vertex)), flats}()
+    wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout, flats}()
     return wrapped_vert, vert_tt, wrapped_frag, frag_tt
+end
+
+"""
+The geometry stage, wrapped: the vertex stage's outputs are what the primitive
+arrays, the geometry stage's own outputs are what an emit writes, and the input
+topology says how many vertices a primitive has.
+
+`Mantle.outputtype` twice over, because the two stages' declarations are
+different things: `VIn` is what this stage READS per vertex and `Out` what it
+WRITES per emit.
+"""
+function geometrystage(pipeline::GraphicsPipeline, cfg)
+    gs = pipeline.geometry
+    return GeometryWrapper{typeof(Mantle.stagefunction(gs)),
+                           Mantle.outputtype(pipeline.vertex),
+                           Mantle.outputtype(gs),
+                           Mantle.flatoutputs(gs),
+                           Mantle.primitivevertices(cfg.input_topology)}()
 end
 
 """
@@ -265,149 +298,6 @@ function pack_gfx_args(::Closed, args, ::Nothing=nothing)
     error("pack_gfx_args requires push_info for non-empty args.")
 end
 
-# ── Blit: Fullscreen Display of GPU Buffer ──
-
-# Built-in vertex shader for fullscreen triangle (3 vertices, no buffer)
-function blit_vertex()
-    vid = vertex_index() - Int32(1)  # 0-based for bit tricks
-    # Fullscreen triangle: covers entire NDC [-1,1]×[-1,1]
-    # vid=0: (-1,-1), vid=1: (3,-1), vid=2: (-1,3)
-    x = Float32(Int32(vid & Int32(1)) * 4 - 1)
-    y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-    u = (x + 1.0f0) * 0.5f0
-    v = (y + 1.0f0) * 0.5f0
-    return (position = Vec4f(x, clip_y(y), 0.0f0, 1.0f0), uv = Vec2f(u, v))
-end
-
-# Convert any RGBA-like color to Vec4f for fragment output
-to_vec4f(v::Vec4f) = v
-to_vec4f(c) = Vec4f(c.r, c.g, c.b, c.alpha)
-
-# Built-in fragment shader for blitting a GPU buffer to screen.
-# Buffer is in Julia column-major layout: element [row, col] is at linear index col * height + row + 1.
-# Screen coords: fx = column (x), fy = row (y, 0 = top in Vulkan).
-function blit_fragment(_inputs, buffer, width::Int32, height::Int32)
-    fx = frag_coord_x()
-    fy = frag_coord_y()
-    ix = unsafe_trunc(Int32, fx)   # column (0-based)
-    iy = unsafe_trunc(Int32, fy)   # row (0-based)
-    # Column-major indexing: col * height + row + 1
-    idx = ix * height + iy + Int32(1)
-    return to_vec4f(buffer[idx])
-end
-
-
-# Likewise the blit pipeline — see `DeviceCaches.blit`.
-
-"""
-What shape a blit source has.
-
-A matrix is `(height, width)` — `img[row, col]`, which is what everything that
-calls an array an image means by it, and what `KernelAbstractions.allocate(be, T,
-h, w)` gives. A vector is that matrix flattened, so the row index varies fastest
-and pixel `(x, y)` is at `x * height + y + 1`.
-
-A `(width, height)` matrix is the transposition, and it is what
-`copy_image_to_buffer!` produces: an image copy packs rows, so its column index
-varies fastest. Reading one and blitting it with the same index is a picture that
-is sheared rather than wrong-looking, so the matrix case says so here. The vector
-case cannot tell the two apart and only checks there are enough pixels.
-"""
-function checkblitsize(a::LavaArray{<:Any,2}, w::Integer, h::Integer)
-    size(a) == (h, w) && return nothing
-    # Only the transposition is an error. A size that merely disagrees is what a
-    # resize looks like between the swapchain following the window and the caller
-    # reallocating, and one frame of the wrong size there is not worth a throw.
-    size(a) == (w, h) && throw(DimensionMismatch(
-        "blit source is $(size(a)) for a $(w)x$(h) target, which is the transpose of " *
-        "the $(h)x$(w) it wants. A source is a (height, width) matrix; an image read " *
-        "back with `copy_image_to_buffer!` packs rows and so comes out the other way."))
-    length(a) >= w * h || throw(DimensionMismatch(
-        "blit source holds $(length(a)) pixels and a $(w)x$(h) target needs $(w * h)"))
-    nothing
-end
-checkblitsize(a::LavaArray{<:Any,1}, w::Integer, h::Integer) =
-    length(a) >= w * h ? nothing : throw(DimensionMismatch(
-        "blit source holds $(length(a)) pixels and a $(w)x$(h) target needs $(w * h)"))
-
-"""
-    blit!(e::Emitter, target::RenderTarget, source::LavaArray; clear=true)
-    blit!(bq, target::RenderTarget, source::LavaArray; clear=true)
-
-Display a GPU array on screen using a fullscreen blit.
-The source array should contain RGBA Float32 pixels (or any 4-component type).
-Its layout is `(height, width)` — see `checkblitsize`.
-
-The emitter form writes the blit where the caller is writing — a frame's
-one-shot, which has to hold the blit, the overlays drawn over it and the
-`presentready!` transition, and go to `present_frame!` as ONE closed buffer.
-The queue form is the same blit in a one-shot of its own, submitted at once.
-"""
-function blit!(e::Emitter, target::RenderTarget, source::LavaArray;
-               clear::Bool=true)
-    if target isa WindowTarget
-        win = target.window
-        w, h = size(win)
-        color_format = win.format
-        view = win.views[win.current_image_idx + 1]
-        image = win.images[win.current_image_idx + 1]
-        extent = win.extent
-    elseif target isa OffscreenTarget
-        fb = target.fb
-        w, h = fb.width, fb.height
-        color_format = fb.color_format
-        view = fb.color_view
-        image = fb.color_image
-        extent = VK.Extent2D(UInt32(w), UInt32(h))
-    else
-        error("blit! only supports WindowTarget and OffscreenTarget")
-    end
-    checkblitsize(source, w, h)
-
-    # Create or reuse blit pipeline. `e.ctx`, not `vk_context()`: this pipeline
-    # is a device-owned handle and the buffer we are writing into names its device.
-    ctx = e.ctx::VkContext
-    if ctx.caches.blit === nothing
-        ctx.caches.blit = GraphicsPipeline(;
-            vertex = VertexShader(blit_vertex; outputs = (uv = Vec2f,)),
-            fragment = FragmentShader(blit_fragment),
-            blend = Opaque(),
-            cull = NoCull(),
-            depth = DepthOff(),
-        )
-    end
-
-    pipeline = ctx.caches.blit
-
-    # Fragment shader takes: (buffer::LavaDeviceArray, width::Int32, height::Int32)
-    # Use the fragment shader's push_info for arg packing since vertex has no args.
-    frag_args = (source, Int32(w), Int32(h))
-    converted_frag = convert_args(frag_args)
-    frag_tt = typeof(converted_frag)
-
-    vfn = Mantle.stagefunction(pipeline.vertex)
-    ffn = Mantle.stagefunction(pipeline.fragment)
-    _, compiled = ensure_compiled_with_shader!(pipeline, vfn, ffn, Tuple{}, frag_tt;
-        ctx, color_format=color_format)
-
-    # Pack fragment args via the fragment shader's push_info
-    frag_shader = get_or_compile_gfx(ffn, frag_tt, :fragment; ctx)
-    clear_color = clear ? (0.0f0, 0.0f0, 0.0f0, 1.0f0) : nothing
-
-    push_data = pack_gfx_args(e.owner, frag_args, frag_shader.push_info)
-    vk_draw!(e, compiled, view, image, extent, 3;
-        push_data, clear_color)
-    return nothing
-end
-
-function blit!(bq::VulkanBatchQueue, target::RenderTarget, source::LavaArray;
-               clear::Bool=true)
-    oneshot!(bq; tag = :blit) do e
-        blit!(e, target, source; clear)
-    end
-    return nothing
-end
-
 """
     presentready!(e, win)
 
@@ -421,7 +311,8 @@ function presentready!(e::Emitter, win::VulkanWindow)
         VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.AccessFlag(0))
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # The swapchain and its images are named by this frame until it has passed.
+    hold!(e, win)
     return nothing
 end
 
@@ -440,7 +331,7 @@ function presentuntouched!(e::Emitter, win::VulkanWindow)
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.AccessFlag(0), VK.AccessFlag(0))
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    hold!(e, win)
     return nothing
 end
 
@@ -470,9 +361,9 @@ function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow, frame::OneShot)
         # by IMAGE, not frame slot — see the comment where these are created.
         signals = ((win.render_finished[win.current_image_idx + 1], UInt64(0),
                     VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)),),
-        fence = win.in_flight[fi], tag = :present)
-    drain_deferred_frees!(bq)
-    drain_deferred_as_frees!(bq)
+        fence = win.in_flight[fi])
+    handover!(bq, tok, frame; tag = :present)
+    drain!(bq)
     present!(win)
     return tok
 end

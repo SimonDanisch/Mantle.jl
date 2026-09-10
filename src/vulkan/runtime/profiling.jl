@@ -194,7 +194,7 @@ end
 
 """Per-dispatch timing record. One entry per `emit_dispatch!` call while timing is on."""
 struct DispatchTiming
-    kernel_name::String        # from `bq.last_dispatch_info` at dispatch time
+    kernel_name::String        # from `driver(bq).last_dispatch_info` at dispatch time
     slot::Int                  # query pool slot of the START timestamp
     gpu_ns::Float64            # filled in on read-back; 0.0 during recording
 end
@@ -327,7 +327,7 @@ end
 function with_dispatch_timing(f, ctx::VkContext = vk_context())
     d = ctx.diag
     prev_timing = d.dispatch_timing
-    # `ka_launch!` only writes `bq.last_dispatch_info` when dispatch logging is on
+    # `ka_launch!` only writes `driver(bq).last_dispatch_info` when dispatch logging is on
     # (it's behind a flag for the production hot path).  We need that name to
     # tag timing records, so flip dispatch logging on for the duration too.
     prev_logging = d.dispatch_logging

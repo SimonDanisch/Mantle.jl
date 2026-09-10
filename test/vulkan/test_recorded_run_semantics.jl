@@ -157,27 +157,32 @@ end
 
     bq = Mantle.batchqueue(dev)
     runs = 10
-    before = bq.ctx.diag.flush_counter[]
+    before = MVE.ctxof(bq).diag.flush_counter[]
     for i in 1:runs
         kref[] = Int32(i)
         Mantle.run!(pl)
         # A store was pending: its one-shot went in front of the recording, in
         # the same submission.
+        # The payload is core's `Submission`: the one-shot the submission GIVES
+        # BACK, and the holds it must outlive — which include the recording,
+        # because that is submitted again next run and stays the plan's.
         sub = last(bq.outstanding).payload
-        @test length(sub.oneshots) == 1
-        @test length(sub.recordings) == 1 && only(sub.recordings) === pl.recording
+        @test sub.recording isa MVE.OneShot
+        @test any(x -> x === pl.recording, sub.holds)
     end
-    @test bq.ctx.diag.flush_counter[] - before == runs
+    @test MVE.ctxof(bq).diag.flush_counter[] - before == runs
     KA.synchronize(be)
     @test Array(Mantle.storage(out)) == fill(Int32(2 * sum(1:runs)), n)
 
     # Nothing pending: the recording alone, and nothing allocated for it.
-    before = bq.ctx.diag.flush_counter[]
+    before = MVE.ctxof(bq).diag.flush_counter[]
     Mantle.run!(pl)
-    @test bq.ctx.diag.flush_counter[] - before == 1
+    @test MVE.ctxof(bq).diag.flush_counter[] - before == 1
     sub = last(bq.outstanding).payload
-    @test isempty(sub.oneshots)
-    @test length(sub.recordings) == 1 && only(sub.recordings) === pl.recording
+    @test sub.recording === nothing
+    # Nothing was opened, so there is no hold frame and nothing to hold: the
+    # plan owns the recording and `release!` is what waits for it.
+    @test isempty(sub.holds)
     KA.synchronize(be)
     # And nothing is left claiming to be in flight once the device has caught up.
     Mantle.sweep!(bq)

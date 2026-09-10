@@ -1,25 +1,25 @@
 """
-A buffer written on one `VulkanBatchQueue` and then used on another makes `sync_access!`
-push a timeline wait onto the submission's `wait_semaphores`. That vector is
-sync2-typed (`Vulkan.PipelineStageFlag2`), but `Vulkan.PIPELINE_STAGE_2_ALL_COMMANDS_BIT`
-is — despite the `_2_` in its name — a *sync1* `PipelineStageFlag`, so the push
-threw a `MethodError` on every cross-queue wait there has ever been.
+A buffer written on one channel and then used on another has to wait for the
+first, and the wait carries a sync2-typed stage flag.
+`Vulkan.PIPELINE_STAGE_2_ALL_COMMANDS_BIT` is — despite the `_2_` in its name —
+a *sync1* `PipelineStageFlag`, so pushing it threw a `MethodError` on every
+cross-queue wait there has ever been.
 
-It did not present as a MethodError. `submit!` calls `sync_access!` *after*
-`vkEndCommandBuffer`, so the throw used to leave a closed command buffer stuck
-half inside the submission that failed. Now a throwing `sync_access!` drops the
-whole submission: every one-shot it carried goes back to `bq.free_oneshots`
-(pins emptied) rather than being left in some ended, half-submitted state, and
-the error propagates to the caller. This is how the underlying bug actually
+It did not present as a MethodError. The push happened *after*
+`vkEndCommandBuffer`, so the throw left a closed command buffer stuck half
+inside the submission that failed. This is how the underlying bug actually
 surfaced: a segfault inside `vkCmdPipelineBarrier` while SAM 2's weights
 uploaded in the video editor, three frames removed from the real bug, and only
 once enough dispatches had queued up to put a submit in the middle of what the
 caller thought was still being recorded.
 
-So this checks both halves: that the wait can be pushed at all, and that a
-throwing `sync_access!` can never again leave a closed command buffer stuck in
-limbo — the submission it belonged to is dropped cleanly and the queue keeps
-working.
+Who DECIDES the wait has moved: core derives it from the stamps it writes
+(`crosswaits!` in `graph/lifetime.jl`), and this backend lowers a (channel,
+token) pair to a timeline semaphore and a value. What is still checked here is
+the same two halves: that a buffer crossing channels is ordered at all, and
+that a call that throws between opening a recording and submitting it leaves
+nothing in limbo — the recording goes back to the pool with its claims dropped,
+and the channel keeps working.
 """
 
 using Test, Lava, KernelAbstractions
@@ -29,11 +29,6 @@ const KA = KernelAbstractions
     i = @index(Global)
     @inbounds a[i] = v
 end
-
-# Pinned object whose access semantics throw, to drive `submit!` into its
-# post-`vkEndCommandBuffer` failure path on demand.
-struct ThrowsOnSync end
-MVE.sync_access!(::MVE.Submission, ::ThrowsOnSync) = error("sync_access! test failure")
 
 @testset "cross-queue sync" begin
     @testset "the stage flag is sync2-typed" begin
@@ -59,8 +54,8 @@ MVE.sync_access!(::MVE.Submission, ::ThrowsOnSync) = error("sync_access! test fa
         KA.synchronize(b1)
         @test all(Array(a) .== 1.0f0)
 
-        # Same buffer, other queue: `sync_access!` must push a wait on bq1's
-        # timeline. This is the call that used to throw inside `submit!`.
+        # Same buffer, other channel: core's `crosswaits!` must derive a wait on
+        # bq1's timeline from the stamp. This is the wait that used to throw.
         xqfill!(b2, 64)(a, 2.0f0; ndrange = n)
         KA.synchronize(b2)
         @test all(Array(a) .== 2.0f0)
@@ -71,21 +66,28 @@ MVE.sync_access!(::MVE.Submission, ::ThrowsOnSync) = error("sync_access! test fa
         @test all(Array(a) .== 3.0f0)
     end
 
-    @testset "a throwing submit! drops the submission and the queue still works" begin
+    @testset "a build that throws leaves nothing in limbo" begin
         bq = MVE.vk_context().default_bq
         b = LavaBackend()
         a = KA.allocate(b, Float32, 64)
         xqfill!(b, 64)(a, 1.0f0; ndrange = 64)
+        KA.synchronize(b)
+        Mantle.drain!(bq)
+        before = length(bq.free)
 
-        o = MVE.oneshot(bq) do e
-            push!(e.owner.pinned, ThrowsOnSync())
+        # The failure now available between opening a recording and submitting
+        # it: the body throws. `oneshot!` gives the recording back unsubmitted
+        # and drops the claims it took, so nothing is left ended-but-unsubmitted
+        # and nothing stays held by a submission that never happened.
+        @test_throws ErrorException Mantle.oneshot!(bq) do e
+            Mantle.hold!(e, a)
+            error("build failure")
         end
-        @test_throws Exception Mantle.submit!(bq, o)
-        @test !o.open
-        @test any(x -> x === o, bq.free_oneshots)   # dropped back to the pool
-        @test isempty(o.pinned)                     # ...with its pins emptied
+        @test (@atomic Mantle.stampof(a).holders) == 0
+        @test length(bq.free) == before           # the recording went back
+        @test all(o -> !o.open && isempty(o.sync), bq.free)
 
-        # The queue must still work afterwards.
+        # The channel must still work afterwards.
         xqfill!(b, 64)(a, 4.0f0; ndrange = 64)
         KA.synchronize(b)
         @test all(Array(a) .== 4.0f0)

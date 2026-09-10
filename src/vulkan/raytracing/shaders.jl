@@ -50,13 +50,13 @@ function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::L
 
     oneshot!(bq; tag = :trace) do e
         owner = e.owner
-        pin_leaves!(owner, pipeline.raygen_func)
+        holdleaves!(owner, pipeline.raygen_func)
         for chit in pipeline.closesthit_funcs
-            pin_leaves!(owner, chit)
+            holdleaves!(owner, chit)
         end
-        pin_leaves!(owner, pipeline.miss_func)
-        pin_leaves!(owner, pipeline.anyhit_func)   # pin_leaves!(::Nothing) is a no-op
-        pin_leaves!(owner, args)
+        holdleaves!(owner, pipeline.miss_func)
+        holdleaves!(owner, pipeline.anyhit_func)   # holdleaves!(::Nothing) is a no-op
+        holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
         converted_args = map(a -> Adapt.adapt(adaptor, a), args)
@@ -68,11 +68,9 @@ function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::L
         arg_buf = get_arg_buffer(owner, total_size)
         pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
                           raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
-        # HWTLAS/BLAS handles are bound via descriptor set, not the arg tuple — pin explicitly.
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-        bq.last_dispatch_info = "rt_trace w=$width h=$height"
+        driver(bq).last_dispatch_info = "rt_trace w=$width h=$height"
         emit_trace!(e, vk_pipeline, tlas, arg_buf.address, width, height, depth,
-                    bq.last_dispatch_info)
+                    driver(bq).last_dispatch_info)
     end
     return nothing
 end
@@ -97,7 +95,7 @@ later, so a difference in how the key is built would show up as a second pipelin
 for the same work rather than as an error.
 """
 function rt_compiled_for(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, args)
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     invalidate_stale_rt_cache!(pipeline)
     tt_key = Tuple{map(arg_sigtype, args)...}
     key = rt_cache_key(pipeline, tt_key)
@@ -136,13 +134,13 @@ function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline
         indirectbarrier!(e, VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                          VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
 
-        pin_leaves!(owner, pipeline.raygen_func)
+        holdleaves!(owner, pipeline.raygen_func)
         for chit in pipeline.closesthit_funcs
-            pin_leaves!(owner, chit)
+            holdleaves!(owner, chit)
         end
-        pin_leaves!(owner, pipeline.miss_func)
-        pin_leaves!(owner, pipeline.anyhit_func)   # pin_leaves!(::Nothing) is a no-op
-        pin_leaves!(owner, args)
+        holdleaves!(owner, pipeline.miss_func)
+        holdleaves!(owner, pipeline.anyhit_func)   # holdleaves!(::Nothing) is a no-op
+        holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
         converted_args = map(a -> Adapt.adapt(adaptor, a), args)
@@ -154,10 +152,9 @@ function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline
         arg_buf = get_arg_buffer(owner, total_size)
         pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
                           raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-        bq.last_dispatch_info = "rt_indirect"
+        driver(bq).last_dispatch_info = "rt_indirect"
         emit_trace_indirect!(e, vk_pipeline, tlas, arg_buf.address, indirect_view,
-                             bq.last_dispatch_info)
+                             driver(bq).last_dispatch_info)
     end
     return nothing
 end

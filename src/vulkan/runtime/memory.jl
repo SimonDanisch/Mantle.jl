@@ -47,7 +47,7 @@ function scan_unified_for_bda! end
 
 # Buffer lifecycle states (atomic CAS transitions).  Every VkManagedBuffer
 # starts ALIVE.  `unsafe_free!` transitions ALIVE → DEFERRED (queued on a
-# bq's deferred_frees list) or ALIVE → DEAD (destroyed immediately).
+# core's retired list) or ALIVE → DEAD (destroyed immediately).
 # `destroy_buffer!` transitions {ALIVE, DEFERRED} → DEAD.  Any call on a
 # DEAD buffer is a no-op.  Using an `@atomic` field with CAS guarantees
 # idempotent double-free protection across main + finalizer threads.
@@ -222,28 +222,25 @@ caller is about to do a heavy synchronous operation anyway.
 
 Whether the *automatic* trim could return anything without flushing.
 
-Two things make a block empty. It may already be, or the release may be sitting
-on a `deferred_frees` list: a sub-allocation's finalizer moves the buffer
-ALIVE → DEFERRED, and the `live` entry it holds is not given back until
-`drain_deferred_frees!` runs inside `quiesce_before_reclaim!` — after the gate.
-So `any(b -> isempty(b.live), blocks)` on its own is a precondition the trim
+Two things make a block empty. It may already be, or the release may be waiting
+on core's retired list: a sub-allocation's finalizer moves the buffer
+ALIVE → DEFERRED and retires it, and the `live` entry it holds is not given back
+until `reclaim!` runs inside `quiesce_before_reclaim!` — after the gate. So
+`any(b -> isempty(b.live), blocks)` on its own is a precondition the trim
 establishes, and gating on it alone means declining to look.
 
-**This deliberately does not see the third case**, which is a buffer pinned by a
-batch that is still recording: `vk_free!` takes the `pins > 0` branch, sets
-`free_requested` and returns, and only the flush inside
-`quiesce_before_reclaim!` releases it. Detecting that would make the automatic
-path flush whenever a batch is open, which for a render loop is a stall every
-`trim_min_interval`. [`trim_gpu_pool!`](@ref) is the caller that wants it and
-pays for it explicitly.
+**This deliberately does not see the third case**, which is a buffer a recording
+that has not been submitted still holds: `reclaim!` leaves it pending until the
+hold is dropped, and only the flush inside `quiesce_before_reclaim!` gets there.
+Detecting that would make the automatic path flush whenever a recording is open,
+which for a render loop is a stall every `trim_min_interval`.
+[`trim_gpu_pool!`](@ref) is the caller that wants it and pays for it explicitly.
 """
 function reclaimable(ctx::VkContext)
     p = mempolicy(ctx)
     any(b -> isempty(b.live), poolblocks(ctx)) && return true
     bq = ctx.default_bq
-    return lock(bq.deferred_frees_lock) do
-        !isempty(bq.deferred_frees) || !isempty(bq.deferred_as_frees)
-    end
+    return lock(() -> !isempty(bq.pending), bq.pendinglock) || !isempty(bq.retiring)
 end
 
 function maybe_trim_pool!(ctx::VkContext)
@@ -283,7 +280,7 @@ Runs a full collection and then `quiesce_before_reclaim!` — a flush, a wait an
 drain — **unconditionally**, because that is the request. It used to return early
 unless some block already had nothing live in it, and that gate is a precondition
 the flush and the drain establish: a buffer pinned by a recording batch, or one
-already moved onto a `deferred_frees` list, holds its entry until then, and
+already retired but not yet destroyed, holds its entry until then, and
 between them that is everything a graph evaluator allocates.
 
 The measurement, on a plain KA workload of 60 dispatches never synchronised:
@@ -442,18 +439,18 @@ function vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
                   extra_usage::UInt32=UInt32(0), unified::Bool=false)
     # Refuse allocation on a lost device — Vulkan calls would either error or
     # (worse) succeed against a torn-down driver state and produce garbage BDAs.
-    device_lost(bq.ctx::VkContext) && throw(LavaError(
+    device_lost(ctxof(bq)) && throw(LavaError(
         "vk_alloc",
         "Vulkan device is lost — cannot allocate new buffers",
         "Call reset_device!() to reinitialize, or restart Julia."))
-    if mempolicy(bq.ctx::VkContext).track_allocs
-        record_alloc_site!(bq.ctx::VkContext, Int(nbytes))
+    if mempolicy(ctxof(bq)).track_allocs
+        record_alloc_site!(ctxof(bq), Int(nbytes))
     end
     # Give back what THIS queue has finished before allocating. Multi-queue:
     # each caller only drains its own queue's timeline — no implicit reach for
     # `ctx.default_bq` here.
     drain!(bq)
-    maybe_collect(bq.ctx::VkContext)
+    maybe_collect(ctxof(bq))
     result = try_vk_alloc(bq, nbytes; extra_usage, unified)
     result isa VkManagedBuffer && return result
     # Reclaim any pool blocks that are now fully empty after the GC drained
@@ -479,7 +476,7 @@ function vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
     end
     fail = result::AllocFailure
     throw(LavaError("memory allocation",
-        format_oom_error(bq.ctx::VkContext, fail),
+        format_oom_error(ctxof(bq), fail),
         "Free unused LavaArrays, reduce problem size, or check for memory leaks with gpu_memory_usage()."))
 end
 
@@ -488,14 +485,14 @@ end
 
 Submit and wait for everything on `bq`, then collect and drain deferred frees.
 
-The order is the point. `drain_deferred_frees!` releases a chunk once its
+The order is the point. `reclaim!` releases a chunk once its
 **`last_write`** semaphore has signaled, which says nothing about dispatches
 that only *read* it, nor about commands already recorded into the batch still
 being built — and a graph evaluator does almost nothing else: every weight and
 every activation is read by the next layer without being written. Draining (or
 reclaiming a block those chunks belong to) while such a batch is open destroys a
 VkBuffer out from under queued work, and the damage surfaces later and
-elsewhere: `sync_access!: buffer is not ALIVE` on a subsequent submit, a
+elsewhere: a use-after-free the buffer's state flags on a later submit, a
 batch-signal desync, or a segfault inside the driver's `vkCmdPipelineBarrier`.
 
 Flushing first makes the invariant unconditional — after it there is no
@@ -525,26 +522,25 @@ function quiesce_before_reclaim!(bq::VulkanBatchQueue)
     # workload trips none of them, so a regression test written against the entry
     # point passes whether the guard is there or not. Two were, and both were
     # worthless. Here there is one thing to ask and one answer.
-    movable(pool(lavadevice(bq.ctx::VkContext))) || return false
-    p = mempolicy(bq.ctx::VkContext)
-    if !p.reclaiming[] && !device_lost(bq.ctx::VkContext)
+    movable(pool(lavadevice(ctxof(bq)))) || return false
+    p = mempolicy(ctxof(bq))
+    if !p.reclaiming[] && !device_lost(ctxof(bq))
         p.reclaiming[] = true
         try
-            flush!(bq, bq.device)
+            flush!(bq)
         finally
             p.reclaiming[] = false
         end
     end
     GC.gc(true)
-    drain_deferred_frees!(bq)
-    drain_deferred_as_frees!(bq)
+    drain!(bq)
     return true
 end
 
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
 function try_vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
                       extra_usage::UInt32=UInt32(0), unified::Bool=false)
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     dev = ctx.device
     nbytes = max(nbytes, 16)
 
@@ -614,7 +610,7 @@ function try_vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
             # `LavaError during vk_flush!` on a FOUR-ELEMENT upload. An oversized
             # allocation is the intended, handled outcome here, so its messages
             # belong to it.
-            let c = bq.ctx::VkContext
+            let c = ctxof(bq)
                 drain_validation_messages!(c)
                 empty!(c.validation.messages)
             end
@@ -631,159 +627,66 @@ function try_vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
     addr_info = VK.BufferDeviceAddressInfo(buf)
     address = VK.get_buffer_device_address(dev, addr_info)
 
-    result = VkManagedBuffer(buf, memory, address, mapped_ptr, Int(nbytes), nothing, nothing, UInt64(0), BUF_STATE_ALIVE, 0, false, ctx)
+    result = VkManagedBuffer(buf, memory, address, mapped_ptr, Int(nbytes), nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
     let p = mempolicy(ctx)
         push!(p.live_buffers, result)
         Threads.atomic_add!(p.live_bytes, nbytes)
     end
-    if (bq.ctx::VkContext).diag.alloc_debug
-        push!((bq.ctx::VkContext).diag.alloc_log,
+    if (ctxof(bq)).diag.alloc_debug
+        push!((ctxof(bq)).diag.alloc_log,
               (kind=:direct, addr=address, size=Int(nbytes), pool=false,
                mtype=Int(mem_type_idx), unified=unified, usage=UInt32(usage)))
     end
     return result
 end
 
-# ── Pin accounting ──
-# A closed command buffer that has `pin!`ed an array holds a claim on the
-# backing buffer until it can no longer run (its submission completed, or
-# failed, or the recording was released).
-# `vk_free!` honours that claim instead of racing it, which makes "pinned by a
-# live batch" and "freed" mutually exclusive by construction rather than by
-# timing.
-function pin_buffer!(buf::VkManagedBuffer)
-    @atomic buf.pins += 1
-    return nothing
-end
-
-# DELETED in phase 1.1: see docs/mantle-owns-it.md
-
 """
     vk_free!(buf::VkManagedBuffer)
 
-Free a managed buffer's Vulkan resources.
+Say that this buffer's Vulkan resources are no longer wanted.
 
-If a command batch is currently recording or in-flight, the destruction is
-deferred until after all batches complete. This prevents DEVICE_LOST from GC
-finalizers freeing GPU memory that the in-flight command buffer still
-references via BDA addresses.
+It does not destroy anything. A destroy requested while work naming the buffer
+may still be running is core's to schedule — `retire!` records it, `reclaim!`
+runs `rawfree` once the submission that named it has passed, and a buffer still
+held by a recording that has not been submitted waits for that too. That is the
+whole of what the old `pins` / `free_requested` / `deferred_frees` machinery
+did, and none of it was a driver's decision.
+
+Callable from any thread, which is what the finalizer path needs: it flips one
+atomic and appends under a lock, and reads no timeline at all.
 """
 function vk_free!(buf::VkManagedBuffer)
-    # A live batch has this buffer pinned, so it can still be submitted with the
-    # buffer's BDA baked into an arg slab.  Do NOT touch `state` here: marking a
-    # pinned buffer DEFERRED is exactly what made `sync_access!` assert
-    # "buffer is not ALIVE (state=1)" at submit.  Record the debt; the last
-    # `unpin_buffer!` pays it.
-    #
-    # The timeline check further down cannot cover this case: it keys off
-    # `last_write`, which `sync_access!` only writes at submit, so a buffer
-    # pinned into a still-open batch reads as never-written and looks idle.
-    if (@atomic :acquire buf.pins) > 0
-        @atomic :release buf.free_requested = true
-        # The last unpin may have landed between those two lines and seen
-        # `free_requested` still false, in which case nobody owes the free.
-        # Claim it back and fall through; otherwise the unpin path owns it.
-        if (@atomic :acquire buf.pins) > 0
-            return
-        end
-        _, owed = @atomicreplace buf.free_requested true => false
-        owed || return
-    end
-
-    # Atomic CAS ALIVE → DEFERRED (optimistic — we haven't yet decided we'll
-    # defer; we just need to claim the buffer so no other thread races us).
-    # If someone else already transitioned this buffer out of ALIVE, we bail
-    # out silently — the work has already been done (or is being done).
+    # Atomic CAS ALIVE → DEFERRED. If someone else already transitioned this
+    # buffer out of ALIVE, bail out silently — the work is already done (or is
+    # being done).
     _, ok = @atomicreplace buf.state BUF_STATE_ALIVE => BUF_STATE_DEFERRED
-    ok || return  # already DEFERRED or DEAD — nothing to do
+    ok || return
 
-    delete!(mempolicy(buf.ctx::VkContext).live_buffers, buf)
-
-    # THREAD first, before anything reads the last-write stamp: the stamp is
-    # the owning thread's alone (see `VkManagedBuffer.last_write_bq`). A free
-    # that starts anywhere else — a finalizer on whichever thread's GC ran —
-    # hands the buffer to the owning thread's deferred list WITHOUT looking, and
-    # the owning thread reads the stamp when it drains. `destroy_buffer!` runs
-    # Vulkan destructors, which was already a reason to defer: doing that from
-    # an arbitrary GC thread is its own hazard. State is already DEFERRED here,
-    # which is what `drain_deferred_frees!` expects.
-    #
-    # This deferral used to be load-bearing against a data race in the
-    # allocator itself: `destroy_buffer!` on a pooled chunk called
-    # `return_to_pool!`, a plain `push!` onto a free-list Vector that
-    # `pool_alloc` popped from on whichever thread was allocating —
-    #
-    #   error in running finalizer: ConcurrencyViolationError("Vector has invalid
-    #   state. Don't modify internal fields incorrectly, or resize without
-    #   correct locks")  _growend! → push! → return_to_pool!
-    #
-    # then a segfault. `Mantle.release!` takes the block's lock now, so that
-    # reason is gone; the two above remain.
-    #
-    # `ctx` is typed `Any` and can be unset on a buffer that never belonged to a
-    # context; such a buffer is not pooled either, so destroying it inline is
-    # safe and the `isa` guard keeps this from throwing inside a finalizer.
-    let c = buf.ctx
-        if c isa VkContext
-            bq = c.default_bq
-            if Threads.threadid() != bq.owning_thread
-                lock(bq.deferred_frees_lock) do
-                    push!(bq.deferred_frees, buf)
-                end
-                return
-            end
-        end
+    c = buf.ctx
+    if !(c isa VkContext)
+        # A buffer that never belonged to a context is not pooled and no queue
+        # can be naming it; destroying it inline is safe and the `isa` keeps
+        # this from throwing inside a finalizer.
+        destroy_buffer!(buf)
+        return
     end
-
-    # Defer destruction if the GPU still has work in flight that references
-    # this buffer. The per-queue timeline semaphore tells us precisely: the
-    # last-write stamp names the queue whose `timeline_sem` the last submission
-    # naming this buffer will signal, and the value it signals. If the current
-    # counter is already >= that value, the GPU is done and free is safe.
-    # Otherwise the buffer stays in DEFERRED state on that queue's deferred-free
-    # list; it will be destroyed next time the queue sweeps completed batches.
-    # A buffer a one-shot names is pinned for the call that writes it
-    # (`pin_buffer!`, the `pins > 0` path above), and the stamp is written at
-    # the submit that closes the call — there is no window in which a buffer is
-    # named by a command buffer nobody has submitted. The "never-submitted
-    # buffer" case this used to defer for was the open batch's.
-    let wbq = buf.last_write_bq
-        if wbq !== nothing
-            bq = wbq::VulkanBatchQueue
-            if !device_lost(bq.ctx::VkContext) && !queue_released(bq) &&
-               !passed(bq, buf.last_write_val)
-                lock(bq.deferred_frees_lock) do
-                    push!(bq.deferred_frees, buf)
-                end
-                return     # state stays DEFERRED; drain_deferred_frees! will transition to DEAD
-            end
-        end
-    end
-
-    # Pre-destroy safety scan: if `buf.address` still appears in any live arg
-    # slab, that's a use-after-free waiting to happen.  Log it and zero the
-    # slot so the GPU faults on a null reference (BDA_POISON) instead of
-    # corrupting whatever memory is mapped at the old address.
-    if (buf.ctx::VkContext).diag.freed_bda_scan
-        hits = scan_unified_for_bda!(buf)
-        if hits > 0 && (buf.ctx::VkContext).diag.destroy_freed_bdas_throws
-            throw(LavaError("vk_free!",
-                "destroying buffer at 0x$(string(buf.address, base=16, pad=16)) but its BDA still appears $(hits)× in live arg slabs",
-                "an unpinned reference is leaking — see ctx.diag.freed_bda_scan_log"))
-        end
-    end
-
-    destroy_buffer!(buf)
+    delete!(mempolicy(c).live_buffers, buf)
+    # The channel is only where the request is parked: `reclaim!` reads the
+    # stamp on the owning thread and hands the buffer to whichever channel last
+    # named it, which is the fact this thread must not read.
+    retire!(c.default_bq, buf)
+    return
 end
 
-"""Actually destroy a buffer's Vulkan resources. Called from `vk_free!` or
-`drain_deferred_frees!`.  Atomic CAS ({ALIVE, DEFERRED} → DEAD) ensures the
-Vulkan destructor fires exactly once even under racing callers."""
+"""Actually destroy a buffer's Vulkan resources — the `rawfree` core calls once
+nothing can be reading the bytes, and the direct path for a buffer no context
+owns. Atomic CAS ({ALIVE, DEFERRED} → DEAD) ensures the Vulkan destructor fires
+exactly once even under racing callers."""
 function destroy_buffer!(buf::VkManagedBuffer)
     # Transition {ALIVE, DEFERRED} → DEAD.  First try DEFERRED (the common
     # path — vk_free! or drain always goes through DEFERRED now); fall back
     # to ALIVE for the rare direct-destroy path (e.g. dropping a buffer we
-    # never pushed into deferred_frees).
+    # never retired).
     _, ok = @atomicreplace buf.state BUF_STATE_DEFERRED => BUF_STATE_DEAD
     if !ok
         _, ok = @atomicreplace buf.state BUF_STATE_ALIVE => BUF_STATE_DEAD
@@ -795,10 +698,22 @@ function destroy_buffer!(buf::VkManagedBuffer)
     # is logged with is read on the owning thread — the only one that may.
     let c = buf.ctx
         if c isa VkContext && c.diag.free_debug
-            wbq = buf.last_write_bq
+            st = buf.stamp
             push!(c.diag.free_log,
                   (addr=buf.address, size=buf.size, pool=buf.region !== nothing,
-                   lw=(wbq === nothing ? nothing : (wbq, buf.last_write_val))))
+                   lw=(st.channel === nothing ? nothing : (st.channel, st.token))))
+        end
+        # Pre-destroy safety scan: if `buf.address` still appears in any live arg
+        # slab, that is a use-after-free waiting to happen. Log it and zero the
+        # slot so the GPU faults on a null reference (BDA_POISON) instead of
+        # corrupting whatever memory is mapped at the old address.
+        if c isa VkContext && c.diag.freed_bda_scan
+            hits = scan_unified_for_bda!(buf)
+            if hits > 0 && c.diag.destroy_freed_bdas_throws
+                throw(LavaError("destroy_buffer!",
+                    "destroying buffer at 0x$(string(buf.address, base=16, pad=16)) but its BDA still appears $(hits)x in live arg slabs",
+                    "an unheld reference is leaking — see ctx.diag.freed_bda_scan_log"))
+            end
         end
     end
 
@@ -824,7 +739,7 @@ function destroy_buffer!(buf::VkManagedBuffer)
             buf.address = BDA_POISON
             buf.mapped_ptr = Ptr{UInt8}(0)
             buf.size = 0
-            buf.last_write_bq = nothing
+            buf.stamp.channel = nothing
             release!(r::Region)
             return
         end
@@ -915,7 +830,7 @@ Call this RIGHT BEFORE submit to catch problems before they reach the GPU.
 """
 function scan_slabs_for_unknown_bdas(bq)
     bq === nothing && return NamedTuple[]
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     live = Set{UInt64}()
     for buf in mempolicy(ctx).live_buffers
         push!(live, buf.address)
@@ -956,65 +871,11 @@ function scan_slabs_for_unknown_bdas(bq)
     return results
 end
 
-"""
-    lastwritepassed(buf, bq, current) -> Bool
-
-Has the device finished the last submission that named `buf`? `current` is
-`bq`'s timeline, read once for a whole sweep; a buffer last written on another
-queue asks that queue. A released queue was idle when it went, so its write has
-landed. Owning thread only: it reads the last-write stamp.
-
-A buffer on `bq`'s deferred list that another queue wrote used to stay there
-forever — the sweep only compared against its own timeline. A finalizer off the
-owning thread defers to the DEFAULT queue's list without reading the stamp, so
-that case is routine now, not an accident.
-"""
-function lastwritepassed(buf::VkManagedBuffer, bq::VulkanBatchQueue, current::UInt64)
-    wbq = buf.last_write_bq
-    wbq === nothing && return true
-    w = wbq::VulkanBatchQueue
-    w === bq && return buf.last_write_val <= current
-    return queue_released(w) || passed(w, buf.last_write_val)
-end
-
-"""
-    drain_deferred_frees!(bq::VulkanBatchQueue)
-
-Destroy any buffers in `bq.deferred_frees` whose last write has been reached.
-Safe to call at any time; it only destroys buffers the GPU is definitely done
-with. Called from `drain!`, at natural sync points: after a flush completes, before
-an allocation.
-"""
-function drain_deferred_frees!(bq::VulkanBatchQueue)
-    isempty(bq.deferred_frees) && return
-    ctx = bq.ctx::VkContext
-    # Device-lost shortcut: empty under the lock so no finalizer-thread push
-    # survives past our empty!().
-    if device_lost(ctx)
-        lock(bq.deferred_frees_lock) do
-            empty!(bq.deferred_frees)
-        end
-        return
-    end
-    current = query_timeline(bq)
-    # Hold the lock for the full sweep.  Finalizer-thread pushes are rare
-    # (GC pauses only) and the drain body is short; SpinLock contention is
-    # negligible.  destroy_buffer! may run Vulkan destructors inside the
-    # critical section — that's fine under SpinLock (no yield points).
-    lock(bq.deferred_frees_lock) do
-        i = 1
-        while i <= length(bq.deferred_frees)
-            buf = bq.deferred_frees[i]::VkManagedBuffer
-            if lastwritepassed(buf, bq, current)
-                destroy_buffer!(buf)
-                deleteat!(bq.deferred_frees, i)
-            else
-                i += 1
-            end
-        end
-    end
-    return nothing
-end
+# `lastwritepassed`, `drain_deferred_frees!` and the two lists they swept are
+# gone with phase 2.2. "Has the device finished the last submission that named
+# this buffer" is one question about one stamp, and core asks it once, for
+# buffers and acceleration structures alike — `reclaim!` in `graph/lifetime.jl`.
+# What this file still answers is the destructor itself: `rawfree`.
 
 # ── Sub-allocation: one pool, and it is Mantle's ──
 #
@@ -1257,20 +1118,20 @@ collect and every allocation past it pays for a collection and grows anyway.
 Try to turn dead LavaArrays back into free spans. Returns whether a collection
 actually ran, so the caller knows whether retrying is worthwhile.
 
-`drain_deferred_frees!` after each collection is what makes this work at all: a
+`drain!` after each collection is what makes this work at all: a
 buffer freed while the GPU still referenced it went to the deferred list rather
 than back to the pool, and until it is drained the memory is dead to everyone.
 """
 function collect_for_pool!(bq::VulkanBatchQueue)
-    p = mempolicy(bq.ctx::VkContext)
+    p = mempolicy(ctxof(bq))
     now = time()
     now - p.gc_last < p.gc_mingap && return false
     t0 = time_ns()
     GC.gc(false)
-    drain_deferred_frees!(bq)
+    drain!(bq)
     if now - p.gc_full_last >= p.gc_full_mingap
         GC.gc(true)
-        drain_deferred_frees!(bq)
+        drain!(bq)
         p.gc_full_last = now
     end
     p.gc_last = time()
@@ -1346,7 +1207,7 @@ index buffer can now sit in a block whose usage bits already permit it and only
 falls out to a dedicated allocation when none does.
 """
 function pool_alloc(bq::VulkanBatchQueue, nbytes::Integer; extra_usage::UInt32=UInt32(0))
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     # Even pure free-span reuse must refuse a dead device — the blocks belong to
     # the old (broken) ctx and would hand back garbage BDAs.
     device_lost(ctx) && throw(LavaError(
@@ -1382,7 +1243,7 @@ function pool_alloc(bq::VulkanBatchQueue, nbytes::Integer; extra_usage::UInt32=U
         blk.address + UInt64(offset(region)),
         Ptr{UInt8}(0),
         length(region),
-        region, nothing, UInt64(0), BUF_STATE_ALIVE, 0, false, ctx)
+        region, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
 end
 
 """
@@ -1399,7 +1260,7 @@ yet handed back.
 worth retrying and it is the only one retried here; anything else — a lost
 device, a bad usage flag — propagates with its own message intact.
 """
-# `dev` is untyped for the same reason `bq.ctx` is: `LavaDevice` is declared in
+# `dev` is untyped for the same reason `ctxof(bq)` is: `LavaDevice` is declared in
 # `graph.jl`, which this file is included before. A signature annotation is
 # evaluated at load; the body is not.
 function acquire_or_reclaim!(bq::VulkanBatchQueue, sp::Pool, dev,
@@ -1417,7 +1278,7 @@ function acquire_or_reclaim!(bq::VulkanBatchQueue, sp::Pool, dev,
     # One escalation, in the order that costs least first: collect, drain, and
     # only then stall the queue to get pinned and in-flight buffers back.
     GC.gc(true)
-    drain_deferred_frees!(bq)
+    drain!(bq)
     # Not while capturing; see `quiesce_before_reclaim!`. The acquire below
     # still runs and still throws its own out-of-memory error if it cannot.
     if quiesce_before_reclaim!(bq)
@@ -1453,7 +1314,7 @@ Callers must have run `quiesce_before_reclaim!` first; see there for why. Not
 finalizer-safe, and never was.
 """
 function reclaim_empty_pool_blocks!(bq::VulkanBatchQueue)
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     sp = spans(ctx)
     before = reserved(sp)
     nbefore = length(poolblocks(ctx))
@@ -1480,7 +1341,7 @@ Unified CPU↔GPU buffer copy — single entry point for every host-visible
 transfer path.  `direction` is `:upload` (host → GPU) or `:download` (GPU → host).
 
 Fast path (BAR memory): direct memcpy via `managed.mapped_ptr` after
-`wait_for_write(managed)` drains any in-flight writer.  No staging, no batch.
+`waitfor!(stampof(managed))` drains any in-flight writer.  No staging, no batch.
 
 Slow path (device-local): allocate staging, record `cmd_copy_buffer!` into
 the active batch, flush, and memcpy between staging and host.  For downloads
@@ -1501,7 +1362,7 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     if managed.mapped_ptr != Ptr{UInt8}(0)
         # `last_write` is stamped at submit, and every writer is submitted the
         # moment it is closed, so this sees every one of them.
-        wait_for_write(managed)
+        waitfor!(stampof(managed))
         if direction === :upload
             unsafe_copyto!(managed.mapped_ptr + offset, host_ptr, nbytes)
         else
@@ -1511,12 +1372,17 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     end
 
     # Device-local: through a `Unified` region and one copy, in a one-shot of
-    # its own.  Pinning `managed` triggers sync_access!'s cross-queue semaphore
-    # wait whenever the buffer was last written on a different VulkanBatchQueue.
+    # its own. Holding `managed` is what orders the copy behind whatever other
+    # channel wrote it — core derives the wait from the stamp at submit.
+    #
+    # A download is recorded on the channel that last named the buffer, so the
+    # copy piggy-backs on the producer's timeline and the host waits once
+    # instead of twice. `stampof` is where that fact is now; it was
+    # `last_write_bq`, read directly.
     bq = if direction === :upload
         (managed.ctx::VkContext).default_bq
     else
-        wbq = managed.last_write_bq
+        wbq = stampof(managed).channel
         (wbq !== nothing && !queue_released(wbq::VulkanBatchQueue)) ?
             (wbq::VulkanBatchQueue) : (managed.ctx::VkContext).default_bq
     end

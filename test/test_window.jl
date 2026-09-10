@@ -264,7 +264,7 @@ else
         KernelAbstractions.synchronize(M.backend(dev))
 
         # Nothing a later frame could wait for is still sitting unsubmitted.
-        @test Mantle.argtoken(s.plan.args) <= dev.bq.next_timeline
+        @test Mantle.argtoken(s.plan.args) <= MVE.driver(dev.bq).next_timeline
         after = Array(M.storage(s.pos))
         moved = [norm(after[i] - before[i]) for i in eachindex(before)]
         @test count(<(1e-6), moved) == 0
@@ -334,7 +334,7 @@ else
             acquire_next_image!(win)
             M.run!(s.plan)
             MVE.copy_framebuffer!(M.storage(s.raw), s.fb)
-            blit!(dev.bq, WindowTarget(win), M.storage(s.out))
+            blit!(dev, WindowTarget(win), M.storage(s.out))
             present_frame!(dev.bq, win, MVE.oneshot(dev.bq) do e
                 MVE.presentready!(e, win)
             end)
@@ -450,7 +450,7 @@ else
         frames = 40
         for _ in 1:frames
             M.run!(plan)
-            Mantle.flush!(dev.bq, dev.ctx.device)
+            Mantle.flush!(dev.bq)
         end
         @test Int(Array(tally)[1]) == frames        # every frame ran its first pass
         @test Int(Array(cnt)[1]) == 512             # and the counter restarted each time

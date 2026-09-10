@@ -39,7 +39,7 @@ error, not a silent pick of a type some image cannot use.
 """
 
 # `ctx`/`bq` typed, not Any: every read of them is on a hot path
-# (`run!` → `waitfor!` → `d.bq.next_timeline`), and an Any field makes each a
+# (`run!` → `waitfor!` → `driver(d.bq).next_timeline`), and an Any field makes each a
 # dynamic getproperty that boxes the UInt64 it lands on.
 struct LavaDevice <: Device
     ctx::VkContext
@@ -207,8 +207,8 @@ bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 # this replaces is the REACH: RayMakie called `alloc_index_buffer` through
 # `Base.get_extension` at five sites, which is a backend name in a package that
 # must not have one.
-Mantle.indexbuffer(::LavaDevice, indices::AbstractVector{UInt32}) =
-    alloc_index_buffer(indices)
+Mantle.indexbuffer(dev::LavaDevice, indices::AbstractVector{UInt32}) =
+    alloc_index_buffer(dev.bq, indices)
 
 rawalloc(dev::LavaDevice, ::Persistent, bytes::Int, usage) =
     rawalloc(dev, Buffers(), bytes, usage)
@@ -225,7 +225,7 @@ constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
 #
 # Nothing is ever recorded and unsubmitted, so the newest submission is the
 # last thing that can be reading a region retired now.
-fence(d::LavaDevice) = d.bq.next_timeline
+fence(d::LavaDevice) = driver(d.bq).next_timeline
 # One predicate for "has the device finished this", spelled once.
 #
 # It was written out as `query_timeline(bq) >= v` at each of the places that ask,
@@ -253,7 +253,7 @@ fence(d::LavaDevice) = d.bq.next_timeline
 # else in the context — a split upload queue, async compute. It throws during a
 # capture, which is correct: a capture has nothing to wait FOR, and returning
 # quietly is how that was hidden before.
-waitidle(d::LavaDevice) = (flush!(d.bq, d.bq.device); waitidle(d.ctx::VkContext))
+waitidle(d::LavaDevice) = (flush!(d.bq); waitidle(d.ctx::VkContext))
 
 passed(bq::VulkanBatchQueue, v) = query_timeline(bq) >= v
 
@@ -269,8 +269,8 @@ ever signal, and waiting on it would hang in a foreign call: it is an error.
 """
 function waitfor(d::LavaDevice, f)
     passed(d, f) && return true
-    f > d.bq.next_timeline && throw(LavaError("waitfor",
-        "asked to wait for timeline value $f, but the queue has only submitted up to $(d.bq.next_timeline)",
+    f > driver(d.bq).next_timeline && throw(LavaError("waitfor",
+        "asked to wait for timeline value $f, but the queue has only submitted up to $(driver(d.bq).next_timeline)",
         "A token beyond the timeline covers work nothing submitted. Every closed command buffer is submitted when it is closed; a token comes from `submit!`."))
     wait_timeline!(d.bq, UInt64(f))
     return true
@@ -789,7 +789,7 @@ function rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage)
     addr = VK.get_buffer_device_address(
         dev.ctx.device, VK.BufferDeviceAddressInfo(buf))
     managed = VkManagedBuffer(buf, mem, UInt64(addr), Ptr{UInt8}(C_NULL), Int(req.size),
-                              nothing, nothing, UInt64(0), BUF_STATE_ALIVE, 0, false, dev.ctx)
+                              nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, dev.ctx)
     ref = GPUArrays.DataRef(_ -> nothing, managed)
     return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
 end
@@ -840,7 +840,7 @@ function rawalloc(dev::LavaDevice, ::Unified, bytes::Int, usage)
     ptr = Ptr{UInt8}(unwrap(VK.map_memory(ctx.device, mem, 0, UInt64(req.size))))
     addr = VK.get_buffer_device_address(ctx.device, VK.BufferDeviceAddressInfo(buf))
     managed = VkManagedBuffer(buf, mem, UInt64(addr), ptr, Int(req.size),
-                              nothing, nothing, UInt64(0), BUF_STATE_ALIVE, 0, false, ctx)
+                              nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
     ref = GPUArrays.DataRef(_ -> nothing, managed)
     return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
 end
@@ -883,7 +883,7 @@ function rawalloc(dev::LavaDevice, ::Readback, bytes::Int, usage)
     bind_buffer!(ctx, buf, mem, 0)
     ptr = Ptr{UInt8}(unwrap(VK.map_memory(ctx.device, mem, 0, UInt64(req.size))))
     managed = VkManagedBuffer(buf, mem, UInt64(0), ptr, Int(req.size),
-                              nothing, nothing, UInt64(0), BUF_STATE_ALIVE, 0, false, ctx)
+                              nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
     ref = GPUArrays.DataRef(_ -> nothing, managed)
     return BufferBlock(buf, mem, UInt64(0), Int(req.size), ref)
 end
@@ -919,6 +919,19 @@ end
 
 # Image arenas hand back raw `VkDeviceMemory` from `rawalloc(dev, Images(), …)`.
 rawfree(::LavaDevice, mem::VK.DeviceMemory) = (mem.destructor(); nothing)
+
+# The destructor core calls for a buffer whose destroy was REQUESTED
+# (`vk_free!`) once the submission that named it has passed — see `retire!` /
+# `reclaim!` in `graph/lifetime.jl`. `destroy_buffer!` is the whole of what a
+# backend still decides here: which Vulkan objects to destroy, and giving a
+# suballocated span back to the pool.
+rawfree(::LavaDevice, buf::VkManagedBuffer) = destroy_buffer!(buf)
+
+# The same for an acceleration structure, whose handle lives in the bytes of its
+# storage buffer — see `unsafe_free!(::Union{LavaBLAS,LavaTLAS})`. Here rather
+# than beside it because `LavaDevice` is declared in this file, after
+# `raytracing/acceleration.jl` is included.
+rawfree(::LavaDevice, as::Union{LavaBLAS, LavaTLAS}) = destroy_now!(as)
 
 # What memory the given transients can legally share. For images that is the
 # INTERSECTION of their type bits — `device_memory` errors on an empty one rather
@@ -1170,19 +1183,19 @@ function packtrace!(e::Emitter, t::CompiledTrace)
     off = t.argoff
     c = t.compiled
     owner = e.owner
-    # Pinned as the unmodelled path pins: the shaders are closures, and a
+    # Held as the unmodelled path holds: the shaders are closures, and a
     # per-material closest-hit holds the device arrays of the material it shades.
-    pin_leaves!(owner, c.desc.raygen_func)
+    holdleaves!(owner, c.desc.raygen_func)
     for chit in c.desc.closesthit_funcs
-        pin_leaves!(owner, chit)
+        holdleaves!(owner, chit)
     end
-    pin_leaves!(owner, c.desc.miss_func)
-    pin_leaves!(owner, c.desc.anyhit_func)     # a no-op on `nothing`
+    holdleaves!(owner, c.desc.miss_func)
+    holdleaves!(owner, c.desc.anyhit_func)     # a no-op on `nothing`
     ad = LavaAdaptor(owner)
     # `rawargs` first, so a `Ref` argument is re-read NOW rather than frozen at
     # compile — that is how a new sample index reaches a plan compiled once.
     raw = rawargs(t.args)
-    pin_leaves!(owner, raw)
+    holdleaves!(owner, raw)
     all_args = (Adapt.adapt(ad, c.desc.raygen_func), devargs(ad, raw)...)
     pack_args_direct!(owner, am.ptr + off, am.address + off,
                       c.offsets, c.argbytes, c.byval, all_args)
@@ -1208,14 +1221,12 @@ function tracelaunch!(e::Emitter, r::DeviceRange, t::CompiledTrace, tlas,
     # core's), with the trace's gate folded in; nothing to prepare here.
     indirect = indirectof(e.args, t.indirect)
     argaddr = packtrace!(e, t)
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emit_trace_indirect!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
     return nothing
 end
 
 function tracelaunch!(e::Emitter, n, t::CompiledTrace, tlas, name::AbstractString)
     argaddr = packtrace!(e, t)
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
     emit_trace!(e, t.compiled.pipeline, tlas, argaddr, Int(n), 1, 1, name)
     return nothing
 end
@@ -1628,8 +1639,13 @@ openrecording(dev::LavaDevice, pl::Plan) = Emitter(recording!(dev.bq), pl.args)
 Seal the command buffer and fill the plan's patch table: where every device
 address the pack wrote landed, keyed by the address — so a resource that MOVES
 later (`resize!`, an arena growing) is a patch in a later run's submission
-rather than a new recording. Then the cross-queue syncs the recording will wait
-on at every submit.
+rather than a new recording.
+
+`seal!` is also where the recording takes the channel's hold frame: it is
+submitted again every run and must outlive all of them, so the holds are the
+RECORDING's and go back at `release!`. The buffers it names were collected into
+`rec.sync` as the commands were written (`syncbuf!`), so there is no separate
+snapshot pass — `collectsync!` walked the pin list to build one.
 """
 function closerecording!(e::Emitter{<:Recording}, pl::Plan)
     rec = e.owner
@@ -1639,7 +1655,6 @@ function closerecording!(e::Emitter{<:Recording}, pl::Plan)
               patchtarget(pl, rec, at))
     end
     empty!(rec.patches)
-    collectsync!(rec)
     return rec
 end
 
@@ -1714,16 +1729,32 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         return present_frame!(bq, win, e.owner)
     end
     rec = pl.recording::Recording
-    e === nothing && return submit!(bq, rec; tag = :run)
-    seal!(e.owner)
-    return submit!(bq, e.owner, rec; tag = :run)
+    if e === nothing
+        # Nothing to store this run: the recording alone, and nothing of it is
+        # given back — it is submitted again next run, and the plan owns it.
+        tok = submit!(bq, rec)
+        rec.token = tok
+        handover!(bq, tok, nothing; tag = :run)
+        return tok
+    end
+    front = e.owner::OneShot
+    seal!(front)
+    # The submission holds the recording it executes; the recording holds
+    # everything the commands name (taken at `seal!`, kept until `release!`), so
+    # a run's own hold list is the front one-shot's stores and this.
+    hold!(bq, rec)
+    tok = submit!(bq, front, rec)
+    rec.token = tok
+    handover!(bq, tok, front; tag = :run)
+    return tok
 end
 
-"""What was written goes with the buffer: sealed so it can be begun again, its
-pins and scratch given back."""
+"""What was written goes with the buffer: sealed so it can be begun again, and
+given back to core with the holds it took."""
 function abandonrun!(dev::LavaDevice, e::Emitter)
-    seal!(e.owner)
-    # DELETED in phase 1.2: see docs/mantle-owns-it.md
+    o = e.owner::OneShot
+    seal!(o)
+    release!(queueof(o), o)
     return nothing
 end
 
@@ -1767,9 +1798,9 @@ loop dispatches once per draw and everything inside is concrete — including
 `devargs(ad, rawargs(d.args))`, which allocated a boxed tuple per draw per frame while it
 was inlined into the loop.
 
-Nothing is allocated and nothing is pinned: the memory belongs to the plan, and
-every resource the arguments name is reachable from the plan for as long as it
-lives.
+Nothing is allocated and nothing is held here: the memory belongs to the plan,
+and every resource the arguments name was held when the recording was written,
+for as long as the recording lives.
 """
 function emitdraw!(e::Emitter, ::Nothing, d::CompiledDraw)
     packdraw!(e, d)
@@ -1783,14 +1814,14 @@ end
 # which is why nothing has to be read back to record a frame.
 
 emit_draw!(e, pipe, n::Integer, addr::UInt64) =
-    draw_in_pass!(e, pipe, n; push_bda = addr, pin = false)
+    draw_in_pass!(e, pipe, n; push_bda = addr)
 
 emit_draw!(e, pipe, x, addr::UInt64) =
-    draw_in_pass!(e, pipe, count(x); push_bda = addr, pin = false)
+    draw_in_pass!(e, pipe, count(x); push_bda = addr)
 
 emit_draw!(e, pipe, c::Commands, addr::UInt64) =
     draw_indirect_in_pass!(e, pipe, storage(c.resource);
-                           push_bda = addr, pin = false)
+                           push_bda = addr)
 
 """
 Write one dispatch's arguments into the plan's argument memory, and answer with

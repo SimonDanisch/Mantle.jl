@@ -53,7 +53,7 @@ are submitted on, and the objects that must outlive the build.
 
 Was `ASBuildContext` in the Vulkan backend and then an abstract type here. It is
 one shared struct: both fields are portable, the second trivially and the first
-once [`BatchQueue`](@ref) stopped being per-backend. Building is the expensive
+once the submission channel stopped being per-backend. Building is the expensive
 part of ray tracing and every backend wants to amortise it, so the context is
 API rather than an implementation detail one of them happens to have.
 """

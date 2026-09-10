@@ -31,8 +31,8 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 
 A batch of N HWTLAS instances all referencing the same BLAS, with instance
 records read from a GPU-resident `LavaArray{VulkanInstanceRecord, 1}` at
-sync! / refit time. Returned `handle` lets callers track the batch in
-# DELETED in phase 1.3: see docs/mantle-owns-it.md
+sync! / refit time. The `handle` it carries is the one core's
+`InstanceBatches` registered it under, and is what a caller tracks it by.
 
 `triangles` holds the per-triangle metadata for the BLAS (typically
 `Vector{Triangle{UInt32}}`). Pass an empty vector for rayQuery-only
@@ -92,11 +92,10 @@ across mutations** — consumers that cache silently see stale geometry.
 # Non-blocking sync!
 
 `sync!(hwtlas)` does NOT call `KA.synchronize(backend)`.  Old backings are
-dropped via `unsafe_free!`, which defers destruction through
-`hwtlas.bq`'s timeline (`bq.deferred_as_frees` / `bq.deferred_frees`) when
-prior dispatches are still in flight.  Phase-B pinning of RT closure leaves
-(tri_gpu, off_gpu, hw_tlas, hw_accel) is what makes the timeline tracking
-correct on the BDA path.
+dropped via `unsafe_free!`, which RECORDS the destroy (`Mantle.retire!`) and
+lets core run it once the submission that named the storage has passed. What
+makes that correct on the BDA path is that a trace HOLDS every structure it
+reads, so nothing in flight can be the last reference.
 
 For a CPU-blocking drain use `Raycore.wait_for_gpu!(hwtlas)`, which calls
 `vk_flush!(hwtlas.bq)` (waits on the VulkanTLAS's own queue specifically, not
@@ -115,11 +114,12 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
 
     # Instance batches -- N instances of one BLAS each, transforms in a GPU buffer.
     # Every push! produces one batch; per-mesh push! batches simply have n=1.
-    # DELETED in phase 1.3: field `instance_batches`
-
-    # Handle management: handle -> index into instance_batches.
-    # DELETED in phase 1.3: field `handle_to_batch_idx`
-    # DELETED in phase 1.3: field `next_handle_id`
+    #
+    # The order, the handles and the reindex on delete are core's
+    # (`raytracing/batches.jl`); this backend supplies only the batch type. The
+    # three fields this replaces — the list, a handle→index `Dict` and a
+    # monotone counter — existed once per backend.
+    instances::InstanceBatches{InstanceBatch{Tri}}
 
     # Bounding box (CPU-side, updated on push!)
     root_aabb::Raycore.Bounds3
@@ -168,9 +168,7 @@ function VulkanTLAS{Tri}(backend::LavaBackend; bq::VulkanBatchQueue=backend.disp
     VulkanTLAS{Tri}(
         backend, bq,
         LavaBLAS[], Vector{Tri}[], UInt32[],
-        InstanceBatch{Tri}[],
-        Dict{Raycore.TLASHandle, Int}(),
-        UInt32(1),
+        InstanceBatches{InstanceBatch{Tri}}(),
         Raycore.Bounds3(),
         nothing, nothing, nothing, nothing,
         nothing,                  # combined_instance_buf
@@ -210,10 +208,10 @@ end
 # was the only thing that could own a pin — so a `Recording` fell through to
 # the generic walker and a hardware-RT plan blew the stack the first time it
 # was RECORDED rather than launched. The stack was 53 320 frames of
-# `pin_leaves!(::Recording, ::VK.Instance)`, whose `destructor` field is a
+# `holdleaves!(::Recording, ::VK.Instance)`, whose `destructor` field is a
 # closure over the instance itself. Every owner has to stop here, which is what
 # the abstract type is for.
-@inline pin_leaves!(::Closed, ::VulkanTLAS) = nothing
+@inline holdleaves!(::Closed, ::VulkanTLAS) = nothing
 
 # ============================================================================
 # Adapt.adapt_structure
@@ -259,7 +257,7 @@ end
 
 Raycore.world_bound(hwtlas::VulkanTLAS)    = hwtlas.root_aabb
 Raycore.n_geometries(hwtlas::VulkanTLAS)   = length(hwtlas.blas_list)
-# DELETED in phase 1.3: see docs/mantle-owns-it.md
+Raycore.n_instances(hwtlas::VulkanTLAS)    = sum(b -> b.n, hwtlas.instances; init = 0)
 
 """
     Raycore.instance_buffer(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle) -> LavaArray{VulkanInstanceRecord, 1}
@@ -272,25 +270,15 @@ the change to the underlying LavaTLAS via MODE_UPDATE_KHR.
 Errors if the handle is not registered.
 """
 function Raycore.instance_buffer(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle)
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    idx === nothing && error("instance_buffer: invalid or deleted handle.")
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    b = batchof(hwtlas.instances, handle)
+    b === nothing && error("instance_buffer: invalid or deleted handle.")
+    return b.instance_buf
 end
 
-# RayMakie compat: hwtlas.instances -> lightweight length-only view
-struct HWTLASInstances
-    n::Int
-end
-Base.isempty(x::HWTLASInstances) = x.n == 0
-Base.length(x::HWTLASInstances) = x.n
-
-function Base.getproperty(hwtlas::VulkanTLAS, s::Symbol)
-    if s === :instances
-        # DELETED in phase 1.3: see docs/mantle-owns-it.md
-        return HWTLASInstances(n)
-    end
-    return getfield(hwtlas, s)
-end
+# RayMakie asks `isempty(hwtlas.instances)` and `length(hwtlas.instances)`, and
+# `InstanceBatches` answers both — of BATCHES, where the old view counted
+# INSTANCES. `HWTLASInstances` is what that view was, and it is gone with the
+# `getproperty` overload that produced it: the field is the batches now.
 
 # ============================================================================
 # wait_for_gpu!
@@ -370,16 +358,30 @@ function hwtlas_add_geometry!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh
     return blas_idx
 end
 
-# Internal: register an InstanceBatch for `blas` with `n` instances initially
-# populated from the CPU-side `records` Vector.  Returns the new handle.
-# DELETED in phase 1.3: see docs/mantle-owns-it.md
-#
-# `_register_batch!`, `instance_batches`, `handle_to_batch_idx` and
-# `next_handle_id` existed once per backend, with different signatures, so a
-# name match called them private helpers. They are the same bookkeeping over a
-# list: allocate a `Raycore.TLASHandle`, append a batch, record its index.
-# Portable; only what a batch CONTAINS is a backend's (Vulkan: an instance
-# buffer, Metal: a transform list). Phase 2.5 puts the list in core.
+# What a Vulkan instance batch IS: a device-resident record buffer and the BLAS
+# every instance in it references. The list it goes into, the handle it gets and
+# the reindex when one is dropped are `Mantle.InstanceBatches` — this used to be
+# `_register_batch!` plus three fields, written once per backend.
+addbatch!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS,
+          instance_buf::LavaArray{VulkanInstanceRecord, 1}, n::Int,
+          triangles::Vector{Tri}, instance_mask::UInt8, custom_index::UInt32,
+          sbt_offset::UInt32) where {Tri} =
+    register!(hwtlas.instances, h ->
+        InstanceBatch{Tri}(blas, instance_buf, n, instance_mask, custom_index, h,
+                           triangles, sbt_offset))
+
+# The CPU-record form: upload the records into a buffer of their own first.
+function addbatch!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS,
+                   records::Vector{VulkanInstanceRecord}, triangles::Vector{Tri},
+                   instance_mask::UInt8, sbt_offset::UInt32) where {Tri}
+    n = length(records)
+    instance_buf = LavaArray{VulkanInstanceRecord, 1}(undef, n;
+                                                      bq = hwtlas.bq, extra_usage = AS_INPUT_USAGE)
+    Base.copyto!(instance_buf, records)
+    h = addbatch!(hwtlas, blas, instance_buf, n, triangles, instance_mask, UInt32(0), sbt_offset)
+    hwtlas.dirty = true
+    return h
+end
 
 function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh, transform::Mat4f=Mat4f(I);
                     instance_id::UInt32=UInt32(0), instance_mask::UInt8=UInt8(0xff),
@@ -390,7 +392,7 @@ function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh, transfor
     record    = VulkanInstanceRecord(mat4_to_vk_transform(transform), blas.address;
                                    custom_index=instance_id, mask=instance_mask,
                                    sbt_offset=sbt_offset)
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    return addbatch!(hwtlas, blas, [record], triangles, instance_mask, sbt_offset)
 end
 
 function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh, transforms::AbstractVector{Mat4f};
@@ -411,7 +413,7 @@ function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh, transfor
                                         custom_index=iid, mask=instance_mask,
                                         sbt_offset=sbt_offset)
     end
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    return addbatch!(hwtlas, blas, records, triangles, instance_mask, sbt_offset)
 end
 
 """
@@ -438,7 +440,7 @@ function Base.push!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS, transform::Mat4f=Ma
     record = VulkanInstanceRecord(mat4_to_vk_transform(transform), blas.address;
                                 custom_index=instance_id, mask=instance_mask,
                                 sbt_offset=sbt_offset)
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    return addbatch!(hwtlas, blas, [record], Tri[], instance_mask, sbt_offset)
 end
 
 """
@@ -471,10 +473,8 @@ function Base.push!(tlas::VulkanTLAS{Tri}, blas::LavaBLAS,
     n_int = Int(n)
     n_int <= length(instance_buf) || error(
         "push!: n=$n_int exceeds instance_buf length $(length(instance_buf))")
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    handle = addbatch!(tlas, blas, instance_buf, n_int, triangles, instance_mask,
+                       custom_index, sbt_offset)
     tlas.dirty = true
     return handle
 end
@@ -506,10 +506,8 @@ function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh,
     blas_idx = hwtlas_add_geometry!(hwtlas, mesh)
     blas = hwtlas.blas_list[blas_idx]
     triangles = hwtlas.blas_triangles[blas_idx]
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    handle = addbatch!(hwtlas, blas, instance_buf, n_int, triangles, instance_mask,
+                       custom_index, sbt_offset)
     hwtlas.dirty = true
     return handle
 end
@@ -540,8 +538,8 @@ applying all pending updates.
 """
 function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
                                     transforms::LavaArray{Mat3x4f, 1})
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    batch = batchof(hwtlas.instances, handle)
+    batch === nothing && error("Invalid handle")
     length(transforms) == batch.n || error(
         "Transform count $(length(transforms)) != batch.n $(batch.n)")
     hwtlas.pending_updates[handle] = transforms
@@ -570,9 +568,10 @@ Set every instance in `handle`'s batch to the same transform. Accepts
 handle was valid.
 """
 function Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat3x4f)
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    Raycore.update_transforms!(hwtlas, handle, LavaArray(fill(transform, batch.n)))
+    batch = batchof(hwtlas.instances, handle)
+    batch === nothing && return false
+    Raycore.update_transforms!(hwtlas, handle,
+                               LavaArray(fill(transform, batch.n); bq = hwtlas.bq))
     return true
 end
 
@@ -595,11 +594,11 @@ end
 # ============================================================================
 
 function Base.delete!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle)::Bool
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
-    #
-    # The whole body was the deleted bookkeeping: find the batch by handle,
-    # drop it, and reindex every handle whose index shifted. Phase 2.5.
-    error("delete!(::HWTLAS, handle) deleted in phase 1.3")
+    # The reindex of every handle whose batch shifted is core's, and it is the
+    # half that was written twice and is easy to get wrong.
+    delete!(hwtlas.instances, handle) || return false
+    hwtlas.dirty = true
+    return true
 end
 
 # ============================================================================
@@ -623,7 +622,9 @@ end
 # offset.  The combined buffer is what build_tlas / refit_tlas! sees.
 function _concat_batch_instances!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     total = 0
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    for batch in hwtlas.instances
+        total += batch.n
+    end
     combined = hwtlas.combined_instance_buf
     if combined === nothing || length(combined) < total
         combined = LavaArray{VulkanInstanceRecord, 1}(undef, total;
@@ -631,7 +632,12 @@ function _concat_batch_instances!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         hwtlas.combined_instance_buf = combined
     end
     inst_offset = 0
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    for batch in hwtlas.instances
+        # GPU->GPU copy at the right offset.  copyto! on LavaArray uses
+        # vkCmdCopyBuffer (no CPU staging).
+        Base.copyto!(combined, inst_offset + 1, batch.instance_buf, 1, batch.n)
+        inst_offset += batch.n
+    end
     return combined, total
 end
 
@@ -644,7 +650,11 @@ function _compact_blas_list!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     used = Set{Int}()
     # Identify each BLAS by reference identity (===) since multiple batches
     # may share the same LavaBLAS object.
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    for batch in hwtlas.instances
+        for (i, blas) in enumerate(hwtlas.blas_list)
+            blas === batch.blas && push!(used, i)
+        end
+    end
     length(used) == n_blas && return LavaBLAS[]
 
     dropped = LavaBLAS[]
@@ -672,7 +682,10 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     # Drop unused BLASes (deleted batches may have left some unreferenced).
     dropped_blases = _compact_blas_list!(hwtlas)
 
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    if isempty(hwtlas.instances)
+        # Caller (sync!) handles the empty path before us; assert defensively.
+        return (nothing, nothing, nothing, nothing, dropped_blases)
+    end
 
     # Rebuild always starts with a fresh combined buffer: the previous one
     # (if any) is now solely owned by the soon-to-be-freed `hw_tlas.preserves`.
@@ -695,7 +708,14 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     per_inst_offsets = UInt32[]
     blas_offsets = UInt32[]
     tri_offset = UInt32(0)
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    for batch in hwtlas.instances
+        push!(blas_offsets, tri_offset)
+        append!(all_tris, batch.triangles)
+        for _ in 1:batch.n
+            push!(per_inst_offsets, tri_offset)
+        end
+        tri_offset += UInt32(length(batch.triangles))
+    end
 
     hw_accel = if hwtlas.hw_accel isa HardwareAccel
         accel_prev = hwtlas.hw_accel
@@ -730,15 +750,37 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
     end
 
     # Empty-topology path: drop the prior AS without rebuilding.
-    # DELETED in phase 1.3: see docs/mantle-owns-it.md
+    if hwtlas.dirty && isempty(hwtlas.instances)
+        # Even with no batches we may still have unreferenced BLASes (e.g.,
+        # the user delete!'d every handle).  Compact + free.
+        dropped_blases = _compact_blas_list!(hwtlas)
+        old_hw_tlas = hwtlas.hw_tlas
+        old_tri_gpu = hwtlas.tri_gpu
+        old_off_gpu = hwtlas.off_gpu
+        hwtlas.hw_tlas    = nothing
+        hwtlas.hw_accel   = nothing
+        hwtlas.tri_gpu    = nothing
+        hwtlas.off_gpu    = nothing
+        hwtlas.dirty            = false
+        hwtlas.transforms_dirty = false
+        empty!(hwtlas.pending_updates)
+        hwtlas.static_tlas = AdaptedAccel(hwtlas)
+        unsafe_free!(old_hw_tlas)
+        unsafe_free!(old_tri_gpu)
+        unsafe_free!(old_off_gpu)
+        for blas in dropped_blases
+            unsafe_free!(blas)
+        end
+        return hwtlas
+    end
 
     # Apply any queued transform updates to instance bufs before reading them.
     had_pending = !isempty(hwtlas.pending_updates)
     if had_pending
         for (handle, update) in hwtlas.pending_updates
-            # DELETED in phase 1.3: see docs/mantle-owns-it.md
-            idx === nothing && continue  # handle was deleted before sync!
-            # DELETED in phase 1.3: see docs/mantle-owns-it.md
+            batch = batchof(hwtlas.instances, handle)
+            batch === nothing && continue  # handle was deleted before sync!
+            _apply_pending_update!(batch, update)
         end
         empty!(hwtlas.pending_updates)
     end
@@ -889,7 +931,9 @@ end
 
 function tlasset!(o::OneShot, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
     desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, tlas)
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # A one-shot runs once, so its set is not cached the way a recording's is —
+    # but the pool that owns it must outlive the submission that binds it.
+    hold!(o, desc_pool)
     return desc_set
 end
 
@@ -898,9 +942,11 @@ function bindtlas!(e::Emitter, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
     set = tlasset!(e.owner, e.ctx.device, pipeline, lava_tlas)
     VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_COMPUTE,
         pipeline.pipeline_layout, UInt32(0), [set], UInt32[])
-    # A ray query walks the HWTLAS into its BLASes and reads their storage, so
-    # every one of them is held — `pintrace!` is core's statement of that.
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # A ray query walks the top level into its bottom levels and reads their
+    # storage, and one hold covers all of it: the `LavaTLAS` references every
+    # `LavaBLAS` it instances, and `syncbuf!(::LavaTLAS)` records each level's
+    # storage for ordering.
+    hold!(e, lava_tlas)
     return nothing
 end
 

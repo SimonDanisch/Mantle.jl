@@ -41,7 +41,28 @@ const KA = KernelAbstractions
     run(200); KA.synchronize(backend)          # warm: compile, plan, pipeline, slab
     run(200); KA.synchronize(backend)          # settle the arg-slab pool
 
+    # Warm the DESTROY path as well, and this is not padding: a collection
+    # inside the measured window runs finalizers, a finalizer retires a buffer,
+    # and the first `retire!`/`reclaim!`/`rawfree` of a session compiles inside
+    # the count. Measured first-in-session with only the two warmups above:
+    # 753 B/dispatch, against 223 with this line — and the number moved with
+    # whenever the GC happened to run, which is what made it look like a
+    # regression that came and went.
+    let scratch = KA.allocate(backend, Float32, 64)
+        Mantle.unsafe_free!(scratch)
+    end
+    GC.gc(true)
+    Mantle.drain!(Mantle.batchqueue(Mantle.Device(Mantle.VulkanAPI())))
+    run(50); KA.synchronize(backend)
+
     n = 500
+    # TWO windows, and the first is thrown away: what is being measured is the
+    # steady state of the dispatch path, and the first window after any warmup
+    # still compiles something — a collection inside it runs a finalizer, the
+    # finalizer retires a buffer, and the destroy path is inferred and compiled
+    # inside the count. Measured first-in-session: 674 B for the first window,
+    # 243 for every one after it, on identical code.
+    @allocated run(n); KA.synchronize(backend)
     bytes = @allocated run(n)
     KA.synchronize(backend)
     per = bytes / n
@@ -74,6 +95,7 @@ const KA = KernelAbstractions
     held = MVE.compiled(allocprobe!(backend), 1024)
     heldrun(n) = for _ in 1:n; held(a); end
     heldrun(200); KA.synchronize(backend)
+    @allocated heldrun(n); KA.synchronize(backend)   # same first-window rule
     heldbytes = @allocated heldrun(n)
     KA.synchronize(backend)
     @test heldbytes / n <= per

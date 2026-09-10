@@ -135,6 +135,16 @@ struct OffscreenTarget <: RenderTarget
     fb::Framebuffer
 end
 
+# What is behind a target, asked of the target. Core's, because the two wrappers
+# are core's: a backend answers for its own framebuffer and its own window, and
+# neither should have to know that Mantle wraps them before a pass sees them.
+# `pass!` and `blit!` ask a TARGET for its extent, and without these every
+# hand-recorded pass was a `MethodError` on both backends.
+target_extent(t::OffscreenTarget) = target_extent(t.fb)
+target_extent(t::WindowTarget) = target_extent(t.window)
+target_format(t::OffscreenTarget) = target_format(t.fb)
+target_format(t::WindowTarget) = target_format(t.window)
+
 """
     CompiledGraphicsPipeline
 
@@ -169,11 +179,11 @@ and Metal with a `MetalTLAS`. Backends implement this constructor.
 abstract type HWTLAS{Tri} <: Raycore.AbstractAccel end
 
 # `AccelBuildContext` is a concrete shared struct in `raytracing/accel.jl`:
-# once `BatchQueue` was shared, both of its fields were portable.
+# once the submission channel was shared, both of its fields were portable.
 
 # ── Queues and interop ────────────────────────────────────────────────────────
 
-# `BatchQueue` is a concrete, shared struct in `graph/queue.jl`. It was abstract
+# A submission channel is `SubmitChannel` in `graph/lifetime.jl`. It was abstract
 # here with one backend-specific implementation, and thirty-one of its
 # forty-one fields turned out to be backend-independent scheduling state.
 

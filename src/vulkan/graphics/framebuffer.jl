@@ -272,7 +272,11 @@ function readback_framebuffer(fb::VulkanFramebuffer)
         )
         VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+        # The readback region and the framebuffer are named by this copy: the
+        # host reads the bytes after the wait below, and neither may be given
+        # back before then.
+        hold!(e, mb)
+        hold!(e, fb)
     end
     waitfor!(bq, tok)
 
@@ -323,8 +327,8 @@ function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
         VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
 
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-        # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+        hold!(e, dst)
+        hold!(e, fb)
     end
     return dst
 end
@@ -362,7 +366,7 @@ function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image
     )
     VK.cmd_copy_image_to_buffer(e.cmd, image,
         VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    hold!(e, dst)
     return dst
 end
 

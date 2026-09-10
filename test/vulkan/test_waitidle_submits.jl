@@ -55,21 +55,21 @@ lasttoken(pl) = Mantle.argtoken(pl.args)
     pl = Base.invokelatest(_waitplan, dev, out, kref, n)
     bq = Mantle.batchqueue(dev)
 
-    flushes = bq.ctx.diag.flush_counter[]
+    flushes = MVE.ctxof(bq).diag.flush_counter[]
     Mantle.run!(pl)
     tok = lasttoken(pl)
     @test tok != 0
     # Submitted the moment it was run: the token is the queue's newest, and
     # the run was one submission.
-    @test tok == bq.next_timeline
-    @test bq.ctx.diag.flush_counter[] == flushes + 1
+    @test tok == MVE.driver(bq).next_timeline
+    @test MVE.ctxof(bq).diag.flush_counter[] == flushes + 1
 
     Mantle.waitidle(dev)
 
     # THE assertion, and it is asked of the timeline rather than of a buffer.
     @test Mantle.passed(dev, tok)
     # …and nothing was submitted to get there: there was nothing left to hand over.
-    @test bq.ctx.diag.flush_counter[] == flushes + 1
+    @test MVE.ctxof(bq).diag.flush_counter[] == flushes + 1
 
     @test Array(Mantle.storage(out)) == fill(Int32(7), n)
     Mantle.free!(pl)
@@ -95,7 +95,7 @@ end
         kref[] = k
         Mantle.run!(pl)
         tok = lasttoken(pl)
-        @test tok == bq.next_timeline       # out the moment the run returned
+        @test tok == MVE.driver(bq).next_timeline       # out the moment the run returned
         Mantle.waitfor!(pl)
         @test Mantle.passed(dev, tok)       # and the device's, after it
         total += k
@@ -103,9 +103,9 @@ end
     end
 
     # Once the device has caught up it is a no-op, not another submission.
-    flushes = Mantle.batchqueue(dev).ctx.diag.flush_counter[]
+    flushes = MVE.ctxof(Mantle.batchqueue(dev)).diag.flush_counter[]
     Mantle.waitfor!(pl)
-    @test Mantle.batchqueue(dev).ctx.diag.flush_counter[] == flushes
+    @test MVE.ctxof(Mantle.batchqueue(dev)).diag.flush_counter[] == flushes
 
     Mantle.free!(pl)
 end

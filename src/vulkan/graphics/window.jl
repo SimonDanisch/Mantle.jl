@@ -384,7 +384,7 @@ function present!(win::VulkanWindow)
     # (a resize, or the compositor remapping the window — it routinely happens on
     # the very first present) and the swapchain has to be rebuilt. Throwing here
     # turned an ordinary condition into a crash on startup.
-    result = VK.queue_present_khr(ctx.default_bq.queue, present_info)
+    result = VK.queue_present_khr(vkqueue(ctx.default_bq), present_info)
     if iserror(result)
         code = unwrap_error(result).code
         if code == VK.ERROR_OUT_OF_DATE_KHR || code == VK.SUBOPTIMAL_KHR

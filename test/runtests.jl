@@ -569,37 +569,59 @@ _VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership
 # Once per backend, like the portable files above — a window, a surface, a
 # resize and a presentation are the same question on every backend, and this
 # file asked it on Vulkan alone for 2,021 lines.
-# The portable half runs everywhere, in process; the big file needs Vulkan
-# until phase 2.8 splits its twenty-six MVE sites out.
-foreachbackend(joinpath(@__DIR__, "test_window_portable.jl"))
-
-@testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in (_VULKAN_OK ? Mantle.eachbackend() : ())
-    log = joinpath(mktempdir(), "window.log")
-    # The child picks the backend by NAME and re-derives the object, because a
-    # backend object does not survive being interpolated into a command line.
-    bename = repr(nameof(typeof(WINDOW_BE)))
-    cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e
-           "using Mantle, Test;
-            Main.MANTLE_TEST_BACKEND = only(b for b in Mantle.eachbackend() if string(nameof(typeof(b))) == $bename);
-            include($(repr(joinpath(@__DIR__, "test_window.jl"))))"`
-    proc = run(pipeline(cmd; stdout = log, stderr = log); wait = false)
-    deadline = time() + 600
-    while process_running(proc) && time() < deadline
-        sleep(1)
+# BOTH window files go in a child with a deadline, and the portable one is here
+# rather than in `foreachbackend` above for the reason the note gives: it opens
+# a window, so it can block, and a file that can block must not run in this
+# process. It did, and the whole suite stopped at it — 100 % of one core inside
+# `_glfwCreateWindowX11`, uninterruptible (a SIGINT cannot land inside a C call),
+# with everything before it still in the stdout buffer. One child per FILE, so a
+# hang in one does not hide what the other would have said.
+@testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
+    # The big file needs Vulkan until phase 2.8 splits its twenty-six MVE sites
+    # out; the portable half runs on every backend.
+    for wf in (_VULKAN_OK ? ("test_window_portable.jl", "test_window.jl") :
+                            ("test_window_portable.jl",))
+        log = joinpath(mktempdir(), "window.log")
+        # The child picks the backend by NAME and re-derives the object, because a
+        # backend object does not survive being interpolated into a command line.
+        #
+        # And it has to LOAD one first: `using Mantle` alone registers nothing —
+        # a backend arrives with its package, which is what `backend_probe.jl`
+        # is for on this side too. Without it `eachbackend()` is empty in the
+        # child and `only` says "Collection is empty" from a process whose
+        # output nobody reads as being about a missing backend.
+        # `repr` of a STRING, not of the Symbol `nameof` answers: the child
+        # compares `string(nameof(typeof(b)))` against this, and a `String` is
+        # never `==` a `Symbol` — the comparison read false for every backend
+        # and the child died on an empty `only`.
+        bename = string(nameof(typeof(WINDOW_BE)))
+        child = """using Mantle, Test
+            include($(repr(joinpath(@__DIR__, "backend_probe.jl"))))
+            foreach(backend_loadable, ("Lava", "Metal"))
+            found = [b for b in Mantle.eachbackend() if string(nameof(typeof(b))) == $(repr(bename))]
+            isempty(found) && error("child: no backend named $bename here; loaded: " *
+                                    string(collect(Mantle.eachbackend())))
+            @eval Main MANTLE_TEST_BACKEND = \$(only(found))
+            include($(repr(joinpath(@__DIR__, wf))))"""
+        cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $child`
+        proc = run(pipeline(cmd; stdout = log, stderr = log); wait = false)
+        deadline = time() + 600
+        while process_running(proc) && time() < deadline
+            sleep(1)
+        end
+        blocked = process_running(proc)
+        blocked && kill(proc, Base.SIGKILL)
+        wait(proc)
+        blocked && @warn """$wf did not finish in 600 s — almost certainly \
+                            blocked creating a visible window. This is a display-stack \
+                            problem, not a Mantle one; see the note above."""
+        # Not `success(...)`: a failure has to say what failed, and the child's
+        # output is the only place that is written down.
+        ok = !blocked && success(proc)
+        ok || println(read(log, String))
+        @test ok
     end
-    blocked = process_running(proc)
-    blocked && kill(proc, Base.SIGKILL)
-    wait(proc)
-    blocked && @warn """test_window.jl did not finish in 600 s — almost certainly \
-                        blocked creating a visible window. This is a display-stack \
-                        problem, not a Mantle one; see the note above."""
-    # Not `success(...)`: a failure has to say what failed, and the child's
-    # output is the only place that is written down.
-    ok = !blocked && success(proc)
-    ok || println(read(log, String))
-    @test ok
-
-end  # if _VULKAN_OK
+end
 
 # ── the Metal backend ─────────────────────────────────────────────────────────
 #
@@ -1089,8 +1111,12 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_permutedims.jl"))
         end
 
-        @testset "phase 1 — pin/sync_access" begin
-            include(joinpath(VULKAN_TESTS, "test_phase1_pin.jl"))
+        @testset "what a submission holds" begin
+            include(joinpath(VULKAN_TESTS, "test_hold_lifetime.jl"))
+        end
+
+        @testset "index buffers" begin
+            include(joinpath(VULKAN_TESTS, "test_indexbuffer.jl"))
         end
 
         @testset "phase 2 — error surfacing" begin
@@ -1203,14 +1229,14 @@ if _VULKAN_OK
             end
 
 
-            @testset "pin_leaves! stops at a VulkanTLAS" begin
-                include(joinpath(VULKAN_TESTS, "test_pin_leaves_stops_at_tlas.jl"))
-                include(joinpath(VULKAN_TESTS, "test_pintrace.jl"))
+            @testset "holdleaves! stops at a VulkanTLAS" begin
+                include(joinpath(VULKAN_TESTS, "test_holdleaves_stops_at_tlas.jl"))
+                include(joinpath(VULKAN_TESTS, "test_hold_trace.jl"))
             end
 
 
-            @testset "pinned buffer lifetime" begin
-                include(joinpath(VULKAN_TESTS, "test_pinned_buffer_lifetime.jl"))
+            @testset "held buffer lifetime" begin
+                include(joinpath(VULKAN_TESTS, "test_held_buffer_lifetime.jl"))
             end
 
 

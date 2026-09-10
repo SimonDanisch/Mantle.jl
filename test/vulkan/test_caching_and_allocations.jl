@@ -105,7 +105,7 @@ using KernelAbstractions
             MVE.vk_flush!(ctx)
             bq = ctx.default_bq
             @test isempty(bq.outstanding)
-            @test all(o -> isempty(o.pinned), bq.free_oneshots)
+            @test all(o -> isempty(o.sync), bq.free)
 
             Mantle.unsafe_free!(a)
         end
@@ -160,7 +160,7 @@ using KernelAbstractions
             # Buffer may be deferred (timeline gate); a sync ensures destroy
             # actually runs and decrements GPU_LIVE_BYTES.
             MVE.vk_flush!(MVE.vk_context())
-            MVE.drain_deferred_frees!(bq)
+            Mantle.drain!(bq)
             after_free = MVE.gpu_live_bytes()
             @test after_free <= after_alloc
         end
@@ -219,16 +219,15 @@ using KernelAbstractions
 
     # ── 9. Broadcast allocation stability ──
     # The live-buffer set is `mempolicy(ctx).live_buffers` now. The old
-    # `flush_deferred_frees!` wrapper was replaced by per-BQ
-    # `drain_deferred_frees!` / `drain_deferred_as_frees!`.
+    # `flush_deferred_frees!` wrapper was replaced by per-channel
+    # `Mantle.drain!`, which sweeps and reclaims in one call.
     @testset "broadcast allocation stability" begin
         @testset "repeated broadcasts don't leak" begin
             ctx = MVE.vk_context()
             bq = ctx.default_bq
             GC.gc(true)
             MVE.vk_flush!(ctx)
-            MVE.drain_deferred_frees!(bq)
-            MVE.drain_deferred_as_frees!(bq)
+            Mantle.drain!(bq)
             baseline = MVE.live_buffer_count()
 
             for _ in 1:20
@@ -242,8 +241,7 @@ using KernelAbstractions
             end
 
             MVE.vk_flush!(ctx)
-            MVE.drain_deferred_frees!(bq)
-            MVE.drain_deferred_as_frees!(bq)
+            Mantle.drain!(bq)
             after = MVE.live_buffer_count()
             @test after == baseline
         end

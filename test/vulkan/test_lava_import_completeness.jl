@@ -92,6 +92,13 @@ function referenced_names(path::AbstractString)
         ex isa Symbol && return push!(out, ex)
         ex isa Expr || return
         ex.head === :quote && return
+        # A MODULE PATH in a `using`/`import` is not a reference to a name that
+        # has to resolve in this module — it is what makes names resolve. Left
+        # in, `import KernelInterface as KI` reported `KernelInterface` as an
+        # unimported Lava name the moment Lava imported that module itself.
+        # `test_ext_imports_are_declared.jl` was fixed for exactly this on
+        # 2026-09-08; this scanner had the same blind spot.
+        (ex.head === :using || ex.head === :import) && return
         if ex.head === :.
             walk(ex.args[1]); return
         elseif ex.head === :macrocall

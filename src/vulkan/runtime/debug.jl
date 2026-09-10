@@ -99,7 +99,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     deadline = time() + timeout
     while time() < deadline && isempty(caught_msg)
         VK.wait_semaphores(dev,
-            VK.SemaphoreWaitInfo([bq.timeline_sem], [target]),
+            VK.SemaphoreWaitInfo([timelineof(bq)], [target]),
             UInt64(200_000_000))   # 200 ms — finite, so a non-signalling fault can't hang us
         drain_validation_messages!(ctx)
         for m in ctx.validation.messages

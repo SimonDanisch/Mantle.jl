@@ -84,67 +84,45 @@ mutable struct LavaTLAS
     desc_sets::Dict{UInt64, Tuple{VK.DescriptorPool, VK.DescriptorSet}}
 end
 
-# ── Timeline-aware destruction for AS objects ──────────────────────────────
+# ── Destruction, on core's timeline ────────────────────────────────────────
 #
-# LavaBLAS/LavaTLAS hold LavaArrays for all their GPU memory.  Each LavaArray's
-# finalizer calls `vk_free!`, which defers via the BQ's timeline semaphore if
-# the buffer is still in flight.  So we just need to:
-#   1. Destroy the Vulkan AccelerationStructureKHR handle (gated on the
-#      storage buffer's last write — same GPU memory backs the accel).
-#   2. Drop refs to the LavaArrays; their finalizers handle the rest.
-# If the storage's last write hasn't been signalled yet, the whole AS object
-# is resurrected onto bq.deferred_as_frees and destroyed on the next drain.
+# A BLAS/TLAS holds `LavaArray`s for all its GPU memory, and the acceleration
+# structure handle itself lives in the bytes of `storage`. So "may
+# `vkDestroyAccelerationStructureKHR` run" is the same question as "may this
+# buffer's destructor run", and core answers it: `retire!` records the request
+# from whatever thread asked, and `reclaim!` calls `rawfree` once the submission
+# that named the storage has passed and no recording still holds it.
 #
-# Same shape as `vk_free!`, for the same reason: the last-write stamp is the
-# owning thread's alone. A finalizer on any other thread hands the AS to the
-# default queue's deferred list WITHOUT reading it, and the owning thread's
-# drain asks the stamp. It used to read the stamp from the finalizer thread and
-# destroy the AS right there when the device was done — the one reader that
-# made the stamp an atomic tuple, boxed at every submit.
+# What this replaces is `deferred_as_frees` — a second list beside
+# `deferred_frees`, sharing its lock, with its own drain function and its own
+# reading of the same stamp.
 
 function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
     # Idempotent: if `destroy_now!` already released `as.storage`'s DataRef
     # (e.g. via an earlier explicit `unsafe_free!` + finalizer double-tap),
-    # there is nothing left to do.  Without this guard, the GC-scheduled
+    # there is nothing left to do. Without this guard, the GC-scheduled
     # finalizer trips `storage.buf[]` → `ArgumentError("Attempt to use a
     # freed reference.")` from GPUArrays.
     as.storage.buf.freed && return
-    buf = as.storage.buf[]::VkManagedBuffer
-    ctx = buf.ctx::VkContext
-    if device_lost(ctx)
-        destroy_now!(as)
-        return
-    end
-    bq = ctx.default_bq
-    if Threads.threadid() != bq.owning_thread
-        lock(bq.deferred_frees_lock) do
-            push!(bq.deferred_as_frees, as)   # resurrect + defer, unread
-        end
-        return
-    end
-    let wbq = buf.last_write_bq
-        if wbq !== nothing
-            w = wbq::VulkanBatchQueue
-            # query_timeline throws on healthy-device failure; device_lost is
-            # checked fresh on the next call.
-            if !queue_released(w) && !passed(w, buf.last_write_val)
-                lock(w.deferred_frees_lock) do
-                    push!(w.deferred_as_frees, as)   # resurrect + defer
-                end
-                return
-            end
-        end
-    end
-    destroy_now!(as)
+    ctx = (as.storage.buf[]::VkManagedBuffer).ctx::VkContext
+    # A lost device signals nothing ever again, so nothing can be waited for and
+    # the handles are dropped as they are.
+    device_lost(ctx) && return destroy_now!(as)
+    retire!(ctx.default_bq, as)
+    return
 end
+
+# Where core writes what it knows about this structure's lifetime: the storage
+# buffer's stamp, because the AS and its storage are the same bytes.
+stampof(as::Union{LavaBLAS, LavaTLAS}) = stampof(as.storage)
 
 function destroy_now!(as::Union{LavaBLAS, LavaTLAS})
     # HWTLAS-only: destroy any RT descriptor pools we lazily created for this
     # AS.  The pool owns the descriptor set; destroying it invalidates the set.
     # Doing this BEFORE `as.accel.destructor()` keeps the spec-required order
     # "free descriptors that reference an AS, then destroy the AS" obvious;
-    # in practice both happen synchronously after the storage timeline is
-    # signalled so there is no in-flight dispatch left to read either.
+    # in practice both happen after core says the storage's submission has
+    # passed, so there is no in-flight dispatch left to read either.
     if as isa LavaTLAS
         for (_, (pool, _)) in as.desc_sets
             try
@@ -160,11 +138,9 @@ function destroy_now!(as::Union{LavaBLAS, LavaTLAS})
     end
     as.accel.destructor()     # vkDestroyAccelerationStructureKHR — let
                               # Julia's finalizer logger surface any failure
-    # Release storage + preserves through DataRef's refcount path.
-    # LavaArray has no finalizer after the Phase 3 refactor, so `finalize(p)`
-    # would be a no-op.  RT dispatches pin `tlas.storage` / `blas.storage`,
-    # so in-flight dispatches still hold the backing VkManagedBuffer alive
-    # through the batch's timeline-gated defer path.
+    # Release storage + preserves through DataRef's refcount path. A trace that
+    # named this structure held it, so its buffers are still reachable from the
+    # submission until core drops that hold.
     unsafe_free!(as.storage)
     for p in as.preserves
         p isa LavaArray && unsafe_free!(p)
@@ -173,54 +149,22 @@ function destroy_now!(as::Union{LavaBLAS, LavaTLAS})
     as isa LavaTLAS && empty!(as.blases)
 end
 
+# What a trace reads of each level: the handle, its storage, and — through the
+# top level — every bottom level it instances. One `hold!(owner, tlas)` at the
+# emit site therefore covers both levels, which is the property `pintrace!`
+# existed to patch in from outside.
+#
+# `blases(t)` was the accessor core reached that through, and it is gone with
+# `pintrace!`: the only reader left is inside this file, and it reads the field.
 
-# The AS is done with when its storage is: `lastwritepassed` on the buffer, and
-# a storage already released explicitly has nothing left in flight.
-function lastwritepassed(as::Union{LavaBLAS, LavaTLAS}, bq::VulkanBatchQueue, current::UInt64)
-    as.storage.buf.freed && return true
-    return lastwritepassed(as.storage.buf[]::VkManagedBuffer, bq, current)
-end
-
-# What a trace reads of each level: the handle, and the storage it lives in.
-# The handle is a `VK.AccelerationStructureKHR` (generic pin), the storage a
-# `LavaArray` (retained ref plus buffer pin). Core's `pintrace!` walks the
-# levels; these say what holding one level means here.
-# DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-# DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
-blases(t::LavaTLAS) = t.blases
-
-"""
-    drain_deferred_as_frees!(bq::VulkanBatchQueue)
-
-Destroy any LavaBLAS/LavaTLAS in `bq.deferred_as_frees` whose storage
-buffer's last write has been reached.  Called at flush sync points.
-"""
-function drain_deferred_as_frees!(bq::VulkanBatchQueue)
-    isempty(bq.deferred_as_frees) && return
-    ctx = bq.ctx::VkContext
-    if device_lost(ctx)
-        lock(bq.deferred_frees_lock) do
-            empty!(bq.deferred_as_frees)
-        end
-        return
-    end
-    current = query_timeline(bq)
-    # Hold the SpinLock for the sweep — shares the lock with deferred_frees
-    # since finalizer-thread pushes can target either list.
-    lock(bq.deferred_frees_lock) do
-        i = 1
-        while i <= length(bq.deferred_as_frees)
-            as = bq.deferred_as_frees[i]
-            if lastwritepassed(as, bq, current)
-                destroy_now!(as)
-                deleteat!(bq.deferred_as_frees, i)
-            else
-                i += 1
-            end
-        end
+function syncbuf!(owner::Closed, t::LavaTLAS)
+    syncbuf!(owner, t.storage)
+    for b in t.blases
+        syncbuf!(owner, b.storage)
     end
     return nothing
 end
+syncbuf!(owner::Closed, b::LavaBLAS) = syncbuf!(owner, b.storage)
 
 """
     VulkanAccelBuildContext
@@ -236,9 +180,9 @@ const VulkanAccelBuildContext = AccelBuildContext{VulkanBatchQueue{VkContext}}
 
 # Derived accessors so call sites stay readable.
 @inline buildcmd(ctx::VulkanAccelBuildContext)   = ctx.into.cmd
-@inline as_queue(ctx::VulkanAccelBuildContext)   = ctx.bq.queue
-@inline as_device(ctx::VulkanAccelBuildContext)  = ctx.bq.device
-@inline as_vkctx(ctx::VulkanAccelBuildContext)   = ctx.bq.ctx::VkContext
+@inline as_queue(ctx::VulkanAccelBuildContext)   = vkqueue(ctx.bq)
+@inline as_device(ctx::VulkanAccelBuildContext)  = vkdevice(ctx.bq)
+@inline as_vkctx(ctx::VulkanAccelBuildContext)   = ctxof(ctx.bq)
 
 """
     build_blas(ctx::VulkanAccelBuildContext, vertices, indices; opaque=true) -> LavaBLAS
@@ -302,8 +246,8 @@ function build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Floa
 
     addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
     as_addr = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
-    if (ctx.bq.ctx::VkContext).diag.alloc_debug
-        push!((ctx.bq.ctx::VkContext).diag.alloc_log,
+    if (ctxof(ctx.bq)).diag.alloc_debug
+        push!((ctxof(ctx.bq)).diag.alloc_log,
               (kind=:blas_as, addr=as_addr, size=0, pool=false, mtype=-1, unified=false, usage=UInt32(0)))
     end
     blas = LavaBLAS(accel, storage, as_addr, blas_preserves,
@@ -409,7 +353,7 @@ intersection); accordingly, this function errors loudly if the device does
 not support `VK_KHR_ray_query`.
 """
 function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque::Bool=true)
-    (ctx.bq.ctx::VkContext).ray_query_available || error(
+    (ctxof(ctx.bq)).ray_query_available || error(
         "build_blas_aabb: this Vulkan device does not support " *
         "VK_KHR_ray_query. Procedural-AABB BLASes are only useful with " *
         "ray_query in this codebase. Build on a device that supports it.")
@@ -463,8 +407,8 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaq
 
     addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
     as_addr   = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
-    if (ctx.bq.ctx::VkContext).diag.alloc_debug
-        push!((ctx.bq.ctx::VkContext).diag.alloc_log,
+    if (ctxof(ctx.bq)).diag.alloc_debug
+        push!((ctxof(ctx.bq)).diag.alloc_log,
               (kind=:blas_aabb_as, addr=as_addr, size=0, pool=false, mtype=-1, unified=false, usage=UInt32(0)))
     end
     blas = LavaBLAS(accel, storage, as_addr, blas_preserves)
@@ -1170,7 +1114,7 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
     n_blas == 0 && return LavaBLAS[]
     @assert length(all_indices) == n_blas
 
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     dev = ctx.device
 
     vfmt = UInt32(VK.FORMAT_R32G32B32_SFLOAT)
@@ -1255,8 +1199,8 @@ function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
         accel = VK.AccelerationStructureKHR(dev, as_ci)
         addr_info = VK.AccelerationStructureDeviceAddressInfoKHR(accel)
         as_addr = VK.get_acceleration_structure_device_address_khr(dev, addr_info)
-        if (bq.ctx::VkContext).diag.alloc_debug
-            push!((bq.ctx::VkContext).diag.alloc_log,
+        if (ctxof(bq)).diag.alloc_debug
+            push!((ctxof(bq)).diag.alloc_log,
                   (kind=:blas_as_pool, addr=as_addr, size=0, pool=true, mtype=-1, unified=false, usage=UInt32(0)))
         end
         # All pooled BLASes share `as_pool_arr` as their storage. They

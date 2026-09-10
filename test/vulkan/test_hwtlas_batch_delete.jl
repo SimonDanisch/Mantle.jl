@@ -26,14 +26,14 @@ using LinearAlgebra: I
     backend = MVE.LavaBackend()
     tlas = MVE.VulkanTLAS(backend)
     handle = push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x04))
-    @test length(tlas.instance_batches) == 1
+    @test length(tlas.instances) == 1
 
     deleted = delete!(tlas, handle)
     @test deleted == true
-    @test length(tlas.instance_batches) == 0
+    @test length(tlas.instances) == 0
     @test tlas.dirty == true
 
-    # Deleting again returns false (handle is gone from handle_to_batch_idx).
+    # Deleting again returns false: the handle names no batch any more.
     @test delete!(tlas, handle) == false
 end
 
@@ -65,10 +65,10 @@ end
         end
     handle_a = push!(tlas, blas, buf_a; n=n, instance_mask=UInt8(0x02))
     handle_b = push!(tlas, blas, buf_b; n=n, instance_mask=UInt8(0x04))
-    @test length(tlas.instance_batches) == 2
+    @test length(tlas.instances) == 2
 
     @test delete!(tlas, handle_a) == true
-    @test length(tlas.instance_batches) == 1
-    @test tlas.instance_batches[1].handle === handle_b
+    @test length(tlas.instances) == 1
+    @test tlas.instances[1].handle === handle_b
 end
 

@@ -34,13 +34,13 @@ using Test, Lava, Mantle
 
     @testset "a released hardware slot is reused" begin
         bq = Mantle.allocate_batch_queue!(MVE.vk_context())
-        idx = bq.queue_index
+        idx = MVE.driver(bq).queue_index
         Mantle.release_batch_queue!(bq)
 
         if idx >= 0
             @test idx in ctx.free_queue_indices
             again = Mantle.allocate_batch_queue!(MVE.vk_context())
-            @test again.queue_index == idx
+            @test MVE.driver(again).queue_index == idx
             @test !(idx in ctx.free_queue_indices)
             Mantle.release_batch_queue!(again)
         else
@@ -70,7 +70,7 @@ using Test, Lava, Mantle
         let bq = Mantle.allocate_batch_queue!(MVE.vk_context())
             a = MVE.LavaArray{Float32, 1}(undef, (4096,))
             Mantle.upload!(a, ones(Float32, 4096))
-            Mantle.flush!(bq, ctx.device)
+            Mantle.flush!(bq)
         end
         GC.gc(true)
         GC.gc(true)

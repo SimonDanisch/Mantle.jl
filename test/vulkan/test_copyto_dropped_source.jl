@@ -6,7 +6,7 @@
 # `DataRef` released, the pooled block went back — and the recorded
 # `vkCmdCopyBuffer` still named it. `submit!` caught it as
 #
-#     AssertionError: sync_access!: buffer is not ALIVE (state=1) — use-after-free
+#     a use-after-free: the buffer's state was no longer ALIVE at submit
 #
 # ── The cause, kept because it is the part that took the time ────────────────
 #
@@ -76,13 +76,13 @@ end
     # once per iteration.
     GC.gc(true)
     MVE.vk_flush!(MVE.vk_context())
-    MVE.drain_deferred_frees!(MVE.vk_context().default_bq)
+    Mantle.drain!(MVE.vk_context().default_bq)
     baseline = MVE.live_buffer_count()
     for _ in 1:20
         copy_from_dropped_source(1024)
     end
     GC.gc(true)
     MVE.vk_flush!(MVE.vk_context())
-    MVE.drain_deferred_frees!(MVE.vk_context().default_bq)
+    Mantle.drain!(MVE.vk_context().default_bq)
     @test MVE.live_buffer_count() == baseline
 end

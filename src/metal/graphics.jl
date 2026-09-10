@@ -889,8 +889,12 @@ end
 """The Tuple type of one stage's device-side arguments."""
 buffer_types(a::StageArgs) = Tuple{map(argdevtype, a.device)...}
 
+# `bindings` is accepted and ignored: a texture is bound to an argument slot
+# here, so a pipeline that samples is compiled no differently. Vulkan builds its
+# pipeline layout around the descriptor set layout and needs it at compile.
 function Mantle.compile_draw(d::MetalDevice, p::Mantle.GraphicsPipeline,
-                             color_formats, depth_format, vert_args, frag_args)
+                             color_formats, depth_format, vert_args, frag_args;
+                             bindings = nothing)
     cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
     vert = StageArgs(vert_args)
     frag = StageArgs(frag_args)

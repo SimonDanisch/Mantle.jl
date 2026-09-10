@@ -210,6 +210,40 @@ const BLIT_PIPELINE = GraphicsPipeline(;
     blend = Opaque(), cull = NoCull(), depth = DepthOff())
 
 """
+    checkblitsize(source, w, h)
+
+Whether `source` can be blitted onto a `w`x`h` target.
+
+A matrix is `(height, width)` — `img[row, col]`, which is what everything that
+calls an array an image means by it, and what `KernelAbstractions.allocate(be, T,
+h, w)` gives. A vector is that matrix flattened, so the row index varies fastest
+and pixel `(x, y)` is at `x * height + y + 1`.
+
+A `(width, height)` matrix is the transposition, and it is what
+`copy_image_to_buffer!` produces: an image copy packs rows, so its column index
+varies fastest. Reading one and blitting it with the same index is a picture that
+is sheared rather than wrong-looking, so the matrix case says so. The vector case
+cannot tell the two apart and only checks there are enough pixels.
+"""
+function checkblitsize(a::AbstractMatrix, w::Integer, h::Integer)
+    size(a) == (h, w) && return nothing
+    # Only the transposition is an error. A size that merely disagrees is what a
+    # resize looks like between the swapchain following the window and the caller
+    # reallocating, and one frame of the wrong size there is not worth a throw.
+    size(a) == (w, h) && throw(DimensionMismatch(
+        "blit source is $(size(a)) for a $(w)x$(h) target, which is the transpose of " *
+        "the $(h)x$(w) it wants. A source is a (height, width) matrix; an image read " *
+        "back with `copy_image_to_buffer!` packs rows and so comes out the other way."))
+    length(a) >= w * h || throw(DimensionMismatch(
+        "blit source holds $(length(a)) pixels and a $(w)x$(h) target needs $(w * h)"))
+    return nothing
+end
+
+checkblitsize(a::AbstractVector, w::Integer, h::Integer) =
+    length(a) >= w * h ? nothing : throw(DimensionMismatch(
+        "blit source holds $(length(a)) pixels and a $(w)x$(h) target needs $(w * h)"))
+
+"""
     blit!(dev, target, source; clear = true)
 
 Draw `source` — a device array holding one pixel per element, column-major — over
@@ -226,9 +260,7 @@ that `pass!` now does.
 function blit!(device, target::RenderTarget, source; clear::Bool = true)
     dev = todevice(device)
     w, h = target_extent(target)
-    n = length(source)
-    n == w * h || throw(ArgumentError(
-        "blit!: the source holds $n elements and the target is $(w)x$(h) = $(w*h)"))
+    checkblitsize(source, w, h)
     args = (resolve(dev, source), Int32(w), Int32(h))
     compiled = compile_draw(dev, BLIT_PIPELINE, (blittarget(target),), nothing, (), args)
     pass!(dev, target; clear = clear ? (0f0, 0f0, 0f0, 1f0) : nothing) do p

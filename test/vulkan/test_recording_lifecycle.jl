@@ -31,7 +31,7 @@ BDA changes), memory returning to the driver (`gpu_live_bytes` is identical
 across the GC), command-buffer recycling, and pool size.
 
 The interleaving case is a real bug this pins. Opening the old batch handed it
-`bq.next_timeline + 1` as its signal value, reserving it, and `submit!`
+`MVE.driver(bq).next_timeline + 1` as its signal value, reserving it, and `submit!`
 later asserts the reservation still holds; a submission path that bumped the same
 counter left any open batch with a stale reservation and the next `submit!` died
 with `AssertionError: batch signal desync: 859 vs 860`, naming neither. The shape

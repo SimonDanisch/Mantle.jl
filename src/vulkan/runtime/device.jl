@@ -46,10 +46,14 @@ abstract type Closed end
     OneShot
 
 Work submitted once: an ad hoc launch, an upload, a readback, a run's host
-stores and pointer patches, a frame. Written and sealed inside one call
-(`oneshot`), owned by the [`Submission`](@ref) that carries it, and returned to
-the queue's pool by the sweep once the timeline has passed it — which is when
-its pins, its retained `DataRef`s and its scratch regions go back too.
+stores and pointer patches, a frame. Written and sealed inside one call, carried
+by the submission that takes it, and given back to the channel's free list by
+the sweep once the timeline has passed it (core's `retire!`), which is when its
+scratch regions go back too.
+
+What the commands must OUTLIVE is not here: that is `hold!` on the channel
+(`graph/lifetime.jl`), and the submission's payload carries it. What is here is
+the driver's own bookkeeping for the buffers the commands name — see `sync`.
 
 `bq` is the `VulkanBatchQueue{VkContext}` it was taken from; typed `Any`
 because the queue is declared below this, and asserted at every read
@@ -58,15 +62,16 @@ because the queue is declared below this, and asserted at every read
 mutable struct OneShot <: Closed
     bq::Any
     cmd::VK.CommandBuffer
-    # Everything the commands name, kept alive until the submission that
-    # carries this one-shot has passed. `pinned_refs` are the retained
-    # `DataRef`s of every pinned `LavaArray` — see `pin!(::LavaArray)`.
-    # DELETED in phase 1.1/1.2: field `pinned`
-    # DELETED in phase 1.1/1.2: field `pinned_refs`
     # The `Unified` regions the commands read their arguments and workgroup
     # counts from. Owned here, so an address handed to `get_arg_buffer` is
     # valid for exactly as long as these commands can run.
     regions::Vector{Region}
+    # The buffers these commands NAME. A fact about the commands, reported
+    # where they are written (`syncbuf!`) and read once at `submit!`, where
+    # core's `crosswaits!` derives the waits from it and `stamp!` records who
+    # took them. What that means — which channel waits for which token — is not
+    # decided here; see `graph/lifetime.jl`.
+    sync::Vector{VkManagedBuffer}
     open::Bool
 end
 
@@ -94,8 +99,6 @@ submit, applied while nothing was being submitted.
 mutable struct Recording <: Closed
     bq::Any
     cmd::VK.CommandBuffer
-    # DELETED in phase 1.1/1.2: field `pinned`
-    # DELETED in phase 1.1/1.2: field `pinned_refs`
     # The `Unified` regions the emitted commands read. A plan's arguments live in
     # its own `ArgMemory`, so this is usually empty — it is here because "who may
     # hand these bytes out again" has to have exactly one answer per owner.
@@ -122,65 +125,21 @@ mutable struct Recording <: Closed
     # emitted, read once by `record!`. A one-shot never needs it — its commands
     # run once — so the hook is a no-op there.
     patches::Vector{Tuple{UInt64,Ptr{UInt8}}}
-    # The VkManagedBuffers a submission of this recording has to `sync_access!`,
-    # snapshotted once at `record!` from `pinned` and `pinned_refs`. A run
-    # iterates THIS — a concrete vector — rather than the `IdSet{Any}` of pins,
-    # which boxed on every element: ~640 bytes a submission on a plan that pins
-    # a ray-tracing acceleration structure's two dozen handles. The set of
-    # buffers is fixed for the recording's life (pins happen during `emitplan!`),
-    # so the snapshot cannot drift the way a per-run walk of `pinned` could not
-    # either — it is the same buffers, un-boxed.
+    # Everything the emitted commands name and must outlive: taken from the
+    # channel's hold frame when the recording is sealed (`takeholds!`), and
+    # dropped by `release!`. On the RECORDING and not on each submission,
+    # because a plan's recording is submitted every run and must outlive all of
+    # them — a submission of it holds only the recording. This is what `pinned`
+    # and `pinned_refs` were, with core deciding when the references go.
+    holds::Vector{Any}
+    # The VkManagedBuffers a submission of this recording has to order against,
+    # collected once while the commands are emitted — every array the pack
+    # walker strips and every acceleration structure a trace binds — and read by
+    # every run through core's `crosswaits!` / `stamp!`. A concrete vector, so a
+    # run boxes nothing. The set is fixed for the recording's life: the
+    # arguments are the plan's.
     sync::Vector{VkManagedBuffer}
 end
-
-"""
-    Submission
-
-What one `vkQueueSubmit2` carried: the one-shots it OWNS, given back to the
-queue's pool when the timeline passes `signal_value`; the recordings it PINNED,
-a plan's, submitted again on the next run, of which the sweep only drops the
-reference; the cross-queue waits `sync_access!` collected over their pins; and
-the refill storage the raw submit call reads, so a submission allocates
-nothing.
-
-The batch with the open command buffer and everything that existed to manage
-it deleted, and the name saying what is left.
-"""
-mutable struct Submission
-    signal_value::UInt64
-    oneshots::Vector{OneShot}
-    recordings::Vector{Recording}
-    # Cross-queue dependencies, built up by `sync_access!(::VkManagedBuffer)` at
-    # submit.
-    wait_semaphores::Vector{Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}}
-    bq::Any
-    # Raw VulkanCore structs: Vulkan.jl's `_`-level wrappers each box a `deps`
-    # vector for GC rooting — right once at setup, wrong fifty times a frame.
-    # `raw_submits[1]` points into these vectors' data, so a refill resizes only
-    # within capacity and the `vkQueueSubmit2` ccall runs under GC.@preserve.
-    raw_cb_infos::Vector{VK.vk.VkCommandBufferSubmitInfo}
-    raw_wait_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
-    raw_signal_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
-    raw_submits::Vector{VK.vk.VkSubmitInfo2}               # always length 1
-end
-
-Submission(bq) = Submission(UInt64(0), OneShot[], Recording[],
-                            Tuple{VK.Semaphore, UInt64, VK.PipelineStageFlag2}[], bq,
-                            sizehint!(VK.vk.VkCommandBufferSubmitInfo[], 8),
-                            sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
-                            sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
-                            Vector{VK.vk.VkSubmitInfo2}(undef, 1))
-
-# `BatchQueue` is Mantle's — see `src/graph/queue.jl`. This alias pins the ten
-# driver parameters to Vulkan's types so every existing `VulkanBatchQueue{VkContext}`
-# still names exactly what it did.
-const VulkanBatchQueue{C} = BatchQueue{VK.Device, VK.Queue, VK.CommandPool,
-                                       Submission, OneShot, VK.Semaphore, C, UInt64}
-
-"""The queue a closed command buffer was taken from, as the concrete type — the
-field is `Any` only because the queue is declared after the closed types."""
-@inline queueof(c::Closed) = c.bq::VulkanBatchQueue{VkContext}
-
 
 """
 Per-queue scratch for the wait and timeline-query fast paths: one semaphore
@@ -202,6 +161,74 @@ QueueSlots() = QueueSlots(Vector{VK.vk.VkSemaphore}(undef, 1), Vector{UInt64}(un
                                                         UInt32(0), C_NULL, C_NULL)),
                           Ref(UInt64(0)))
 
+"""
+    VulkanQueue{C}
+
+What this backend submits through, behind core's `SubmitChannel`: the `VkQueue`,
+its command pool and timeline semaphore, the context, and the per-queue scratch
+the submit and wait fast paths refill rather than allocate.
+
+Core's channel owns what is in flight (`outstanding`), what each submission must
+outlive (the hold frames) and the recordings it reuses (`free`). Nothing of that
+is here — this is the driver arrangement and only the driver arrangement.
+"""
+mutable struct VulkanQueue{C}
+    device::VK.Device
+    queue::VK.Queue
+    family_index::UInt32
+    cmd_pool::VK.CommandPool
+    # One timeline semaphore per queue. Each submit signals next_timeline+1.
+    timeline_sem::VK.Semaphore
+    next_timeline::UInt64
+    # The owning VkContext. A type parameter because `VkContext` is declared
+    # after this struct; `VkContext` holds a `VulkanBatchQueue{VkContext}`.
+    ctx::C
+    # How long `flush!` waits before it decides a dispatch is not completing.
+    flush_timeout_ns::UInt64
+    # What the last dispatch on this queue was, for the dispatch log and for
+    # DEVICE_LOST diagnostics. Per queue: process-wide, these attributed one
+    # queue's crash to another queue's kernel.
+    last_dispatch_info::String
+    prev_dispatch_info::String
+    # Which hardware queue of `family_index` this one drives, so
+    # `release_batch_queue!` can hand the slot back. -1 for the primary queue
+    # and for any queue that had to share it because the family ran out.
+    queue_index::Int
+    # Per-queue scratch for the wait and timeline-query fast paths.
+    slots::QueueSlots
+    # Per-queue scratch for `submit!`, refilled per call — single-writer, and a
+    # submit is synchronous, so one set per queue is exactly enough. These were
+    # per `Submission` and pooled with it; the pool is core's now and holds
+    # recordings, not driver scratch.
+    #
+    # Cross-channel dependencies for this submission, filled by core's
+    # `crosswaits!` from the buffers the closed command buffers name: pairs of
+    # (channel, token), which this backend lowers to a timeline semaphore and a
+    # value. `Any` in the first slot because the channel type names this one.
+    waits::Vector{Tuple{Any,UInt64}}
+    # Raw VulkanCore structs: Vulkan.jl's `_`-level wrappers each box a `deps`
+    # vector for GC rooting — right once at setup, wrong fifty times a frame.
+    # `raw_submits[1]` points into these vectors' data, so a refill resizes only
+    # within capacity and the `vkQueueSubmit2` ccall runs under GC.@preserve.
+    raw_cb_infos::Vector{VK.vk.VkCommandBufferSubmitInfo}
+    raw_wait_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
+    raw_signal_infos::Vector{VK.vk.VkSemaphoreSubmitInfo}
+    raw_submits::Vector{VK.vk.VkSubmitInfo2}               # always length 1
+end
+
+# The channel this backend submits on: core's `SubmitChannel` over the driver
+# bundle above. The recording type it pools is `OneShot`; a plan's `Recording`
+# keeps its own lifetime (`release!`) and is never pooled. The payload of a
+# submission is core's `Submission` over the one-shot it carried — or `nothing`
+# when a run submits its recording alone.
+const VulkanBatchQueue{C} = SubmitChannel{VulkanQueue{C}, OneShot, UInt64,
+                                          Submission{Union{Nothing,OneShot}}}
+
+"""The queue a closed command buffer was taken from, as the concrete type — the
+field is `Any` only because the queue is declared after the closed types."""
+@inline queueof(c::Closed) = c.bq::VulkanBatchQueue{VkContext}
+
+
 function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
                     queue_index::Int=-1)
     cmd_pool = VK.CommandPool(device, qf_idx;
@@ -210,27 +237,37 @@ function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ct
     type_info = VK.SemaphoreTypeCreateInfo(VK.SEMAPHORE_TYPE_TIMELINE, UInt64(0))
     timeline_sem = unwrap(VK.create_semaphore(device,
         VK.SemaphoreCreateInfo(; next=type_info)))
-    # `{typeof(ctx)}`, and the parameter is not optional. `BatchQueue` gained a
-    # context TYPE PARAMETER when it moved to `src/graph/queue.jl` — `ctx::C`,
-    # so `bq.ctx.caches` infers — and `VulkanBatchQueue{C}` leaves it free.
-    # Julia generates a field-wise constructor for the bare name and for all
-    # parameters given, never for a partial application, so the unparameterised
-    # call this was landed on the four-argument method above and raised a
-    # `MethodError` listing forty-one arguments.
-    bq = VulkanBatchQueue{typeof(ctx)}(device, queue, qf_idx, cmd_pool,
-                    Submission[], OneShot[],                # the two pools
+    q = VulkanQueue{typeof(ctx)}(device, queue, qf_idx, cmd_pool,
                     timeline_sem, UInt64(0),
-                    Any[], Any[],    # deferred_frees, deferred_as_frees
-                    Base.Threads.SpinLock(),  # deferred_frees_lock
-                    ctx,             # owning VkContext (required)
-                    Threads.threadid(),  # owning_thread
+                    ctx,
                     UInt64(120) * 1_000_000_000,            # flush timeout
-                    Outstanding{UInt64,Submission}[],       # outstanding submissions
                     "", "",                                 # last / prev dispatch info
                     queue_index,
-                    QueueSlots())                           # fast-path scratch
-    return bq
+                    QueueSlots(),
+                    Tuple{Any,UInt64}[],
+                    sizehint!(VK.vk.VkCommandBufferSubmitInfo[], 8),
+                    sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
+                    sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
+                    Vector{VK.vk.VkSubmitInfo2}(undef, 1))
+    return VulkanBatchQueue{typeof(ctx)}(q)
 end
+
+# The driver bundle behind the channel, and its fields. Every site that wrote
+# `ctxof(bq)` or `timelineof(bq)` reads one of these instead: the arrangement is
+# the backend's, the lists around it are core's, and `channelof` is the one
+# field core hands back without looking inside it.
+@inline driver(bq::VulkanBatchQueue{C}) where {C} = bq.channel::VulkanQueue{C}
+@inline ctxof(bq::VulkanBatchQueue{C}) where {C} = driver(bq).ctx::C
+@inline vkdevice(bq::VulkanBatchQueue) = driver(bq).device
+@inline vkqueue(bq::VulkanBatchQueue) = driver(bq).queue
+@inline timelineof(bq::VulkanBatchQueue) = driver(bq).timeline_sem
+
+# The Mantle device this channel submits to — what core asks `rawfree` and
+# `flush!` of. A verb and not a field: a `LavaDevice` is built AROUND its
+# default channel (it holds the channel and the pool), so a channel that held
+# its device could not be constructed first. `lavadevice` is the cache that
+# makes this one device per context rather than one per call.
+deviceof(bq::VulkanBatchQueue) = lavadevice(ctxof(bq))
 
 """
     CoopMat2Caps
@@ -1778,7 +1815,7 @@ function allocate_batch_queue!(ctx::VkContext)
         idx == ctx.next_queue_index && (ctx.next_queue_index += 1)
     else
         # All hardware queues taken — reuse primary queue with separate command pool
-        queue = ctx.default_bq.queue
+        queue = vkqueue(ctx.default_bq)
         idx = -1
     end
     bq = VulkanBatchQueue(ctx.device, queue, ctx.queue_family_index, ctx; queue_index = idx)
@@ -1802,7 +1839,7 @@ a command pool, a semaphore and its argument slabs rather than a dangling
 handle.
 """
 function release_batch_queue!(bq::VulkanBatchQueue)
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     bq === ctx.default_bq &&
         throw(LavaError("release_batch_queue!", "the context's primary queue cannot be released",
                         "Only queues from `allocate_batch_queue!` can be given back."))
@@ -1812,13 +1849,12 @@ function release_batch_queue!(bq::VulkanBatchQueue)
     # Drain before letting go. On a lost device there is nothing to wait for and
     # every call would fail, so the queue is dropped as-is.
     if !device_lost(ctx)
-        flush!(bq, ctx.device)
-        drain_deferred_frees!(bq)
-        drain_deferred_as_frees!(bq)
+        flush!(bq)
+        drain!(bq)
     end
 
     deleteat!(ctx.extra_queues, i)
-    bq.queue_index >= 0 && push!(ctx.free_queue_indices, bq.queue_index)
+    driver(bq).queue_index >= 0 && push!(ctx.free_queue_indices, driver(bq).queue_index)
     return nothing
 end
 
@@ -1843,7 +1879,7 @@ Membership in `ctx.extra_queues` is already the liveness record, so this needs n
 flag — `release_batch_queue!` removing the entry IS the transition.
 """
 function queue_released(bq::VulkanBatchQueue)
-    ctx = bq.ctx::VkContext
+    ctx = ctxof(bq)
     bq === ctx.default_bq && return false      # the primary queue is never released
     return findfirst(q -> q === bq, ctx.extra_queues) === nothing
 end

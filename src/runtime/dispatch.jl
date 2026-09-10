@@ -94,7 +94,7 @@ with `ref[] = x`, and a value that does not is passed as itself. Refusing it at
 the declaration is what keeps one from silently freezing at whatever it held
 when the plan recorded.
 
-Walks the argument tree the way the Vulkan backend's `pin_leaves!` does — per
+Walks the argument tree the way [`holdleaves!`](@ref) does — per
 concrete type, unrolled at compile time — through tuples, NamedTuples and
 immutable structs, which is the value tree a packer flattens. It stops at a
 resource, an array, and any other MUTABLE struct: those are handles that own

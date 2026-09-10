@@ -575,9 +575,19 @@ const BACKEND_VOCABULARY = (
     :indexbuffer,
     # The recording primitives a submission channel needs — 2.3. Core owns the
     # free list and when a recording may be reused; these are the driver half.
-    :makerecording, :resetrecording!, :destroyrecording!, :retire!, :recorder,
-    # What a hand-recorded pass needs beyond the graph's three — see
-    # `graphics/record.jl`. `setviewport!` is the only genuinely new one.
+    :makerecording, :resetrecording!, :destroyrecording!, :finishrecording!, :recorder,
+    # 2.2: the driver half of lifetime. Core decides WHEN a destructor may run
+    # and which channel has to wait for which; `rawfree` is the destructor and
+    # `stampof` is the storage the decision is written into. `hold!` and
+    # `holdleaves!` are core's verbs, and a backend adds the method that says
+    # what a claim means on its own closed command buffer — a reference AND the
+    # driver fact "these commands name this buffer".
+    :stampof, :deviceof, :hold!, :holdleaves!,
+    # The hand-recorded pass — see `graphics/record.jl`. The first four are what
+    # `pass!`/`draw!` lower to, and `beginrender!(::Immediate, …)` forwards to
+    # the same four, so a backend writes one pass implementation and both the
+    # graph's walk and a hand-recorded pass reach it.
+    :compile_draw, :begin_render_pass!, :record_draw!, :end_render_pass!,
     :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,                             # Vulkan needs a usage bit at allocation, Metal does not
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
@@ -611,7 +621,7 @@ const BACKEND_VOCABULARY = (
     :Framebuffer, :Window, :Surface, :Texture2D, :Sampler, :screenshot,
     :acquire_next_image!, :present_frame!, :begin_pass!, :end_pass!, :draw!,
     :draw_in_pass!, :draw_indexed_in_pass!, :draw_indirect_in_pass!, :set_viewport!,
-    :use_bindings!, :bind_textures, :blit!, :transition_image!, :readback_framebuffer,
+    :use_bindings!, :bind_textures, :transition_image!, :readback_framebuffer,
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
     # ray tracing
     # DELETED in phase 1.1: `:pin!`, `:blases`. See raytracing/api.jl.

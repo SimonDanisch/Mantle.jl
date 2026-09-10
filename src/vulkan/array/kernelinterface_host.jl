@@ -160,8 +160,8 @@ function (k::KI.Kernel{LavaBackend})(args...;
     tlas    = find_tlas_in_args(args)
     oneshot!(bq; tag = :launch) do e
         owner = e.owner
-        pin_leaves!(owner, k.kern)
-        pin_leaves!(owner, args)
+        holdleaves!(owner, k.kern)
+        holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         # `ka_launch!` drops `all_args[1]` from the compiled signature
         # (`Base.tail`, ka_backend.jl) and `pack_args_direct!` skips it as a

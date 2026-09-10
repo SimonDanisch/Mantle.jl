@@ -14,7 +14,7 @@ function draw_and_readback(pipeline, vertex_count;
         clear_color=(0f0, 0f0, 0f0, 1f0),
         color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT,
         depth=false, instances=1)
-    fb = VulkanFramebuffer(width, height; ctx = MVE.vk_context(), depth, color_format)
+    fb = Mantle.Framebuffer(MVE.LavaBackend(), width, height; depth, color_format)
     target = OffscreenTarget(fb)
     ctx = MVE.vk_context()
     bq = ctx.default_bq
@@ -30,16 +30,12 @@ end
 
     @testset "solid color triangle" begin
         function solid_vert()
-            vid = Lava.vertex_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
             x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-            Lava.set_position!(Vec4f(x, y, 0.5f0, 1.0f0))
-            return nothing
+            return (position = Vec4f(x, y, 0.5f0, 1.0f0),)
         end
-        function solid_frag()
-            Lava.gfx_output(0, Vec4f(0.0f0, 1.0f0, 0.0f0, 1.0f0))
-            return nothing
-        end
+        solid_frag(_inputs) = Vec4f(1.0f0, 1.0f0, 0.0f0, 1.0f0)
         pip = GraphicsPipeline(; vertex = VertexShader(solid_vert),
                                  fragment = FragmentShader(solid_frag),
                                  blend = Opaque(),
@@ -52,14 +48,8 @@ end
 
     @testset "clear color works" begin
         # Draw zero vertices — only clear should be visible
-        function noop_vert()
-            Lava.set_position!(Vec4f(0f0, 0f0, 0f0, 1f0))
-            return nothing
-        end
-        function noop_frag()
-            Lava.gfx_output(0, Vec4f(0f0, 0f0, 0f0, 0f0))
-            return nothing
-        end
+        noop_vert() = (position = Vec4f(0f0, 0f0, 0f0, 1f0),)
+        noop_frag(_inputs) = Vec4f(0f0, 0f0, 0f0, 0f0)
         pip = GraphicsPipeline(; vertex = VertexShader(noop_vert),
                                  fragment = FragmentShader(noop_frag),
                                  blend = Opaque(),
@@ -73,18 +63,13 @@ end
 
     @testset "vertex BDA args" begin
         function bda_vert(positions::Lava.LavaDeviceArray{Vec3f, 1})
-            vid = Lava.vertex_index()
+            vid = Mantle.vertex_index()
             @inbounds p = positions[vid]
-            Lava.set_position!(Vec4f(p[1], p[2], p[3], 1.0f0))
-            Lava.gfx_output(0, Vec4f(1.0f0, 0.0f0, 0.0f0, 1.0f0))
-            return nothing
+            return (position = Vec4f(p[1], p[2], p[3], 1.0f0),
+                    color = Vec4f(1.0f0, 0.0f0, 0.0f0, 1.0f0))
         end
-        function bda_frag()
-            c = Lava.gfx_input(Vec4f, 0)
-            Lava.gfx_output(0, c)
-            return nothing
-        end
-        pip = GraphicsPipeline(; vertex = VertexShader(bda_vert),
+        bda_frag(inputs) = inputs.color
+        pip = GraphicsPipeline(; vertex = VertexShader(bda_vert; outputs = (color = Vec4f,)),
                                  fragment = FragmentShader(bda_frag),
                                  blend = Opaque(),
                                  cull = NoCull(),
@@ -97,22 +82,15 @@ end
 
     @testset "vertex-to-fragment varying" begin
         function vary_vert()
-            vid = Lava.vertex_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
             x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-            Lava.set_position!(Vec4f(x, y, 0.5f0, 1.0f0))
-            # Pass UV as varying
             u = (x + 1f0) * 0.5f0
             v = (y + 1f0) * 0.5f0
-            Lava.gfx_output(0, Vec2f(u, v))
-            return nothing
+            return (position = Vec4f(x, y, 0.5f0, 1.0f0), uv = Vec2f(u, v))
         end
-        function vary_frag()
-            uv = Lava.gfx_input(Vec2f, 0)
-            Lava.gfx_output(0, Vec4f(uv[1], uv[2], 0f0, 1f0))
-            return nothing
-        end
-        pip = GraphicsPipeline(; vertex = VertexShader(vary_vert),
+        vary_frag(inputs) = Vec4f(inputs.uv[1], inputs.uv[2], 0f0, 1f0)
+        pip = GraphicsPipeline(; vertex = VertexShader(vary_vert; outputs = (uv = Vec2f,)),
                                  fragment = FragmentShader(vary_frag),
                                  blend = Opaque(),
                                  cull = NoCull(),
@@ -129,18 +107,16 @@ end
 
     @testset "fragment uses frag_coord" begin
         function fc_vert()
-            vid = Lava.vertex_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
             x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-            Lava.set_position!(Vec4f(x, y, 0.5f0, 1.0f0))
-            return nothing
+            return (position = Vec4f(x, y, 0.5f0, 1.0f0),)
         end
-        function fc_frag()
-            fx = Lava.frag_coord_x()
-            fy = Lava.frag_coord_y()
+        function fc_frag(_inputs)
+            fx = Mantle.frag_coord_x()
+            fy = Mantle.frag_coord_y()
             # Normalize to [0,1] range using 16x16 framebuffer
-            Lava.gfx_output(0, Vec4f(fx / 16f0, fy / 16f0, 0f0, 1f0))
-            return nothing
+            return Vec4f(fx / 16f0, fy / 16f0, 0f0, 1f0)
         end
         pip = GraphicsPipeline(; vertex = VertexShader(fc_vert),
                                  fragment = FragmentShader(fc_frag),
@@ -158,17 +134,13 @@ end
 
     @testset "alpha blend" begin
         function ab_vert()
-            vid = Lava.vertex_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
             x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-            Lava.set_position!(Vec4f(x, y, 0.5f0, 1.0f0))
-            return nothing
+            return (position = Vec4f(x, y, 0.5f0, 1.0f0),)
         end
-        function ab_frag()
-            # Semi-transparent red
-            Lava.gfx_output(0, Vec4f(1f0, 0f0, 0f0, 0.5f0))
-            return nothing
-        end
+        # Semi-transparent red
+        ab_frag(_inputs) = Vec4f(1f0, 0f0, 0f0, 0.5f0)
         pip = GraphicsPipeline(; vertex = VertexShader(ab_vert),
                                  fragment = FragmentShader(ab_frag),
                                  blend = AlphaBlend(),
@@ -193,25 +165,19 @@ end
         # did unconditionally — leaves every fragment passing against 1.0, so the
         # later draw always won and the assertion held whatever the z values were.
         function depth_vert(color::Vec4f, z_val::Float32)
-            vid = Lava.vertex_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
             x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-            Lava.set_position!(Vec4f(x, y, z_val, 1.0f0))
-            Lava.gfx_output(0, color)
-            return nothing
+            return (position = Vec4f(x, y, z_val, 1.0f0), color = color)
         end
-        function depth_frag()
-            c = Lava.gfx_input(Vec4f, 0)
-            Lava.gfx_output(0, c)
-            return nothing
-        end
-        pip = GraphicsPipeline(; vertex = VertexShader(depth_vert),
+        depth_frag(inputs) = inputs.color
+        pip = GraphicsPipeline(; vertex = VertexShader(depth_vert; outputs = (color = Vec4f,)),
                                  fragment = FragmentShader(depth_frag),
                                  blend = Opaque(),
                                  cull = NoCull(),
                                  depth = DepthLess())
 
-        fb = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
+        fb = Mantle.Framebuffer(MVE.LavaBackend(), 8, 8; depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         ctx = MVE.vk_context()
         bq = ctx.default_bq
@@ -234,7 +200,7 @@ end
 
         # The other order is the half that a per-draw depth clear could not fail:
         # near first, far second, and the far one must be rejected.
-        fb2 = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=true,
+        fb2 = Mantle.Framebuffer(MVE.LavaBackend(), 8, 8; depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         t2 = OffscreenTarget(fb2)
         draw!(bq, pip, t2, 3;
@@ -258,16 +224,12 @@ end
     # opaque, or the reverse, depending on which ran first. Every other testset
     # here defines its own shader functions, which is why nothing caught it.
     function state_vert()
-        vid = Lava.vertex_index() - Int32(1)
+        vid = Mantle.vertex_index() - Int32(1)
         x = Float32(Int32(vid & Int32(1)) * 4 - 1)
         y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-        Lava.set_position!(Vec4f(x, y, 0.5f0, 1.0f0))
-        return nothing
+        return (position = Vec4f(x, y, 0.5f0, 1.0f0),)
     end
-    function state_frag()
-        Lava.gfx_output(0, Vec4f(0.25f0, 0f0, 0f0, 1f0))
-        return nothing
-    end
+    state_frag(_inputs) = Vec4f(0.25f0, 0f0, 0f0, 1f0)
 
     @testset "pipeline state is part of the cache key" begin
         opaque = GraphicsPipeline(; vertex = VertexShader(state_vert),
@@ -287,7 +249,7 @@ end
         # opaque blending.
         @test draw_and_readback(opaque, 3)[4, 4][1] ≈ 0.25f0 atol=0.01
 
-        fb = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=false,
+        fb = Mantle.Framebuffer(MVE.LavaBackend(), 8, 8; depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         draw!(bq, additive, target, 3; clear_color=(0f0, 0f0, 0f0, 1f0))
@@ -316,24 +278,19 @@ end
         # depth, so the pipeline has to declare its format. Nothing is tested or
         # written, so the later draw wins whatever its z is.
         function zvert(color::Vec4f, z_val::Float32)
-            vid = Lava.vertex_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
             x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-            Lava.set_position!(Vec4f(x, y, z_val, 1.0f0))
-            Lava.gfx_output(0, color)
-            return nothing
+            return (position = Vec4f(x, y, z_val, 1.0f0), color = color)
         end
-        function zfrag()
-            Lava.gfx_output(0, Lava.gfx_input(Vec4f, 0))
-            return nothing
-        end
-        pip = GraphicsPipeline(; vertex = VertexShader(zvert),
+        zfrag(inputs) = inputs.color
+        pip = GraphicsPipeline(; vertex = VertexShader(zvert; outputs = (color = Vec4f,)),
                                  fragment = FragmentShader(zfrag),
                                  blend = Opaque(),
                                  cull = NoCull(),
                                  depth = DepthOff())
 
-        fb = VulkanFramebuffer(8, 8; ctx = MVE.vk_context(), depth=true,
+        fb = Mantle.Framebuffer(MVE.LavaBackend(), 8, 8; depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         ctx = MVE.vk_context()
@@ -352,25 +309,19 @@ end
 
     @testset "instanced drawing" begin
         function inst_vert()
-            vid = Lava.vertex_index() - Int32(1)
-            iid = Lava.instance_index() - Int32(1)
+            vid = Mantle.vertex_index() - Int32(1)
+            iid = Mantle.instance_index() - Int32(1)
             # Shift each instance right by 0.5 NDC
             base_x = Float32(Int32(vid & Int32(1)) * 4 - 1)
             base_y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
             x = base_x + Float32(iid) * 0.5f0
-            Lava.set_position!(Vec4f(x, base_y, 0.5f0, 1.0f0))
             # Color by instance: 0=red, 1=green
             r = iid == Int32(0) ? 1f0 : 0f0
             g = iid == Int32(1) ? 1f0 : 0f0
-            Lava.gfx_output(0, Vec4f(r, g, 0f0, 1f0))
-            return nothing
+            return (position = Vec4f(x, base_y, 0.5f0, 1.0f0), color = Vec4f(r, g, 0f0, 1f0))
         end
-        function inst_frag()
-            c = Lava.gfx_input(Vec4f, 0)
-            Lava.gfx_output(0, c)
-            return nothing
-        end
-        pip = GraphicsPipeline(; vertex = VertexShader(inst_vert),
+        inst_frag(inputs) = inputs.color
+        pip = GraphicsPipeline(; vertex = VertexShader(inst_vert; outputs = (color = Vec4f,)),
                                  fragment = FragmentShader(inst_frag),
                                  blend = Opaque(),
                                  cull = NoCull(),
@@ -408,7 +359,7 @@ end
             color_format=Vulkan.Format[Vulkan.FORMAT_R8G8B8A8_UNORM,
                                        Vulkan.FORMAT_R8G8B8A8_UNORM],
             depth_format=Vulkan.FORMAT_UNDEFINED)
-        @test compiled isa VulkanCompiledGraphicsPipeline
+        @test compiled isa MVE.VulkanCompiledGraphicsPipeline
     end
 
     @testset "a blit source is a (height, width) matrix" begin
@@ -418,16 +369,16 @@ end
         # shears the picture rather than breaking it, which is how it survived in
         # two benches; a matrix source now says so instead.
         w, h = 32, 16
-        fb = VulkanFramebuffer(w, h; ctx = MVE.vk_context(), depth=false,
+        fb = Mantle.Framebuffer(MVE.LavaBackend(), w, h; depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
-        bq = MVE.vk_context().default_bq
+        dev = Mantle.Device(Mantle.VulkanAPI())
         right = LavaArray(reshape([Vec4f(0, 1, 0, 1) for _ in 1:(w * h)], h, w))
         wrong = LavaArray(reshape([Vec4f(0, 1, 0, 1) for _ in 1:(w * h)], w, h))
-        @test_throws DimensionMismatch blit!(bq, OffscreenTarget(fb), wrong)
-        @test_throws DimensionMismatch blit!(bq, OffscreenTarget(fb),
+        @test_throws DimensionMismatch blit!(dev, OffscreenTarget(fb), wrong)
+        @test_throws DimensionMismatch blit!(dev, OffscreenTarget(fb),
                                             LavaArray([Vec4f(0, 0, 0, 1) for _ in 1:(w * h - 1)]))
 
-        blit!(bq, OffscreenTarget(fb), right)
+        blit!(dev, OffscreenTarget(fb), right)
         MVE.vk_flush!(MVE.vk_context())
         px = readback_framebuffer(fb)
         @test all(p -> p[2] > 0.9f0, px)

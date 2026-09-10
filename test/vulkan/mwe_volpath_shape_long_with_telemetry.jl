@@ -5,7 +5,7 @@
 #      (Earlier "cross-test session limit" pegged the cascade around
 #      ~7600 dispatches in one session.)
 #   2. What Lava-side state grows monotonically across iters?  If
-#      *anything* grows without bound (deferred_frees, outstanding,
+#      *anything* grows without bound (the retired list, outstanding,
 #      unified-arena blocks, timeline gaps), we have a candidate leak.
 #
 # Telemetry is sampled per iter (cheap) into a CSV-shaped buffer.
@@ -174,11 +174,11 @@ function snapshot(bq, ctx, iter)
     return (
         iter = iter,
         device_lost   = MVE.device_lost(ctx),
-        next_tl       = Int(bq.next_timeline),
+        next_tl       = Int(MVE.driver(bq).next_timeline),
         outstanding   = length(bq.outstanding),
-        free_oneshots = length(bq.free_oneshots),
-        deferred      = length(bq.deferred_frees),
-        deferred_as   = length(bq.deferred_as_frees),
+        free = length(bq.free),
+        deferred      = length(bq.pending),
+        deferred_as   = length(bq.retiring),
         # What a recording reads: blocks of the unified arena, and how many
         # regions of them are still handed out. Growth in either is the leak
         # this MWE is looking for; the two slab rings it used to read are gone.
@@ -214,9 +214,9 @@ end
 println()
 
 println("\n--- per-iter snapshots ---")
-println("iter  device_lost  next_tl  outstanding  free_oneshots  deferred  def_as  unified blocks/live")
+println("iter  device_lost  next_tl  outstanding  free  deferred  def_as  unified blocks/live")
 for s in snapshots
-    @printf "%4d  %-11s  %7d  %11d  %12d  %8d  %6d  %19s\n" s.iter string(s.device_lost) s.next_tl s.outstanding s.free_oneshots s.deferred s.deferred_as "$(s.blocks)/$(s.live_regions)"
+    @printf "%4d  %-11s  %7d  %11d  %12d  %8d  %6d  %19s\n" s.iter string(s.device_lost) s.next_tl s.outstanding s.free s.deferred s.deferred_as "$(s.blocks)/$(s.live_regions)"
 end
 
 if crashed_at == 0

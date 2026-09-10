@@ -28,6 +28,14 @@
 # of them are the DEVICE INTRINSICS (`lava_local_invocation_id_x` and friends),
 # which a syntactic scan misses entirely because they are generated in an `@eval`
 # loop; those only surfaced when a kernel refused to compile.
+#
+# What is NOT here any more: the shader builtins a body writes. `vertex_index`,
+# the `frag_coord` family and the `rt_*` intrinsics are KernelInterface's names
+# (phase 2.1), which this package reaches through `using KernelInterface` in
+# `Mantle.jl` — Lava OVERRIDES them for this target rather than defining names
+# of its own. `gfx_input`/`gfx_output`/`set_position!` and the two stage
+# wrappers stay, because they are the lowering the wrappers compile a stage's
+# NamedTuple into and nobody outside writes them.
 using Lava
 using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             CoopMatrix, FROZEN_HITS, FROZEN_LOG_MISSES, FROZEN_MISSES,
@@ -38,11 +46,11 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             LavaGfxShader, LavaRTShader, LavaSharedArray, MatrixA, MatrixB,
             Op, PushConstantInfo, Scope, SourceMap, TENSOR_CLAMP_CONSTANT,
             TENSOR_CLAMP_UNDEFINED, TargetFeatures, TessConfig,
-            VertexWrapper, WorkgroupMatrix, cache_io_error,
+            GeometryWrapper, VertexWrapper, WorkgroupMatrix, cache_io_error,
             coopmat_convert, coopmat_getcomp, coopmat_length, coopmat_load,
             coopmat_muladd, coopmat_setcomp, coopmat_store, coopmat_undef,
             coopmat_zero, disassemble_spirv, dump_spirv_to_disk,
-            frag_coord_x, frag_coord_y, frozen_binpath, frozen_cache_dir,
+            frozen_binpath, frozen_cache_dir,
             frozen_eligible, frozen_key, frozen_logging, frozen_max_bytes,
             frozen_path, frozen_rt_load, frozen_rt_store, gfx_input,
             gfx_output, invoke_frozen, kernel_dump_wanted,
@@ -56,17 +64,20 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_ray_query_get_instance_id,
             lava_ray_query_get_primitive_index, lava_ray_query_get_t,
             lava_ray_query_get_type, lava_ray_query_init,
-            lava_ray_query_proceed, lava_rt_hit_bary_u, lava_rt_hit_bary_v,
-            lava_rt_instance_custom_index, lava_rt_instance_id,
-            lava_rt_launch_id_x, lava_rt_payload_load_f32_at,
-            lava_rt_payload_store_f32_at, lava_rt_primitive_id,
-            lava_rt_ray_tmax, lava_rt_trace_ray, lava_workgroup_barrier,
+            lava_ray_query_proceed,
+            # The four RT intrinsics KernelInterface does not declare — the set
+            # there is what CALLERS use, and these are called only by this
+            # backend's own raygen and closest-hit shaders
+            # (`raytracing/raycore_compat.jl`).
+            lava_rt_payload_load_f32_at, lava_rt_payload_store_f32_at,
+            lava_rt_terminate_ray, lava_rt_trace_ray,
+            lava_workgroup_barrier,
             lava_workgroup_id_x, lava_workgroup_id_y, lava_workgroup_id_z,
             run_spirv_opt, set_position!, spirv_content_hash, subgroup_add,
             subgroup_elect, subgroup_shuffle, subgroup_size,
             tensor_layout, tensor_load,
             tensor_setdim, tensor_setstride, tensor_slice, tensor_store,
-            typestring, unroll_loops!, validate_spirv, vertex_index,
+            typestring, unroll_loops!, validate_spirv,
             wg_compute_type_alignment, wg_compute_type_size
 
 
@@ -79,7 +90,6 @@ include("runtime/memory.jl")
 include("runtime/pipeline.jl")
 include("runtime/command.jl")
 include("array/lavaarray.jl")
-include("array/pin_leaves.jl")
 include("runtime/launch.jl")
 include("runtime/frozen_pipeline.jl")
 include("runtime/workload.jl")
@@ -117,6 +127,9 @@ include("kernels/instance_writer.jl")
 # Last, because they are written against everything above.
 include("lowering.jl")
 include("graph.jl")
+# After `graph.jl`: the hand-recorded pass opens a one-shot on a `LavaDevice`,
+# which is declared there.
+include("graphics/record.jl")
 
 # ── No exports here ───────────────────────────────────────────────────────────
 #

@@ -25,7 +25,7 @@ function gpu_memory_usage()
     bq_deferred = 0
     if ctx !== nothing
         bq = ctx.default_bq
-        bq_deferred = length(bq.deferred_frees) + length(bq.deferred_as_frees)
+        bq_deferred = length(bq.pending) + length(bq.retiring)
     end
     # Both counts come off the context now, so both are guarded by the same
     # `ctx !== nothing` as the queue fields above — a caller with no device gets
@@ -37,7 +37,7 @@ function gpu_memory_usage()
     # pool reports like any other memory it holds.
     (live_bytes = ctx === nothing ? 0 : gpu_live_bytes(ctx),
      live_buffers = ctx === nothing ? 0 : live_buffer_count(ctx),
-     deferred_frees = bq_deferred,
+     retired = bq_deferred,
      unified_blocks = ctx === nothing ? 0 : length(unifiedblocks(ctx)),
      pipelines_cached = n_pipelines,
      kernels_cached = n_kernels)
@@ -55,7 +55,7 @@ function dump_state(; io::IO=stdout)
     println(io, "Device lost: ", device_lost())
     mem = gpu_memory_usage()
     live_mb = mem.live_bytes ÷ (1024 * 1024)
-    println(io, "GPU memory: $(live_mb) MiB in $(mem.live_buffers) buffers ($(mem.deferred_frees) deferred)")
+    println(io, "GPU memory: $(live_mb) MiB in $(mem.live_buffers) buffers ($(mem.retired) waiting to be destroyed)")
     println(io, "Pipelines cached: $(mem.pipelines_cached) (max $(MAX_PIPELINE_CACHE_SIZE[]))")
     println(io, "Kernels cached: $(mem.kernels_cached)")
     if ctx !== nothing
@@ -64,7 +64,7 @@ function dump_state(; io::IO=stdout)
     if ctx !== nothing
         bq = ctx.default_bq
         println(io, "Outstanding: $(length(bq.outstanding)) submission(s)")
-        # DELETED in phase 1.2: see docs/mantle-owns-it.md
+        println(io, "Recordings pooled: $(length(bq.free))")
     end
     println(io, "Flushes: $(ctx === nothing ? 0 : ctx.diag.flush_counter[])")
     println(io, "Total dispatches: $(ctx === nothing ? 0 : ctx.diag.total_dispatches[])")

@@ -2024,7 +2024,7 @@ monotonically and reused.
 A fresh allocation per multiply is not merely wasteful here: the array is
 dropped as soon as `coopmat_gemm!` returns while the dispatches reading it are
 still queued, and once the pool starts reclaiming blocks under that churn the
-result is `sync_access!: buffer is not ALIVE`. One buffer that only ever grows
+result is a use-after-free the buffer's state flags. One buffer that only ever grows
 avoids both. Callers that already own scratch (the convolution's `Workspace`)
 pass `partials` and never touch this.
 

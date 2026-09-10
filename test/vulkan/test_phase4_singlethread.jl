@@ -1,10 +1,13 @@
 using Test, Lava, Mantle
 @testset "Phase 4 — single-writer enforcement + GC counter fix" begin
 
-@testset "VulkanBatchQueue has owning_thread set to construction thread" begin
+@testset "the channel records the thread it was created on" begin
+    # `thread`, on core's `SubmitChannel`: the single-writer invariant is the
+    # same one, asked by `Mantle.ownthread` at every entry point that records or
+    # submits. It was `owning_thread` on the backend's queue.
     bq = MVE.vk_context().default_bq
-    @test hasfield(MVE.VulkanBatchQueue, :owning_thread)
-    @test bq.owning_thread == Threads.threadid()
+    @test hasfield(Mantle.SubmitChannel, :thread)
+    @test bq.thread == Threads.threadid()
 end
 
 @testset "cross-thread dispatch trips the assert" begin
@@ -28,7 +31,10 @@ end
             end
         end
         wait(task)
-        @test result[] isa AssertionError
+        # An `ErrorException` and not an `AssertionError`: recording into one
+        # channel from two threads interleaves two command streams into one
+        # buffer, which is not something to compile out.
+        @test result[] isa ErrorException
     else
         @info "Skipping cross-thread test; run with `julia -t 2+` to exercise"
     end

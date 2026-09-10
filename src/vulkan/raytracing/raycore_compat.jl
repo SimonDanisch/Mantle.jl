@@ -179,7 +179,7 @@ end
 function hw_raygen(rays::LavaDeviceArray{RTRay,1},
                    results::LavaDeviceArray{RTHitResult,1},
                    cull_mask::UInt32)
-    lid = lava_rt_launch_id_x()
+    lid = rt_launch_id_x()
 
     ray = rays[lid + 1]
 
@@ -218,12 +218,12 @@ function hw_raygen(rays::LavaDeviceArray{RTRay,1},
 end
 
 function hw_closesthit()
-    t = lava_rt_ray_tmax()
-    ci = lava_rt_instance_custom_index()
-    iid = lava_rt_instance_id()
-    pid = lava_rt_primitive_id()
-    bu = lava_rt_hit_bary_u()
-    bv = lava_rt_hit_bary_v()
+    t = rt_ray_tmax()
+    ci = rt_instance_custom_index()
+    iid = rt_instance_id()
+    pid = rt_primitive_id()
+    bu = rt_hit_bary_u()
+    bv = rt_hit_bary_v()
 
     lava_rt_payload_store_f32_at(reinterpret(Float32, UInt32(1)), UInt32(0))  # hit=1
     lava_rt_payload_store_f32_at(t, UInt32(1))

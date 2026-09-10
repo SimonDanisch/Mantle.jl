@@ -5,7 +5,7 @@ import AcceleratedKernels as AK
 
 # Regression: `copy_buffer!` BAR fast-path ([runtime/memory.jl:678-697]) used to
 # call `wait_for_write(managed)` and memcpy without flushing the active batch.
-# Since `buf.last_write` is only updated by `sync_access!` at submit time, any
+# Since a buffer's stamp is only written at submit time, any
 # kernel that was recorded but not yet submitted was invisible to the wait —
 # the memcpy would read pre-kernel memory (which RADV zeros on alloc).
 #

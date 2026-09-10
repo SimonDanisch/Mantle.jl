@@ -192,7 +192,7 @@ end
         drain!()
         baseline_pool = length(MVE.poolblocks(MVE.vk_context()))
         # Allocate + free 8 MiB arrays repeatedly. Each alloc hits the pool
-        # (< 64 MiB pool block size), and frees go to deferred_frees.
+        # (< 64 MiB pool block size), and frees are recorded on the retired list.
         for _ in 1:50
             a = MVE.LavaArray{Float32}(undef, 2_000_000)
             Mantle.unsafe_free!(a)
@@ -202,15 +202,15 @@ end
     end
 
     # ── 8. Deferred-free lists drain on submit ──
-    @testset "deferred-free lists drain" begin
+    @testset "the retired list drains" begin
         drain!()
         for _ in 1:10
             MVE.LavaArray(Float32[1, 2, 3, 4])  # orphaned, will be GC'd + deferred
         end
         GC.gc(true)
         drain!()
-        @test length(BQ.deferred_frees)    == 0
-        @test length(BQ.deferred_as_frees) == 0
+        @test length(BQ.pending)  == 0
+        @test length(BQ.retiring) == 0
     end
 
     # ── 9. Derived arrays (views/reshape) keep parent alive via DataRef ──
@@ -266,7 +266,7 @@ end
         # makes an absolute count fail on file order. The claim is about these
         # 500 dispatches — their regions belong to batches, and every batch is
         # reclaimed — so it is a DELTA.
-        before = sum(b -> length(b.live), MVE.unifiedblocks(BQ.ctx); init = 0)
+        before = sum(b -> length(b.live), MVE.unifiedblocks(MVE.ctxof(BQ)); init = 0)
         # 50 flushes × 10 dispatches = 500 total dispatches across many batches
         for _ in 1:50
             for _ in 1:10
@@ -277,13 +277,13 @@ end
         drain!()
 
         @test length(BQ.outstanding)       == 0
-        @test length(BQ.deferred_frees)    == 0
-        @test length(BQ.deferred_as_frees) == 0
+        @test length(BQ.pending)  == 0
+        @test length(BQ.retiring) == 0
         # And the argument memory those 500 dispatches read is back: every
         # region belonged to a batch, and every batch has been reclaimed. A
         # handful of blocks, not one per hundred launches.
-        @test length(MVE.unifiedblocks(BQ.ctx)) <= 4
-        @test sum(b -> length(b.live), MVE.unifiedblocks(BQ.ctx); init = 0) == before
+        @test length(MVE.unifiedblocks(MVE.ctxof(BQ))) <= 4
+        @test sum(b -> length(b.live), MVE.unifiedblocks(MVE.ctxof(BQ)); init = 0) == before
 
         @test Array(a)[1] ≈ 500f0  # sanity: kernel did run 500 times
         Mantle.unsafe_free!(a)

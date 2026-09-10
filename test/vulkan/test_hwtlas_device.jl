@@ -6,7 +6,7 @@ The mesh-push path (`push!(::VulkanTLAS, ::Mesh)` → `hwtlas_add_geometry!` →
 instance buffer, the concatenated instance buffer, and the triangle/offset GPU
 arrays. Each used the bare `LavaArray` constructor, whose queue defaults to the
 PROCESS-GLOBAL context — so a TLAS built for a second device put its instance
-records on the first, and the first cross-context use faulted (`sync_access!:
+records on the first, and the first cross-context use faulted (`submit!:
 buffer was last written on a VulkanBatchQueue from a DIFFERENT VkContext`, or a
 segfault). This was the leak that made a full RayMakie render on a non-default
 GPU fail while the isolated primitives all passed.
@@ -34,13 +34,13 @@ end
     @test default.ctx !== other.ctx
     try
         tlas = MVE.VulkanTLAS(Mantle.backend(other))
-        @test (tlas.bq.ctx)::MVE.VkContext === other.ctx
+        @test MVE.ctxof(tlas.bq)::MVE.VkContext === other.ctx
         push!(tlas, tri_mesh())
         Raycore.sync!(tlas)
 
         # THE assertions: every GPU array the push/sync allocated is on `other`,
         # not on the default. Before the fix these were on `default.ctx`.
-        batch = tlas.instance_batches[1]
+        batch = tlas.instances[1]
         @test (batch.instance_buf.buf[].ctx)::MVE.VkContext === other.ctx
         @test tlas.combined_instance_buf !== nothing
         @test (tlas.combined_instance_buf.buf[].ctx)::MVE.VkContext === other.ctx

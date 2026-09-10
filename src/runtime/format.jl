@@ -31,9 +31,9 @@ with, which the sync vocabulary already carries.
 element type is its layout, which is all of them."""
 pixelbytes(::Type{T}) where {T} = sizeof(T)
 
-"""
-    vkformat(backend, T; srgb = false) -> backend format
-
-Implemented in the backend extension, which is the only place a format is named.
-"""
-function vkformat end
+# `vkformat` is NOT declared here. It was — `function vkformat end`, in core,
+# with the methods in the backend — and phase 1.7 took it out of
+# `BACKEND_VOCABULARY` for the reason CLAUDE.md gives for code paths: the vendor
+# is in the name. A name only one backend answers, called only from that
+# backend, is that backend's own function; `mtlformat` already was. It is
+# declared in `src/vulkan/lowering.jl`, beside the table it lowers.

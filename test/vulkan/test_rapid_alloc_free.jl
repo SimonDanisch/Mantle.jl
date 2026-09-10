@@ -23,9 +23,10 @@ using Test, Lava, KernelAbstractions
     @inbounds dst[i] = val
 end
 
-"""Pending deferred frees on `bq`, read under the lock the finalizers push with."""
-pendingfrees(bq) = lock(bq.deferred_frees_lock) do
-    length(bq.deferred_frees) + length(bq.deferred_as_frees)
+"""Destroys `bq` has been asked for and not yet run, read under the lock the
+finalizers push with."""
+pendingfrees(bq) = lock(bq.pendinglock) do
+    length(bq.pending) + length(bq.retiring)
 end
 
 @testset "Rapid allocation/free cycles" begin

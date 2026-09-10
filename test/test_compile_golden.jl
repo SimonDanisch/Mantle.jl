@@ -98,7 +98,15 @@ compileresult(g, plan) = (
     # `needs_transition`, and `sync/backend.jl` asks exactly that of it. Reading
     # the answer here rather than assuming one is the difference between a
     # portable assertion and one backend's.
-    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), Any, Any)
+    #
+    # Asked with the usage a storage WRITE declares, on both sides: two
+    # dispatches writing the same bytes race even though the declared access did
+    # not change, so a backend that derives anything derives this one. It used
+    # to be asked with `Any`, which is not a `Usage` at all — the generic body
+    # calls `unordered` on it and a backend that does not short-circuit gets a
+    # `MethodError` instead of an answer.
+    wr = M.Storage{M.BufferKind, M.WriteOnly}
+    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), wr, wr)
     @test derives ? all(r.barriered) : !any(r.barriered)
 
     # Pass indices are 1-based over the schedule above, so the update pass at

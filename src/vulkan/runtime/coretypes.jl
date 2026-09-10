@@ -70,42 +70,28 @@ mutable struct VkManagedBuffer
     # a slice of one, which is still how a mapped, unified or unusually-flagged
     # buffer is served. That case is what `pool_offset` returning 0 says.
     region::Union{Nothing, Region}
-    # Cross-queue synchronization: which VulkanBatchQueue last wrote to this
-    # buffer (`nothing` = never written), and at which timeline value. Consumed
-    # by `sync_access!` to insert a semaphore wait when a submission on a
-    # different queue takes this buffer, and by the frees to know when the
-    # device is done with it. `Any` because VulkanBatchQueue is defined later.
+    # What core knows about this buffer's lifetime: which channel last submitted
+    # work naming it, under which token, and how many recordings that can still
+    # submit hold it. Read and written ONLY by `graph/lifetime.jl` — the backend
+    # supplies the storage and `stampof` says where it is, and nothing in this
+    # package decides anything from it.
     #
-    # **The owning thread's, and nobody else's.** Two plain fields, not one
-    # atomic tuple: the tuple was `Union{Nothing, Tuple{Any, UInt64}}`, and
-    # storing one boxed 48 bytes per buffer per submission — on a ray-tracing
-    # plan that syncs 48 buffers a sample, that was every byte a run allocated.
-    # The atomic existed for the finalizer thread, which read the pair to ask
-    # whether the device was done; it does not read it any more. A free that
-    # starts off the owning thread hands the buffer to the owning thread's
-    # deferred list WITHOUT looking (`vk_free!`, `unsafe_free!(::LavaBLAS)`),
-    # and the owning thread reads the pair when it drains. A finalizer that
-    # runs ON the owning thread cannot interleave the two stores in
-    # `sync_access!` either: nothing between them is a safepoint.
-    last_write_bq::Any
-    last_write_val::UInt64
-    # Lifecycle state — see BUF_STATE_* constants above.  @atomic CAS is the
+    # Three fields before — `last_write_bq::Any`, `last_write_val::UInt64` and
+    # `@atomic pins::Int`, with a `free_requested::Bool` beside them for the
+    # free the last unpin owed — each read by backend code that decided
+    # something with it: whether to insert a cross-queue wait, whether a
+    # destructor could run, whether a free had to be deferred. Those are
+    # decisions about SUBMISSIONS and they are core's now.
+    #
+    # A heap object rather than plain fields, and it costs nothing per store:
+    # writing `s.channel` and `s.token` is a pointer store and a word store, the
+    # boxing the two-field version existed to avoid (`Union{Nothing,Tuple{Any,
+    # UInt64}}`, 48 bytes a submission) is not reintroduced, and `holders` is
+    # `@atomic` because two channels on two threads can hold one buffer.
+    stamp::Stamp{UInt64}
+    # Lifecycle state — see BUF_STATE_* constants above. @atomic CAS is the
     # single point where double-free / use-after-free is ruled out.
     @atomic state::UInt8
-    # Number of live closed command buffers that have `pin!`ed an array backed
-    # by this buffer.  Incremented at pin time, decremented when the owner
-    # releases its pins (`release_pinned_refs!`, i.e. the submission completed or
-    # failed).  A buffer with pins > 0 is REACHABLE BY A BATCH THAT CAN STILL
-    # SUBMIT, so `vk_free!` must not touch it — not even to mark it DEFERRED,
-    # because `sync_access!` asserts the buffer is ALIVE at submit.
-    #
-    # This is what makes the guarantee structural rather than a timing accident:
-    # `last_write` only tells us about work already *submitted*, so a buffer
-    # pinned into a still-open batch looks idle to the timeline check.
-    @atomic pins::Int
-    # A free was requested while pins > 0.  The free is not lost, just owed: the
-    # last `unpin_buffer!` performs it.
-    @atomic free_requested::Bool
     # Owning VkContext — so upload!/download!/vk_free! don't need the global.
     # Loose type because VkContext is declared in device.jl, included first.
     ctx::Any
@@ -651,15 +637,14 @@ outlived the device they described, `ctx.id` was a surrogate for "the object I
 should have stored this on", and `RESET_CALLBACKS` existed almost entirely to
 empty them. A field dies with its context, so none of that is needed.
 
-The last two — `BLIT_PIPELINE` and `TIMESTAMP_POOL` — were never keyed at all.
-They are module-level `Ref`s holding device-owned handles, which is precisely the
-shape that produced the function-pointer crash and the memory-pool corruption;
-they survived only because the two-device probe's path (dispatch, reduction,
-GEMM) reaches neither graphics nor dispatch profiling.
-
-`blit` is `Any` because `GraphicsPipeline` is defined near the end of the include
-list — no worse than the `Ref{Any}` it replaces, and the only field that is not
-concrete.
+`TIMESTAMP_POOL` was never keyed at all: a module-level `Ref` holding a
+device-owned handle, which is precisely the shape that produced the
+function-pointer crash and the memory-pool corruption; it survived only because
+the two-device probe's path (dispatch, reduction, GEMM) reaches neither graphics
+nor dispatch profiling. The `blit` field beside it was the same shape and went
+with the backend's blit: core's `BLIT_PIPELINE` is a pipeline DESCRIPTION and
+holds no handle, and the compiled pipeline it turns into is keyed on the device
+in `gfx_pipelines`, like every other draw.
 """
 mutable struct DeviceCaches
     # Compute pipelines, keyed by SPIR-V content hash. The key no longer needs
@@ -713,7 +698,6 @@ mutable struct DeviceCaches
     # `CompiledRTPipeline` and not `LavaRTPipeline`: see the supertype above for
     # why the concrete name cannot be spelled here.
     rt_pipelines::Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
-    blit::Any
     timestamp_pool::Union{Nothing,VK.QueryPool}
     timestamp_next_slot::Int
     timestamp_period_ns::Float64
@@ -760,6 +744,6 @@ DeviceCaches() = DeviceCaches(
     MemoryPolicy(), 0, nothing, nothing, false,
     Dict{UInt64,VulkanCompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
     Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
-    nothing, nothing, 0, 1.0, Any[],
+    nothing, 0, 1.0, Any[],
     Dict{Tuple{DataType,DataType,Any},Any}(), nothing,
     IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[])

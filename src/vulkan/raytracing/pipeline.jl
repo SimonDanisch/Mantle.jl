@@ -269,11 +269,14 @@ function emit_trace!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
     cmd = e.cmd
     desc_set = get_rt_descriptor_set(pipeline, tlas)
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    hold!(e, pipeline)
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-    # The TLAS and every BLAS it instances are held by the caller's `pintrace!`;
-    # the two top-level pins that stood here were a partial copy of it.
+    # One hold covers BOTH levels: the top level references every bottom level it
+    # instances, so keeping it keeps them, and `syncbuf!(::LavaTLAS)` records
+    # each level's storage for ordering. `pintrace!` was a walk from outside
+    # doing the same thing to a list it could not see the end of.
+    hold!(e, tlas)
     push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
     # Same optional GPU timestamps as the compute paths.  Without these the
     # profiler is blind to hardware ray tracing — on an hw_accel=true frame
@@ -299,11 +302,14 @@ function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTL
     cmd = e.cmd
     desc_set = get_rt_descriptor_set(pipeline, tlas)
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    hold!(e, pipeline)
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-    # The TLAS and every BLAS it instances are held by the caller's `pintrace!`;
-    # the two top-level pins that stood here were a partial copy of it.
+    # One hold covers BOTH levels: the top level references every bottom level it
+    # instances, so keeping it keeps them, and `syncbuf!(::LavaTLAS)` records
+    # each level's storage for ordering. `pintrace!` was a walk from outside
+    # doing the same thing to a list it could not see the end of.
+    hold!(e, tlas)
     push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
     # bda_address(indirect) includes the view's element offset, so the address
     # passed to Vulkan points exactly at the 3-UInt32 command.
@@ -316,7 +322,8 @@ function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTL
     maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts_slot, e.ctx.cmd_pipeline_barrier_fptr;
         stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
-    # DELETED in phase 1.1 (lifetime) / 1.2 (object pools): see docs/mantle-owns-it.md
+    # The ray count is READ BY THE DEVICE from here.
+    hold!(e, indirect)
     emitted!(e, name)
     return nothing
 end

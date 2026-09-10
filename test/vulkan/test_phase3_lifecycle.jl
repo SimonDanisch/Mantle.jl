@@ -34,22 +34,31 @@ end
     @test a isa LavaArray
 end
 
-@testset "VulkanBatchQueue has deferred_frees_lock" begin
+@testset "the destroy that has to wait is core's list, not the backend's" begin
+    # It was `deferred_frees`, `deferred_as_frees` and a `SpinLock` on the
+    # backend's queue, with two drain functions reading a stamp the backend also
+    # owned. Core keeps one list per channel — see `graph/lifetime.jl`.
     bq = MVE.vk_context().default_bq
-    @test hasfield(MVE.VulkanBatchQueue, :deferred_frees_lock)
-    @test bq.deferred_frees_lock isa Base.Threads.SpinLock
+    @test !hasfield(MVE.VulkanQueue, :deferred_frees)
+    @test !hasfield(MVE.VulkanQueue, :deferred_as_frees)
+    @test !hasfield(MVE.VulkanQueue, :deferred_frees_lock)
+    @test bq.pendinglock isa ReentrantLock
+    @test bq.pending isa Vector{Any}
 end
 
-@testset "last_write is two plain fields, empty until a submit stamps them" begin
-    # It was one `@atomic Union{Nothing,Tuple}` field, boxing 48 B per synced
-    # buffer per submit. It is `last_write_bq`/`last_write_val` now, written
-    # and read on the owning thread only; a finalizer on another thread defers
-    # to the queue's list without reading it (see `vk_free!`).
+@testset "the stamp is one object, empty until a submit writes it" begin
+    # It was `last_write_bq` + `last_write_val` + `@atomic pins` +
+    # `free_requested`, four fields the backend read to decide a lifetime. It is
+    # a `Mantle.Stamp` now: the backend supplies the storage, core writes every
+    # value in it.
     a = LavaArray{Float32,1}(undef, (4,))
     buf = a.buf[]
     @test !hasfield(typeof(buf), :last_write)
-    @test buf.last_write_bq === nothing
-    @test buf.last_write_val == 0
+    @test !hasfield(typeof(buf), :last_write_bq)
+    st = Mantle.stampof(buf)
+    @test st.channel === nothing
+    @test st.token == 0
+    @test (@atomic st.holders) == 0
 end
 
 end  # @testset

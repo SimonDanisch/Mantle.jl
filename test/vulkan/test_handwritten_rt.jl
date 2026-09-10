@@ -13,12 +13,12 @@ using Vulkan
 using Test
 
 # The hand-written pipeline's dispatch, as the unmodelled path spells it today:
-# one one-shot holding the trace, the acceleration structures it reads pinned
-# by core's `pintrace!`, submitted when it closes. `rt_dispatch!` was the name
-# of the open-batch version.
+# one one-shot holding the trace, submitted when it closes. `emit_trace!` holds
+# the structures it reads — one `hold!` covers the top level and every bottom
+# level it instances — so there is nothing to state here. `rt_dispatch!` was the
+# name of the open-batch version.
 function rt_dispatch!(bq, pipeline, tlas, push_bda, W, H)
-    MVE.oneshot!(bq; tag = :trace) do e
-        Mantle.pintrace!(e, tlas)
+    Mantle.oneshot!(bq; tag = :trace) do e
         MVE.emit_trace!(e, pipeline, tlas, push_bda, W, H, 1)
     end
     return nothing

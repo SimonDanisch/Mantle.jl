@@ -47,7 +47,7 @@ import Mantle: Attribute, Device, Graph, Plan, Surface, Transient,
     needs_transition, newpass, npipelines, overlapping, passed, passes, pool,
     rawalloc, rawfree, recorded, release!, remap!, remappable,
     render!, retire!, screenshot, stages, storage, stride, syncbackend,
-    touch!, upload!, usages, use, vkformat, waitfor
+    touch!, upload!, usages, use, waitfor
 
 # The API verbs. Every one of these is declared in `graphics/commands.jl` or
 # `raytracing/api.jl` and implemented below — `import`, so the methods land on
@@ -55,15 +55,24 @@ import Mantle: Attribute, Device, Graph, Plan, Surface, Transient,
 # `using` they would be new functions in this module and silently unreachable,
 # which is the same trap the lists above exist for.
 # The queue lifecycle verbs and the device-idle wait. Declared in
-# `src/graph/queue.jl` beside the shared `BatchQueue` struct; the methods below
-# are Vulkan's. `import`, so `Mantle.flush!` resolves for a caller like RayMakie
+# `src/graph/queue.jl` beside `SubmitChannel`; the methods below are Vulkan's. `import`, so `Mantle.flush!` resolves for a caller like RayMakie
 # rather than being a separate `MantleVulkanExt.flush!` nothing can reach.
 import Mantle: allocate_batch_queue!, release_batch_queue!, waitfor!,
     flush!, waitidle, supports_graphics, use_bindings!, devicearray, supports_rt_pipeline,
     supports_batch_queue, submit!, batchqueue, devices, defaultdevice!,
     # The submission record — `graph/submission.jl`. One list of what the device
     # has been given, replacing the five separate records this backend kept.
-    Outstanding, submitted!, newest, sweep!, idle, outstanding, recycle!
+    Outstanding, submitted!, newest, sweep!, idle, outstanding, recycle!,
+    # Lifetime and recording reuse — `graph/lifetime.jl`, phases 2.2 and 2.3.
+    # `hold!` is what `pin!` meant; `stampof` and `rawfree` are the storage and
+    # the destructor core decides with; the four `*recording*` verbs are the
+    # command buffer a channel pools.
+    SubmitChannel, Stamp, hold!, holdleaves!, unhold!, takeholds!, oneshot!,
+    acquire!, drain!, reclaim!, stampof, deviceof, handover!,
+    crosswaits!, stamp!, ownthread, Submission, channelof,
+    makerecording, resetrecording!, destroyrecording!, finishrecording!, recorder,
+    # The instances a top-level structure holds — `raytracing/batches.jl`, 2.5.
+    InstanceBatches, register!, batchof, ninstances
 
 import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
     draw_indirect_in_pass!, set_viewport!, reset_device!, blit!, present_frame!,
@@ -72,8 +81,8 @@ import Mantle: begin_pass!, end_pass!, draw_in_pass!, draw_indexed_in_pass!,
 import Mantle: build_accel!, refit_tlas!, set_anyhit_pipeline!, trace_rays!,
     trace_rays_indirect!, trace_closest_hits!, trace_closest_hits_indirect!,
     trace_closest_hits_anyhit!, trace_closest_hits_anyhit_indirect!
-# DELETED in phase 1.1: `pin!` and `blases`. Lifetime is core's; see
-# docs/mantle-owns-it.md 2.2.
+# `pin!` and `blases` are gone: lifetime is core's, and what this backend
+# imports for it is in the list above. See docs/mantle-owns-it.md 2.2.
 
 # The graph's backend interface — `src/graph/backend.jl` is the whole of what
 # Mantle asks of a backend, and these are this backend's answers. `isdepth` is
@@ -101,7 +110,7 @@ import Mantle: isdepth, target_extent, checkextents, region_bda,
 # than reached through `using Mantle` because `VulkanTexture2D <: Texture2D`
 # needs the name at type-definition time.
 import Mantle: Texture, Texture1D, Texture2D, Sampler, TextureBindings,
-    Framebuffer, RenderTarget, HWTLAS, AccelBuildContext, BatchQueue,
+    Framebuffer, RenderTarget, HWTLAS, AccelBuildContext,
     ExternalImage, CompiledGraphicsPipeline, Window
 
 # Not a supertype — a concrete Mantle type this backend adds a CONSTRUCTOR to,
@@ -139,7 +148,13 @@ import Mantle: ArgMemory, Attr, BufferBlock, BufferRange, Buffers, Commands,
     Predicate, supportspredicate,
     initial_usage, kernelfor, lastuses, lp_of, makeimage,
     rawargs, remakeimage!,
-    record_draw!,
+    # The hand-recorded pass — core's `pass!` DSL in `graphics/record.jl`. Every
+    # one of these is EXTENDED by `src/vulkan/graphics/record.jl`, so every one
+    # has to be imported: a method on an un-imported name defines a new function
+    # in this module and core's `pass!` never sees it, which is exactly what
+    # `MethodError: no method matching blittarget(::OffscreenTarget)` was.
+    begin_render_pass!, end_render_pass!, record_draw!, setviewport!,
+    compile_draw, colorimage, depthimage, currentimage, blittarget,
     # The modelled trace pass: the declaration this backend compiles, and the
     # compiled form it records. `Trace` is exported and would arrive through
     # `using Mantle`; it is listed because `CompiledTrace` is not, and a pair

@@ -218,6 +218,17 @@ end
 # ── formats ───────────────────────────────────────────────────────────────────
 # sRGB and UNORM have identical memory and differ only in the hardware's
 # conversion on read and write, so it is a flag rather than a different type.
+"""
+    vkformat(api, T; srgb = false) -> VK.Format
+
+The Vulkan format a Julia element type is stored in.
+
+This backend's own function, declared here rather than in core: the vendor is in
+the name, only this backend answers it and only this backend calls it. Metal's
+`mtlformat` is the counterpart and was always local in the same way.
+"""
+function vkformat end
+
 vkformat(::VulkanAPI, ::Type{RGBA{N0f8}}; srgb::Bool = false) =
     srgb ? VK.FORMAT_R8G8B8A8_SRGB : VK.FORMAT_R8G8B8A8_UNORM
 vkformat(::VulkanAPI, ::Type{BGRA{N0f8}}; srgb::Bool = false) =

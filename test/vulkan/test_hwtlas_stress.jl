@@ -442,7 +442,7 @@ end
         Raycore.sync!(hwtlas)
 
         @test Raycore.n_instances(hwtlas) == 1
-        @test length(hwtlas.instance_batches) == 1
+        @test length(hwtlas.instances) == 1
 
         # HW trace through the freshly-built BVH.  If the previous iter's
         # trace dispatch hadn't completed before sync! freed the old HWTLAS
@@ -482,7 +482,7 @@ end
         Raycore.sync!(hwtlas)
 
         @test Raycore.n_instances(hwtlas) == N
-        @test length(hwtlas.instance_batches) == 1
+        @test length(hwtlas.instances) == 1
 
         # Trace + verify against THIS frame's geometry.  A UAF on the freed
         # previous-frame instance_buf or BLAS would manifest as wrong hits
@@ -508,7 +508,7 @@ end
         elseif op == 2 && length(handles) > 0
             i = rand(rng, 1:length(handles))
             h = handles[i]
-            n_h = hwtlas.instance_batches[hwtlas.handle_to_batch_idx[h]].n
+            n_h = Mantle.batchof(hwtlas.instances, h).n
             Raycore.delete!(hwtlas, h)
             deleteat!(handles, i)
             expected -= n_h

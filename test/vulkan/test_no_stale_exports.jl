@@ -56,28 +56,30 @@ end
                    getproperty(Lava, n) === getproperty(Mantle, n), shared)
 end
 
-@testset "the shader builtins are Mantle's names, implemented by Lava" begin
+@testset "the shader builtins are KernelInterface's names, overridden by Lava" begin
     # `vertex_index`, `instance_index` and the `frag_coord` family are DECLARED
-    # by Mantle (`function vertex_index end`, no methods) so that a shader can
-    # write `vertex_index()` and have the compiler that is running decide what
-    # it means — Lava's implementation on Vulkan, Metal's on Metal, through
-    # `@lava_device_override` / `@device_override`.
+    # by KernelInterface (`function vertex_index end`, no methods) so that a
+    # shader can write `vertex_index()` and have the compiler that is running
+    # decide what it means — Lava's implementation on Vulkan, Metal's on Metal,
+    # through `@lava_device_override` / `@device_override`. Mantle re-exports the
+    # names so `using Mantle` is enough downstream.
     #
-    # Lava used to EXPORT its implementations under the same names, and this
-    # testset exempted them from the identity check above as "on purpose". It
-    # was not: two modules exporting one name that resolves to two functions
-    # leaves the bare name unbound in any scope that loads both, so a shader
-    # naming `vertex_index()` in a file with `using Mantle, Lava` inferred `Any`
-    # and failed to compile — `test_window.jl` had not compiled a vertex shader
-    # since the split. Mantle exports the name; Lava defines the implementation
-    # and does not export it; the backend reaches it qualified.
-    for n in Mantle.SHADER_BUILTINS
+    # They were declared in Mantle and defined AGAIN in Lava, with a bridge in
+    # `MantleVulkanExt`; and before that Lava EXPORTED its own under the same
+    # names, which left the bare name unbound in any scope that loaded both — a
+    # shader naming `vertex_index()` in a file with `using Mantle, Lava`
+    # inferred `Any` and failed to compile. One declaration, in a module both
+    # depend on, is what closes it for good.
+    builtins = (:vertex_index, :instance_index, :frag_coord, :frag_coord_x,
+                :frag_coord_y, :frag_coord_z, :frag_coord_w, :frag_coord_xy,
+                :dFdx, :dFdy, :set_point_size!, :sample_texture_2d,
+                :emit_vertex!, :end_primitive!, :primitive_id_in)
+    for n in builtins
         @test n in names(Mantle)
         @test !(n in names(Lava))
-        # …but it must still be DEFINED there, or the override binds nothing.
-        @test isdefined(Lava, n)
-        @test parentmodule(getproperty(Mantle, n)) === Mantle
-        @test parentmodule(getproperty(Lava, n)) === Lava
+        # Neither package DEFINES it: the function is KernelInterface's, and
+        # what Lava adds is a method on it in its own overlay table.
+        @test nameof(parentmodule(getproperty(Mantle, n))) === :KernelInterface
     end
 end
 
