@@ -40,7 +40,9 @@ function allclosed(bq)
         sub.recording === nothing || push!(cs, sub.recording)
         # A plan's recording is not the payload — it is submitted again next
         # run — so it rides in the holds like anything else the commands name.
-        for h in sub.holds
+        # `nothing` when the submission held nothing at all, which is what a
+        # recorded run with no store to land is.
+        for h in something(sub.holds, ())
             h isa MVE.Closed && push!(cs, h)
         end
     end
@@ -123,7 +125,10 @@ end
     @test r == (submits = 1, barriers = 0, tokens = 1, open = false)
     sub = last(bq.outstanding).payload
     @test sub.recording === nothing
-    @test isempty(sub.holds)
+    # No hold frame at all, not an empty one — see `unhold!(::SubmitChannel,
+    # ::Nothing)`: a submission that holds nothing is handed none, so a run in
+    # a loop that never waits allocates zero.
+    @test sub.holds === nothing
 
     # With a store pending: the store's one-shot in front of the recording, in
     # ONE submission.

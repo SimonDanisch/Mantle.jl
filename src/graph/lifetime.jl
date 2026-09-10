@@ -309,7 +309,7 @@ submission that holds nothing allocates nothing.
 """
 function takeholds!(ch::SubmitChannel)
     ownthread(ch)
-    isempty(ch.holds) && return emptyframe!(ch)
+    isempty(ch.holds) && return nothing
     return pop!(ch.holds)
 end
 
@@ -339,6 +339,15 @@ function unhold!(ch::SubmitChannel, h::Vector{Any})
     push!(ch.spare, h)
     return nothing
 end
+
+# A submission that held nothing carries no list to give back. `nothing` and not
+# an empty vector, because a recorded plan's run is exactly this case and it is
+# the hot one: `closerun!` submits the plan's own recording, holds nothing of
+# its own, and there is no open recording to pop a frame from. Handing it a
+# fresh `Any[]` cost 32 bytes a frame once the spare pool drained — which it
+# does whenever submissions outrun reclaim, i.e. in any render loop that does
+# not wait — and `test_render_allocates_nothing.jl` is the guard.
+unhold!(::SubmitChannel, ::Nothing) = nothing
 
 # Open a hold frame for a recording that is about to be built.
 pushholds!(ch::SubmitChannel) = (push!(ch.holds, emptyframe!(ch)); nothing)
@@ -625,7 +634,8 @@ dropped.
 """
 struct Submission{R}
     recording::R
-    holds::Vector{Any}
+    # `nothing` when the submission held nothing — see `unhold!`.
+    holds::Union{Nothing,Vector{Any}}
 end
 
 # The payload half of the two facts. Nothing is destroyed here — dropping the

@@ -131,7 +131,10 @@ mutable struct Recording <: Closed
     # because a plan's recording is submitted every run and must outlive all of
     # them — a submission of it holds only the recording. This is what `pinned`
     # and `pinned_refs` were, with core deciding when the references go.
-    holds::Vector{Any}
+    #
+    # `nothing` before the recording is sealed and after `release!`: a hold
+    # frame is a list core hands over, and there is none until one is taken.
+    holds::Union{Nothing,Vector{Any}}
     # The VkManagedBuffers a submission of this recording has to order against,
     # collected once while the commands are emitted — every array the pack
     # walker strips and every acceleration structure a trace binds — and read by

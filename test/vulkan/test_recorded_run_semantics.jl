@@ -181,8 +181,11 @@ end
     sub = last(bq.outstanding).payload
     @test sub.recording === nothing
     # Nothing was opened, so there is no hold frame and nothing to hold: the
-    # plan owns the recording and `release!` is what waits for it.
-    @test isempty(sub.holds)
+    # plan owns the recording and `release!` is what waits for it. `nothing`
+    # and not an empty list — a submission that holds nothing is handed none,
+    # which is what makes a recorded run allocate zero bytes
+    # (`test_run_allocates_nothing.jl`, and RayMakie's render loop).
+    @test sub.holds === nothing
     KA.synchronize(be)
     # And nothing is left claiming to be in flight once the device has caught up.
     Mantle.sweep!(bq)

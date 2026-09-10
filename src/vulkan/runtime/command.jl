@@ -174,7 +174,7 @@ function recording!(bq::VulkanBatchQueue)
     throw_if_error(bq, "vkBeginCommandBuffer",
         VK._begin_command_buffer(o.cmd, BEGIN_INFO_SIMULTANEOUS))
     return Recording(bq, o.cmd, Region[], Any[], UInt64(0), true,
-                     Tuple{UInt64,Ptr{UInt8}}[], Any[], VkManagedBuffer[])
+                     Tuple{UInt64,Ptr{UInt8}}[], nothing, VkManagedBuffer[])
 end
 
 """Close a command buffer. Nothing more may be emitted into it, and it can be
@@ -220,11 +220,10 @@ function release!(rec::Recording)
     end
     rec.token = 0
     rec.open && seal!(rec)          # takes the hold frame if it is still open
-    # The list itself goes back to the channel's spares; the recording keeps a
-    # fresh one, because `release!` may be called on a plan that is recorded
-    # again afterwards.
+    # The list itself goes back to the channel's spares, and the recording is
+    # left with none — `sealed!` takes a fresh frame if it is recorded again.
     unhold!(bq, rec.holds)
-    rec.holds = Any[]
+    rec.holds = nothing
     empty!(rec.sync)
     let p = pool(dev)
         for r in rec.regions
