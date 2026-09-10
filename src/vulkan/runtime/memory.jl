@@ -1042,6 +1042,7 @@ function destroy_pool!(ctx::VkContext)
     empty!(p.arenas)
     empty!(p.pending)
     empty!(p.retiring)
+    empty!(p.retiring_at)
     delete!(DEVICES, ctx)
     return nothing
 end

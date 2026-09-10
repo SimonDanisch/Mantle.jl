@@ -168,15 +168,19 @@ supports_graphics(backend) = false
 Whether this backend has the stage at all.
 
 `false` by default, so a backend opts in — and both defaults are the honest
-answer for Metal, which has no geometry stage (Apple's replacement is the mesh
-pipeline, which Mantle does not describe) and no tessellation through Mantle.
+answer for Metal, which has no geometry stage and no tessellation.
 
 They exist because `GraphicsPipeline` HAS a `geometry` field and a
 `tess_control`/`tess_eval` pair, so a caller can build one that a device cannot
 run — and the only way to find out was to compile it and read the error. A
 capability a caller cannot ask about is one they find out about from a shader
-compile, which is the wrong place and the wrong time. RayMakie's overlay is the
-caller that needs the answer: its scatter path emits geometry.
+compile, which is the wrong place and the wrong time.
+
+`supports_geometry_stage` answering `false` no longer means a geometry pipeline
+cannot be drawn: a backend with a mesh pipeline runs it through
+[`lower_geometry_to_mesh`](@ref), which is what Metal's `compile_draw` does. So
+this asks which STAGE a device has, and [`supports_mesh_pipeline`](@ref) is the
+question a caller holding a geometry body should ask instead.
 """
 supports_geometry_stage(backend) = false
 @doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
@@ -191,7 +195,8 @@ that one answering `false` is not the end of the sentence. Metal has no geometry
 stage, but Apple's replacement for it is the mesh pipeline, and Khronos arrived
 at the same two stages under different names in `VK_EXT_mesh_shader` — so this
 is the capability a caller with a geometry body actually wants to ask about. A
-geometry stage is expressible on a mesh pipeline; the reverse is not.
+geometry stage is expressible on a mesh pipeline; the reverse is not, and
+[`lower_geometry_to_mesh`](@ref) is that expression.
 
 `false` by default, so a backend opts in.
 """

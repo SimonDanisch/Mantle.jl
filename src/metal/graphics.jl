@@ -106,6 +106,12 @@ Dispatches on the BACKEND, matching `Texture2D(::LavaBackend, …)` on the other
 side — with two backends loaded there is nothing else to tell them apart by. The
 element type names the format, as everywhere a caller names one in Mantle.
 
+`data[x, y]`: the FIRST index is the horizontal one. That is the convention the
+whole Julia GPU stack already uses — GLMakie's `Texture(::Matrix)`, and the
+Vulkan side here, both hand a column-major matrix to the driver as tightly packed
+rows, which makes a Julia column one row of the image — and it is what makes
+Makie's glyph atlas sample as itself rather than as its transpose.
+
 `storageMode` is Shared and the upload goes through `replace_region!` rather than
 a buffer-backed texture: a linear texture cannot be sampled on an Apple GPU, and
 the same storage cannot be both a render target and a sampled source. This is
@@ -113,15 +119,19 @@ the same reason `MetalFramebuffer` reads back through `getBytes!`.
 """
 function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {T}
     dev = Metal.device()
-    h, w = size(data)          # (row, col), which is (height, width)
+    w, h = size(data)          # first index is x, second is y
     desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, false)
     desc.usage = MTLm.MTLTextureUsageShaderRead
     desc.storageMode = MTLm.MTLStorageModeShared
     tex = MTLm.MTLTexture(dev, desc)
-    # Metal wants rows contiguous, and a Julia matrix is COLUMN-major, so the
-    # transpose is what makes `bytesPerRow` mean what Metal reads it as. Copying
-    # rather than reinterpreting, because a lazy transpose has no pointer.
-    rows = collect(transpose(data))
+    # A Julia matrix is COLUMN-major, so its columns are already the contiguous
+    # runs `bytesPerRow` describes — one column IS one row of the image, which is
+    # the same reading the Vulkan upload takes of the same bytes. Transposing here
+    # instead was the bug: the atlas came out mirrored about its diagonal, and text
+    # rendered as pieces of the wrong glyphs.
+    #
+    # `collect` for anything without a pointer to hand — a view or a lazy adjoint.
+    rows = data isa DenseMatrix{T} ? data : collect(data)
     GC.@preserve rows MTLm.replace_region!(
         tex, MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1)), 0,
         convert(Ptr{Cvoid}, pointer(rows)), w * sizeof(T))
@@ -235,6 +245,23 @@ function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # an encoding for 8-bit channels, and a float target holds linear values.
     T === RGBA{Float16} && return MTLm.MTLPixelFormatRGBA16Float
     T === RGBA{Float32} && return MTLm.MTLPixelFormatRGBA32Float
+
+    # The TUPLE spellings, which is what a portable shader says a texel is:
+    # `NTuple{4,Float32}` is how `Vec4f` reaches a stage, and the Vulkan side's
+    # `julia_to_vk_format` has taken them all along. Without them an `image!` or a
+    # `heatmap!` — whose texels RayMakie builds as `NTuple{4,Float32}` — died in
+    # `Texture2D` with "no Metal pixel format", and the plot silently did not draw
+    # while the axis around it did.
+    T === NTuple{4,Float32} && return MTLm.MTLPixelFormatRGBA32Float
+    T === NTuple{2,Float32} && return MTLm.MTLPixelFormatRG32Float
+    T === NTuple{4,Float16} && return MTLm.MTLPixelFormatRGBA16Float
+    T === NTuple{2,Float16} && return MTLm.MTLPixelFormatRG16Float
+    T === NTuple{4,UInt8}   && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
+                                             MTLm.MTLPixelFormatRGBA8Unorm
+    T === UInt8             && return MTLm.MTLPixelFormatR8Unorm
+    # `NTuple{3,Float32}` is deliberately absent: Metal has no three-channel pixel
+    # format at all, and Vulkan's `R32G32B32_SFLOAT` is optional there too. A caller
+    # with three channels pads to four.
     error("no Metal pixel format for $T — extend `mtlformat` in metal/graphics.jl")
 end
 
@@ -345,12 +372,25 @@ for every attachment count.
     return :(Out($vals))
 end
 
-"""A vertex shader that returns `(position = …, varyings…)`."""
-struct MetalVertexStage{F, Out} end
+"""
+A vertex shader that returns `(position = …, varyings…)`.
 
+`VID` is whether the body takes its vertex index as a leading
+`KernelInterface.VertexIndex` instead of calling `vertex_index()`. Decided on the
+HOST, from the method table, and carried as a type parameter — a `@generated`
+function may not ask `hasmethod` itself, and the answer is a property of the
+shader rather than of one invocation. See `KernelInterface.wantsvertexindex`.
+"""
+struct MetalVertexStage{F, Out, VID} end
 
-@generated function (::MetalVertexStage{F,Out})(args::Vararg{Any,N}) where {F,Out,N}
-    call = Expr(:call, :(F.instance), (:(args[$i]) for i in 1:(N - 1))...)
+# The old two-parameter spelling, for a body that calls the builtin. Kept as a
+# constructor rather than a second `@generated` method so there is one body.
+MetalVertexStage{F,Out}() where {F,Out} = MetalVertexStage{F,Out,false}()
+
+@generated function (::MetalVertexStage{F,Out,VID})(args::Vararg{Any,N}) where {F,Out,VID,N}
+    bufs = (:(args[$i]) for i in 1:(N - 1))
+    call = VID ? Expr(:call, :(F.instance), :(KI.VertexIndex(KI.vertex_index())), bufs...) :
+                 Expr(:call, :(F.instance), bufs...)
     # By NAME, not by position: the shader is free to list its varyings in
     # whatever order reads well, and the declaration is what fixes the layout.
     # `position` is the one field with a meaning of its own — every vertex stage
@@ -379,11 +419,22 @@ buffers keep the leading positions they were given, so their `air.buffer`
 location indices are the slots `record_draw!` binds, and the output stays last
 because that is what `stage_return!` takes it to be.
 """
-struct MetalFragmentStage{F, VIn, Out} end
+struct MetalFragmentStage{F, VIn, Out, NT} end
 
-@generated function (::MetalFragmentStage{F,VIn,Out})(args::Vararg{Any,N}) where {F,VIn,Out,N}
+# The old three-parameter spelling, for a stage that samples nothing.
+MetalFragmentStage{F,VIn,Out}() where {F,VIn,Out} = MetalFragmentStage{F,VIn,Out,0}()
+
+@generated function (::MetalFragmentStage{F,VIn,Out,NT})(args::Vararg{Any,N}) where {F,VIn,Out,NT,N}
     nv = fieldcount(VIn)
-    nbuf = N - 1 - nv
+    # `NT` textures cost TWO parameters each — the texture and its sampler — and
+    # they come after the varyings, which is the order the driver requires; see
+    # `texture_markers`. The body takes neither: a texture reaches
+    # `sample_texture_2d` through the lowering in `Metal/src/compiler/texture.jl`,
+    # because AIR has no way to name one from a function that was not handed it.
+    ntex = 2 * NT
+    nbuf = N - 1 - nv - ntex
+    nbuf >= 0 || error("a fragment stage with $nv varyings and $NT textures needs " *
+                       "at least $(nv + ntex + 1) parameters, got $N")
     ins = Expr(:tuple, (:(args[$(nbuf + i)].value) for i in 1:nv)...)
     call = Expr(:call, :(F.instance), :(VIn($ins)), (:(args[$i]) for i in 1:nbuf)...)
     quote
@@ -403,6 +454,29 @@ argument metadata reproducible.
 """
 varying_markers(VIn::Type) =
     Tuple(Metal.Varying{n, fieldtype(VIn, n)} for n in fieldnames(VIn))
+
+"""
+    texture_markers(n) -> Tuple
+
+The parameters a stage that samples `n` bound textures needs: one texture pointer
+and one sampler pointer each, in binding order.
+
+Both are real parameters and not markers in the `Varying` sense, because in AIR a
+texture IS an entry-function parameter — that is the whole reason
+`sample_texture_2d` cannot be a free function on this backend without a lowering.
+See `Metal/src/compiler/texture.jl`.
+
+They come AFTER the varyings, which is where the shipped shaders put them —
+`GPUPass` in CoreDisplay's metallib is `(position, texCoord, texture, buffer,
+texture, sampler, …)`. That order is not cosmetic: with the textures in FRONT of
+the interpolated inputs the Metal compiler service segfaults in
+`AGCLLVMUserFragmentShader::setupShaderInputs`, so a stage that samples anything
+fails to build a pipeline with `XPC_ERROR_CONNECTION_INTERRUPTED` and no
+diagnostic. The buffers stay first either way, which is what keeps their
+`air.location_index` the slot the encoder binds them at.
+"""
+texture_markers(n::Integer) =
+    (ntuple(_ -> Metal.Texture2DPtr{Float32}, n)..., ntuple(_ -> Metal.SamplerPtr, n)...)
 
 """Compiled pipelines, keyed on everything baked into one."""
 const GFX_CACHE = Dict{Any,Any}()
@@ -433,7 +507,14 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
                           vert_bufs::Type, frag_bufs::Type)
     VIn  = varying_type(p)
     VOut = stage_output_type(p, Val(:vertex))
-    vfn = MetalVertexStage{typeof(Mantle.stagefunction(p.vertex)), VOut}()
+    vf = Mantle.stagefunction(p.vertex)
+    # Asked of the method table, here on the host: a body that declares the
+    # leading `VertexIndex` is handed one, and one that does not is untouched. The
+    # two spellings are the same number — see `KernelInterface.VertexIndex` — and
+    # a shader that has both runs natively through this and lowers onto a mesh
+    # stage through `lower_geometry_to_mesh`.
+    vid = KI.wantsvertexindex(vf, Tuple(vert_bufs.parameters))
+    vfn = MetalVertexStage{typeof(vf), VOut, vid}()
     vert_tt = Tuple{vert_bufs.parameters..., Core.LLVMPtr{VOut,1}}
     # No colour attachment means no fragment stage at all — a shadow pass writes
     # depth and nothing else, and its `fragment` returns `nothing`. Metal spells
@@ -441,9 +522,10 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     # returns an EMPTY struct instead is not a thing AIR has.
     ncolor == 0 && return vfn, nothing, vert_tt, nothing
     FOut = stage_output_type(p, Val(:fragment), ncolor)
-    ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut}()
+    ntex = Mantle.ntextures(p.fragment)
+    ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
-                    Core.LLVMPtr{FOut,1}}
+                    texture_markers(ntex)..., Core.LLVMPtr{FOut,1}}
     return vfn, ffn, vert_tt, frag_tt
 end
 
@@ -467,14 +549,20 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     # `supports_geometry_stage(backend)` BEFORE building a pipeline, which is
     # the point of phase 2.7 — the answer used to be reachable only by
     # compiling one and reading the error.
+    #
+    # A geometry pipeline does not normally reach this function at all:
+    # `compile_draw` dispatches one onto the mesh path (`metal/mesh.jl`), which
+    # lowers it. This is the direct entry point, and it compiles a NATIVE stage
+    # per stage — which is the one thing this backend has no program kind for.
     be = Metal.MetalBackend()
     p.geometry === nothing || Mantle.supports_geometry_stage(be) ||
-        error("this backend has no geometry stage. Apple's replacement is the " *
-              "mesh pipeline, which this backend DOES run — see " *
-              "`Mantle.MeshPipeline` and `supports_mesh_pipeline`. Lower the " *
-              "pipeline with `Mantle.lower_geometry_to_mesh` instead of asking " *
-              "for a geometry stage; ask `supports_geometry_stage(backend)` " *
-              "first if you need to know which you are on.")
+        error("`compile_pipeline` compiles each stage of the pipeline as itself, " *
+              "and this backend has no geometry stage to compile one into. Apple's " *
+              "replacement is the mesh pipeline, which this backend DOES run: go " *
+              "through `Mantle.compile_draw`, which lowers a geometry pipeline " *
+              "with `Mantle.lower_geometry_to_mesh` and compiles the mesh " *
+              "pipeline that comes out. Ask `supports_geometry_stage(backend)` " *
+              "only if you need to know which of the two ran.")
     (p.tess_control === nothing && p.tess_eval === nothing) ||
         Mantle.supports_tessellation(be) ||
         error("this backend has no tessellation; ask " *
@@ -990,24 +1078,39 @@ end
 
 The rectangle the following draws land in, and the scissor derived from it.
 
-`abs(height)`, and that is deliberate. Vulkan expresses "clip-space +y at the
-top" as a NEGATIVE viewport height; Metal has no such thing — this backend
-mirrors y in the vertex stage instead (`flip_clip`, and the matching
-`MTLWindingCounterClockwise`, see `mantle-clip-space-is-vulkans`). So the sign
-carries no extra instruction here: honouring it would flip a second time and
-undo the shader's.
+A NEGATIVE `height` is Vulkan's way of saying "clip-space +y at the top", and it
+names the BOTTOM edge in `y`: the rect runs from `y + height` up to `y`. Metal
+has no such spelling — this backend mirrors y in the vertex stage instead
+(`flip_clip`, and the matching `MTLWindingCounterClockwise`, see
+`mantle-clip-space-is-vulkans`) — so the flip itself is already paid for. What
+the sign still carries is WHICH EDGE `y` is, and that has to be honoured: it is
+the same rectangle, named from the other side.
 
-NOT verified against Vulkan side by side. A mirrored scene still looks like a
-scene, which is exactly how the clip flip got in unnoticed in the first place;
-the check is two renders of the same overlay, one per backend, diffed.
+Metal takes a negative `MTLViewport.height` and means by it what Vulkan does, so
+the sign is passed straight through and the two conventions meet without a
+special case. Only the SCISSOR is normalised, because a scissor rectangle has no
+orientation.
+
+Taking `abs(height)` and keeping `y` was the bug this replaces. A full-target
+overlay is recorded as `(0, h, w, -h)`, which reached the encoder as a viewport
+at `y = h` of height `h` — the whole rect one target BELOW the target. What came
+out was a figure at the wrong offset and scale with everything above the bottom
+edge missing: an axis frame, its ticks and its labels were simply outside. And
+relocating the rect without keeping the sign is not enough either: it lands in
+the right place and draws upside down, because the mirror in the vertex stage is
+then never undone.
 """
 function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
-    ah = abs(hgt)
+    # The SIGN goes through untouched: it is the only thing that can undo the mirror
+    # the vertex stage applies, and a caller asking for a negative height is asking
+    # for exactly that. The scissor is the same rectangle written the ordinary way
+    # round, since a scissor has no orientation to carry.
+    top = min(y, y + hgt)
     MTLm.set_viewport!(h.encoder,
-        MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(ah), 0.0, 1.0))
+        MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
     MTLm.set_scissor!(h.encoder,
-        MTLm.MTLScissorRect(UInt(max(0, floor(Int, x))), UInt(max(0, floor(Int, y))),
-                            UInt(max(1, ceil(Int, w))), UInt(max(1, ceil(Int, ah)))))
+        MTLm.MTLScissorRect(UInt(max(0, floor(Int, x))), UInt(max(0, floor(Int, top))),
+                            UInt(max(1, ceil(Int, w))), UInt(max(1, ceil(Int, abs(hgt))))))
     return nothing
 end
 
@@ -1182,14 +1285,23 @@ Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 #                          rather than in the hardware.
 #   `set_point_size!`      needs `[[point_size]]` on the stage output struct,
 #                          which the AIR writer does not emit yet.
-#   `sample_texture_2d`    needs a bound-texture argument, which the graph's
-#                          argument ABI does not carry yet.
 #   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
-#   `end_primitive!`,      replacement is the mesh pipeline (object + mesh
-#   `primitive_id_in`      stages), which Mantle does not describe.
+#   `end_primitive!`,      replacement is the mesh pipeline, which this backend
+#   `primitive_id_in`      DOES run — a geometry pipeline is lowered onto it by
+#                          `Mantle.lower_geometry_to_mesh`, so these three are
+#                          the leaf of a lowering nothing here reaches.
 #
-# The first three are unimplemented; the last three are absent from the
-# hardware. `caps` is where a caller asks which — see `supports_geometry`.
+# The first two are unimplemented; the last three are absent from the hardware.
+# `caps` is where a caller asks which — see `supports_geometry`.
+
+# Sampling a bound texture. The binding is a SLOT and AIR has no global textures,
+# so the texture reaches the intrinsic through a lowering rather than an argument
+# — `Metal/src/compiler/texture.jl` has the whole of why. A stage says how many
+# it samples through `Mantle.FragmentShader`'s `textures`, and that count is what
+# gives the entry its parameters.
+Metal.@device_override KI.sample_texture_2d(binding::UInt32, u::Float32, v::Float32,
+                                            component::UInt32) =
+    Metal.sample_texture_2d(binding, u, v, component)
 
 # Metal's clip space is the other one: +y is UP where the portable convention's
 # (Vulkan's) is down.

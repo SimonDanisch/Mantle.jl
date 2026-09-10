@@ -56,9 +56,15 @@ end
     @test [p.pass.name for p in plan.passes] == ["updates", "scale", "add"]
     # The transient was placed into an arena, not allocated on its own.
     @test Mantle.peakbytes(plan) >= n * sizeof(Float32)
-    # A KernelAbstractions backend has no argument memory and no profiler; the
-    # plan says so rather than carrying an empty one.
-    @test plan.args === nothing
+    # Argument memory, because this backend RECORDS: an indirect command binds
+    # buffers and has no `setBytes`, so every argument a launch would push lives in
+    # the plan's own memory and the commands bind slices of it. It is allocated
+    # whether or not this particular plan ends up recorded — the layout is decided
+    # when the plan compiles, and by then nothing knows yet.
+    @test plan.args !== nothing
+    @test plan.args.address != 0
+    # Still no profiler: this backend has no timestamp queries, and the plan says so
+    # rather than carrying an empty one.
     @test plan.profiler === nothing
 
     Mantle.run!(plan)

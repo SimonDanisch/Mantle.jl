@@ -71,18 +71,39 @@ end
 VertexShader(f; outputs::NamedTuple = (;)) = VertexShader(f, outputs)
 
 """
-    FragmentShader(f)
+    FragmentShader(f; textures = 0)
 
 The per-fragment stage.
 
-Nothing to declare: its inputs are the previous stage's outputs, and its outputs
-are the pass's colour attachments — a shader compiled for one attachment when
-the pass has three would silently drop two, so the count comes from the pass.
+Its inputs are the previous stage's outputs and its outputs are the pass's colour
+attachments — a shader compiled for one attachment when the pass has three would
+silently drop two, so the count comes from the pass.
+
+`textures` is how many BOUND textures the body samples through
+`sample_texture_2d`, and it is the one thing that has to be declared: see
+[`ntextures`](@ref).
 """
 struct FragmentShader{F} <: ShaderStage
     f::F
+    textures::Int
 end
+FragmentShader(f; textures::Integer = 0) = FragmentShader(f, Int(textures))
 stageoutputs(::FragmentShader) = (;)
+
+"""
+    ntextures(s::ShaderStage) -> Int
+
+How many BOUND textures this stage samples, which is the highest binding it names
+plus one. Zero for a stage that samples none, which is most of them.
+
+Declared and not derived, because it is part of the stage's INTERFACE and both
+backends need it before they see the body: a descriptor set layout has that many
+entries on Vulkan, and on Metal a texture is an entry-function parameter, so the
+count decides the signature. The body still names its slots through
+`sample_texture_2d(binding, …)`; this only says how many there are.
+"""
+ntextures(::ShaderStage) = 0
+ntextures(s::FragmentShader) = s.textures
 
 """
     GeometryShader(f; outputs, input, output, max_vertices, invocations = 1)

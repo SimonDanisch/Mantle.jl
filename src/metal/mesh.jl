@@ -65,8 +65,12 @@ end
                        flip_clip(_mesh_vec4(Base.getfield(v, :position))))))
     for n in fieldnames(v)
         n === :position && continue
+        # FIELD before SLOT: that is AIR's order for the two data intrinsics and
+        # not for `set_position_mesh` above. See `Metal/src/compiler/mesh.jl` —
+        # the two orders agree for the first vertex and nowhere else, so getting
+        # it wrong leaves a shader whose varyings are right at one corner.
         push!(calls, :(Metal.set_vertex_data_mesh(
-            out, slot, $(mesh_field_index(V, n)),
+            out, $(mesh_field_index(V, n)), slot,
             _mesh_component(Base.getfield(v, $(QuoteNode(n)))))))
     end
     return Expr(:block, Expr(:meta, :inline), calls..., :(return nothing))
@@ -75,7 +79,7 @@ end
 @generated function _write_mesh_primitive!(out::Metal.MeshPtr{V,P,NV,NP,T},
                                            slot::Int32, d::NamedTuple) where {V,P,NV,NP,T}
     calls = Expr[:(Metal.set_primitive_data_mesh(
-                       out, slot, $(mesh_field_index(P, n)),
+                       out, $(mesh_field_index(P, n)), slot,
                        _mesh_component(Base.getfield(d, $(QuoteNode(n))))))
                  for n in fieldnames(d)]
     return Expr(:block, Expr(:meta, :inline), calls..., :(return nothing))
@@ -278,9 +282,10 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     VIn  = Mantle.fragmentinputtype(p)
     FOut = NamedTuple{ntuple(i -> Symbol(:color, i), length(color_formats)),
                       NTuple{length(color_formats), NTuple{4,Float32}}}
-    ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut}()
+    ntex = Mantle.ntextures(p.fragment)
+    ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
-                    Core.LLVMPtr{FOut,1}}
+                    texture_markers(ntex)..., Core.LLVMPtr{FOut,1}}
     ffun, flib = compile_stage_function(ffn, frag_tt, :fragment,
                                         string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
 
@@ -390,3 +395,122 @@ end
 # alike, because a caller may hold either.
 Mantle.supports_mesh_pipeline(::Metal.MetalBackend) = true
 Mantle.supports_mesh_pipeline(::MetalDevice) = true
+
+# ── a geometry pipeline, run as a mesh pipeline ──────────────────────────────
+#
+# `Mantle.lower_geometry_to_mesh` rewrites the vertex + geometry pair as one mesh
+# stage; these two hooks are what make that automatic, so a renderer hands this
+# backend the same `GraphicsPipeline` it hands Vulkan and does not ask which
+# stages exist here. That is the whole point of the lowering living in core:
+# `supports_geometry_stage` answers `false` and a geometry pipeline still draws.
+#
+# Dispatch on the pipeline's geometry parameter rather than a branch, because
+# `GraphicsPipeline` carries it in its type: `Nothing` or a `GeometryShader`.
+
+"""One draw of a lowered geometry pipeline: the description, and the baked arguments."""
+struct MetalCompiledGeometryDraw
+    pipeline::Mantle.GraphicsPipeline
+    color_formats::Vector{MTLm.MTLPixelFormat}
+    depth_format::Union{Nothing,MTLm.MTLPixelFormat}
+    mesh::StageArgs
+    frag::StageArgs
+end
+
+"""
+    compile_draw(d::MetalDevice, p::GeometryPipeline, …)
+
+Bake a geometry pipeline's arguments and keep what its mesh pipeline needs.
+
+The PIPELINE is not compiled here, and the reason is the index buffer. A lowered
+mesh stage reads it as one of its own arguments — a mesh pipeline has no index
+buffer, so the fetch a vertex stage got for free has to happen in the shader —
+and whether a draw is indexed is the DRAW's business, arriving at
+[`record_draw!`](@ref). So the stage's signature is only complete there, and this
+keeps the two `StageArgs` and the formats until it is.
+
+The vertex body is checked for its `VertexIndex` parameter here rather than there,
+because a missing one is a mistake in the SHADER and should be reported the first
+time the pipeline is used, not from inside a shader compilation.
+"""
+function Mantle.compile_draw(d::MetalDevice,
+                             p::Mantle.GeometryPipeline,
+                             color_formats, depth_format, vert_args, frag_args)
+    mesh = StageArgs(vert_args)
+    frag = StageArgs(frag_args)
+    Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), buffer_types(mesh))
+    cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
+    dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
+    return MetalCompiledGeometryDraw(p, cfmts, dfmt, mesh, frag)
+end
+
+"""
+    record_draw!(h, d::MetalCompiledGeometryDraw, args, count; instances, indices)
+
+Record a lowered geometry draw: one mesh threadgroup per input primitive.
+
+`count` is the draw's vertex or index count, exactly as the geometry pipeline
+would take it, and how many primitives an assembler would have made of it is what
+`Mantle.primitivecount` answers — so the caller counts vertices whichever backend
+it is on.
+"""
+function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, args,
+                             count::Integer; instances::Integer = 1, indices = nothing)
+    instances == 1 || error(
+        "a lowered geometry pipeline draws one instance, and this draw asks for " *
+        "$instances. A mesh dispatch has a three-dimensional threadgroup grid and " *
+        "the instance would go on its second axis, which needs a portable name for " *
+        "`instance_index()` inside a mesh stage; there is none yet and nothing in " *
+        "tree instances a geometry pipeline.")
+
+    lowered = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = indices !== nothing)
+    # The index buffer as the mesh stage's LAST argument, which is where
+    # `GeometryAsMesh` reads it. Converted the same way every other argument is,
+    # so what the shader sees is the device array and not a raw address.
+    ix = indices === nothing ? nothing : bakearg(indices)
+    mesh_bufs = ix === nothing ? buffer_types(d.mesh) :
+        Tuple{map(argdevtype, d.mesh.device)..., argdevtype(ix)}
+    c = compile_pipeline(lowered, d.color_formats, d.depth_format,
+                         mesh_bufs, buffer_types(d.frag))
+
+    enc = h.encoder
+    MTLm.set_pipeline!(enc, c.state)
+    c.depth_state === nothing || MTLm.set_depth_stencil_state!(enc, c.depth_state)
+    MTLm.set_cull_mode!(enc, c.cull)
+    # As the vertex path does, and for the same reason: `flip_clip` mirrors y,
+    # which reverses the handedness of every primitive the emitter wound.
+    MTLm.set_front_facing_winding!(enc, MTLm.MTLWindingCounterClockwise)
+    bind_stage!(enc, d.mesh, MTLm.set_mesh_bytes!, MTLm.MTLRenderStageMesh)
+    if ix !== nothing
+        ibuf = metal_buffer(indices)
+        ibuf === nothing && error(
+            "an indexed draw needs a device buffer of indices, got $(typeof(indices))")
+        # Resident for the MESH stage, not the vertex one: on this path the
+        # indices are read by a shader, and an address the encoder was never told
+        # about reads as zeros rather than faulting.
+        MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageMesh)
+        bind_arg!(MTLm.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1)
+    end
+    bind_stage!(enc, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
+
+    groups = Mantle.primitivecount(d.pipeline.topology, count)
+    # Not an error: a `lines` plot with one point assembles no primitive, and a
+    # draw of nothing is a draw of nothing. `drawMeshThreadgroups` with a zero
+    # grid is refused by Metal.
+    groups == 0 && return nothing
+    MTLm.draw_mesh_threadgroups!(enc, MTLm.MTLSize(groups, 1, 1),
+                                      MTLm.MTLSize(1, 1, 1),
+                                      MTLm.MTLSize(c.threads, 1, 1))
+    return nothing
+end
+
+# An indirect draw of a lowered geometry pipeline. The threadgroup count would
+# have to be read out of the same buffer, and `drawMeshThreadgroups` has no
+# indirect form that takes one — `MTLIndirectCommandBuffer` is the mechanism, and
+# it is a different object with its own encoding path.
+Mantle.record_draw!(::MetalPassHandle, ::MetalCompiledGeometryDraw, _args,
+                    n::Mantle.Commands; kw...) = error(
+    "a geometry pipeline lowered onto a mesh stage cannot take a device-written " *
+    "draw count yet: the count would be the number of mesh threadgroups, and " *
+    "`drawMeshThreadgroups` reads its grid from the encoder, not from a buffer. " *
+    "An `MTLIndirectCommandBuffer` is what does this on Metal. Draw with a host " *
+    "count, or run the pipeline where the geometry stage is native.")

@@ -125,7 +125,7 @@ end
     be = Metal.MetalBackend()
     mesh = GeometryBasics.normal_mesh(Sphere(Point3f(0), 0.5f0))
     t = Mantle.HWTLAS{Raycore.Triangle{UInt32}}(be)
-    push!(t, mesh, Mat4f(I))
+    push!(t, mesh, Mat4f(LinearAlgebra.I))
     shifted = Mat4f(1,0,0,0, 0,1,0,0, 0,0,1,0, 1.5f0,0,0,1)   # column-major translate
     push!(t, mesh, shifted)
     Raycore.sync!(t)

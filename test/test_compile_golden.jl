@@ -68,7 +68,11 @@ end
 compileresult(g, plan) = (
     peak       = M.peakbytes(plan),
     scheduled  = [pp.pass.name for pp in plan.passes],
-    barriered  = [pp.barrier !== nothing for pp in plan.passes],
+    # A pass "has a barrier" if the backend was given anything to emit before it:
+    # the memory barrier a driver builds an object for, or the transitions a
+    # backend with no such object reads instead (Metal's recorder sets one bit
+    # from them). Reading only the object made this blind to the second kind.
+    barriered  = [pp.barrier !== nothing || !isempty(pp.pre) for pp in plan.passes],
     intervals  = sort([(t.first, t.last) for t in values(g.transient_by_id)]),
 )
 
@@ -92,21 +96,17 @@ compileresult(g, plan) = (
     # Every pass, including the two that share no data with anything — those are
     # ALIASING barriers. If a refactor drops them the peak stays right and the
     # picture goes wrong intermittently, which is the worst failure available.
-    # Backend-aware, and only since the answer is measured (2.6). A backend
-    # whose passes each commit their own command buffer on one queue is ordered
-    # by commit order and derives nothing — it says so through
-    # `needs_transition`, and `sync/backend.jl` asks exactly that of it. Reading
-    # the answer here rather than assuming one is the difference between a
-    # portable assertion and one backend's.
-    #
-    # Asked with the usage a storage WRITE declares, on both sides: two
-    # dispatches writing the same bytes race even though the declared access did
-    # not change, so a backend that derives anything derives this one. It used
-    # to be asked with `Any`, which is not a `Usage` at all — the generic body
-    # calls `unordered` on it and a backend that does not short-circuit gets a
-    # `MethodError` instead of an answer.
-    wr = M.Storage{M.BufferKind, M.WriteOnly}
-    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), wr, wr)
+    # Backend-aware, because a backend whose passes each commit their own command
+    # buffer on one queue is ordered by commit order and may derive nothing —
+    # `sync/backend.jl` asks exactly that of it, and reading the answer here rather
+    # than assuming one is the difference between a portable assertion and one
+    # backend's. Asked with a REAL pair of usages: a write followed by a read of the
+    # same buffer, which is the hazard this graph's chain is made of. It used to be
+    # asked with `Any, Any`, which only worked while every method ignored its
+    # arguments — the portable rule in `sync/transition.jl` reads them.
+    W = M.Storage{M.BufferKind, M.Access{false, true}}
+    R = M.Storage{M.BufferKind, M.Access{true, false}}
+    derives = M.needs_transition(M.syncbackend(dev), M.BufferKind(), W, R)
     @test derives ? all(r.barriered) : !any(r.barriered)
 
     # Pass indices are 1-based over the schedule above, so the update pass at

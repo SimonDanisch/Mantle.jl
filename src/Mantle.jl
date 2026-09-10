@@ -50,14 +50,23 @@ using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
 export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
     frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
     sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y
+# The vertex index a body can be HANDED instead of asking for. Exported because a
+# shader declares the parameter, and `graphics/lowering.jl` is what passes one —
+# a mesh stage has no `vertex_index()` to call.
+using KernelInterface: VertexIndex, wantsvertexindex
+export VertexIndex
 # The mesh pipeline's half of the same vocabulary. `emit!`/`endprimitive!` are
 # what a geometry body calls, and the emitter it is handed decides whether that
 # reaches a native geometry stage or a mesh stage — which is why the body needs
 # no backend name and no second version. See `KernelInterface/src/mesh.jl`.
 using KernelInterface: MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter,
     MeshEmitter, emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!,
-    set_mesh_line!, set_mesh_point!, set_mesh_outputs!, set_mesh_groups!,
-    mesh_thread_index, mesh_group_index
+    set_mesh_line!, set_mesh_point!, set_mesh_primitive_data!, set_mesh_outputs!,
+    set_mesh_groups!, mesh_thread_index, mesh_group_index
+# What an emitter wrote, which is what `set_mesh_outputs!` has to be told. Read by
+# `graphics/lowering.jl` and not re-exported: a shader body emits and does not
+# count, and the one caller that counts is the lowering.
+using KernelInterface: nvertices, nprimitives
 # `Flat` and the interface-list accessors. `GeometryConfig` was Lava's, which
 # meant a portable pipeline description could not hold one without depending on
 # a SPIR-V compiler; it is beside `MeshConfig` now, for the reason both are
@@ -66,8 +75,8 @@ using KernelInterface: Flat, isflat, unflat, flatnames, smoothnames, valuetypes,
     GeometryConfig, inputvertices
 export MeshConfig, ObjectConfig, PrimitiveEmitter, NativeEmitter, MeshEmitter,
     emit!, endprimitive!, set_mesh_vertex!, set_mesh_triangle!, set_mesh_line!,
-    set_mesh_point!, set_mesh_outputs!, set_mesh_groups!, mesh_thread_index,
-    mesh_group_index
+    set_mesh_point!, set_mesh_primitive_data!, set_mesh_outputs!, set_mesh_groups!,
+    mesh_thread_index, mesh_group_index
 export Flat, isflat, unflat, GeometryConfig
 using KernelInterface: rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
     rt_hit_object_execute_shader, rt_ignore_intersection, rt_primitive_id,
@@ -81,6 +90,10 @@ export rt_launch_id_x, rt_hit_object_trace_ray, rt_reorder_thread,
 using KernelInterface: primitivevertices,
     Topology, TriangleList, TriangleStrip, LineList,
     LineStrip, PointList, PatchList, LineListAdjacency, LineStripAdjacency
+# How the assembler walks a stream of that topology. `graphics/lowering.jl` turns
+# a draw's count into a threadgroup count with these, and a mesh stage computes
+# which input primitive it is from them.
+using KernelInterface: primitivestride, primitivecount, firstinputvertex
 # `import`, not `using … :` — these get `Mantle.Device` methods below, and
 # `caps` in particular becomes one function with a `Device` method here and a
 # `KI.Backend` method in each backend.
@@ -298,13 +311,15 @@ export readback_framebuffer, readback_window, readback_target
 export ShaderStage, VertexShader, FragmentShader, GeometryShader, MeshShader,
     ObjectShader
 export stagefunction, stageoutputs, stageinputs, stageconfig, flatoutputs,
-    smoothoutputs, outputtype
+    smoothoutputs, outputtype, ntextures
 # What the fragment stage reads, which depends on which stages a pipeline has.
 export lastgeometrystage, fragmentinputs, fragmentinputtype
 # Recording a pass by hand. Shaped like the graph's `render!`/`draw!` on purpose.
 export pass!, viewport!, bindings!, PassRecorder
 export setviewport!, colorimage, depthimage, currentimage, blittarget, todevice
-export lower_geometry_to_mesh
+# The geometry-to-mesh translation. `GeometryAsMesh` is exported because it is
+# what a backend compiles and what a stack trace from a lowered shader names.
+export lower_geometry_to_mesh, GeometryAsMesh, GeometryPipeline
 export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
 export DrawIndirectCommand
 # The mesh pipeline. Described here, run by a backend that answers

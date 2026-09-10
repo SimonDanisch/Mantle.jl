@@ -99,7 +99,7 @@ Mantle.constraintof(::HostDevice, ::Mantle.Persistent, ts) = nothing
 # returned by the time anyone could ask. So a fence carries no information, and
 # `reclaim!` releases in the same call that stamps — the boundary it waits for on
 # a device backend has already happened by construction.
-Mantle.fence(::HostDevice) = nothing
+Mantle.fence(::HostDevice) = UInt64(0)
 Mantle.passed(::HostDevice, _) = true
 # Already true, so there is never anything to wait for.
 Mantle.waitfor(::HostDevice, _) = true

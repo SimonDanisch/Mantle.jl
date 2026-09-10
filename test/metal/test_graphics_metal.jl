@@ -480,3 +480,342 @@ end
     # BGRA on the wire, so the blue channel is first and the red last.
     @test all(==((0x00, 0x80, 0xff, 0xff)), px)
 end
+
+# ── a geometry pipeline, lowered onto the mesh stage ─────────────────────────
+#
+# Metal has no geometry stage, so `compile_draw` lowers a `GraphicsPipeline` that
+# declares one with `Mantle.lower_geometry_to_mesh` and compiles the mesh pipeline
+# that comes out. Nothing in the CALLER changes: the same description, the same
+# `pass!`, the same vertex count — which is the point, and the reason
+# `supports_geometry_stage` answering `false` no longer means an overlay is lost.
+#
+# The lowering's own arithmetic is asserted on the host in `test/test_lowering.jl`,
+# over `HostMeshOutput`, where the emitted vertices and indices can be read back.
+# What is asserted HERE is that the resulting pixels are right: the quad lands
+# where the input point is, the smooth plane interpolates across it, and the flat
+# plane carries one value per primitive.
+
+lg_vertex(vid::Mantle.VertexIndex, points) =
+    (position = Vec4f(points[vid.value][1], points[vid.value][2], 0f0, 1f0),
+     tint = Float32(vid.value))
+lg_vertex(points) = lg_vertex(Mantle.VertexIndex(Mantle.vertex_index()), points)
+
+function lg_geometry(gs, prim, points)
+    c = prim.position[1]
+    t = prim.tint[1]
+    for k in Int32(1):Int32(4)
+        dx = (k == Int32(1) || k == Int32(2)) ? -0.25f0 : 0.25f0
+        dy = (k == Int32(1) || k == Int32(3)) ? -0.25f0 : 0.25f0
+        Mantle.emit!(gs, (position = Vec4f(c[1] + dx, c[2] + dy, c[3], c[4]),
+                          uv = (dx, dy), tint = (t / 4f0, 0f0, 0f0, 1f0)))
+    end
+    Mantle.endprimitive!(gs)
+    return nothing
+end
+
+# The smooth plane in two channels and the flat one in the third, so one frame
+# shows both and shows which vertex and which primitive each value came from.
+lg_frag_uv(inputs, points) = (abs(inputs.uv[1]) * 4f0, abs(inputs.uv[2]) * 4f0,
+                              0.5f0, 1f0)
+lg_frag_tint(inputs, points) = inputs.tint
+
+lg_pipeline(frag) = Mantle.GraphicsPipeline(;
+    vertex = Mantle.VertexShader(lg_vertex; outputs = (tint = Float32,)),
+    geometry = Mantle.GeometryShader(lg_geometry;
+                                    outputs = (uv = NTuple{2,Float32},
+                                               tint = Mantle.Flat{NTuple{4,Float32}}),
+                                    input = Mantle.PointList(),
+                                    output = Mantle.TriangleStrip(), max_vertices = 4),
+    fragment = Mantle.FragmentShader(frag),
+    topology = Mantle.PointList(), cull = Mantle.NoCull(), depth = Mantle.DepthOff())
+
+# The `lines` shape: four input vertices per primitive, out of an index buffer.
+lg_seg_vertex(vid::Mantle.VertexIndex, points) =
+    (position = Vec4f(points[vid.value][1], points[vid.value][2], 0f0, 1f0),
+     tint = Float32(vid.value))
+
+function lg_seg_geometry(gs, prim, points)
+    a = prim.position[2]
+    b = prim.position[3]
+    cx = 0.5f0 * (a[1] + b[1]); cy = 0.5f0 * (a[2] + b[2])
+    t = (prim.tint[1] + prim.tint[4]) / 16f0
+    for k in Int32(1):Int32(4)
+        dx = (k == Int32(1) || k == Int32(2)) ? -0.1f0 : 0.1f0
+        dy = (k == Int32(1) || k == Int32(3)) ? -0.1f0 : 0.1f0
+        Mantle.emit!(gs, (position = Vec4f(cx + dx, cy + dy, 0f0, 1f0),
+                          uv = (dx, dy), tint = (t, 0f0, 0f0, 1f0)))
+    end
+    Mantle.endprimitive!(gs)
+    return nothing
+end
+
+lg_seg_pipeline() = Mantle.GraphicsPipeline(;
+    vertex = Mantle.VertexShader(lg_seg_vertex; outputs = (tint = Float32,)),
+    geometry = Mantle.GeometryShader(lg_seg_geometry;
+                                    outputs = (uv = NTuple{2,Float32},
+                                               tint = Mantle.Flat{NTuple{4,Float32}}),
+                                    input = Mantle.LineStripAdjacency(),
+                                    output = Mantle.TriangleStrip(), max_vertices = 4),
+    fragment = Mantle.FragmentShader(lg_frag_tint),
+    topology = Mantle.LineStripAdjacency(), cull = Mantle.NoCull(),
+    depth = Mantle.DepthOff())
+
+"""
+Record one draw of `p` through `pass!` — the path RayMakie's overlays take.
+
+`compile_draw` and `record_draw!` and nothing mesh-specific: a caller that has a
+geometry pipeline writes exactly this on either backend.
+"""
+function lg_draw(p, args, count; n = 64, indices = nothing, instances = 1)
+    be = Metal.MetalBackend()
+    dev = Mantle.todevice(be)
+    fb = Mantle.Framebuffer(be, n, n; depth = false)
+    target = Mantle.OffscreenTarget(fb)
+    compiled = Mantle.compile_draw(dev, p, (Mantle.blittarget(target),), nothing,
+                                   args, args)
+    Mantle.pass!(dev, target; clear = (0f0, 0f0, 0f0, 1f0)) do pr
+        Mantle.viewport!(pr, 0, 0, n, n)
+        Mantle.draw!(pr, compiled, args, count; indices, instances)
+    end
+    return Mantle.readback_framebuffer(fb)
+end
+
+"""The pixels that are not the clear colour, and the block they occupy."""
+function lg_covered(px)
+    idx = findall(q -> q != (0x00, 0x00, 0x00, 0xff), px)
+    isempty(idx) && return (n = 0, rows = (0, 0), cols = (0, 0), colours = eltype(px)[])
+    r = extrema(getindex.(idx, 1))
+    c = extrema(getindex.(idx, 2))
+    return (n = length(idx), rows = r, cols = c, colours = sort(unique(px[idx])))
+end
+
+@testset "a geometry pipeline draws on a backend with no geometry stage" begin
+    be = Metal.MetalBackend()
+    # The capability still answers honestly about the STAGE…
+    @test !Mantle.supports_geometry_stage(be)
+    # …and the one a caller with a geometry body should ask says yes.
+    @test Mantle.supports_mesh_pipeline(be)
+
+    # One point at the origin: a quad of 0.5 in NDC is a quarter of each axis, so
+    # 16x16 of a 64x64 frame, centred.
+    pts = Metal.MtlVector{Vec2f}([Vec2f(0, 0)])
+    px = lg_draw(lg_pipeline(lg_frag_uv), (pts,), 1)
+    cov = lg_covered(px)
+    @test cov.n == 16 * 16
+    @test cov.rows == (25, 40) && cov.cols == (25, 40)
+
+    # The SMOOTH plane interpolates: `uv` runs from -0.25 at one edge to +0.25 at
+    # the other, so `abs(uv) * 4` sweeps nearly the whole range and is smallest in
+    # the middle. This is what the per-vertex plane being addressed per FIELD and
+    # per SLOT buys — with the two AIR operands the other way round only the first
+    # vertex's `uv` landed and the interpolation collapsed to a corner ramp.
+    sub = px[cov.rows[1]:cov.rows[2], cov.cols[1]:cov.cols[2]]
+    ch2 = map(q -> q[2], sub)
+    ch3 = map(q -> q[3], sub)
+    @test maximum(ch2) > 0xd0 && maximum(ch3) > 0xd0
+    @test minimum(ch2) < 0x20 && minimum(ch3) < 0x20
+    # Symmetric about the centre in both directions, which a one-corner ramp is
+    # not: the first row equals the last, and the first column the last.
+    @test ch2[1, :] == ch2[end, :]
+    @test ch3[:, 1] == ch3[:, end]
+    # The blue channel is the fragment's own constant, so every covered pixel has
+    # it — a check that the frame is the shader's and not something left over.
+    @test all(q -> q[1] == 0x80, sub)
+end
+
+@testset "a lowered draw runs one threadgroup per input primitive" begin
+    # Three points, three quads, and each carries its own vertex index as a
+    # per-primitive value. A lowering that ignored `mesh_group_index` would draw
+    # one quad three times over; one that got the flat plane wrong would draw
+    # three quads of one colour.
+    pts = Metal.MtlVector{Vec2f}([Vec2f(-0.5, -0.5), Vec2f(0.5, 0.5), Vec2f(-0.5, 0.5)])
+    px = lg_draw(lg_pipeline(lg_frag_tint), (pts,), 3)
+    cov = lg_covered(px)
+    @test cov.n == 3 * 16 * 16
+    # `tint = vertex index / 4`, so 0.25, 0.5 and 0.75 — and BGRA on the wire puts
+    # the red channel third.
+    @test cov.colours == [(0x00, 0x00, 0x40, 0xff), (0x00, 0x00, 0x80, 0xff),
+                          (0x00, 0x00, 0xbf, 0xff)]
+end
+
+@testset "an indexed lowered draw fetches its own vertex indices" begin
+    # `LineStripAdjacency` over `0 0 1 2 3 3`: a four-wide window sliding one
+    # index at a time, which is how RayMakie's `lines` walks a polyline. A mesh
+    # pipeline has no index buffer, so the lowered stage reads it as one of its
+    # own arguments — the one part of this that is more than a rearrangement.
+    be = Metal.MetalBackend()
+    dev = Mantle.todevice(be)
+    pts = Metal.MtlVector{Vec2f}([Vec2f(-0.6, -0.6), Vec2f(-0.2, -0.2),
+                                  Vec2f(0.2, 0.2), Vec2f(0.6, 0.6)])
+    ib = Mantle.indexbuffer(dev, UInt32[0, 0, 1, 2, 3, 3])
+    px = lg_draw(lg_seg_pipeline(), (pts,), 6; indices = ib)
+    cov = lg_covered(px)
+    # Six indices give three segments, each a 0.2-wide quad: 6 or 7 pixels a side
+    # on a 64-pixel axis.
+    @test 3 * 30 < cov.n < 3 * 50
+    # One colour per segment, and they are the OUTER two vertices of each window:
+    # (1+3)/16, (1+4)/16, (2+4)/16 one-based.
+    @test cov.colours == [(0x00, 0x00, 0x40, 0xff), (0x00, 0x00, 0x50, 0xff),
+                          (0x00, 0x00, 0x60, 0xff)]
+    # …and the three sit along the diagonal, at the midpoints of the segments.
+    centres = [(sum(getindex.(findall(==(c), px), 1)) / count(==(c), px),
+                sum(getindex.(findall(==(c), px), 2)) / count(==(c), px))
+               for c in cov.colours]
+    @test all(abs(c[1] - c[2]) < 1 for c in centres)
+    @test issorted(first.(centres))
+end
+
+@testset "a lowered draw refuses what it cannot record" begin
+    be = Metal.MetalBackend()
+    dev = Mantle.todevice(be)
+    pts = Metal.MtlVector{Vec2f}([Vec2f(0, 0)])
+    # Instancing would put the instance on the mesh grid's second axis, which needs
+    # a portable name for `instance_index()` inside a mesh stage. There is none, so
+    # this says so rather than drawing one instance and reporting success.
+    @test_throws ErrorException lg_draw(lg_pipeline(lg_frag_tint), (pts,), 1;
+                                       instances = 2)
+
+    # A vertex body that cannot be handed its index names itself, rather than
+    # failing as a `MethodError` from inside a shader compilation.
+    noindex(points) = (position = Vec4f(0f0, 0f0, 0f0, 1f0), tint = 0f0)
+    p = Mantle.GraphicsPipeline(;
+        vertex = Mantle.VertexShader(noindex; outputs = (tint = Float32,)),
+        geometry = Mantle.GeometryShader(lg_geometry;
+                                        outputs = (uv = NTuple{2,Float32},
+                                                   tint = Mantle.Flat{NTuple{4,Float32}}),
+                                        input = Mantle.PointList(),
+                                        output = Mantle.TriangleStrip(), max_vertices = 4),
+        fragment = Mantle.FragmentShader(lg_frag_tint),
+        topology = Mantle.PointList(), cull = Mantle.NoCull(), depth = Mantle.DepthOff())
+    err = try
+        lg_draw(p, (pts,), 1)
+    catch e
+        e
+    end
+    @test err isa ErrorException
+    @test occursin("VertexIndex", err.msg)
+
+    # Fewer vertices than one primitive needs draws nothing, and that is not an
+    # error: a `lines` plot with one point assembles no segment. `drawMeshThreadgroups`
+    # refuses a zero grid, so the count has to be checked rather than passed on.
+    ib = Mantle.indexbuffer(dev, UInt32[0, 0, 1])
+    blank = lg_draw(lg_seg_pipeline(), (pts,), 3; indices = ib)
+    @test all(==((0x00, 0x00, 0x00, 0xff)), blank)
+end
+
+# ── Sampling a bound texture, and the layout it is bound in ─────────────────
+#
+# `KernelInterface.sample_texture_2d` names a SLOT, and on this backend the
+# texture reaches the intrinsic through a lowering rather than an argument. What
+# is asserted here is what a caller can see: which texel a coordinate lands on,
+# and that the FILTERING is the sampler's rather than the shader's.
+
+# A fullscreen triangle whose `uv` sweeps 0..1 across the target.
+function tex_vertex()
+    vid = vertex_index() - Int32(1)
+    x = Float32(Int32(vid & Int32(1)) * 4 - 1)
+    y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
+    return (position = Vec4f(x, Mantle.clip_y(y), 0f0, 1f0),
+            uv = (0.5f0 * (x + 1f0), 0.5f0 * (y + 1f0)))
+end
+
+tex_fragment(inputs) =
+    (Mantle.sample_texture_2d(UInt32(0), inputs.uv[1], inputs.uv[2], UInt32(0)),
+     0f0, 0f0, 1f0)
+
+tex_pipeline() = Mantle.GraphicsPipeline(;
+    vertex = Mantle.VertexShader(tex_vertex; outputs = (uv = NTuple{2,Float32},)),
+    fragment = Mantle.FragmentShader(tex_fragment; textures = 1),
+    cull = Mantle.NoCull(), depth = Mantle.DepthOff())
+
+"""Draw the sampling quad over `data` into an n x n target and read it back."""
+function tex_draw(data; n = 4, filter = :nearest)
+    be = Metal.MetalBackend()
+    dev = Mantle.todevice(be)
+    tex = Mantle.Texture2D(be, data)
+    sampler = Mantle.Sampler(be; filter, wrap = :clamp)
+    bindings = Mantle.bind_textures([Mantle.SampledTexture(tex, sampler)])
+    fb = Mantle.Framebuffer(be, n, n; depth = false)
+    target = Mantle.OffscreenTarget(fb)
+    compiled = Mantle.compile_draw(dev, tex_pipeline(), (Mantle.blittarget(target),),
+                                   nothing, (), ())
+    Mantle.pass!(dev, target; clear = (0f0, 0f0, 0f0, 1f0)) do pr
+        Mantle.viewport!(pr, 0, 0, n, n)
+        Mantle.bindings!(pr, compiled, bindings)
+        Mantle.draw!(pr, compiled, (), 3)
+    end
+    px = Mantle.readback_framebuffer(fb)
+    # The red channel carries component 0; the readback is BGRA, and its second
+    # index counts from the top while `uv.y = 0` is the bottom of the target.
+    return [px[x, n + 1 - y][3] / 255 for x in 1:n, y in 1:n]
+end
+
+@testset "a texture is bound as data[x, y]" begin
+    # NON-SQUARE on purpose: 4 wide and 2 tall is the case a square atlas cannot
+    # tell apart, and it is the one both uploads used to get wrong — the Vulkan
+    # side read the dimensions one way round and copied the bytes the other, so
+    # only a square texture or a single row came out whole.
+    data = Float32[(16 * (x - 1) + 2 * (y - 1)) / 100 for x in 1:4, y in 1:2]
+    got = tex_draw(data; n = 4)
+
+    # Four columns of the target over four texel columns; the two texel rows each
+    # cover half the height. `data[x, y]`: x is the FIRST index.
+    for x in 1:4, y in 1:2
+        rows = y == 1 ? (1:2) : (3:4)     # y = 1 is v ≈ 0, the bottom half
+        for r in rows
+            @test isapprox(got[x, r], data[x, y]; atol = 0.01)
+        end
+    end
+end
+
+@testset "the filtering is the sampler's" begin
+    # Two texels, black and white. A LINEAR sampler mixes them across the middle
+    # of the target and a NEAREST one cannot: no intermediate value exists in the
+    # texture, so anything between the two came from the texture unit.
+    data = Float32[0f0 1f0]'          # 2 wide, 1 tall — data[x, y]
+    near = tex_draw(data; n = 16, filter = :nearest)
+    lin  = tex_draw(data; n = 16, filter = :linear)
+    @test all(v -> v < 0.01 || v > 0.99, near)
+    @test any(v -> 0.2 < v < 0.8, lin)
+    # …and the ends still read as the texels themselves.
+    @test lin[1, 8] < 0.1 && lin[end, 8] > 0.9
+end
+
+@testset "a negative viewport height flips what it draws" begin
+    # Vulkan's spelling for "clip-space +y at the top", and the only thing that
+    # can undo the mirror this backend's vertex stage applies. `y` names the
+    # BOTTOM edge when the height is negative, so the rect is the same either way
+    # and only the orientation differs.
+    pts = Metal.MtlVector{Vec2f}([Vec2f(0f0, 0.5f0)])
+    n = 64
+
+    function draw_at(vp)
+        be = Metal.MetalBackend()
+        dev = Mantle.todevice(be)
+        fb = Mantle.Framebuffer(be, n, n; depth = false)
+        target = Mantle.OffscreenTarget(fb)
+        p = lg_pipeline(lg_frag_uv)
+        compiled = Mantle.compile_draw(dev, p, (Mantle.blittarget(target),), nothing,
+                                       (pts,), (pts,))
+        Mantle.pass!(dev, target; clear = (0f0, 0f0, 0f0, 1f0)) do pr
+            Mantle.viewport!(pr, vp...)
+            Mantle.draw!(pr, compiled, (pts,), 1)
+        end
+        return lg_covered(Mantle.readback_framebuffer(fb))
+    end
+
+    up   = draw_at((0, 0, n, n))          # portable default: clip +y is DOWN
+    down = draw_at((0, n, n, -n))         # flipped: clip +y is UP
+
+    # The same quad, the same size, in opposite halves — and both INSIDE the
+    # target, which is what `abs(height)` with the given `y` did not manage: it
+    # put the rect one whole target below and nothing came out where it should.
+    #
+    # `lg_covered` names its extents after a matrix, and the readback is indexed
+    # the other way round: its FIRST index is the column and its second the row.
+    # So `cols` is the vertical extent here.
+    @test up.n == down.n == 16 * 16
+    @test up.cols[1] > n ÷ 2            # +0.5 goes down…
+    @test down.cols[2] < n ÷ 2          # …and up when the height is negative
+    @test up.rows == down.rows          # x is untouched either way
+end

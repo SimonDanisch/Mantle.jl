@@ -64,3 +64,8 @@ include("images.jl")
 # The presentation surface. After graphics.jl: needs `mtlformat` and the
 # submission helpers (`framebuffer!`, `commit!`).
 include("window.jl")
+
+# Recording a plan into an indirect command buffer, which is what baking is here.
+# Last, because it is the only file that needs every other one: the device, the
+# pool's storage, the KA glue and the window are all in what a frame replays.
+include("record.jl")
