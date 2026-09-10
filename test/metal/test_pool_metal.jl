@@ -166,3 +166,45 @@ end
     @test Mantle.download(d, a) == collect(2.0f0:2.0f0:128.0f0)
     @test Mantle.reserved(p) > 0
 end
+
+# ── What `reclaim!` costs a frame that cannot release anything ───────────────
+#
+# `run!` calls `reclaim!` at its head, every frame, and the walk covers every
+# retired region the device has not finished with. On THIS device that set is
+# long and stays long: the timeline counts retirements, and `passed` only moves
+# when something asks `waitfor` for a full `Metal.synchronize()` — so everything
+# dropped since the last wait is still on the list, and the walk runs over all of
+# it again on the next frame.
+#
+# `test_pool.jl` pins the same property against a device double, where the
+# timeline is a field the test writes. This asks it of the real one, because that
+# is where it was found: four RayMakie screens created and closed left ~600
+# regions retired, and every frame after that paid 1200 allocations and 48 KB to
+# walk them — on a frame whose own cost is 240 bytes. The list being long is not
+# the defect and is not fixed here; walking it costing anything was.
+@testset "Metal: reclaim! allocates nothing for a backlog it cannot release" begin
+    d = Mantle.Device(Mantle.MetalAPI())
+    p = Mantle.Pool()                       # this testset's own, as above
+    B = Mantle.Buffers()
+    rs = [Mantle.acquire!(p, d, B, nothing, 256; blocksize = 1 << 22) for _ in 1:200]
+    for r in rs
+        Mantle.retire!(p, r)
+    end
+    # First call stamps them with a fence this device has not passed. Asserted,
+    # not assumed: if they were released here the measurement below would be of
+    # an empty list and would pass for the wrong reason.
+    Mantle.reclaim!(p, d)
+    @test length(p.retiring) == 200
+    @test length(p.retiring_at) == 200
+
+    Mantle.reclaim!(p, d)                   # warm the walk
+    bytes = [(@allocated Mantle.reclaim!(p, d)) for _ in 1:5]
+    @test maximum(bytes) == 0
+    @test length(p.retiring) == 200         # still nothing released
+
+    # And it does release, once the device is asked to catch up — which is what
+    # `wait = true` is for, and the only place in Mantle that waits at all.
+    @test Mantle.reclaim!(p, d; wait = true) == 200
+    @test isempty(p.retiring)
+    @test isempty(p.retiring_at)
+end

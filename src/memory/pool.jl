@@ -328,18 +328,44 @@ struct Pool
     arenas::Dict{Any,Arena}
     # Regions handed back from a context that must not touch a free list, and
     # the same regions once stamped with a fence. See `retire!` / `reclaim!`.
+    #
+    # PARALLEL vectors, and the fences CONCRETE. This was one
+    # `Vector{Tuple{Region,Any}}` — `Any` because a fence was documented as opaque
+    # — and a tuple with a boxed field makes every element non-isbits, so
+    # `reclaim!` paid a boxed read and a boxed write for each entry it KEPT. That
+    # walk runs on every `run!`, over everything the device has not finished with:
+    # measured through RayMakie with four dropped screens' worth in the list, 1200
+    # allocations and 48 KB a frame, on a frame whose own cost is 240 bytes.
+    #
+    # `UInt64` and not a type parameter on `Pool`, which is the other way to make
+    # it concrete: `LavaDevice` and `MetalDevice` hold their pool by value, and a
+    # `Pool{F}` field would be abstract in both unless the parameter cascaded into
+    # the device types too — churn for a property the element type already gives.
+    # What it costs instead is a narrower contract, and `fence` below now states
+    # it: a fence IS a monotone `UInt64`. Both real backends already mint one (a
+    # timeline-semaphore value on Vulkan, a retirement counter on Metal), and a
+    # backend with nothing to count says so with zero.
     pending::Vector{Region}
-    retiring::Vector{Tuple{Region,Any}}
+    retiring::Vector{Region}
+    retiring_at::Vector{UInt64}
     # The plans whose recordings hold device addresses, so a resource that
     # MOVES (`resize!`, an arena growing) can patch their argument memory
     # instead of invalidating them — see `notify_move!`. Registered by
     # `record!`, dropped by `free!` and by the recording going away. Weak, like
     # an arena's tenants: a plan nobody holds cannot run.
     movelisteners::Vector{WeakRef}
+    # Bumped whenever a BLOCK is created or destroyed, so a caller that caches
+    # something derived from the block list can tell in one comparison whether its
+    # cache is stale. Metal's recorded replay is the caller: the commands reach
+    # every resource by address, so the frame has to declare the blocks to its
+    # encoder, and counting them under this lock every frame is the scanning this
+    # codebase does not do. Nothing else about the pool changes it — a region
+    # acquired or released inside an existing block does not move any block.
+    blockgen::Base.RefValue{Int}
     lock::ReentrantLock
 end
 Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
-              Region[], Tuple{Region,Any}[], WeakRef[], ReentrantLock())
+              Region[], Region[], UInt64[], WeakRef[], Ref(0), ReentrantLock())
 
 arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 
@@ -535,6 +561,7 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
         n = max(bytes, blocksize)
         blk = Block(rawalloc(dev, kind, n, want), n, kind, want)
         push!(blks, blk)
+        pool.blockgen[] += 1
         r = carve!(blk, bytes, align)
         r === nothing && error("a fresh $n-byte block could not host $bytes bytes at " *
                                "alignment $align — the block size or the alignment is wrong")
@@ -579,13 +606,17 @@ function release!(r::Region)
 end
 
 """
-    fence(dev) -> f
+    fence(dev) -> UInt64
 
-An opaque stand-in for "everything submitted to `dev` up to now".
+A stand-in for "everything submitted to `dev` up to now", as a monotone counter.
 
-Opaque because what it is differs per backend and core has no use for the value
-beyond handing it back to [`passed`](@ref) — a timeline-semaphore counter on
-Vulkan, nothing at all on a backend whose work is synchronous.
+`UInt64` rather than anything a backend likes, and the narrowing is deliberate:
+`reclaim!` keeps one of these per retired region and walks them every frame, so
+the type is what decides whether that walk allocates (see `Pool.retiring_at`).
+Both real backends already mint a counter — a timeline-semaphore value on Vulkan,
+a retirement count on Metal — and core only ever hands it back to [`passed`](@ref),
+which compares. A backend whose work is synchronous has nothing to count and
+answers zero, which `passed` then ignores.
 """
 function fence end
 
@@ -669,21 +700,36 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
         if !isempty(p.pending)
             f = fence(dev)
             for r in p.pending
-                push!(p.retiring, (r, f))
+                push!(p.retiring, r)
+                push!(p.retiring_at, f)
             end
             empty!(p.pending)
         end
-        freed = keep = 0
-        for (r, f) in p.retiring
-            if passed(dev, f) || (wait && waitfor(dev, f))
-                release!(r)
-                freed += 1
-            else
-                keep += 1
-                p.retiring[keep] = (r, f)
-            end
+        # A PREFIX, and the loop stops at the first entry that has not passed.
+        #
+        # `retiring_at` is sorted by construction — `fence` is monotone and every
+        # entry is appended with the value it had when the region was stamped — so
+        # the entries the device is through with are a prefix, and the first one
+        # that fails ends the question for all of them. A frame that releases
+        # nothing therefore asks `passed` ONCE, whatever is waiting behind it.
+        #
+        # It used to walk the whole list and compact it. That is scanning for work
+        # in a codebase that marks it: with four dropped screens' worth of regions
+        # in the list — 600 of them, and on a backend whose timeline only advances
+        # on an explicit wait they stay — every still frame paid 600 comparisons to
+        # rediscover that there was nothing to do.
+        freed = 0
+        n = length(p.retiring)
+        while freed < n
+            f = p.retiring_at[freed + 1]
+            (passed(dev, f) || (wait && waitfor(dev, f))) || break
+            release!(p.retiring[freed + 1])
+            freed += 1
         end
-        resize!(p.retiring, keep)
+        if freed > 0
+            deleteat!(p.retiring, 1:freed)
+            deleteat!(p.retiring_at, 1:freed)
+        end
         return freed
     finally
         unlock(p.lock)
@@ -714,6 +760,7 @@ function trim!(pool::Pool, dev)
                     push!(keep, blk)
                 end
             end
+            length(keep) == length(blks) || (pool.blockgen[] += 1)
             pool.blocks[kind] = keep
         end
     end

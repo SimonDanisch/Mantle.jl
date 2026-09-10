@@ -461,3 +461,61 @@ M.mergeconstraints(::BitDev, kind, a::UInt32, b::UInt32) = a | b
     M.reserve!(p2, PickyDev(), :img, :typeA, 64; blocksize = 4096)
     @test_throws ArgumentError M.reserve!(p2, PickyDev(), :img, :typeB, 64; blocksize = 4096)
 end
+
+# ── What `reclaim!` costs a frame that releases nothing ──────────────────────
+#
+# `run!` calls `reclaim!` every frame, and `reclaim!` walks everything retired
+# that the device has not finished with. That walk has to be free, because the
+# list is long exactly when the renderer is busy: a screen that was closed leaves
+# its regions retired until the device is known to be past them, and on a backend
+# whose timeline only advances on an explicit wait, they stay.
+#
+# It was not free. `retiring` was a `Vector{Tuple{Region,Any}}` — `Any` because
+# what a fence IS belongs to the backend — and a tuple with a boxed field made
+# every element non-isbits, so the loop paid a boxed read and a boxed write for
+# each entry it KEPT. Measured through RayMakie with four dropped screens' worth
+# in the list: 1200 allocations and 48 KB per frame, on a frame whose own cost is
+# 240 bytes. The fix is two parallel vectors; this pins the property.
+mutable struct TimelineDev <: M.Device
+    next::UInt64
+    completed::UInt64
+    asked::Int          # how many times `reclaim!` had to ask about a fence
+end
+TimelineDev(next, completed) = TimelineDev(next, completed, 0)
+M.rawalloc(::TimelineDev, kind, bytes, c) = zeros(UInt8, bytes)
+M.rawfree(::TimelineDev, mem) = nothing
+M.constraintof(::TimelineDev, kind, ts) = kind
+M.compatible(::TimelineDev, a, b) = a === b
+M.bufferusage(::TimelineDev, ::Type) = nothing
+M.fence(d::TimelineDev) = (d.next += UInt64(1); d.next)
+M.passed(d::TimelineDev, f) = (d.asked += 1; UInt64(f) <= d.completed)
+
+@testset "Pool: reclaim! allocates nothing for what it cannot release yet" begin
+    d, p = TimelineDev(0, 0), M.Pool()
+    rs = [M.acquire!(p, d, :buf, nothing, 256; blocksize = 1 << 20) for _ in 1:200]
+    for r in rs
+        M.retire!(p, r)
+    end
+    @test M.reclaim!(p, d) == 0            # stamped, and nothing has passed
+    @test length(p.retiring) == 200
+    @test length(p.retiring_at) == 200
+
+    M.reclaim!(p, d)                       # warm the walk
+    bytes = [(@allocated M.reclaim!(p, d)) for _ in 1:5]
+    @test maximum(bytes) == 0
+    @test length(p.retiring) == 200        # still nothing released
+
+    # And it ASKS ONCE, not 200 times: the fences are monotone, so what the device
+    # is through with is a prefix, and the first entry that fails answers for the
+    # rest. Counted rather than timed, because the claim is about the shape of the
+    # loop — a frame that releases nothing must not walk what it cannot release.
+    d.asked = 0
+    M.reclaim!(p, d)
+    @test d.asked == 1
+
+    # …and it still releases, and empties both halves, once the device is past them.
+    d.completed = d.next
+    @test M.reclaim!(p, d) == 200
+    @test isempty(p.retiring)
+    @test isempty(p.retiring_at)
+end
