@@ -21,7 +21,10 @@ using Test, Mantle, Metal, ColorTypes, KernelAbstractions
 using Metal: vertex_index
 using GeometryBasics: Vec4f, Vec3f
 const M = Mantle
-const N0f8 = ColorTypes.FixedPointNumbers.N0f8
+# `using`, not `const`: these files are all included into ONE `Main`, and another
+# of them already imports this name — a second binding for it is a load error
+# rather than a shadow.
+using ColorTypes.FixedPointNumbers: N0f8
 const MEXTr = Base.get_extension(Mantle, :MantleMetalExt)
 
 # Indexed, NOT `unsafe_load`: the point is that a graph draw's argument is a
@@ -292,6 +295,29 @@ end
 
     @test Array(cmd)[1].vertices == 3
     @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(color)) == 1682
+
+    # Again, three times, and the reason is a hazard that only shows from the
+    # SECOND plan on. `useResource` is not only about residency: it is how the
+    # driver learns that a dispatch touched those bytes, and a resource that is
+    # resident but undeclared is one it believes nobody used — so it may overlap
+    # the command buffer behind this one with it. A dispatch that handed the
+    # encoder arguments already converted to raw addresses skipped that
+    # declaration, and this draw read the count from BEFORE the dispatch, in
+    # seven runs of eight. The one that passed is why a single run is not enough
+    # of a test.
+    for _ in 1:3
+        g2 = M.Graph(RG_DEV)
+        color2 = M.Transient.Image(g2, RGBA{N0f8}, (64, 64))
+        cmd2 = M.Buffer(RG_DEV, M.DrawIndirectCommand, 1)
+        M.compute!(g2, "count") do p
+            M.dispatch!(p, rg_setcount!, (M.use(p, cmd2; write = true), Int32(3)), 1)
+        end
+        M.render!(g2, "tri", color2 => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, RG_PIPE, (RG_TRI,), cmd2)
+        end
+        M.run!(M.Plan(g2))
+        @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(color2)) == 1682
+    end
 end
 
 @testset "the FIRST run of a plan is already correct" begin

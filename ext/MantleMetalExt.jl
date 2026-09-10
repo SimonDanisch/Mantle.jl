@@ -28,8 +28,11 @@ import Mantle: Device, backend, pool,
 
 import Mantle: caps
 # The graph's execution path is core's (`graph/kalaunch.jl`); this backend
-# supplies `resolve` and says that barriers are a no-op.
-import Mantle: resolve, syncbackend, needs_transition, materialize!, alignment
+# supplies `resolve`, the hazards a recording needs (`passbarriers`) and the
+# transient's storage. `needs_transition` is NOT here: this backend takes the
+# portable rule in `sync/transition.jl` rather than answering `false` and
+# deriving nothing — see the head of `src/metal/ka.jl`.
+import Mantle: resolve, syncbackend, passbarriers, materialize!, alignment
 # Hardware ray tracing — the verbs Mantle declares in `raytracing/api.jl`.
 import Mantle: build_accel!, refit_tlas!, trace_closest_hits!
 # Device-wide sync, the graphics capability answer, and the queue verb that
@@ -63,6 +66,9 @@ using Metal.ObjectiveC: NSArray
 using Mantle: TransientBuffer
 # Read, not extended.
 using Mantle: Pool, DeviceArray, Persistent, Buffers, Images, region, memoryof, offset
+# Extended for the plan's argument memory, which this backend allocates outside the
+# pool and therefore defers on the queue rather than on the pool's timeline.
+import Mantle: retire!
 
 # `KernelInterface` is what a backend implements; `caps` in particular is one
 # function with a `Device` method in Mantle and a `KI.Backend` method here.

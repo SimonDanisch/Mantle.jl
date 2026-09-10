@@ -73,7 +73,17 @@ end
 function VulkanTexture2D(data::Matrix{T}; ctx::VkContext=vk_context(), filter=:linear, wrap=:repeat) where T
     dev = ctx.device
 
-    h, w = size(data)
+    # `data[x, y]`: the FIRST index is the horizontal one, as on the Metal side and
+    # as GLMakie's `Texture(::Matrix)` reads one.
+    #
+    # This used to read `h, w = size(data)` while the upload below copies the
+    # column-major bytes untouched, and those two disagree: the bytes make a Julia
+    # COLUMN one row of the image, so the width has to be `size(data, 1)`. With the
+    # dimensions the other way round the copy is only right when the two are equal —
+    # a square glyph atlas — or when there is a single row, where the whole matrix is
+    # one contiguous run either way. Anything else was uploaded scrambled: an N-by-M
+    # texture read its texels along the wrong stride.
+    w, h = size(data)
     format = julia_to_vk_format(T)
 
     image = VK.Image(dev,

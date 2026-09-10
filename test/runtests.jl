@@ -486,6 +486,12 @@ include(joinpath(@__DIR__, "test_host.jl"))
 # arithmetic those names lower to is tested in KernelInterface, over its host
 # output object.
 include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
+# Also needs no GPU, and that is the point of the design rather than a happy
+# accident: everything the geometry-to-mesh lowering does except read one builtin
+# is portable code over an output object, so `runprimitive` plus
+# `KernelInterface.HostMeshOutput` runs what a mesh stage runs and shows the
+# vertices, indices and per-primitive values a frame can only imply.
+include(joinpath(@__DIR__, "test_lowering.jl"))
 include(joinpath(@__DIR__, "test_ext_imports_are_declared.jl"))
 # The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
 # written before the refactor deletes anything, so each one fails today and
@@ -620,7 +626,7 @@ if _METAL_OK
                   "test_graph_metal.jl", "test_raytracing_metal.jl",
                   "test_trace_metal.jl", "test_hwtlas_metal.jl",
                   "test_residency_metal.jl", "test_graphics_metal.jl",
-                  "test_render_graph_metal.jl")
+                  "test_render_graph_metal.jl", "test_record_metal.jl")
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end
