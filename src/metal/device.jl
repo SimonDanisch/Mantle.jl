@@ -232,6 +232,7 @@ end
 # ── Budgets ───────────────────────────────────────────────────────────────────
 
 """The largest single `MTLBuffer` this device will create."""
+devicename(d::MetalDevice) = String(d.dev.name)
 maxalloc(d::MetalDevice) = Int(d.dev.maxBufferLength)
 
 """

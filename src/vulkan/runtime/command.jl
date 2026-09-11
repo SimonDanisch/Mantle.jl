@@ -1107,6 +1107,10 @@ end
 # a raw `VK.Device`, so the portable spelling could not reach it.
 function flush!(bq::VulkanBatchQueue, ::Device)
     @assert Threads.threadid() == bq.thread  "VulkanBatchQueue is single-writer; cross-thread flush forbidden"
+    # Was `vk_flush!`'s, which is gone: waiting on a semaphore of a dead device
+    # is the confusing failure this turns into a message that says what to do.
+    device_lost(ctxof(bq)) && throw(LavaError("command flush", "Vulkan device lost",
+        "Call reset_device!() to reinitialize, or restart Julia session."))
     # One question, one list. This used to seed `target` from `replay_watermark`
     # and then fold a maximum over `in_flight`, because the two submission paths
     # kept separate records; a caller that forgot either returned early.
@@ -1193,7 +1197,7 @@ function flush!(bq::VulkanBatchQueue, ::Device)
         end
     end
     drain!(bq)
-    check_validation_errors!("vk_flush!")
+    check_validation_errors!("flush!")
     return
 end
 
@@ -1227,23 +1231,6 @@ The three fields it replaces were `last_write_bq`, `last_write_val` and
 it.
 """
 @inline stampof(buf::VkManagedBuffer) = buf.stamp
-
-"""
-    vk_flush!(bq::VulkanBatchQueue)
-    vk_flush!(ctx::VkContext)       # flushes ctx.default_bq
-
-Flush a specific batch queue.  Always spell the queue (or its ctx) explicitly —
-zero-arg convenience forms have been removed per the "Explicit arguments over
-implicit state" rule.
-"""
-function vk_flush!(bq::VulkanBatchQueue)
-    ctx = ctxof(bq)
-    device_lost(ctx) && throw(LavaError("command flush", "Vulkan device lost",
-        "Call reset_device!() to reinitialize, or restart Julia session."))
-    flush!(bq)
-    return
-end
-vk_flush!(ctx::VkContext) = vk_flush!(ctx.default_bq)
 
 # ── Buffer copy ──────────────────────────────────────────────────────────
 #

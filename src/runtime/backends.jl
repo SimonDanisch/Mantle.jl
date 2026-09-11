@@ -124,9 +124,9 @@ function defaultbackend()
         b === nothing || return b
     end
     throw(ArgumentError(
-        "Mantle: no GPU backend is available. Load one — `using Lava` (with a " *
-        "Vulkan loader) or `using Metal` on an Apple GPU — or pass the backend " *
-        "explicitly instead of relying on the default."))
+        "Mantle: no GPU backend is available. `using Mantle` compiles in the " *
+        "one for this platform, so reaching here means the driver is missing " *
+        "or exposes no usable device — not that a package was left unloaded."))
 end
 
 """

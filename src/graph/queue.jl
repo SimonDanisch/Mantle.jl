@@ -121,6 +121,14 @@ function flush! end
 # driver-shaped hole this file exists to close.
 flush!(ch::SubmitChannel) = flush!(ch, deviceof(ch))
 
+# And the device's own queue, for a caller that holds a device rather than a
+# channel. This is what `vk_flush!(ctx)` was: a backend spelling of "flush this
+# device's default queue", reached through `vk_context()` at 122 test sites.
+# `batchqueue` and `flush!` are both already vocabulary, so this needs nothing
+# from a backend. NOT `waitidle`, which also does a full device wait — that is a
+# stronger promise and a different verb.
+flush!(d::Device) = flush!(batchqueue(d))
+
 """
     waitidle(device)
 

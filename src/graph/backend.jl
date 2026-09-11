@@ -556,6 +556,22 @@ macro compile_workload(version, ex)
 end
 
 """
+    devicename(device) -> String
+
+What GPU this is, for a human: "AMD Radeon RX 7900 XTX (RADV NAVI31)".
+
+`devices(api)` already answers this for the devices a caller could PICK; this
+answers it for the one they HAVE. RayDemo's benchmark harness wanted it to name
+a results file and had to read `vk_context().device_name` to get it, which is a
+demo reaching past the portable API for something entirely ordinary.
+
+For display only. Nothing should branch on it — a driver that renames itself
+between releases would change behaviour, and what a caller actually wants to ask
+is `caps(device)` or one of the `supports_*` predicates.
+"""
+function devicename end
+
+"""
     initbackend!()
 
 Whatever the backend this build compiled in has to do once, at `__init__`.
@@ -582,6 +598,8 @@ function initbackend! end
 const BACKEND_VOCABULARY = (
     # what a backend does once, at load
     :initbackend!,
+    # for humans: which GPU this is
+    :devicename,
     # devices, memory, resources
     :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,

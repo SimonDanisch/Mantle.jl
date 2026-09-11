@@ -98,7 +98,7 @@ makes that correct on the BDA path is that a trace HOLDS every structure it
 reads, so nothing in flight can be the last reference.
 
 For a CPU-blocking drain use `Raycore.wait_for_gpu!(hwtlas)`, which calls
-`vk_flush!(hwtlas.bq)` (waits on the VulkanTLAS's own queue specifically, not
+`flush!(hwtlas.bq)` (waits on the VulkanTLAS's own queue specifically, not
 the backend-wide queue the Raycore default `wait_for_gpu!` uses).
 """
 mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
@@ -288,10 +288,10 @@ end
     Raycore.wait_for_gpu!(hwtlas::VulkanTLAS) -> hwtlas
 
 Block until all pending GPU work on `hwtlas.bq` has completed.
-Uses Lava's `vk_flush!` rather than `KA.synchronize(backend)`.
+Uses `flush!` rather than `KA.synchronize(backend)`.
 """
 function Raycore.wait_for_gpu!(hwtlas::VulkanTLAS)
-    vk_flush!(hwtlas.bq)
+    flush!(hwtlas.bq)
     return hwtlas
 end
 
@@ -793,7 +793,7 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
         # If we just dispatched pending kernels, flush so their writes are
         # visible to the GPU-GPU copies. Rare path (topology + transform
         # update in the same frame).
-        had_pending && vk_flush!(hwtlas.bq)
+        had_pending && flush!(hwtlas.bq)
         hw_tlas, hw_accel, tri_gpu, off_gpu, dropped_blases =
             rebuild_hw_tlas_from_batch!(hwtlas)
 

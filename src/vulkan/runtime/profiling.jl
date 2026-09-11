@@ -260,7 +260,7 @@ end
 Read back the recorded timestamps from the query pool, convert to ns, and
 aggregate by kernel name. Returns a vector sorted by total time descending.
 
-If `flush_first=true` (default), forces a `vk_flush!` first so all submitted
+If `flush_first=true` (default), forces a `flush!` first so all submitted
 dispatches' timestamps are written to the pool before read-back. Pass
 `false` only if you've already synchronized and want to inspect a partial
 record.
@@ -270,7 +270,7 @@ function dispatch_timing_report(ctx::VkContext = vk_context(); flush_first::Bool
     pool === nothing && return KernelTimingReport[]
     isempty(ctx.caches.recorded_dispatches) && return KernelTimingReport[]
     if flush_first
-        vk_flush!(ctx.default_bq)
+        flush!(ctx.default_bq)
     end
     n_slots = ctx.caches.timestamp_next_slot
     n_slots == 0 && return KernelTimingReport[]

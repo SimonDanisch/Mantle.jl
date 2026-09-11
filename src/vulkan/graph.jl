@@ -225,6 +225,8 @@ constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
 #
 # Nothing is ever recorded and unsubmitted, so the newest submission is the
 # last thing that can be reading a region retired now.
+devicename(d::LavaDevice) = d.ctx.device_name
+
 fence(d::LavaDevice) = driver(d.bq).next_timeline
 # One predicate for "has the device finished this", spelled once.
 #

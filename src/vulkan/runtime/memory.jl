@@ -607,7 +607,7 @@ function try_vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
             #
             # Observed exactly that way: test_source_mapping.jl:699 asks for 40 GB
             # deliberately, and the error surfaced 40 lines later at :739 as a
-            # `LavaError during vk_flush!` on a FOUR-ELEMENT upload. An oversized
+            # `LavaError during flush!` on a FOUR-ELEMENT upload. An oversized
             # allocation is the intended, handled outcome here, so its messages
             # belong to it.
             let c = ctxof(bq)

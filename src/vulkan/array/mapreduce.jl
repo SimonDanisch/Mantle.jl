@@ -93,7 +93,7 @@ function vk_reduce_sum(A::LavaArray{Float32})
     ndr = Int(total_threads)
     _vk_reduce_fadd_kernel!(KA.get_backend(A), wgsize)(out, A, total_threads; ndrange=ndr)
     bq = ctx.default_bq
-    vk_flush!(bq)
+    flush!(bq)
     # out is mapped — read directly.
     return unsafe_load(out_ptr)
 end
