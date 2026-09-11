@@ -69,3 +69,11 @@ include("window.jl")
 # Last, because it is the only file that needs every other one: the device, the
 # pool's storage, the KA glue and the window are all in what a frame replays.
 include("record.jl")
+
+# ── What this backend does once, at load ──────────────────────────────────────
+#
+# Declared by core in `graph/backend.jl`. No pipeline thread and no `atexit`
+# hook: neither half of Vulkan's has anything to reach for here.
+Mantle.initbackend!() = register_backend!(; name = :metal, priority = 90) do
+    Metal.functional() ? Metal.MetalBackend() : nothing
+end

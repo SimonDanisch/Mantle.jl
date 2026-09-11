@@ -555,6 +555,19 @@ macro compile_workload(version, ex)
     end)
 end
 
+"""
+    initbackend!()
+
+Whatever the backend this build compiled in has to do once, at `__init__`.
+
+Declared here and answered in `src/vulkan/` or `src/metal/`, rather than written
+as a body inside the `@static if` in `Mantle.jl`: a Vulkan `initbackend!` names
+`vulkan_available`, `LavaBackend` and three more things only that backend
+defines, and a core file naming those is what `test_core_names_no_backend.jl`
+exists to catch. Metal's does one registration and no threads.
+"""
+function initbackend! end
+
 # ── The vocabulary, and the test that holds the line ─────────────────────────
 #
 # Every core function or type a backend is allowed to add a method to. This is
@@ -567,6 +580,8 @@ end
 # `docs/backend-independence.md` deletes; a step is done when its names are
 # gone from this list and the test still passes.
 const BACKEND_VOCABULARY = (
+    # what a backend does once, at load
+    :initbackend!,
     # devices, memory, resources
     :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,

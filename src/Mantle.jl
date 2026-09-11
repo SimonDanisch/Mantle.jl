@@ -99,10 +99,10 @@ using KernelInterface: primitivestride, primitivecount, firstinputvertex
 # `KI.Backend` method in each backend.
 import KernelInterface: supports, bestshape, caps, matrix_shapes, wggranularity
 
-# Vulkan and Lava are NOT here. They are `[weakdeps]`, and `src/vulkan/` is
-# loaded by `ext/MantleVulkanExt.jl` when both are present — which is what lets
-# `using Mantle` work on a machine with no Vulkan loader, since `VulkanCore`'s
-# `__init__` calls `error()` rather than degrading when it cannot `dlopen` one.
+# Vulkan and Lava are NOT here. They come in at the BOTTOM of this file, under
+# `@static if`, so that everything above loads with no driver and no compiler.
+# `using Mantle` works on a machine with no Vulkan loader because VulkanCore's
+# `__init__` records a missing loader instead of calling `error()`.
 #
 # The backend markers are `VulkanAPI`/`MetalAPI` rather than `Vulkan`/`Metal` for
 # a related reason: a marker named after its package would shadow the package in
@@ -124,6 +124,14 @@ using GPUCompiler
 using LLVM
 using LLVM: API
 using GPUArrays
+# `import`, not `using`: GPUArrays does not export `unsafe_free!`, so a plain
+# `using` leaves an unqualified `function unsafe_free!(as::LavaBLAS)` in
+# `vulkan/raytracing/acceleration.jl` defining a NEW `Mantle.unsafe_free!`. The
+# `finalizer(unsafe_free!, xs)` in `vulkan/array/lavaarray.jl` then registers
+# that one, and every `LavaArray` finalization is a `MethodError` printed from
+# the GC — 125 of them in one suite run, and no test fails. The extension
+# carried this import; it is the only third-party one it had that core did not.
+import GPUArrays: unsafe_free!
 using GPUArraysCore
 using KernelAbstractions
 using Adapt
@@ -239,12 +247,9 @@ include("graph/kalaunch.jl")
 # load with no driver and no compiler present — `test_pool.jl` drives the whole
 # allocator with neither.
 #
-# `src/vulkan/` is loaded by `ext/MantleVulkanExt.jl` when both Lava and Vulkan
-# are, and `src/metal/` will be loaded the same way by `ext/MantleMetalExt.jl`.
-# The host backend needs no weak dependency, so it is not an extension: KA is a
-# hard dependency of core, and an extension triggered on a hard dependency
-# always fires. It is included at the BOTTOM of this file, after every
-# declaration it adds a method to.
+# `src/vulkan/` and `src/metal/` are `@static include`d at the BOTTOM of this
+# file, one or the other, after every declaration they add a method to. So is
+# the host backend, which every platform gets.
 
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is deliberately not exported: it is a Span predicate nothing outside
@@ -441,9 +446,9 @@ fit.
 """
 capacity(dev) = typemax(Int)
 
-# `__init__` is `MantleVulkanExt`'s: both halves of it — the pipeline builder
-# thread and the `atexit` device-lost hook — reach into the Vulkan context, and
-# there is nothing for them to do in a session with no backend loaded.
+# `__init__` is at the bottom, with the backend: both halves of the Vulkan one —
+# the pipeline builder thread and the `atexit` device-lost hook — reach into the
+# Vulkan context, and Metal's does neither.
 
 
 # The host backend, last: every method in it is a method on something declared
@@ -480,27 +485,15 @@ include("host/host.jl")
     using Metal: MtlArray
     using Metal.ObjectiveC: NSArray
     using KernelInterface: DeviceCaps, MatrixShape, MatrixScope, SubgroupScope
+    # `src/metal/hwtlas.jl` implements Raycore's traversal interface, so these
+    # are extended, not called. Same reason as `unsafe_free!` above.
+    import Raycore: closest_hit, any_hit, sync!, world_bound, n_geometries,
+        n_instances, update_transforms!, update_transform!, wait_for_gpu!
     include("metal/metal.jl")
-
-    initbackend!() = register_backend!(; name = :metal, priority = 90) do
-        Metal.functional() ? Metal.MetalBackend() : nothing
-    end
 else
     import Vulkan as VK
     using Vulkan: unwrap, iserror, unwrap_error
     include("vulkan/vulkan.jl")
-
-    function initbackend!()
-        register_backend!(; name = :vulkan, priority = 100) do
-            vulkan_available() ? LavaBackend() : nothing
-        end
-        register_kernel_recorder!(with_frozen_recording; name = :vulkan)
-        init_pipeline_thread!()
-        atexit() do
-            mark_all_devices_lost!()
-            bind_context!(nothing)
-        end
-    end
 end
 
 """

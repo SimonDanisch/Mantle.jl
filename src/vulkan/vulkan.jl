@@ -148,3 +148,19 @@ include("graphics/record.jl")
 # It is reachable as `MantleVulkanExt.@compile_workload`; giving it a home in
 # Mantle means deciding what it does with no device, which is a question for
 # whoever needs it from a second backend.
+
+# ── What this backend does once, at load ──────────────────────────────────────
+#
+# Declared by core in `graph/backend.jl`; the body is here because every name in
+# it is this backend's.
+function initbackend!()
+    register_backend!(; name = :vulkan, priority = 100) do
+        vulkan_available() ? LavaBackend() : nothing
+    end
+    register_kernel_recorder!(with_frozen_recording; name = :vulkan)
+    init_pipeline_thread!()
+    atexit() do
+        mark_all_devices_lost!()
+        bind_context!(nothing)
+    end
+end
