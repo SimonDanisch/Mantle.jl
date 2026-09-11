@@ -66,7 +66,7 @@ back.
 The slab is an `MTLBuffer`, where the host backend's is a `Vector{UInt8}` and
 the Vulkan backend's is a `BufferBlock`. Same hook, three storages.
 """
-function materialize!(t::TransientBuffer{T}, buf::MTL.MTLBuffer, off::Int) where {T}
+function materialize!(::MetalDevice, t::TransientBuffer{T}, buf::MTL.MTLBuffer, off::Int) where {T}
     ref = GPUArrays.DataRef(_ -> nothing, buf)
     t.block = MtlArray{T,1}(ref, (t.n,); maxsize = Int(buf.length) - off, offset = off)
     t.offset = off

@@ -150,9 +150,11 @@ end
     Mantle.target_extent(r::Base.RefValue{Tuple{Int,Int}}) = r[]
     t = M.Transient.Image(g, RGBA{N0f8}, src)
     @test size(t) == (32, 32)
-    @test !M.refit!(t)                   # nothing moved
+    # The device is an explicit argument now (`graph/build.jl`), so a refit names
+    # the device it reallocates on rather than reaching for a global.
+    @test !M.refit!(RG_DEV, t)           # nothing moved
     src[] = (48, 48)
-    @test M.refit!(t)
+    @test M.refit!(RG_DEV, t)
     @test size(t) == (48, 48)
     @test t.req.size >= 48 * 48 * 4
     @test t.image === nothing            # unbound again; the placement is void

@@ -99,6 +99,16 @@ using KernelInterface: primitivestride, primitivecount, firstinputvertex
 # `KI.Backend` method in each backend.
 import KernelInterface: supports, bestshape, caps, matrix_shapes, wggranularity
 
+# `KI` is how the backends spell the module when they EXTEND its interface rather
+# than call into it — `KI.synchronize(::MetalBackend)` and the thirty methods
+# beside it in `src/metal/kernelinterface.jl`. It used to be a `const` in
+# `ext/MantleMetalExt.jl`; deleting that file when the backend stopped being an
+# extension took the binding with it, and the metal source has not loaded on this
+# platform since.
+import KernelInterface
+const KI = KernelInterface
+
+
 # Vulkan and Lava are NOT here. They come in at the BOTTOM of this file, under
 # `@static if`, so that everything above loads with no driver and no compiler.
 # `using Mantle` works on a machine with no Vulkan loader because VulkanCore's
@@ -142,6 +152,16 @@ using SPIRV_Tools_jll
 using LinearAlgebra
 using StaticArrays
 using GeometryBasics
+# Three more the extension used to hold, and that `src/metal/` uses: `KA` is only
+# `const`-defined in `src/vulkan/raytracing/hwtlas.jl`, which does not load on a
+# Mac, so the Metal source had no alias at all; `@propagate_inbounds` is
+# `hwtlas.jl`'s and `FixedPoint` is `graphics.jl`'s. `SVector`, `decompose` and
+# the GeometryBasics point types need nothing — core already imports both
+# packages wholesale above.
+const KA = KernelAbstractions
+using Base: @propagate_inbounds
+using ColorTypes.FixedPointNumbers: FixedPoint, N0f8
+using ColorTypes: FixedPointNumbers
 using Raycore: Ray
 # …and the module itself, which `using Raycore: Ray` does NOT bind. `HWTLAS` and
 # `AdaptedAccel` name `Raycore.AbstractAccel` / `Raycore.AbstractAdaptedAccel`

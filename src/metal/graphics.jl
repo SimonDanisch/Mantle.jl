@@ -1140,8 +1140,12 @@ Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
 
 Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
 Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
-Mantle.target_extent(t::Mantle.OffscreenTarget) = Mantle.target_extent(t.fb)
-Mantle.target_extent(t::Mantle.WindowTarget) = Mantle.target_extent(t.window)
+# The `OffscreenTarget` and `WindowTarget` methods that used to sit here are
+# core's, in `graphics/resources.jl`, and were byte-identical to them. Two
+# identical definitions of one signature were harmless while this file was an
+# extension — a different module extending the same function — and are a method
+# OVERWRITE now that it is included into Mantle itself, which precompilation
+# refuses outright.
 
 # The ELEMENT type of the attachment, which is what a pipeline is compiled
 # against. `MetalFramebuffer` keeps the MTL format it was created with and not the

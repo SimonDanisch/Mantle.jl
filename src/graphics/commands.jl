@@ -338,6 +338,17 @@ compute pass reads next.
 """
 function copy_target! end
 
+# The fallback every other hook in this file's neighbourhood has, and the reason
+# is not politeness: `test_core_names_no_backend.jl` reads a bare
+# `function f end` as a name only a backend defines, because a declaration
+# carries no method. A core method — even one that only explains itself — is what
+# says "this is core's vocabulary, answered by a backend" rather than "core
+# reached into a backend".
+copy_target!(dev::Device, dst, src) = throw(ArgumentError(
+    "copy_target!: $(typeof(dev)) does not implement the `copy!` pass. A render " *
+    "target is not addressable memory, so each backend moves those bytes its own " *
+    "way — `vkCmdCopyImageToBuffer` on Vulkan, a blit encoder on Metal."))
+
 """
     end_render_pass!(handle)
 
