@@ -1527,10 +1527,8 @@ end
 
 
 
-# The no-argument `Device()`. In the backend and not in core: choosing a default
-# backend is not something the portable half can do, and on a machine with two
-# loaded it would have to guess.
-Device() = Device(VulkanAPI())
+# `Device()` with no argument is core's — see `Mantle.jl`.
+
 
 
 # `adaptor` for this backend. It names `LavaAdaptor`, which is exactly the line

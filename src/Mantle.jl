@@ -453,4 +453,71 @@ capacity(dev) = typemax(Int)
 # the backend-facing surface it is, and it stays trivially re-extractable.
 include("host/host.jl")
 
+# ── The GPU backend, chosen at parse time ─────────────────────────────────────
+#
+# An `@static include` and not an extension. An extension exists to make a
+# dependency OPTIONAL and load-triggered; here the trigger is a platform fact,
+# so there is nothing conditional left for it to express — `using Mantle` on a
+# Mac wants Metal and never anything else, and MoltenVK is a translation layer
+# we deliberately do not reach for.
+#
+# What that buys is not ergonomics. `src/vulkan/` and `src/metal/` were written
+# inside `module Mantle`, where every name they extend resolved for free; as
+# separate modules they had to re-declare each one by hand — 400 lines of
+# `import Mantle: …` across the two — and a name MISSED there does not fail,
+# it silently DEFINES `MantleVulkanExt.release!` instead of extending
+# `Mantle.release!`, and nothing breaks until something calls the wrong one.
+# `ext/MantleHostExt.jl` came back into core for the same reason; see the
+# paragraph above `host/host.jl`.
+#
+# Vulkan is imported QUALIFIED. It exports 8573 names, and five of them —
+# `Buffer`, `Device`, `DrawIndirectCommand`, `Framebuffer`, `Sampler` — are
+# Mantle's own. A blanket `using Vulkan` here would let the local definition
+# win silently, which is the shadow hazard again with its sign flipped.
+# `src/vulkan/` already says `VK.` everywhere, so the only names it ever took
+# from the blanket import are the three `ResultTypes` ones Vulkan re-exports.
+@static if Sys.isapple()
+    using Metal: MtlArray
+    using Metal.ObjectiveC: NSArray
+    using KernelInterface: DeviceCaps, MatrixShape, MatrixScope, SubgroupScope
+    include("metal/metal.jl")
+
+    initbackend!() = register_backend!(; name = :metal, priority = 90) do
+        Metal.functional() ? Metal.MetalBackend() : nothing
+    end
+else
+    import Vulkan as VK
+    using Vulkan: unwrap, iserror, unwrap_error
+    include("vulkan/vulkan.jl")
+
+    function initbackend!()
+        register_backend!(; name = :vulkan, priority = 100) do
+            vulkan_available() ? LavaBackend() : nothing
+        end
+        register_kernel_recorder!(with_frozen_recording; name = :vulkan)
+        init_pipeline_thread!()
+        atexit() do
+            mark_all_devices_lost!()
+            bind_context!(nothing)
+        end
+    end
+end
+
+"""
+    Device() -> Device
+
+The GPU of this machine, without naming an API.
+
+Core's, and it could not be before: the no-arg form used to live in the Vulkan
+backend and hardcode `VulkanAPI()`, because "on a machine with two loaded it
+would have to guess". With the backend chosen at parse time there is never more
+than one, so the guess is a platform fact and this is the one place allowed to
+state it. `Device(VulkanAPI())` and `Device(MetalAPI())` stay for a caller who
+wants to say which, and `devices`/`selectdevice`/`defaultdevice!` still choose
+among the GPUs of the one that is here.
+"""
+Device() = @static Sys.isapple() ? Device(MetalAPI()) : Device(VulkanAPI())
+
+__init__() = initbackend!()
+
 end

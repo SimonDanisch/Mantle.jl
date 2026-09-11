@@ -11,6 +11,9 @@ version = "0.1.0"
 # optional, which is what makes it the shape a future Metal backend should take
 # rather than this one.
 [deps]
+Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 AcceleratedKernels = "6a4ca0a5-0e36-4168-a932-d9be78d558f1"
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
@@ -38,18 +41,7 @@ UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
 # — and core needs it unconditionally, since `gemv.jl`, `fft.jl` and
 # `narrow_phase.jl` all write `@kernel`. KA is a plain dependency now and the
 # host backend is `src/host/host.jl`, included like any other file.
-[weakdeps]
-Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
-Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
-Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
 
-[extensions]
-# Both, not either: Vulkan is the driver and Lava is the Julia→SPIR-V
-# compiler that feeds it. The backend is not loadable without the pair.
-MantleVulkanExt = ["Lava", "Vulkan"]
-# Metal alone: unlike the Vulkan backend this one needs no separate compiler,
-# because Metal.jl brings its own.
-MantleMetalExt = "Metal"
 
 [sources]
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}
