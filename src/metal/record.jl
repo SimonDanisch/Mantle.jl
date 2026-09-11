@@ -385,6 +385,14 @@ mutable struct MetalRecorder
     auxcursor::Int
     ranges::Metal.MtlVector{UInt32}
     writers::Vector{MetalRangeWriter}
+    # The pass about to be emitted, stashed by `emitbarriers!` — which is the only
+    # hook that sees one before `withpredicate` decides what segment it belongs to.
+    pass::Any
+    nwriters::Int       # how many gated runs the plan holds, counted at open
+    # Set when a gate is absorbed into the open iteration. Every iteration of one
+    # `repeat!` names the SAME one-slot flag, so the predicate alone cannot tell the
+    # next iteration from the rest of this one — the gate that went by can.
+    newiter::Bool
 end
 
 """What a recorded frame replays, and everything it must keep alive to do so."""
@@ -485,7 +493,8 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     nslots <= MAX_KERNEL_BUFFERS || throw(ArgumentError(
         "record!: a dispatch binds $(nslots) buffers and an indirect command may " *
         "bind $(MAX_KERNEL_BUFFERS). Pass fewer arguments, or group them in a struct."))
-    ncommands = ndispatch + nwriters
+    # …plus the range reset, which every gated plan opens with (`emithead!`).
+    ncommands = ndispatch + nwriters + (nwriters > 0 ? 1 : 0)
     # `ray_tracing`, unconditionally: a command whose kernel traces — an inline
     # ray query against a hardware acceleration structure — is refused by a buffer
     # that did not declare it, and the refusal is a MISS rather than an error.
@@ -497,14 +506,17 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, ncommands)
     # One 256-byte slot per range-writer argument, plus its kernel state. Sized
     # generously and once: this is record-time memory, not a frame's.
-    aux = MTL.MTLBuffer(d.dev, max(256 * (1 + 7 * nwriters), 256);
+    # One 256-byte slot per argument: the head's range reset takes three, and each
+    # range writer its kernel state plus six. Sized generously and once — this is
+    # record-time memory, not a frame's.
+    aux = MTL.MTLBuffer(d.dev, max(256 * (4 + 7 * nwriters), 256);
                         storage = Metal.SharedStorage)
     Metal.make_persistently_resident!(aux)
     ranges = Metal.MtlVector{UInt32}(undef, max(2 * nwriters, 2))
     fill!(ranges, UInt32(0))
     return MetalRecorder(d, pl, icb, ncommands, 0, false, MetalSegment[], 1, nothing, -1,
                          aux, convert(Ptr{UInt8}, MTL.contents(aux)), 0,
-                         ranges, MetalRangeWriter[])
+                         ranges, MetalRangeWriter[], nothing, nwriters, false)
 end
 
 """How many buffer slots a dispatch's arguments take, which is what the descriptor
@@ -523,6 +535,21 @@ is a ghost and takes none.
 const RANGE_WRITER_SLOTS = 7
 
 # ── The gate: what a discarded iteration does to a recording ──────────────────
+
+"""
+One thread, zeroing every execution range before the frame writes any of them.
+
+The reset is what makes absorbing a gate into the iteration before it SAFE: a
+discarded iteration does not run the gate that would have written the next range,
+so the next range has to already say "run nothing". Without this it would say
+whatever the previous frame left there.
+"""
+function metal_reset_ranges!(range, n::Int32)
+    @inbounds for k in Int32(1):n
+        range[k] = UInt32(0)
+    end
+    return nothing
+end
 
 """
 One thread, writing the execution range the command processor reads next.
@@ -614,8 +641,14 @@ independent dispatches independent. Consumed by the first command emitted after 
 so a pass that needs one gets it on its first command and the rest of the pass still
 runs concurrently.
 """
-Mantle.emitbarriers!(e::MetalRecorder, pp::Mantle.PassPlan) =
-    (isempty(pp.pre) || (e.barrier = true); nothing)
+function Mantle.emitbarriers!(e::MetalRecorder, pp::Mantle.PassPlan)
+    # Stashed here because this is the only hook that sees the PASS before
+    # `withpredicate` has to decide which segment its work belongs to, and that
+    # decision reads what the pass writes — see `gatesopen`.
+    e.pass = pp
+    isempty(pp.pre) || (e.barrier = true)
+    return nothing
+end
 
 # A recording holds no host store: it would replay this run's values for ever. Core
 # lands them in the run's own submission instead (`emitupdates!`).
@@ -630,7 +663,7 @@ writer, which is encoded into the segment BEFORE it so that it runs before the
 command processor reads what it wrote.
 """
 function Mantle.withpredicate(f, e::MetalRecorder, pred::Tuple{Any,Int})
-    if !samepredicate(pred, e.pred)
+    if !samepredicate(pred, e.pred) || e.newiter
         # The writer belongs to the segment that is open now (the one holding the
         # gate dispatch), and must wait for it: a barrier, then close, then the
         # gated segment starts after it.
@@ -639,13 +672,44 @@ function Mantle.withpredicate(f, e::MetalRecorder, pred::Tuple{Any,Int})
         closesegment!(e)
         e.pred = pred
         e.slot = length(e.writers) - 1
+        e.newiter = false
     end
     f()
     return nothing
 end
 
+"""
+Whether the pass about to be emitted is the GATE of the segment that is open.
+
+A `repeat!` gate is an ungated pass that writes the flag the next iteration reads,
+and it is the only ungated work that may be absorbed into the iteration before it:
+if that iteration is discarded the gate does not run, its range stays zero from
+`emithead!`'s reset, and the next iteration is discarded too — which is the right
+answer, because a discarded iteration writes nothing the gate reads and so the gate
+would have said the same thing. Once closed, a `repeat!` loop stays closed.
+
+Asked of what the pass WRITES rather than of its name: `repeat!` declares
+`use(p, pred; write = true)` on its gate, and a pass that happens to be scheduled
+between two iterations without touching the flag is real work and ends the segment.
+"""
+function gatesopen(e::MetalRecorder)
+    e.pred === nothing && return false
+    pp = e.pass
+    pp === nothing && return false
+    pid = Mantle.resourceid(e.plan.graph, e.pred[1])
+    for (id, u) in pp.pass.usages
+        id == pid && Mantle.writes(u) && return true
+    end
+    return false
+end
+
 function Mantle.withpredicate(f, e::MetalRecorder, ::Nothing)
-    e.pred === nothing || closesegment!(e)
+    # Absorbed rather than ending the segment: this is what makes a frame ONE
+    # `executeCommandsInBuffer` per iteration instead of two, and the gate is the
+    # only ungated pass it is sound for.
+    if e.pred !== nothing
+        gatesopen(e) ? (e.newiter = true) : closesegment!(e)
+    end
     f()
     return nothing
 end
@@ -688,6 +752,29 @@ function patchwriter!(e::MetalRecorder, w::MetalRangeWriter, first::Int, last::I
                UInt32(first - 1), UInt32(last - first + 1))
     w.adapted = adapted
     pack_recorded!(e.auxptr, w.args, (w.state, metal_write_range!, adapted...))
+    return nothing
+end
+
+"""
+    Mantle.emithead!(recorder, plan)
+
+The one command that runs before anything the graph asked for: the range reset.
+
+Only for a plan that has gates. Its arguments live in the recording's auxiliary
+buffer like a range writer's, and it is the first command of the head segment, so
+every `run!` clears the ranges before the first gate writes one.
+"""
+function Mantle.emithead!(e::MetalRecorder, pl::Mantle.Plan)
+    e.nwriters == 0 && return nothing
+    adapted = (Metal.mtlconvert(e.ranges), Int32(2 * e.nwriters))
+    tt = Base.to_tuple_type(map(typeof, adapted))
+    kernel = Metal.mtlfunction(metal_reset_ranges!, tt;
+                               name = icb_name("reset_ranges", 0), indirect = true)
+    state = recorded_state(e.dev, kernel)
+    args, nbytes = recorded_args((state, metal_reset_ranges!, adapted...), e.auxcursor)
+    e.auxcursor += Mantle.argalign(nbytes)
+    pack_recorded!(e.auxptr, args, (state, metal_reset_ranges!, adapted...))
+    encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(1), MTL.MTLSize(1))
     return nothing
 end
 
