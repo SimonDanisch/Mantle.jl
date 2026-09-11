@@ -167,7 +167,7 @@ end
 # ---------------------------------------------------------------------------
 @testset "narrow_phase_contacts_kernel — Lava backend (GPU smoke)" begin
     using Mantle: ContactRecord, narrow_phase_contacts_kernel
-    using .MVE: LavaArray, LavaBackend
+    using Mantle: LavaArray, LavaBackend
     using GeometryBasics: Vec3f
     max_contacts = Int32(4)
     n_grains     = 2
@@ -184,7 +184,7 @@ end
         transforms, pairs, Mantle.UnitCube(),
         counters, contacts, max_contacts;
         ndrange = 1)
-    MVE.vk_flush!(MVE.vk_context().default_bq)
+    Mantle.vk_flush!(Mantle.vk_context().default_bq)
 
     cs = Array(counters)
     rs = Array(contacts)

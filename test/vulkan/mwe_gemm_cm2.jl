@@ -26,7 +26,7 @@
 using Lava, KernelAbstractions, Printf, LinearAlgebra
 const KA = KernelAbstractions
 
-# The kernel itself lives in `MVE.gemm_cm2!` — this file drives it rather than
+# The kernel itself lives in `Mantle.gemm_cm2!` — this file drives it rather than
 # holding a second copy. A kernel written twice is a kernel that drifts, and the
 # copy in a test file is the one nobody updates.
 
@@ -38,7 +38,7 @@ function run(M, N, K; tol = 3e-2)
     B = KA.allocate(back, Float16, K, N); copyto!(B, b)
     C = KA.allocate(back, Float32, M, N); fill!(C, Float32(NaN))
 
-    MVE.coopmat_gemm_cm2!(C, A, B, M, N, K)
+    Mantle.coopmat_gemm_cm2!(C, A, B, M, N, K)
     KA.synchronize(back)
     got = Array(C)
     want = Float32.(a) * Float32.(b)
@@ -48,8 +48,8 @@ function run(M, N, K; tol = 3e-2)
     ok
 end
 
-ctx = MVE.vk_context()
-if isempty(MVE.caps(MVE.vk_context()).wggran)
+ctx = Mantle.vk_context()
+if isempty(Mantle.caps(Mantle.vk_context()).wggran)
     @info "no workgroup-scope cooperative matrices here — nothing to run"
 else
     ok = run(128, 192, 96)          # every extent divides its tile

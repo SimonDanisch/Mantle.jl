@@ -25,7 +25,6 @@ const M = Mantle
 # of them already imports this name — a second binding for it is a load error
 # rather than a shadow.
 using ColorTypes.FixedPointNumbers: N0f8
-const MEXTr = Base.get_extension(Mantle, :MantleMetalExt)
 
 # Indexed, NOT `unsafe_load`: the point is that a graph draw's argument is a
 # device ARRAY with its length, the same thing a kernel gets, so a shader
@@ -63,7 +62,7 @@ const RG_TRI = M.Buffer(RG_DEV, NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0),
     @test !M.isdepth(color)
     @test z.format == Metal.MTL.MTLPixelFormatDepth32Float
     @test color.format == Metal.MTL.MTLPixelFormatRGBA8Unorm
-    @test MEXTr.mtlformat(RGBA{N0f8}; srgb = true) == Metal.MTL.MTLPixelFormatRGBA8Unorm_sRGB
+    @test Mantle.mtlformat(RGBA{N0f8}; srgb = true) == Metal.MTL.MTLPixelFormatRGBA8Unorm_sRGB
 
     # What the placer reads, asked of the driver before any memory exists.
     @test M.nbytes(color) > 64 * 64 * 4 - 1
@@ -425,7 +424,7 @@ end
 using ColorTypes: BGRA
 
 @testset "a graph renders into a presentation surface" begin
-    win = MEXTr.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
+    win = Mantle.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
     @test win isa M.Window
     @test size(win) == (64, 64)
     @test eltype(win) == BGRA{N0f8}
@@ -508,7 +507,7 @@ tinted_fragment(inputs) = inputs.tint
     M.run!(plan_off)
     a = M.readback_target(off)
 
-    win = MEXTr.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
+    win = Mantle.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
     plan_win, _ = draw_into(g -> M.Surface(g, win))
     M.beforeframe!(RG_DEV, plan_win)
     e = M.openrun(RG_DEV, plan_win)
@@ -534,7 +533,7 @@ end
     # placement, re-register as a tenant — was `refit!(pl::Plan{LavaDevice})`.
     # Every line of it is the graph's; the one driver-shaped line, rebuilding
     # the argument memory, already had a hook.
-    win = MEXTr.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
+    win = Mantle.MetalWindow(BGRA{N0f8}, 64, 64; vsync = false)
     g = M.Graph(RG_DEV)
     screen = M.Surface(g, win)
     z = M.Transient.Image(g, Float32, screen)
@@ -620,7 +619,7 @@ end
     # No global holding a half-written buffer between calls. Named rather than
     # implied: reintroducing one without the graph deciding where it closes is
     # the regression this file is here to catch, and it would land here.
-    @test !isdefined(MEXTr, :OPEN_CB)
+    @test !isdefined(Mantle, :OPEN_CB)
 
     M.run!(plan)
     @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(b)) == 1682
@@ -670,18 +669,18 @@ end
     end
     plan = M.Plan(g)                        # NOT profiled
     @test plan.profiler === nothing
-    empty!(MEXTr.COMMITTED)
+    empty!(Mantle.COMMITTED)
     for _ in 1:20
         M.run!(plan)
     end
     # Either collection is off, or it is bounded — never unbounded.
-    @test length(MEXTr.COMMITTED) <= MEXTr.COMMITTED_MAX
+    @test length(Mantle.COMMITTED) <= Mantle.COMMITTED_MAX
     # And with a profiled plan, every pass drains what it committed.
     prof = M.Plan(g; profile = true)
     for _ in 1:5
         M.run!(prof)
     end
-    @test isempty(MEXTr.COMMITTED)
+    @test isempty(Mantle.COMMITTED)
 end
 
 @testset "clip space is Mantle's, not the backend's" begin
@@ -729,7 +728,7 @@ end
     # Nothing here needs a view: a detached layer already shows the invariant,
     # which is that the extent a window reports is the extent of the texture it
     # hands out. Every pass that strides a buffer by hand depends on it.
-    win = MEXTr.MetalWindow(BGRA{N0f8}, 96, 48; vsync = false)
+    win = Mantle.MetalWindow(BGRA{N0f8}, 96, 48; vsync = false)
     @test M.target_extent(win) == (96, 48)
 
     M.beginframe!(win)

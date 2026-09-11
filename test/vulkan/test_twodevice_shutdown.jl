@@ -3,7 +3,7 @@ The shutdown hook marks EVERY device lost, not just the bound one.
 
 `atexit` runs before Julia's final finalizer sweep, and `MantleVulkanExt.__init__`
 uses that: it marks the device lost so a `LavaArray` finalizer running afterwards
-takes the `device_lost(MVE.ctxof(bq))` branch in `vk_free!` and skips `query_timeline`,
+takes the `device_lost(Mantle.ctxof(bq))` branch in `vk_free!` and skips `query_timeline`,
 instead of calling `vkGetSemaphoreCounterValue` on a driver that has already been
 torn down.
 
@@ -43,9 +43,6 @@ suite with it.
 using Test, Mantle, Lava
 
 @testset "the shutdown hook covers every device" begin
-    MVE = Base.get_extension(Mantle, :MantleVulkanExt)
-    @test MVE !== nothing
-
     # Skipped rather than failed where the machine has no software rasterizer:
     # the assertion needs a second driver, and one is all some boxes offer.
     # Loud, because a quiet skip is how this went unnoticed for months.
@@ -55,21 +52,20 @@ using Test, Mantle, Lava
     else
         code = """
         using Mantle, Lava, Test
-        MVE = Base.get_extension(Mantle, :MantleVulkanExt)
-        gpu = MVE.vk_context()
-        cpu = MVE.VkContext(select = "llvmpipe")
+        gpu = Mantle.vk_context()
+        cpu = Mantle.VkContext(select = "llvmpipe")
         # Distinct devices, or the test is one device asserted twice.
         gpu === cpu && error("expected two contexts, got one")
-        MVE.device_lost(gpu) && error("gpu context was already marked lost")
-        MVE.device_lost(cpu) && error("lavapipe context was already marked lost")
+        Mantle.device_lost(gpu) && error("gpu context was already marked lost")
+        Mantle.device_lost(cpu) && error("lavapipe context was already marked lost")
 
-        MVE.mark_all_devices_lost!()            # what `atexit` calls
+        Mantle.mark_all_devices_lost!()            # what `atexit` calls
 
         # The bound one was always marked. The second is the regression: with the
         # old hook it stayed live, and its buffers' finalizers called into a dead
         # driver during the shutdown sweep.
-        MVE.device_lost(gpu) || error("bound context not marked lost")
-        MVE.device_lost(cpu) || error("SECOND context not marked lost — the bug")
+        Mantle.device_lost(gpu) || error("bound context not marked lost")
+        Mantle.device_lost(cpu) || error("SECOND context not marked lost — the bug")
         exit(0)
         """
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $code`

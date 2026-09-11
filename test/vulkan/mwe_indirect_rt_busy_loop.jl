@@ -13,9 +13,9 @@ using KernelAbstractions
 const KA = KernelAbstractions
 
 backend = LavaBackend()
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 
-hwtlas = MVE.VulkanTLAS(backend)
+hwtlas = Mantle.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
@@ -31,10 +31,10 @@ const N_ITERS = 20
 crashed_at = 0
 for iter in 1:N_ITERS
     # 12 fresh LavaArrays per iter (mirrors VolPathState count).
-    bufs = [MVE.LavaArray(zeros(Float32, 1024)) for _ in 1:12]
-    rays = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:1024])
-    hits = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1024))
-    n_buf = MVE.LavaArray(Int32[1024])
+    bufs = [Mantle.LavaArray(zeros(Float32, 1024)) for _ in 1:12]
+    rays = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:1024])
+    hits = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1024))
+    n_buf = Mantle.LavaArray(Int32[1024])
 
     # Mimic Hikari's per-sample pattern: ~10 compute dispatches + indirect RT.
     for sample in 1:4
@@ -50,7 +50,7 @@ for iter in 1:N_ITERS
 
     bufs = nothing; rays = nothing; hits = nothing; n_buf = nothing
 
-    if MVE.device_lost(ctx)
+    if Mantle.device_lost(ctx)
         global crashed_at = iter
         break
     end
@@ -63,4 +63,4 @@ end
 
 using Test
 @test crashed_at == 0
-@test !MVE.device_lost(ctx)
+@test !Mantle.device_lost(ctx)

@@ -19,7 +19,7 @@
 # constant-folding bug can be right for some indices and wrong for others.
 
 using Test, Lava, KernelAbstractions, GeometryBasics, StaticArrays
-using .MVE: LavaArray, LavaBackend
+using Mantle: LavaArray, LavaBackend
 using GeometryBasics: Vec3f
 
 @inline function double_indirect_body(idxs::AbstractVector, i::Integer)
@@ -50,7 +50,7 @@ end
         idxs = LavaArray(Int32[k])
         out  = LavaArray([Vec3f(0, 0, 0)])
         double_indirect_kernel(LavaBackend())(out, idxs; ndrange = 1)
-        MVE.vk_flush!(MVE.vk_context().default_bq)
+        Mantle.vk_flush!(Mantle.vk_context().default_bq)
         @test Array(out)[1] == double_indirect_ref(k)
     end
 
@@ -59,7 +59,7 @@ end
     idxs = LavaArray(Int32.(collect(1:8)))
     out  = LavaArray(fill(Vec3f(0, 0, 0), 8))
     double_indirect_kernel(LavaBackend())(out, idxs; ndrange = 8)
-    MVE.vk_flush!(MVE.vk_context().default_bq)
+    Mantle.vk_flush!(Mantle.vk_context().default_bq)
     @test Array(out) == [double_indirect_ref(k) for k in 1:8]
 end
 

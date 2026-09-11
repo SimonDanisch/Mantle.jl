@@ -16,7 +16,7 @@ import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index, synchronize
 using LinearAlgebra: dot, normalize
 
-backend = MVE.LavaBackend()
+backend = Mantle.LavaBackend()
 println("Backend: lavapipe")
 
 # The crashing pattern: reflect → recompute cos → max guard → divide

@@ -1,16 +1,16 @@
 using Test, GeometryBasics, StaticArrays, LinearAlgebra
 using Raycore, Lava, Adapt
 
-@testset "MVE.VulkanTLAS — UAF safety without CPU fence" begin
-    backend = MVE.LavaBackend()
-    hwtlas = MVE.VulkanTLAS(backend)
+@testset "Mantle.VulkanTLAS — UAF safety without CPU fence" begin
+    backend = Mantle.LavaBackend()
+    hwtlas = Mantle.VulkanTLAS(backend)
 
     mesh1 = GeometryBasics.normal_mesh(Sphere(Point3f(0,0,0), 1f0))
     h1 = push!(hwtlas, mesh1, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
     Raycore.sync!(hwtlas)
 
-    rays = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3)])
-    hits1 = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1))
+    rays = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3)])
+    hits1 = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1))
     Mantle.trace_closest_hits!(hits1, rays, hwtlas.hw_accel, 1)
     # DO NOT wait; leave the dispatch in flight.
 
@@ -22,7 +22,7 @@ using Raycore, Lava, Adapt
     Raycore.sync!(hwtlas)
 
     # Second dispatch reads new geometry.
-    hits2 = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1))
+    hits2 = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1))
     Mantle.trace_closest_hits!(hits2, rays, hwtlas.hw_accel, 1)
 
     Raycore.wait_for_gpu!(hwtlas)

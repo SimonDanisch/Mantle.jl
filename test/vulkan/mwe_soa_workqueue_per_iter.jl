@@ -10,7 +10,7 @@ using KernelAbstractions
 const KA = KernelAbstractions
 
 backend = LavaBackend()
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 
 # Mirror VPRayWorkItem-ish layout (Bool + struct fields that go through SoA).
 struct WorkItem
@@ -22,10 +22,10 @@ end
 
 # Build a SoA StructArray of LavaArrays — same shape as Hikari's WorkQueue.items.
 function alloc_soa_workqueue(n::Int)
-    a    = MVE.LavaArray(zeros(Float32, n))
-    b    = MVE.LavaArray(zeros(Float32, n))
-    c    = MVE.LavaArray(zeros(Float32, n))
-    flag = MVE.LavaArray(zeros(Bool,    n))
+    a    = Mantle.LavaArray(zeros(Float32, n))
+    b    = Mantle.LavaArray(zeros(Float32, n))
+    c    = Mantle.LavaArray(zeros(Float32, n))
+    flag = Mantle.LavaArray(zeros(Bool,    n))
     return StructArray{WorkItem}((a=a, b=b, c=c, flag=flag))
 end
 
@@ -48,7 +48,7 @@ for iter in 1:N_ITERS
         KA.synchronize(backend)
     end
     queue = nothing; aux1 = nothing; aux2 = nothing
-    if MVE.device_lost(ctx)
+    if Mantle.device_lost(ctx)
         global crashed_at = iter
         break
     end
@@ -59,4 +59,4 @@ println(crashed_at == 0 ? "MWE-5: $N_ITERS iters clean." : "MWE-5: !!! crashed i
 
 using Test
 @test crashed_at == 0
-@test !MVE.device_lost(ctx)
+@test !Mantle.device_lost(ctx)

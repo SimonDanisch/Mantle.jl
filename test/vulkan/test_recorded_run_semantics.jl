@@ -116,7 +116,7 @@ argbytes(pl) = copy(unsafe_wrap(Array, pl.args.ptr, length(pl.args.store)))
     @test Mantle.isdirty(kref_b)
     # ONE recording. It was one per argument slot, and the slots existed because
     # a run rewrote argument bytes on the host; nothing does.
-    @test pl_b.recording isa MVE.Recording
+    @test pl_b.recording isa Mantle.Recording
 
     for k in steps
         kref_b[] = k
@@ -157,7 +157,7 @@ end
 
     bq = Mantle.batchqueue(dev)
     runs = 10
-    before = MVE.ctxof(bq).diag.flush_counter[]
+    before = Mantle.ctxof(bq).diag.flush_counter[]
     for i in 1:runs
         kref[] = Int32(i)
         Mantle.run!(pl)
@@ -167,17 +167,17 @@ end
         # BACK, and the holds it must outlive — which include the recording,
         # because that is submitted again next run and stays the plan's.
         sub = last(bq.outstanding).payload
-        @test sub.recording isa MVE.OneShot
+        @test sub.recording isa Mantle.OneShot
         @test any(x -> x === pl.recording, sub.holds)
     end
-    @test MVE.ctxof(bq).diag.flush_counter[] - before == runs
+    @test Mantle.ctxof(bq).diag.flush_counter[] - before == runs
     KA.synchronize(be)
     @test Array(Mantle.storage(out)) == fill(Int32(2 * sum(1:runs)), n)
 
     # Nothing pending: the recording alone, and nothing allocated for it.
-    before = MVE.ctxof(bq).diag.flush_counter[]
+    before = Mantle.ctxof(bq).diag.flush_counter[]
     Mantle.run!(pl)
-    @test MVE.ctxof(bq).diag.flush_counter[] - before == 1
+    @test Mantle.ctxof(bq).diag.flush_counter[] - before == 1
     sub = last(bq.outstanding).payload
     @test sub.recording === nothing
     # Nothing was opened, so there is no hold frame and nothing to hold: the

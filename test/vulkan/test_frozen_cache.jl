@@ -61,11 +61,11 @@ end
     end
 
     @testset "record then replay: hits, no stores, same answer" begin
-        MVE.frozen_clear!(version = version)
+        Mantle.frozen_clear!(version = version)
         Lava.frozen_reset_stats!()
 
         # Record.
-        MVE.with_frozen_recording(version) do
+        Mantle.with_frozen_recording(version) do
             frozentest_scale!(back)(out, a, 4.0f0; ndrange = 256)
             frozentest_add!(back)(out, a, b; ndrange = 256)
             KA.synchronize(back)
@@ -106,9 +106,9 @@ end
         # be on by default at all.
         delete!(Lava.FROZEN_UNPACKAGED, @__MODULE__)
         try
-            MVE.frozen_clear!(version = version)
+            Mantle.frozen_clear!(version = version)
             Lava.frozen_reset_stats!()
-            MVE.with_frozen_recording(version) do
+            Mantle.with_frozen_recording(version) do
                 frozentest_scale!(back)(out, a, 3.0f0; ndrange = 256)
                 KA.synchronize(back)
             end
@@ -119,7 +119,7 @@ end
             @test all(==(6.0f0), Array(out))
         finally
             push!(Lava.FROZEN_UNPACKAGED, @__MODULE__)
-            MVE.frozen_clear!(version = version)
+            Mantle.frozen_clear!(version = version)
             Lava.FROZEN_VERSION[] = ""
         end
     end
@@ -146,8 +146,8 @@ end
     end
 
     @testset "a damaged entry costs a recompile, not the session" begin
-        MVE.frozen_clear!(version = version)
-        MVE.with_frozen_recording(version) do
+        Mantle.frozen_clear!(version = version)
+        Mantle.with_frozen_recording(version) do
             frozentest_scale!(back)(out, a, 4.0f0; ndrange = 256)
             KA.synchronize(back)
         end
@@ -155,13 +155,13 @@ end
         entry = first(filter(f -> endswith(f, "_v$(version).spirv") &&
                                   occursin("frozentest_scale", f), readdir(dir)))
         write(joinpath(dir, entry), rand(UInt8, 64))     # not a serialized kernel
-        empty!(MVE.vk_context().caches.frozen_mem)
-        MVE.use_frozen_kernels(version)
+        empty!(Mantle.vk_context().caches.frozen_mem)
+        Mantle.use_frozen_kernels(version)
         fill!(out, 0.0f0)
         frozentest_scale!(back)(out, a, 4.0f0; ndrange = 256)   # must not throw
         KA.synchronize(back)
         @test all(==(8.0f0), Array(out))                 # fell back and is correct
-        MVE.frozen_clear!(version = version)
+        Mantle.frozen_clear!(version = version)
         Lava.FROZEN_VERSION[] = ""
     end
 
@@ -171,24 +171,24 @@ end
 end
 
 @testset "pipeline cache header validation" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     pd = ctx.physical_device
-    props = MVE.VK.get_physical_device_properties(pd)
+    props = Mantle.VK.get_physical_device_properties(pd)
     # A well-formed header for THIS device is accepted…
     good = UInt8[]
-    append!(good, reinterpret(UInt8, [UInt32(MVE.PIPELINE_CACHE_HEADER_BYTES)]))
-    append!(good, reinterpret(UInt8, [MVE.PIPELINE_CACHE_HEADER_VERSION_ONE]))
+    append!(good, reinterpret(UInt8, [UInt32(Mantle.PIPELINE_CACHE_HEADER_BYTES)]))
+    append!(good, reinterpret(UInt8, [Mantle.PIPELINE_CACHE_HEADER_VERSION_ONE]))
     append!(good, reinterpret(UInt8, [UInt32(props.vendor_id)]))
     append!(good, reinterpret(UInt8, [UInt32(props.device_id)]))
     append!(good, collect(props.pipeline_cache_uuid))
-    @test MVE.pipeline_cache_compatible(good, pd)
+    @test Mantle.pipeline_cache_compatible(good, pd)
 
     # …and every way of being wrong is rejected, because the driver is not a
     # safe place to discover a mismatch.
-    @test !MVE.pipeline_cache_compatible(UInt8[], pd)
-    @test !MVE.pipeline_cache_compatible(good[1:16], pd)          # truncated
+    @test !Mantle.pipeline_cache_compatible(UInt8[], pd)
+    @test !Mantle.pipeline_cache_compatible(good[1:16], pd)          # truncated
     for byte in (1, 5, 9, 13, 17)                                   # each header field
         bad = copy(good); bad[byte] ⊻= 0xff
-        @test !MVE.pipeline_cache_compatible(bad, pd)
+        @test !Mantle.pipeline_cache_compatible(bad, pd)
     end
 end

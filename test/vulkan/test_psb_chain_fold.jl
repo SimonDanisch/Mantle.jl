@@ -22,8 +22,8 @@ using Random
 const KA = Lava.KernelAbstractions
 
 @testset "PSB shared-access-chain miscompile regression" begin
-    backend = MVE.LavaBackend()
-    bq = MVE.vk_context().default_bq
+    backend = Mantle.LavaBackend()
+    bq = Mantle.vk_context().default_bq
     bs = 256
 
     # Minimal: two loads from one array at different loop-varying indices.
@@ -39,9 +39,9 @@ const KA = Lava.KernelAbstractions
         nothing
     end
     n = 256; w = Float32.(1:n)
-    out = MVE.LavaArray(fill(-1f0, n))
-    two_loads!(backend, bs)(out, MVE.LavaArray(w), Int32(3), Int32(n), ndrange=(n,))
-    MVE.vk_flush!(bq)
+    out = Mantle.LavaArray(fill(-1f0, n))
+    two_loads!(backend, bs)(out, Mantle.LavaArray(w), Int32(3), Int32(n), ndrange=(n,))
+    Mantle.vk_flush!(bq)
     expected = [ Float32(sum(w[((i + k) % n) + 1] + w[((i + k + 50) % n) + 1] for k in 0:2)) for i in 1:n ]
     @test Array(out) == expected
     @test !all(Array(out) .== 0)   # the bug made every element 0
@@ -51,11 +51,11 @@ end
 # loads `v[ix] < v[iy]` from the value array per comparison).
 @testset "AcceleratedKernels.sortperm!" begin
     import AcceleratedKernels as AK
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     for nn in (256, 1024, 4000, 100_000)
         v = rand(MersenneTwister(nn + 1), Float32, nn)
-        vg = MVE.LavaArray(v)
-        ix = MVE.LavaArray(collect(UInt32(1):UInt32(nn)))
+        vg = Mantle.LavaArray(v)
+        ix = Mantle.LavaArray(collect(UInt32(1):UInt32(nn)))
         AK.sortperm!(ix, vg); KA.synchronize(backend)
         @test Array(ix) == sortperm(v)
     end

@@ -16,12 +16,12 @@ const KA = KernelAbstractions
 
 @testset "empty pool blocks are trimmed without an OOM" begin
     be = LavaBackend()
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
 
     # Grow the pool past the trim threshold, then drop every reference.
-    target = MVE.mempolicy(MVE.vk_context()).trim_threshold + 256 * 1024 * 1024
-    let arrays = MVE.LavaArray[]
-        while MVE.gpu_live_bytes() < target
+    target = Mantle.mempolicy(Mantle.vk_context()).trim_threshold + 256 * 1024 * 1024
+    let arrays = Mantle.LavaArray[]
+        while Mantle.gpu_live_bytes() < target
             a = KA.allocate(be, Float32, 4_000_000)   # 16 MB each
             fill!(a, 1.0f0)
             push!(arrays, a)
@@ -30,16 +30,16 @@ const KA = KernelAbstractions
         empty!(arrays)
     end
 
-    grown = MVE.gpu_live_bytes()
-    @test grown >= MVE.mempolicy(MVE.vk_context()).trim_threshold
+    grown = Mantle.gpu_live_bytes()
+    @test grown >= Mantle.mempolicy(Mantle.vk_context()).trim_threshold
 
     # Defeat the rate limiter so the test doesn't depend on wall-clock timing.
-    MVE.mempolicy(MVE.vk_context()).last_trim = 0.0
-    MVE.maybe_trim_pool!(ctx)
+    Mantle.mempolicy(Mantle.vk_context()).last_trim = 0.0
+    Mantle.maybe_trim_pool!(ctx)
 
-    trimmed = MVE.gpu_live_bytes()
+    trimmed = Mantle.gpu_live_bytes()
     @test trimmed < grown                     # capacity actually came back
-    @test trimmed < MVE.mempolicy(MVE.vk_context()).trim_threshold
+    @test trimmed < Mantle.mempolicy(Mantle.vk_context()).trim_threshold
 
     # And the allocator still works afterwards — blocks were returned, not corrupted.
     b = KA.allocate(be, Float32, 1024)
@@ -72,8 +72,8 @@ end
 # passing on a technicality.
 @testset "an explicit trim flushes before it decides there is nothing to do" begin
     be = LavaBackend()
-    ctx = MVE.vk_context()
-    MVE.trim_gpu_pool!(ctx)                  # from a known floor
+    ctx = Mantle.vk_context()
+    Mantle.trim_gpu_pool!(ctx)                  # from a known floor
 
     @kernel function grind!(a)
         i = @index(Global)
@@ -84,7 +84,7 @@ end
         a[i] = x
     end
 
-    let arrays = MVE.LavaArray[]
+    let arrays = Mantle.LavaArray[]
         for _ in 1:60
             a = KA.allocate(be, Float32, 4_000_000)          # 16 MB
             fill!(a, 1.0f0)
@@ -95,16 +95,16 @@ end
     end
     GC.gc(true)
 
-    grown = MVE.gpu_live_bytes()
+    grown = Mantle.gpu_live_bytes()
     @test grown > 256 * 1024 * 1024
     # The state the old gate mishandled — every block still counted as live even
     # though every reference to its contents is gone.
-    @test !any(b -> isempty(b.live), MVE.poolblocks(ctx))
+    @test !any(b -> isempty(b.live), Mantle.poolblocks(ctx))
 
-    blocks, bytes = MVE.trim_gpu_pool!(ctx)
+    blocks, bytes = Mantle.trim_gpu_pool!(ctx)
     @test blocks > 0
     @test bytes > 0
-    @test MVE.gpu_live_bytes() < grown ÷ 2
+    @test Mantle.gpu_live_bytes() < grown ÷ 2
 
     # And the allocator still works — blocks were returned, not corrupted.
     b = KA.allocate(be, Float32, 1024)
@@ -114,9 +114,9 @@ end
 end
 
 @testset "trim is rate-limited" begin
-    ctx = MVE.vk_context()
-    MVE.mempolicy(MVE.vk_context()).last_trim = time()            # just trimmed
-    before = MVE.gpu_live_bytes()
-    MVE.maybe_trim_pool!(ctx)                # must be a no-op, not a stall
-    @test MVE.gpu_live_bytes() == before
+    ctx = Mantle.vk_context()
+    Mantle.mempolicy(Mantle.vk_context()).last_trim = time()            # just trimmed
+    before = Mantle.gpu_live_bytes()
+    Mantle.maybe_trim_pool!(ctx)                # must be a no-op, not a stall
+    @test Mantle.gpu_live_bytes() == before
 end

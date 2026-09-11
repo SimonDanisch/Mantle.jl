@@ -2,24 +2,24 @@ using Test, Lava, Mantle
 @testset "Phase 2 — error surfacing" begin
 
 @testset "query_timeline exists and returns current counter on healthy device" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     bq = ctx.default_bq
-    @test isdefined(MVE, :query_timeline)
+    @test isdefined(Mantle, :query_timeline)
 
     # Healthy-device query path: must return a UInt64 without throwing.
-    current = MVE.query_timeline(bq)
+    current = Mantle.query_timeline(bq)
     @test current isa UInt64
 end
 
 @testset "safe_fin_log and @vk_checked exist" begin
-    @test isdefined(MVE, :safe_fin_log)
+    @test isdefined(Mantle, :safe_fin_log)
     # `Symbol("@vk_checked")` — a macro, so the plain `isdefined(Lava, :name)`
     # sweep that moved the rest of these to Mantle did not match it. It lives
     # in the Vulkan extension now, like the rest of the runtime it checks.
-    @test isdefined(MVE, Symbol("@vk_checked"))
+    @test isdefined(Mantle, Symbol("@vk_checked"))
 
     # safe_fin_log should not throw on a normal string.
-    @test MVE.safe_fin_log("test: safe_fin_log smoke\n") === nothing
+    @test Mantle.safe_fin_log("test: safe_fin_log smoke\n") === nothing
 end
 
 @testset "no typemax(UInt64) sentinel in catch bodies" begin

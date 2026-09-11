@@ -50,7 +50,7 @@ lay(nrow, ncol) = Lava.tensor_slice(
     Mantle.copyto!(pointer(three), 1, T, m3)
 end
 
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 if !ctx.coopmat2.per_element_operations
     @info "no coopmat2 per-element operations on this device — nothing to run"
 else

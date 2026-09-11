@@ -30,7 +30,6 @@ using Adapt, StaticArrays
 # it — an `UndefVarError` whose cause is the ORDER of the includes.
 import LinearAlgebra
 const KA = KernelAbstractions
-const MEXT = Base.get_extension(Mantle, :MantleMetalExt)
 
 @kernel function _hw_probe!(hits, ts, insts, dirs, accel, O)
     i = @index(Global)
@@ -48,11 +47,11 @@ function _probe_dirs(n, O)
 end
 
 @testset "Metal: the hit-record ABI matches the MSL it is shared with" begin
-    @test sizeof(MEXT.MetalHit) == 24
-    @test isbitstype(MEXT.MetalHit)
-    @test fieldnames(MEXT.MetalHit) == (:t, :hit, :prim, :inst, :bu, :bv)
+    @test sizeof(Mantle.MetalHit) == 24
+    @test isbitstype(Mantle.MetalHit)
+    @test fieldnames(Mantle.MetalHit) == (:t, :hit, :prim, :inst, :bu, :bv)
     # Plain scalars, no padding — the MSL struct is declared the same way.
-    @test all(fieldoffset(MEXT.MetalHit, i) == 4(i - 1) for i in 1:6)
+    @test all(fieldoffset(Mantle.MetalHit, i) == 4(i - 1) for i in 1:6)
 end
 
 @testset "Metal: HWTLAS is reachable through the portable constructor" begin

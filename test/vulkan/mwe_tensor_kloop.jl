@@ -58,12 +58,12 @@ const KK = 64          # four k-steps — enough that a wrong axis walks off
     Mantle.copyto!(pointer(out), 1, TK, accm)
 end
 
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device"
 else
     back = LavaBackend()
-    WG = MVE.device_subgroup_size(ctx)
+    WG = Mantle.device_subgroup_size(ctx)
     a = Float16.(reshape(1:(MK * KK), MK, KK) ./ 512)
     b = Float16.(reshape((KK * NK):-1:1, KK, NK) ./ 512)
     A = KA.allocate(back, Float16, MK, KK); copyto!(A, a)

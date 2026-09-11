@@ -10,11 +10,10 @@ be in the wrong place.
 
 using Test, Mantle, Metal
 const MTL = Metal.MTL
-const MEXT = Base.get_extension(Mantle, :MantleMetalExt)
 
 @testset "Metal: the transform is converted, not reinterpreted" begin
     id = Mantle.identity_transform()
-    packed = MEXT.packedtransform(id)
+    packed = Mantle.packedtransform(id)
 
     # Mantle/Vulkan: a row-major 3×4 — three rows of four.
     @test collect(reinterpret(Float32, [id])) ==
@@ -30,7 +29,7 @@ const MEXT = Base.get_extension(Mantle, :MantleMetalExt)
     # …and the translation column survives the transpose intact, which is the
     # part a sheared matrix gets subtly wrong rather than obviously.
     t = Mantle.Mat3x4f(1, 0, 0, 7,  0, 1, 0, 8,  0, 0, 1, 9)
-    pf = collect(reinterpret(Float32, [MEXT.packedtransform(t)]))
+    pf = collect(reinterpret(Float32, [Mantle.packedtransform(t)]))
     @test pf[10:12] == Float32[7, 8, 9]      # the fourth column IS the translation
 end
 
@@ -58,7 +57,7 @@ end
     vbuf = MTL.MTLBuffer(d.dev, sizeof(verts); storage = Metal.SharedStorage)
     unsafe_copyto!(convert(Ptr{Float32}, MTL.contents(vbuf)), pointer(verts), length(verts))
 
-    blas = MEXT.build_blas(d, vbuf, 1)
+    blas = Mantle.build_blas(d, vbuf, 1)
     @test blas.handle.size > 0
 end
 
@@ -67,7 +66,7 @@ end
     verts = Float32[0, 0, 0,  1, 0, 0,  0, 1, 0]
     vbuf = MTL.MTLBuffer(d.dev, sizeof(verts); storage = Metal.SharedStorage)
     unsafe_copyto!(convert(Ptr{Float32}, MTL.contents(vbuf)), pointer(verts), length(verts))
-    blas = MEXT.build_blas(d, vbuf, 1)
+    blas = Mantle.build_blas(d, vbuf, 1)
 
     I = Mantle.identity_transform()
     shifted = Mantle.Mat3x4f(1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 3)
@@ -99,7 +98,7 @@ end
     verts = Float32[0, 0, 0,  1, 0, 0,  0, 1, 0]
     vbuf = MTL.MTLBuffer(d.dev, sizeof(verts); storage = Metal.SharedStorage)
     unsafe_copyto!(convert(Ptr{Float32}, MTL.contents(vbuf)), pointer(verts), length(verts))
-    blas = MEXT.build_blas(d, vbuf, 1)
+    blas = Mantle.build_blas(d, vbuf, 1)
 
     plain = Mantle.build_accel!(d, [blas], [Mantle.identity_transform()])
     @test !plain.refittable

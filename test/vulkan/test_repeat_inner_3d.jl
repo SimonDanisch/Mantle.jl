@@ -23,7 +23,7 @@ using Random
 @testset "repeat(inner=) 3-D — NVIDIA stride-product miscompile" begin
     # The originally-failing case: 2-D source, 3-D inner, argmax(inner)==1.
     xmat = reshape(Float32.(1:12), 3, 4)
-    g = MVE.LavaArray(xmat)
+    g = Mantle.LavaArray(xmat)
     for inner in [(3, 1, 2), (2, 1, 1), (3, 2, 2), (1, 3, 1), (4, 1, 3)]
         @test Array(repeat(g, inner = inner)) == repeat(xmat, inner = inner)
     end
@@ -31,13 +31,13 @@ using Random
     # Genuine 3-D source arrays (linear_index NTuple{3} path) and 4-D (general
     # Horner-loop path).
     x3 = reshape(Float32.(1:24), 2, 3, 4)
-    g3 = MVE.LavaArray(x3)
+    g3 = Mantle.LavaArray(x3)
     for inner in [(2, 1, 2), (1, 2, 3), (3, 1, 1)]
         @test Array(repeat(g3, inner = inner)) == repeat(x3, inner = inner)
     end
 
     x4 = reshape(Float32.(1:48), 2, 3, 2, 4)
-    g4 = MVE.LavaArray(x4)
+    g4 = Mantle.LavaArray(x4)
     for inner in [(2, 1, 3, 1), (1, 2, 1, 2)]
         @test Array(repeat(g4, inner = inner)) == repeat(x4, inner = inner)
     end
@@ -52,10 +52,10 @@ end
 # built via division (the exact shape that dropped the I[1] term).
 @testset "linear_index{3} load offset is exact (no dropped term)" begin
     using Lava.KernelAbstractions
-    backend = MVE.LavaBackend()
-    bq = MVE.vk_context().default_bq
+    backend = Mantle.LavaBackend()
+    bq = Mantle.vk_context().default_bq
     xsrc = reshape(Float32.(1:(3 * 4 * 2)), 3, 4, 2)   # 3-D source
-    xg = MVE.LavaArray(xsrc)
+    xg = Mantle.LavaArray(xsrc)
 
     @kernel function ri_probe!(out, @Const(xs), inner::NTuple{3,Int})
         odx = @index(Global, Cartesian)
@@ -66,9 +66,9 @@ end
         @inbounds out[odx] = xs[CartesianIndex(sdx)]
     end
 
-    out = MVE.LavaArray(zeros(Float32, 9, 4, 2))
+    out = Mantle.LavaArray(zeros(Float32, 9, 4, 2))
     ri_probe!(backend)(out, xg, (3, 1, 1); ndrange = (9, 4, 2))
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     got = Array(out)
     expref = similar(got)
     for k in 1:2, j in 1:4, i in 1:9

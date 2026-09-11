@@ -27,8 +27,7 @@ built and cannot be switched on afterwards — which is also why the seven `LAVA
 environment variables this file used to ask for are gone. **Every `LavaArray`
 alive becomes invalid**, so this goes first, before any of the builders below.
 """
-const MVE = Base.get_extension(Mantle, :MantleVulkanExt)
-syncdevice!() = MVE.reset_device!(debug = MVE.DebugConfig(sync_val = true))
+syncdevice!() = Mantle.reset_device!(debug = Mantle.DebugConfig(sync_val = true))
 
 """
 Refuse to report a clean run out of a device that is not instrumented.

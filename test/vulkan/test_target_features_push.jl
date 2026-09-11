@@ -20,7 +20,7 @@ The compiler's half, given a record, what does it emit, is
 using Test, Mantle, Lava
 
 @testset "the context carries what the device reports" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     @test ctx.features.ser === ctx.ser_available
     @test ctx.features.ray_query === ctx.ray_query_available
     @test Lava.FROZEN_LOG_MISSES[] === ctx.diag.frozen_log_misses

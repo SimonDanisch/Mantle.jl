@@ -36,7 +36,6 @@
 using Test, Lava, Mantle, KernelAbstractions
 
 # Bound by the suite's preamble for every file; standalone, bind them here.
-@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
 const KA = KernelAbstractions
 
 """
@@ -86,8 +85,8 @@ end
     # the test asserts nothing. Point the cache at a scratch dir of its own so
     # every kernel below compiles and dumps.
     cachedir = mktempdir()
-    prevcache = MVE.LAVA_DISK_CACHE_DIR[]
-    MVE.LAVA_DISK_CACHE_DIR[] = cachedir
+    prevcache = Mantle.LAVA_DISK_CACHE_DIR[]
+    Mantle.LAVA_DISK_CACHE_DIR[] = cachedir
     # …and the FROZEN cache is consulted before either, and never dumps.
     # Redirect all three so every kernel below really compiles and really
     # writes to `dumpdir` — the assert used to go vacuously green the moment
@@ -98,13 +97,13 @@ end
     # In-memory too: a kernel compiled earlier in this process answers from
     # `ctx.caches` without compiling — and without dumping. They rebuild on
     # demand, so clearing costs the next kernels a recompile and nothing else.
-    caches = MVE.vk_context().caches
+    caches = Mantle.vk_context().caches
     empty!(caches.linked)
     empty!(caches.pipelines)
     try
-        out = MVE.LavaArray(zeros(Float32, M))
-        lpb_clamped_ternary!(MVE.LavaBackend())(out; ndrange = M, workgroupsize = M)
-        KA.synchronize(MVE.LavaBackend())
+        out = Mantle.LavaArray(zeros(Float32, M))
+        lpb_clamped_ternary!(Mantle.LavaBackend())(out; ndrange = M, workgroupsize = M)
+        KA.synchronize(Mantle.LavaBackend())
 
         # The answer must still be right — the fix reconciles the select's
         # operands, it does not change what the kernel computes.
@@ -136,7 +135,7 @@ end
         end
     finally
         prev === nothing ? delete!(ENV, "LAVA_SPIRV_DUMP_DIR") : (ENV["LAVA_SPIRV_DUMP_DIR"] = prev)
-        MVE.LAVA_DISK_CACHE_DIR[] = prevcache
+        Mantle.LAVA_DISK_CACHE_DIR[] = prevcache
         Lava.FROZEN_CACHE_DIR[] = prevfrozen
         rm(dumpdir; recursive = true, force = true)
         rm(cachedir; recursive = true, force = true)
@@ -173,8 +172,8 @@ end
     # the test asserts nothing. Point the cache at a scratch dir of its own so
     # every kernel below compiles and dumps.
     cachedir = mktempdir()
-    prevcache = MVE.LAVA_DISK_CACHE_DIR[]
-    MVE.LAVA_DISK_CACHE_DIR[] = cachedir
+    prevcache = Mantle.LAVA_DISK_CACHE_DIR[]
+    Mantle.LAVA_DISK_CACHE_DIR[] = cachedir
     # …and the FROZEN cache is consulted before either, and never dumps.
     # Redirect all three so every kernel below really compiles and really
     # writes to `dumpdir` — the assert used to go vacuously green the moment
@@ -185,15 +184,15 @@ end
     # In-memory too: a kernel compiled earlier in this process answers from
     # `ctx.caches` without compiling — and without dumping. They rebuild on
     # demand, so clearing costs the next kernels a recompile and nothing else.
-    caches = MVE.vk_context().caches
+    caches = Mantle.vk_context().caches
     empty!(caches.linked)
     empty!(caches.pipelines)
     try
         for T in types
             xc = zeros(T, (2, 3, 4))
             yc = rand(T, (2, 3))
-            x = MVE.LavaArray(copy(xc))
-            y = MVE.LavaArray(copy(yc))
+            x = Mantle.LavaArray(copy(xc))
+            y = Mantle.LavaArray(copy(yc))
 
             x[:, :, 2] = y                 # the store path
             xc[:, :, 2] = yc
@@ -208,7 +207,7 @@ end
         @test isempty(lpb_ptr_bitcasts(dumpdir))
     finally
         prev === nothing ? delete!(ENV, "LAVA_SPIRV_DUMP_DIR") : (ENV["LAVA_SPIRV_DUMP_DIR"] = prev)
-        MVE.LAVA_DISK_CACHE_DIR[] = prevcache
+        Mantle.LAVA_DISK_CACHE_DIR[] = prevcache
         Lava.FROZEN_CACHE_DIR[] = prevfrozen
         rm(dumpdir; recursive = true, force = true)
         rm(cachedir; recursive = true, force = true)

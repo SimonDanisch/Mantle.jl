@@ -33,23 +33,23 @@ end
     other   = Mantle.Device(Mantle.VulkanAPI(); select = "llvmpipe")
     @test default.ctx !== other.ctx
     try
-        tlas = MVE.VulkanTLAS(Mantle.backend(other))
-        @test MVE.ctxof(tlas.bq)::MVE.VkContext === other.ctx
+        tlas = Mantle.VulkanTLAS(Mantle.backend(other))
+        @test Mantle.ctxof(tlas.bq)::Mantle.VkContext === other.ctx
         push!(tlas, tri_mesh())
         Raycore.sync!(tlas)
 
         # THE assertions: every GPU array the push/sync allocated is on `other`,
         # not on the default. Before the fix these were on `default.ctx`.
         batch = tlas.instances[1]
-        @test (batch.instance_buf.buf[].ctx)::MVE.VkContext === other.ctx
+        @test (batch.instance_buf.buf[].ctx)::Mantle.VkContext === other.ctx
         @test tlas.combined_instance_buf !== nothing
-        @test (tlas.combined_instance_buf.buf[].ctx)::MVE.VkContext === other.ctx
-        tlas.tri_gpu === nothing || @test (tlas.tri_gpu.buf[].ctx)::MVE.VkContext === other.ctx
-        tlas.off_gpu === nothing || @test (tlas.off_gpu.buf[].ctx)::MVE.VkContext === other.ctx
+        @test (tlas.combined_instance_buf.buf[].ctx)::Mantle.VkContext === other.ctx
+        tlas.tri_gpu === nothing || @test (tlas.tri_gpu.buf[].ctx)::Mantle.VkContext === other.ctx
+        tlas.off_gpu === nothing || @test (tlas.off_gpu.buf[].ctx)::Mantle.VkContext === other.ctx
 
         # And the default context was never written to by this build.
-        @test MVE.vk_context() === default.ctx
+        @test Mantle.vk_context() === default.ctx
     finally
-        MVE.mark_device_lost!(other.ctx)
+        Mantle.mark_device_lost!(other.ctx)
     end
 end

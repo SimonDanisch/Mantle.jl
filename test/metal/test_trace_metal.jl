@@ -15,14 +15,13 @@ shears every hit record and nothing would report it.
 
 using Test, Mantle, Metal, Raycore
 const MTL = Metal.MTL
-const MEXT = Base.get_extension(Mantle, :MantleMetalExt)
 
 # One BLAS from a flat Float32 vertex list, three floats per vertex.
 function _blas_from(d, verts::Vector{Float32})
     @assert length(verts) % 9 == 0 "three vertices of three floats per triangle"
     buf = MTL.MTLBuffer(d.dev, sizeof(verts); storage = Metal.SharedStorage)
     unsafe_copyto!(convert(Ptr{Float32}, MTL.contents(buf)), pointer(verts), length(verts))
-    return MEXT.build_blas(d, buf, length(verts) ÷ 9)
+    return Mantle.build_blas(d, buf, length(verts) ÷ 9)
 end
 
 _ray(ox, oy, oz, dx, dy, dz; tmin = 0f0, tmax = 1f30) =

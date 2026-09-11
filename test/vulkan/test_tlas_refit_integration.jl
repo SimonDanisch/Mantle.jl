@@ -1,6 +1,6 @@
 using Test, Lava, Mantle
 using Mantle: refit_tlas!, build_accel!
-using .MVE: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, build_tlas, AS_INPUT_USAGE
+using Mantle: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, build_tlas, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 # Validates the full P1 flow: GPU kernel writes instances, allow_update build,
@@ -8,28 +8,28 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "HWTLAS refit cycle -- kernel-written instances, then refit" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0
     quats_cpu = [Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:n]
-    quats_gpu = MVE.LavaArray(quats_cpu)
-    instances_gpu = MVE.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
+    quats_gpu = Mantle.LavaArray(quats_cpu)
+    instances_gpu = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
                                                         extra_usage=AS_INPUT_USAGE)
-    backend = MVE.LavaBackend()
-    bq = MVE.vk_context().default_bq
+    backend = Mantle.LavaBackend()
+    bq = Mantle.vk_context().default_bq
 
     # Frame 0: grains at x = 0, 5, 10, 15 (separated so each has its own AABB).
     pos_a = [Point3f(Float32(5*(i-1)), 0f0, 0f0) for i in 1:n]
-    positions_gpu = MVE.LavaArray(pos_a)
+    positions_gpu = Mantle.LavaArray(pos_a)
     write_grain_instances_kernel(backend)(positions_gpu, quats_gpu, radius,
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
-    tlas = build_accel!(MVE.vk_context().default_bq) do ctx
+    tlas = build_accel!(Mantle.vk_context().default_bq) do ctx
         build_tlas(ctx, instances_gpu, 2 * n; allow_update=true)
     end
 
@@ -43,9 +43,9 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
-    build_accel!(MVE.vk_context().default_bq) do ctx
+    build_accel!(Mantle.vk_context().default_bq) do ctx
         refit_tlas!(ctx, tlas, instances_gpu, 2 * n)
     end
 

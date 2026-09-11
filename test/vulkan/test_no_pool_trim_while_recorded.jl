@@ -83,7 +83,7 @@ end
     Mantle.record!(pl)
     @test !Mantle.remappable(pl)
     @test !Mantle.movable(Mantle.pool(dev))
-    @test MVE.quiesce_before_reclaim!(bq) === false
+    @test Mantle.quiesce_before_reclaim!(bq) === false
 
     # The converse — that it says `true` again once nothing is recorded — is NOT
     # asserted, and the reason is the guard's actual breadth: ONE recorded plan

@@ -18,14 +18,14 @@ using StaticArrays: SVector, SMatrix
 const Mat4f = SMatrix{4, 4, Float32, 16}
 
 @testset "AdaptedAccel: closest_hit + any_hit via inline ray query" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
         @test_skip true
         return
     end
 
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     bq = backend.dispatch_bq
 
     # Two triangles at z=2 and z=5 (same xy footprint).  Same scene as the
@@ -37,7 +37,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     near_mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(near_v, faces))
     far_mesh  = GeometryBasics.normal_mesh(GeometryBasics.Mesh(far_v,  faces))
 
-    hwtlas = MVE.VulkanTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, near_mesh, Mat4f(I))
     push!(hwtlas, far_mesh,  Mat4f(I))
     Raycore.sync!(hwtlas)
@@ -85,17 +85,17 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
         return nothing
     end
 
-    origins_g = MVE.LavaArray(origins)
+    origins_g = Mantle.LavaArray(origins)
 
     # Case 1 — tmax=10: both triangles in range.
     #   closest_hit must return t=2 for hit rays.
     #   any_hit  is allowed to return any of t∈{2,5} for hit rays
     #            (impl-defined commit order).
-    cls_g = MVE.LavaArray(fill(-2f0, n))
-    any_g = MVE.LavaArray(fill(-2f0, n))
-    MVE.lava_launch!(bq, unified_kernel, cls_g, any_g, origins_g, 10f0, accel;
+    cls_g = Mantle.LavaArray(fill(-2f0, n))
+    any_g = Mantle.LavaArray(fill(-2f0, n))
+    Mantle.lava_launch!(bq, unified_kernel, cls_g, any_g, origins_g, 10f0, accel;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     cls_full = Array(cls_g); any_full = Array(any_g)
 
     @test all(i -> expected_hit[i] ?
@@ -108,11 +108,11 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
               1:n)
 
     # Case 2 — tmax=3: only near triangle in range.
-    cls_g2 = MVE.LavaArray(fill(-2f0, n))
-    any_g2 = MVE.LavaArray(fill(-2f0, n))
-    MVE.lava_launch!(bq, unified_kernel, cls_g2, any_g2, origins_g, 3f0, accel;
+    cls_g2 = Mantle.LavaArray(fill(-2f0, n))
+    any_g2 = Mantle.LavaArray(fill(-2f0, n))
+    Mantle.lava_launch!(bq, unified_kernel, cls_g2, any_g2, origins_g, 3f0, accel;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     cls_near = Array(cls_g2); any_near = Array(any_g2)
 
     @test all(i -> expected_hit[i] ?
@@ -130,14 +130,14 @@ end
 # Polymorphism repeated against the production AdaptedAccel:
 # same kernel, swap accel between SW StaticTLAS and HW AdaptedAccel.
 @testset "AdaptedAccel polymorphism — SW BVH vs HW ray query" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping: VK_KHR_ray_query not available"
         @test_skip true
         return
     end
 
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     bq = backend.dispatch_bq
 
     verts = [
@@ -147,7 +147,7 @@ end
     faces = [GLTriangleFace(1, 2, 3), GLTriangleFace(4, 5, 6)]
     mesh = GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
 
-    hwtlas = MVE.VulkanTLAS(backend)
+    hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, mesh, Mat4f(I))
     Raycore.sync!(hwtlas)
     accel_hw = Adapt.adapt(backend, hwtlas)
@@ -172,19 +172,19 @@ end
 
     n = 64
     origins = [Point3f((i%8 - 3.5f0) * 0.25f0, (i÷8 - 3.5f0) * 0.25f0, 0f0) for i in 0:n-1]
-    origins_g = MVE.LavaArray(origins)
+    origins_g = Mantle.LavaArray(origins)
 
-    t_hw = MVE.LavaArray(fill(-2f0, n))
-    h_hw = MVE.LavaArray(fill(UInt32(99), n))
-    MVE.lava_launch!(bq, poly_kernel, t_hw, h_hw, origins_g, accel_hw;
+    t_hw = Mantle.LavaArray(fill(-2f0, n))
+    h_hw = Mantle.LavaArray(fill(UInt32(99), n))
+    Mantle.lava_launch!(bq, poly_kernel, t_hw, h_hw, origins_g, accel_hw;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
-    t_sw = MVE.LavaArray(fill(-2f0, n))
-    h_sw = MVE.LavaArray(fill(UInt32(99), n))
-    MVE.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;
+    t_sw = Mantle.LavaArray(fill(-2f0, n))
+    h_sw = Mantle.LavaArray(fill(UInt32(99), n))
+    Mantle.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;
                       ndrange=n, workgroup_size=(64, 1, 1))
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
     t_hw_a = Array(t_hw); h_hw_a = Array(h_hw)
     t_sw_a = Array(t_sw); h_sw_a = Array(h_sw)

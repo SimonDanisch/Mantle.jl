@@ -11,34 +11,34 @@
 
 using Test, Lava, Mantle
 using Mantle: build_accel!
-using .MVE: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, AS_INPUT_USAGE
+using Mantle: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "write_grain_instances_kernel -- 4 grains, identity rotations" begin
     # Build two trivial BLASes so we have non-zero device addresses.
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     positions_cpu = [Point3f(Float32(i), 0f0, 0f0) for i in 1:n]
     quats_cpu     = [Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:n]   # identity quaternions
-    positions_gpu = MVE.LavaArray(positions_cpu)
-    quats_gpu     = MVE.LavaArray(quats_cpu)
-    instances_gpu = MVE.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
+    positions_gpu = Mantle.LavaArray(positions_cpu)
+    quats_gpu     = Mantle.LavaArray(quats_cpu)
+    instances_gpu = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
                                                         extra_usage=AS_INPUT_USAGE)
 
     radius = 0.5f0
 
     # Launch via KA backend pattern: kernel(LavaBackend())(args...; ndrange=n)
-    k = write_grain_instances_kernel(MVE.LavaBackend())
+    k = write_grain_instances_kernel(Mantle.LavaBackend())
     k(positions_gpu, quats_gpu, radius,
       aabb_blas.address, tri_blas.address,
       instances_gpu;
       ndrange = n)
 
-    bq = MVE.vk_context().default_bq
-    MVE.vk_flush!(bq)
+    bq = Mantle.vk_context().default_bq
+    Mantle.vk_flush!(bq)
 
     instances_cpu = Array(instances_gpu)
 

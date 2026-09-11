@@ -64,7 +64,7 @@
 #     three explicit multiplies changes nothing.
 #   * **`spirv-val --target-env vulkan1.3` passes.** GPU-assisted validation
 #     (`Mantle.enable_gpu_av`) reports nothing on the failing dispatch — but
-#     `MVE.verify_gpu_av()` fails on this layer, so GPU-AV cannot see BDA
+#     `Mantle.verify_gpu_av()` fails on this layer, so GPU-AV cannot see BDA
 #     accesses here and its silence is **not** evidence.
 #
 # ── What does NOT reproduce it, which is why it looked like `CartesianIndices` ──
@@ -81,7 +81,7 @@
 # ── Consequence for kernels ──
 #
 # Any kernel doing two *dependent* 64-bit integer divisions and re-using the
-# first quotient afterwards is exposed. `MVE.splitidx` / `cart32` (magic-number
+# first quotient afterwards is exposed. `Mantle.splitidx` / `cart32` (magic-number
 # division, no `OpSDiv`) is the standing workaround and is why Lava's broadcast
 # path is safe; narrowing the arithmetic to `Int32` also avoids it. Both cases
 # below were `@test_broken` waiting on a driver fix, and on 2026-09-04 they
@@ -99,7 +99,7 @@
 # exposed to the same silent wrong answer.
 
 using Test, Lava, KernelAbstractions
-using .MVE: FastDiv32, cart32
+using Mantle: FastDiv32, cart32
 const KA = KernelAbstractions
 
 # Four decompositions of the same linear index into the same `Broadcasted`. The

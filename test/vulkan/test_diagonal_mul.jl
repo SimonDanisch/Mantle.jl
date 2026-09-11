@@ -21,20 +21,20 @@ using Test, Lava, LinearAlgebra
     hd = rand(Float32, n); hB = rand(Float32, n, m); hC = rand(Float32, n, m)
     α, β = 2.0f0, 3.0f0
 
-    D = Diagonal(MVE.LavaArray(copy(hd)))
-    B = MVE.LavaArray(copy(hB))
-    C = MVE.LavaArray(copy(hC))
+    D = Diagonal(Mantle.LavaArray(copy(hd)))
+    B = Mantle.LavaArray(copy(hB))
+    C = Mantle.LavaArray(copy(hC))
     LinearAlgebra.mul!(C, D, B, α, β)
     @test Array(C) ≈ α .* Diagonal(hd) * hB .+ β .* hC
 
     # β = 0 must ignore C's existing contents rather than scale them.
-    C0 = MVE.LavaArray(copy(hC))
+    C0 = Mantle.LavaArray(copy(hC))
     LinearAlgebra.mul!(C0, D, B, 1.0f0, 0.0f0)
     @test Array(C0) ≈ Diagonal(hd) * hB
 
     # The dense path must be unaffected by the added method.
-    A = MVE.LavaArray(rand(Float32, n, n))
-    C2 = MVE.LavaArray(zeros(Float32, n, m))
+    A = Mantle.LavaArray(rand(Float32, n, n))
+    C2 = Mantle.LavaArray(zeros(Float32, n, m))
     LinearAlgebra.mul!(C2, A, B, 1.0f0, 0.0f0)
     @test Array(C2) ≈ Array(A) * hB
 
@@ -46,22 +46,22 @@ using Test, Lava, LinearAlgebra
     # Non-square on purpose: D scales COLUMNS here, so a square shape would hide a
     # rows/columns mix-up.
     hE = rand(Float32, m, n); hdn = rand(Float32, n)
-    Dn = Diagonal(MVE.LavaArray(copy(hdn)))
-    E  = MVE.LavaArray(copy(hE))
+    Dn = Diagonal(Mantle.LavaArray(copy(hdn)))
+    E  = Mantle.LavaArray(copy(hE))
     hC3 = rand(Float32, m, n)
-    C3 = MVE.LavaArray(copy(hC3))
+    C3 = Mantle.LavaArray(copy(hC3))
     LinearAlgebra.mul!(C3, E, Dn, α, β)
     @test Array(C3) ≈ α .* hE * Diagonal(hdn) .+ β .* hC3
 
-    C4 = MVE.LavaArray(copy(hC3))
+    C4 = Mantle.LavaArray(copy(hC3))
     LinearAlgebra.mul!(C4, E, Dn, 1.0f0, 0.0f0)
     @test Array(C4) ≈ hE * Diagonal(hdn)
 
     # ComplexF32 too: it is the other eltype GPUArrays exercises, and a conjugation
     # mistake would only show here.
     hEc = rand(ComplexF32, m, n); hdc = rand(ComplexF32, n)
-    Ec = MVE.LavaArray(copy(hEc)); Dc = Diagonal(MVE.LavaArray(copy(hdc)))
-    C5 = MVE.LavaArray(zeros(ComplexF32, m, n))
+    Ec = Mantle.LavaArray(copy(hEc)); Dc = Diagonal(Mantle.LavaArray(copy(hdc)))
+    C5 = Mantle.LavaArray(zeros(ComplexF32, m, n))
     LinearAlgebra.mul!(C5, Ec, Dc, one(ComplexF32), zero(ComplexF32))
     @test Array(C5) ≈ hEc * Diagonal(hdc)
 end

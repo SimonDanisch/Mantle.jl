@@ -27,8 +27,8 @@ import Vulkan
 # Start from a clean cache file each run so we don't carry poison across
 # unrelated sessions.
 function clean_pipeline_cache_file!()
-    ctx = MVE.vk_context()
-    path = MVE.lava_pipeline_cache_path(ctx.device_name, ctx.driver_version)
+    ctx = Mantle.vk_context()
+    path = Mantle.lava_pipeline_cache_path(ctx.device_name, ctx.driver_version)
     isfile(path) && rm(path; force=true)
     return path
 end
@@ -47,24 +47,24 @@ end
 # ── Step 1: clean start ───────────────────────────────────────────────────
 path = clean_pipeline_cache_file!()
 println("\n[step 1] cleaned cache file: $path")
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 println("         pipeline_cache handle: $(typeof(ctx.pipeline_cache))")
 println("         file exists post-init: $(isfile(path))  (expected: false)")
 
 # ── Step 2: compile + dispatch ────────────────────────────────────────────
 println("\n[step 2] compile + dispatch trivial kernel")
 N = 64
-buf = MVE.LavaArray(zeros(Float32, N))
-bq = MVE.LavaBackend().dispatch_bq
-MVE.lava_launch!(bq, trivial_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
-MVE.vk_flush!(bq)
+buf = Mantle.LavaArray(zeros(Float32, N))
+bq = Mantle.LavaBackend().dispatch_bq
+Mantle.lava_launch!(bq, trivial_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
+Mantle.vk_flush!(bq)
 result = Array(buf)
 @assert result == Float32.(1:N) "kernel produced wrong values: $(result[1:8])"
 println("         kernel produced expected values ✓")
 
 # ── Step 3: save ──────────────────────────────────────────────────────────
 println("\n[step 3] save pipeline cache to disk")
-MVE.save_pipeline_cache!(ctx)
+Mantle.save_pipeline_cache!(ctx)
 @assert isfile(path) "save_pipeline_cache! did not write a file"
 sz = filesize(path)
 println("         file size: $sz bytes")
@@ -90,17 +90,17 @@ end
 # ── Step 4: reset device → loads from disk ────────────────────────────────
 println("\n[step 4] reset_device! — should save again then re-load from disk")
 Mantle.reset_device!()
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 @assert isfile(path) "reset deleted the cache file"
 sz2 = filesize(path)
 println("         post-reset file size: $sz2 bytes  (was: $sz)")
 
 # ── Step 5: compile + dispatch on the reloaded device ─────────────────────
 println("\n[step 5] re-dispatch trivial kernel on fresh device w/ loaded cache")
-buf2 = MVE.LavaArray(zeros(Float32, N))
-bq2 = MVE.LavaBackend().dispatch_bq
-MVE.lava_launch!(bq2, trivial_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
-MVE.vk_flush!(bq2)
+buf2 = Mantle.LavaArray(zeros(Float32, N))
+bq2 = Mantle.LavaBackend().dispatch_bq
+Mantle.lava_launch!(bq2, trivial_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
+Mantle.vk_flush!(bq2)
 result2 = Array(buf2)
 @assert result2 == Float32.(1:N) "kernel after reload produced wrong values: $(result2[1:8])"
 println("         kernel still produces correct values ✓")
@@ -109,11 +109,11 @@ println("         kernel still produces correct values ✓")
 println("\n[step 6] reset+dispatch loop (5 iterations) — exercise restart path")
 for iter in 1:5
     Mantle.reset_device!()
-    ctx = MVE.vk_context()
-    buf_i = MVE.LavaArray(zeros(Float32, N))
-    bq_i = MVE.LavaBackend().dispatch_bq
-    MVE.lava_launch!(bq_i, trivial_kernel!, buf_i; ndrange=N, workgroup_size=(64, 1, 1))
-    MVE.vk_flush!(bq_i)
+    ctx = Mantle.vk_context()
+    buf_i = Mantle.LavaArray(zeros(Float32, N))
+    bq_i = Mantle.LavaBackend().dispatch_bq
+    Mantle.lava_launch!(bq_i, trivial_kernel!, buf_i; ndrange=N, workgroup_size=(64, 1, 1))
+    Mantle.vk_flush!(bq_i)
     r = Array(buf_i)
     @assert r == Float32.(1:N) "iter $iter produced wrong values"
     sz_i = filesize(path)

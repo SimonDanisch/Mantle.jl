@@ -2,15 +2,8 @@ using Mantle, Test
 
 include(joinpath(@__DIR__, "backend_probe.jl"))
 
-# At TOP level, not in the testset below, because of what the `global` spelling
-# hid: a kernel that names `MVE` (the coopmat pin test spells `MVE.GEMM_TILE`)
-# reads a Main global, and a non-const one is a type-unstable global access
-# that GPUCompiler rejects — the coopmat pin failed only inside this suite and
-# passed everywhere the binding was a const. `const` is not allowed in the
-# testset's local scope, so the binding lives here, before it.
 _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
              backend_loadable("Lava") !== nothing
-const MVE = _VULKAN_OK ? Base.get_extension(Mantle, :MantleVulkanExt) : nothing
 
 # BOTH backends are probed here, before anything runs.
 #
@@ -223,48 +216,26 @@ end
 
 # ── everything below that needs a Vulkan driver ───────────────────────────────
 #
-# `Vulkan` is a weakdep of Mantle now, so this file is reached on a machine that
-# has no loader at all. See `backend_probe.jl` for why that used to be fatal.
+# `Vulkan` loads with Mantle but the DRIVER need not be there, so this file is
+# reached on a machine that has no loader at all. See `backend_probe.jl` for why
+# that used to be fatal.
 #
-# BOTH, because that is what `MantleVulkanExt` is triggered on: Vulkan is the
-# driver and Lava is the Julia→SPIR-V compiler that feeds it, and the extension
-# does not load until both are. Asking only about Vulkan let the gate open on a
-# machine where the backend was not loaded at all — `Mantle.stages` in the `sync`
-# testset just below is defined in `src/vulkan/lowering.jl`, so it would have
-# failed with an `UndefVarError` under a gate that had just said the driver was
-# fine.
-# (bound at top level now — before the testset — so `MVE` can be a const)
+# BOTH, because the backend is the pair: Vulkan is the driver and Lava is the
+# Julia→SPIR-V compiler that feeds it. Asking only about Vulkan let the gate open
+# on a machine where the compiler was missing — `Mantle.stages` in the `sync`
+# testset just below is defined in `src/vulkan/lowering.jl` and needs both.
 _VULKAN_OK || @info "Mantle tests: no Vulkan driver and compiler pair; skipping the Vulkan backend and the sync lowering"
 
-# The Vulkan backend module, for the 153 files that test it.
-#
-# `src/vulkan/` is `MantleVulkanExt` now, not `Mantle`, so `Mantle.LavaArray`,
-# `Mantle.vk_context` and 174 other names moved out from under every one of
-# them. They are the BACKEND's tests, so naming the backend module is what they
-# should have been doing; core names stay on `Mantle`, which is why this is not a
-# blanket rename. (`test/metal/` needs no such thing — those tests only ever
-# touch the portable API, which is the shape a backend test gets to have once the
-# backend is not also the runtime.)
-#
-# Here and not in `backend_probe.jl` because an extension does not exist until
-# its triggers are loaded, and the line above is what loads them.
-# (bound at top level — see the top of this file)
-_VULKAN_OK && MVE === nothing && error(
-    "Vulkan and Lava both loaded but MantleVulkanExt did not. Its precompilation " *
-    "failed — the error is above this line, and every Vulkan test below would " *
-    "otherwise fail one confusing UndefVarError at a time.")
-
-# The backend names the test files use WITHOUT qualifying, which is a second
-# way the same move broke them: `Mantle.LavaArray` was rewritten to `MVE.`, but
-# a file that said plain `LavaArray` was relying on `using Mantle` exporting it,
-# and Mantle does not export what lives in its extension.
+# The backend names the test files use WITHOUT qualifying: a file that says plain
+# `LavaArray` relies on `using Mantle` exporting it, and Mantle does not export
+# its backend's names.
 #
 # Here rather than file by file, because the files are `include`d into `Main` and
 # one import serves all of them — 54 of them name `LavaBackend` alone. Derived by
 # parsing every driven test file for free identifiers that ONLY the extension
 # defines, so the list is what is actually used and not a guess.
 if _VULKAN_OK
-    using .MVE: LavaArray, LavaBackend, VulkanFramebuffer, VulkanWindow,
+    using Mantle: LavaArray, LavaBackend, VulkanFramebuffer, VulkanWindow,
                 VulkanCompiledGraphicsPipeline, DebugConfig, copy_framebuffer!,
                 fastdiv
 end
@@ -492,7 +463,7 @@ include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 # `KernelInterface.HostMeshOutput` runs what a mesh stage runs and shows the
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
-include(joinpath(@__DIR__, "test_ext_imports_are_declared.jl"))
+include(joinpath(@__DIR__, "test_core_names_no_backend.jl"))
 # The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
 # written before the refactor deletes anything, so each one fails today and
 # turns into an "Unexpectedly Pass" the moment its phase lands.
@@ -541,7 +512,7 @@ end
 # that compiled a plan is still a tenant until a GC reaps it. Adding an include
 # above this line that touches the Lava device breaks it.
 # NOT per-backend yet. Three of its assertions are genuinely Vulkan's — a
-# `pool_offset` inside a VkBuffer, `plan.recording isa MVE.Recording`, and
+# `pool_offset` inside a VkBuffer, `plan.recording isa Mantle.Recording`, and
 # `vk_flush!` — and two of those have portable spellings (`recordsplans(dev)`
 # and `waitidle(dev)`) while the third belongs in `test/vulkan/`. Splitting it
 # is the rest of 0.7; gating it is honest in the meantime, and the guard in
@@ -583,7 +554,7 @@ _VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership
 # with everything before it still in the stdout buffer. One child per FILE, so a
 # hang in one does not hide what the other would have said.
 @testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
-    # The big file needs Vulkan until phase 2.8 splits its twenty-six MVE sites
+    # The big file needs Vulkan until phase 2.8 splits its twenty-six backend sites
     # out; the portable half runs on every backend.
     for wf in (_VULKAN_OK ? ("test_window_portable.jl", "test_window.jl") :
                             ("test_window_portable.jl",))

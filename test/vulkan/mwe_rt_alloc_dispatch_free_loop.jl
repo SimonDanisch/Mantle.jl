@@ -11,10 +11,10 @@ using KernelAbstractions
 const KA = KernelAbstractions
 
 backend = LavaBackend()
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 
 # One persistent VulkanTLAS shared across iters.
-hwtlas = MVE.VulkanTLAS(backend)
+hwtlas = Mantle.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
@@ -30,12 +30,12 @@ const N_ITERS = 20
 crashed_at = 0
 for iter in 1:N_ITERS
     # Per-iter: allocate fresh buffers for ray + hits (mirrors Hikari pattern)
-    rays = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:1024])
-    hits = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1024))
+    rays = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:1024])
+    hits = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), 1024))
 
     # Add some compute kernels too — like Hikari does.
-    aux1 = MVE.LavaArray(zeros(Float32, 1024))
-    aux2 = MVE.LavaArray(zeros(Float32, 1024))
+    aux1 = Mantle.LavaArray(zeros(Float32, 1024))
+    aux2 = Mantle.LavaArray(zeros(Float32, 1024))
     _compute_kernel!(backend)(aux1, Float32(iter); ndrange=1024)
     _compute_kernel!(backend)(aux2, Float32(iter); ndrange=1024)
 
@@ -50,7 +50,7 @@ for iter in 1:N_ITERS
     # Drop all per-iter buffers — finalizer thread frees them mid-loop.
     rays = nothing; hits = nothing; aux1 = nothing; aux2 = nothing
 
-    if MVE.device_lost(ctx)
+    if Mantle.device_lost(ctx)
         global crashed_at = iter
         break
     end
@@ -63,4 +63,4 @@ end
 
 using Test
 @test crashed_at == 0
-@test !MVE.device_lost(ctx)
+@test !Mantle.device_lost(ctx)

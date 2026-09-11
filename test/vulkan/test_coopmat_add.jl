@@ -22,7 +22,7 @@ Portable: KHR, not `VK_NV_cooperative_matrix2`, so RDNA3's WMMA path gets it too
 
 using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
-const T = MVE.GEMM_TILE
+const T = Mantle.GEMM_TILE
 
 @kernel cpu=false unsafe_indices=true function addtiles!(out, @Const(x), @Const(y))
     a = Lava.AcceleratedMatrix{Float32,T,T,Lava.Accumulator}(pointer(x), 1, T)
@@ -40,13 +40,13 @@ end
 
 @testset "coopmat_add: OpFAdd is component-wise" begin
     backend = LavaBackend()
-    ctx = MVE.vk_context()
-    if !MVE.coopmat_shape(ctx, Float16, T, T, T)
+    ctx = Mantle.vk_context()
+    if !Mantle.coopmat_shape(ctx, Float16, T, T, T)
         @info "no cooperative matrices on this device; skipping" ctx.device_name
     else
         xh = reshape(Float32.(1:(T * T)), T, T)
         yh = reshape(Float32.((T * T):-1:1), T, T)
-        x = MVE.LavaArray(xh); y = MVE.LavaArray(yh)
+        x = Mantle.LavaArray(xh); y = Mantle.LavaArray(yh)
         out = KA.allocate(backend, Float32, T, T); fill!(out, 0.0f0)
 
         addtiles!(backend, 32)(out, x, y; ndrange = 32)
@@ -56,8 +56,8 @@ end
         # Stride 0 on one operand: every column reads the same vector. This is
         # the bias half, and it is the part the specification does not define.
         bh = Float32.(1:T)
-        bias = MVE.LavaArray(bh)
-        res = MVE.LavaArray(yh)
+        bias = Mantle.LavaArray(bh)
+        res = Mantle.LavaArray(yh)
         fill!(out, 0.0f0)
         biasplusres!(backend, 32)(out, bias, res; ndrange = 32)
         KA.synchronize(backend)

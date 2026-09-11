@@ -40,7 +40,7 @@ lay(nrow, ncol) = Lava.tensor_slice(
     Lava.tensor_store(m, UInt64(pointer(viewed)), lay(R, C), vt)
 end
 
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device — nothing to run"
 else

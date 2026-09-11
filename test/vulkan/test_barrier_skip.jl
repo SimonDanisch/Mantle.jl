@@ -63,7 +63,7 @@ const KA = KernelAbstractions
             A[i] = Int32(i)
         end
 
-        backend = MVE.LavaBackend()
+        backend = Mantle.LavaBackend()
         A = LavaArray(zeros(Int32, 128))
         kill = LavaArray(Int32[64])
         barrier_error_kernel(backend)(A, kill; ndrange=128, workgroupsize=128)

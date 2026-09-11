@@ -85,7 +85,7 @@ end
     # about when to submit applied while nothing was being submitted. It was
     # then one per argument slot, and now it is one, because nothing rewrites a
     # plan's argument memory between runs.
-    @test pl.recording isa MVE.Recording
+    @test pl.recording isa Mantle.Recording
     @test !pl.recording.open
 
     # …and the recording is real: running it does the work.

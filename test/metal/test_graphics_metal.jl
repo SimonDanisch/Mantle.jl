@@ -88,20 +88,19 @@ end
 @testset "the portable pipeline state reaches Metal" begin
     # One method per state value rather than a lookup table, so an unhandled one
     # is a missing method at compile time instead of a `KeyError` mid-frame.
-    MEXT = Base.get_extension(Mantle, :MantleMetalExt)
-    @test MEXT.mtl_cull(Mantle.NoCull())    == MTLg.MTLCullModeNone
-    @test MEXT.mtl_cull(Mantle.CullBack())  == MTLg.MTLCullModeBack
-    @test MEXT.mtl_cull(Mantle.CullFront()) == MTLg.MTLCullModeFront
-    @test MEXT.mtl_primitive(Mantle.TriangleList()) == MTLg.MTLPrimitiveTypeTriangle
-    @test MEXT.mtl_primitive(Mantle.LineList())     == MTLg.MTLPrimitiveTypeLine
-    @test MEXT.mtl_depth_compare(Mantle.DepthLess()) == MTLg.MTLCompareFunctionLess
-    @test !MEXT.depth_writes(Mantle.DepthOff())
-    @test MEXT.depth_writes(Mantle.DepthLess())
+    @test Mantle.mtl_cull(Mantle.NoCull())    == MTLg.MTLCullModeNone
+    @test Mantle.mtl_cull(Mantle.CullBack())  == MTLg.MTLCullModeBack
+    @test Mantle.mtl_cull(Mantle.CullFront()) == MTLg.MTLCullModeFront
+    @test Mantle.mtl_primitive(Mantle.TriangleList()) == MTLg.MTLPrimitiveTypeTriangle
+    @test Mantle.mtl_primitive(Mantle.LineList())     == MTLg.MTLPrimitiveTypeLine
+    @test Mantle.mtl_depth_compare(Mantle.DepthLess()) == MTLg.MTLCompareFunctionLess
+    @test !Mantle.depth_writes(Mantle.DepthOff())
+    @test Mantle.depth_writes(Mantle.DepthLess())
 
     # Metal has no geometry stage at all — Apple's replacement is the mesh
     # pipeline — so asking for one has to fail loudly rather than silently drop
     # the stage and render something plausible.
-    @test_throws ErrorException MEXT.compile_pipeline(
+    @test_throws ErrorException Mantle.compile_pipeline(
         Mantle.GraphicsPipeline(;
             vertex = Mantle.VertexShader(mantle_gfx_vertex),
             fragment = Mantle.FragmentShader(mantle_gfx_fragment),
@@ -399,7 +398,6 @@ mp_pipeline(f) = Mantle.MeshPipeline(;
     cull = Mantle.NoCull(), depth = Mantle.DepthOff())
 
 @testset "a portable MeshPipeline draws on Metal" begin
-    MEXT = Base.get_extension(Mantle, :MantleMetalExt)
     be = Metal.MetalBackend()
     # The capability now answers `true`, and for the backend and the device
     # alike — a caller may hold either.
@@ -410,7 +408,7 @@ mp_pipeline(f) = Mantle.MeshPipeline(;
     # The object's type is DERIVED from the declaration: the `Flat` split gives
     # the two planes, `MeshConfig` the bounds, and a strip topology collapses to
     # the primitive KIND because a mesh stage has no input stream to group.
-    Obj = MEXT.mesh_object_of(p)
+    Obj = Mantle.mesh_object_of(p)
     @test Obj === Metal.MeshObject{@NamedTuple{position::NTuple{4,Float32},
                                                uv::NTuple{2,Float32}},
                                    @NamedTuple{colour::NTuple{4,Float32}},

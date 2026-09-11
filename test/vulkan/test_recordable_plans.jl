@@ -23,14 +23,8 @@ using GeometryBasics: Vec4f
 using ColorTypes: RGBA
 # `KA` and `M` are `const` in whichever test file gets there first, and a `const`
 # re-bound to what it already holds is not a redefinition.
-#
-# `MVE` is bound by `runtests.jl` — a `const` now, because kernels read through
-# it (`MVE.GEMM_TILE`) and a non-const Main global is a type-unstable global
-# access that GPUCompiler rejects. Files bind it themselves only when the
-# harness has not, which is what lets them work standalone too.
 const KA = KernelAbstractions
 const M = Mantle
-@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
 
 function tri_vertex()
     v = Mantle.vertex_index() - Int32(1)
@@ -97,7 +91,7 @@ end
                                    M.use(p, src; read = true)), n)
     end
     pl = M.record!(M.Plan(g))
-    @test MVE.recordable(pl)
+    @test Mantle.recordable(pl)
     # The store the plan was compiled against, so a rename would show up as a
     # different object rather than as a wrong number.
     store = src.store
@@ -123,7 +117,7 @@ end
                                    M.use(p, src; read = true)), n)
     end
     pl = M.Plan(g)
-    @test MVE.recordable(pl)
+    @test Mantle.recordable(pl)
     M.record!(pl)
     for v in (3f0, 7f0, 11f0, 13f0)
         src[1:n] = fill(v, n)

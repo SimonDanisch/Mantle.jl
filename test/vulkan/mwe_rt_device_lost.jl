@@ -12,7 +12,7 @@ using Hikari, Lava, GeometryBasics
 import KernelAbstractions as KA
 import Adapt
 
-backend = MVE.LavaBackend()
+backend = Mantle.LavaBackend()
 
 # Use a test scene with multiple material types
 sf = "dev/Hikari/test/pbrt/scenes/mat_conductor_gold_light_point.pbrt"

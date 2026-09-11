@@ -209,7 +209,7 @@ function run(; E = 72, EP = 96, Lq = 128, Lk = 256, H = 2, B = 1, tol = 2e-2)
     isfinite(worst) && worst < tol
 end
 
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 if !(ctx.coopmat2.workgroup_scope && ctx.coopmat2.tensor_addressing &&
      ctx.coopmat2.per_element_operations && ctx.coopmat2.reductions)
     @info "device lacks a coopmat2 sub-feature this needs — nothing to run"

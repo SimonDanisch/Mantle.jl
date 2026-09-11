@@ -47,12 +47,12 @@ end
 function check_copy(::Type{S}, mk) where {S}
     n = 16
     src_data = [mk(i) for i in 1:n]
-    src = MVE.LavaArray(src_data)
+    src = Mantle.LavaArray(src_data)
 
-    bcast = MVE.LavaArray{S}(undef, n)
+    bcast = Mantle.LavaArray{S}(undef, n)
     bcast .= src
 
-    kern = MVE.LavaArray{S}(undef, n)
+    kern = Mantle.LavaArray{S}(undef, n)
     aggregate_copy!(LavaBackend(), 64)(kern, src; ndrange = n)
     KA.synchronize(LavaBackend())
 
@@ -84,9 +84,9 @@ end
     # cannot quietly start routing them through a broken one.
     n = 16
     sd = [CopyS6(Int16(i), Int16(i * 3), Int16(i * 7)) for i in 1:n]
-    src = MVE.LavaArray(sd)
-    d = MVE.LavaArray{CopyS6}(undef, n)
+    src = Mantle.LavaArray(sd)
+    d = Mantle.LavaArray{CopyS6}(undef, n)
     copyto!(d, src)
-    MVE.vk_flush!(MVE.vk_context())
+    Mantle.vk_flush!(Mantle.vk_context())
     @test Array(d) == sd
 end

@@ -30,20 +30,20 @@ pendingfrees(bq) = lock(bq.pendinglock) do
 end
 
 @testset "Rapid allocation/free cycles" begin
-    backend = MVE.LavaBackend()
-    bq = MVE.vk_context().default_bq
-    drainfrees!() = MVE.quiesce_before_reclaim!(bq)
+    backend = Mantle.LavaBackend()
+    bq = Mantle.vk_context().default_bq
+    drainfrees!() = Mantle.quiesce_before_reclaim!(bq)
 
     @testset "many small arrays created and discarded" begin
         # Simulate 50 "test iterations" each creating 10 arrays
         for iter in 1:50
-            arrays = [MVE.LavaArray(rand(Float32, 100)) for _ in 1:10]
+            arrays = [Mantle.LavaArray(rand(Float32, 100)) for _ in 1:10]
 
             # Dispatch on each array
             for a in arrays
                 fill_kernel!(backend)(a, Float32(iter); ndrange=100)
             end
-            MVE.vk_flush!(MVE.vk_context())
+            Mantle.vk_flush!(Mantle.vk_context())
 
             # Verify last array
             result = Array(arrays[end])
@@ -59,12 +59,12 @@ end
     @testset "allocation during active recording" begin
         # Create arrays and dispatch without flushing between iterations
         for iter in 1:20
-            a = MVE.LavaArray(rand(Float32, 200))
-            b = MVE.LavaArray(zeros(Float32, 200))
+            a = Mantle.LavaArray(rand(Float32, 200))
+            b = Mantle.LavaArray(zeros(Float32, 200))
             fill_kernel!(backend)(b, 1f0; ndrange=200)
             # Don't flush — batches accumulate
         end
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         GC.gc(true)
         drainfrees!()
         @test true
@@ -74,13 +74,13 @@ end
         # Mirrors the reference test pattern: create figure data, render, discard, repeat
         for iter in 1:30
             # "Scatter plot" data
-            positions = MVE.LavaArray(rand(Float32, 50))
-            colors = MVE.LavaArray(rand(Float32, 50))
-            sizes = MVE.LavaArray(rand(Float32, 50))
+            positions = Mantle.LavaArray(rand(Float32, 50))
+            colors = Mantle.LavaArray(rand(Float32, 50))
+            sizes = Mantle.LavaArray(rand(Float32, 50))
 
             # "Line plot" data
-            line_pos = MVE.LavaArray(rand(Float32, 100))
-            line_colors = MVE.LavaArray(rand(Float32, 100))
+            line_pos = Mantle.LavaArray(rand(Float32, 100))
+            line_colors = Mantle.LavaArray(rand(Float32, 100))
 
             # Dispatch
             fill_kernel!(backend)(positions, Float32(iter); ndrange=50)
@@ -88,12 +88,12 @@ end
 
             # Flush every 5 iterations (like the reference test GC between test files)
             if iter % 5 == 0
-                MVE.vk_flush!(MVE.vk_context())
+                Mantle.vk_flush!(Mantle.vk_context())
                 drainfrees!()
                 GC.gc(true)
             end
         end
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         drainfrees!()
         GC.gc(true)
         @test true
@@ -104,21 +104,21 @@ end
         for iter in 1:20
             # Mimic prep_sprite_gfx allocations
             n = 50
-            positions = MVE.LavaArray(rand(Float32, n * 3))
-            quad_offsets = MVE.LavaArray(rand(Float32, n * 2))
-            quad_scales = MVE.LavaArray(rand(Float32, n * 2))
-            rotations = MVE.LavaArray(rand(Float32, n * 4))
-            colors = MVE.LavaArray(rand(Float32, n * 4))
-            uv_rects = MVE.LavaArray(rand(Float32, n * 4))
-            shapes = MVE.LavaArray(rand(UInt8, n))
-            stroke_colors = MVE.LavaArray(zeros(Float32, n * 4))
-            glow_colors = MVE.LavaArray(zeros(Float32, n * 4))
+            positions = Mantle.LavaArray(rand(Float32, n * 3))
+            quad_offsets = Mantle.LavaArray(rand(Float32, n * 2))
+            quad_scales = Mantle.LavaArray(rand(Float32, n * 2))
+            rotations = Mantle.LavaArray(rand(Float32, n * 4))
+            colors = Mantle.LavaArray(rand(Float32, n * 4))
+            uv_rects = Mantle.LavaArray(rand(Float32, n * 4))
+            shapes = Mantle.LavaArray(rand(UInt8, n))
+            stroke_colors = Mantle.LavaArray(zeros(Float32, n * 4))
+            glow_colors = Mantle.LavaArray(zeros(Float32, n * 4))
 
             # Dispatch a compute kernel on some of them
             fill_kernel!(backend)(positions, 1f0; ndrange=n*3)
             fill_kernel!(backend)(colors, 0.5f0; ndrange=n*4)
 
-            MVE.vk_flush!(MVE.vk_context())
+            Mantle.vk_flush!(Mantle.vk_context())
 
             # Explicit cleanup (what the reference tests should do)
             for arr in [positions, quad_offsets, quad_scales, rotations, colors,
@@ -137,12 +137,12 @@ end
         initial_deferred = pendingfrees(bq)
 
         for iter in 1:100
-            a = MVE.LavaArray(rand(Float32, 50))
+            a = Mantle.LavaArray(rand(Float32, 50))
             fill_kernel!(backend)(a, 1f0; ndrange=50)
             # Don't explicitly free — let GC handle it
         end
 
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         GC.gc(true)
         drainfrees!()
 
@@ -154,25 +154,25 @@ end
         # Deferred frees should be flushed automatically by vk_alloc when safe
         # (not recording, no in-flight batches)
         for iter in 1:30
-            a = MVE.LavaArray(rand(Float32, 100))
+            a = Mantle.LavaArray(rand(Float32, 100))
             fill_kernel!(backend)(a, Float32(iter); ndrange=100)
-            MVE.vk_flush!(MVE.vk_context())
+            Mantle.vk_flush!(Mantle.vk_context())
             # Let a go out of scope without explicit free — GC finalizer should handle it
         end
         GC.gc(true)
         # Next allocation should proactively flush any accumulated deferred frees
-        b = MVE.LavaArray(rand(Float32, 10))
+        b = Mantle.LavaArray(rand(Float32, 10))
         @test pendingfrees(bq) == 0
         Mantle.unsafe_free!(b)
     end
 
     @testset "no crash after many flush cycles" begin
         for cycle in 1:50
-            arrays = [MVE.LavaArray(rand(Float32, 100)) for _ in 1:5]
+            arrays = [Mantle.LavaArray(rand(Float32, 100)) for _ in 1:5]
             for a in arrays
                 fill_kernel!(backend)(a, Float32(cycle); ndrange=100)
             end
-            MVE.vk_flush!(MVE.vk_context())
+            Mantle.vk_flush!(Mantle.vk_context())
         end
         GC.gc(true)
         drainfrees!()

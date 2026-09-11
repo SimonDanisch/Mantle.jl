@@ -35,28 +35,28 @@ end
         cpu = cpudev.ctx
         try
             @test gpu !== cpu
-            @test MVE.vk_context() === gpu               # building the second did not install it
+            @test Mantle.vk_context() === gpu               # building the second did not install it
 
             # ── identity: the second device's backend resolves to the second device
-            bcpu = MVE.LavaBackend(cpu)
+            bcpu = Mantle.LavaBackend(cpu)
             @test Mantle.Device(bcpu) === cpudev
             @test Mantle.Device(bcpu) !== gpudev
-            @test MVE.vk_context(Mantle.backend(cpudev)) === cpu
-            @test MVE.vk_context(MVE.LavaBackend()) === gpu             # the default, pinned
-            @test MVE.vk_context(Mantle.defaultbackend()) === gpu
+            @test Mantle.vk_context(Mantle.backend(cpudev)) === cpu
+            @test Mantle.vk_context(Mantle.LavaBackend()) === gpu             # the default, pinned
+            @test Mantle.vk_context(Mantle.defaultbackend()) === gpu
 
             # ── allocation lands on the named device, never the default
-            @test MVE.vk_context(KA.allocate(bcpu, Float32, 8)) === cpu
-            @test MVE.vk_context(Adapt.adapt(bcpu, rand(Float32, 4))) === cpu
-            @test MVE.vk_context(similar(KA.allocate(bcpu, Float32, 8))) === cpu
+            @test Mantle.vk_context(KA.allocate(bcpu, Float32, 8)) === cpu
+            @test Mantle.vk_context(Adapt.adapt(bcpu, rand(Float32, 4))) === cpu
+            @test Mantle.vk_context(similar(KA.allocate(bcpu, Float32, 8))) === cpu
             @test Mantle.Framebuffer(bcpu, 16, 16; depth = false).ctx === cpu
 
             # ── a backend's identity is its device, not its queue
-            @test MVE.LavaBackend() == MVE.LavaBackend(gpu)
-            @test MVE.LavaBackend(gpu) != bcpu
+            @test Mantle.LavaBackend() == Mantle.LavaBackend(gpu)
+            @test Mantle.LavaBackend(gpu) != bcpu
             q = Mantle.allocate_batch_queue!(cpu)
             try
-                @test MVE.LavaBackend(q) == bcpu           # another queue, same device
+                @test Mantle.LavaBackend(q) == bcpu           # another queue, same device
             finally
                 Mantle.release_batch_queue!(q)
             end
@@ -72,19 +72,19 @@ end
                     Mantle.dispatch!(p, di_bump!, (out, cnt), Mantle.DeviceRange(cnt); group = 64)
                 end
                 pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))
-                before_gpu = MVE.driver(gpu.default_bq).next_timeline
+                before_gpu = Mantle.driver(gpu.default_bq).next_timeline
                 Mantle.run!(pl); Mantle.waitfor!(pl)
                 @test Array(Mantle.storage(out)) == fill(Int32(1), n)
-                @test MVE.driver(gpu.default_bq).next_timeline == before_gpu   # nothing ran on the default
+                @test Mantle.driver(gpu.default_bq).next_timeline == before_gpu   # nothing ran on the default
                 Mantle.free!(pl)
             end
 
             # ── a cross-device copy stages through the host instead of faulting
             let
                 a = KA.allocate(bcpu, Float32, 16); fill!(a, 3f0)
-                b = KA.allocate(MVE.LavaBackend(gpu), Float32, 16); fill!(b, 0f0)
+                b = KA.allocate(Mantle.LavaBackend(gpu), Float32, 16); fill!(b, 0f0)
                 copyto!(b, a)
-                KA.synchronize(MVE.LavaBackend(gpu))
+                KA.synchronize(Mantle.LavaBackend(gpu))
                 @test all(Array(b) .== 3f0)
             end
 
@@ -93,7 +93,7 @@ end
             @test cpu.features.ray_query === cpu.ray_query_available
             @test gpu.features.ser === gpu.ser_available
         finally
-            MVE.mark_device_lost!(cpu)      # retire the device this test built; nothing else can
+            Mantle.mark_device_lost!(cpu)      # retire the device this test built; nothing else can
         end
     end
 end

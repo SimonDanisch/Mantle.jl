@@ -14,7 +14,7 @@ extension changes what every ray-query kernel compiles to.
 using Test, Mantle, Lava
 
 @testset "Ray Query - device probe" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     @test hasfield(typeof(ctx), :ray_query_available)
 
     # Soft check: if the RT pipeline is available, ray query almost certainly is

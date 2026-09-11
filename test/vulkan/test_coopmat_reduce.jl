@@ -37,7 +37,7 @@ usage.
 using Test, Lava, KernelAbstractions
 using Lava: AcceleratedMatrix, Accumulator, CoopMatReduce, coopmat_reduce
 const KA = KernelAbstractions
-const RT = MVE.GEMM_TILE
+const RT = Mantle.GEMM_TILE
 
 # Top-level, not closures, and NOT `@noinline` — `coopmat_reduce_thunk` is the
 # function the instruction names and `f` should melt into it.
@@ -54,7 +54,7 @@ rfirst(x::Float32, y::Float32) = x          # the reference's `smearReduce`
 end
 
 @testset "coopmat_reduce: OpCooperativeMatrixReduceNV" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     backend = LavaBackend()
     if !ctx.coopmat2.available || !ctx.coopmat2.reductions
         @info "no coopmat2 reductions on this device; skipping" ctx.device_name
@@ -62,7 +62,7 @@ end
         # Column-major, so element (r, c) is at r + c*RT. Distinct per row so a
         # row reduction cannot pass by accident.
         xh = Float32[(r - 1) * 100 + (c - 1) for r in 1:RT, c in 1:RT]
-        x = MVE.LavaArray(xh)
+        x = Mantle.LavaArray(xh)
         out = KA.allocate(backend, Float32, RT, RT)
 
         # ── Does a SUBGROUP-scoped reduce compile and run at all?
@@ -118,7 +118,7 @@ end
             # And the same combiner on a row-uniform input — the reference's
             # actual usage — is exact.
             uh = Float32[(r - 1) * 10 for r in 1:RT, c in 1:RT]
-            u = MVE.LavaArray(uh)
+            u = Mantle.LavaArray(uh)
             fill!(out, -1.0f0)
             reducerow!(backend, 32)(out, u, Val(:first); ndrange = 32)
             KA.synchronize(backend)

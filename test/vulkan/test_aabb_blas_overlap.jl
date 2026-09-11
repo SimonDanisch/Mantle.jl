@@ -22,14 +22,14 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 
 @testset "AABB BLAS - rayQuery overlap count vs CPU brute-force" begin
 
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping AABB rayQuery test: VK_KHR_ray_query not available on this device"
         @test_skip true
         return
     end
 
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     bq = backend.dispatch_bq
 
     # -------------------------------------------------------------------------
@@ -50,12 +50,12 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     # Build AABB BLAS and wrap in VulkanTLAS.
     # -------------------------------------------------------------------------
     blas = Mantle.build_accel!(bq) do ctx_build
-        MVE.build_blas_aabb(ctx_build, aabbs)
+        Mantle.build_blas_aabb(ctx_build, aabbs)
     end
 
     @test blas.address != UInt64(0)
 
-    tlas = MVE.VulkanTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, Mat4f(I); instance_id=UInt32(0))
     Raycore.sync!(tlas)
 
@@ -139,12 +139,12 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
         return nothing
     end
 
-    MVE.lava_launch!(bq, count_overlaps_kernel,
+    Mantle.lava_launch!(bq, count_overlaps_kernel,
                       out_g, gqx, gqy, gqz,
                       gmn_x, gmn_y, gmn_z,
                       gmx_x, gmx_y, gmx_z;
                       ndrange=n_q, workgroup_size=(64, 1, 1), tlas=tlas)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
     gpu = Array(out_g)
 

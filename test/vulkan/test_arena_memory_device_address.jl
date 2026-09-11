@@ -56,8 +56,8 @@ end
     # `test_pool_alloc_oom` then reported a validation error where it expected
     # "out of memory", and `test_coopmat_perelement` got a spirv-val error, both
     # ~40 minutes downstream of here with nothing pointing back.
-    prev = MVE.vk_context().debug
-    MVE.reset_device!(debug = MVE.DebugConfig(validation = true))
+    prev = Mantle.vk_context().debug
+    Mantle.reset_device!(debug = Mantle.DebugConfig(validation = true))
     try
         dev = Mantle.Device(Mantle.VulkanAPI())
         be = Mantle.defaultbackend()
@@ -74,12 +74,12 @@ end
 
         # THE assertion. Without the flag this holds
         # `VUID-vkBindBufferMemory-bufferDeviceAddress-03339`.
-        ctx = MVE.vk_context()
-        MVE.drain_validation_messages!(ctx)
+        ctx = Mantle.vk_context()
+        Mantle.drain_validation_messages!(ctx)
         @test isempty(ctx.validation.messages)
 
         Mantle.free!(pl)
     finally
-        MVE.reset_device!(debug = prev)
+        Mantle.reset_device!(debug = prev)
     end
 end

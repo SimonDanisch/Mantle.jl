@@ -25,14 +25,14 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
 
 @testset "trace_closest_hits! cull_mask kwarg filters instances" begin
 
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if ctx.rt_pipeline_properties === nothing
         @warn "Skipping cull_mask test: VK_KHR_ray_tracing_pipeline not available"
         @test_skip true
         return
     end
 
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
 
     # Single triangle at z=depth_z, spanning [-1,1] in xy.
     function tri_mesh(depth_z::Float32)
@@ -43,7 +43,7 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
         GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
     end
 
-    tlas = MVE.VulkanTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     # Instance A: mask 0x01 at z=5
     push!(tlas, tri_mesh(5f0),  Mat4f_CM(I);
           instance_id=UInt32(1), instance_mask=UInt8(0x01))
@@ -60,14 +60,14 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
                         1f-4,             # tmin
                         0f0, 0f0, 1f0,   # direction
                         1f4)              # tmax
-    gpu_rays = MVE.LavaArray([ray])
-    gpu_hits = MVE.LavaArray([Raycore.RTHitResult(0, 0f0, 0, 0, 0f0, 0f0, 0, 0)])
+    gpu_rays = Mantle.LavaArray([ray])
+    gpu_hits = Mantle.LavaArray([Raycore.RTHitResult(0, 0f0, 0, 0, 0f0, 0f0, 0, 0)])
 
     function do_trace(mask::UInt32)
         # Re-use the same buffer; each call overwrites it.
-        gpu_hits_local = MVE.LavaArray([Raycore.RTHitResult(0, 0f0, 0, 0, 0f0, 0f0, 0, 0)])
+        gpu_hits_local = Mantle.LavaArray([Raycore.RTHitResult(0, 0f0, 0, 0, 0f0, 0f0, 0, 0)])
         Mantle.trace_closest_hits!(gpu_hits_local, gpu_rays, accel, 1; cull_mask=mask)
-        MVE.vk_flush!(backend.dispatch_bq)
+        Mantle.vk_flush!(backend.dispatch_bq)
         return Array(gpu_hits_local)[1]
     end
 

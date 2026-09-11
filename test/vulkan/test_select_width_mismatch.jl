@@ -33,9 +33,9 @@ const KA = KernelAbstractions
         end
     end
 
-    out = MVE.LavaArray(zeros(Float32, M))
-    _clamped_ternary!(MVE.LavaBackend())(out; ndrange = M, workgroupsize = M)
-    KA.synchronize(MVE.LavaBackend())
+    out = Mantle.LavaArray(zeros(Float32, M))
+    _clamped_ternary!(Mantle.LavaBackend())(out; ndrange = M, workgroupsize = M)
+    KA.synchronize(Mantle.LavaBackend())
     got = Array(out)
 
     # CPU reference: clamped 3-point average of v = 1:M.

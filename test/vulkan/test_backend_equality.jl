@@ -18,9 +18,9 @@ using Test, Mantle, Lava, KernelAbstractions
 const KA = KernelAbstractions
 
 @testset "a backend equals every spelling of its device" begin
-    ctx = MVE.vk_context()
-    default = MVE.LavaBackend()
-    pinned = MVE.LavaBackend(ctx)
+    ctx = Mantle.vk_context()
+    default = Mantle.LavaBackend()
+    pinned = Mantle.LavaBackend(ctx)
     @test default == pinned
     @test pinned == default
     @test hash(default) == hash(pinned)
@@ -30,14 +30,14 @@ const KA = KernelAbstractions
 
     bq2 = Mantle.allocate_batch_queue!(ctx)
     try
-        other = MVE.LavaBackend(bq2)
+        other = Mantle.LavaBackend(bq2)
         @test other == pinned
         @test other !== pinned
         @test hash(other) == hash(pinned)
-        @test MVE.LavaBackend(bq2, bq2) == other
+        @test Mantle.LavaBackend(bq2, bq2) == other
         # The split spelling, another upload queue on the same device, is the
         # same device too.
-        @test MVE.LavaBackend(ctx.default_bq, bq2) == pinned
+        @test Mantle.LavaBackend(ctx.default_bq, bq2) == pinned
     finally
         Mantle.release_batch_queue!(bq2)
     end

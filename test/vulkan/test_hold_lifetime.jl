@@ -35,19 +35,19 @@ holders(a) = @atomic Mantle.stampof(a).holders
 
 @testset "the deleted mechanism is gone" begin
     # Not "renamed": these named a decision the backend was making.
-    @test !isdefined(MVE, :pin!)
-    @test !isdefined(MVE, :sync_access!)
-    @test !isdefined(MVE, :pin_leaves!)
-    @test !isdefined(MVE, :collectsync!)
-    @test !hasfield(MVE.OneShot, :pinned)
-    @test !hasfield(MVE.OneShot, :pinned_refs)
-    @test !hasfield(MVE.VkManagedBuffer, :last_write_bq)
-    @test !hasfield(MVE.VkManagedBuffer, :pins)
+    @test !isdefined(Mantle, :pin!)
+    @test !isdefined(Mantle, :sync_access!)
+    @test !isdefined(Mantle, :pin_leaves!)
+    @test !isdefined(Mantle, :collectsync!)
+    @test !hasfield(Mantle.OneShot, :pinned)
+    @test !hasfield(Mantle.OneShot, :pinned_refs)
+    @test !hasfield(Mantle.VkManagedBuffer, :last_write_bq)
+    @test !hasfield(Mantle.VkManagedBuffer, :pins)
 
     # What replaced it: core keeps the lists, the backend keeps the facts.
-    @test hasfield(MVE.OneShot, :sync)          # the buffers these commands name
-    @test hasfield(MVE.Recording, :holds)       # a recording outlives its submissions
-    @test hasfield(MVE.VkManagedBuffer, :stamp)
+    @test hasfield(Mantle.OneShot, :sync)          # the buffers these commands name
+    @test hasfield(Mantle.Recording, :holds)       # a recording outlives its submissions
+    @test hasfield(Mantle.VkManagedBuffer, :stamp)
     @test fieldnames(Mantle.Stamp) == (:channel, :token, :holders)
     for f in (:outstanding, :free, :holds, :spare, :pending, :retiring)
         @test hasfield(Mantle.SubmitChannel, f)
@@ -55,12 +55,12 @@ holders(a) = @atomic Mantle.stampof(a).holders
 
     # LavaAdaptor still carries the owner (no zero-arg constructor, but a
     # `nothing` owner is allowed for a pure strip).
-    @test fieldnames(MVE.LavaAdaptor) == (:batch,)
-    @test_throws MethodError MVE.LavaAdaptor()
+    @test fieldnames(Mantle.LavaAdaptor) == (:batch,)
+    @test_throws MethodError Mantle.LavaAdaptor()
 end
 
 @testset "a buffer is recorded once however often it is held" begin
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 8))
 
     Mantle.oneshot!(bq) do e
@@ -75,21 +75,21 @@ end
         @test e.owner.sync[1] === a.buf[]
         @test holders(a) == 5
     end
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     @test holders(a) == 0
 end
 
 @testset "the submission that ran is stamped on the buffer" begin
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 4))
 
     Mantle.oneshot!(bq) do e
         Mantle.hold!(e, a)
     end
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     st = Mantle.stampof(a)
     @test st.channel === bq
-    @test st.token == MVE.driver(bq).next_timeline
+    @test st.token == Mantle.driver(bq).next_timeline
 
     # Nothing without device-visible bytes of its own is tracked, and asking is
     # not an error: that is what makes `hold!` usable for a pipeline.
@@ -106,7 +106,7 @@ end
     KernelAbstractions.synchronize(be)
     @test holders(a) == 0
 
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
     touchkernel!(be, 16)(a; ndrange = 16)
     @test holders(a) > 0                        # held while in flight
     # And the one-shot that carried it names the buffer, which is what the
@@ -117,11 +117,11 @@ end
 end
 
 @testset "the adaptor strips and holds nothing" begin
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 8))
 
     Mantle.oneshot!(bq) do e
-        adaptor = MVE.LavaAdaptor(e.owner)
+        adaptor = Mantle.LavaAdaptor(e.owner)
         # `adapt` strips LavaArray → LavaDeviceArray and takes no claim: the
         # launch path holds explicitly, which the testset above checks against
         # the observable guarantee rather than against where the call sits.
@@ -129,17 +129,17 @@ end
         @test dev_a isa Lava.LavaDeviceArray
         @test holders(a) == 0
     end
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 end
 
 @testset "wrapper struct: the adaptor leaves an unregistered struct alone" begin
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
     a = LavaArray{Float32,1}(zeros(Float32, 4))
     b = LavaArray{Int32,1}(zeros(Int32, 4))
     w = TestWrapper(a, b)
 
     Mantle.oneshot!(bq) do e
-        adaptor = MVE.LavaAdaptor(e.owner)
+        adaptor = Mantle.LavaAdaptor(e.owner)
         # A struct with no `Adapt.@adapt_structure` rule is returned untouched —
         # the adaptor does not recurse into arbitrary user types. Anything
         # relying on nested arrays reaching the device must either register the
@@ -150,7 +150,7 @@ end
         @test wc.items === a
         @test wc.sizes === b
     end
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 end
 
 end  # @testset

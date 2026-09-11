@@ -4,12 +4,12 @@ using Test, Lava, Mantle
 @testset "legacy transfer symbols are gone" begin
     @test !isdefined(Lava, :one_shot_copy)
     @test !isdefined(Lava, :append_copy_and_flush!)
-    @test !hasfield(MVE.VulkanBatchQueue, :xfer_cmd_buf)
-    @test !hasfield(MVE.VulkanBatchQueue, :xfer_fence)
+    @test !hasfield(Mantle.VulkanBatchQueue, :xfer_cmd_buf)
+    @test !hasfield(Mantle.VulkanBatchQueue, :xfer_fence)
 end
 
 @testset "cmd_copy_buffer! is the single entry point" begin
-    @test isdefined(MVE, :cmd_copy_buffer!)
+    @test isdefined(Mantle, :cmd_copy_buffer!)
 end
 
 @testset "upload/download roundtrip via new path" begin

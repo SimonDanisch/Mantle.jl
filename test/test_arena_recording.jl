@@ -70,10 +70,9 @@ end
     @inbounds d[i] = x[i] + y[i]
 end
 
-# The Vulkan backend module. `pool_offset` below is the BACKEND's — it names
-# an offset inside a `VkBuffer` — and since the runtime moved into
-# `MantleVulkanExt` it is not Mantle's to reach.
-const E = MVE
+# `pool_offset` below is the BACKEND's — it names an offset inside a
+# `VkBuffer` — so this file is one of the ones 0.7 still owes `test/vulkan/`.
+const E = Mantle
 
 @testset "two plans in one process commit the max, not the sum" begin
     # The gate for the device-owned arena. It can only pass if the `Device` owns
@@ -188,7 +187,7 @@ end
     @test M.record!(s.plan) === s.plan                     # idempotent
     # ONE recording, not one per argument slot: nothing rewrites a plan's
     # argument memory after `record!`, so there is nothing for a ring to protect.
-    @test s.plan.recording isa MVE.Recording
+    @test s.plan.recording isa Mantle.Recording
 
     M.run!(s.plan)
     KernelAbstractions.synchronize(M.backend(dev))
@@ -211,7 +210,7 @@ end
     # of this testset, it is not a ratio anybody has to keep generous, and it does
     # not move on a shared machine. `test_recording_lifecycle.jl` owns the
     # host-cost comparison, where the two sides genuinely differ.
-    diag = MVE.ctxof(M.batchqueue(dev)).diag
+    diag = Mantle.ctxof(M.batchqueue(dev)).diag
     function batchrecorded(f, n)
         f()                                  # warm, and outside the count
         KernelAbstractions.synchronize(M.backend(dev))
@@ -344,7 +343,7 @@ end
     want = reshape(collect(1f0:12f0), 3, 4)
     b = M.Buffer(dev, want)
     @test size(b) == (3, 4)
-    # Was `MVE.LavaArray{Float32,2}`, which is one backend's array type in a
+    # Was `Mantle.LavaArray{Float32,2}`, which is one backend's array type in a
     # file that runs against all of them. What the property IS: a Buffer's
     # storage is the backend's own 2-D device array, whatever that is.
     @test M.storage(b) isa AbstractArray{Float32,2}
@@ -391,7 +390,7 @@ end
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 
     # Wait, so the fence it was stamped with has passed.
-    MVE.vk_flush!(dev.ctx)
+    Mantle.vk_flush!(dev.ctx)
     KernelAbstractions.synchronize(M.backend(dev))
     @test M.reclaim!(pool, dev) == 1        # now
     @test M.reclaim!(pool, dev) == 0

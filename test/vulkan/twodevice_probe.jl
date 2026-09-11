@@ -120,8 +120,7 @@ four caches, and **none of the four was what actually broke it.**
 """
 
 using Lava, Mantle, KernelAbstractions, LinearAlgebra
-@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
-@isdefined(LavaBackend) || (LavaBackend = MVE.LavaBackend)
+@isdefined(LavaBackend) || (LavaBackend = Mantle.LavaBackend)
 const KA = KernelAbstractions
 
 @kernel function twodev!(d, s)
@@ -130,8 +129,8 @@ const KA = KernelAbstractions
 end
 
 function probe()
-    gpu = MVE.vk_context()
-    cpu = MVE.VkContext(select = "llvmpipe")
+    gpu = Mantle.vk_context()
+    cpu = Mantle.VkContext(select = "llvmpipe")
 
     println("gpu id=$(gpu.id)  $(gpu.device_name)")
     println("cpu id=$(cpu.id)  $(cpu.device_name)")
@@ -167,7 +166,7 @@ function probe()
         # ── a reduction: the scratch was keyed by context but ALLOCATED on the
         #    global one, so the second device's entry held the first device's
         #    buffer. Keyed right, allocated wrong. Now `ctx.caches.reduce_scratch`.
-        r = MVE.vk_reduce_sum(a)
+        r = Mantle.vk_reduce_sum(a)
         okr = r ≈ 64 * 5.0f0
 
         # ── a GEMM big enough to split K: the split-K scratch was one `Ref`
@@ -198,10 +197,10 @@ function probe()
     # `pUserData`, which is what the callback reads.
     gpu.validation === cpu.validation &&
         error("both contexts share one ValidationRing — the global is back")
-    MVE.ring_user_data(gpu.validation) == MVE.ring_user_data(cpu.validation) &&
+    Mantle.ring_user_data(gpu.validation) == Mantle.ring_user_data(cpu.validation) &&
         error("both messengers were handed the same pUserData")
     for (name, ctx) in (("gpu", gpu), ("cpu", cpu))
-        MVE.drain_validation_messages!(ctx)
+        Mantle.drain_validation_messages!(ctx)
         println("  $name: ring wrote $(ctx.validation.write[1]), " *
                 "drained $(length(ctx.validation.messages)) message(s)")
     end
@@ -220,7 +219,7 @@ function probe()
         println("  $name: pipelines=$(length(ctx.caches.pipelines)) ",
                 "linked=$(length(ctx.caches.linked)) ",
                 "launchplans=$(length(ctx.caches.launchplans)) ",
-                "pool blocks=$(length(Mantle.pool(MVE.lavadevice(ctx)).blocks))")
+                "pool blocks=$(length(Mantle.pool(Mantle.lavadevice(ctx)).blocks))")
     end
     gpu.caches === cpu.caches && error("both contexts share one DeviceCaches")
     gpu.caches.pipelines === cpu.caches.pipelines && error("both contexts share one pipeline cache")
@@ -238,7 +237,7 @@ function probe()
     # lavapipe device Vulkan.jl has already torn down. The suite printed its
     # summary and then the process died with SIGSEGV in `libvulkan_lvp.so`,
     # which reads as "the tests crashed" and is a long way from this line.
-    MVE.mark_device_lost!(cpu)
+    Mantle.mark_device_lost!(cpu)
     println("\nPASS")
 end
 

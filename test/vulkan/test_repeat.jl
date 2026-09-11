@@ -263,7 +263,7 @@ end
 
 @testset "repeat!: the fold discards without conditional rendering" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     had = ctx.conditional_rendering_available
     ctx.conditional_rendering_available = false
     try

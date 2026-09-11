@@ -98,7 +98,7 @@ end
         # 1024 is this device's `maxComputeWorkGroupInvocations`, now queried
         # rather than assumed — the sizes below have to be launchable for the
         # coverage assertions to mean anything.
-        @test MVE.workgroup_limit(MVE.vk_context()) == 1024
+        @test Mantle.workgroup_limit(Mantle.vk_context()) == 1024
         for K in (32, 64, 128), wg in (64, 128, 256, 512, 1024)
             @test groupcoverage(backend, K, wg; static = true) == 1.0
             @test groupcoverage(backend, K, wg; static = false) == 1.0

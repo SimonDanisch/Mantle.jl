@@ -28,7 +28,7 @@ import .SPIRVTestUtils: check, check_not, check_dag, check_sequence, check_count
     check_regex, normalize_spirv, compare_golden, compile_and_disasm,
     spirv_opt_roundtrip, check_vendor_safety, compile_with_llc
 
-let ctx = MVE.vk_context()
+let ctx = Mantle.vk_context()
     has_rt = ctx.rt_pipeline_properties !== nothing
     @info "Lava CI suite" device=ctx.device_name has_rt
 end
@@ -195,8 +195,8 @@ end
         a = LavaArray(rand(Float32, 256))
         b = LavaArray(rand(Float32, 256))
         c = LavaArray(zeros(Float32, 256))
-        vadd_ka(MVE.LavaBackend())(a, b, c; ndrange=256)
-        KernelAbstractions.synchronize(MVE.LavaBackend())
+        vadd_ka(Mantle.LavaBackend())(a, b, c; ndrange=256)
+        KernelAbstractions.synchronize(Mantle.LavaBackend())
         @test Array(c) ≈ Array(a) .+ Array(b)
 
         # Shared memory + synchronize
@@ -217,8 +217,8 @@ end
 
         input = LavaArray(ones(Float32, 256))
         output = LavaArray(zeros(Float32, 4))
-        reduce_ka(MVE.LavaBackend())(input, output; ndrange=256, workgroupsize=64)
-        KernelAbstractions.synchronize(MVE.LavaBackend())
+        reduce_ka(Mantle.LavaBackend())(input, output; ndrange=256, workgroupsize=64)
+        KernelAbstractions.synchronize(Mantle.LavaBackend())
         @test all(Array(output) .≈ 64.0f0)
     end
 
@@ -239,7 +239,7 @@ end
             A[i] = Int32(i)
         end
 
-        backend = MVE.LavaBackend()
+        backend = Mantle.LavaBackend()
         A = LavaArray(zeros(Int32, 128))
         kill = LavaArray(Int32[64])
         barrier_error_kernel(backend)(A, kill; ndrange=128, workgroupsize=128)

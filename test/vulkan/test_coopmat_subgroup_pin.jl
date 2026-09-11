@@ -27,8 +27,7 @@
 using Test, Mantle, Lava, KernelAbstractions
 
 # Bound by the suite's preamble for every file; standalone, bind them here.
-@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
-@isdefined(LavaBackend) || (LavaBackend = MVE.LavaBackend)
+@isdefined(LavaBackend) || (LavaBackend = Mantle.LavaBackend)
 const KA = KernelAbstractions
 
 # Exists only to make the module declare CooperativeMatrixKHR, which is the
@@ -37,29 +36,29 @@ const KA = KernelAbstractions
 @kernel cpu=false unsafe_indices=true function cmr_probe!(out)
     i = Lava.lava_local_invocation_index() + UInt32(1)
     @inbounds begin
-        m = Lava.AcceleratedMatrix{Float32,MVE.GEMM_TILE,MVE.GEMM_TILE,Lava.Accumulator}(
-                pointer(out), 1, MVE.GEMM_TILE)
+        m = Lava.AcceleratedMatrix{Float32,Mantle.GEMM_TILE,Mantle.GEMM_TILE,Lava.Accumulator}(
+                pointer(out), 1, Mantle.GEMM_TILE)
         out[i] = Lava.coopmat_getcomp(m, Int32(0))
     end
 end
 
 @testset "coopmat pipelines and the 32-lane pin" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
 
-    if !MVE.coopmat_gemm_available(ctx)
+    if !Mantle.coopmat_gemm_available(ctx)
         @info "no cooperative matrices on this device; the guard is unreachable"
-        @test_skip MVE.coopmat_gemm_available(ctx)
+        @test_skip Mantle.coopmat_gemm_available(ctx)
     else
         # ── the half that must hold on this machine ──────────────────────────
-        @test MVE.can_require_subgroup_size(ctx, MVE.COOPMAT_SUBGROUP)
+        @test Mantle.can_require_subgroup_size(ctx, Mantle.COOPMAT_SUBGROUP)
 
         # A real coopmat kernel builds and computes correctly at the pinned width.
         # `mul!` on fp16 operands with an fp32 destination is the shipped route
         # onto `coopmat_gemm!`.
         M = N = K = 128
-        A = MVE.LavaArray(Float16.(randn(Float32, M, K) .* 0.1f0))
-        B = MVE.LavaArray(Float16.(randn(Float32, K, N) .* 0.1f0))
-        C = MVE.LavaArray(zeros(Float32, M, N))
+        A = Mantle.LavaArray(Float16.(randn(Float32, M, K) .* 0.1f0))
+        B = Mantle.LavaArray(Float16.(randn(Float32, K, N) .* 0.1f0))
+        C = Mantle.LavaArray(zeros(Float32, M, N))
         ref = Float32.(Array(A)) * Float32.(Array(B))
         Mantle.LinearAlgebra.mul!(C, A, B)
         KA.synchronize(LavaBackend())
@@ -80,13 +79,13 @@ end
         # is the capability query (`coopmat_gemm_available`, `flashcmfits`); this
         # is the backstop for a hand-written kernel that bypasses them.
         saved_ctl  = ctx.caches.subgroup_control
-        saved_size = MVE.device_subgroup_size(ctx)
+        saved_size = Mantle.device_subgroup_size(ctx)
         saved_warn = ctx.caches.coopmat_warned
         try
-            ctx.caches.subgroup_control = MVE.SubgroupSizeControl(64, 64, true)
+            ctx.caches.subgroup_control = Mantle.SubgroupSizeControl(64, 64, true)
             ctx.caches.subgroup_size    = 64
             ctx.caches.coopmat_warned   = false     # one warning per device
-            @test !MVE.can_require_subgroup_size(ctx, MVE.COOPMAT_SUBGROUP)
+            @test !Mantle.can_require_subgroup_size(ctx, Mantle.COOPMAT_SUBGROUP)
 
             let c = ctx.caches
                 empty!(c.pipelines); empty!(c.pipeline_order)

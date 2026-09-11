@@ -13,7 +13,7 @@
 
 using Test, Lava, Mantle
 @testset "coopmat_shape honours the operand type" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
 
     if !ctx.coopmat_available
         @info "no cooperative-matrix support on this device; skipping"
@@ -24,32 +24,32 @@ using Test, Lava, Mantle
 
         # Every reported (extent, operand type) pair must be found...
         for s in shapes
-            s.scope == MVE.VK_SCOPE_SUBGROUP || continue
-            T = findfirst(t -> MVE.vkcomponenttype(t) == s.ab_type,
+            s.scope == Mantle.VK_SCOPE_SUBGROUP || continue
+            T = findfirst(t -> Mantle.vkcomponenttype(t) == s.ab_type,
                           (Float16, Float32, Float64,
                            Int8, Int16, Int32, Int64,
                            UInt8, UInt16, UInt32, UInt64))
             T === nothing && continue
             ty = (Float16, Float32, Float64, Int8, Int16, Int32, Int64,
                   UInt8, UInt16, UInt32, UInt64)[T]
-            @test MVE.coopmat_shape(ctx, ty, s.M, s.N, s.K)
+            @test Mantle.coopmat_shape(ctx, ty, s.M, s.N, s.K)
         end
 
         # ...and an operand type the device reports for NO shape must not match,
         # however many shapes share its extents.
         reported = Set(s.ab_type for s in shapes)
         for ty in (Float16, Float32, Float64, Int8, UInt8)
-            MVE.vkcomponenttype(ty) in reported && continue
+            Mantle.vkcomponenttype(ty) in reported && continue
             for s in shapes
-                @test !MVE.coopmat_shape(ctx, ty, s.M, s.N, s.K)
+                @test !Mantle.coopmat_shape(ctx, ty, s.M, s.N, s.K)
             end
         end
 
         # Extents the device never reports must not match either.
-        @test !MVE.coopmat_shape(ctx, Float16, 7, 7, 7)
+        @test !Mantle.coopmat_shape(ctx, Float16, 7, 7, 7)
 
         # A type with no VkComponentTypeKHR mapping is not a shape.
-        @test !MVE.coopmat_shape(ctx, ComplexF32, 16, 16, 16)
-        @test MVE.vkcomponenttype(ComplexF32) === nothing
+        @test !Mantle.coopmat_shape(ctx, ComplexF32, 16, 16, 16)
+        @test Mantle.vkcomponenttype(ComplexF32) === nothing
     end
 end

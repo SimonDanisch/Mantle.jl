@@ -18,27 +18,27 @@ using Test, Lava, LinearAlgebra, KernelAbstractions
 const KA = KernelAbstractions
 
 @testset "coopmat GEMM requires a matching subgroup size" begin
-    ctx = MVE.vk_context()
-    sg = MVE.device_subgroup_size(ctx)
+    ctx = Mantle.vk_context()
+    sg = Mantle.device_subgroup_size(ctx)
     @test sg > 0
 
     # The kernel may only be used where a subgroup really is GEMM_SUBGROUP wide:
     # either natively, or because the pipeline pinned it. Never on a wave width
     # that is neither.
-    if MVE.coopmat_gemm_available(ctx)
-        @test sg == MVE.GEMM_SUBGROUP || MVE.can_require_subgroup_size(ctx, MVE.GEMM_SUBGROUP)
+    if Mantle.coopmat_gemm_available(ctx)
+        @test sg == Mantle.GEMM_SUBGROUP || Mantle.can_require_subgroup_size(ctx, Mantle.GEMM_SUBGROUP)
     else
-        @test !(sg == MVE.GEMM_SUBGROUP || MVE.can_require_subgroup_size(ctx, MVE.GEMM_SUBGROUP)) ||
-              !MVE.coopmat_shape(ctx, Float16, MVE.GEMM_TILE, MVE.GEMM_TILE, MVE.GEMM_TILE)
+        @test !(sg == Mantle.GEMM_SUBGROUP || Mantle.can_require_subgroup_size(ctx, Mantle.GEMM_SUBGROUP)) ||
+              !Mantle.coopmat_shape(ctx, Float16, Mantle.GEMM_TILE, Mantle.GEMM_TILE, Mantle.GEMM_TILE)
     end
 
     # A pinnable device must actually be pinned, and only for coopmat modules —
     # the whole guarantee rests on `get_compute_pipeline` recognising the
     # capability, so check the scanner in both directions against real SPIR-V.
-    if MVE.can_require_subgroup_size(ctx, MVE.GEMM_SUBGROUP)
-        c = MVE.subgroup_size_control(ctx)
+    if Mantle.can_require_subgroup_size(ctx, Mantle.GEMM_SUBGROUP)
+        c = Mantle.subgroup_size_control(ctx)
         @test c.compute
-        @test c.min <= MVE.GEMM_SUBGROUP <= c.max
+        @test c.min <= Mantle.GEMM_SUBGROUP <= c.max
     end
     # Hand-built modules so the parser is pinned exactly, with no compile cost.
     spv(caps...) = collect(reinterpret(UInt8, UInt32[
@@ -47,24 +47,24 @@ const KA = KernelAbstractions
         (vcat(([UInt32(2 << 16 | 17), UInt32(c)] for c in caps)...))...,
         UInt32(3 << 16 | 14), UInt32(0), UInt32(1),      # OpMemoryModel ends the section
     ]))
-    @test MVE.spirv_declares_capability(spv(Lava.Cap.CooperativeMatrixKHR),
+    @test Mantle.spirv_declares_capability(spv(Lava.Cap.CooperativeMatrixKHR),
                                           Lava.Cap.CooperativeMatrixKHR)
-    @test MVE.spirv_declares_capability(spv(UInt32(1), Lava.Cap.CooperativeMatrixKHR),
+    @test Mantle.spirv_declares_capability(spv(UInt32(1), Lava.Cap.CooperativeMatrixKHR),
                                           Lava.Cap.CooperativeMatrixKHR)   # not just the first
-    @test !MVE.spirv_declares_capability(spv(UInt32(1)), Lava.Cap.CooperativeMatrixKHR)
-    @test !MVE.spirv_declares_capability(UInt8[], Lava.Cap.CooperativeMatrixKHR)
-    @test !MVE.spirv_declares_capability(UInt8[0x01, 0x02, 0x03],           # not word-aligned
+    @test !Mantle.spirv_declares_capability(spv(UInt32(1)), Lava.Cap.CooperativeMatrixKHR)
+    @test !Mantle.spirv_declares_capability(UInt8[], Lava.Cap.CooperativeMatrixKHR)
+    @test !Mantle.spirv_declares_capability(UInt8[0x01, 0x02, 0x03],           # not word-aligned
                                           Lava.Cap.CooperativeMatrixKHR)
     bad = collect(spv(Lava.Cap.CooperativeMatrixKHR)); bad[1] = 0x00        # wrong magic
-    @test !MVE.spirv_declares_capability(bad, Lava.Cap.CooperativeMatrixKHR)
+    @test !Mantle.spirv_declares_capability(bad, Lava.Cap.CooperativeMatrixKHR)
 
     # Whichever path `mul!` picks, the answer must be right — this is the case
     # that silently returned a half-written tile.
     M, N, K = 64, 64, 32
     hA = Float16.(reshape(sin.(range(0, 3, M * K)), M, K))
     hB = Float16.(reshape(cos.(range(0, 4, K * N)), K, N))
-    A = MVE.LavaArray(hA); B = MVE.LavaArray(hB)
-    C = MVE.LavaArray(zeros(Float32, M, N))
+    A = Mantle.LavaArray(hA); B = Mantle.LavaArray(hB)
+    C = Mantle.LavaArray(zeros(Float32, M, N))
     LinearAlgebra.mul!(C, A, B, 1.0f0, 0.0f0)
     KA.synchronize(LavaBackend())
     got = Array(C)

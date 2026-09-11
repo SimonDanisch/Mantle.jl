@@ -40,12 +40,12 @@ const SENT = -999.0f0
     Mantle.copyto!(pointer(out), 1, TC, m)
 end
 
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device"
 else
     back = LavaBackend()
-    WG = MVE.device_subgroup_size(ctx)
+    WG = Mantle.device_subgroup_size(ctx)
     src = KA.allocate(back, Float32, EXT_C, EXT_C)
     s = Float32.(reshape(1:(EXT_C * EXT_C), EXT_C, EXT_C))
     copyto!(src, s)

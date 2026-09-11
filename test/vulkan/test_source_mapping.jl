@@ -504,9 +504,9 @@ end
         @inbounds A[i] = rand()
     end
 
-    a = MVE.LavaArray(Float32[1, 2, 3])
+    a = Mantle.LavaArray(Float32[1, 2, 3])
     err = try
-        _srcmap_bad_ka!(MVE.LavaBackend())(a; ndrange=3)
+        _srcmap_bad_ka!(Mantle.LavaBackend())(a; ndrange=3)
         nothing
     catch e
         e
@@ -701,10 +701,10 @@ end
     # and it now takes the VulkanBatchQueue it allocates against. This test kept calling
     # the old name and threw UndefVarError; nobody saw it because the file was not
     # registered in runtests.jl.
-    MVE.try_vk_alloc(MVE.vk_context().default_bq, 40_000_000_000)  # 40GB, will fail
+    Mantle.try_vk_alloc(Mantle.vk_context().default_bq, 40_000_000_000)  # 40GB, will fail
 
     # Validation messages should be drained by the failed alloc
-    @test isempty(MVE.vk_context().validation.messages)
+    @test isempty(Mantle.vk_context().validation.messages)
 
     # Next compilation should succeed without stale validation errors
     r = lava_compile(Lava._srcmap_add!,
@@ -743,9 +743,9 @@ end
 
 @testset "Source mapping doesn't break kernel execution" begin
     # Simple add
-    a = MVE.LavaArray(Float32[1, 2, 3, 4])
+    a = Mantle.LavaArray(Float32[1, 2, 3, 4])
     b = a .+ 10.0f0
-    MVE.vk_flush!(MVE.vk_context())
+    Mantle.vk_flush!(Mantle.vk_context())
     @test Array(b) == Float32[11, 12, 13, 14]
 
     # Reduction
@@ -765,10 +765,10 @@ end
         end
     end
 
-    src = MVE.LavaArray([SrcMapTestStruct(1.0f0, 2.0f0), SrcMapTestStruct(3.0f0, 4.0f0)])
-    dst = MVE.LavaArray{SrcMapTestStruct}(undef, 2)
-    srcmap_struct_ka!(MVE.LavaBackend())(dst, src, 2.0f0; ndrange=2)
-    MVE.vk_flush!(MVE.vk_context())
+    src = Mantle.LavaArray([SrcMapTestStruct(1.0f0, 2.0f0), SrcMapTestStruct(3.0f0, 4.0f0)])
+    dst = Mantle.LavaArray{SrcMapTestStruct}(undef, 2)
+    srcmap_struct_ka!(Mantle.LavaBackend())(dst, src, 2.0f0; ndrange=2)
+    Mantle.vk_flush!(Mantle.vk_context())
     result = Array(dst)
     @test result[1].a ≈ 2.0f0
     @test result[1].b ≈ 4.0f0

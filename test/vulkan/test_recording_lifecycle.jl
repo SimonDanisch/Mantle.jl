@@ -3,7 +3,7 @@ What a recording has to survive between the run that wrote it and the runs that
 submit it.
 
 Three files stood here — `test_capture_replay.jl`, `test_capture_gc.jl` and
-`test_replay_interleaved.jl` — and all three drove `MVE.capture(f, bq)` over ad
+`test_replay_interleaved.jl` — and all three drove `Mantle.capture(f, bq)` over ad
 hoc KernelAbstractions launches. That API is gone: `capture` recorded by running
 the ordinary recorder and collecting whatever `submit!` sealed on the way past,
 which is why it also EXECUTED, why it needed `bq.capturing` for four separate
@@ -31,7 +31,7 @@ BDA changes), memory returning to the driver (`gpu_live_bytes` is identical
 across the GC), command-buffer recycling, and pool size.
 
 The interleaving case is a real bug this pins. Opening the old batch handed it
-`MVE.driver(bq).next_timeline + 1` as its signal value, reserving it, and `submit!`
+`Mantle.driver(bq).next_timeline + 1` as its signal value, reserving it, and `submit!`
 later asserts the reservation still holds; a submission path that bumped the same
 counter left any open batch with a stale reservation and the next `submit!` died
 with `AssertionError: batch signal desync: 859 vs 860`, naming neither. The shape

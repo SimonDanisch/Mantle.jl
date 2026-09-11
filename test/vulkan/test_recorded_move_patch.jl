@@ -22,7 +22,6 @@ using GeometryBasics: Vec4f
 
 const KA = KernelAbstractions
 const M = Mantle
-@isdefined(MVE) || (MVE = Base.get_extension(Mantle, :MantleVulkanExt))
 
 @kernel function _movepatch_copy!(dst, @Const(src))
     i = @index(Global)

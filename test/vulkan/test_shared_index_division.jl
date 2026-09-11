@@ -150,7 +150,7 @@ sitting as a documented "unexplained" blocker.
 
 using Test, Lava, KernelAbstractions
 using Lava: AcceleratedMatrix, MatrixA, MatrixB, Accumulator
-using .MVE: splitidx
+using Mantle: splitidx
 const KA = KernelAbstractions
 
 const SID_BM, SID_LDA, SID_BK, SID_WG = 96, 104, 32, 256
@@ -206,7 +206,7 @@ end
 
 @testset "shared stores through a divided index" begin
     backend = LavaBackend()
-    if !MVE.coopmat_gemm_available(MVE.vk_context())
+    if !Mantle.coopmat_gemm_available(Mantle.vk_context())
         @info "skipping: no cooperative-matrix support on this device"
     else
         total = SID_BM * SID_BK
@@ -236,15 +236,15 @@ end
 # — four 8x8x8 shapes — which is the fact this file previously got wrong.
 @testset "the same pattern on a second cooperative-matrix consumer" begin
     lp = try
-        MVE.VkContext(select = "llvmpipe")
+        Mantle.VkContext(select = "llvmpipe")
     catch e
         @info "no lavapipe device; skipping the second-consumer check" exception=e
         nothing
     end
     if lp === nothing
-    elseif !MVE.coopmat_shape(lp, Float16, 8, 8, 8)
+    elseif !Mantle.coopmat_shape(lp, Float16, 8, 8, 8)
         @info "lavapipe has no 8x8x8 Float16 cooperative matrix here" lp.device_name
-        MVE.mark_device_lost!(lp)
+        Mantle.mark_device_lost!(lp)
     else
         try
             back = LavaBackend(lp)
@@ -265,7 +265,7 @@ end
             # Nothing else can retire a context built with `VkContext(; select)`,
             # and its buffers' finalizers would otherwise run against a torn-down
             # device at exit.
-            MVE.mark_device_lost!(lp)
+            Mantle.mark_device_lost!(lp)
         end
     end
 end

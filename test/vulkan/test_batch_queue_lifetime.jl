@@ -16,11 +16,11 @@
 
 using Test, Lava, Mantle
 @testset "batch queue lifetime" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
 
     @testset "the context owns what it hands out" begin
         held = length(ctx.extra_queues)
-        bq = Mantle.allocate_batch_queue!(MVE.vk_context())
+        bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
         # Reachable from the context, not just from the caller's binding. This
         # single assertion is the memory-safety property: a GC that collects the
         # caller cannot take the semaphore with it.
@@ -33,14 +33,14 @@ using Test, Lava, Mantle
     end
 
     @testset "a released hardware slot is reused" begin
-        bq = Mantle.allocate_batch_queue!(MVE.vk_context())
-        idx = MVE.driver(bq).queue_index
+        bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
+        idx = Mantle.driver(bq).queue_index
         Mantle.release_batch_queue!(bq)
 
         if idx >= 0
             @test idx in ctx.free_queue_indices
-            again = Mantle.allocate_batch_queue!(MVE.vk_context())
-            @test MVE.driver(again).queue_index == idx
+            again = Mantle.allocate_batch_queue!(Mantle.vk_context())
+            @test Mantle.driver(again).queue_index == idx
             @test !(idx in ctx.free_queue_indices)
             Mantle.release_batch_queue!(again)
         else
@@ -51,7 +51,7 @@ using Test, Lava, Mantle
     end
 
     @testset "releasing twice is a no-op, releasing the primary is an error" begin
-        bq = Mantle.allocate_batch_queue!(MVE.vk_context())
+        bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
         Mantle.release_batch_queue!(bq)
         held = length(ctx.extra_queues)
         freed = copy(ctx.free_queue_indices)
@@ -67,8 +67,8 @@ using Test, Lava, Mantle
         # queue, drop every reference to that queue, then force collection. The
         # buffer's finalizer queries a timeline semaphore that only the
         # context's reference is keeping alive.
-        let bq = Mantle.allocate_batch_queue!(MVE.vk_context())
-            a = MVE.LavaArray{Float32, 1}(undef, (4096,))
+        let bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
+            a = Mantle.LavaArray{Float32, 1}(undef, (4096,))
             Mantle.upload!(a, ones(Float32, 4096))
             Mantle.flush!(bq)
         end

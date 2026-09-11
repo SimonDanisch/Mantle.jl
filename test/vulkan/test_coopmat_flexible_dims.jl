@@ -24,19 +24,19 @@ const AMg = Lava.AcceleratedMatrix
 end
 
 @testset "coopmat2 flexible dimensions" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if !ctx.coopmat_available || !ctx.coopmat2.flexible_dimensions
         @info "flexible dimensions unavailable — skipping"
     else
         # The premise. If some device DOES report a 64-row shape, this test is
         # exercising the ordinary KHR path and proves nothing about flexibility.
         @test !any(s -> s.M == 64 && s.N == 16 && s.K == 16, ctx.coopmat_shapes)
-        @test !MVE.coopmat_shape(ctx, Float16, 64, 16, 16)
+        @test !Mantle.coopmat_shape(ctx, Float16, 64, 16, 16)
 
         back = LavaBackend()
         # A cooperative matrix is subgroup-scoped, so the launch is exactly one
         # subgroup wide — asked rather than assumed (32 on Ada, 64 on RDNA 3.5).
-        WG = Int(MVE.device_subgroup_size(ctx))
+        WG = Int(Mantle.device_subgroup_size(ctx))
         a = Float16.(randn(Float32, 64, 16) .* 0.1f0)
         b = Float16.(randn(Float32, 16, 16) .* 0.1f0)
         Ad = KA.allocate(back, Float16, 64, 16); copyto!(Ad, a)

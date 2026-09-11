@@ -34,7 +34,7 @@ const KA = KernelAbstractions
 end
 
 @testset "frozen kernels are visible to the profiler" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     saved_version = Lava.FROZEN_VERSION[]
     saved_recording = Lava.FROZEN_RECORDING[]
     try
@@ -44,8 +44,8 @@ end
         empty!(ctx.caches.frozen_mem)
 
         back = LavaBackend()
-        x = MVE.LavaArray(collect(Float32, 1:256))
-        out = MVE.LavaArray(zeros(Float32, 256))
+        x = Mantle.LavaArray(collect(Float32, 1:256))
+        out = Mantle.LavaArray(zeros(Float32, 256))
         fcpd_scale!(back, 64)(out, x, 2.0f0; ndrange = 256)
         KA.synchronize(back)
         @test Array(out) == Float32.(2 .* (1:256))
@@ -58,9 +58,9 @@ end
         KA.synchronize(back)
         @test Array(out) == Float32.(3 .* (1:256))
 
-        ks = MVE.list_compiled_kernels(ctx)
+        ks = Mantle.list_compiled_kernels(ctx)
         @test !isempty(ks)
-        @test all(k -> k isa MVE.KernelStats, ks)
+        @test all(k -> k isa Mantle.KernelStats, ks)
         @test all(k -> k.spirv.bytes > 0 && k.spirv.n_instructions > 0, ks)
 
         # `.name` cannot tell two kernels apart; `.source` must.
@@ -70,12 +70,12 @@ end
         # And every kernel in the frozen memo is reported, which is the half that
         # was missing: with `caches.linked` empty this returned nothing at all.
         for (_, linked) in ctx.caches.frozen_mem
-            linked isa MVE.LavaLinkedKernel || continue
+            linked isa Mantle.LavaLinkedKernel || continue
             @test any(k -> k.spirv.bytes == length(linked.compiled.spirv_bytes), ks)
         end
     finally
         Lava.FROZEN_RECORDING[] = saved_recording
-        MVE.frozen_clear!()
+        Mantle.frozen_clear!()
         Lava.FROZEN_VERSION[] = saved_version
         empty!(ctx.caches.frozen_mem)
     end

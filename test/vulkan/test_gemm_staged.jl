@@ -66,15 +66,15 @@ than merely *that* it is — and an integer count survives fp16 exactly, where a
 relative error on random data can hide four missing terms in the tolerance.
 """
 function stagedcount(backend, cfg, K; blocks = 2)
-    M = MVE.gemm_bm(cfg) * blocks
-    N = MVE.gemm_bn(cfg) * blocks
+    M = Mantle.gemm_bm(cfg) * blocks
+    N = Mantle.gemm_bn(cfg) * blocks
     A = KA.allocate(backend, Float16, M, K); fill!(A, one(Float16))
     B = KA.allocate(backend, Float16, K, N); fill!(B, one(Float16))
     C = KA.allocate(backend, Float16, M, N); fill!(C, Float16(-1))
-    wg = MVE.gemm_wg(cfg)
-    MVE.GEMM_STAGED_KERNELS[cfg](backend, wg)(
+    wg = Mantle.gemm_wg(cfg)
+    Mantle.GEMM_STAGED_KERNELS[cfg](backend, wg)(
         C, A, B, nothing, identity, Val(M), Val(N), Val(K);
-        ndrange = (M ÷ MVE.gemm_bm(cfg)) * (N ÷ MVE.gemm_bn(cfg)) * wg)
+        ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg)
     KA.synchronize(backend)
     g = Float32.(Array(C))
     (correct = all(==(Float32(K)), g), K = K, seen = sort(unique(g)))
@@ -103,12 +103,12 @@ end
         # whichever is currently the default. Passed per call now; it used to be
         # a global set inside a `try`.
         for v2 in (false, true)
-            for cfg in MVE.GEMM_TILINGS,
+            for cfg in Mantle.GEMM_TILINGS,
                 K in (32, 64, 96, 128, 288, 576, 2304)
-                K % MVE.gemm_bk(cfg) == 0 || continue
-                v2 && !haskey(MVE.GEMM_STAGED_V2_KERNELS, cfg) && continue
-                @test gemmerr(backend, ws, MVE.gemm_bm(cfg) * 2,
-                              MVE.gemm_bn(cfg) * 2, K;
+                K % Mantle.gemm_bk(cfg) == 0 || continue
+                v2 && !haskey(Mantle.GEMM_STAGED_V2_KERNELS, cfg) && continue
+                @test gemmerr(backend, ws, Mantle.gemm_bm(cfg) * 2,
+                              Mantle.gemm_bn(cfg) * 2, K;
                               staged = true, withbias = false, vec2 = v2) < 2.0f-2
             end
         end
@@ -119,9 +119,9 @@ end
         # depends on the trip count as well as the geometry — the same kernel is
         # exact at K = 32 and loses terms at K = 64 — so checking one size proves
         # nothing about the others. 32 to 2304 is one iteration to seventy-two.
-        for cfg in MVE.GEMM_TILINGS,
+        for cfg in Mantle.GEMM_TILINGS,
             K in (32, 64, 96, 128, 160, 288, 320, 576, 1152, 2304)
-            K % MVE.gemm_bk(cfg) == 0 || continue
+            K % Mantle.gemm_bk(cfg) == 0 || continue
             r = stagedcount(backend, cfg, K)
             r.correct || @info "tiling $cfg lost k-terms" K = r.K seen = r.seen
             @test r.correct
@@ -133,24 +133,24 @@ end
         # and not passing one IS the unforced case.
         for (M, N, K) in vcat(shapes, [(288, 16384, 1152), (1152, 16384, 288),
                                        (2304, 4096, 576), (48, 64, 64)])
-            c = MVE.gemm_tiling(M, N, K)
+            c = Mantle.gemm_tiling(M, N, K)
             c === nothing && continue
-            @test M % MVE.gemm_bm(c) == 0
-            @test N % MVE.gemm_bn(c) == 0
-            @test K % MVE.gemm_bk(c) == 0
-            @test c in MVE.GEMM_TILINGS
+            @test M % Mantle.gemm_bm(c) == 0
+            @test N % Mantle.gemm_bn(c) == 0
+            @test K % Mantle.gemm_bk(c) == 0
+            @test c in Mantle.GEMM_TILINGS
         end
     end
 
     @testset "the guard names the calls the staged kernel may take" begin
         for (M, N, K) in shapes
-            splitk = MVE.coopmat_gemm_shape(M, N, K)[2]
-            MVE.staged_gemm_tiling(M, N, K, 1, splitk; staged = true) === nothing ||
+            splitk = Mantle.coopmat_gemm_shape(M, N, K)[2]
+            Mantle.staged_gemm_tiling(M, N, K, 1, splitk; staged = true) === nothing ||
                 @test splitk == 1
         end
-        @test MVE.staged_gemm_tiling(64, 64, 64, 1, 4; staged = true) === nothing  # split: refused
-        @test MVE.staged_gemm_tiling(64, 64, 64, 2, 1; staged = true) === nothing  # batched: refused
-        @test MVE.staged_gemm_tiling(48, 40, 64, 1, 1; staged = true) === nothing  # no block divides
+        @test Mantle.staged_gemm_tiling(64, 64, 64, 1, 4; staged = true) === nothing  # split: refused
+        @test Mantle.staged_gemm_tiling(64, 64, 64, 2, 1; staged = true) === nothing  # batched: refused
+        @test Mantle.staged_gemm_tiling(48, 40, 64, 1, 1; staged = true) === nothing  # no block divides
     end
 
     # `gemm_padn` decides what a caller that pads `N` should pad it *to*. Rounding
@@ -161,18 +161,18 @@ end
         # Whisper's encoder, the case that found this. 1500 tokens: cld(1500,16)*16
         # is 1504, which no tiling's block divides; 1536 is 12 x 128.
         for (M, K) in ((1280, 1280), (5120, 1280), (1280, 5120))
-            @test MVE.gemm_padn(M, 1500, K) == 1536
-            c = MVE.gemm_tiling(M, MVE.gemm_padn(M, 1500, K), K)
+            @test Mantle.gemm_padn(M, 1500, K) == 1536
+            c = Mantle.gemm_tiling(M, Mantle.gemm_padn(M, 1500, K), K)
             @test c !== nothing
-            @test haskey(MVE.GEMM_STAGED_KERNELS, c)
+            @test haskey(Mantle.GEMM_STAGED_KERNELS, c)
             # The old rounding is what it must beat, and it is only 32 columns away.
-            @test MVE.gemm_tiling(M, cld(1500, 16) * 16, K) === nothing
+            @test Mantle.gemm_tiling(M, cld(1500, 16) * 16, K) === nothing
         end
 
         # Already on a block: no padding at all, so a shape that was fast stays
         # fast and pays nothing.
-        @test MVE.gemm_padn(1280, 1536, 1280) == 1536
-        @test MVE.gemm_padn(1280, 4096, 1280) == 4096
+        @test Mantle.gemm_padn(1280, 1536, 1280) == 1536
+        @test Mantle.gemm_padn(1280, 4096, 1280) == 4096
 
         # The padded width is always a multiple of the block the chooser then
         # picks — the two ask the same predicates in the same order, and a
@@ -180,31 +180,31 @@ end
         for M in (64, 96, 128, 192, 256, 576, 1280, 2304, 5120),
             K in (32, 64, 288, 576, 1152, 1280, 2304, 5120),
             N in (1, 7, 40, 100, 1500, 4095)
-            NP = MVE.gemm_padn(M, N, K)
+            NP = Mantle.gemm_padn(M, N, K)
             @test NP >= N
-            c = MVE.gemm_tiling(M, NP, K)
-            c === nothing || @test NP % MVE.gemm_bn(c) == 0
+            c = Mantle.gemm_tiling(M, NP, K)
+            c === nothing || @test NP % Mantle.gemm_bn(c) == 0
         end
 
         # No tiling can take these `M`/`K` at all, so there is nothing to pad for
         # and the tile rounding is what is left.
-        @test MVE.gemm_padn(48, 40, 64) == 48        # M = 48 divides no block
-        @test MVE.gemm_padn(64, 40, 48) == 48        # K = 48 is not a multiple of 32
+        @test Mantle.gemm_padn(48, 40, 64) == 48        # M = 48 divides no block
+        @test Mantle.gemm_padn(64, 40, 48) == 48        # K = 48 is not a multiple of 32
 
         # `slack` is the point of the rule, not a detail of it: a small `N` pads
         # to more work than the faster kernel can pay back, so it must NOT be
         # padded. N = 48 would go to 64 (1.33x) and N = 8 to 64 (8x).
-        @test MVE.gemm_padn(1280, 48, 1280) == 48
-        @test MVE.gemm_padn(1280, 8, 1280) == 16
+        @test Mantle.gemm_padn(1280, 48, 1280) == 48
+        @test Mantle.gemm_padn(1280, 8, 1280) == 16
         # ...and the same shape with the bar removed does pad, so the assertions
         # above are testing the bar rather than an unreachable branch.
-        @test MVE.gemm_padn(1280, 48, 1280; slack = 10) == 64
+        @test Mantle.gemm_padn(1280, 48, 1280; slack = 10) == 64
         # Either side of the bar, measured against the tile rounding the padding
         # replaces rather than against `N` itself:
-        @test MVE.gemm_padn(1280, 208, 1280) == 256   # 256/208 = 1.23, just inside
-        @test MVE.gemm_padn(1280, 72, 1280) == 80     # 128/80  = 1.60, refused
+        @test Mantle.gemm_padn(1280, 208, 1280) == 256   # 256/208 = 1.23, just inside
+        @test Mantle.gemm_padn(1280, 72, 1280) == 80     # 128/80  = 1.60, refused
         # Already on a 64-wide block: nothing to pay, nothing to refuse.
-        @test MVE.gemm_padn(1280, 192, 1280) == 192
+        @test Mantle.gemm_padn(1280, 192, 1280) == 192
     end
 end
 
@@ -220,36 +220,36 @@ end
     # that have nothing to do with the rule.
     let
         c96 = (3, 2, 2, 4, 32, 8)
-        @test MVE.gemm_bm(c96) == 96 && !ispow2(MVE.gemm_bm(c96))
-        @test MVE.gemm_aliasing(c96, 2304)          # 256 * 9
-        @test MVE.gemm_aliasing(c96, 1024)
-        @test !MVE.gemm_aliasing(c96, 2208)         # one step below, and fine
-        @test !MVE.gemm_aliasing(c96, 2400)         # one step above, and fine
+        @test Mantle.gemm_bm(c96) == 96 && !ispow2(Mantle.gemm_bm(c96))
+        @test Mantle.gemm_aliasing(c96, 2304)          # 256 * 9
+        @test Mantle.gemm_aliasing(c96, 1024)
+        @test !Mantle.gemm_aliasing(c96, 2208)         # one step below, and fine
+        @test !Mantle.gemm_aliasing(c96, 2400)         # one step above, and fine
         # A power-of-two block is never refused, whatever K does.
-        for c in MVE.GEMM_TILINGS, K in (256, 1024, 2304, 4096)
-            ispow2(MVE.gemm_bm(c)) && @test !MVE.gemm_aliasing(c, K)
+        for c in Mantle.GEMM_TILINGS, K in (256, 1024, 2304, 4096)
+            ispow2(Mantle.gemm_bm(c)) && @test !Mantle.gemm_aliasing(c, K)
         end
 
         # The rule as the picker applies it: no shape whose K is a multiple of
         # 256 may come back with a non-power-of-two block.
         for K in (256, 512, 1024, 1536, 2048, 2304, 2560, 3072), M in (576, 1152, 2304)
-            c = MVE.gemm_tiling(M, 4096, K)
+            c = Mantle.gemm_tiling(M, 4096, K)
             c === nothing && continue
-            @test ispow2(MVE.gemm_bm(c))
+            @test ispow2(Mantle.gemm_bm(c))
         end
         # ...and where it is allowed, the 96-row block is what gets picked, since
         # it now leads the table.
         for K in (576, 1152, 1728, 2880), M in (576, 1152, 2304)
-            @test MVE.gemm_tiling(M, 4096, K) == c96
+            @test Mantle.gemm_tiling(M, 4096, K) == c96
         end
 
         # SAM 2's own six, as the encoder runs them.
-        @test MVE.gemm_tiling(2304, 4096,  576) == c96
-        @test MVE.gemm_tiling( 576, 4096, 2304) == (2, 2, 2, 4, 32, 8)   # the bad K
-        @test MVE.gemm_tiling(1728, 4096,  576) == c96
-        @test MVE.gemm_tiling( 576, 4096,  576) == c96
-        @test MVE.gemm_tiling( 288, 16384, 1152) == c96
-        @test MVE.gemm_tiling(1152, 16384,  288) == c96
+        @test Mantle.gemm_tiling(2304, 4096,  576) == c96
+        @test Mantle.gemm_tiling( 576, 4096, 2304) == (2, 2, 2, 4, 32, 8)   # the bad K
+        @test Mantle.gemm_tiling(1728, 4096,  576) == c96
+        @test Mantle.gemm_tiling( 576, 4096,  576) == c96
+        @test Mantle.gemm_tiling( 288, 16384, 1152) == c96
+        @test Mantle.gemm_tiling(1152, 16384,  288) == c96
     end
 end
 
@@ -270,12 +270,12 @@ end
         M, N, K = 256, 256, 128
         hA = rand(Float16, M, K) .- Float16(0.5)
         hB = rand(Float16, K, N) .- Float16(0.5)
-        A, B = MVE.LavaArray(hA), MVE.LavaArray(hB)
-        bias = MVE.LavaArray(rand(Float16, M) .- Float16(0.5))
+        A, B = Mantle.LavaArray(hA), Mantle.LavaArray(hB)
+        bias = Mantle.LavaArray(rand(Float16, M) .- Float16(0.5))
         for withbias in (false, true), epi in (identity, x -> x * 2.0f0)
             outs = map((true, false)) do vec2
                 C = KA.allocate(LavaBackend(), Float32, M, N); fill!(C, 0f0)
-                MVE.coopmat_gemm!(C, A, B, M, N, K; blk_split = (1, 1), staged = true,
+                Mantle.coopmat_gemm!(C, A, B, M, N, K; blk_split = (1, 1), staged = true,
                                    vec2, bias = withbias ? bias : nothing, epilogue = epi)
                 KA.synchronize(LavaBackend())
                 Array(C)
@@ -302,14 +302,14 @@ end
         @testset "M$M N$N K$K" for (M, N, K) in
                 [(4096, 2304, 576), (4096, 576, 2304), (1024, 1152, 288),
                  (256, 256, 256), (512, 128, 64), (2048, 576, 576)]
-            A = MVE.LavaArray(Float16.(reshape(0.2 .* sin.(range(0, 9, M * K)), M, K)))
-            B = MVE.LavaArray(Float16.(reshape(0.2 .* cos.(range(0, 7, K * N)), K, N)))
+            A = Mantle.LavaArray(Float16.(reshape(0.2 .* sin.(range(0, 9, M * K)), M, K)))
+            B = Mantle.LavaArray(Float16.(reshape(0.2 .* cos.(range(0, 7, K * N)), K, N)))
             C = KA.allocate(back, Float16, M, N)
 
-            fill!(C, Float16(0)); MVE.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = false)
+            fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = false)
             KA.synchronize(back); wide = copy(Array(C))
 
-            fill!(C, Float16(0)); MVE.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = true)
+            fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = true)
             KA.synchronize(back); narrow = copy(Array(C))
 
             @test narrow == wide
@@ -319,15 +319,15 @@ end
 
         # The guard that decides which one may run. `M*K`, `K*N` and `M*N` all
         # have to fit an Int32; the wide kernel is the fallback above that.
-        @test MVE.gemm_fits32(4096, 2304, 576)
-        @test MVE.gemm_fits32(16384, 1152, 288)             # the largest here, 18.9M
-        @test !MVE.gemm_fits32(65536, 65536, 65536)
-        @test !MVE.gemm_fits32(1 << 16, 2, 1 << 16)         # M*K alone overflows
-        @test !MVE.gemm_fits32(2, 1 << 16, 1 << 16)         # K*N alone overflows
-        @test !MVE.gemm_fits32(1 << 16, 1 << 16, 2)         # M*N alone overflows
+        @test Mantle.gemm_fits32(4096, 2304, 576)
+        @test Mantle.gemm_fits32(16384, 1152, 288)             # the largest here, 18.9M
+        @test !Mantle.gemm_fits32(65536, 65536, 65536)
+        @test !Mantle.gemm_fits32(1 << 16, 2, 1 << 16)         # M*K alone overflows
+        @test !Mantle.gemm_fits32(2, 1 << 16, 1 << 16)         # K*N alone overflows
+        @test !Mantle.gemm_fits32(1 << 16, 1 << 16, 2)         # M*N alone overflows
         # The boundary is exclusive because the indices are 1-based.
-        @test !MVE.gemm_fits32(typemax(Int32), 1, 1)
-        @test MVE.gemm_fits32(typemax(Int32) - 1, 1, 1)
+        @test !Mantle.gemm_fits32(typemax(Int32), 1, 1)
+        @test Mantle.gemm_fits32(typemax(Int32) - 1, 1, 1)
     end
 end
 
@@ -343,9 +343,9 @@ end
     back = LavaBackend()
     for (M, N, K) in ((192, 256, 32), (192, 256, 64), (192, 256, 96),
                       (576, 512, 576), (96, 128, 32))
-        for c in MVE.GEMM_TILINGS
-            (MVE.gemm_divides(c, M, N, K) && !MVE.gemm_aliasing(c, K)) || continue
-            haskey(MVE.GEMM_STAGED_DB_KERNELS, c) || continue
+        for c in Mantle.GEMM_TILINGS
+            (Mantle.gemm_divides(c, M, N, K) && !Mantle.gemm_aliasing(c, K)) || continue
+            haskey(Mantle.GEMM_STAGED_DB_KERNELS, c) || continue
             a = Float16.(0.05f0 .* randn(Float32, M, K))
             b = Float16.(0.05f0 .* randn(Float32, K, N))
             A = KA.allocate(back, Float16, M, K); copyto!(A, a)
@@ -353,11 +353,11 @@ end
             C = KA.allocate(back, Float16, M, N)
 
             fill!(C, Float16(NaN))
-            MVE.coopmat_gemm!(C, A, B, M, N, K; tiling = c, doublebuf = false)
+            Mantle.coopmat_gemm!(C, A, B, M, N, K; tiling = c, doublebuf = false)
             KA.synchronize(back); one_ = copy(Array(C))
 
             fill!(C, Float16(NaN))
-            MVE.coopmat_gemm!(C, A, B, M, N, K; tiling = c, doublebuf = true)
+            Mantle.coopmat_gemm!(C, A, B, M, N, K; tiling = c, doublebuf = true)
             KA.synchronize(back); two = copy(Array(C))
 
             @test two == one_

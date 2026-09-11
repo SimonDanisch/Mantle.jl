@@ -27,7 +27,7 @@ const KA = KernelAbstractions
 @testset "multi-index a[i,j,k,…] — NVIDIA stride-product miscompile" begin
     @testset "strided slices materialise correctly" begin
         h4 = reshape(Float32.(1:12), 3, 2, 2, 1)
-        g4 = MVE.LavaArray(h4)
+        g4 = Mantle.LavaArray(h4)
         @test Array(g4[:, :, 2:2, :]) == h4[:, :, 2:2, :]
         @test Array(g4[:, :, 2, :]) == h4[:, :, 2, :]
         @test Array(g4[:, :, 2, 1]) == h4[:, :, 2, 1]
@@ -35,13 +35,13 @@ const KA = KernelAbstractions
         @test Array(copy(view(g4, :, :, 2:2, :))) == h4[:, :, 2:2, :]
 
         h3 = reshape(Float32.(1:24), 2, 3, 4)
-        g3 = MVE.LavaArray(h3)
+        g3 = Mantle.LavaArray(h3)
         @test Array(g3[:, :, 2]) == h3[:, :, 2]
         @test Array(g3[:, 2:2, :]) == h3[:, 2:2, :]
         @test Array(g3[:, :, 2:3]) == h3[:, :, 2:3]
 
         h5 = reshape(Float32.(1:24), 2, 2, 3, 2, 1)
-        g5 = MVE.LavaArray(h5)
+        g5 = Mantle.LavaArray(h5)
         @test Array(g5[:, :, :, 1, :]) == h5[:, :, :, 1, :]
         @test Array(g5[:, :, 2, :, :]) == h5[:, :, 2, :, :]
     end
@@ -55,11 +55,11 @@ const KA = KernelAbstractions
             @inbounds out[i] = src[is[1], is[2], 2, 1]
         end
         h = reshape(Float32.(1:12), 3, 2, 2, 1)
-        g = MVE.LavaArray(h)
-        out = KA.allocate(MVE.LavaBackend(), Float32, 3, 2, 1, 1)
+        g = Mantle.LavaArray(h)
+        out = KA.allocate(Mantle.LavaBackend(), Float32, 3, 2, 1, 1)
         fill!(out, -1.0f0)
-        readcomputed!(MVE.LavaBackend())(out, g, (3, 2, 1, 1); ndrange=size(out))
-        KA.synchronize(MVE.LavaBackend())
+        readcomputed!(Mantle.LavaBackend())(out, g, (3, 2, 1, 1); ndrange=size(out))
+        KA.synchronize(Mantle.LavaBackend())
         @test vec(Array(out)) == vec(h[:, :, 2:2, :])
     end
 
@@ -70,10 +70,10 @@ const KA = KernelAbstractions
             @inbounds dst[is[1], is[2], is[3], is[4]] = Float32(i)
         end
         dims = (3, 2, 2, 1)
-        dst = KA.allocate(MVE.LavaBackend(), Float32, dims...)
+        dst = KA.allocate(Mantle.LavaBackend(), Float32, dims...)
         fill!(dst, -1.0f0)
-        writecomputed!(MVE.LavaBackend())(dst, dims; ndrange=dims)
-        KA.synchronize(MVE.LavaBackend())
+        writecomputed!(Mantle.LavaBackend())(dst, dims; ndrange=dims)
+        KA.synchronize(Mantle.LavaBackend())
         @test vec(Array(dst)) == Float32.(1:prod(dims))
     end
 end
@@ -91,13 +91,13 @@ end
 #
 # Nothing about it was type-specific; every eltype failed identically.
 @testset "trailing singleton indices (more indices than dims)" begin
-    be = MVE.LavaBackend()
+    be = Mantle.LavaBackend()
 
     @testset "kron(vec, matrix) — $T" for T in (Int16, Float32, ComplexF32)
         ha = rand(T, 16, 32)
         hb = rand(T, 64, 8)
-        a = MVE.LavaArray(ha)
-        b = MVE.LavaArray(hb)
+        a = Mantle.LavaArray(ha)
+        b = Mantle.LavaArray(hb)
         for op in (identity, transpose, adjoint)
             got = Array(kron(vec(a), op(b)))
             ref = kron(vec(ha), op(hb))
@@ -110,8 +110,8 @@ end
 
     @testset "reading a 1-D device array with two indices" begin
         n = 8
-        src = MVE.LavaArray(Float32.(1:n))
-        dst = MVE.LavaArray(zeros(Float32, n))
+        src = Mantle.LavaArray(Float32.(1:n))
+        dst = Mantle.LavaArray(zeros(Float32, n))
         @kernel function trailing_one!(dst, @Const(src))
             i = @index(Global, Linear)
             @inbounds dst[i] = src[i, 1]      # trailing singleton

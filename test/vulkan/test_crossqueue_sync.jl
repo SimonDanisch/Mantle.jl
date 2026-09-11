@@ -33,17 +33,17 @@ end
 @testset "cross-queue sync" begin
     @testset "the stage flag is sync2-typed" begin
         # The bug in one line: right value, wrong wrapper type.
-        # `MVE.VK`. This file said `import Lava: Vulkan`, which resolved
+        # `Mantle.VK`. This file said `import Lava: Vulkan`, which resolved
         # while Lava depended on Vulkan.jl and afterwards bound the name to
         # nothing — Julia reports it as "defined but not assigned a value", so
         # the two assertions below errored rather than failing.
-        @test MVE.STAGE2_ALL_COMMANDS isa MVE.VK.PipelineStageFlag2
-        @test UInt64(MVE.STAGE2_ALL_COMMANDS.val) ==
-              UInt64(MVE.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT.val)
+        @test Mantle.STAGE2_ALL_COMMANDS isa Mantle.VK.PipelineStageFlag2
+        @test UInt64(Mantle.STAGE2_ALL_COMMANDS.val) ==
+              UInt64(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT.val)
     end
 
     @testset "a buffer crossing queues submits" begin
-        ctx = MVE.vk_context()
+        ctx = Mantle.vk_context()
         b1 = LavaBackend()                             # ctx.default_bq
         bq2 = Mantle.allocate_batch_queue!(ctx)
         b2 = LavaBackend(bq2)
@@ -67,7 +67,7 @@ end
     end
 
     @testset "a build that throws leaves nothing in limbo" begin
-        bq = MVE.vk_context().default_bq
+        bq = Mantle.vk_context().default_bq
         b = LavaBackend()
         a = KA.allocate(b, Float32, 64)
         xqfill!(b, 64)(a, 1.0f0; ndrange = 64)

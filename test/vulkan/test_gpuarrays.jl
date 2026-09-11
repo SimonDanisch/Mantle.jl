@@ -3,8 +3,8 @@
 
 using Lava, Mantle
 # `LavaArray` by name: it was Lava's export and is Mantle's type now, and Mantle
-# exports only `LavaBackend` — everything downstream says `MVE.LavaArray`.
-using .MVE: LavaArray, LavaBackend
+# exports only `LavaBackend` — everything downstream says `Mantle.LavaArray`.
+using Mantle: LavaArray, LavaBackend
 import GPUArrays
 using Test
 
@@ -75,7 +75,7 @@ const LAVAPIPE_CRASH_SKIP = Set([
 
 function effective_skip()
     skip = copy(SKIP)
-    if occursin("llvmpipe", lowercase(MVE.vk_context().device_name))
+    if occursin("llvmpipe", lowercase(Mantle.vk_context().device_name))
         union!(skip, LAVAPIPE_CRASH_SKIP)
     end
     return skip

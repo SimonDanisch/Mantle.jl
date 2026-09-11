@@ -39,12 +39,12 @@ const SENT_S = -777.0f0
 end
 
 @testset "OpCooperativeMatrixStoreTensorNV clamps writes" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if !ctx.coopmat2.tensor_addressing
         @info "device has no coopmat2 tensor addressing — skipping"
     else
         back = LavaBackend()
-        WG = Int(MVE.device_subgroup_size(ctx))
+        WG = Int(Mantle.device_subgroup_size(ctx))
         src = KA.allocate(back, Float32, TS, TS)
         copyto!(src, Float32.(reshape(1:(TS * TS), TS, TS)))
 

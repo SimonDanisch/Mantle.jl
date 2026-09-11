@@ -15,10 +15,10 @@ using KernelAbstractions
 const KA = KernelAbstractions
 
 backend = LavaBackend()
-ctx     = MVE.vk_context()
+ctx     = Mantle.vk_context()
 bq      = ctx.default_bq
 
-hwtlas = MVE.VulkanTLAS(backend)
+hwtlas = Mantle.VulkanTLAS(backend)
 mesh = GeometryBasics.normal_mesh(GeometryBasics.Tessellation(
     GeometryBasics.Sphere(GeometryBasics.Point3f(0), 1f0), 8))
 push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))
@@ -40,9 +40,9 @@ struct SoAQueue{T,V,S}
 end
 function SoAQueue{T}(n::Int) where T
     fnames = fieldnames(T); ftypes = fieldtypes(T)
-    cols = NamedTuple{fnames}(ntuple(i -> MVE.LavaArray(zeros(ftypes[i], n)), length(fnames)))
+    cols = NamedTuple{fnames}(ntuple(i -> Mantle.LavaArray(zeros(ftypes[i], n)), length(fnames)))
     items = StructArray{T}(cols)
-    size  = MVE.LavaArray(Int32[0])
+    size  = Mantle.LavaArray(Int32[0])
     SoAQueue{T,typeof(items),typeof(size)}(items, size, Int32(n))
 end
 
@@ -120,15 +120,15 @@ function alloc_state(n_pixels::Int)
         shadow   = SoAQueue{ShadowWI}(n_pixels),
         escaped  = SoAQueue{EscapedWI}(n_pixels),
         samples  = SoAQueue{RaySamples}(n_pixels).items,
-        pixel_L     = MVE.LavaArray(zeros(Float32, n_pixels)),
-        pixel_rgb   = MVE.LavaArray(zeros(Float32, n_pixels)),
-        weight_sum  = MVE.LavaArray(zeros(Float32, n_pixels)),
-        rays      = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
-        hits      = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
-        n_buf     = MVE.LavaArray(Int32[n_pixels]),
-        shadow_rays = MVE.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
-        shadow_hits = MVE.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
-        shadow_n    = MVE.LavaArray(Int32[n_pixels]),
+        pixel_L     = Mantle.LavaArray(zeros(Float32, n_pixels)),
+        pixel_rgb   = Mantle.LavaArray(zeros(Float32, n_pixels)),
+        weight_sum  = Mantle.LavaArray(zeros(Float32, n_pixels)),
+        rays      = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
+        hits      = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
+        n_buf     = Mantle.LavaArray(Int32[n_pixels]),
+        shadow_rays = Mantle.LavaArray([Raycore.RTRay(0,0,5, 0, 0,0,-1, 1f3) for _ in 1:n_pixels]),
+        shadow_hits = Mantle.LavaArray(fill(Raycore.RTHitResult(0,0,0,0,0,0,0,0), n_pixels)),
+        shadow_n    = Mantle.LavaArray(Int32[n_pixels]),
     )
 end
 
@@ -173,8 +173,8 @@ end
 function snapshot(bq, ctx, iter)
     return (
         iter = iter,
-        device_lost   = MVE.device_lost(ctx),
-        next_tl       = Int(MVE.driver(bq).next_timeline),
+        device_lost   = Mantle.device_lost(ctx),
+        next_tl       = Int(Mantle.driver(bq).next_timeline),
         outstanding   = length(bq.outstanding),
         free = length(bq.free),
         deferred      = length(bq.pending),
@@ -182,8 +182,8 @@ function snapshot(bq, ctx, iter)
         # What a recording reads: blocks of the unified arena, and how many
         # regions of them are still handed out. Growth in either is the leak
         # this MWE is looking for; the two slab rings it used to read are gone.
-        blocks        = length(MVE.unifiedblocks(ctx)),
-        live_regions  = sum(b -> length(b.live), MVE.unifiedblocks(ctx); init = 0),
+        blocks        = length(Mantle.unifiedblocks(ctx)),
+        live_regions  = sum(b -> length(b.live), Mantle.unifiedblocks(ctx); init = 0),
     )
 end
 
@@ -204,7 +204,7 @@ for iter in 1:N_ITERS
         push!(snapshots, snapshot(bq, ctx, iter))
     end
 
-    if MVE.device_lost(ctx)
+    if Mantle.device_lost(ctx)
         global crashed_at = iter
         push!(snapshots, snapshot(bq, ctx, iter))
         break

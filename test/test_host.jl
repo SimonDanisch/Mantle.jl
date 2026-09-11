@@ -226,7 +226,7 @@ include(joinpath(@__DIR__, "backend_probe.jl"))
     # other — is worth checking on a machine with no Vulkan loader too, so the
     # Host half stays unconditional and the file keeps running there.
     if backend_loadable("Vulkan") !== nothing
-        @test M.Device(M.VulkanAPI()) isa MVE.LavaDevice
+        @test M.Device(M.VulkanAPI()) isa Mantle.LavaDevice
     else
         @info "no Vulkan loader; the Vulkan half of the coexistence test is skipped"
     end

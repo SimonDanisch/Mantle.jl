@@ -12,8 +12,6 @@
 import Mantle
 using Lava, GeometryBasics, LinearAlgebra, KernelAbstractions
 const M = Mantle
-# The backend, for the framebuffer readback this bench measures with.
-const MVE = Base.get_extension(Mantle, :MantleVulkanExt)
 
 const W, H = 1000, 750
 const NPX = W * H
@@ -96,10 +94,10 @@ function measure_chain(frames = 300; n = 200_000)
         s.mvp[] = camera(0.4f0 * Float32(time() - t0))
         acquire_next_image!(win)
         M.run!(s.plan)                               # render + compute chain
-        MVE.copy_framebuffer!(M.storage(s.raw), s.fb) # ColorAttachment -> CopySrc
+        Mantle.copy_framebuffer!(M.storage(s.raw), s.fb) # ColorAttachment -> CopySrc
         blit!(bq, WindowTarget(win), M.storage(s.out))
-        present_frame!(bq, win, MVE.oneshot(bq) do e
-            MVE.presentready!(e, win)
+        present_frame!(bq, win, Mantle.oneshot(bq) do e
+            Mantle.presentready!(e, win)
         end)
         Mantle.flush!(bq, dev.ctx.device)
         push!(times, time() - tf)

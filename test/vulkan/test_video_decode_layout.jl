@@ -15,10 +15,10 @@
 #    VIDEO_DECODE_DST|VIDEO_DECODE_DPB and every frame would decode to zero.
 
 using Test, Lava, Mantle
-const VD = MVE.VideoDecode
+const VD = Mantle.VideoDecode
 
 @testset "H.264 decoder layout + bitstream alignment" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
 
     if !ctx.video_decode_available || !VD.decode_supported(ctx)
         @info "skipping decoder layout test: no usable video-decode support on $(ctx.device_name)"
@@ -73,15 +73,15 @@ const VD = MVE.VideoDecode
         w, h = 128, 96
         nframes = length(yref) ÷ (w * h)
 
-        _, _, batched = MVE.decode_h264_gpu(annexb)          # one big chunk
+        _, _, batched = Mantle.decode_h264_gpu(annexb)          # one big chunk
         @test length(batched) == nframes
 
-        incremental = MVE.VideoDecode.H264Decoder(MVE.vk_context(), annexb)
+        incremental = Mantle.VideoDecode.H264Decoder(Mantle.vk_context(), annexb)
         got = Any[]
         try
-            MVE.VideoDecode.feed!(incremental, annexb)
-            while MVE.VideoDecode.remaining(incremental) > 0
-                append!(got, MVE.VideoDecode.decodemore!(incremental, 1))   # ONE AU per submit
+            Mantle.VideoDecode.feed!(incremental, annexb)
+            while Mantle.VideoDecode.remaining(incremental) > 0
+                append!(got, Mantle.VideoDecode.decodemore!(incremental, 1))   # ONE AU per submit
             end
         finally
             close(incremental)

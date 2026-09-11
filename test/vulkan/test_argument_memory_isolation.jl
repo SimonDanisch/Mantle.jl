@@ -53,7 +53,7 @@ end
 end
 
 @testset "a mid-recording sweep must not reclaim a recorded dispatch's arguments" begin
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     bq = backend.dispatch_bq
     n = 4096
 
@@ -68,7 +68,7 @@ end
     # 1. Launch A (slow — keeps the GPU busy). It submits itself immediately;
     #    its one-shot owns its own argument region until ITS submission passes.
     heavy!(a, Int32(1); ndrange=n)
-    target = MVE.driver(bq).next_timeline
+    target = Mantle.driver(bq).next_timeline
 
     # 2. Launch B — a separate submission with its own region, taken out
     #    while A is still in flight.
@@ -77,7 +77,7 @@ end
     # 3. Wait for A's submission to complete WITHOUT sweeping, so it sits
     #    completed-but-unreclaimed in in_flight.
     deadline = time() + 10.0
-    while MVE.query_timeline(bq) < target
+    while Mantle.query_timeline(bq) < target
         time() > deadline && error("timeout waiting for submitted batch")
         sleep(0.001)
     end
@@ -117,27 +117,27 @@ end
 # question: what matters is who owns the bytes, and the answer is now a `Region`
 # the one-shot holds until it is reclaimed.
 @testset "two handouts are two disjoint blocks, whatever the sweep does" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     bq = ctx.default_bq
-    MVE.vk_flush!(ctx)                      # nothing in flight, nothing recorded
+    Mantle.vk_flush!(ctx)                      # nothing in flight, nothing recorded
 
     # A submission that has completed but has not been swept yet: that is what
     # the sweep drains, and draining is what used to reset the cursors.
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     k! = fill_value_kernel!(backend, 256)
     e0 = KA.allocate(backend, Int32, 4)
     k!(e0, Int32(0); ndrange=4)
-    target = MVE.driver(bq).next_timeline
-    while MVE.query_timeline(bq) < target; end   # polling does not sweep
+    target = Mantle.driver(bq).next_timeline
+    while Mantle.query_timeline(bq) < target; end   # polling does not sweep
 
     # `get_arg_buffer` takes the OWNER of the bytes, not the queue: what decides
     # when they may be handed out again is who holds them, and a queue does not.
     a = Ref{Any}(nothing)
     b = Ref{Any}(nothing)
-    o = MVE.oneshot(bq) do e
-        a[] = MVE.get_arg_buffer(e.owner, 256)   # a draw's arguments, not yet recorded
-        MVE.drain!(bq)                           # sweeps: outstanding drains here
-        b[] = MVE.get_arg_buffer(e.owner, 256)   # the next draw's arguments
+    o = Mantle.oneshot(bq) do e
+        a[] = Mantle.get_arg_buffer(e.owner, 256)   # a draw's arguments, not yet recorded
+        Mantle.drain!(bq)                           # sweeps: outstanding drains here
+        b[] = Mantle.get_arg_buffer(e.owner, 256)   # the next draw's arguments
     end
 
     # Disjoint, not ordered: the pool fits a request into the best free span it

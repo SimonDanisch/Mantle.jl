@@ -17,7 +17,7 @@ using KernelAbstractions
 using GeometryBasics: Vec3f, Vec
 const KA = KernelAbstractions
 
-const SMBACKEND = MVE.LavaBackend()
+const SMBACKEND = Mantle.LavaBackend()
 
 # ── A. Tree reduction (sum) — multiple barriers, types × workgroup sizes ──────
 # One block per `TILE` elements; log2(TILE) barrier-synchronised halving steps.
@@ -48,8 +48,8 @@ end
     for TILE in (32, 64, 128, 256), T in (Float32, Float64, Int32, Int64)
         n = TILE * nblocks
         cpu = T <: Integer ? rand(T(1):T(9), n) : rand(T, n)
-        g = MVE.LavaArray(cpu)
-        out = MVE.LavaArray(zeros(T, nblocks))
+        g = Mantle.LavaArray(cpu)
+        out = Mantle.LavaArray(zeros(T, nblocks))
         k = getfield(@__MODULE__, Symbol("_smr_reduce_", T, "_", TILE, "!"))(SMBACKEND)
         k(g, out; ndrange = n, workgroupsize = TILE)
         KA.synchronize(SMBACKEND)
@@ -95,8 +95,8 @@ end
     for TILE in (64, 128), T in (Float32, Int32)
         n = TILE * nblocks
         cpu = T <: Integer ? rand(T(0):T(4), n) : rand(T, n)
-        g = MVE.LavaArray(cpu)
-        out = MVE.LavaArray(zeros(T, n))
+        g = Mantle.LavaArray(cpu)
+        out = Mantle.LavaArray(zeros(T, n))
         k = getfield(@__MODULE__, Symbol("_smr_scan_", T, "_", TILE, "!"))(SMBACKEND)
         k(g, out; ndrange = n, workgroupsize = TILE)
         KA.synchronize(SMBACKEND)
@@ -134,8 +134,8 @@ end
 @testset "shared-memory tile transpose" begin
     m = TT * 3; n = TT * 4
     cpu = rand(Float32, m, n)               # m rows, n cols
-    g = MVE.LavaArray(cpu)
-    out = MVE.LavaArray(zeros(Float32, n, m))
+    g = Mantle.LavaArray(cpu)
+    out = Mantle.LavaArray(zeros(Float32, n, m))
     _smr_transpose!(SMBACKEND)(g, out; ndrange = (n, m), workgroupsize = (TT, TT))
     KA.synchronize(SMBACKEND)
     @test Array(out) ≈ permutedims(cpu)
@@ -166,8 +166,8 @@ end
     nblocks = 4
     n = VTILE * nblocks
     cpu = [Vec3f(rand(), rand(), rand()) for _ in 1:n]
-    g = MVE.LavaArray(cpu)
-    out = MVE.LavaArray(fill(Vec3f(0), nblocks))
+    g = Mantle.LavaArray(cpu)
+    out = Mantle.LavaArray(fill(Vec3f(0), nblocks))
     _smr_vec3_reduce!(SMBACKEND)(g, out; ndrange = n, workgroupsize = VTILE)
     KA.synchronize(SMBACKEND)
     ref = [reduce(+, cpu[(b-1)*VTILE+1 : b*VTILE]) for b in 1:nblocks]
@@ -203,8 +203,8 @@ end
     nblocks = 6
     n = BTILE * nblocks
     cpu = rand(Float32, n)
-    g = MVE.LavaArray(cpu)
-    out = MVE.LavaArray(zeros(Int32, nblocks))
+    g = Mantle.LavaArray(cpu)
+    out = Mantle.LavaArray(zeros(Int32, nblocks))
     _smr_bool_count!(SMBACKEND)(g, out; ndrange = n, workgroupsize = BTILE)
     KA.synchronize(SMBACKEND)
     ref = [Int32(count(>(0.5f0), cpu[(b-1)*BTILE+1 : b*BTILE])) for b in 1:nblocks]
@@ -243,8 +243,8 @@ end
     nblocks = 3
     n = STILE * nblocks
     cpu = rand(Float32, n)
-    g = MVE.LavaArray(cpu)
-    out = MVE.LavaArray(zeros(Float32, n))
+    g = Mantle.LavaArray(cpu)
+    out = Mantle.LavaArray(zeros(Float32, n))
     _smr_stencil!(SMBACKEND)(g, out; ndrange = n, workgroupsize = STILE)
     KA.synchronize(SMBACKEND)
     # CPU reference: same per-block clamped 3-point average, STEPS times

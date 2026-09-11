@@ -43,7 +43,7 @@ const EA = 10      # rows the array actually has — 6 rows of every load are FI
     Mantle.copyto!(pointer(out), 1, E, m)
 end
 
-ctx = MVE.vk_context()
+ctx = Mantle.vk_context()
 if !ctx.coopmat2.tensor_addressing
     @info "no coopmat2 tensor addressing on this device — nothing to run"
 else

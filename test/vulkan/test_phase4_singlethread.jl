@@ -5,7 +5,7 @@ using Test, Lava, Mantle
     # `thread`, on core's `SubmitChannel`: the single-writer invariant is the
     # same one, asked by `Mantle.ownthread` at every entry point that records or
     # submits. It was `owning_thread` on the backend's queue.
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
     @test hasfield(Mantle.SubmitChannel, :thread)
     @test bq.thread == Threads.threadid()
 end
@@ -13,7 +13,7 @@ end
 @testset "cross-thread dispatch trips the assert" begin
     # Only meaningful under `julia -t N` with N > 1.
     if Threads.nthreads() > 1
-        bq = MVE.vk_context().default_bq
+        bq = Mantle.vk_context().default_bq
         result = Ref{Any}(nothing)
         # Open a one-shot from a different thread.
         #
@@ -24,7 +24,7 @@ end
         # came back `nothing`, failing against a Lava that behaves correctly.
         task = Threads.@spawn begin
             try
-                MVE.oneshot(bq) do e end
+                Mantle.oneshot(bq) do e end
                 result[] = :no_assert   # should not happen
             catch e
                 result[] = e
@@ -41,7 +41,7 @@ end
 end
 
 @testset "live_bytes is atomic" begin
-    @test MVE.mempolicy(MVE.vk_context()).live_bytes isa Threads.Atomic{Int}
+    @test Mantle.mempolicy(Mantle.vk_context()).live_bytes isa Threads.Atomic{Int}
 end
 
 @testset "VkContext has no public nothing-default_bq path" begin
@@ -54,8 +54,8 @@ end
     # the field to the UnionAll and broke when `VulkanBatchQueue` gained its `{C}`
     # parameter. `VulkanBatchQueue{VkContext}` satisfies the intent MORE strongly (it
     # is concrete), so test the property, not one spelling of it.
-    T = fieldtype(MVE.VkContext, :default_bq)
-    @test T <: MVE.VulkanBatchQueue
+    T = fieldtype(Mantle.VkContext, :default_bq)
+    @test T <: Mantle.VulkanBatchQueue
     @test !(Nothing <: T)
 end
 

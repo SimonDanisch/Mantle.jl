@@ -21,16 +21,16 @@ using Test, Lava, Mantle
 import KernelAbstractions as KA
 
 @testset "DeviceCaps" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     c = Lava.caps(ctx)
 
     @testset "shared memory limit is core Vulkan, always real" begin
-        m = MVE.max_shared_memory(ctx)
+        m = Mantle.max_shared_memory(ctx)
         @test m isa Int
         @test m > 0
         # Cross-check against an independent read, so a mis-wired field shows up
         # as a mismatch rather than as a plausible number.
-        limits = MVE.VK.get_physical_device_properties(ctx.physical_device).limits
+        limits = Mantle.VK.get_physical_device_properties(ctx.physical_device).limits
         @test m == Int(limits.max_compute_shared_memory_size)
         @test m == c.sharedbudget
         # A workgroup cannot be given more than this; kernels that size
@@ -42,16 +42,16 @@ import KernelAbstractions as KA
         # This is the regression the field exists for: it was `Ref(1024)` with a
         # docstring claiming to be the query below. A device whose real limit is
         # not 1024 would have been told it was.
-        limits = MVE.VK.get_physical_device_properties(ctx.physical_device).limits
+        limits = Mantle.VK.get_physical_device_properties(ctx.physical_device).limits
         @test c.workgrouplimit == Int(limits.max_compute_work_group_invocations)
-        @test MVE.workgroup_limit(ctx) == c.workgrouplimit
+        @test Mantle.workgroup_limit(ctx) == c.workgrouplimit
         @test c.workgrouplimit >= 128   # the Vulkan-mandated minimum
     end
 
     @testset "core count: nothing, or a positive number" begin
-        cores = MVE.shader_core_count(ctx)
+        cores = Mantle.shader_core_count(ctx)
         @test cores === nothing || (cores isa Int && cores > 0)
-        w = MVE.shader_warps_per_sm(ctx)
+        w = Mantle.shader_warps_per_sm(ctx)
         @test w === nothing || (w isa Int && w > 0)
 
         # `nothing`, not `0` — the value is used as a denominator, and a zero
@@ -65,14 +65,14 @@ import KernelAbstractions as KA
     end
 
     @testset "an advertised extension must actually fill the chain" begin
-        nv = MVE.has_extension(ctx.physical_device, "VK_NV_shader_sm_builtins")
-        amd = MVE.has_extension(ctx.physical_device, "VK_AMD_shader_core_properties2")
+        nv = Mantle.has_extension(ctx.physical_device, "VK_NV_shader_sm_builtins")
+        amd = Mantle.has_extension(ctx.physical_device, "VK_AMD_shader_core_properties2")
         if nv || amd
-            @test MVE.shader_core_count(ctx) !== nothing
-            nv && @test MVE.shader_warps_per_sm(ctx) !== nothing
+            @test Mantle.shader_core_count(ctx) !== nothing
+            nv && @test Mantle.shader_warps_per_sm(ctx) !== nothing
         else
             @info "device reports no SM/CU count extension; count is expected to be unknown" device=ctx.device_name
-            @test MVE.shader_core_count(ctx) === nothing
+            @test Mantle.shader_core_count(ctx) === nothing
         end
     end
 
@@ -82,8 +82,8 @@ import KernelAbstractions as KA
         # `get_compute_pipeline` pins every coopmat module to 32, so a workgroup
         # sized in units of `subgroup` asks for twice the threads the kernel
         # indexes and writes half its tile.
-        @test c.coopmatsubgroup == MVE.COOPMAT_SUBGROUP
-        @test c.subgroup == MVE.device_subgroup_size(ctx)
+        @test c.coopmatsubgroup == Mantle.COOPMAT_SUBGROUP
+        @test c.subgroup == Mantle.device_subgroup_size(ctx)
         @test c.subgroup > 0
         # A coopmat kernel's workgroup is a multiple of `coopmatsubgroup`; that
         # multiple has to fit in the device's limit for any of this to launch.
@@ -91,8 +91,8 @@ import KernelAbstractions as KA
     end
 
     @testset "coopmat availability agrees with the GEMM's own probe" begin
-        @test c.coopmat == MVE.coopmat_gemm_available(ctx)
-        @test c.tile == MVE.GEMM_TILE
+        @test c.coopmat == Mantle.coopmat_gemm_available(ctx)
+        @test c.tile == Mantle.GEMM_TILE
     end
 
     @testset "queried once, cached on the context" begin
@@ -134,8 +134,8 @@ import KernelAbstractions as KA
         # a table built from a mistaken component-type mapping would still be
         # self-consistent, so it is checked against the raw query.
         @test length(c.shapes) ==
-              count(s -> MVE.juliacomponenttype(s.ab_type) !== nothing &&
-                         MVE.juliacomponenttype(s.c_type) !== nothing,
+              count(s -> Mantle.juliacomponenttype(s.ab_type) !== nothing &&
+                         Mantle.juliacomponenttype(s.c_type) !== nothing,
                     ctx.coopmat_shapes)
         @test Mantle.supports(c, sq)
     end

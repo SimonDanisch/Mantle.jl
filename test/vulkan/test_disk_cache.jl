@@ -23,20 +23,20 @@ using GPUCompiler
             @inbounds dst[i] = src[i] + 1f0
         end
 
-        backend = MVE.LavaBackend()
-        a = MVE.LavaArray(Float32[1, 2, 3, 4])
-        b = MVE.LavaArray(zeros(Float32, 4))
+        backend = Mantle.LavaBackend()
+        a = Mantle.LavaArray(Float32[1, 2, 3, 4])
+        b = Mantle.LavaArray(zeros(Float32, 4))
 
         # Clear caches
-        empty!(MVE.vk_context().caches.linked)
+        empty!(Mantle.vk_context().caches.linked)
 
         # First dispatch populates both tiers
         tier_test_kernel(backend)(b, a; ndrange=4)
         KernelAbstractions.synchronize(backend)
 
-        @test length(MVE.vk_context().caches.linked) >= 1
+        @test length(Mantle.vk_context().caches.linked) >= 1
         # Disk cache should have written files
-        dir = MVE.lava_disk_cache_dir()
+        dir = Mantle.lava_disk_cache_dir()
         @test isdir(dir) && !isempty(filter(f -> endswith(f, ".jls"), readdir(dir)))
         @test Array(b) == Float32[2, 3, 4, 5]
     end
@@ -47,9 +47,9 @@ using GPUCompiler
             @inbounds dst[i] = src[i] * 2f0
         end
 
-        backend = MVE.LavaBackend()
-        a = MVE.LavaArray(Float32[1, 2, 3, 4])
-        b = MVE.LavaArray(zeros(Float32, 4))
+        backend = Mantle.LavaBackend()
+        a = Mantle.LavaArray(Float32[1, 2, 3, 4])
+        b = Mantle.LavaArray(zeros(Float32, 4))
 
         # Warm up (compile)
         speed_test_kernel(backend)(b, a; ndrange=4)
@@ -69,8 +69,8 @@ using GPUCompiler
             @inbounds dst[i] = val
         end
 
-        backend = MVE.LavaBackend()
-        c = MVE.LavaArray(zeros(Float32, 4))
+        backend = Mantle.LavaBackend()
+        c = Mantle.LavaArray(zeros(Float32, 4))
 
         # Compile once
         repop_test_kernel(backend)(c, 42f0; ndrange=4)
@@ -81,7 +81,7 @@ using GPUCompiler
         # `KERNEL_INSERTION_ORDER` was removed when the insertion-order
         # tracking was folded into LINKED_KERNEL_CACHE itself; clearing the
         # cache is the only access we need.
-        empty!(MVE.vk_context().caches.linked)
+        empty!(Mantle.vk_context().caches.linked)
         # LAUNCH_PLAN_CACHE sits ABOVE both tiers: `launch_plan` returns a
         # cached LaunchPlan without ever calling
         # `get_compiled_kernel_and_pipeline`, so with only Tier 1 cleared the
@@ -89,13 +89,13 @@ using GPUCompiler
         # the assertion below failed with `0 >= 1`. The plan cache postdates
         # this test (added by "perf: overlap recording with execution"), so drop
         # it too or the test measures nothing.
-        empty!(MVE.vk_context().caches.launchplans)
+        empty!(Mantle.vk_context().caches.launchplans)
 
         # Next dispatch should hit Tier 2 and repopulate Tier 1
         repop_test_kernel(backend)(c, 99f0; ndrange=4)
         KernelAbstractions.synchronize(backend)
 
-        @test length(MVE.vk_context().caches.linked) >= 1
+        @test length(Mantle.vk_context().caches.linked) >= 1
         @test Array(c) == fill(99f0, 4)
     end
 
@@ -105,17 +105,17 @@ using GPUCompiler
             @inbounds dst[i] = Float32(i)
         end
 
-        backend = MVE.LavaBackend()
-        d = MVE.LavaArray(zeros(Float32, 64))
-        before = length(MVE.vk_context().caches.linked)
+        backend = Mantle.LavaBackend()
+        d = Mantle.LavaArray(zeros(Float32, 64))
+        before = length(Mantle.vk_context().caches.linked)
 
         wg_test_kernel(backend)(d; ndrange=64, workgroupsize=32)
         KernelAbstractions.synchronize(backend)
-        after_32 = length(MVE.vk_context().caches.linked)
+        after_32 = length(Mantle.vk_context().caches.linked)
 
         wg_test_kernel(backend)(d; ndrange=64, workgroupsize=64)
         KernelAbstractions.synchronize(backend)
-        after_64 = length(MVE.vk_context().caches.linked)
+        after_64 = length(Mantle.vk_context().caches.linked)
 
         # Two different workgroup sizes should create two cache entries
         @test after_64 > after_32
@@ -123,8 +123,8 @@ using GPUCompiler
 
     @testset "LavaLinkedKernel has correct fields" begin
         # Check that the linked kernel has all expected data
-        for (key, linked) in MVE.vk_context().caches.linked
-            @test linked isa MVE.LavaLinkedKernel
+        for (key, linked) in Mantle.vk_context().caches.linked
+            @test linked isa Mantle.LavaLinkedKernel
             @test !isempty(linked.compiled.spirv_bytes)
             @test !isempty(linked.compiled.entry_name)
             @test linked.compiled.workgroup_size isa NTuple{3, Int}
@@ -151,8 +151,8 @@ using GPUCompiler
             @inbounds dst[i] = 1f0
         end
 
-        backend = MVE.LavaBackend()
-        e = MVE.LavaArray(zeros(Float32, 4))
+        backend = Mantle.LavaBackend()
+        e = Mantle.LavaArray(zeros(Float32, 4))
         repl_kernel(backend)(e; ndrange=4)
         KernelAbstractions.synchronize(backend)
 

@@ -39,7 +39,7 @@ end
 
 @testset "the prepare of a discarded iteration writes zero groups" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
-    MVE.vk_context().conditional_rendering_available || error(
+    Mantle.vk_context().conditional_rendering_available || error(
         "this device has no conditional rendering; the bug this pins needs it")
     n = 200
     out = Mantle.Buffer(dev, zeros(Int32, n))

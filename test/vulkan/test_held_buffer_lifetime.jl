@@ -24,16 +24,16 @@ holders(buf) = @atomic Mantle.stampof(buf).holders
 
 @testset "a held buffer survives unsafe_free! until its submission passes" begin
     be = LavaBackend()
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
 
     a = KA.allocate(be, Float32, 64)
     buf = a.buf[]                    # hold the VkManagedBuffer itself
-    @test state(buf) == MVE.BUF_STATE_ALIVE
+    @test state(buf) == Mantle.BUF_STATE_ALIVE
     @test holders(buf) == 0
 
     # A one-shot, written and sealed but NOT submitted — the window the
     # timeline cannot see.
-    o = MVE.oneshot(bq) do e
+    o = Mantle.oneshot(bq) do e
         Mantle.hold!(e, a)
     end
     @test holders(buf) == 1
@@ -44,16 +44,16 @@ holders(buf) = @atomic Mantle.stampof(buf).holders
     # The request is recorded, not performed: nothing has been destroyed, and a
     # drain that asks now declines because something can still submit.
     Mantle.drain!(bq)
-    @test state(buf) != MVE.BUF_STATE_DEAD
+    @test state(buf) != Mantle.BUF_STATE_DEAD
     @test holders(buf) == 1
 
     # Submit it, wait, and drain: the hold goes with the submission, and the
     # destroy that was owed runs.
     Mantle.handover!(bq, Mantle.submit!(bq, o), o)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     @test holders(buf) == 0
     Mantle.drain!(bq)
-    @test state(buf) == MVE.BUF_STATE_DEAD
+    @test state(buf) == Mantle.BUF_STATE_DEAD
 end
 
 @testset "a direct vk_free! on a held buffer is recorded, not performed" begin
@@ -61,24 +61,24 @@ end
     # that frees the BUFFER directly bypasses it, so the claim has to hold on
     # its own.
     be = LavaBackend()
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
 
     a = KA.allocate(be, Float32, 64)
     buf = a.buf[]
-    o = MVE.oneshot(bq) do e
+    o = Mantle.oneshot(bq) do e
         Mantle.hold!(e, a)
     end
 
-    MVE.vk_free!(buf)               # e.g. a teardown path that owns the buffer
+    Mantle.vk_free!(buf)               # e.g. a teardown path that owns the buffer
     Mantle.drain!(bq)
-    @test state(buf) != MVE.BUF_STATE_DEAD
+    @test state(buf) != Mantle.BUF_STATE_DEAD
     @test holders(buf) == 1
 
     Mantle.handover!(bq, Mantle.submit!(bq, o), o)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
     Mantle.drain!(bq)
     @test holders(buf) == 0
-    @test state(buf) == MVE.BUF_STATE_DEAD
+    @test state(buf) == Mantle.BUF_STATE_DEAD
 end
 
 @testset "an unheld buffer is destroyed at the first drain" begin
@@ -89,6 +89,6 @@ end
     Mantle.unsafe_free!(a)
     # Nothing named it, so nothing defers it beyond the drain that runs the
     # requests: no submission, no wait.
-    Mantle.drain!(MVE.vk_context().default_bq)
-    @test state(buf) == MVE.BUF_STATE_DEAD
+    Mantle.drain!(Mantle.vk_context().default_bq)
+    @test state(buf) == Mantle.BUF_STATE_DEAD
 end

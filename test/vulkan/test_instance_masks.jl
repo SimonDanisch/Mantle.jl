@@ -16,14 +16,14 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
 
 @testset "Instance masks: rayQuery filters by cullMask" begin
 
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     if !ctx.ray_query_available
         @warn "Skipping instance-mask test: VK_KHR_ray_query not available on this device"
         @test_skip true
         return
     end
 
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     bq = backend.dispatch_bq
 
     # Build two single-triangle meshes at different z-planes.
@@ -33,7 +33,7 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
         GeometryBasics.normal_mesh(GeometryBasics.Mesh(verts, faces))
     end
 
-    tlas = MVE.VulkanTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     # Instance 1: mask 0x01, z=5
     push!(tlas, tri_mesh(5f0),  Mat4f_IM(I); instance_id=UInt32(1), instance_mask=UInt8(0x01))
     # Instance 2: mask 0x02, z=10
@@ -61,9 +61,9 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
         return nothing
     end
 
-    MVE.lava_launch!(bq, mask_kernel, out_g;
+    Mantle.lava_launch!(bq, mask_kernel, out_g;
                       ndrange=3, workgroup_size=(64, 1, 1), tlas=tlas)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
     r = Array(out_g)
 

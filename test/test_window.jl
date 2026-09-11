@@ -65,9 +65,9 @@ if !(Sys.isapple() || !isempty(get(ENV, "DISPLAY", "")))
 else
     GLFW.Init() || error("GLFW.Init failed")
 
-    # DELETED in phase 1.5: `const MVE = Base.get_extension(Mantle, :MantleVulkanExt)`.
-    # The testsets that used it drove a window without a graph through the
-    # backend's own window type. The portable spelling is `Window(backend, w, h)`,
+    # DELETED in phase 1.5: the testsets that reached for the backend module
+    # drove a window without a graph through the backend's own window type.
+    # The portable spelling is `Window(backend, w, h)`,
     # which is in the vocabulary and which only Lava answers; phase 2.7 makes
     # Metal answer it, and these testsets then need no extension at all.
     include(joinpath(@__DIR__, "..", "bench", "two_scatters.jl"))
@@ -149,8 +149,8 @@ else
         v = pp.barrier.vks
         v.memoryBarrierCount == 0 && return nothing
         m = unsafe_load(v.pMemoryBarriers, 1)
-        (MVE.VK.PipelineStageFlag2(m.srcStageMask),
-         MVE.VK.PipelineStageFlag2(m.dstStageMask))
+        (Mantle.VK.PipelineStageFlag2(m.srcStageMask),
+         Mantle.VK.PipelineStageFlag2(m.dstStageMask))
     end
 
     # A quad at a given depth, and a fragment that writes no attachment, which is
@@ -264,7 +264,7 @@ else
         KernelAbstractions.synchronize(M.backend(dev))
 
         # Nothing a later frame could wait for is still sitting unsubmitted.
-        @test Mantle.argtoken(s.plan.args) <= MVE.driver(dev.bq).next_timeline
+        @test Mantle.argtoken(s.plan.args) <= Mantle.driver(dev.bq).next_timeline
         after = Array(M.storage(s.pos))
         moved = [norm(after[i] - before[i]) for i in eachindex(before)]
         @test count(<(1e-6), moved) == 0
@@ -322,7 +322,7 @@ else
         # A Lava window, not a Mantle one: this test drives acquire/blit/present
         # by hand because the chain ends in a compute pass and Mantle has no blit.
         # Anything that renders through a plan uses `M.Window`.
-        win = MVE.VulkanWindow(W, H; ctx = MVE.vk_context(), title = "chain", vsync = false)
+        win = Mantle.VulkanWindow(W, H; ctx = Mantle.vk_context(), title = "chain", vsync = false)
         s = Base.invokelatest(build_chain, dev, win, 20_000)
 
         peak = M.peakbytes(s.plan)
@@ -333,10 +333,10 @@ else
         for _ in 1:20
             acquire_next_image!(win)
             M.run!(s.plan)
-            MVE.copy_framebuffer!(M.storage(s.raw), s.fb)
+            Mantle.copy_framebuffer!(M.storage(s.raw), s.fb)
             blit!(dev, WindowTarget(win), M.storage(s.out))
-            present_frame!(dev.bq, win, MVE.oneshot(dev.bq) do e
-                MVE.presentready!(e, win)
+            present_frame!(dev.bq, win, Mantle.oneshot(dev.bq) do e
+                Mantle.presentready!(e, win)
             end)
         end
         KernelAbstractions.synchronize(M.backend(dev))
@@ -1007,7 +1007,7 @@ else
                 end
             end
             plan = M.Plan(g)
-            for _ in 1:20; MVE.GLFW.PollEvents(); M.run!(plan); end
+            for _ in 1:20; Mantle.GLFW.PollEvents(); M.run!(plan); end
             KernelAbstractions.synchronize(M.backend(dev))
             img = M.screenshot(win); close(win)
             sum(Float64(p[1]) + p[2] + p[3] for p in img)
@@ -1254,7 +1254,7 @@ else
         #
         # The assertion is on the state rather than on not hanging, so a
         # regression fails on the first iteration instead of stopping the suite.
-        win = MVE.VulkanWindow(256, 256; ctx = MVE.vk_context(), title = "readback pairing", vsync = false)
+        win = Mantle.VulkanWindow(256, 256; ctx = Mantle.vk_context(), title = "readback pairing", vsync = false)
         for _ in 1:6
             readback_window(win)
             @test !win.acquired
@@ -1275,7 +1275,7 @@ else
         # Found by measuring a running demo from the REPL, which wedged the whole
         # session. A regression here hangs the suite rather than failing it —
         # that is exactly what the check is for.
-        win = MVE.VulkanWindow(256, 256; ctx = MVE.vk_context(), title = "one frame at a time", vsync = false)
+        win = Mantle.VulkanWindow(256, 256; ctx = Mantle.vk_context(), title = "one frame at a time", vsync = false)
         acquire_next_image!(win)
         @test win.acquired
         @test win.acquirer === current_task()
@@ -1291,11 +1291,11 @@ else
         # The refused acquires changed nothing, so the frame that owns the image
         # can still finish, and the window is usable afterwards.
         bq = win.ctx.default_bq
-        present_frame!(bq, win, MVE.oneshot(bq) do e; MVE.presentready!(e, win); end)
+        present_frame!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
         @test !win.acquired
         @test win.acquirer === nothing
         acquire_next_image!(win)
-        present_frame!(bq, win, MVE.oneshot(bq) do e; MVE.presentready!(e, win); end)
+        present_frame!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
         @test !win.acquired
         close(win)
     end
@@ -1310,7 +1310,7 @@ else
         # The surface needs destroying by name rather than by `finalize`: Lava
         # wraps it around the pointer GLFW returns without going through
         # Vulkan.jl's `init_handle!`, so it has no destructor and no finalizer.
-        win = MVE.VulkanWindow(64, 64; ctx = MVE.vk_context(), title = "close test", vsync = false)
+        win = Mantle.VulkanWindow(64, 64; ctx = Mantle.vk_context(), title = "close test", vsync = false)
         @test !isempty(win.views)
         @test win.swapchain !== nothing
         @test win.surface.destructor isa UndefInitializer   # why finalize cannot work
@@ -1327,11 +1327,11 @@ else
         # clear colour was given can only ever pick CLEAR or LOAD, so a pass that
         # covers every pixel used to pay for a load it discards.
         E = Mantle
-        @test MVE.loadop(M.Keep) == MVE.VK.ATTACHMENT_LOAD_OP_LOAD
-        @test MVE.loadop(M.Discard) == MVE.VK.ATTACHMENT_LOAD_OP_DONT_CARE
-        @test MVE.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == MVE.VK.ATTACHMENT_LOAD_OP_CLEAR
-        @test MVE.clearvalue(M.Keep) === nothing
-        @test MVE.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
+        @test Mantle.loadop(M.Keep) == Mantle.VK.ATTACHMENT_LOAD_OP_LOAD
+        @test Mantle.loadop(M.Discard) == Mantle.VK.ATTACHMENT_LOAD_OP_DONT_CARE
+        @test Mantle.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == Mantle.VK.ATTACHMENT_LOAD_OP_CLEAR
+        @test Mantle.clearvalue(M.Keep) === nothing
+        @test Mantle.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
 
         # And all three actually render. The target is a transient, so its state
         # before the pass is Undefined and the barrier into it comes from there.
@@ -1420,8 +1420,8 @@ else
         E = Mantle
         zt = only(t for t in probe.plan.graph.transients
                   if t isa E.TransientImage && eltype(t) === Float32)
-        @test zt.format == MVE.VK.FORMAT_D32_SFLOAT
-        @test MVE.aspect(zt) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT
+        @test zt.format == Mantle.VK.FORMAT_D32_SFLOAT
+        @test Mantle.aspect(zt) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT
 
         for order in ((near, far), (far, near))
             got = shot(order, ZPIPE)
@@ -1507,7 +1507,7 @@ else
         copies = [pp for pp in plan.passes if pp.pass.kind === :copy]
         @test length(copies) == 2
         for pp in copies
-            @test any(b -> b.new == MVE.VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
+            @test any(b -> b.new == Mantle.VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
         end
 
         M.run!(plan)
@@ -1672,12 +1672,12 @@ else
 
         E = Mantle
         depth = only(b for b in first(pp for pp in plan.passes if pp.pass.kind === :render).images
-                     if MVE.aspect(b.resource) == MVE.VK.IMAGE_ASPECT_DEPTH_BIT)
+                     if Mantle.aspect(b.resource) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT)
         # The layout still comes from UNDEFINED — the clear discards — but the
         # barrier has to wait for the previous frame's depth write all the same.
-        @test depth.old == MVE.VK.IMAGE_LAYOUT_UNDEFINED
-        @test depth.src_access != MVE.VK.AccessFlag2(0)
-        @test depth.src_stage != MVE.VK.PipelineStageFlag2(0)
+        @test depth.old == Mantle.VK.IMAGE_LAYOUT_UNDEFINED
+        @test depth.src_access != Mantle.VK.AccessFlag2(0)
+        @test depth.src_stage != Mantle.VK.PipelineStageFlag2(0)
     end
 
     @testset "a scalar attribute is written in place" begin
@@ -1935,8 +1935,8 @@ else
         # if the barrier is derived they differ, and if it is assumed they cannot.
         N = 256
         dev = M.Device(TESTBACKEND)
-        every = MVE.VK.PipelineStageFlag2(MVE.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-        copybit = MVE.VK.PipelineStageFlag2(MVE.VK.PIPELINE_STAGE_2_COPY_BIT)
+        every = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+        copybit = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_COPY_BIT)
 
         # (a) the vacating transient was last *read by a shader*
         function shaderlast(dev)

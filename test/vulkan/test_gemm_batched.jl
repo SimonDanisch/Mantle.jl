@@ -33,7 +33,7 @@ function rungemm(M, N, K, nb)
     A = KA.allocate(back, Float16, M * K * nb); copyto!(A, Ah)
     B = KA.allocate(back, Float16, K * N * nb); copyto!(B, Bh)
     C = KA.allocate(back, Float32, M * N * nb); fill!(C, 0.0f0)
-    MVE.coopmat_gemm!(C, A, B, M, N, K; nbatch = nb)
+    Mantle.coopmat_gemm!(C, A, B, M, N, K; nbatch = nb)
     KA.synchronize(back)
     got = reshape(Array(C), M, N, nb)
     want = hostref(Ah, Bh, M, N, K, nb)
@@ -43,8 +43,8 @@ function rungemm(M, N, K, nb)
 end
 
 @testset "batched coopmat GEMM" begin
-    if !MVE.coopmat_gemm_available(MVE.vk_context())
-        @info "skipping: the coopmat GEMM needs a $(MVE.GEMM_SUBGROUP)-lane subgroup and needs the device to report a $(MVE.GEMM_TILE)^3 Float16 shape; this device has subgroup=$(MVE.device_subgroup_size(MVE.vk_context())), shape=$(MVE.coopmat_shape(MVE.vk_context(), Float16, MVE.GEMM_TILE, MVE.GEMM_TILE, MVE.GEMM_TILE))"
+    if !Mantle.coopmat_gemm_available(Mantle.vk_context())
+        @info "skipping: the coopmat GEMM needs a $(Mantle.GEMM_SUBGROUP)-lane subgroup and needs the device to report a $(Mantle.GEMM_TILE)^3 Float16 shape; this device has subgroup=$(Mantle.device_subgroup_size(Mantle.vk_context())), shape=$(Mantle.coopmat_shape(Mantle.vk_context(), Float16, Mantle.GEMM_TILE, Mantle.GEMM_TILE, Mantle.GEMM_TILE))"
     else
         @testset "nbatch = 1 is unchanged" begin
             for (M, N, K) in ((64, 64, 32), (128, 256, 64), (256, 64, 80))
@@ -64,13 +64,13 @@ end
             # Not cosmetic: on the unbatched target, SAM 2's windowed attention
             # picks a 5-way split that runs at 1.2 TFLOP/s against 11.6 without
             # one — 1.14 ms versus 0.12 for the same product.
-            @test MVE.coopmat_gemm_shape(256, 256, 80; nbatch = 128)[2] == 1
-            @test MVE.coopmat_gemm_shape(256, 80, 256; nbatch = 128)[2] == 1
+            @test Mantle.coopmat_gemm_shape(256, 256, 80; nbatch = 128)[2] == 1
+            @test Mantle.coopmat_gemm_shape(256, 80, 256; nbatch = 128)[2] == 1
             # …and an unbatched call still splits, which is what the skinny
             # im2col convolutions depend on.
-            @test MVE.coopmat_gemm_shape(128, 256, 2304)[2] > 1
-            @test MVE.coopmat_gemm_shape(128, 256, 2304; nbatch = 1) ==
-                  MVE.coopmat_gemm_shape(128, 256, 2304)
+            @test Mantle.coopmat_gemm_shape(128, 256, 2304)[2] > 1
+            @test Mantle.coopmat_gemm_shape(128, 256, 2304; nbatch = 1) ==
+                  Mantle.coopmat_gemm_shape(128, 256, 2304)
         end
 
         @testset "a wrong batch would not pass" begin
@@ -83,7 +83,7 @@ end
             A = KA.allocate(back, Float16, M * K * nb); copyto!(A, Ah)
             B = KA.allocate(back, Float16, K * N * nb); copyto!(B, Bh)
             C = KA.allocate(back, Float32, M * N * nb); fill!(C, 0.0f0)
-            MVE.coopmat_gemm!(C, A, B, M, N, K; nbatch = nb)
+            Mantle.coopmat_gemm!(C, A, B, M, N, K; nbatch = nb)
             KA.synchronize(back)
             got = reshape(Array(C), M, N, nb)
             @test all(≈(Float32(K)), got[:, :, 1])

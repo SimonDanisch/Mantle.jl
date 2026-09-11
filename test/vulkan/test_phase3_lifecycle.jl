@@ -2,25 +2,25 @@ using Test, Lava, Mantle
 @testset "Phase 3 — lifecycle state + finalizer/main-thread separation" begin
 
 @testset "buffer state machine" begin
-    @test isdefined(MVE, :BUF_STATE_ALIVE)
-    @test isdefined(MVE, :BUF_STATE_DEFERRED)
-    @test isdefined(MVE, :BUF_STATE_DEAD)
-    @test hasfield(MVE.VkManagedBuffer, :state)
+    @test isdefined(Mantle, :BUF_STATE_ALIVE)
+    @test isdefined(Mantle, :BUF_STATE_DEFERRED)
+    @test isdefined(Mantle, :BUF_STATE_DEAD)
+    @test hasfield(Mantle.VkManagedBuffer, :state)
 
     a = LavaArray{Float32,1}(undef, (4,))
     buf = a.buf[]
-    @test (@atomic :acquire buf.state) == MVE.BUF_STATE_ALIVE
+    @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_ALIVE
 
-    MVE.vk_free!(buf)
+    Mantle.vk_free!(buf)
     # After vk_free!: either DEFERRED (GPU busy) or DEAD (immediately destroyed).
     s = @atomic :acquire buf.state
-    @test s == MVE.BUF_STATE_DEFERRED || s == MVE.BUF_STATE_DEAD
+    @test s == Mantle.BUF_STATE_DEFERRED || s == Mantle.BUF_STATE_DEAD
 
     # Second vk_free! must be idempotent — the CAS from ALIVE fails because
     # state is no longer ALIVE.  Nothing crashes, state doesn't regress.
-    MVE.vk_free!(buf)
+    Mantle.vk_free!(buf)
     s2 = @atomic :acquire buf.state
-    @test s2 == s || s2 == MVE.BUF_STATE_DEAD   # monotonic progression only
+    @test s2 == s || s2 == Mantle.BUF_STATE_DEAD   # monotonic progression only
 end
 
 @testset "LavaArray has no direct finalizer (DataRef refcount is sole owner)" begin
@@ -38,10 +38,10 @@ end
     # It was `deferred_frees`, `deferred_as_frees` and a `SpinLock` on the
     # backend's queue, with two drain functions reading a stamp the backend also
     # owned. Core keeps one list per channel — see `graph/lifetime.jl`.
-    bq = MVE.vk_context().default_bq
-    @test !hasfield(MVE.VulkanQueue, :deferred_frees)
-    @test !hasfield(MVE.VulkanQueue, :deferred_as_frees)
-    @test !hasfield(MVE.VulkanQueue, :deferred_frees_lock)
+    bq = Mantle.vk_context().default_bq
+    @test !hasfield(Mantle.VulkanQueue, :deferred_frees)
+    @test !hasfield(Mantle.VulkanQueue, :deferred_as_frees)
+    @test !hasfield(Mantle.VulkanQueue, :deferred_frees_lock)
     @test bq.pendinglock isa ReentrantLock
     @test bq.pending isa Vector{Any}
 end

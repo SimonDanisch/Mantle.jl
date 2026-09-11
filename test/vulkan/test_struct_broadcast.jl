@@ -42,30 +42,30 @@ end
     # - n=1,5 → small sizes
     # - n=32,64,256,1000 → typical sizes with workgroup_size=32/64/256
     @testset "S12 broadcast n=$n" for n in [1, 5, 10, 32, 64, 100, 256, 1000]
-        src = MVE.LavaArray(TestS12[TestS12(Float32(i), Float32(i+0.5), Float32(i+0.25)) for i in 1:n])
-        dst = MVE.LavaArray{TestS12}(undef, n)
+        src = Mantle.LavaArray(TestS12[TestS12(Float32(i), Float32(i+0.5), Float32(i+0.25)) for i in 1:n])
+        dst = Mantle.LavaArray{TestS12}(undef, n)
         dst .= src
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         expected = Array(src)
         @test result == expected
     end
 
     @testset "S52 broadcast n=$n" for n in [1, 10, 64, 256]
-        src = MVE.LavaArray(TestS52[TestS52(ntuple(j -> Float32(i*100 + j), 13)...) for i in 1:n])
-        dst = MVE.LavaArray{TestS52}(undef, n)
+        src = Mantle.LavaArray(TestS52[TestS52(ntuple(j -> Float32(i*100 + j), 13)...) for i in 1:n])
+        dst = Mantle.LavaArray{TestS52}(undef, n)
         dst .= src
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         expected = Array(src)
         @test result == expected
     end
 
     @testset "S24 (Float64 fields) broadcast n=$n" for n in [1, 10, 64]
-        src = MVE.LavaArray(TestS24[TestS24(Float64(i), Float64(i+0.5), Float64(i+0.25)) for i in 1:n])
-        dst = MVE.LavaArray{TestS24}(undef, n)
+        src = Mantle.LavaArray(TestS24[TestS24(Float64(i), Float64(i+0.5), Float64(i+0.25)) for i in 1:n])
+        dst = Mantle.LavaArray{TestS24}(undef, n)
         dst .= src
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         expected = Array(src)
         @test result == expected
@@ -75,10 +75,10 @@ end
     @testset "byval_llvm_sizes populated" begin
         # After running broadcasts above, linked cache should have entries.
         # Two levels: the cache is keyed by device first, then by kernel.
-        @test !isempty(MVE.linked_kernel_cache(MVE.vk_context()))
+        @test !isempty(Mantle.linked_kernel_cache(Mantle.vk_context()))
         # All byval_sizes should be non-negative. One level now: the cache is a
         # field on the context, so there is no outer dict to iterate by mistake.
-        for (_, linked) in MVE.vk_context().caches.linked
+        for (_, linked) in Mantle.vk_context().caches.linked
             @test all(s -> s >= 0, linked.byval_sizes)
         end
     end
@@ -91,11 +91,11 @@ end
     end
 
     @testset "KA copy S12 n=$n" for n in [10, 64, 256]
-        src = MVE.LavaArray(TestS12[TestS12(Float32(i), Float32(2i), Float32(3i)) for i in 1:n])
-        dst = MVE.LavaArray{TestS12}(undef, n)
-        kernel = copy_structs_ka(MVE.LavaBackend())
+        src = Mantle.LavaArray(TestS12[TestS12(Float32(i), Float32(2i), Float32(3i)) for i in 1:n])
+        dst = Mantle.LavaArray{TestS12}(undef, n)
+        kernel = copy_structs_ka(Mantle.LavaBackend())
         kernel(dst, src; ndrange=n)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test Array(dst) == Array(src)
     end
 
@@ -106,11 +106,11 @@ end
     end
 
     @testset "KA transform S12 with scalar arg n=$n" for n in [10, 64]
-        src = MVE.LavaArray(TestS12[TestS12(1f0, 2f0, 3f0) for _ in 1:n])
-        dst = MVE.LavaArray{TestS12}(undef, n)
-        kernel = transform_structs_ka(MVE.LavaBackend())
+        src = Mantle.LavaArray(TestS12[TestS12(1f0, 2f0, 3f0) for _ in 1:n])
+        dst = Mantle.LavaArray{TestS12}(undef, n)
+        kernel = transform_structs_ka(Mantle.LavaBackend())
         kernel(dst, src, 2f0; ndrange=n)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         @test all(r -> r == TestS12(2f0, 4f0, 6f0), result)
     end
@@ -147,7 +147,7 @@ struct BoolHeavyStruct
 end
 
 @testset "Bool Padding Alignment" begin
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
 
     @kernel function read_bool_pad(dst, @Const(src))
         i = @index(Global)
@@ -158,10 +158,10 @@ end
     end
 
     @testset "BoolPadStruct read n=$n" for n in [64, 256, 1024]
-        src = MVE.LavaArray([BoolPadStruct(Float32(i), isodd(i), Float32(i+1)) for i in 1:n])
-        dst = MVE.LavaArray(zeros(Float32, n))
+        src = Mantle.LavaArray([BoolPadStruct(Float32(i), isodd(i), Float32(i+1)) for i in 1:n])
+        dst = Mantle.LavaArray(zeros(Float32, n))
         read_bool_pad(backend)(dst, src; ndrange=n)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         expected = [isodd(i) ? Float32(2i+1) : Float32(-1) for i in 1:n]
         @test result ≈ expected
@@ -173,9 +173,9 @@ end
     end
 
     @testset "BoolPadStruct write n=$n" for n in [64, 256]
-        dst = MVE.LavaArray{BoolPadStruct}(undef, n)
+        dst = Mantle.LavaArray{BoolPadStruct}(undef, n)
         write_bool_pad(backend)(dst, 2f0; ndrange=n)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         for i in 1:n
             @test result[i].x ≈ Float32(i) * 2f0
@@ -196,10 +196,10 @@ end
     end
 
     @testset "TwoBoolStruct (consecutive bools) n=$n" for n in [64, 256]
-        src = MVE.LavaArray([TwoBoolStruct(1f0, 2f0, 3f0, isodd(i), i % 3 == 0, 4f0) for i in 1:n])
-        dst = MVE.LavaArray(zeros(Float32, n))
+        src = Mantle.LavaArray([TwoBoolStruct(1f0, 2f0, 3f0, isodd(i), i % 3 == 0, 4f0) for i in 1:n])
+        dst = Mantle.LavaArray(zeros(Float32, n))
         read_two_bools(backend)(dst, src; ndrange=n)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         for i in 1:n
             expected = 10f0 + (isodd(i) ? 100f0 : 0f0) + (i % 3 == 0 ? 1000f0 : 0f0)
@@ -219,10 +219,10 @@ end
     end
 
     @testset "BoolHeavyStruct (bools at different offsets) n=$n" for n in [64, 256]
-        src = MVE.LavaArray([BoolHeavyStruct(1f0,2f0,3f0, isodd(i), 4f0,5f0,6f0,7f0, i%3==0, 8f0) for i in 1:n])
-        dst = MVE.LavaArray(zeros(Float32, n))
+        src = Mantle.LavaArray([BoolHeavyStruct(1f0,2f0,3f0, isodd(i), 4f0,5f0,6f0,7f0, i%3==0, 8f0) for i in 1:n])
+        dst = Mantle.LavaArray(zeros(Float32, n))
         read_bool_heavy(backend)(dst, src; ndrange=n)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(dst)
         for i in 1:n
             base = 36f0  # 1+2+3+4+5+6+7+8
@@ -277,7 +277,7 @@ struct RoundtripNested
 end
 
 @testset "CPU-vs-GPU Roundtrip" begin
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     N = 512
 
     @kernel function roundtrip_small_kernel(dst, @Const(src), scale::Float32)
@@ -298,9 +298,9 @@ end
         data = [RoundtripSmall(ntuple(j->Float32(i*10+j), 3), ntuple(j->Float32(j), 3), Float32(i), Int32(i)) for i in 1:N]
         src_cpu = copy(data); dst_cpu = similar(data)
         roundtrip_small_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu, 0.5f0; ndrange=N)
-        src_gpu = MVE.LavaArray(data); dst_gpu = MVE.LavaArray{RoundtripSmall}(undef, N)
+        src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray{RoundtripSmall}(undef, N)
         roundtrip_small_kernel(backend)(dst_gpu, src_gpu, 0.5f0; ndrange=N)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test Array(dst_gpu) == dst_cpu
     end
 
@@ -326,9 +326,9 @@ end
         ) for i in 1:N]
         src_cpu = copy(data); dst_cpu = similar(data)
         roundtrip_bool_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu; ndrange=N)
-        src_gpu = MVE.LavaArray(data); dst_gpu = MVE.LavaArray{RoundtripWithBool}(undef, N)
+        src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray{RoundtripWithBool}(undef, N)
         roundtrip_bool_kernel(backend)(dst_gpu, src_gpu; ndrange=N)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test Array(dst_gpu) == dst_cpu
     end
 
@@ -352,9 +352,9 @@ end
         ) for i in 1:N]
         src_cpu = copy(data); dst_cpu = zeros(Float32, N)
         roundtrip_twobool_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu; ndrange=N)
-        src_gpu = MVE.LavaArray(data); dst_gpu = MVE.LavaArray(zeros(Float32, N))
+        src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray(zeros(Float32, N))
         roundtrip_twobool_kernel(backend)(dst_gpu, src_gpu; ndrange=N)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test Array(dst_gpu) ≈ dst_cpu
     end
 
@@ -376,9 +376,9 @@ end
         ) for i in 1:N]
         src_cpu = copy(data); dst_cpu = zeros(Float32, N)
         roundtrip_nested_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu, 100f0; ndrange=N)
-        src_gpu = MVE.LavaArray(data); dst_gpu = MVE.LavaArray(zeros(Float32, N))
+        src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray(zeros(Float32, N))
         roundtrip_nested_kernel(backend)(dst_gpu, src_gpu, 100f0; ndrange=N)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test Array(dst_gpu) ≈ dst_cpu
     end
 end
@@ -416,7 +416,7 @@ random_fuzz_value(::Type{Float64}) = randn(Float64)
 
 @testset "Struct Layout Fuzzing" begin
     import Random
-    backend = MVE.LavaBackend()
+    backend = Mantle.LavaBackend()
     N = 128
     rng = Random.MersenneTwister(42)  # deterministic seed
 
@@ -443,10 +443,10 @@ random_fuzz_value(::Type{Float64}) = randn(Float64)
         dst_cpu = similar(data)
         dst_cpu .= src_cpu
 
-        src_gpu = MVE.LavaArray(data)
-        dst_gpu = MVE.LavaArray{T}(undef, N)
+        src_gpu = Mantle.LavaArray(data)
+        dst_gpu = Mantle.LavaArray{T}(undef, N)
         dst_gpu .= src_gpu
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
 
         result_gpu = Array(dst_gpu)
 
@@ -468,51 +468,51 @@ using ColorTypes: RGB
 
 @testset "Constant struct broadcast" begin
     @testset "RGB{Float32} constant" begin
-        a = MVE.LavaArray(fill(RGB{Float32}(1,1,1), 64))
+        a = Mantle.LavaArray(fill(RGB{Float32}(1,1,1), 64))
         a .= RGB{Float32}(0, 0, 0)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test all(Array(a) .== RGB{Float32}(0, 0, 0))
     end
 
     @testset "NTuple{3,Float32} via fill!" begin
-        a = MVE.LavaArray(fill(NTuple{3,Float32}((1,1,1)), 64))
+        a = Mantle.LavaArray(fill(NTuple{3,Float32}((1,1,1)), 64))
         fill!(a, NTuple{3,Float32}((0,0,0)))
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test all(x -> x == NTuple{3,Float32}((0,0,0)), Array(a))
     end
 
     @testset "TestS12 Ref broadcast" begin
-        a = MVE.LavaArray(fill(TestS12(1,1,1), 64))
+        a = Mantle.LavaArray(fill(TestS12(1,1,1), 64))
         a .= Ref(TestS12(0, 0, 0))
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test all(x -> x == TestS12(0,0,0), Array(a))
     end
 
     @testset "BoolPadStruct Ref broadcast" begin
-        a = MVE.LavaArray(fill(BoolPadStruct(1f0, true, 2f0), 64))
+        a = Mantle.LavaArray(fill(BoolPadStruct(1f0, true, 2f0), 64))
         a .= Ref(BoolPadStruct(0f0, false, 0f0))
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test all(x -> x == BoolPadStruct(0f0, false, 0f0), Array(a))
     end
 
     @testset "2D RGB array constant" begin
-        a = MVE.LavaArray(fill(RGB{Float32}(1,1,1), 16, 16))
+        a = Mantle.LavaArray(fill(RGB{Float32}(1,1,1), 16, 16))
         a .= RGB{Float32}(0.5, 0.5, 0.5)
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test all(Array(a) .== RGB{Float32}(0.5, 0.5, 0.5))
     end
 
     @testset "Ref-wrapped struct with nonzero values" begin
-        a = MVE.LavaArray(fill(TestS12(0,0,0), 64))
+        a = Mantle.LavaArray(fill(TestS12(0,0,0), 64))
         a .= Ref(TestS12(42, 43, 44))
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         @test all(x -> x == TestS12(42,43,44), Array(a))
     end
 
     @testset "non-zero value preserves data" begin
-        a = MVE.LavaArray(fill(TestS12(0,0,0), 128))
+        a = Mantle.LavaArray(fill(TestS12(0,0,0), 128))
         a .= Ref(TestS12(1.5f0, 2.5f0, 3.5f0))
-        MVE.vk_flush!(MVE.vk_context())
+        Mantle.vk_flush!(Mantle.vk_context())
         result = Array(a)
         @test result[1].a == 1.5f0
         @test result[1].b == 2.5f0
@@ -523,16 +523,16 @@ end
 
 @testset "Broadcast with closure-captured struct array" begin
     # Array-to-array broadcast through closure (exercises BDA struct copy pattern)
-    src = MVE.LavaArray(rand(Float32, 256))
-    dst = MVE.LavaArray(zeros(Float32, 256))
+    src = Mantle.LavaArray(rand(Float32, 256))
+    dst = Mantle.LavaArray(zeros(Float32, 256))
     dst .= src
-    MVE.vk_flush!(MVE.vk_context())
+    Mantle.vk_flush!(Mantle.vk_context())
     @test Array(dst) == Array(src)
 
     # Same with struct elements
-    src_s = MVE.LavaArray([TestS12(rand(Float32, 3)...) for _ in 1:64])
-    dst_s = MVE.LavaArray(fill(TestS12(0,0,0), 64))
+    src_s = Mantle.LavaArray([TestS12(rand(Float32, 3)...) for _ in 1:64])
+    dst_s = Mantle.LavaArray(fill(TestS12(0,0,0), 64))
     dst_s .= src_s
-    MVE.vk_flush!(MVE.vk_context())
+    Mantle.vk_flush!(Mantle.vk_context())
     @test Array(dst_s) == Array(src_s)
 end

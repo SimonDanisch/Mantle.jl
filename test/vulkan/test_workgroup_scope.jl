@@ -47,8 +47,8 @@ wgtlay(nrow, ncol) = Lava.tensor_slice(
 end
 
 @testset "workgroup-scope cooperative matrices" begin
-    ctx = MVE.vk_context()
-    dev = MVE.caps(MVE.vk_context())
+    ctx = Mantle.vk_context()
+    dev = Mantle.caps(Mantle.vk_context())
 
     @testset "the device reports its shapes, and they pair with a workgroup size" begin
         # Empty means no workgroup-scope matrices at all, so `isempty` is the
@@ -59,8 +59,8 @@ end
             @test nt > 0 && ispow2(nt)
             # Granularities are multiples, so each is a multiple of the
             # cooperative-matrix tile.
-            @test m % MVE.GEMM_TILE == 0 && n % MVE.GEMM_TILE == 0 &&
-                  k % MVE.GEMM_TILE == 0
+            @test m % Mantle.GEMM_TILE == 0 && n % Mantle.GEMM_TILE == 0 &&
+                  k % Mantle.GEMM_TILE == 0
         end
         # …and it coarsens as the workgroup grows, which is the property the
         # flash kernel's workgroup choice depends on.

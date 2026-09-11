@@ -39,11 +39,11 @@ const KA = KernelAbstractions
 end
 
 @testset "a queue's sweep asks that queue's timeline" begin
-    ctx = MVE.vk_context()
+    ctx = Mantle.vk_context()
     bq1 = ctx.default_bq
     b1 = LavaBackend()
     bq2 = Mantle.allocate_batch_queue!(ctx)
-    dev = MVE.vkdevice(bq1)
+    dev = Mantle.vkdevice(bq1)
     gatesem = Vulkan.unwrap(Vulkan.create_semaphore(dev, Vulkan.SemaphoreCreateInfo(;
         next = Vulkan.SemaphoreTypeCreateInfo(Vulkan.SEMAPHORE_TYPE_TIMELINE, UInt64(0)))))
     try
@@ -57,13 +57,13 @@ end
 
         # Then a submission on the second channel that the GPU cannot finish:
         # it waits on `gatesem`, which only this file signals.
-        o = MVE.oneshot(bq2) do e end
+        o = Mantle.oneshot(bq2) do e end
         tok2 = Mantle.submit!(bq2, o;
-            waits = ((gatesem, UInt64(1), MVE.STAGE2_ALL_COMMANDS),))
+            waits = ((gatesem, UInt64(1), Mantle.STAGE2_ALL_COMMANDS),))
         Mantle.handover!(bq2, tok2, o; tag = :gated)
         @test length(Mantle.outstanding(bq2)) == 1
-        @test !MVE.passed(bq2, tok2)
-        @test MVE.query_timeline(bq1) >= tok2      # the misreading's premise
+        @test !Mantle.passed(bq2, tok2)
+        @test Mantle.query_timeline(bq1) >= tok2      # the misreading's premise
 
         # THE assertion: the sweep (`drain!` is what every path on this queue
         # calls before it opens or submits) gives nothing back, because on ITS

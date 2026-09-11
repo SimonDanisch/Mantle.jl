@@ -39,7 +39,7 @@ end
 
 @testset "a free while the buffer is in flight is honoured, not raced" begin
     backend = LavaBackend()
-    bq = MVE.vk_context().default_bq
+    bq = Mantle.vk_context().default_bq
 
     # Quiesce, so nothing left over decides the outcome.
     KA.synchronize(backend)
@@ -49,7 +49,7 @@ end
         a = KA.allocate(backend, Float32, 64)
         buf = a.buf[]
         holders() = @atomic Mantle.stampof(buf).holders
-        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_ALIVE
+        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_ALIVE
         @test holders() == 0
 
         # Slow launch: its submission is still outstanding when the free below
@@ -62,9 +62,9 @@ end
 
         # The request is recorded and nothing is destroyed: a drain that asks
         # now finds the submission still in flight.
-        @test (@atomic :acquire buf.state) != MVE.BUF_STATE_DEAD
+        @test (@atomic :acquire buf.state) != Mantle.BUF_STATE_DEAD
         Mantle.drain!(bq)
-        @test (@atomic :acquire buf.state) != MVE.BUF_STATE_DEAD
+        @test (@atomic :acquire buf.state) != Mantle.BUF_STATE_DEAD
         @test holders() == 1
 
         # And nothing leaks: once the submission has passed, the sweep drops the
@@ -72,7 +72,7 @@ end
         KA.synchronize(backend)
         Mantle.drain!(bq)
         @test holders() == 0
-        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEAD
+        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_DEAD
     end
 
     @testset "nothing in flight names it: freed immediately" begin
@@ -83,9 +83,9 @@ end
         b = KA.allocate(backend, Float32, 64)
         buf = b.buf[]
         KA.synchronize(backend)          # nothing left in flight naming it
-        @test isempty(bq.outstanding) || all(o -> o.token <= MVE.query_timeline(bq), bq.outstanding)
+        @test isempty(bq.outstanding) || all(o -> o.token <= Mantle.query_timeline(bq), bq.outstanding)
         Mantle.unsafe_free!(b)
         Mantle.drain!(bq)
-        @test (@atomic :acquire buf.state) == MVE.BUF_STATE_DEAD
+        @test (@atomic :acquire buf.state) == Mantle.BUF_STATE_DEAD
     end
 end

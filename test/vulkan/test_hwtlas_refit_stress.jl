@@ -1,6 +1,6 @@
 using Test, Lava, Raycore, Printf
 using Mantle: build_accel!
-using .MVE: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE, write_grain_instances_kernel
+using Mantle: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE, write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
 using KernelAbstractions
 
@@ -19,28 +19,28 @@ end
 @testset "VulkanTLAS 1M instance refit stress" begin
     aabb = Mantle.AABB(Point3f(-0.005f0, -0.005f0, -0.005f0),
                      Point3f( 0.005f0,  0.005f0,  0.005f0))
-    blas = build_accel!(MVE.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     N = 1_000_000
     radius = 0.005f0
 
-    quats     = MVE.LavaArray([Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:N])
-    positions = MVE.LavaArray([Point3f(Float32(0.01 * (i % 1000)),
+    quats     = Mantle.LavaArray([Vec4f(0f0, 0f0, 0f0, 1f0) for _ in 1:N])
+    positions = Mantle.LavaArray([Point3f(Float32(0.01 * (i % 1000)),
                                         Float32(0.01 * ((i ÷ 1000) % 1000)),
                                         0f0) for i in 1:N])
-    instance_buf = MVE.LavaArray{VulkanInstanceRecord}(undef, 2 * N;
+    instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * N;
                                                        extra_usage=AS_INPUT_USAGE)
 
-    backend = MVE.LavaBackend()
-    bq      = MVE.vk_context().default_bq
+    backend = Mantle.LavaBackend()
+    bq      = Mantle.vk_context().default_bq
 
     # Initial instance record write.
     write_grain_instances_kernel(backend)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = N)
-    MVE.vk_flush!(bq)
+    Mantle.vk_flush!(bq)
 
-    tlas = MVE.VulkanTLAS(backend)
+    tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n = 2 * N,
           instance_mask = UInt8(0x02))
     Raycore.sync!(tlas)
@@ -55,12 +55,12 @@ end
     for f in 1:n_frames
         # Shift positions on the GPU -- no CPU vector allocation per frame.
         shift_kernel(positions, 0.001f0; ndrange = N)
-        MVE.vk_flush!(bq)
+        Mantle.vk_flush!(bq)
 
         write_grain_instances_kernel(backend)(
             positions, quats, radius, blas.address, blas.address, instance_buf;
             ndrange = N)
-        MVE.vk_flush!(bq)
+        Mantle.vk_flush!(bq)
 
         t0 = time()
         tlas.transforms_dirty = true
