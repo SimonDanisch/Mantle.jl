@@ -744,8 +744,13 @@ end
 A fresh command buffer for this backend's own work, behind whatever compute
 Metal.jl has batched and not yet committed.
 """
-function framebuffer!(dev)
-    bq = Metal.global_queue(dev)
+# `draw!` takes a KernelAbstractions backend and so has only the raw `MTLDevice`.
+# The Mantle device for it is the process one — `Device(MetalAPI())` is cached and
+# is the same object the graph is running on.
+framebuffer!(::MTLm.MTLDevice) = framebuffer!(Device(MetalAPI()))
+
+function framebuffer!(d::MetalDevice)
+    bq = batchqueue(d)
     # Compute was recorded since our last buffer. Theirs first, then ours.
     bq.cmdbuf === nothing || Metal.flush!(bq)
     return MTLm.MTLCommandBuffer(bq.queue)
@@ -832,7 +837,7 @@ profiled frame slower than a real one. A buffer that never reached the GPU
 reports zeros for both ends, and contributes nothing rather than a negative.
 """
 function Mantle.gpupasstime!(d::MetalDevice)
-    bq = Metal.global_queue(d.dev)
+    bq = batchqueue(d)
     # Every buffer this backend opened for the pass has been committed by the
     # call that opened it; Metal.jl's batch may still be open and is picked up
     # here, so the numbers describe the frame as it ran.

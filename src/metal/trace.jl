@@ -150,7 +150,7 @@ function trace_closest_hits!(hits::MtlArray, rays::MtlArray, tlas::MetalTLAS,
     n = UInt32(n_rays)
     cm = cull_mask
 
-    cmdbuf = MTL.MTLCommandBuffer(d.queue)
+    cmdbuf = MTL.MTLCommandBuffer(cmdqueue(d))
     MTL.MTLComputeCommandEncoder(cmdbuf) do cce
         MTL.set_function!(cce, pip)
         MTL.set_acceleration_structure!(cce, tlas.handle, 1)

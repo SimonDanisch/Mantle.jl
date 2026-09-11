@@ -14,6 +14,7 @@ covered device-free. Re-running them against Metal would test Metal for nothing.
 """
 
 using Test, Mantle, Metal
+const MTL = Metal.MTL
 
 @testset "Metal: the pool primitives" begin
     d = Mantle.Device(Mantle.MetalAPI())
@@ -74,7 +75,12 @@ using Test, Mantle, Metal
         @test Mantle.reserved(p) == 0
     end
 
-    @testset "the timeline only clears a region after a real sync" begin
+    @testset "the legacy timeline only clears a region after a real sync" begin
+        # On the LEGACY queue specifically, built here by name rather than taken
+        # from the process device: what a fence means is the one thing the two
+        # Metal generations disagree about, and this is the older answer. The
+        # MTL4 counterpart is the testset below.
+        d = Mantle.MetalDevice(Metal.device(), Mantle.LegacyQueue(Metal.device()))
         # This testset used to assert the opposite — that a region retired with
         # no command buffer recording is immediately reusable — on the reasoning
         # that `fence` reports what the GPU has already finished. That reasoning
@@ -99,6 +105,34 @@ using Test, Mantle, Metal
         # A fence taken after the wait is again unpassed: the sync covered what
         # had been issued, not what will be.
         @test !Mantle.passed(d, Mantle.fence(d))
+    end
+
+    # The same question of an MTL4 queue, which answers it without touching the
+    # device. This is what the whole generation is for: on the legacy path every
+    # pooled region costs a `Metal.synchronize()` to reuse, which is why a
+    # session that had opened and closed a few screens carried hundreds of
+    # retired regions it could not release.
+    if MTL.supports_mtl4(Metal.device())
+        @testset "the MTL4 timeline clears a region without a sync" begin
+            d4 = Mantle.MetalDevice(Metal.device(), Mantle.MTL4Queue(Metal.device()))
+            # A READ, so two calls with nothing submitted between them agree.
+            f1 = Mantle.fence(d4)
+            @test Mantle.fence(d4) == f1
+            # Nothing has been submitted, so nothing can be reading those bytes
+            # and the region is reusable NOW — no drain, no wait, no submission.
+            @test Mantle.passed(d4, f1)
+            @test Mantle.waitfor(d4, f1)
+            @test d4.queue.event.signaledValue == 0
+
+            # And a token that a submission WILL signal is unpassed until it
+            # does. One empty submission, through the same verbs a replay uses.
+            sub = Mantle.opensubmit!(d4, MTL.MTLBuffer[])
+            tok = Mantle.closesubmit!(d4, sub)
+            @test tok == f1
+            @test Mantle.waitfor(d4, tok)
+            @test Mantle.passed(d4, tok)
+            @test d4.queue.event.signaledValue >= tok
+        end
     end
 
     @testset "storage modes order by accessibility" begin
@@ -183,7 +217,10 @@ end
 # walk them — on a frame whose own cost is 240 bytes. The list being long is not
 # the defect and is not fixed here; walking it costing anything was.
 @testset "Metal: reclaim! allocates nothing for a backlog it cannot release" begin
-    d = Mantle.Device(Mantle.MetalAPI())
+    # A LEGACY device, by name: a backlog that cannot be released without a drain
+    # is that generation's property, and it is the one the 48 KB-per-frame walk
+    # was found on.
+    d = Mantle.MetalDevice(Metal.device(), Mantle.LegacyQueue(Metal.device()))
     p = Mantle.Pool()                       # this testset's own, as above
     B = Mantle.Buffers()
     rs = [Mantle.acquire!(p, d, B, nothing, 256; blocksize = 1 << 22) for _ in 1:200]
@@ -205,6 +242,30 @@ end
     # And it does release, once the device is asked to catch up — which is what
     # `wait = true` is for, and the only place in Mantle that waits at all.
     @test Mantle.reclaim!(p, d; wait = true) == 200
+    @test isempty(p.retiring)
+    @test isempty(p.retiring_at)
+end
+
+# The same measurement against the device the process actually runs on, which on
+# this machine is the MTL4 one. The backlog is the legacy queue's problem — an
+# MTL4 timeline releases a region as soon as the submission that could have been
+# reading it has signalled, so the list never grows in the first place — but the
+# property being measured is the WALK, and it has to cost nothing either way.
+@testset "Metal: reclaim! allocates nothing, on the process device" begin
+    d = Mantle.Device(Mantle.MetalAPI())
+    p = Mantle.Pool()
+    B = Mantle.Buffers()
+    rs = [Mantle.acquire!(p, d, B, nothing, 256; blocksize = 1 << 22) for _ in 1:200]
+    for r in rs
+        Mantle.retire!(p, r)
+    end
+    Mantle.reclaim!(p, d)
+    Mantle.reclaim!(p, d)                   # warm the walk
+    bytes = [(@allocated Mantle.reclaim!(p, d)) for _ in 1:5]
+    @test maximum(bytes) == 0
+    # Whatever is left is releasable once the device has caught up, and asking
+    # never leaves anything behind.
+    Mantle.reclaim!(p, d; wait = true)
     @test isempty(p.retiring)
     @test isempty(p.retiring_at)
 end

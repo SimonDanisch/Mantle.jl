@@ -78,7 +78,10 @@ root of the open batch it is released when that batch's command buffer completes
 and not before.
 """
 function Mantle.retire!(::Pool, buf::MTL.MTLBuffer)
-    Metal.record_operation!(Metal.global_queue(buf.device), buf)
+    # The device's batch, not `Metal.global_queue`: the root has to be held by the
+    # command buffer that actually reads these bytes, and that is the one Mantle
+    # submits to. `Device(MetalAPI())` is the process device this pool belongs to.
+    Metal.record_operation!(batchqueue(Device(MetalAPI())), buf)
     return nothing
 end
 
@@ -277,7 +280,7 @@ Everything `KernelAbstractions` would work out per launch is worked out here: th
 iteration space, the grid, the argument conversion, the kernel state and the
 pipeline. A frame does none of it.
 """
-function Mantle.compile_dispatch(c::Mantle.Compile{MetalDevice}, d::Mantle.Dispatch,
+function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dispatch,
                                  argoff::Int, indirect::Int)
     dev = c.graph.dev
     # A `DeviceRange` with no ceiling has no fixed size to record: the count is on
@@ -503,7 +506,21 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     # traversal is a call inside the shader, not a property of the dispatch.
     desc = MTL.MTLIndirectCommandBufferDescriptor(; max_kernel_buffers = max(nslots, 1),
                                                   ray_tracing = true)
-    icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, ncommands)
+    # SHARED, because the HOST encodes these commands. Metal's API validation
+    # refuses CPU access to a `Private` indirect command buffer outright
+    # ("CPU access for MTLIndirectCommandBuffer with MTLResourceStorageModePrivate
+    # storage mode is disallowed"), so the default storage made this backend
+    # un-runnable under `MTL_DEBUG_LAYER=1` — which is the one place a silent
+    # residency or hazard mistake gets reported. On unified memory the mode costs
+    # nothing; the buffer is written once at record time and read by the command
+    # processor every frame either way.
+    icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, ncommands;
+                                       storage = MTL.MTLResourceStorageModeShared)
+    # Resident for the life of the recording. The legacy encoder learns about the
+    # buffer from `executeCommandsInBuffer:` itself; a submission path with no
+    # `useResource` at all does not, and a command processor reading an
+    # unmapped indirect command buffer faults the queue rather than erroring.
+    Metal.make_persistently_resident!(icb, d.dev)
     # One 256-byte slot per range-writer argument, plus its kernel state. Sized
     # generously and once: this is record-time memory, not a frame's.
     # One 256-byte slot per argument: the head's range reset takes three, and each
@@ -606,6 +623,13 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
         MTL.set_kernel_buffer!(cmd, buf, off, a.index)
     end
     MTL.dispatch_threadgroups!(cmd, groups, threads)
+    # The bit, on BOTH generations. MTL4 does no automatic hazard tracking, which
+    # made it look as though it must ignore a command's barrier bit too — it does
+    # not: 40 chained dispatches replayed from one `executeCommandsInBuffer:` come
+    # out at 40 on an MTL4 encoder at every size tried up to eight million
+    # elements. The run that read 10 of 40 was an upload racing the replay from
+    # the other queue, not a barrier being dropped, and splitting the execute at
+    # every barrier to "fix" it cost 79 sends where one did.
     if e.barrier
         MTL.set_barrier!(cmd)
         e.barrier = false
@@ -629,7 +653,7 @@ recorded pass needs to know whether anything before it wrote what it reads.
 no layout to transition and there is no object to build, so the whole answer is the
 list, and what the recorder does with it is set one bit.
 """
-Mantle.passbarriers(c::Mantle.Compile{MetalDevice}, p::Mantle.Pass) =
+Mantle.passbarriers(c::Mantle.Compile{<:MetalDevice}, p::Mantle.Pass) =
     (Nothing[], c.prepass[p], nothing)
 
 """
@@ -824,6 +848,11 @@ updates nothing never opens this at all.
 """
 function Mantle.openrun(d::MetalDevice, pl::Mantle.Plan)
     pl.recording === nothing || Metal.synchronize()
+    # This device's queue is the one Metal.jl launches on, whatever task we are
+    # on (`adoptqueue!`), and when to submit to it is the graph's question rather
+    # than Metal.jl's op counter (`ownflush!`).
+    adoptqueue!(d)
+    ownflush!(d, true)
     return Mantle.Immediate()
 end
 
@@ -841,15 +870,20 @@ Mantle.closerun!(d::MetalDevice, pl::Mantle.Plan, ::Nothing) = submitrun!(d, pl)
 
 function submitrun!(d::MetalDevice, pl::Mantle.Plan)
     rec = pl.recording
-    rec === nothing || replay!(d, rec::MetalRecording)
+    # The token `waitfor!(plan)` waits on, and it comes OUT of the submission: a
+    # queue that signals an event per submit knows which value this run will
+    # reach, and one that does not falls back to bumping its retirement counter.
+    # A walked plan submitted nothing here, so it asks for a bare fence.
+    tok = rec === nothing ? closeframe!(d) : replay!(d, rec::MetalRecording)
     for s in pl.graph.surfaces
         Mantle.present_frame!(d, s.win)
     end
-    # The token `waitfor!(plan)` waits on. This backend's timeline counts what it
-    # has issued rather than what the GPU has signalled — Mantle does not own the
-    # submissions here — so waiting on it is a full `Metal.synchronize()`, which is
-    # the only wait available and is what `waitfor` already does with it.
-    return Mantle.fence(d)
+    # Given back here rather than left off, so that a `@metal` launch outside a
+    # run keeps the batching Metal.jl promises its own callers. A run that threw
+    # leaves it held, which costs nothing: the next run takes it again, and a
+    # `synchronize` flushes regardless of this setting.
+    ownflush!(d, false)
+    return tok
 end
 
 """
@@ -904,22 +938,9 @@ This is the whole of a baked frame's host work. Nothing here looks at a dispatch
 argument or a kernel; what runs was decided when the plan was recorded.
 """
 function replay!(d::MetalDevice, rec::MetalRecording)
-    bq = Metal.global_queue(d.dev)
-    enc = Metal.compute_encoder(bq)
-    MTL.use!(enc, replayresources!(d, rec), MTL.ReadWriteUsage)
+    sub = opensubmit!(d, replayresources!(d, rec))
     for s in rec.segments
-        if s.slot < 0
-            MTL.execute_commands!(enc, rec.icb, s.first:s.last)
-        else
-            MTL.execute_commands_indirect!(enc, rec.icb, rec.rangebuf,
-                                           rec.rangeoff + 8 * s.slot)
-        end
+        executesegment!(d, sub, rec, s)
     end
-    # An indirect execution leaves the encoder's own pipeline binding undefined, and
-    # `set_pipeline!` skips a set it believes is already in place. Forgetting this
-    # sends the next ordinary launch through whatever pipeline the recording left.
-    bq.last_pipeline = nothing
-    Metal.note_recorded!(bq, 0, nothing)
-    Metal.flush!(bq)
-    return nothing
+    return closesubmit!(d, sub)
 end

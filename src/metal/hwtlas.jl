@@ -109,9 +109,7 @@ end
 # argument buffer are exactly the case where Metal cannot infer residency, and
 # the failure mode without this is a silent miss rather than an error.
 function make_resident!(d::MetalDevice, resources...)
-    bq = Metal.global_queue(d.dev)
-    q = bq isa MTL.MTLCommandQueue ? bq : getfield(bq, :queue)
-    resset = Metal.install_queue_residency!(q, d.dev)
+    resset = Metal.install_queue_residency!(cmdqueue(d), d.dev)
     for r in resources
         r === nothing && continue
         MTL.add_allocation!(resset, r)

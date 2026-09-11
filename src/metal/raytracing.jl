@@ -82,7 +82,7 @@ than threading them through the graph's timeline. When acceleration-structure
 builds move into a pass, this becomes an encoder the graph hands over.
 """
 function withaccelencoder(f, d::MetalDevice)
-    cb = MTL.MTLCommandBuffer(d.queue)
+    cb = MTL.MTLCommandBuffer(cmdqueue(d))
     enc = MTL.MTLAccelerationStructureCommandEncoder(cb)
     try
         f(enc)
