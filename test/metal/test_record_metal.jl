@@ -123,11 +123,14 @@ end
         end
         plan = Mantle.record!(Mantle.Plan(g))
 
-        # Four iterations, each a gate pass and a gated pass: four ungated
-        # segments (the gate dispatch and the range writer behind it) and four
-        # gated ones.
-        @test length(plan.recording.segments) == 8
+        # ONE execute per iteration, not two. The head segment holds the range
+        # reset, the first gate and its range writer; every gated segment then
+        # absorbs the NEXT iteration's gate and writer, so a discarded iteration
+        # takes the following gate down with it — which is the right answer,
+        # because a discarded iteration writes nothing the gate reads.
+        @test length(plan.recording.segments) == 5
         @test count(s -> s.slot >= 0, plan.recording.segments) == 4
+        @test plan.recording.segments[1].slot == -1
 
         Mantle.run!(plan)
         Mantle.waitfor!(plan)
