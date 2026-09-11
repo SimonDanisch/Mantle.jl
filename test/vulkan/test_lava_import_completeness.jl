@@ -96,7 +96,7 @@ function referenced_names(path::AbstractString)
         # has to resolve in this module — it is what makes names resolve. Left
         # in, `import KernelInterface as KI` reported `KernelInterface` as an
         # unimported Lava name the moment Lava imported that module itself.
-        # `test_ext_imports_are_declared.jl` was fixed for exactly this on
+        # `test_core_names_no_backend.jl` was fixed for exactly this on
         # 2026-09-08; this scanner had the same blind spot.
         (ex.head === :using || ex.head === :import) && return
         if ex.head === :.
@@ -127,131 +127,146 @@ function referenced_names(path::AbstractString)
     return out
 end
 
-"""
-Which module a source file's bare names have to resolve in.
+# Uppercase, and the same value the other two guards bind: these files are
+# `include`d into `Main` side by side, and a const re-bound to what it already
+# holds is not a redefinition.
+const SRC = joinpath(pkgdir(Mantle), "src")
 
-`src/vulkan/` is no longer part of `Mantle`: it is included by
-`ext/MantleVulkanExt.jl`, so a bare `release!` in it resolves against the
-EXTENSION's bindings, not Mantle's. That is precisely why the extension carries
-explicit `import Mantle: …` and `using Mantle: …` lists — and precisely why this
-check has to follow the file into the module that now owns it, or it would
-report every one of the backend's Lava names as unimported while the real
-question, whether the extension's lists are complete, went unasked.
-
-`nothing` means no module owns the file in this session: the extension is not
-loaded, because this machine has no Vulkan loader.
-"""
-const BACKEND_EXTS = ("vulkan/" => :MantleVulkanExt, "metal/" => :MantleMetalExt)
-
-function owner(relpath_)
-    for (dir, ext) in BACKEND_EXTS
-        startswith(relpath_, dir) && return Base.get_extension(Mantle, ext)
-    end
-    # `src/host/` is NOT in that list: the host backend is included straight into
-    # `Mantle`, because its trigger would be KernelAbstractions — a hard
-    # dependency — and an extension on one of those always fires anyway.
-    return Mantle
+"""The modules a file bare-`using`s: `using Foo`, not `using Foo: bar`."""
+function bare_usings(path::AbstractString)
+    out = Symbol[]
+    walk(ex) = ex isa Expr &&
+        (ex.head === :using && !(ex.args[1] isa Expr && ex.args[1].head === :(:)) ?
+         foreach(a -> a isa Expr && a.head === :. && length(a.args) == 1 &&
+                      push!(out, a.args[1]), ex.args) :
+         foreach(walk, ex.args))
+    walk(Meta.parseall(read(path, String)))
+    return out
 end
 
 @testset "every Lava name Mantle uses is imported" begin
-    src = joinpath(pkgdir(Mantle), "src")
 
-    # Grouped by owning module, since a bare name resolves against whichever
-    # module included the file.
-    sites = Dict{Module, Dict{Symbol, Vector{String}}}()
-    skipped = String[]
-    for (root, _, files) in walkdir(src), f in files
+    # One dict, because one module owns every file: `src/vulkan/` is `@static
+    # include`d into `Mantle` again, so a bare `release!` in it resolves against
+    # Mantle's bindings the way it did before the extension split.
+    sites = Dict{Symbol, Vector{String}}()
+    for (root, _, files) in walkdir(SRC), f in files
         endswith(f, ".jl") || continue
         path = joinpath(root, f)
-        rel = relpath(path, src)
-        m = owner(rel)
-        if m === nothing
-            push!(skipped, rel)
-            continue
-        end
+        rel = relpath(path, SRC)
         for s in referenced_names(path)
-            push!(get!(Vector{String}, get!(Dict{Symbol,Vector{String}}, sites, m), s), rel)
+            push!(get!(Vector{String}, sites, s), rel)
         end
     end
 
-    for (m, bymod) in sites
-        # Base and Core are the other two ways a bare name resolves, and a name in
-        # either is not evidence of anything about the import list.
-        visible(s) = isdefined(m, s) || isdefined(Base, s) || isdefined(Core, s)
-        unimported = sort([s for s in keys(bymod) if isdefined(Lava, s) && !visible(s)];
-                          by = string)
+    # Base and Core are the other two ways a bare name resolves, and a name in
+    # either is not evidence of anything about the import list.
+    visible(s) = isdefined(Mantle, s) || isdefined(Base, s) || isdefined(Core, s)
+    unimported = sort([s for s in keys(sites) if isdefined(Lava, s) && !visible(s)];
+                      by = string)
 
-        # Named, not counted: the failure has to say which name and which file, or
-        # the next person re-derives what this test already knows.
-        @test (nameof(m), [(s, sort(unique(bymod[s]))) for s in unimported]) ==
-              (nameof(m), Tuple{Symbol,Vector{String}}[])
-    end
+    # Named, not counted: the failure has to say which name and which file, or
+    # the next person re-derives what this test already knows.
+    @test [(s, sort(unique(sites[s]))) for s in unimported] ==
+          Tuple{Symbol,Vector{String}}[]
 
-    # ── Names two of the extension's `using`s both export ─────────────────────
+    # ── Names two of Mantle's `using`s both export ────────────────────────────
     #
     # The same question from a direction the loop above cannot see. A module that
-    # says `using Mantle` and `using Vulkan` gets every name they BOTH export
-    # bound to NEITHER: Julia refuses to guess, so the name is `isdefined` ==
-    # false and the first use is an `UndefVarError` whose message suggests
+    # says `using Vulkan` alongside its own definitions gets every name they BOTH
+    # export bound to NEITHER: Julia refuses to guess, so the name is `isdefined`
+    # == false and the first use is an `UndefVarError` whose message suggests
     # checking the spelling.
     #
-    # Six collide today, and the backend means Mantle's every time. Three were
-    # disambiguated for unrelated reasons; the others surfaced ONE AT A TIME, in
-    # load order, over four reloads — `DrawIndirectCommand` in
-    # `graphics/pipeline.jl`, `Buffer` in four `rename!` signatures in the last
-    # file included, and `Backend` not until the sync lowering RAN, because that
-    # one is inside a function body. That is the whole argument for checking it
-    # statically instead of finding out.
+    # Five collide with Vulkan today — `Buffer`, `Device`, `DrawIndirectCommand`,
+    # `Framebuffer` and `Sampler` — and the backend means Mantle's every time.
+    # They surfaced ONE AT A TIME, in load order, over four reloads:
+    # `DrawIndirectCommand` in `graphics/pipeline.jl`, `Buffer` in four `rename!`
+    # signatures in the last file included, and `Backend` not until the sync
+    # lowering RAN, because that one is inside a function body. That is the whole
+    # argument for checking it statically instead of finding out.
     #
-    # Against every module the extension bare-`using`s, not just the driver:
+    # `src/Mantle.jl` says `import Vulkan as VK` for exactly this reason, so the
+    # five are not live — and this is what fails if anyone makes it a bare
+    # `using` again.
+    #
+    # Against every module bare-`using`d anywhere in `src/`, not just the driver:
     # `Backend` collides with KernelAbstractions, not with Vulkan. And a
     # collision is created by EITHER side adding an export, so neither package's
     # own tests can see one coming.
     #
-    # Checked against what the backend actually REFERENCES rather than against
-    # the whole intersection — `Scalar` (Mantle's vs StaticArrays') collides and
-    # appears in this backend only in comments, which is not a defect.
-    """The modules a file bare-`using`s: `using Foo`, not `using Foo: bar`."""
-    function bare_usings(path::AbstractString)
-        out = Symbol[]
-        walk(ex) = ex isa Expr &&
-            (ex.head === :using && !(ex.args[1] isa Expr && ex.args[1].head === :(:)) ?
-             foreach(a -> a isa Expr && a.head === :. && length(a.args) == 1 &&
-                          push!(out, a.args[1]), ex.args) :
-             foreach(walk, ex.args))
-        walk(Meta.parseall(read(path, String)))
-        return out
-    end
+    # Checked against what Mantle actually REFERENCES rather than against the
+    # whole intersection — `Scalar` (Mantle's vs StaticArrays') collides and
+    # appears only in comments, which is not a defect.
     loadedmod(n) = (for (_, m) in Base.loaded_modules; nameof(m) === n && return m; end;
                     nothing)
 
-    @testset "$extname" for (_, extname) in BACKEND_EXTS
-        ext = Base.get_extension(Mantle, extname)
-        if ext === nothing
-            @info "$extname is not loaded here, so its collisions are unchecked."
-            continue
-        end
-        extfile = joinpath(pkgdir(Mantle), "ext", string(extname) * ".jl")
-        others = filter(!isnothing, loadedmod.(setdiff(bare_usings(extfile), [:Mantle])))
-        both = union(Set{Symbol}(), (intersect(Set(names(Mantle)), Set(names(m)))
-                                     for m in others)...)
-        used = get(sites, ext, Dict{Symbol,Vector{String}}())
-        # Named with their files, so the failure says where to add the import.
-        clashing = sort([(s, sort(unique(used[s]))) for s in both
-                         if haskey(used, s) && !isdefined(ext, s)]; by = first)
-        @test (extname, clashing) == (extname, Tuple{Symbol,Vector{String}}[])
+    # Every file, because a bare `using` anywhere in the tree binds for the whole
+    # module — which is the difference the extension split used to hide.
+    usings = Set{Symbol}()
+    for (root, _, files) in walkdir(SRC), f in files
+        endswith(f, ".jl") && union!(usings, bare_usings(joinpath(root, f)))
     end
+    others = filter(!isnothing, loadedmod.(setdiff(collect(usings), [:Mantle])))
+    both = union(Set{Symbol}(), (intersect(Set(names(Mantle)), Set(names(m)))
+                                 for m in others)...)
+    # Named with their files, so the failure says where to add the import.
+    clashing = sort([(s, sort(unique(sites[s]))) for s in both
+                     if haskey(sites, s) && !isdefined(Mantle, s)]; by = first)
+    @test clashing == Tuple{Symbol,Vector{String}}[]
+end
 
-    # Loudly, not silently. A machine with no Vulkan loader cannot load the
-    # extension, so the backend's half of this check does not run there — and a
-    # test that quietly covers less than it says is how the import lists rotted
-    # the first time.
-    if !isempty(skipped)
-        missing_exts = [String(e) for (_, e) in BACKEND_EXTS
-                        if Base.get_extension(Mantle, e) === nothing]
-        @info """$(join(missing_exts, " and ")) not loaded, so $(length(skipped)) backend \
-                 files were not checked. Run this where those backends load to cover them."""
+# ── Names Mantle DEFINES that a dependency also defines ──────────────────────
+#
+# The third way a bare name goes to the wrong function, and the one that cost
+# the most. `vulkan/raytracing/acceleration.jl` says
+#
+#     function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
+#
+# unqualified. While `src/vulkan/` was an extension that extended whatever
+# `import GPUArrays: unsafe_free!` had brought in; back inside `module Mantle`
+# with no such import it DEFINES `Mantle.unsafe_free!`, a new function. The
+# `finalizer(unsafe_free!, xs)` in `vulkan/array/lavaarray.jl` then registers
+# that one, which has no `LavaArray` method, and every array finalization prints
+# `error in running finalizer: MethodError` from the GC. 125 in one suite run,
+# and not one test failed — a finalizer error is not an exception anyone catches.
+#
+# GPUArrays does not EXPORT `unsafe_free!`, so the collision check above cannot
+# see it: the name never collides, it is simply absent and gets defined. What is
+# checkable is the SET of names in this position, pinned. A new entry means
+# someone wrote a definition that may have been meant to extend a dependency —
+# and if it was meant, it goes in the list with the others.
+@testset "no new name shadows a dependency's" begin
+    # `eval`, `include` and `__init__` are in every module by construction.
+    universal = (:eval, :include, :__init__)
+    loadedmod(n) = (for (_, m) in Base.loaded_modules; nameof(m) === n && return m; end;
+                    nothing)
+    usings = Set{Symbol}()
+    for (root, _, files) in walkdir(SRC), f in files
+        endswith(f, ".jl") && union!(usings, bare_usings(joinpath(root, f)))
     end
-    @test isempty(skipped) ||
-          any(e -> Base.get_extension(Mantle, e) === nothing, last.(BACKEND_EXTS))
+    deps = filter(!isnothing, loadedmod.(setdiff(collect(usings), [:Mantle])))
+
+    # `binding_module`, not `parentmodule`: it answers for an imported binding
+    # as well as a defined one, and it does not throw on a union alias the way
+    # `parentmodule(Mantle.AnyLavaArray)` does.
+    defines(m, n) = isdefined(m, n) && Base.binding_module(m, n) === m &&
+                    (v = getglobal(m, n); v isa Function || v isa Type)
+    ours = [n for n in names(Mantle; all = true)
+            if !startswith(String(n), "#") && !(n in universal) && defines(Mantle, n)]
+    shadows = sort([(n, nameof(m)) for n in ours for m in deps if defines(m, n)]; by = first)
+
+    # Every one of these is Mantle's own vocabulary that happens to spell a name
+    # a dependency also uses — `Backend` and `Window` are the documented ones,
+    # `fence` is the timeline counter and not UnsafeAtomics' barrier. Reviewed
+    # on 2026-09-11; `unsafe_free!` is NOT here, because it is imported now.
+    known = [(:Attribute, :LLVM), (:Backend, :KernelAbstractions),
+             (:Mat4f, :GeometryBasics), (:Pass, :LLVM), (:Window, :GLFW),
+             (:alignment, :LLVM), (:allocate, :KernelAbstractions),
+             (:backend, :KernelAbstractions), (:count, :AcceleratedKernels),
+             (:device, :KernelAbstractions), (:fence, :UnsafeAtomics),
+             (:free!, :LLVM), (:gemv!, :LinearAlgebra), (:offset, :LLVM),
+             (:overlaps, :GeometryBasics), (:register!, :LLVM), (:run!, :LLVM),
+             (:storage, :GPUArrays), (:workgroupsize, :KernelAbstractions)]
+    @test setdiff(shadows, known) == Tuple{Symbol,Symbol}[]
 end

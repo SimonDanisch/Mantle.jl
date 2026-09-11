@@ -70,9 +70,12 @@ end
 const NOT_PORTABLE = Set{Symbol}()
 
 @testset "0.2 a vocabulary name has a core default or every backend" begin
-    exts = filter(!isnothing, [Base.get_extension(Mantle, :MantleVulkanExt),
-                               Base.get_extension(Mantle, :MantleMetalExt)])
-    if isempty(exts)
+    # A backend is `@static include`d into Mantle now, not an extension, so
+    # "is one here" is a question about files rather than about modules.
+    hasbackend = any(methods(Mantle.caps)) do m
+        any(b -> occursin(joinpath("src", b), string(m.file)), BACKEND_DIRS)
+    end
+    if !hasbackend
         @info "0.2 no backend loaded; nothing to check"
     else
         lonely = Symbol[]
@@ -157,11 +160,11 @@ end
 #
 # `src/` outside the two backend trees must not name a driver or a driver
 # package in code position. Comments and docstrings are stripped, as in
-# `test_ext_imports_are_declared.jl`.
+# `test_core_names_no_backend.jl`.
 # ALREADY TRUE, so this is a plain `@test` and not a `@test_broken`: with the
-# three deliberate `…API` markers excluded, core names no backend anywhere. It
-# is a ratchet over a property that already holds, and the one guard here that
-# must never go red rather than one that starts red.
+# three deliberate `…API` markers excluded, core names no backend in ONE place.
+# It is a ratchet over a property that already holds, and the one guard here
+# that must never go red rather than one that starts red.
 
 @testset "0.4 core names no backend" begin
     core, _ = sourcefiles()
@@ -177,8 +180,19 @@ end
             push!(hits, (relpath(p, ROOT), m.match))
         end
     end
-    isempty(hits) || @info "0.4 backend names in core" count = length(hits) first10 = first(hits, 10)
-    @test isempty(hits)
+    # The one exception, pinned exactly rather than pattern-matched away.
+    # `src/Mantle.jl` ends in an `@static if Sys.isapple()` that picks the
+    # backend at PARSE time, and picking it means naming the package: `import
+    # Vulkan as VK` and `using Vulkan: unwrap, iserror, unwrap_error`. That is
+    # the whole point of the block — it is what replaced `ext/MantleVulkanExt.jl`
+    # — and it is the only spelling of a backend core gets. A third mention,
+    # here or anywhere else, fails. (`Metal` and `include("vulkan/vulkan.jl")`
+    # do not match the pattern, so the Metal arm of the same block needs no
+    # entry; if the pattern ever widens, they belong here beside these two.)
+    allowed = [("src/Mantle.jl", "Vulkan"), ("src/Mantle.jl", "Vulkan")]
+    extra = sort(hits) != sort(allowed) ? hits : Tuple{String,String}[]
+    isempty(extra) || @info "0.4 backend names in core" count = length(hits) first10 = first(hits, 10)
+    @test sort(hits) == sort(allowed)
 end
 
 # ── 0.6 One device per process ───────────────────────────────────────────────
@@ -194,14 +208,15 @@ end
 # cannot run from here, because Mantle does not depend on Hikari or RayMakie.
 
 @testset "0.6 one device per process" begin
-    MX = Base.get_extension(Mantle, :MantleMetalExt)
-    if MX === nothing
+    hasmetal = any(m -> occursin(joinpath("src", "metal"), string(m.file)),
+                   methods(Mantle.caps))
+    if !hasmetal
         @info "0.6 Metal not loaded; nothing to check"
     else
         d = Mantle.Device(Mantle.MetalAPI())
         Mantle.caps(Mantle.backend(d))          # the second entry point
         # A second cache not existing at all is the passing state.
-        second = isdefined(MX, :_DEVICE) ? getglobal(MX, :_DEVICE)[] : nothing
+        second = isdefined(Mantle, :_DEVICE) ? getglobal(Mantle, :_DEVICE)[] : nothing
         second === nothing && (second = d)
         same = d === second
         same || @info "0.6 a second device exists" pools_differ = Mantle.pool(d) !== Mantle.pool(second)
@@ -240,7 +255,7 @@ const BACKEND_NAMED_ALLOWED = Set([
     # spellings (`recordsplans`, `waitidle`); the third belongs in
     # `test/vulkan/`. Splitting it is the rest of 0.7 and this line goes then.
     "test_arena_recording.jl",
-    # 2,000 lines with 26 MVE sites, 16 of them raw `VK.` enums for image
+    # 2,000 lines with 26 backend sites, 16 of them raw `VK.` enums for image
     # layouts, load ops and aspects — genuinely that backend's, and they belong
     # under `test/vulkan/`. The portable half is already split out into
     # `test_window_portable.jl`, which runs per backend; splitting the rest is
@@ -258,5 +273,64 @@ const BACKEND_NAMED_ALLOWED = Set([
         n == 0 || push!(hits, (f, n))
     end
     isempty(hits) || @info "0.7 backend named in the shared test layer" hits
+    @test isempty(hits)
+end
+
+# ── 0.7b The shared test layer names no backend-only BINDING ─────────────────
+#
+# 0.7 above asks whether a shared test hardcodes an API marker. It never asked
+# what those tests NAME, and for as long as the backend was an extension it did
+# not have to: a reach was spelled `MVE.LavaArray`, the module prefix announced
+# itself, and `grep MVE\.` found all 1,960 of them. The extension is gone and
+# the prefix with it — `Mantle.LavaArray` reads exactly like portable API.
+#
+# So ask the definition SITE, which is what the rule was always about and needs
+# no vendor name in the pattern: is this a thing only `src/vulkan/` or
+# `src/metal/` defines? That covers more than the prefix ever did, because it
+# also catches a shared test that names a backend-private binding unqualified.
+#
+# 1,913 of the 1,960 reaches were in `test/vulkan/`, which is the backend's own
+# test directory and exactly where they belong. The 47 in the shared layer are
+# in the four files below, all of them already named by `BACKEND_NAMED_ALLOWED`
+# with the split that retires them. This starts green and is a ratchet: it locks
+# in that no OTHER shared test reaches into a backend.
+#
+# Functions and types only: those are the things with a definition site to ask
+# about. A plain `const` (`GEMM_TILE`) and a module alias (`VK`, from `import
+# Vulkan as VK`) have none, so three of the seventeen names the shared layer
+# reaches for are not covered here — all three are in files on the allow-list.
+# Asking about modules by any other means does not work: every `using`d package
+# and every core submodule (`Transient`) is a module bound in `Mantle` too, and
+# separating a driver from a dependency would mean naming the vendor.
+#
+# The token scan OVER-approximates: it does not know a binding from a reference,
+# so a local named `acc` or `stage` counts as naming the backend function that
+# happens to share the spelling. That is the right direction for a ratchet which
+# starts green — a new entry is read by a person either way — and the precise
+# extractor lives in `test_core_names_no_backend.jl`, which is a separate file
+# included separately, so reaching for it here would be an ordering dependency.
+@testset "0.7b the shared test layer names no backend-only binding" begin
+    backendsrc(f) = any(d -> occursin(joinpath("src", d), string(f)), BACKEND_DIRS)
+    coresrc(f) = startswith(string(f), joinpath(ROOT, "src")) && !backendsrc(f)
+
+    function backendonly(s::Symbol)
+        s in Mantle.BACKEND_VOCABULARY && return false
+        (isdefined(Mantle, s) && Base.binding_module(Mantle, s) === Mantle) || return false
+        v = getglobal(Mantle, s)
+        (v isa Function || v isa Type) || return false
+        ms = collect(methods(v))
+        return any(m -> backendsrc(m.file), ms) && !any(m -> coresrc(m.file), ms)
+    end
+
+    dir = joinpath(ROOT, "test")
+    hits = Tuple{String,Vector{Symbol}}[]
+    for f in readdir(dir)
+        endswith(f, ".jl") && !(f in BACKEND_NAMED_ALLOWED) || continue
+        code = codeonly(read(joinpath(dir, f), String))
+        named = Set(Symbol(m.match) for m in eachmatch(r"\b[A-Za-z_][A-Za-z0-9_]*!?\b", code))
+        bad = sort(collect(filter(backendonly, named)); by = string)
+        isempty(bad) || push!(hits, (f, bad))
+    end
+    isempty(hits) || @info "0.7b backend-only bindings named in the shared test layer" hits
     @test isempty(hits)
 end
