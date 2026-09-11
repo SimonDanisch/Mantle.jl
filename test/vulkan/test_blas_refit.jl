@@ -39,7 +39,7 @@ isdefined(@__MODULE__, :build_raygen_shader) ||
         indices = UInt32[0, 1, 2]
         at_z(z) = [(0.0f0, 0.0f0, z), (1.0f0, 0.0f0, z), (0.0f0, 1.0f0, z)]
 
-        blas, tlas = Mantle.build_accel!(Mantle.vk_context().default_bq) do c
+        blas, tlas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c
             b = Mantle.build_blas(c, at_z(0.0f0), indices; allow_update = true)
             (b, Mantle.build_tlas(c, [b]))
         end
@@ -66,7 +66,7 @@ isdefined(@__MODULE__, :build_raygen_shader) ||
         @test t_before ≈ 1.0f0 atol = 1.0f-3   # plane at z=0, origin at z=-1
 
         # Move the plane to z=5 and refit in place. Same topology, same buffer.
-        Mantle.build_accel!(Mantle.vk_context().default_bq) do c
+        Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c
             Mantle.refit_blas!(c, blas, at_z(5.0f0))
         end
         Mantle.VK.device_wait_idle(ctx.device)
@@ -85,18 +85,18 @@ end
 
     # A BLAS built without ALLOW_UPDATE cannot be refit, and saying so beats a
     # driver-level fault or a silently ignored build.
-    static_blas = Mantle.build_accel!(Mantle.vk_context().default_bq) do c; Mantle.build_blas(c, verts, indices); end
+    static_blas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c; Mantle.build_blas(c, verts, indices); end
     @test !static_blas.allow_update
     @test static_blas.update_scratch_size == 0
-    @test_throws ErrorException Mantle.build_accel!(Mantle.vk_context().default_bq) do c
+    @test_throws ErrorException Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c
         Mantle.refit_blas!(c, static_blas, verts)
     end
 
     # Topology is fixed at build: MODE_UPDATE_KHR refits the existing tree.
-    dyn_blas = Mantle.build_accel!(Mantle.vk_context().default_bq) do c
+    dyn_blas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c
         Mantle.build_blas(c, verts, indices; allow_update = true)
     end
-    @test_throws ErrorException Mantle.build_accel!(Mantle.vk_context().default_bq) do c
+    @test_throws ErrorException Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do c
         Mantle.refit_blas!(c, dyn_blas, vcat(verts, verts))
     end
 end

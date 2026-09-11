@@ -511,11 +511,12 @@ end
 # shared arena, and `Device(VulkanAPI())` is cached per context, so any earlier file
 # that compiled a plan is still a tenant until a GC reaps it. Adding an include
 # above this line that touches the Lava device breaks it.
-# NOT per-backend yet. Three of its assertions are genuinely Vulkan's — a
-# `pool_offset` inside a VkBuffer, `plan.recording isa Mantle.Recording`, and
-# `vk_flush!` — and two of those have portable spellings (`recordsplans(dev)`
-# and `waitidle(dev)`) while the third belongs in `test/vulkan/`. Splitting it
-# is the rest of 0.7; gating it is honest in the meantime, and the guard in
+# NOT per-backend yet. Two of its assertions are genuinely Vulkan's — a
+# `pool_offset` inside a VkBuffer and `plan.recording isa Mantle.Recording` —
+# and the first belongs in `test/vulkan/` while the second has a portable
+# spelling (`recordsplans(dev)`). The third was `vk_flush!`, which is gone:
+# `flush!(device)` is core's now. Splitting the rest is the remainder of 0.7;
+# gating it is honest in the meantime, and the guard in
 # `test_mantle_owns_it.jl` still names the file.
 _VULKAN_OK && include(joinpath(@__DIR__, "test_arena_recording.jl"))
 foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))

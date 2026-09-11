@@ -46,7 +46,7 @@ end
         k = Mantle.LavaArray(copy(h))
         v = Mantle.LavaArray(collect(Int32(1):Int32(n)))
         AK.merge_sort_by_key!(k, v)
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
         @test Array(k) == sort(h)
         @test h[Array(v)] == sort(h)   # values permuted consistently with keys
     end
@@ -60,7 +60,7 @@ end
     v = Mantle.LavaArray(copy(h))
     ix = Mantle.LavaArray(collect(Int32(1):Int32(n)))
     AK.sortperm!(ix, v)
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test h[Array(ix)] == sort(h)
     # Recursion used to grow the pool by tens of GB before dying.
     @test Mantle.gpu_live_bytes() - before < 256_000_000

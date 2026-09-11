@@ -135,7 +135,7 @@ const VULKAN_BUDGET = Dict(
     # did. If these ever disagree, a kernel sized through `caps` is being launched
     # against a different device's limits — which is silent, and wrong.
     @testset "the portable queries agree with the context ones" begin
-        be = Mantle.LavaBackend()
+        be = Mantle.defaultbackend()
         a = KA.allocate(be, Float32, 16)
         ctx = Mantle.vk_context()
         @test Mantle.workgrouplimit(a) == Mantle.workgroup_limit(ctx)

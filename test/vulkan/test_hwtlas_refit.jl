@@ -7,7 +7,7 @@ using LinearAlgebra: I
 
 @testset "Raycore.sync!(VulkanTLAS) refit cycles" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0
@@ -24,13 +24,13 @@ using LinearAlgebra: I
                                                 blas.address)
                            for _ in 1:length(_buf)])
         end
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq = Mantle.batchqueue(Mantle.Device())
 
     write_grain_instances_kernel(backend)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = n)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n=2*n, instance_mask=UInt8(0x02))
@@ -42,7 +42,7 @@ using LinearAlgebra: I
     write_grain_instances_kernel(backend)(
         new_positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = n)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     tlas.transforms_dirty = true
     Raycore.sync!(tlas)

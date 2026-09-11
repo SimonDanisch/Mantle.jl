@@ -20,7 +20,7 @@ using Test, Lava, Mantle
 
     @testset "the context owns what it hands out" begin
         held = length(ctx.extra_queues)
-        bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
+        bq = Mantle.allocate_batch_queue!(Mantle.Device())
         # Reachable from the context, not just from the caller's binding. This
         # single assertion is the memory-safety property: a GC that collects the
         # caller cannot take the semaphore with it.
@@ -33,13 +33,13 @@ using Test, Lava, Mantle
     end
 
     @testset "a released hardware slot is reused" begin
-        bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
+        bq = Mantle.allocate_batch_queue!(Mantle.Device())
         idx = Mantle.driver(bq).queue_index
         Mantle.release_batch_queue!(bq)
 
         if idx >= 0
             @test idx in ctx.free_queue_indices
-            again = Mantle.allocate_batch_queue!(Mantle.vk_context())
+            again = Mantle.allocate_batch_queue!(Mantle.Device())
             @test Mantle.driver(again).queue_index == idx
             @test !(idx in ctx.free_queue_indices)
             Mantle.release_batch_queue!(again)
@@ -51,7 +51,7 @@ using Test, Lava, Mantle
     end
 
     @testset "releasing twice is a no-op, releasing the primary is an error" begin
-        bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
+        bq = Mantle.allocate_batch_queue!(Mantle.Device())
         Mantle.release_batch_queue!(bq)
         held = length(ctx.extra_queues)
         freed = copy(ctx.free_queue_indices)
@@ -67,7 +67,7 @@ using Test, Lava, Mantle
         # queue, drop every reference to that queue, then force collection. The
         # buffer's finalizer queries a timeline semaphore that only the
         # context's reference is keeping alive.
-        let bq = Mantle.allocate_batch_queue!(Mantle.vk_context())
+        let bq = Mantle.allocate_batch_queue!(Mantle.Device())
             a = Mantle.LavaArray{Float32, 1}(undef, (4096,))
             Mantle.upload!(a, ones(Float32, 4096))
             Mantle.flush!(bq)

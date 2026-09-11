@@ -60,7 +60,7 @@ holders(a) = @atomic Mantle.stampof(a).holders
 end
 
 @testset "a buffer is recorded once however often it is held" begin
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     a = LavaArray{Float32,1}(zeros(Float32, 8))
 
     Mantle.oneshot!(bq) do e
@@ -75,18 +75,18 @@ end
         @test e.owner.sync[1] === a.buf[]
         @test holders(a) == 5
     end
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     @test holders(a) == 0
 end
 
 @testset "the submission that ran is stamped on the buffer" begin
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     a = LavaArray{Float32,1}(zeros(Float32, 4))
 
     Mantle.oneshot!(bq) do e
         Mantle.hold!(e, a)
     end
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     st = Mantle.stampof(a)
     @test st.channel === bq
     @test st.token == Mantle.driver(bq).next_timeline
@@ -106,7 +106,7 @@ end
     KernelAbstractions.synchronize(be)
     @test holders(a) == 0
 
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     touchkernel!(be, 16)(a; ndrange = 16)
     @test holders(a) > 0                        # held while in flight
     # And the one-shot that carried it names the buffer, which is what the
@@ -117,7 +117,7 @@ end
 end
 
 @testset "the adaptor strips and holds nothing" begin
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     a = LavaArray{Float32,1}(zeros(Float32, 8))
 
     Mantle.oneshot!(bq) do e
@@ -129,11 +129,11 @@ end
         @test dev_a isa Lava.LavaDeviceArray
         @test holders(a) == 0
     end
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 end
 
 @testset "wrapper struct: the adaptor leaves an unregistered struct alone" begin
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     a = LavaArray{Float32,1}(zeros(Float32, 4))
     b = LavaArray{Int32,1}(zeros(Int32, 4))
     w = TestWrapper(a, b)
@@ -150,7 +150,7 @@ end
         @test wc.items === a
         @test wc.sizes === b
     end
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 end
 
 end  # @testset

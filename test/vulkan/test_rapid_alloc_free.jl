@@ -30,8 +30,8 @@ pendingfrees(bq) = lock(bq.pendinglock) do
 end
 
 @testset "Rapid allocation/free cycles" begin
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq = Mantle.batchqueue(Mantle.Device())
     drainfrees!() = Mantle.quiesce_before_reclaim!(bq)
 
     @testset "many small arrays created and discarded" begin
@@ -43,7 +43,7 @@ end
             for a in arrays
                 fill_kernel!(backend)(a, Float32(iter); ndrange=100)
             end
-            Mantle.vk_flush!(Mantle.vk_context())
+            Mantle.flush!(Mantle.Device())
 
             # Verify last array
             result = Array(arrays[end])
@@ -64,7 +64,7 @@ end
             fill_kernel!(backend)(b, 1f0; ndrange=200)
             # Don't flush — batches accumulate
         end
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
         GC.gc(true)
         drainfrees!()
         @test true
@@ -88,12 +88,12 @@ end
 
             # Flush every 5 iterations (like the reference test GC between test files)
             if iter % 5 == 0
-                Mantle.vk_flush!(Mantle.vk_context())
+                Mantle.flush!(Mantle.Device())
                 drainfrees!()
                 GC.gc(true)
             end
         end
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
         drainfrees!()
         GC.gc(true)
         @test true
@@ -118,7 +118,7 @@ end
             fill_kernel!(backend)(positions, 1f0; ndrange=n*3)
             fill_kernel!(backend)(colors, 0.5f0; ndrange=n*4)
 
-            Mantle.vk_flush!(Mantle.vk_context())
+            Mantle.flush!(Mantle.Device())
 
             # Explicit cleanup (what the reference tests should do)
             for arr in [positions, quad_offsets, quad_scales, rotations, colors,
@@ -142,7 +142,7 @@ end
             # Don't explicitly free — let GC handle it
         end
 
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
         GC.gc(true)
         drainfrees!()
 
@@ -156,7 +156,7 @@ end
         for iter in 1:30
             a = Mantle.LavaArray(rand(Float32, 100))
             fill_kernel!(backend)(a, Float32(iter); ndrange=100)
-            Mantle.vk_flush!(Mantle.vk_context())
+            Mantle.flush!(Mantle.Device())
             # Let a go out of scope without explicit free — GC finalizer should handle it
         end
         GC.gc(true)
@@ -172,7 +172,7 @@ end
             for a in arrays
                 fill_kernel!(backend)(a, Float32(cycle); ndrange=100)
             end
-            Mantle.vk_flush!(Mantle.vk_context())
+            Mantle.flush!(Mantle.Device())
         end
         GC.gc(true)
         drainfrees!()

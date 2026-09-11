@@ -19,7 +19,7 @@ end
 @testset "VulkanTLAS 1M instance refit stress" begin
     aabb = Mantle.AABB(Point3f(-0.005f0, -0.005f0, -0.005f0),
                      Point3f( 0.005f0,  0.005f0,  0.005f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     N = 1_000_000
     radius = 0.005f0
@@ -31,14 +31,14 @@ end
     instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * N;
                                                        extra_usage=AS_INPUT_USAGE)
 
-    backend = Mantle.LavaBackend()
-    bq      = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq      = Mantle.batchqueue(Mantle.Device())
 
     # Initial instance record write.
     write_grain_instances_kernel(backend)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = N)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n = 2 * N,
@@ -55,12 +55,12 @@ end
     for f in 1:n_frames
         # Shift positions on the GPU -- no CPU vector allocation per frame.
         shift_kernel(positions, 0.001f0; ndrange = N)
-        Mantle.vk_flush!(bq)
+        Mantle.flush!(bq)
 
         write_grain_instances_kernel(backend)(
             positions, quats, radius, blas.address, blas.address, instance_buf;
             ndrange = N)
-        Mantle.vk_flush!(bq)
+        Mantle.flush!(bq)
 
         t0 = time()
         tlas.transforms_dirty = true

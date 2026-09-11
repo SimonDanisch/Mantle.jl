@@ -5,7 +5,7 @@ using Test, Lava, Mantle
     # `thread`, on core's `SubmitChannel`: the single-writer invariant is the
     # same one, asked by `Mantle.ownthread` at every entry point that records or
     # submits. It was `owning_thread` on the backend's queue.
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     @test hasfield(Mantle.SubmitChannel, :thread)
     @test bq.thread == Threads.threadid()
 end
@@ -13,7 +13,7 @@ end
 @testset "cross-thread dispatch trips the assert" begin
     # Only meaningful under `julia -t N` with N > 1.
     if Threads.nthreads() > 1
-        bq = Mantle.vk_context().default_bq
+        bq = Mantle.batchqueue(Mantle.Device())
         result = Ref{Any}(nothing)
         # Open a one-shot from a different thread.
         #

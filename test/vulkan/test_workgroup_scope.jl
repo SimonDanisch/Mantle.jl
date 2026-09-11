@@ -48,7 +48,7 @@ end
 
 @testset "workgroup-scope cooperative matrices" begin
     ctx = Mantle.vk_context()
-    dev = Mantle.caps(Mantle.vk_context())
+    dev = Mantle.caps(Mantle.Device())
 
     @testset "the device reports its shapes, and they pair with a workgroup size" begin
         # Empty means no workgroup-scope matrices at all, so `isempty` is the

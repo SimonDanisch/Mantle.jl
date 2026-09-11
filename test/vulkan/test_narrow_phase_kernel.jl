@@ -169,7 +169,7 @@ end
     results    = LavaArray([sentinel])
     Mantle.narrow_phase_kernel(LavaBackend())(transforms, pairs, Mantle.UnitCube(), results;
                                             ndrange=1)
-    Mantle.vk_flush!(Mantle.vk_context().default_bq)
+    Mantle.flush!(Mantle.Device())
     r = Array(results)[1]
     # Two unit cubes overlapping by 0.1 along +X: depth 0.1, normal (1,0,0),
     # contact on the +X face of cube A at (1, 1, 1) corner-ish.

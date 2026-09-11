@@ -102,8 +102,8 @@ end
     empty!(caches.pipelines)
     try
         out = Mantle.LavaArray(zeros(Float32, M))
-        lpb_clamped_ternary!(Mantle.LavaBackend())(out; ndrange = M, workgroupsize = M)
-        KA.synchronize(Mantle.LavaBackend())
+        lpb_clamped_ternary!(Mantle.defaultbackend())(out; ndrange = M, workgroupsize = M)
+        KA.synchronize(Mantle.defaultbackend())
 
         # The answer must still be right — the fix reconciles the select's
         # operands, it does not change what the kernel computes.

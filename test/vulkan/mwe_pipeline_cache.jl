@@ -55,9 +55,9 @@ println("         file exists post-init: $(isfile(path))  (expected: false)")
 println("\n[step 2] compile + dispatch trivial kernel")
 N = 64
 buf = Mantle.LavaArray(zeros(Float32, N))
-bq = Mantle.LavaBackend().dispatch_bq
+bq = Mantle.defaultbackend().dispatch_bq
 Mantle.lava_launch!(bq, trivial_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
-Mantle.vk_flush!(bq)
+Mantle.flush!(bq)
 result = Array(buf)
 @assert result == Float32.(1:N) "kernel produced wrong values: $(result[1:8])"
 println("         kernel produced expected values ✓")
@@ -98,9 +98,9 @@ println("         post-reset file size: $sz2 bytes  (was: $sz)")
 # ── Step 5: compile + dispatch on the reloaded device ─────────────────────
 println("\n[step 5] re-dispatch trivial kernel on fresh device w/ loaded cache")
 buf2 = Mantle.LavaArray(zeros(Float32, N))
-bq2 = Mantle.LavaBackend().dispatch_bq
+bq2 = Mantle.defaultbackend().dispatch_bq
 Mantle.lava_launch!(bq2, trivial_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
-Mantle.vk_flush!(bq2)
+Mantle.flush!(bq2)
 result2 = Array(buf2)
 @assert result2 == Float32.(1:N) "kernel after reload produced wrong values: $(result2[1:8])"
 println("         kernel still produces correct values ✓")
@@ -111,9 +111,9 @@ for iter in 1:5
     Mantle.reset_device!()
     ctx = Mantle.vk_context()
     buf_i = Mantle.LavaArray(zeros(Float32, N))
-    bq_i = Mantle.LavaBackend().dispatch_bq
+    bq_i = Mantle.defaultbackend().dispatch_bq
     Mantle.lava_launch!(bq_i, trivial_kernel!, buf_i; ndrange=N, workgroup_size=(64, 1, 1))
-    Mantle.vk_flush!(bq_i)
+    Mantle.flush!(bq_i)
     r = Array(buf_i)
     @assert r == Float32.(1:N) "iter $iter produced wrong values"
     sz_i = filesize(path)

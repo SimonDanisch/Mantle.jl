@@ -15,7 +15,7 @@ using ImplicitBVH: BoundingVolume, BBox
 import AcceleratedKernels as AK
 import KernelAbstractions as KA
 
-backend = Mantle.LavaBackend()
+backend = Mantle.defaultbackend()
 
 BV = BoundingVolume{BBox{Float32}, Int32, UInt32}
 

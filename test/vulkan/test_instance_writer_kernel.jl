@@ -17,8 +17,8 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 @testset "write_grain_instances_kernel -- 4 grains, identity rotations" begin
     # Build two trivial BLASes so we have non-zero device addresses.
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     positions_cpu = [Point3f(Float32(i), 0f0, 0f0) for i in 1:n]
@@ -31,14 +31,14 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     radius = 0.5f0
 
     # Launch via KA backend pattern: kernel(LavaBackend())(args...; ndrange=n)
-    k = write_grain_instances_kernel(Mantle.LavaBackend())
+    k = write_grain_instances_kernel(Mantle.defaultbackend())
     k(positions_gpu, quats_gpu, radius,
       aabb_blas.address, tri_blas.address,
       instances_gpu;
       ndrange = n)
 
-    bq = Mantle.vk_context().default_bq
-    Mantle.vk_flush!(bq)
+    bq = Mantle.batchqueue(Mantle.Device())
+    Mantle.flush!(bq)
 
     instances_cpu = Array(instances_gpu)
 

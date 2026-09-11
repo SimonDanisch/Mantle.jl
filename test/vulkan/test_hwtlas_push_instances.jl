@@ -7,7 +7,7 @@ using LinearAlgebra: I
 
 @testset "push!(hwtlas, blas, instance_buf) -- registration" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 100
     instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
@@ -22,7 +22,7 @@ using LinearAlgebra: I
                            for _ in 1:length(_buf)])
         end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     tlas = Mantle.VulkanTLAS(backend)
 
     handle = push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x02))

@@ -184,7 +184,7 @@ end
         transforms, pairs, Mantle.UnitCube(),
         counters, contacts, max_contacts;
         ndrange = 1)
-    Mantle.vk_flush!(Mantle.vk_context().default_bq)
+    Mantle.flush!(Mantle.Device())
 
     cs = Array(counters)
     rs = Array(contacts)

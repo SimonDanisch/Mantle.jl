@@ -23,7 +23,7 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     # Build two single-triangle meshes at different z-planes.
@@ -63,7 +63,7 @@ const Mat4f_IM = SMatrix{4, 4, Float32, 16}
 
     Mantle.lava_launch!(bq, mask_kernel, out_g;
                       ndrange=3, workgroup_size=(64, 1, 1), tlas=tlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     r = Array(out_g)
 

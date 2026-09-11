@@ -12,7 +12,7 @@ using ImplicitBVH: BBox
 import AcceleratedKernels as AK
 import KernelAbstractions as KA
 
-backend = Mantle.LavaBackend()
+backend = Mantle.defaultbackend()
 
 # Create random bounding boxes
 N = 1024

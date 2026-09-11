@@ -31,7 +31,7 @@ N = 32
 println("=== Run 1: cold compile + dispatch ===")
 buf = Mantle.LavaArray(zeros(Float32, N))
 Mantle.lava_launch!(bq, rt_kernel!, buf; ndrange=N, workgroup_size=(64, 1, 1))
-Mantle.vk_flush!(bq)
+Mantle.flush!(bq)
 ref = Array(buf)
 println("  result[1:8] = ", ref[1:8])
 @assert ref == Float32.(2 .* (1:N))
@@ -116,7 +116,7 @@ println("  replacing caches.linked[$key_to_replace] with reconstructed kernel")
 Mantle.vk_context().caches.linked[key_to_replace] = linked_des
 
 Mantle.lava_launch!(bq, rt_kernel!, buf2; ndrange=N, workgroup_size=(64, 1, 1))
-Mantle.vk_flush!(bq)
+Mantle.flush!(bq)
 got = Array(buf2)
 println("  result[1:8] = ", got[1:8])
 println("  match fresh: ", got == ref)

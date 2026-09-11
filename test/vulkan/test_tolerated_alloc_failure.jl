@@ -57,7 +57,7 @@ const KA = KernelAbstractions
         # original symptom, a small upload that has nothing to do with the 40 GB.
         a = Mantle.LavaArray(Float32[1, 2, 3, 4])
         b = a .+ 10.0f0
-        Mantle.vk_flush!(ctx)
+        Mantle.flush!(ctx.default_bq)
         @test Array(b) == Float32[11, 12, 13, 14]
     end
 end

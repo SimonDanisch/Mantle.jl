@@ -25,7 +25,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     # ----------------------------------------------------------------
@@ -132,7 +132,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 
     Mantle.lava_launch!(bq, rq_kernel_noarg, out_g, origins_g;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=tlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     gpu = Array(out_g)
 

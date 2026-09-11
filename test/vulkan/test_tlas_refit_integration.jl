@@ -8,8 +8,8 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 
 @testset "HWTLAS refit cycle -- kernel-written instances, then refit" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    aabb_blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
-    tri_blas  = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    aabb_blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
+    tri_blas  = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     radius = 1f0
@@ -17,8 +17,8 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     quats_gpu = Mantle.LavaArray(quats_cpu)
     instances_gpu = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n;
                                                         extra_usage=AS_INPUT_USAGE)
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq = Mantle.batchqueue(Mantle.Device())
 
     # Frame 0: grains at x = 0, 5, 10, 15 (separated so each has its own AABB).
     pos_a = [Point3f(Float32(5*(i-1)), 0f0, 0f0) for i in 1:n]
@@ -27,9 +27,9 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
-    tlas = build_accel!(Mantle.vk_context().default_bq) do ctx
+    tlas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx
         build_tlas(ctx, instances_gpu, 2 * n; allow_update=true)
     end
 
@@ -43,9 +43,9 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
-    build_accel!(Mantle.vk_context().default_bq) do ctx
+    build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx
         refit_tlas!(ctx, tlas, instances_gpu, 2 * n)
     end
 

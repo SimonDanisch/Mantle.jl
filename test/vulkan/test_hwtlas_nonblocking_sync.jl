@@ -44,7 +44,7 @@ using Raycore, Lava
 end
 
 @testset "Mantle.VulkanTLAS — sync! CPU time is bounded on idle queue" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     hwtlas = Mantle.VulkanTLAS(backend)
     mesh = GeometryBasics.normal_mesh(Tessellation(Sphere(Point3f(0), 1f0), 128))
     h = push!(hwtlas, mesh, SMatrix{4,4,Float32}(I); instance_id=UInt32(1))

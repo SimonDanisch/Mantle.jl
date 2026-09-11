@@ -25,7 +25,7 @@ const CTX = Mantle.vk_context()
 const BQ  = CTX.default_bq
 
 function drain!()
-    Mantle.vk_flush!(BQ)
+    Mantle.flush!(BQ)
     GC.gc(true); GC.gc(true)
     Mantle.drain!(BQ)
 end
@@ -42,7 +42,7 @@ end
         @testset "freed LavaArray rejected at launch" begin
             a = Mantle.LavaArray(Float32[1, 2, 3])
             Mantle.unsafe_free!(a)
-            @test_throws Lava.LavaError noop_k!(Mantle.LavaBackend())(a; ndrange=3)
+            @test_throws Lava.LavaError noop_k!(Mantle.defaultbackend())(a; ndrange=3)
         end
 
         # Synthetic tests that poked buffer.address/size directly were removed
@@ -103,8 +103,8 @@ end
 
         for _ in 1:50
             a = Mantle.LavaArray(Float32.(ones(4096)))
-            touch_k!(Mantle.LavaBackend())(a; ndrange=4096)
-            Mantle.vk_flush!(BQ)          # submit so the pin releases
+            touch_k!(Mantle.defaultbackend())(a; ndrange=4096)
+            Mantle.flush!(BQ)          # submit so the pin releases
             Mantle.unsafe_free!(a)
         end
         drain!()
@@ -130,11 +130,11 @@ end
 
         a = Mantle.LavaArray(zeros(Float32, 256))
         for _ in 1:64
-            inc_k!(Mantle.LavaBackend())(a; ndrange=256)
+            inc_k!(Mantle.defaultbackend())(a; ndrange=256)
             GC.gc(false)            # force a young-gen sweep mid-batch
         end
         GC.gc(true)                 # full sweep too
-        Mantle.vk_flush!(BQ)
+        Mantle.flush!(BQ)
         @test all(x -> x ≈ 64.0f0, Array(a))
         Mantle.unsafe_free!(a)
     end
@@ -157,8 +157,8 @@ end
 
         for n in (64, 256, 1024, 16384, 131072)
             out = Mantle.LavaArray(Float32[0f0])
-            sg_atomic_add!(Mantle.LavaBackend(), 64)(out; ndrange=n)
-            Mantle.vk_flush!(BQ)
+            sg_atomic_add!(Mantle.defaultbackend(), 64)(out; ndrange=n)
+            Mantle.flush!(BQ)
             @test Array(out)[1] ≈ Float32(n)
             Mantle.unsafe_free!(out)
         end
@@ -270,9 +270,9 @@ end
         # 50 flushes × 10 dispatches = 500 total dispatches across many batches
         for _ in 1:50
             for _ in 1:10
-                cheap_k!(Mantle.LavaBackend())(a; ndrange=64)
+                cheap_k!(Mantle.defaultbackend())(a; ndrange=64)
             end
-            Mantle.vk_flush!(BQ)
+            Mantle.flush!(BQ)
         end
         drain!()
 

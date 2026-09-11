@@ -53,7 +53,7 @@ end
 end
 
 @testset "a mid-recording sweep must not reclaim a recorded dispatch's arguments" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
     n = 4096
 
@@ -119,11 +119,11 @@ end
 @testset "two handouts are two disjoint blocks, whatever the sweep does" begin
     ctx = Mantle.vk_context()
     bq = ctx.default_bq
-    Mantle.vk_flush!(ctx)                      # nothing in flight, nothing recorded
+    Mantle.flush!(ctx.default_bq)                      # nothing in flight, nothing recorded
 
     # A submission that has completed but has not been swept yet: that is what
     # the sweep drains, and draining is what used to reset the cursors.
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     k! = fill_value_kernel!(backend, 256)
     e0 = KA.allocate(backend, Int32, 4)
     k!(e0, Int32(0); ndrange=4)

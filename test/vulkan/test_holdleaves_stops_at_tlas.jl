@@ -23,7 +23,7 @@ using Test, GeometryBasics, StaticArrays, LinearAlgebra
 using Raycore, Lava, Mantle
 
 @testset "holdleaves! stops at a VulkanTLAS for every owner" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
     hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, GeometryBasics.normal_mesh(Sphere(Point3f(0, 0, 0), 1f0)),

@@ -42,7 +42,7 @@ end
             @test Mantle.Device(bcpu) === cpudev
             @test Mantle.Device(bcpu) !== gpudev
             @test Mantle.vk_context(Mantle.backend(cpudev)) === cpu
-            @test Mantle.vk_context(Mantle.LavaBackend()) === gpu             # the default, pinned
+            @test Mantle.vk_context(Mantle.defaultbackend()) === gpu             # the default, pinned
             @test Mantle.vk_context(Mantle.defaultbackend()) === gpu
 
             # ── allocation lands on the named device, never the default
@@ -52,7 +52,7 @@ end
             @test Mantle.Framebuffer(bcpu, 16, 16; depth = false).ctx === cpu
 
             # ── a backend's identity is its device, not its queue
-            @test Mantle.LavaBackend() == Mantle.LavaBackend(gpu)
+            @test Mantle.defaultbackend() == Mantle.LavaBackend(gpu)
             @test Mantle.LavaBackend(gpu) != bcpu
             q = Mantle.allocate_batch_queue!(cpu)
             try

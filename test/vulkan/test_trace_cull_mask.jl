@@ -32,7 +32,7 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
 
     # Single triangle at z=depth_z, spanning [-1,1] in xy.
     function tri_mesh(depth_z::Float32)
@@ -67,7 +67,7 @@ const Mat4f_CM = SMatrix{4, 4, Float32, 16}
         # Re-use the same buffer; each call overwrites it.
         gpu_hits_local = Mantle.LavaArray([Raycore.RTHitResult(0, 0f0, 0, 0, 0f0, 0f0, 0, 0)])
         Mantle.trace_closest_hits!(gpu_hits_local, gpu_rays, accel, 1; cull_mask=mask)
-        Mantle.vk_flush!(backend.dispatch_bq)
+        Mantle.flush!(backend.dispatch_bq)
         return Array(gpu_hits_local)[1]
     end
 

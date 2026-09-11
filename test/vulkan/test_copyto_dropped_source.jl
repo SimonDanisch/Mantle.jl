@@ -41,7 +41,7 @@ import KernelAbstractions as KA
 
 "The bug: the source is a temporary with no reference after the call."
 function copy_from_dropped_source(n = 4096)
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     dst = KA.allocate(backend, Float32, n)
     KA.fill!(dst, 0f0)
     copyto!(dst, Adapt.adapt(backend, fill(3f0, n)))   # source unreferenced from here
@@ -52,7 +52,7 @@ end
 
 "The same copy with the source held — the control, and what always worked."
 function copy_from_held_source(n = 4096)
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     dst = KA.allocate(backend, Float32, n)
     KA.fill!(dst, 0f0)
     src = Adapt.adapt(backend, fill(3f0, n))
@@ -75,14 +75,14 @@ end
     # temporaries sat in would never come back and the live count would climb
     # once per iteration.
     GC.gc(true)
-    Mantle.vk_flush!(Mantle.vk_context())
-    Mantle.drain!(Mantle.vk_context().default_bq)
+    Mantle.flush!(Mantle.Device())
+    Mantle.drain!(Mantle.batchqueue(Mantle.Device()))
     baseline = Mantle.live_buffer_count()
     for _ in 1:20
         copy_from_dropped_source(1024)
     end
     GC.gc(true)
-    Mantle.vk_flush!(Mantle.vk_context())
-    Mantle.drain!(Mantle.vk_context().default_bq)
+    Mantle.flush!(Mantle.Device())
+    Mantle.drain!(Mantle.batchqueue(Mantle.Device()))
     @test Mantle.live_buffer_count() == baseline
 end

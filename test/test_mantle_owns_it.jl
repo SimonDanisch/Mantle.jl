@@ -250,10 +250,11 @@ const BACKEND_NAMED_ALLOWED = Set([
     "runtests.jl",                # the harness names the sections it guards
     "test_host.jl",               # "Host and Vulkan devices coexist" needs two
     "test_mantle_owns_it.jl",     # 0.6 asks a Metal-specific question
-    # Three of its assertions are Vulkan's: a `pool_offset` inside a VkBuffer,
-    # `plan.recording isa Recording`, and `vk_flush!`. Two have portable
-    # spellings (`recordsplans`, `waitidle`); the third belongs in
-    # `test/vulkan/`. Splitting it is the rest of 0.7 and this line goes then.
+    # Two of its assertions are Vulkan's: a `pool_offset` inside a VkBuffer and
+    # `plan.recording isa Recording`. The second has a portable spelling
+    # (`recordsplans`); the first belongs in `test/vulkan/`. A third was
+    # `vk_flush!`, now core's `flush!(device)`. Splitting the rest is what is
+    # left of 0.7, and this line goes then.
     "test_arena_recording.jl",
     # 2,000 lines with 26 backend sites, 16 of them raw `VK.` enums for image
     # layouts, load ops and aspects — genuinely that backend's, and they belong

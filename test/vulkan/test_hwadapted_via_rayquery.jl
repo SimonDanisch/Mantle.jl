@@ -25,7 +25,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     # Two triangles at z=2 and z=5 (same xy footprint).  Same scene as the
@@ -95,7 +95,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     any_g = Mantle.LavaArray(fill(-2f0, n))
     Mantle.lava_launch!(bq, unified_kernel, cls_g, any_g, origins_g, 10f0, accel;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     cls_full = Array(cls_g); any_full = Array(any_g)
 
     @test all(i -> expected_hit[i] ?
@@ -112,7 +112,7 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
     any_g2 = Mantle.LavaArray(fill(-2f0, n))
     Mantle.lava_launch!(bq, unified_kernel, cls_g2, any_g2, origins_g, 3f0, accel;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     cls_near = Array(cls_g2); any_near = Array(any_g2)
 
     @test all(i -> expected_hit[i] ?
@@ -137,7 +137,7 @@ end
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     verts = [
@@ -178,13 +178,13 @@ end
     h_hw = Mantle.LavaArray(fill(UInt32(99), n))
     Mantle.lava_launch!(bq, poly_kernel, t_hw, h_hw, origins_g, accel_hw;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     t_sw = Mantle.LavaArray(fill(-2f0, n))
     h_sw = Mantle.LavaArray(fill(UInt32(99), n))
     Mantle.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;
                       ndrange=n, workgroup_size=(64, 1, 1))
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     t_hw_a = Array(t_hw); h_hw_a = Array(h_hw)
     t_sw_a = Array(t_sw); h_sw_a = Array(h_sw)

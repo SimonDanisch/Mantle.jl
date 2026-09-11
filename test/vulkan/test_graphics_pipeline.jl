@@ -14,13 +14,13 @@ function draw_and_readback(pipeline, vertex_count;
         clear_color=(0f0, 0f0, 0f0, 1f0),
         color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT,
         depth=false, instances=1)
-    fb = Mantle.Framebuffer(Mantle.LavaBackend(), width, height; depth, color_format)
+    fb = Mantle.Framebuffer(Mantle.defaultbackend(), width, height; depth, color_format)
     target = OffscreenTarget(fb)
     ctx = Mantle.vk_context()
     bq = ctx.default_bq
     draw!(bq, pipeline, target, vertex_count;
         args, frag_args, instances, clear_color)
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     return readback_framebuffer(fb)
 end
 
@@ -177,7 +177,7 @@ end
                                  cull = NoCull(),
                                  depth = DepthLess())
 
-        fb = Mantle.Framebuffer(Mantle.LavaBackend(), 8, 8; depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
+        fb = Mantle.Framebuffer(Mantle.defaultbackend(), 8, 8; depth=true, color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         ctx = Mantle.vk_context()
         bq = ctx.default_bq
@@ -190,7 +190,7 @@ end
         draw!(bq, pip, target, 3;
             args=(Vec4f(0f0, 0f0, 1f0, 1f0), 0.3f0),
             clear_color=nothing, depth_clear=nothing)
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
 
         pixels = readback_framebuffer(fb)
         # Blue should win (closer)
@@ -200,7 +200,7 @@ end
 
         # The other order is the half that a per-draw depth clear could not fail:
         # near first, far second, and the far one must be rejected.
-        fb2 = Mantle.Framebuffer(Mantle.LavaBackend(), 8, 8; depth=true,
+        fb2 = Mantle.Framebuffer(Mantle.defaultbackend(), 8, 8; depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         t2 = OffscreenTarget(fb2)
         draw!(bq, pip, t2, 3;
@@ -209,7 +209,7 @@ end
         draw!(bq, pip, t2, 3;
             args=(Vec4f(1f0, 0f0, 0f0, 1f0), 0.7f0),
             clear_color=nothing, depth_clear=nothing)
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
 
         q = readback_framebuffer(fb2)[4, 4]
         @test q[3] ≈ 1f0 atol=0.05  # still blue: the far draw failed the test
@@ -249,12 +249,12 @@ end
         # opaque blending.
         @test draw_and_readback(opaque, 3)[4, 4][1] ≈ 0.25f0 atol=0.01
 
-        fb = Mantle.Framebuffer(Mantle.LavaBackend(), 8, 8; depth=false,
+        fb = Mantle.Framebuffer(Mantle.defaultbackend(), 8, 8; depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         draw!(bq, additive, target, 3; clear_color=(0f0, 0f0, 0f0, 1f0))
         draw!(bq, additive, target, 3; clear_color=nothing)
-        Mantle.vk_flush!(ctx)
+        Mantle.flush!(ctx.default_bq)
         @test readback_framebuffer(fb)[4, 4][1] ≈ 0.5f0 atol=0.01
     end
 
@@ -290,7 +290,7 @@ end
                                  cull = NoCull(),
                                  depth = DepthOff())
 
-        fb = Mantle.Framebuffer(Mantle.LavaBackend(), 8, 8; depth=true,
+        fb = Mantle.Framebuffer(Mantle.defaultbackend(), 8, 8; depth=true,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         target = OffscreenTarget(fb)
         ctx = Mantle.vk_context()
@@ -299,7 +299,7 @@ end
             clear_color=(0f0, 0f0, 0f0, 1f0))          # near blue
         draw!(bq, pip, target, 3; args=(Vec4f(1f0, 0f0, 0f0, 1f0), 0.7f0),
             clear_color=nothing)                        # far red, drawn later
-        Mantle.vk_flush!(ctx)
+        Mantle.flush!(ctx.default_bq)
         p = readback_framebuffer(fb)[4, 4]
         @test p[1] ≈ 1f0 atol=0.05                      # red: no depth test ran
         @test p[3] ≈ 0f0 atol=0.05
@@ -369,7 +369,7 @@ end
         # shears the picture rather than breaking it, which is how it survived in
         # two benches; a matrix source now says so instead.
         w, h = 32, 16
-        fb = Mantle.Framebuffer(Mantle.LavaBackend(), w, h; depth=false,
+        fb = Mantle.Framebuffer(Mantle.defaultbackend(), w, h; depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
         dev = Mantle.Device(Mantle.VulkanAPI())
         right = LavaArray(reshape([Vec4f(0, 1, 0, 1) for _ in 1:(w * h)], h, w))
@@ -379,7 +379,7 @@ end
                                             LavaArray([Vec4f(0, 0, 0, 1) for _ in 1:(w * h - 1)]))
 
         blit!(dev, OffscreenTarget(fb), right)
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
         px = readback_framebuffer(fb)
         @test all(p -> p[2] > 0.9f0, px)
     end

@@ -24,14 +24,14 @@ using KernelAbstractions
             end
 
             # First call: compile
-            double_k!(Mantle.LavaBackend())(a; ndrange=64)
-            Mantle.vk_flush!(Mantle.vk_context())
+            double_k!(Mantle.defaultbackend())(a; ndrange=64)
+            Mantle.flush!(Mantle.Device())
             r1 = Array(a)
 
             # Second call: cache hit
             fill!(a, 0.0f0)
-            double_k!(Mantle.LavaBackend())(a; ndrange=64)
-            Mantle.vk_flush!(Mantle.vk_context())
+            double_k!(Mantle.defaultbackend())(a; ndrange=64)
+            Mantle.flush!(Mantle.Device())
             r2 = Array(a)
 
             @test r1 == r2
@@ -71,12 +71,12 @@ using KernelAbstractions
                 @inbounds a[i] = 5.0f0
             end
 
-            pk1!(Mantle.LavaBackend())(a; ndrange=16)
-            pk2!(Mantle.LavaBackend())(a; ndrange=16)
-            pk3!(Mantle.LavaBackend())(a; ndrange=16)
-            pk4!(Mantle.LavaBackend())(a; ndrange=16)
-            pk5!(Mantle.LavaBackend())(a; ndrange=16)
-            Mantle.vk_flush!(Mantle.vk_context())
+            pk1!(Mantle.defaultbackend())(a; ndrange=16)
+            pk2!(Mantle.defaultbackend())(a; ndrange=16)
+            pk3!(Mantle.defaultbackend())(a; ndrange=16)
+            pk4!(Mantle.defaultbackend())(a; ndrange=16)
+            pk5!(Mantle.defaultbackend())(a; ndrange=16)
+            Mantle.flush!(Mantle.Device())
 
             @test length(Mantle.vk_context().caches.pipelines) <= 3
             @test length(Mantle.vk_context().caches.pipeline_order) <= 3
@@ -99,10 +99,10 @@ using KernelAbstractions
             @kernel function noop_cb!(x)
                 i = @index(Global, Linear)
             end
-            noop_cb!(Mantle.LavaBackend())(a; ndrange=3)
+            noop_cb!(Mantle.defaultbackend())(a; ndrange=3)
 
             ctx = Mantle.vk_context()
-            Mantle.vk_flush!(ctx)
+            Mantle.flush!(ctx.default_bq)
             bq = ctx.default_bq
             @test isempty(bq.outstanding)
             @test all(o -> isempty(o.sync), bq.free)
@@ -127,15 +127,15 @@ using KernelAbstractions
             ctx = Mantle.vk_context()
 
             for _ in 1:100
-                slab_k!(Mantle.LavaBackend())(a; ndrange=16)
+                slab_k!(Mantle.defaultbackend())(a; ndrange=16)
             end
-            Mantle.vk_flush!(ctx)
+            Mantle.flush!(ctx.default_bq)
             n_after_first = length(Mantle.unifiedblocks(ctx))
 
             for _ in 1:100
-                slab_k!(Mantle.LavaBackend())(a; ndrange=16)
+                slab_k!(Mantle.defaultbackend())(a; ndrange=16)
             end
-            Mantle.vk_flush!(ctx)
+            Mantle.flush!(ctx.default_bq)
             n_after_second = length(Mantle.unifiedblocks(ctx))
 
             @test n_after_second == n_after_first
@@ -151,7 +151,7 @@ using KernelAbstractions
     # increments on `vk_alloc` and decrements on `vk_free!`.
     @testset "GC pressure tracking" begin
         @testset "live_bytes tracks vk_alloc / vk_free!" begin
-            bq = Mantle.vk_context().default_bq
+            bq = Mantle.batchqueue(Mantle.Device())
             before = Mantle.gpu_live_bytes()
             buf = Mantle.vk_alloc(bq, 1024)
             after_alloc = Mantle.gpu_live_bytes()
@@ -159,7 +159,7 @@ using KernelAbstractions
             Mantle.vk_free!(buf)
             # Buffer may be deferred (timeline gate); a sync ensures destroy
             # actually runs and decrements GPU_LIVE_BYTES.
-            Mantle.vk_flush!(Mantle.vk_context())
+            Mantle.flush!(Mantle.Device())
             Mantle.drain!(bq)
             after_free = Mantle.gpu_live_bytes()
             @test after_free <= after_alloc
@@ -200,16 +200,16 @@ using KernelAbstractions
 
             fill!(a, 7.0f0)
 
-            id_k!(Mantle.LavaBackend())(b, a; ndrange=N)
-            Mantle.vk_flush!(Mantle.vk_context())
+            id_k!(Mantle.defaultbackend())(b, a; ndrange=N)
+            Mantle.flush!(Mantle.Device())
             @test all(Array(b) .≈ 7.0f0)
 
-            neg_k!(Mantle.LavaBackend())(b, a; ndrange=N)
-            Mantle.vk_flush!(Mantle.vk_context())
+            neg_k!(Mantle.defaultbackend())(b, a; ndrange=N)
+            Mantle.flush!(Mantle.Device())
             @test all(Array(b) .≈ -7.0f0)
 
-            add_k!(Mantle.LavaBackend())(b, a, 3.0f0; ndrange=N)
-            Mantle.vk_flush!(Mantle.vk_context())
+            add_k!(Mantle.defaultbackend())(b, a, 3.0f0; ndrange=N)
+            Mantle.flush!(Mantle.Device())
             @test all(Array(b) .≈ 10.0f0)
 
             Mantle.unsafe_free!(a)
@@ -226,7 +226,7 @@ using KernelAbstractions
             ctx = Mantle.vk_context()
             bq = ctx.default_bq
             GC.gc(true)
-            Mantle.vk_flush!(ctx)
+            Mantle.flush!(ctx.default_bq)
             Mantle.drain!(bq)
             baseline = Mantle.live_buffer_count()
 
@@ -234,13 +234,13 @@ using KernelAbstractions
                 a = Mantle.LavaArray(Float32.(rand(128)))
                 b = Mantle.LavaArray(Float32.(rand(128)))
                 c = a .+ b
-                Mantle.vk_flush!(ctx)
+                Mantle.flush!(ctx.default_bq)
                 Mantle.unsafe_free!(a)
                 Mantle.unsafe_free!(b)
                 Mantle.unsafe_free!(c)
             end
 
-            Mantle.vk_flush!(ctx)
+            Mantle.flush!(ctx.default_bq)
             Mantle.drain!(bq)
             after = Mantle.live_buffer_count()
             @test after == baseline
@@ -250,7 +250,7 @@ using KernelAbstractions
     # ── 10. Unified buffer allocation ──
     @testset "unified buffer allocation" begin
         @testset "mapped ptr is non-null" begin
-            bq = Mantle.vk_context().default_bq
+            bq = Mantle.batchqueue(Mantle.Device())
             buf = Mantle.vk_alloc(bq, 256; unified=true)
             @test buf.mapped_ptr != Ptr{UInt8}(0)
             @test buf.address != 0

@@ -56,7 +56,7 @@ end
 end
 
 @testset "an indirect dispatch is ordered after its own prepare" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     n = 65536
     cap = 100_000
 
@@ -95,7 +95,7 @@ end
     # fused them into one dispatch and put one shared barrier behind them; a
     # plan does that from `emitprepares!`, and an undeclared launch does not get
     # to.
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     n = 65536
     cap = 100_000
 

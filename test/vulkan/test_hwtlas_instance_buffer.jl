@@ -7,7 +7,7 @@ using LinearAlgebra: I
 
 @testset "instance_buffer returns the buffer behind a batch handle" begin
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
     instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
@@ -21,7 +21,7 @@ using LinearAlgebra: I
                                                 blas.address)
                            for _ in 1:length(_buf)])
         end
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     tlas = Mantle.VulkanTLAS(backend)
 
     handle = push!(tlas, blas, instance_buf; n=n, instance_mask=UInt8(0x04))
@@ -32,7 +32,7 @@ using LinearAlgebra: I
 end
 
 @testset "instance_buffer errors on invalid handle" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     tlas = Mantle.VulkanTLAS(backend)
     fake_handle = Raycore.TLASHandle(UInt32(99))
     @test_throws ErrorException Raycore.instance_buffer(tlas, fake_handle)

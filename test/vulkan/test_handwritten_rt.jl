@@ -372,7 +372,7 @@ end
         # Build triangle: (0,0,0), (1,0,0), (0,1,0)
         vertices = [(0f0, 0f0, 0f0), (1f0, 0f0, 0f0), (0f0, 1f0, 0f0)]
         indices = UInt32[0, 1, 2]
-        blas, tlas = Mantle.build_accel!(Mantle.vk_context().default_bq) do ctx
+        blas, tlas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx
             b = Mantle.build_blas(ctx, vertices, indices)
             t = Mantle.build_tlas(ctx, [b])
             (b, t)
@@ -394,7 +394,7 @@ end
         push_bda = output_buf.address
 
         # Dispatch
-        rt_dispatch!(Mantle.vk_context().default_bq, pipeline, tlas, push_bda, W, H)
+        rt_dispatch!(Mantle.batchqueue(Mantle.Device()), pipeline, tlas, push_bda, W, H)
 
         # Read back results
         result_bytes = Vector{UInt8}(undef, W * H * sizeof(Float32))

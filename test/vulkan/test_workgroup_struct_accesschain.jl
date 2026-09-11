@@ -70,12 +70,12 @@ end
     bv = BVStruct((0f0, 0f0, 0f0), (1f0, 1f0, 1f0), Int32(0), UInt32(0))
     in_arr = Mantle.LavaArray([bv for _ in 1:8])
     out_arr = Mantle.LavaArray([bv for _ in 1:8])
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     # Compile-only path is enough — emit + spirv-val happen inside.
     @test_nowarn _scatter_gather_kernel!(backend, 8)(in_arr, out_arr; ndrange=8)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     out = Array(out_arr)
     @test out[1] == bv  # round-trip through @localmem worked
 end

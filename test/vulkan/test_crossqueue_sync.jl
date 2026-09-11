@@ -67,7 +67,7 @@ end
     end
 
     @testset "a build that throws leaves nothing in limbo" begin
-        bq = Mantle.vk_context().default_bq
+        bq = Mantle.batchqueue(Mantle.Device())
         b = LavaBackend()
         a = KA.allocate(b, Float32, 64)
         xqfill!(b, 64)(a, 1.0f0; ndrange = 64)

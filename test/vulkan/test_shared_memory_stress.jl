@@ -17,7 +17,7 @@ using KernelAbstractions
 using GeometryBasics: Vec3f, Vec
 const KA = KernelAbstractions
 
-const SMBACKEND = Mantle.LavaBackend()
+const SMBACKEND = Mantle.defaultbackend()
 
 # ── A. Tree reduction (sum) — multiple barriers, types × workgroup sizes ──────
 # One block per `TILE` elements; log2(TILE) barrier-synchronised halving steps.

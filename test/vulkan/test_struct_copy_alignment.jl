@@ -87,6 +87,6 @@ end
     src = Mantle.LavaArray(sd)
     d = Mantle.LavaArray{CopyS6}(undef, n)
     copyto!(d, src)
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(d) == sd
 end

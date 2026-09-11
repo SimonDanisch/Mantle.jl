@@ -39,7 +39,7 @@ const KA = KernelAbstractions
     ctx = Mantle.vk_context()
     bq  = ctx.default_bq
     dev = Mantle.lavadevice(ctx)
-    be  = Mantle.LavaBackend()
+    be  = Mantle.defaultbackend()
     huge = 400 * 1024^3
 
     @testset "the driver refuses with the exception the guard names" begin

@@ -390,7 +390,7 @@ end
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 
     # Wait, so the fence it was stamped with has passed.
-    Mantle.vk_flush!(dev.ctx)
+    Mantle.flush!(dev.ctx.default_bq)
     KernelAbstractions.synchronize(M.backend(dev))
     @test M.reclaim!(pool, dev) == 1        # now
     @test M.reclaim!(pool, dev) == 0

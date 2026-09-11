@@ -2,7 +2,7 @@ using Test, GeometryBasics, StaticArrays, LinearAlgebra
 using Raycore, Lava, Adapt
 
 @testset "Mantle.VulkanTLAS — UAF safety without CPU fence" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     hwtlas = Mantle.VulkanTLAS(backend)
 
     mesh1 = GeometryBasics.normal_mesh(Sphere(Point3f(0,0,0), 1f0))

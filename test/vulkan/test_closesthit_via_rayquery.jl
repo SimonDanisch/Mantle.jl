@@ -94,7 +94,7 @@ end
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     # Single-triangle scene at z=5.  Rays from z=0 firing +z hit at t=5.
@@ -169,7 +169,7 @@ end
 
     Mantle.lava_launch!(bq, closesthit_kernel, t_out, prim_out, origins_g, accel_cpu;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     gpu_t = Array(t_out)
     gpu_prim = Array(prim_out)
@@ -210,7 +210,7 @@ end
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     near_v = [Point3f(-1, -1, 2), Point3f(1, -1, 2), Point3f(0, 1, 2)]
@@ -251,7 +251,7 @@ end
     origins_g = Mantle.LavaArray(origins)
     Mantle.lava_launch!(bq, any_hit_kernel, any_t_g, cls_t_g, origins_g, 10f0, accel_cpu;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     any_full   = Array(any_t_g)
     cls_full   = Array(cls_t_g)
 
@@ -261,7 +261,7 @@ end
     cls_t_g2 = Mantle.LavaArray(fill(-2f0, n))
     Mantle.lava_launch!(bq, any_hit_kernel, any_t_g2, cls_t_g2, origins_g, 3f0, accel_cpu;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     any_near = Array(any_t_g2)
     cls_near = Array(cls_t_g2)
 
@@ -312,7 +312,7 @@ end
         return
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     # Build a small two-triangle scene (one mesh with two faces).
@@ -359,7 +359,7 @@ end
     h_hw = Mantle.LavaArray(fill(UInt32(99), n))
     Mantle.lava_launch!(bq, poly_kernel, t_hw, h_hw, origins_g, accel_hw;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     t_hw_arr = Array(t_hw); h_hw_arr = Array(h_hw)
 
     # Run on SW (no tlas kwarg; SW kernel doesn't need a HWTLAS descriptor).
@@ -367,7 +367,7 @@ end
     h_sw = Mantle.LavaArray(fill(UInt32(99), n))
     Mantle.lava_launch!(bq, poly_kernel, t_sw, h_sw, origins_g, accel_sw;
                       ndrange=n, workgroup_size=(64, 1, 1))
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     t_sw_arr = Array(t_sw); h_sw_arr = Array(h_sw)
 
     # Same kernel, same scene — results must match.

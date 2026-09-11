@@ -6,7 +6,7 @@ using LinearAlgebra: I
 
 @testset "VulkanTLAS sync! with instance batch" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
     radius = 1f0
@@ -14,14 +14,14 @@ using LinearAlgebra: I
     positions = Mantle.LavaArray([Point3f(Float32(3*(i-1)),0,0) for i in 1:n])
     instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, 2 * n; extra_usage=AS_INPUT_USAGE)
 
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq = Mantle.batchqueue(Mantle.Device())
 
     # Use the KA backend pattern for @kernel-defined kernels.
     write_grain_instances_kernel(backend)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = n)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
 
     tlas = Mantle.VulkanTLAS(backend)
     push!(tlas, blas, instance_buf; n=2*n, instance_mask=UInt8(0x02))
@@ -37,7 +37,7 @@ end
     # P3-fu4 lifted the single-batch guard.  Multiple batches concatenate into
     # a combined instance buffer and the HWTLAS spans them all.
     aabb = Mantle.AABB(Point3f(-1f0, -1f0, -1f0), Point3f(1f0, 1f0, 1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n_a = 4; n_b = 6
     instance_buf1 = Mantle.LavaArray{VulkanInstanceRecord}(undef, n_a; extra_usage=AS_INPUT_USAGE)
@@ -52,7 +52,7 @@ end
                       for _ in 1:length(buf)])
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     tlas = Mantle.VulkanTLAS(backend)
     h1 = push!(tlas, blas, instance_buf1; n=n_a, instance_mask=UInt8(0x02))
     h2 = push!(tlas, blas, instance_buf2; n=n_b, instance_mask=UInt8(0x04))

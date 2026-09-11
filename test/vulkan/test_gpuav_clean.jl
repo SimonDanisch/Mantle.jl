@@ -32,7 +32,7 @@ else
     using LinearAlgebra: I
 
     @testset "GPU-AV clean — minimal Hikari HW RT render" begin
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         ctx = Mantle.vk_context()
 
         # Tiny scene + tiny film keeps the GPU-AV-instrumented run finite.

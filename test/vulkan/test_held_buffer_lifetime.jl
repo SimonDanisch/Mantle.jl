@@ -24,7 +24,7 @@ holders(buf) = @atomic Mantle.stampof(buf).holders
 
 @testset "a held buffer survives unsafe_free! until its submission passes" begin
     be = LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
 
     a = KA.allocate(be, Float32, 64)
     buf = a.buf[]                    # hold the VkManagedBuffer itself
@@ -50,7 +50,7 @@ holders(buf) = @atomic Mantle.stampof(buf).holders
     # Submit it, wait, and drain: the hold goes with the submission, and the
     # destroy that was owed runs.
     Mantle.handover!(bq, Mantle.submit!(bq, o), o)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     @test holders(buf) == 0
     Mantle.drain!(bq)
     @test state(buf) == Mantle.BUF_STATE_DEAD
@@ -61,7 +61,7 @@ end
     # that frees the BUFFER directly bypasses it, so the claim has to hold on
     # its own.
     be = LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
 
     a = KA.allocate(be, Float32, 64)
     buf = a.buf[]
@@ -75,7 +75,7 @@ end
     @test holders(buf) == 1
 
     Mantle.handover!(bq, Mantle.submit!(bq, o), o)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     Mantle.drain!(bq)
     @test holders(buf) == 0
     @test state(buf) == Mantle.BUF_STATE_DEAD
@@ -89,6 +89,6 @@ end
     Mantle.unsafe_free!(a)
     # Nothing named it, so nothing defers it beyond the drain that runs the
     # requests: no submission, no wait.
-    Mantle.drain!(Mantle.vk_context().default_bq)
+    Mantle.drain!(Mantle.batchqueue(Mantle.Device()))
     @test state(buf) == Mantle.BUF_STATE_DEAD
 end

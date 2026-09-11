@@ -20,7 +20,7 @@ using Raycore, Lava, Mantle
 holders(x) = @atomic Mantle.stampof(x).holders
 
 @testset "hold!(e, tlas) covers the top level and every bottom level" begin
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
     hwtlas = Mantle.VulkanTLAS(backend)
     push!(hwtlas, GeometryBasics.normal_mesh(Sphere(Point3f(0, 0, 0), 1f0)),
@@ -45,7 +45,7 @@ holders(x) = @atomic Mantle.stampof(x).holders
     end
 
     Mantle.handover!(bq, Mantle.submit!(bq, o), o)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     @test holders(tlas) == 0
 
     # The statement is one call, and what a level is stays the backend's.

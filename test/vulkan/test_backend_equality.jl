@@ -19,7 +19,7 @@ const KA = KernelAbstractions
 
 @testset "a backend equals every spelling of its device" begin
     ctx = Mantle.vk_context()
-    default = Mantle.LavaBackend()
+    default = Mantle.defaultbackend()
     pinned = Mantle.LavaBackend(ctx)
     @test default == pinned
     @test pinned == default

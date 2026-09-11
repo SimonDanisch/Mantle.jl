@@ -49,7 +49,7 @@ function run(M, N, K; tol = 3e-2)
 end
 
 ctx = Mantle.vk_context()
-if isempty(Mantle.caps(Mantle.vk_context()).wggran)
+if isempty(Mantle.caps(Mantle.Device()).wggran)
     @info "no workgroup-scope cooperative matrices here — nothing to run"
 else
     ok = run(128, 192, 96)          # every extent divides its tile

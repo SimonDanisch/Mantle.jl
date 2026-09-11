@@ -19,8 +19,8 @@ using Random
 const KA = Lava.KernelAbstractions
 
 @testset "loop-unswitch miscompile regression" begin
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq = Mantle.batchqueue(Mantle.Device())
     bs = 256
     n = 512
 
@@ -45,7 +45,7 @@ const KA = Lava.KernelAbstractions
     flags  = Int32[isodd(i) ? 1 : 0 for i in 1:n]
     a_g = Mantle.LavaArray(arrcpu); f_g = Mantle.LavaArray(flags)
     o_g = Mantle.LavaArray(fill(Int32(-9), n))
-    uw_kernel!(backend, bs)(a_g, f_g, o_g, Int32(n), ndrange=(n,)); Mantle.vk_flush!(bq)
+    uw_kernel!(backend, bs)(a_g, f_g, o_g, Int32(n), ndrange=(n,)); Mantle.flush!(bq)
     lo = count(<(0.25f0), arrcpu); hi = count(<(0.5f0), arrcpu)
     expected = [flags[i] != 0 ? hi : lo for i in 1:n]
     @test Array(o_g) == expected
@@ -64,7 +64,7 @@ const KA = Lava.KernelAbstractions
     end
     sorted = sort(rand(MersenneTwister(11), Float32, n))
     s_g = Mantle.LavaArray(sorted); b_g = Mantle.LavaArray(fill(Int32(-9), n))
-    lb_kernel!(backend, bs)(s_g, b_g, Int32(n), ndrange=(n,)); Mantle.vk_flush!(bq)
+    lb_kernel!(backend, bs)(s_g, b_g, Int32(n), ndrange=(n,)); Mantle.flush!(bq)
     truth = [let l=Int32(0), r=Int32(n)
         while r > l + Int32(1)
             mm = l + ((r - l) >> 0x1)
@@ -77,7 +77,7 @@ end
 # real exercise of the isless binary search across data sizes.
 @testset "AcceleratedKernels.sort! multiset preservation" begin
     import AcceleratedKernels as AK
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     for nn in (1024, 4000, 100_000), T in (Float32, UInt32)
         cpu = rand(MersenneTwister(3), T, nn)
         g = Mantle.LavaArray(cpu)

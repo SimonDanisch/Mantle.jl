@@ -17,7 +17,7 @@ using Raycore
 using Lava, Mantle
 using Adapt
 
-const HW_BACKEND = Mantle.LavaBackend()
+const HW_BACKEND = Mantle.defaultbackend()
 
 # Reuse buffers across iterations so allocation noise doesn't mask the leak test.
 const HW_RAYS_BUF = Mantle.LavaArray([Raycore.RTRay(0f0, 0f0, 5f0, 0f0, 0f0, 0f0, -1f0, 1f3)])

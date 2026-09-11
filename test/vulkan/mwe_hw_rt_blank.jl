@@ -77,7 +77,7 @@ end
 
 function run_once(label::String)
     println("\n=== $label ===")
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     bq = backend.dispatch_bq
 
     tri_v0 = Point3f(-1f0, -1f0, 5f0)
@@ -116,7 +116,7 @@ function run_once(label::String)
     origins_g = Mantle.LavaArray(origins)
     Mantle.lava_launch!(bq, k, t_out, origins_g, accel;
                       ndrange=n, workgroup_size=(64, 1, 1), tlas=hwtlas)
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     gpu_t = Array(t_out)
 
     n_hit_ref = count(>=(0f0), ref)

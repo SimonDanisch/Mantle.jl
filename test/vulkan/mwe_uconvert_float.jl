@@ -22,7 +22,7 @@ using Hikari, Lava, GeometryBasics, FileIO
 import KernelAbstractions as KA
 
 ENV["VK_ICD_FILENAMES"] = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
-backend = Mantle.LavaBackend()
+backend = Mantle.defaultbackend()
 
 # This scene uses Conductor{..., Texture{Float32, 2, Matrix{Float32}}, ...} (checkerboard roughness)
 scene_file = joinpath(@__DIR__, "..", "dev", "Hikari", "test", "pbrt", "scenes", "tex_conductor_checker_rough_light_point.pbrt")

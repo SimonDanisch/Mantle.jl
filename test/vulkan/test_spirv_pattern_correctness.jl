@@ -84,8 +84,8 @@ end
     data = [Fix3_Struct(Float32(i), Float32(i*2), UInt8(i % 128), Float32(i*3)) for i in 1:N]
     src = Mantle.LavaArray(data)
     dst = Mantle.LavaArray{Fix3_Struct}(undef, N)
-    fix3_kernel!(Mantle.LavaBackend())(dst, src; ndrange=N)
-    Mantle.vk_flush!(Mantle.vk_context())
+    fix3_kernel!(Mantle.defaultbackend())(dst, src; ndrange=N)
+    Mantle.flush!(Mantle.Device())
     result = Array(dst)
     @test result == data
 end
@@ -123,8 +123,8 @@ end
         data = [Struct60(ntuple(j -> Float32(i * 100 + j), 15)...) for i in 1:N]
         src = Mantle.LavaArray(data)
         dst = Mantle.LavaArray{Struct60}(undef, N)
-        copy60!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        copy60!(Mantle.defaultbackend())(dst, src; ndrange=N)
+        Mantle.flush!(Mantle.Device())
         result = Array(dst)
         @test result == data
     end
@@ -147,8 +147,8 @@ end
         data = [Struct52(ntuple(j -> Float32(i * 100 + j), 13)...) for i in 1:N]
         src = Mantle.LavaArray(data)
         dst = Mantle.LavaArray{Struct52}(undef, N)
-        copy52!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        copy52!(Mantle.defaultbackend())(dst, src; ndrange=N)
+        Mantle.flush!(Mantle.Device())
         result = Array(dst)
         @test result == data
     end
@@ -174,8 +174,8 @@ end
                            UInt32(i), UInt32(i+1), Float32(4i)) for i in 1:N]
         src = Mantle.LavaArray(data)
         dst = Mantle.LavaArray{MixedAlign}(undef, N)
-        copy_mixed!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        copy_mixed!(Mantle.defaultbackend())(dst, src; ndrange=N)
+        Mantle.flush!(Mantle.Device())
         result = Array(dst)
         @test result == data
     end
@@ -197,8 +197,8 @@ end
         data = [OddOffsets(UInt8(i % 256), Float32(i), Float32(2i), Float32(3i)) for i in 1:N]
         src = Mantle.LavaArray(data)
         dst = Mantle.LavaArray{OddOffsets}(undef, N)
-        copy_odd!(Mantle.LavaBackend())(dst, src; ndrange=N)
-        Mantle.vk_flush!(Mantle.vk_context())
+        copy_odd!(Mantle.defaultbackend())(dst, src; ndrange=N)
+        Mantle.flush!(Mantle.Device())
         result = Array(dst)
         @test result == data
     end
@@ -225,7 +225,7 @@ end
     src = Mantle.LavaArray([Fix6_S(Float32(i), Float32(2i), Float32(3i)) for i in 1:n])
     dst = Mantle.LavaArray{Fix6_S}(undef, n)
     dst .= src
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(dst) == Array(src)
 end
 
@@ -257,8 +257,8 @@ end
     sel = Mantle.LavaArray(rand(Float32, N))
     output = Mantle.LavaArray(zeros(Float32, N))
 
-    phi_cycle_kernel!(Mantle.LavaBackend())(output, a, b, sel; ndrange=N)
-    Mantle.vk_flush!(Mantle.vk_context())
+    phi_cycle_kernel!(Mantle.defaultbackend())(output, a, b, sel; ndrange=N)
+    Mantle.flush!(Mantle.Device())
     result = Array(output)
     sel_h = Array(sel)
     for i in 1:N
@@ -288,10 +288,10 @@ end
 
     # 20 rapid dispatches alternating targets
     for _ in 1:10
-        fill_val!(Mantle.LavaBackend())(a, 42.0f0; ndrange=N)
-        fill_val!(Mantle.LavaBackend())(b, 99.0f0; ndrange=N)
+        fill_val!(Mantle.defaultbackend())(a, 42.0f0; ndrange=N)
+        fill_val!(Mantle.defaultbackend())(b, 99.0f0; ndrange=N)
     end
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
 
     @test all(Array(a) .== 42.0f0)
     @test all(Array(b) .== 99.0f0)
@@ -314,7 +314,7 @@ end
     a = Mantle.LavaArray(zeros(Float32, N))
 
     # Dispatch a kernel, then download — should piggyback copy onto batch
-    iota!(Mantle.LavaBackend())(a; ndrange=N)
+    iota!(Mantle.defaultbackend())(a; ndrange=N)
     # The download triggers _append_copy_and_flush! if batch is active
     result = Array(a)
 
@@ -332,7 +332,7 @@ end
     for _ in 1:100
         a = a .+ 1.0f0
     end
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test all(Array(a) .== 101.0f0)
 end
 
@@ -341,7 +341,7 @@ end
     a = Mantle.LavaArray(ones(Float32, N))
     b = Mantle.LavaArray(fill(2.0f0, N))
     c = a .+ b .* 3.0f0
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(c)[1] == 7.0f0
     @test Array(c)[N] == 7.0f0
 end
@@ -356,7 +356,7 @@ end
         # Let tmp go out of scope — GC may try to free it
     end
     GC.gc()  # Force GC while batch is still recording
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     r = Array(result)
     # Sum of 1..50 = 1275
     @test r[1] ≈ 1275.0f0
@@ -366,7 +366,7 @@ end
     for i in 1:20
         a = Mantle.LavaArray(fill(Float32(i), 1024))
         b = a .* 2.0f0
-        Mantle.vk_flush!(Mantle.vk_context())
+        Mantle.flush!(Mantle.Device())
         @test Array(b)[1] == Float32(2i)
         # a and b go out of scope each iteration
     end
@@ -381,8 +381,8 @@ end
 
     M, N = 128, 64
     a = Mantle.LavaArray(zeros(Float32, M, N))
-    fill_2d!(Mantle.LavaBackend())(a; ndrange=(M, N))
-    Mantle.vk_flush!(Mantle.vk_context())
+    fill_2d!(Mantle.defaultbackend())(a; ndrange=(M, N))
+    Mantle.flush!(Mantle.Device())
     result = Array(a)
     @test result[1, 1] == 101.0f0
     @test result[M, N] == Float32(M * 100 + N)
@@ -400,19 +400,19 @@ end
     # Int32
     a = Mantle.LavaArray(Int32[1, 2, 3, 4])
     b = a .+ Int32(10)
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(b) == Int32[11, 12, 13, 14]
 
     # UInt32
     a = Mantle.LavaArray(UInt32[10, 20, 30, 40])
     b = a .- UInt32(5)
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(b) == UInt32[5, 15, 25, 35]
 
     # Float64
     a = Mantle.LavaArray(Float64[1.0, 2.0, 3.0])
     b = a .* 2.0
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(b) ≈ Float64[2.0, 4.0, 6.0]
 end
 
@@ -438,8 +438,8 @@ end
     b = Mantle.LavaArray(b_data)
     dst = Mantle.LavaArray{SpectrumData}(undef, N)
 
-    spectrum_add!(Mantle.LavaBackend())(dst, a, b; ndrange=N)
-    Mantle.vk_flush!(Mantle.vk_context())
+    spectrum_add!(Mantle.defaultbackend())(dst, a, b; ndrange=N)
+    Mantle.flush!(Mantle.Device())
 
     result = Array(dst)
     for i in 1:N
@@ -469,13 +469,13 @@ end
         @inbounds a[i] += 1.0f0
     end
 
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     a = Mantle.LavaArray(zeros(Float32, 256))
     kernel = cb_split_inc!(backend)
     for _ in 1:5000
         kernel(a; ndrange=256)
     end
 
-    Mantle.vk_flush!(Mantle.vk_context())
+    Mantle.flush!(Mantle.Device())
     @test Array(a) == fill(5000.0f0, 256)
 end

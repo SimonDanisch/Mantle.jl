@@ -10,7 +10,7 @@ const Tri = Raycore.Triangle{UInt32}
 
 @testset "push!(hwtlas, blas, instance_buf) triangles kwarg -- batch path populates tri_gpu/off_gpu" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 8
     instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
@@ -24,7 +24,7 @@ const Tri = Raycore.Triangle{UInt32}
                                                 blas.address)
                            for _ in 1:length(_buf)])
         end
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     tlas = Mantle.VulkanTLAS(backend)
 
     # 12 dummy triangles -- same count as a cube BLAS.
@@ -52,7 +52,7 @@ end
 
 @testset "push!(hwtlas, blas, instance_buf) default triangles kwarg -- off_gpu sized, tri_gpu empty" begin
     aabb = Mantle.AABB(Point3f(-1f0,-1f0,-1f0), Point3f(1f0,1f0,1f0))
-    blas = build_accel!(Mantle.vk_context().default_bq) do ctx; build_blas_aabb(ctx, [aabb]); end
+    blas = build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx; build_blas_aabb(ctx, [aabb]); end
 
     n = 4
     instance_buf = Mantle.LavaArray{VulkanInstanceRecord}(undef, n; extra_usage=AS_INPUT_USAGE)
@@ -66,7 +66,7 @@ end
                                                 blas.address)
                            for _ in 1:length(_buf)])
         end
-    backend = Mantle.LavaBackend()
+    backend = Mantle.defaultbackend()
     tlas = Mantle.VulkanTLAS(backend)
 
     # No triangles supplied -- rayQuery-only backward-compat path.

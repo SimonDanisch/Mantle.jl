@@ -39,7 +39,7 @@ end
 
 @testset "a free while the buffer is in flight is honoured, not raced" begin
     backend = LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
 
     # Quiesce, so nothing left over decides the outcome.
     KA.synchronize(backend)

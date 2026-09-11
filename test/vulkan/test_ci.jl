@@ -195,8 +195,8 @@ end
         a = LavaArray(rand(Float32, 256))
         b = LavaArray(rand(Float32, 256))
         c = LavaArray(zeros(Float32, 256))
-        vadd_ka(Mantle.LavaBackend())(a, b, c; ndrange=256)
-        KernelAbstractions.synchronize(Mantle.LavaBackend())
+        vadd_ka(Mantle.defaultbackend())(a, b, c; ndrange=256)
+        KernelAbstractions.synchronize(Mantle.defaultbackend())
         @test Array(c) ≈ Array(a) .+ Array(b)
 
         # Shared memory + synchronize
@@ -217,8 +217,8 @@ end
 
         input = LavaArray(ones(Float32, 256))
         output = LavaArray(zeros(Float32, 4))
-        reduce_ka(Mantle.LavaBackend())(input, output; ndrange=256, workgroupsize=64)
-        KernelAbstractions.synchronize(Mantle.LavaBackend())
+        reduce_ka(Mantle.defaultbackend())(input, output; ndrange=256, workgroupsize=64)
+        KernelAbstractions.synchronize(Mantle.defaultbackend())
         @test all(Array(output) .≈ 64.0f0)
     end
 
@@ -239,7 +239,7 @@ end
             A[i] = Int32(i)
         end
 
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         A = LavaArray(zeros(Int32, 128))
         kill = LavaArray(Int32[64])
         barrier_error_kernel(backend)(A, kill; ndrange=128, workgroupsize=128)

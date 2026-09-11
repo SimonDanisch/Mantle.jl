@@ -38,7 +38,7 @@ end
     # It was `deferred_frees`, `deferred_as_frees` and a `SpinLock` on the
     # backend's queue, with two drain functions reading a stamp the backend also
     # owned. Core keeps one list per channel — see `graph/lifetime.jl`.
-    bq = Mantle.vk_context().default_bq
+    bq = Mantle.batchqueue(Mantle.Device())
     @test !hasfield(Mantle.VulkanQueue, :deferred_frees)
     @test !hasfield(Mantle.VulkanQueue, :deferred_as_frees)
     @test !hasfield(Mantle.VulkanQueue, :deferred_frees_lock)

@@ -23,7 +23,7 @@ using GPUCompiler
             @inbounds dst[i] = src[i] + 1f0
         end
 
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         a = Mantle.LavaArray(Float32[1, 2, 3, 4])
         b = Mantle.LavaArray(zeros(Float32, 4))
 
@@ -47,7 +47,7 @@ using GPUCompiler
             @inbounds dst[i] = src[i] * 2f0
         end
 
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         a = Mantle.LavaArray(Float32[1, 2, 3, 4])
         b = Mantle.LavaArray(zeros(Float32, 4))
 
@@ -69,7 +69,7 @@ using GPUCompiler
             @inbounds dst[i] = val
         end
 
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         c = Mantle.LavaArray(zeros(Float32, 4))
 
         # Compile once
@@ -105,7 +105,7 @@ using GPUCompiler
             @inbounds dst[i] = Float32(i)
         end
 
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         d = Mantle.LavaArray(zeros(Float32, 64))
         before = length(Mantle.vk_context().caches.linked)
 
@@ -151,7 +151,7 @@ using GPUCompiler
             @inbounds dst[i] = 1f0
         end
 
-        backend = Mantle.LavaBackend()
+        backend = Mantle.defaultbackend()
         e = Mantle.LavaArray(zeros(Float32, 4))
         repl_kernel(backend)(e; ndrange=4)
         KernelAbstractions.synchronize(backend)

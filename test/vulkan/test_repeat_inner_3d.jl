@@ -52,8 +52,8 @@ end
 # built via division (the exact shape that dropped the I[1] term).
 @testset "linear_index{3} load offset is exact (no dropped term)" begin
     using Lava.KernelAbstractions
-    backend = Mantle.LavaBackend()
-    bq = Mantle.vk_context().default_bq
+    backend = Mantle.defaultbackend()
+    bq = Mantle.batchqueue(Mantle.Device())
     xsrc = reshape(Float32.(1:(3 * 4 * 2)), 3, 4, 2)   # 3-D source
     xg = Mantle.LavaArray(xsrc)
 
@@ -68,7 +68,7 @@ end
 
     out = Mantle.LavaArray(zeros(Float32, 9, 4, 2))
     ri_probe!(backend)(out, xg, (3, 1, 1); ndrange = (9, 4, 2))
-    Mantle.vk_flush!(bq)
+    Mantle.flush!(bq)
     got = Array(out)
     expref = similar(got)
     for k in 1:2, j in 1:4, i in 1:9

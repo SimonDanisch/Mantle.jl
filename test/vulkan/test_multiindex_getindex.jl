@@ -56,10 +56,10 @@ const KA = KernelAbstractions
         end
         h = reshape(Float32.(1:12), 3, 2, 2, 1)
         g = Mantle.LavaArray(h)
-        out = KA.allocate(Mantle.LavaBackend(), Float32, 3, 2, 1, 1)
+        out = KA.allocate(Mantle.defaultbackend(), Float32, 3, 2, 1, 1)
         fill!(out, -1.0f0)
-        readcomputed!(Mantle.LavaBackend())(out, g, (3, 2, 1, 1); ndrange=size(out))
-        KA.synchronize(Mantle.LavaBackend())
+        readcomputed!(Mantle.defaultbackend())(out, g, (3, 2, 1, 1); ndrange=size(out))
+        KA.synchronize(Mantle.defaultbackend())
         @test vec(Array(out)) == vec(h[:, :, 2:2, :])
     end
 
@@ -70,10 +70,10 @@ const KA = KernelAbstractions
             @inbounds dst[is[1], is[2], is[3], is[4]] = Float32(i)
         end
         dims = (3, 2, 2, 1)
-        dst = KA.allocate(Mantle.LavaBackend(), Float32, dims...)
+        dst = KA.allocate(Mantle.defaultbackend(), Float32, dims...)
         fill!(dst, -1.0f0)
-        writecomputed!(Mantle.LavaBackend())(dst, dims; ndrange=dims)
-        KA.synchronize(Mantle.LavaBackend())
+        writecomputed!(Mantle.defaultbackend())(dst, dims; ndrange=dims)
+        KA.synchronize(Mantle.defaultbackend())
         @test vec(Array(dst)) == Float32.(1:prod(dims))
     end
 end
@@ -91,7 +91,7 @@ end
 #
 # Nothing about it was type-specific; every eltype failed identically.
 @testset "trailing singleton indices (more indices than dims)" begin
-    be = Mantle.LavaBackend()
+    be = Mantle.defaultbackend()
 
     @testset "kron(vec, matrix) — $T" for T in (Int16, Float32, ComplexF32)
         ha = rand(T, 16, 32)

@@ -60,8 +60,8 @@ if get(ENV, "LAVA_PRINTF_LIVE", "0") == "1"
     @testset "@lava_printf live output (resets device)" begin
         Mantle.reset_device!(debug = Mantle.DebugConfig(printf = true))
         try
-            backend = Mantle.LavaBackend()
-            bq = Mantle.vk_context().default_bq
+            backend = Mantle.defaultbackend()
+            bq = Mantle.batchqueue(Mantle.Device())
             @kernel function pf_live!(out)
                 i = @index(Global)
                 @lava_printf "tid=%u val=%f\n" UInt32(i) Float32(i) * 10f0
@@ -70,7 +70,7 @@ if get(ENV, "LAVA_PRINTF_LIVE", "0") == "1"
             Mantle.clear_printf_output!()
             out = Mantle.LavaArray(zeros(Float32, 4))
             pf_live!(backend)(out; ndrange = 4)
-            Mantle.vk_flush!(bq)
+            Mantle.flush!(bq)
             KernelAbstractions.synchronize(backend)
             msgs = Mantle.get_printf_output()
             @test length(msgs) == 4
