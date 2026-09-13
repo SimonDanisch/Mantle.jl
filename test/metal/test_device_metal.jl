@@ -173,6 +173,229 @@ end
 # It is silent, it is not a race that a barrier fixes, and it does not reproduce
 # under `MTL_SHADER_VALIDATION=1`, so it is pinned as a VALUE.
 
+# ── The driver defect, refused rather than waited on ─────────────────────────
+#
+# `executeCommandsInBuffer:` on an MTL4 compute encoder stops completing after
+# about a second of replayed GPU work: the timeline freezes, `MTL4CommitFeedback`
+# reports nothing, the system log is empty and the next submission blocks for
+# ever. Ninety lines of Metal.jl reproduce it with no Mantle in them
+# (`Metal/research/mtl4_icb_stall.jl`), and every workaround at the API level was
+# tried — both execute forms, a fresh allocator and command buffer per submission,
+# forty distinct indirect command buffers, one submission in flight, no feedback
+# handler, `supportMTLEvent`, `ray_tracing` off, a `Private` buffer, a barrier
+# after the execute, a fresh queue per submission.
+#
+# So a recorded plan does not go through that queue as a REPLAY. It goes through
+# as an ENCODED frame instead: the recorder captures every dispatch's pipeline,
+# argument table, grid and barrier, and a run puts them on the encoder directly.
+# Three sends per dispatch against one per segment, and the two routes are one
+# predicate apart — `canreplay`, in `device.jl`, which is also the only file that
+# knows a generation exists.
+#
+# A `repeat!` gate survives the crossing because a threadgroup count can be read
+# from memory: where a replay shortens an execution range to nothing, an encoded
+# frame writes a grid of zeros and the dispatch runs no threadgroups. Same
+# one-thread writer, same "the host never learns whether the iteration ran".
+
+@kernel function seam_gatecount!(dst, @Const(src), flag)
+    i = @index(Global)
+    @inbounds dst[i] += src[i]
+    i == 1 && (@inbounds flag[1] -= Int32(1))
+end
+
+# A second `MetalDevice` is a second `Pool` over one `MTLDevice`, so these stay
+# small and are the only tests here that allocate from one.
+function seam_gatedplan(dev, n, iters)
+    g = M.Graph(dev)
+    a = M.Buffer(dev, zeros(Float32, n))
+    b = M.Buffer(dev, fill(1.0f0, n))
+    flag = M.Buffer(dev, Int32[iters])
+    M.repeat!(g, iters; while_nonzero = flag) do i
+        M.compute!(g, "it-$i") do p
+            M.dispatch!(p, seam_gatecount!,
+                        (M.use(p, a; read = true, write = true),
+                         M.use(p, b; read = true),
+                         M.use(p, flag; read = true, write = true)), n)
+        end
+    end
+    return M.record!(M.Plan(g)), a, flag
+end
+
+if MTLm.supports_mtl4(Metal.device())
+    @testset "an MTL4 queue encodes a recording instead of replaying it" begin
+        mtldev = Metal.device()
+        @test Mantle.canreplay(Mantle.LegacyQueue(mtldev))
+        @test !Mantle.canreplay(Mantle.MTL4Queue(mtldev))
+        # Exactly one of the two, and not both: a queue that replays captures
+        # nothing at record time and one that encodes captures everything.
+        @test !Mantle.encodes(Mantle.LegacyQueue(mtldev))
+        @test Mantle.encodes(Mantle.MTL4Queue(mtldev))
+    end
+
+    @testset "a gated plan runs the same on both generations" begin
+        mtldev = Metal.device()
+        for q in (Mantle.MTL4Queue(mtldev), Mantle.LegacyQueue(mtldev))
+            dev = Mantle.MetalDevice(mtldev, q)
+            Mantle.adoptqueue!(dev)
+            pl, a, flag = seam_gatedplan(dev, 1 << 10, 8)
+            rec = pl.recording
+            @test count(s -> s.slot >= 0, rec.segments) == 8
+            # Captured only where it is needed, and then every command inside a
+            # gated segment takes its grid from memory.
+            if Mantle.encodes(q)
+                @test length(rec.encoded) == rec.ncommands
+                @test count(c -> c.gridoff >= 0, rec.encoded) > 0
+                # Both ends of every gated run carry a barrier: the count is
+                # written by a dispatch and read by the command processor, so
+                # nothing inside a shader can order it.
+                for sg in rec.segments
+                    sg.slot < 0 && continue
+                    @test rec.encoded[sg.first].barrier
+                    sg.last < length(rec.encoded) && @test rec.encoded[sg.last + 1].barrier
+                end
+            else
+                @test isempty(rec.encoded)
+            end
+
+            # Open: every iteration runs, and the last one shuts the gate.
+            M.run!(pl); M.waitfor!(pl)
+            @test Array(M.storage(a))[1] == 8.0f0
+            @test Array(M.storage(flag))[1] == 0
+
+            # Shut, and back to back so the ring fills: the iterations are
+            # discarded and nothing corrupts what had already run.
+            for _ in 1:12; M.run!(pl); end
+            M.waitfor!(pl)
+            @test Array(M.storage(a))[1] == 8.0f0
+            @test Array(M.storage(flag))[1] == 0
+
+            # Reopened to three: exactly three more, then shut again.
+            M.update!(flag, Int32[3])
+            M.run!(pl); M.waitfor!(pl)
+            @test Array(M.storage(a))[1] == 11.0f0
+            @test Array(M.storage(flag))[1] == 0
+            M.run!(pl); M.waitfor!(pl)
+            @test Array(M.storage(a))[1] == 11.0f0
+        end
+        # Handed back, so the rest of the suite runs on the device it built its
+        # buffers on. Not required for correctness — every run adopts its own
+        # device's queue and `adopt_queue!` drains the one it leaves — but a test
+        # that leaves the process pointing at its own scratch device is a test that
+        # will be blamed for the next unrelated failure.
+        Mantle.adoptqueue!(DEV_SEAM)
+    end
+
+    # A recording is shaped for ONE of the two routes, and only one of the two
+    # mismatches is loud. A replay-shaped recording has no dispatches to encode and
+    # says so. An ENCODE-shaped one replays perfectly well and silently discards
+    # every iteration of every `repeat!`, because its execution ranges were never
+    # written and stayed at the zeros `openrecording` left — a black frame with
+    # nothing to read. Both are refused, and the second is the reason why.
+    #
+    # Neither is reachable through the public API today (a plan's device is fixed
+    # when it records), which is exactly why it wants a test: the day something
+    # re-records a plan onto another device, this says so instead of going quiet.
+    @testset "a recording is refused by the route it was not made for" begin
+        mtldev = Metal.device()
+        legacy = Mantle.MetalDevice(mtldev, Mantle.LegacyQueue(mtldev))
+        mtl4 = Mantle.MetalDevice(mtldev, Mantle.MTL4Queue(mtldev))
+        pl_legacy, = seam_gatedplan(legacy, 256, 2)
+        pl_mtl4, = seam_gatedplan(mtl4, 256, 2)
+
+        @test Mantle.canrun(legacy.queue, pl_legacy.recording)
+        @test Mantle.canrun(mtl4.queue, pl_mtl4.recording)
+        @test !Mantle.canrun(mtl4.queue, pl_legacy.recording)
+        @test !Mantle.canrun(legacy.queue, pl_mtl4.recording)
+        # And `replay!` is where that is asked, so neither runs a command.
+        @test_throws ArgumentError Mantle.replay!(mtl4, pl_legacy.recording)
+        @test_throws ArgumentError Mantle.replay!(legacy, pl_mtl4.recording)
+        Mantle.adoptqueue!(DEV_SEAM)
+    end
+end
+
+# ── The queue is adopted by every run, not only by one that opens a front ────
+#
+# Core opens a front only for a run with host stores or address patches to put in
+# front of its recording, so a STEADY frame of a recorded plan never reaches
+# `openrun`. With `adoptqueue!` only there, a device that was not the process
+# device ran every frame on whatever queue Metal.jl had handed the task — and a
+# `Buffer(dev, data)` uploaded on that queue landed AFTER the first frame that
+# read it. One wrong frame, every frame after it right, nothing reported.
+#
+# Both halves are pinned: the device below is built by name and allocated from
+# BEFORE it adopts anything, which is the order that used to fail.
+
+@kernel function seam_adopt!(dst, @Const(src))
+    i = @index(Global)
+    @inbounds dst[i] += src[i]
+end
+
+@testset "a run adopts this device's queue whatever core opens" begin
+    mtldev = Metal.device()
+    for q in (Mantle.LegacyQueue(mtldev), Mantle.MTL4Queue(mtldev))
+        MTLm.supports_mtl4(mtldev) || q isa Mantle.LegacyQueue || continue
+        dev = Mantle.MetalDevice(mtldev, q)
+        g = M.Graph(dev)
+        a = M.Buffer(dev, zeros(Float32, 64))
+        b = M.Buffer(dev, fill(2.0f0, 64))
+        M.compute!(g, "fill") do p
+            M.dispatch!(p, seam_adopt!, (M.use(p, a; read = true, write = true),
+                                         M.use(p, b; read = true)), 64)
+        end
+        pl = M.record!(M.Plan(g))
+        # THE FIRST RUN is the whole test.
+        M.run!(pl); M.waitfor!(pl)
+        @test Array(M.storage(a))[1] == 2.0f0
+        @test Metal.adopted_queue[] === Mantle.batchqueue(dev)
+    end
+    Mantle.adoptqueue!(DEV_SEAM)
+end
+
+# ── …and so does RECORDING, which is not host work either ────────────────────
+#
+# `openrecording` fills three arrays with a kernel launch and `closerecording!`
+# blits the gate template, so a `record!` on a device nothing has adopted puts all
+# of it on whatever queue Metal.jl handed the task — and the frames, which run on
+# THIS device's queue, are ordered against it by nothing.
+#
+# `ranges` and `grids` survive that: `emithead!`'s reset rewrites them inside every
+# frame. The TEMPLATE does not. It is written once at record time and read by every
+# gate for ever after, so a blit the first frames are not ordered behind is a plan
+# whose gates open onto a grid of zeros and which silently runs nothing at all.
+#
+# The device below is therefore built by name and NEVER adopted before `record!`,
+# which is the order that used to leave the blit on the wrong queue.
+
+@testset "recording adopts this device's queue too" begin
+    mtldev = Metal.device()
+    for q in (Mantle.LegacyQueue(mtldev), Mantle.MTL4Queue(mtldev))
+        MTLm.supports_mtl4(mtldev) || q isa Mantle.LegacyQueue || continue
+        Mantle.adoptqueue!(DEV_SEAM)          # point the process somewhere else first
+        dev = Mantle.MetalDevice(mtldev, q)
+        g = M.Graph(dev)
+        a = M.Buffer(dev, zeros(Float32, 256))
+        b = M.Buffer(dev, fill(1.0f0, 256))
+        flag = M.Buffer(dev, Int32[4])
+        M.repeat!(g, 4; while_nonzero = flag) do i
+            M.compute!(g, "it-$i") do p
+                M.dispatch!(p, seam_gatecount!,
+                            (M.use(p, a; read = true, write = true),
+                             M.use(p, b; read = true),
+                             M.use(p, flag; read = true, write = true)), 256)
+            end
+        end
+        pl = M.Plan(g)
+        @test Metal.adopted_queue[] === Mantle.batchqueue(DEV_SEAM)
+        M.record!(pl)
+        @test Metal.adopted_queue[] === Mantle.batchqueue(dev)
+        # THE FIRST RUN is the whole test: four iterations, not zero.
+        M.run!(pl); M.waitfor!(pl)
+        @test Array(M.storage(a))[1] == 4.0f0
+        @test Array(M.storage(flag))[1] == 0
+    end
+    Mantle.adoptqueue!(DEV_SEAM)
+end
+
 # ── And the one that only the crown found ────────────────────────────────────
 #
 # A recording is not read-only. A `repeat!` gate's execution range lives in the

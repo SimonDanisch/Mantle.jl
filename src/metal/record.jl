@@ -356,13 +356,59 @@ The range writer for one gated segment, and where its arguments live.
 holds is not known until its passes have been emitted, and the writer command that
 carries the number was encoded before them.
 """
-mutable struct MetalRangeWriter
+abstract type MetalWriter end
+
+mutable struct MetalRangeWriter <: MetalWriter
     kernel::Metal.HostKernel
     args::Vector{RecordedArg}
     adapted::Tuple
     state::Metal.KernelState
     slot::Int
 end
+
+"""
+The same job for a queue that ENCODES a recording rather than replaying it.
+
+There is no execution range to shorten when there is no indirect command buffer in
+the frame, so a gated dispatch takes its threadgroup count from memory instead
+(`dispatchThreadgroupsWithIndirectBuffer:`) and a closed gate writes a count of
+zero. Identical fields, a different kernel and a different patch — which is what the
+two types are for.
+"""
+mutable struct MetalGridWriter <: MetalWriter
+    kernel::Metal.HostKernel
+    args::Vector{RecordedArg}
+    adapted::Tuple
+    state::Metal.KernelState
+    slot::Int
+end
+
+"""
+One recorded dispatch as an ENCODER needs it, rather than as a command in a buffer.
+
+The second way to bake a plan, for a queue that cannot replay an indirect command
+buffer (see `canreplay` in `device.jl`). Everything here is fixed at record time —
+the pipeline, the grid, and an argument table holding the addresses, which do not
+move for a recorded plan — so a frame is three sends per dispatch and no lookup.
+
+Dearer than a replay, which is one send per SEGMENT, and the only thing that runs
+at all on a queue whose `executeCommandsInBuffer:` stalls.
+"""
+struct MetalEncodedCommand
+    pipeline::MTL.MTLComputePipelineState
+    table::MTL.MTL4ArgumentTable
+    groups::MTL.MTLSize
+    threads::MTL.MTLSize
+    barrier::Bool
+    # Zero-based WORD offset into the recording's grid buffer for a dispatch inside
+    # a gated segment, whose threadgroup count the device writes and the host never
+    # learns; `-1` for one whose grid is fixed at record time.
+    gridoff::Int
+end
+
+"""The same command with its barrier bit set, since a frame cannot set one."""
+withbarrier(c::MetalEncodedCommand) =
+    MetalEncodedCommand(c.pipeline, c.table, c.groups, c.threads, true, c.gridoff)
 
 """
 What `record!` walks a Metal plan with: one indirect command buffer, a cursor into
@@ -375,6 +421,10 @@ mutable struct MetalRecorder
     ncommands::Int
     cursor::Int
     barrier::Bool
+    # Filled only when the queue encodes instead of replaying. Capturing costs
+    # record time and nothing per frame, and an empty vector is the signal that
+    # this recording has no encoded form.
+    encoded::Vector{MetalEncodedCommand}
     segments::Vector{MetalSegment}
     # The segment being built: where it starts, what gates it, and which range slot
     # that gate writes.
@@ -387,7 +437,16 @@ mutable struct MetalRecorder
     auxptr::Ptr{UInt8}
     auxcursor::Int
     ranges::Metal.MtlVector{UInt32}
-    writers::Vector{MetalRangeWriter}
+    # The encode path's answer to `ranges`: three `UInt32` per gated dispatch, the
+    # threadgroup count an indirect dispatch reads. `templ` holds what an OPEN gate
+    # restores — the grids as recorded — and is filled from `templhost` when the
+    # recording closes. Both are one element long on a queue that replays.
+    grids::Metal.MtlVector{UInt32}
+    templ::Metal.MtlVector{UInt32}
+    templhost::Vector{UInt32}
+    gridcursor::Int     # how many triples are spoken for
+    gridfirst::Int      # the first triple of the segment under construction
+    writers::Vector{MetalWriter}
     # The pass about to be emitted, stashed by `emitbarriers!` — which is the only
     # hook that sees one before `withpredicate` decides what segment it belongs to.
     pass::Any
@@ -405,10 +464,19 @@ struct MetalRecording
     rangebuf::MTL.MTLBuffer
     rangeoff::Int
     ranges::Metal.MtlVector{UInt32}
+    # The grid buffer a gated dispatch reads its threadgroup count from, and the
+    # template an open gate restores it from. See `MetalGridWriter`.
+    gridbuf::MTL.MTLBuffer
+    gridoff::Int
+    grids::Metal.MtlVector{UInt32}
+    templ::Metal.MtlVector{UInt32}
     aux::MTL.MTLBuffer
     argstore::MTL.MTLBuffer
-    writers::Vector{MetalRangeWriter}
+    writers::Vector{MetalWriter}
     ncommands::Int
+    # Empty unless the device's queue encodes rather than replays; see
+    # `MetalEncodedCommand`.
+    encoded::Vector{MetalEncodedCommand}
     # What the replay declares to its encoder, and the pool's block GENERATION it
     # was built at — see `replayresources!`.
     resources::Vector{MTL.MTLBuffer}
@@ -477,6 +545,19 @@ The indirect command buffer the plan's commands go into, sized for them.
 """
 function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     walkedplan(pl) && return nothing
+    # THIS DEVICE'S QUEUE, before anything below touches the GPU, for the same
+    # reason `enterrun!` does it before a frame: recording is not pure host work.
+    # It fills three arrays with a kernel launch and blits the gate template, and
+    # Metal.jl launches on the task's queue unless told otherwise — so on a device
+    # that was built by name and has not been adopted, all of that lands on a queue
+    # nothing orders the frames against.
+    #
+    # The template is the one that cannot recover. `ranges` and `grids` are rewritten
+    # by `emithead!`'s reset inside every frame, so a lost `fill!` costs nothing;
+    # `templ` is written ONCE here and read by every gate for ever after, so a blit
+    # the first frames are not ordered behind is a plan whose gates all open onto a
+    # grid of zeros and which silently runs nothing.
+    adoptqueue!(d)
     let why = norecordreason(pl)
         why === nothing || throw(ArgumentError("record!: " * why))
     end
@@ -531,9 +612,18 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     Metal.make_persistently_resident!(aux)
     ranges = Metal.MtlVector{UInt32}(undef, max(2 * nwriters, 2))
     fill!(ranges, UInt32(0))
-    return MetalRecorder(d, pl, icb, ncommands, 0, false, MetalSegment[], 1, nothing, -1,
+    # Three words per dispatch is the ceiling: every dispatch in the plan could sit
+    # inside a gated segment. One element on a queue that replays, where nothing
+    # reads either of these — the fields are not optional so the type stays concrete.
+    ngrid = encodes(d.queue) && nwriters > 0 ? 3 * ncommands : 1
+    grids = Metal.MtlVector{UInt32}(undef, ngrid)
+    templ = Metal.MtlVector{UInt32}(undef, ngrid)
+    fill!(grids, UInt32(0))
+    fill!(templ, UInt32(0))
+    return MetalRecorder(d, pl, icb, ncommands, 0, false, MetalEncodedCommand[], MetalSegment[], 1, nothing, -1,
                          aux, convert(Ptr{UInt8}, MTL.contents(aux)), 0,
-                         ranges, MetalRangeWriter[], nothing, nwriters, false)
+                         ranges, grids, templ, zeros(UInt32, ngrid), 0, 0,
+                         MetalWriter[], nothing, nwriters, false)
 end
 
 """How many buffer slots a dispatch's arguments take, which is what the descriptor
@@ -584,6 +674,24 @@ function metal_write_range!(range, pred, i::Int32, base::Int32, loc::UInt32, len
 end
 
 """
+One thread, writing the threadgroup counts the command processor reads next.
+
+The encode path's `metal_write_range!`. `base` is the first WORD of this segment's
+run of triples and `n` how many dispatches it holds; an open gate copies the grids
+as recorded, a closed one writes zeros and each of those dispatches runs no
+threadgroups at all. Measured before it was built: a zero count from memory really
+does run nothing, and a count written by the dispatch before it is visible across an
+encoder barrier.
+"""
+function metal_write_grids!(grids, templ, pred, i::Int32, base::Int32, n::Int32)
+    @inbounds go = pred[i + Int32(1)].go != UInt32(0)
+    for k in Int32(1):(Int32(3) * n)
+        @inbounds grids[base + k] = go ? templ[base + k] : UInt32(0)
+    end
+    return nothing
+end
+
+"""
     Mantle.emitdispatch!(recorder, dispatch, name)
 
 Encode one dispatch as the next command of the recording.
@@ -623,6 +731,28 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
         MTL.set_kernel_buffer!(cmd, buf, off, a.index)
     end
     MTL.dispatch_threadgroups!(cmd, groups, threads)
+    # The same dispatch, captured as an encoder would need it, for a queue that
+    # cannot replay the buffer this command was just written into. Record-time
+    # only: the addresses are fixed for the life of the recording, which is what
+    # lets the table be built once.
+    if encodes(e.dev.queue)
+        # A command inside a gated segment takes its grid from memory, and the run
+        # it belongs to has one triple per command. The writer that opens the NEXT
+        # segment is encoded while this one is still open, so it takes a triple too
+        # and is discarded with the iteration that should not have run it — which is
+        # the whole of "once closed, a `repeat!` loop stays closed".
+        goff = -1
+        if e.slot >= 0
+            goff = 3 * e.gridcursor
+            e.gridcursor += 1
+            e.templhost[goff + 1] = UInt32(groups.width)
+            e.templhost[goff + 2] = UInt32(groups.height)
+            e.templhost[goff + 3] = UInt32(groups.depth)
+        end
+        push!(e.encoded,
+              MetalEncodedCommand(pipeline, argtable(e.dev, args, store), groups,
+                                  threads, e.barrier, goff))
+    end
     # The bit, on BOTH generations. MTL4 does no automatic hazard tracking, which
     # made it look as though it must ignore a command's barrier bit too — it does
     # not: 40 chained dispatches replayed from one `executeCommandsInBuffer:` come
@@ -696,6 +826,10 @@ function Mantle.withpredicate(f, e::MetalRecorder, pred::Tuple{Any,Int})
         closesegment!(e)
         e.pred = pred
         e.slot = length(e.writers) - 1
+        # Where this segment's triples begin. Read by `patchwriter!` when it closes:
+        # a segment's length is not known until its passes have been emitted, and
+        # neither is the run of grids the gate has to zero.
+        e.gridfirst = e.gridcursor
         e.newiter = false
     end
     f()
@@ -752,8 +886,18 @@ function closesegment!(e::MetalRecorder)
     return nothing
 end
 
-"""Encode the command that writes one gated segment's execution range."""
-function emitwriter!(e::MetalRecorder, pred::Tuple{Any,Int})
+"""
+Encode the command that decides, on the device, whether one gated segment runs.
+
+Which command that is depends on how this queue will run the recording: an
+execution range for a replay, a run of threadgroup counts for an encoded frame.
+`encodes` is the only thing asked, so a third generation answers it and gets one of
+these two without a line here changing.
+"""
+emitwriter!(e::MetalRecorder, pred::Tuple{Any,Int}) =
+    encodes(e.dev.queue) ? emitgridwriter!(e, pred) : emitrangewriter!(e, pred)
+
+function emitrangewriter!(e::MetalRecorder, pred::Tuple{Any,Int})
     slot = length(e.writers)
     adapted = (Metal.mtlconvert(e.ranges),
                Metal.mtlconvert(Mantle.storage(pred[1])),
@@ -770,12 +914,41 @@ function emitwriter!(e::MetalRecorder, pred::Tuple{Any,Int})
     return w
 end
 
-"""Give a writer the range it writes, and pack its arguments."""
+function emitgridwriter!(e::MetalRecorder, pred::Tuple{Any,Int})
+    slot = length(e.writers)
+    # `base` and `n` are both zero here and both patched when the segment closes:
+    # the writer is encoded before the commands it counts, and before the triples
+    # they will take. Zero is also the safe value, since a writer that never got
+    # patched would zero nothing and leave the head reset's zeros standing.
+    adapted = (Metal.mtlconvert(e.grids), Metal.mtlconvert(e.templ),
+               Metal.mtlconvert(Mantle.storage(pred[1])),
+               Int32(pred[2]), Int32(0), Int32(0))
+    tt = Base.to_tuple_type(map(typeof, adapted))
+    kernel = Metal.mtlfunction(metal_write_grids!, tt;
+                               name = icb_name("write_grids", slot), indirect = true)
+    state = recorded_state(e.dev, kernel)
+    args, nbytes = recorded_args((state, metal_write_grids!, adapted...), e.auxcursor)
+    e.auxcursor += Mantle.argalign(nbytes)
+    w = MetalGridWriter(kernel, args, adapted, state, slot)
+    push!(e.writers, w)
+    encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(1), MTL.MTLSize(1))
+    return w
+end
+
+"""Give a writer the run it writes, and pack its arguments."""
 function patchwriter!(e::MetalRecorder, w::MetalRangeWriter, first::Int, last::Int)
     adapted = (w.adapted[1], w.adapted[2], w.adapted[3], w.adapted[4],
                UInt32(first - 1), UInt32(last - first + 1))
     w.adapted = adapted
     pack_recorded!(e.auxptr, w.args, (w.state, metal_write_range!, adapted...))
+    return nothing
+end
+
+function patchwriter!(e::MetalRecorder, w::MetalGridWriter, first::Int, last::Int)
+    adapted = (w.adapted[1], w.adapted[2], w.adapted[3], w.adapted[4],
+               Int32(3 * e.gridfirst), Int32(last - first + 1))
+    w.adapted = adapted
+    pack_recorded!(e.auxptr, w.args, (w.state, metal_write_grids!, adapted...))
     return nothing
 end
 
@@ -790,7 +963,10 @@ every `run!` clears the ranges before the first gate writes one.
 """
 function Mantle.emithead!(e::MetalRecorder, pl::Mantle.Plan)
     e.nwriters == 0 && return nothing
-    adapted = (Metal.mtlconvert(e.ranges), Int32(2 * e.nwriters))
+    # Same kernel either way; what differs is which array a gate is read out of.
+    arr = encodes(e.dev.queue) ? e.grids : e.ranges
+    n = encodes(e.dev.queue) ? Int32(length(e.grids)) : Int32(2 * e.nwriters)
+    adapted = (Metal.mtlconvert(arr), n)
     tt = Base.to_tuple_type(map(typeof, adapted))
     kernel = Metal.mtlfunction(metal_reset_ranges!, tt;
                                name = icb_name("reset_ranges", 0), indirect = true)
@@ -815,9 +991,37 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
     am = pl.args
     am === nothing && throw(ArgumentError(
         "record!: the plan has no argument memory to bind commands against."))
+    if encodes(e.dev.queue)
+        # What an open gate restores, uploaded once. A blit on the queue this device
+        # adopted, which `closesubmit!` orders every submission behind.
+        e.gridcursor == 0 || copyto!(e.templ, e.templhost)
+        markgates!(e)
+    end
     return MetalRecording(e.icb, e.segments, e.ranges.data[], Int(e.ranges.offset),
-                          e.ranges, e.aux, am.store, e.writers, e.ncommands,
-                          MTL.MTLBuffer[], Ref(-1))
+                          e.ranges, e.grids.data[], Int(e.grids.offset), e.grids,
+                          e.templ, e.aux, am.store, e.writers, e.ncommands,
+                          e.encoded, MTL.MTLBuffer[], Ref(-1))
+end
+
+"""
+Put a barrier on both ends of every gated segment, for the encoded frame.
+
+A gate's threadgroup counts are written by a dispatch and read by the COMMAND
+PROCESSOR, so no ordering inside the shader can cover it: the write has to have
+landed before the first dispatch that fetches a count, and the run after the segment
+must not begin while the segment is still writing. `executesegment!` says the same
+thing with two `barrier!` calls around an execute; here it is a bit on the commands
+either side, because that is the only place a frame can be told about it without
+walking the segments again.
+"""
+function markgates!(e::MetalRecorder)
+    for sg in e.segments
+        sg.slot < 0 && continue
+        for k in (sg.first, sg.last + 1)
+            1 <= k <= length(e.encoded) && (e.encoded[k] = withbarrier(e.encoded[k]))
+        end
+    end
+    return nothing
 end
 
 # Neither is reachable: `norecordreason` refuses a plan holding a copy or a render
@@ -848,12 +1052,34 @@ updates nothing never opens this at all.
 """
 function Mantle.openrun(d::MetalDevice, pl::Mantle.Plan)
     pl.recording === nothing || Metal.synchronize()
-    # This device's queue is the one Metal.jl launches on, whatever task we are
-    # on (`adoptqueue!`), and when to submit to it is the graph's question rather
-    # than Metal.jl's op counter (`ownflush!`).
+    enterrun!(d)
+    return Mantle.Immediate()
+end
+
+"""
+What every run of this device has to do first, whether or not it opens a front.
+
+This device's queue is the one Metal.jl launches on, whatever task we are on
+(`adoptqueue!`), and when to submit to it is the graph's question rather than
+Metal.jl's op counter (`ownflush!`).
+
+Called from `submitrun!` as well as `openrun`, and that is the point: core opens a
+front only for a run that has host stores or address patches to put in front of its
+recording, so a STEADY frame of a recorded plan never reaches `openrun` at all. With
+these two only there, a device that was not the process device — one built by name,
+which is the only way to ask for a second queue generation — ran every frame on
+whatever queue Metal.jl had handed the task. That is the same hazard `defaultdevice!`
+documents, and it showed the same way: a `Buffer(dev, data)` uploaded on the task's
+queue landed AFTER the first frame that read it, so run 1 came out empty and every
+run after it was right.
+
+Idempotent, and cheap when nothing changed: `Metal.adopt_queue!` returns on the same
+queue without touching the driver.
+"""
+function enterrun!(d::MetalDevice)
     adoptqueue!(d)
     ownflush!(d, true)
-    return Mantle.Immediate()
+    return nothing
 end
 
 """
@@ -869,6 +1095,7 @@ Mantle.closerun!(d::MetalDevice, pl::Mantle.Plan, ::Mantle.Immediate) = submitru
 Mantle.closerun!(d::MetalDevice, pl::Mantle.Plan, ::Nothing) = submitrun!(d, pl)
 
 function submitrun!(d::MetalDevice, pl::Mantle.Plan)
+    enterrun!(d)
     rec = pl.recording
     # The token `waitfor!(plan)` waits on, and it comes OUT of the submission: a
     # queue that signals an event per submit knows which value this run will
@@ -927,6 +1154,8 @@ function replayresources!(d::MetalDevice, rec::MetalRecording)
     push!(rec.resources, rec.argstore)
     push!(rec.resources, rec.aux)
     push!(rec.resources, rec.rangebuf)
+    push!(rec.resources, rec.gridbuf)
+    push!(rec.resources, rec.templ.data[])
     rec.nblocks[] = n
     return rec.resources
 end
@@ -938,9 +1167,22 @@ This is the whole of a baked frame's host work. Nothing here looks at a dispatch
 argument or a kernel; what runs was decided when the plan was recorded.
 """
 function replay!(d::MetalDevice, rec::MetalRecording)
+    # REFUSED rather than hung. `executeCommandsInBuffer:` on an MTL4 compute
+    # encoder stops completing after roughly a second of replayed GPU work, and
+    # reports nothing when it does: no error from the commit feedback, nothing in
+    # the system log, and the next submission blocks forever. Every workaround at
+    # the API level was tried and none of them is one — see the note above
+    # `metalqueue` in `device.jl` for the measurements, and
+    # `Metal/research/mtl4_icb_stall.jl` for the reproducer with the knobs that
+    # rule each cause out.
+    canrun(d.queue, rec) || refusereplay(d.queue)
     sub = opensubmit!(d, replayresources!(d, rec))
-    for s in rec.segments
-        executesegment!(d, sub, rec, s)
+    if canreplay(d.queue)
+        for s in rec.segments
+            executesegment!(d, sub, rec, s)
+        end
+    else
+        encodeplan!(sub, rec)
     end
     return closesubmit!(d, sub)
 end

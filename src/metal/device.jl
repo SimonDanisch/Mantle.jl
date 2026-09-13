@@ -100,25 +100,68 @@ Which submission generation this device gets. The one place that decides, so
 that a test can decide differently by handing `MetalDevice` a queue directly.
 """
 #
-# LEGACY, on a machine that has an MTL4 queue, and the reason is one open defect
-# rather than a preference.
+# LEGACY, on a machine that has an MTL4 queue, and the reason is a driver defect
+# that has been isolated rather than a preference.
 #
-# `MTL4Queue` is complete and is exercised by the whole suite: gates, the
-# timeline, residency, the ordering against the other queue, replays that do not
-# overlap. It renders RayDemo's crown correctly with hardware traversal at every
-# size tried up to 2000x2800 and at bounce depth 100 — with ONE sample per frame.
-# At sixteen samples per frame it stops: after six or seven submissions the
-# timeline stops advancing, the driver reports no failure through
-# `MTL4CommitFeedback`, and nothing appears in the system log. The trigger is the
-# sample count and not the depth or the resolution (depth 8 at sixteen samples
-# hangs; depth 100 at one sample does not), which points at many replays of one
-# recording issued back to back — but the ordering that was supposed to cover
-# that is in place and a twelve-deep version of it passes in the suite, so the
-# cause is not yet known and the default must not be a path that can hang a real
-# scene.
+# `executeCommandsInBuffer:` on an `MTL4ComputeCommandEncoder` STOPS COMPLETING
+# after roughly a second of cumulative replayed GPU work. The timeline simply
+# stops advancing: no error from `MTL4CommitFeedback`, nothing in the system log,
+# and the next `opensubmit!` blocks forever. Heavier replays hit it sooner — 207
+# ms of work per submission stalls at the fifth, 27 ms at the twenty-first, and
+# an empty submission never does.
 #
-# A caller asks for it by name — `MetalDevice(mtldev, MTL4Queue(mtldev))` — which
-# is what the parameter is for, and how the suite runs both here.
+# It is the ONE call. Measured on this M5, same indirect command buffer and same
+# kernel each time:
+#
+#   legacy queue, executeCommandsInBuffer:      60/60 submissions, 207 ms each
+#   MTL4 queue, direct dispatch (arg table)     60/60 submissions, 208 ms each
+#   MTL4 queue, executeCommandsInBuffer:        stalls at 5 to 11
+#   MTL4 queue, empty submissions               100/100
+#
+# And it is none of the things it looked like. It survives, unchanged, a fresh
+# allocator AND command buffer per submission; forty distinct indirect command
+# buffers so none is ever replayed twice; full host serialisation with one
+# submission in flight; no commit-feedback handler; `supportMTLEvent` on the queue
+# descriptor; `ray_tracing` off; a `Private` buffer; a `barrier!` after the
+# execute; the other execute form (`indirectBuffer:`); and the selector sent by
+# hand, which rules out the wrapper. A fresh QUEUE per submission does avoid it —
+# and runs no work at all, three of forty increments landing, so that is a second
+# failure rather than a way out.
+#
+# So a recorded plan cannot go through an MTL4 queue AS AN ICB REPLAY. That is not
+# the same as MTL4 being unusable, and the way out is measured rather than
+# guessed: on the same queue, under the same load,
+#
+#   direct dispatch through an argument table          60/60, 208 ms each
+#   INDIRECT dispatch, grid read from memory           60/60, 208 ms each
+#
+# The second is the one that matters, because it is what a `repeat!` gate needs
+# without an indirect command buffer: a closed gate writes a zero THREADGROUP
+# COUNT where it now writes a zero-length execution range, and the host still
+# never learns whether the iteration ran.
+#
+# That is the route this backend took, and it is what `canreplay`/`encodes` below
+# select between: an MTL4 queue ENCODES a recorded plan's dispatches into its
+# command buffer every frame instead of replaying them. The recorder already knew
+# each dispatch's pipeline, arguments, grid and barrier, so capturing them costs
+# record time and nothing per frame, and `emitwriter!` writes three `UInt32` per
+# gated dispatch where the replay writes two. Three sends per dispatch against one
+# per segment: about 27 us of host time for a forty-dispatch plan where the replay
+# is 4 us.
+#
+# It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
+# depth 8, hardware traversal — the case that used to stall at the sixth or
+# seventh submission — runs thirty consecutive frames on an MTL4 queue at a median
+# of 1817 ms, against 1842 ms for the same scene replaying on the legacy queue, and
+# the two images agree.
+#
+# So the default is legacy for the ONE remaining reason: every other Metal path in
+# this backend — render passes, blits, acceleration-structure builds, Metal.jl's
+# own launches — still goes through the `MTLCommandQueue` either way, so MTL4 buys
+# a timeline that answers `passed` with a load instead of a device drain, and that
+# is not yet worth making a machine's default depend on a driver whose replay
+# stalls. A caller asks for it by name — `MetalDevice(mtldev, MTL4Queue(mtldev))` —
+# which is what the parameter is for and how the suite exercises both here.
 #
 # A replayed segment is otherwise IDENTICAL on the two: one
 # `executeCommandsInBuffer:`, and the barrier bit a command carries is honoured on
@@ -492,6 +535,120 @@ end
 
 encoder(s::MTL4Submission) = s.enc
 
+"""
+Whether this queue can replay a recording at all.
+
+`true` everywhere except an MTL4 queue, where `executeCommandsInBuffer:` stops
+completing after about a second of replayed GPU work — see the note above
+`metalqueue`, and `Metal/research/mtl4_icb_stall.jl` for the ninety-line
+reproducer. A caller that has opted into MTL4 and then records a plan gets told
+so, rather than a frame that never returns.
+"""
+canreplay(q) = true
+canreplay(::MTL4Queue) = false
+
+"""
+Whether a recording for this queue needs its dispatches captured for ENCODING.
+
+The other half of `canreplay`: a queue that cannot replay an indirect command
+buffer can still run a recorded plan by encoding its dispatches into the command
+buffer every frame, so the recorder captures what an encoder would need. Costs
+record time and nothing per frame.
+"""
+encodes(q) = false
+encodes(::MTL4Queue) = true
+
+"""
+An argument table holding one dispatch's addresses, built once at record time.
+
+The MTL4 replacement for the buffer bindings a recorded command carries. A
+recorded plan's addresses do not move — that is what makes a recording a
+recording — so the table is filled here and only bound at run time.
+"""
+function argtable(d::MetalDevice, args, store::MTL.MTLBuffer)
+    nslots = maximum(a -> a.index, args; init = 0)
+    t = MTL.MTL4ArgumentTable(d.dev; buffers = max(nslots, 1))
+    for a in args
+        buf = a.buffer === nothing ? store : a.buffer
+        off = a.buffer === nothing ? a.offset : a.bufoffset
+        MTL.set_address!(t, UInt64(buf.gpuAddress) + UInt64(off), a.index)
+    end
+    return t
+end
+
+"""
+    encodeplan!(sub, rec)
+
+Run a recorded plan by ENCODING its dispatches, for a queue that cannot replay
+them. Three sends each — the table, the pipeline, the grid — and a barrier where
+the recorder marked a pass boundary.
+
+The barrier is not optional here the way the bit on a recorded command is: MTL4
+does no hazard tracking, and this is where the graph's derived ordering has to be
+said out loud.
+"""
+function encodeplan!(s::MTL4Submission, rec)
+    enc = s.enc
+    for c in rec.encoded
+        c.barrier && MTL.barrier!(enc)
+        MTL.set_argument_table!(enc, c.table)
+        MTL.set_function!(enc, c.pipeline)
+        if c.gridoff < 0
+            MTL.dispatch_threadgroups!(enc, c.groups, c.threads)
+        else
+            # A gated dispatch. The count is four bytes per word into the grid
+            # buffer, and a closed gate has left three zeros there — which runs no
+            # threadgroups and costs one command rather than the iteration.
+            MTL.dispatch_threadgroups_indirect!(enc, rec.gridbuf,
+                                                rec.gridoff + 4 * c.gridoff,
+                                                c.threads)
+        end
+    end
+    return nothing
+end
+
+"""
+Whether this recording was made for the route this queue takes.
+
+A recording is shaped for ONE of the two, and the shape is visible: a plan recorded
+for an encoding queue carries its dispatches and its gates write threadgroup counts,
+one recorded for a replaying queue carries none and its gates write execution
+ranges. Neither survives the other route, and only one of the two failures is loud —
+a replay-shaped recording has nothing to encode, but an ENCODE-shaped one replays
+perfectly well and silently runs no gated iteration at all, because its execution
+ranges were never written and stayed at the zeros `openrecording` left.
+
+So both directions are refused, symmetrically, rather than the first one only. A
+plan's device is fixed when it is recorded, so neither is reachable through the
+public API today — but the quiet one would be a black frame with nothing to read.
+"""
+canrun(q, rec) = encodes(q) ? !isempty(rec.encoded) : isempty(rec.encoded)
+
+"""Why this queue cannot run this recording, said where the generations are named."""
+refusereplay(::MTL4Queue) = throw(ArgumentError(
+    "Mantle: this recording holds nothing an MTL4 queue can run. It was recorded " *
+    "for a queue that replays an indirect command buffer, and an MTL4 queue cannot: " *
+    "`executeCommandsInBuffer:` on an MTL4 compute encoder stops completing after " *
+    "about a second of replayed GPU work, with no error from the commit feedback " *
+    "and nothing in the system log (`Metal/research/mtl4_icb_stall.jl` is the " *
+    "reproducer). Record the plan on the device that runs it, and its dispatches " *
+    "are captured for encoding as well."))
+
+refusereplay(::LegacyQueue) = throw(ArgumentError(
+    "Mantle: this recording was made to be ENCODED, and this queue replays. Its " *
+    "gates write threadgroup counts and its execution ranges were never written, " *
+    "so replaying it would run every ungated pass and silently discard every " *
+    "iteration of every `repeat!`. Record the plan on the device that runs it."))
+
+# NOT reached, and deliberately: `replay!` asks `canreplay` first and gets `false`
+# here, so nothing in the suite runs this and a regression in it would not be
+# caught. Kept anyway, because it is correct — 40 chained dispatches from one
+# execute come out at 40, gates included, measured before the stall was found — and
+# because the ONE thing wrong with it is a driver defect a release may fix. Deleting
+# `canreplay(::MTL4Queue)` makes this the faster of the two routes again, at one
+# send per segment against three per dispatch; re-record first, since a recording
+# made for the encode path writes threadgroup counts and leaves every execution
+# range at the head reset's zeros, which replays as a gate that never opens.
 function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
     if seg.slot < 0
         MTL.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
