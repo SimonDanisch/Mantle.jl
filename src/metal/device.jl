@@ -90,8 +90,37 @@ end
 function LegacyQueue(dev::MTL.MTLDevice)
     mtl = MTL.MTLCommandQueue(dev)
     mtl.label = "Mantle"
-    return LegacyQueue(mtl, Metal.BatchedCommandQueue(mtl), UInt64(0), UInt64(0))
+    bq = Metal.BatchedCommandQueue(mtl)
+    pinpipeline!(bq)
+    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0))
 end
+
+"""
+How many command buffers this backend may keep in flight, PINNED.
+
+Three, and it is load-bearing rather than a tuning choice. Metal.jl's own default
+is three and Mantle was silently relying on it: `JULIA_METAL_COMMAND_BATCHING_INFLIGHT`
+or the matching preference would have raised it under us. Pinned here so that
+cannot happen.
+
+Raising it is a correctness bug, not a slow path. Measured at eight, the crown
+renders BLACK — mean luma 0.0 against 0.74, reproducibly, alternating 8/3/8/3 in
+one process — while the whole 9781-assertion suite still passes, so no test
+catches it. The host runs ahead of the GPU and mutates state an in-flight replay
+is still reading; three deep, the block inside `flush!` was hiding that.
+
+And it costs real throughput, which is the tempting part. A one-dispatch plan,
+median us per frame:
+
+    inflight     3     4     6     8    16    24    64
+    us/frame  74.9  55.6  28.8  22.4  20.8  16.1  17.2
+
+So there is a 3x frame-rate win behind this, and it is NOT available until the
+per-frame mutable state a replay reads — the plan's argument memory, and the
+recording's own range and grid buffers — is either multi-buffered per frame in
+flight or ordered against the host writes that touch it. Until then, three.
+"""
+pinpipeline!(bq) = Metal.inflight!(bq, 3)
 
 """
     metalqueue(mtldevice) -> queue
@@ -564,6 +593,7 @@ function MTL4Queue(dev::MTL.MTLDevice)
     # `BatchedCommandQueue` installs the residency set for its queue, so asking
     # for it afterwards returns that one rather than making a second.
     bq = Metal.BatchedCommandQueue(mtl)
+    pinpipeline!(bq)
     resset = Metal.can_use_residency_sets(dev) ?
         Metal.install_queue_residency!(mtl, dev) : nothing
     # Both: on the queue so every submission has it, and on each command buffer

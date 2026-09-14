@@ -76,6 +76,33 @@ end
     end
 end
 
+# ── The in-flight depth is correctness, not tuning ───────────────────────────
+#
+# Metal.jl blocks in `flush!` once its queue has `inflight` command buffers still
+# running, and its default is three. Mantle was relying on that default without
+# saying so, which meant `JULIA_METAL_COMMAND_BATCHING_INFLIGHT` — or the matching
+# preference — could raise it under us.
+#
+# Raising it renders BLACK. Measured at eight: the crown comes out at mean luma
+# 0.0 against 0.74, reproducibly, alternating 8/3/8/3 in one process. The host
+# runs ahead of the GPU and mutates state an in-flight replay is still reading.
+# Nothing in this suite caught it — all 9781 assertions passed while the image was
+# black — so the invariant is pinned directly instead.
+@testset "the in-flight depth is pinned, not inherited" begin
+    for d in seamdevices()
+        @test M.batchqueue(d).inflight == 3
+    end
+    # Even when Metal.jl's own default has been raised.
+    was = Metal.command_batching_inflight()
+    try
+        @eval Metal command_batching_inflight() = 32
+        q = Base.invokelatest(Mantle.LegacyQueue, Metal.device())
+        @test M.batchqueue(q).inflight == 3
+    finally
+        @eval Metal command_batching_inflight() = $was
+    end
+end
+
 @testset "the legacy timeline counts retirements" begin
     q = Mantle.LegacyQueue(Metal.device())
     @test M.fence(q) == 1
