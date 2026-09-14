@@ -523,6 +523,7 @@ foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
 foreachbackend(joinpath(@__DIR__, "test_devicerange.jl"))
+foreachbackend(joinpath(@__DIR__, "test_run_ordering.jl"))
 # And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.
