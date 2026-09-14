@@ -92,6 +92,18 @@ end
     for d in seamdevices()
         @test M.batchqueue(d).inflight == 8
     end
+    # And the declaration the depth depends on. A source check, like
+    # "no generation is named outside device.jl" above, because the VALUE tests
+    # cannot see this one: with `useResource` deleted the whole suite passes and
+    # only a real scene goes wrong. The corrupted crown looked exactly like a
+    # render with fewer samples — 0.6537 against the 1-sample image's 0.6545 —
+    # because overlapping frames lose accumulations rather than garbling them,
+    # which is precisely the failure a value assertion on a small plan misses.
+    src = read(joinpath(pkgdir(Mantle), "src", "metal", "device.jl"), String)
+    open_legacy = match(r"function opensubmit!\(q::LegacyQueue.*?\nend"s, src)
+    @test open_legacy !== nothing
+    @test occursin(r"\buse!\(", open_legacy.match)
+
     # Even when Metal.jl's own default has been raised.
     was = Metal.command_batching_inflight()
     try
