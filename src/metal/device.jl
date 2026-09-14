@@ -105,11 +105,15 @@ on an M5, one-dispatch plan, median us per frame:
     inflight     3     8    16
     us/frame    74    22    21
 
-Eight is the knee. It is only safe because `opensubmit!` declares what a
-submission touches with `useResource` — see there. Without that declaration the
-driver overlaps frames and a deeper pipeline corrupts them: the crown renders
-BLACK at eight, while the whole suite still passes. The two go together; do not
-raise this without that.
+Eight is the perf knee, not a safety limit: with the declaration in place the
+crown is correct at 8, 16, 32 and 64 (0.7964 at every one). What bounds the
+choice above the knee is retention — each command buffer in flight holds its
+Julia roots alive — not correctness.
+
+It is only safe at all because `opensubmit!` declares what a submission touches
+with `useResource` — see there. Without that declaration the driver overlaps
+frames and a deeper pipeline loses their accumulations, while the whole suite
+still passes. The two go together; do not raise this without that.
 
 Pinned rather than inherited so a `JULIA_METAL_COMMAND_BATCHING_INFLIGHT` set for
 some other purpose cannot silently change how deep this backend pipelines.
