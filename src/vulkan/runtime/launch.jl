@@ -268,7 +268,7 @@ end
         unsafe_store!(Ptr{T}(mapped_ptr + inline_offset), x)
         unsafe_store!(Ptr{UInt64}(mapped_ptr + offset),
                       arg_buf_bda + UInt64(inline_offset))
-        notepacked!(batch, T, mapped_ptr + inline_offset)
+        recpatchfields!(batch, T, mapped_ptr + inline_offset)
         return inline_offset + byval_size
     else
         unsafe_store!(Ptr{T}(mapped_ptr + offset), x)
@@ -329,7 +329,7 @@ end
     unsafe_store!(Ptr{LavaDeviceArray{T,N}}(mapped_ptr + inline_offset), x)
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset),
                   arg_buf_bda + UInt64(inline_offset))
-    notepacked!(batch, LavaDeviceArray{T,N}, mapped_ptr + inline_offset)
+    recpatchfields!(batch, LavaDeviceArray{T,N}, mapped_ptr + inline_offset)
     return inline_offset + byval_size
 end
 

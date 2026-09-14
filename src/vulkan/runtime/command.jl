@@ -124,7 +124,7 @@ recpatch!(rec::Recording, address::UInt64, at::Ptr{UInt8}) =
     (push!(rec.patches, (address, at)); nothing)
 
 """
-    notepacked!(owner, T, at)
+    recpatchfields!(owner, T, at)
 
 Note every device pointer inside a just-packed value of type `T` whose bytes are
 at `at`.
@@ -138,8 +138,15 @@ backends cannot drift, and the one that answered nothing at all could not.
 The COLLECTION stays here: Vulkan notes host pointers into the recording and
 resolves them to `(region, offset)` when it seals (`patchtarget`), which a
 backend whose argument memory is not a pool region does differently.
+
+Named for `recpatch!`, which it wraps, and deliberately NOT for core's
+`notepacked!`: core never calls this, the signatures are unrelated, and sharing
+the name made it look like a vocabulary hook to
+`test/vulkan/test_backend_vocabulary.jl` — which is right, since a backend adding
+a method to a core function outside the vocabulary is exactly what that test is
+for.
 """
-@inline function notepacked!(owner, ::Type{T}, at::Ptr{UInt8}) where {T}
+@inline function recpatchfields!(owner, ::Type{T}, at::Ptr{UInt8}) where {T}
     fields = devicepointeroffsets(T)
     isempty(fields) && return nothing
     for f in fields
