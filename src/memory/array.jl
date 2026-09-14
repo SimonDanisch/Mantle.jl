@@ -119,6 +119,24 @@ they were that file's ENTIRE dependency on Vulkan. It has none now.
 sharedbudget(x) = caps(KernelAbstractions.get_backend(x)).sharedbudget
 
 """
+    subgroupwidth(x) -> Int
+
+How many lanes a subgroup reduction on `x`'s backend covers.
+
+The third device fact a portable kernel needs, beside [`workgrouplimit`](@ref)
+and [`sharedbudget`](@ref), and it is not optional. A kernel that reduces within
+a subgroup and then across subgroups has to partition its threads the same way
+the hardware does: `gemv.jl` assumed 32, which is right on NVIDIA and Metal and
+wrong on AMD, where it is 64 — so every lane 32..63 was treated as the leader of
+a second subgroup that does not exist, wrote the WHOLE subgroup's sum as its
+partial, and the answer came back exactly doubled.
+
+Doubled, not garbage, which is why it survived: the shapes still had the right
+magnitude and only an exact reference caught it.
+"""
+subgroupwidth(x) = caps(KernelAbstractions.get_backend(x)).subgroup
+
+"""
     coopmatgemm(x) -> Bool
 
 Whether a cooperative-matrix GEMM is usable on `x`'s backend.

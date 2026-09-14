@@ -124,11 +124,11 @@
 # scalars from `Base.Cartesian.@nexprs`, every index is a literal, and there is
 # no closure anywhere.
 
-"Generated K-contiguous GEMV kernels, keyed by (NROWS, BLOCK). Compiled once each."
-const GEMV_KERNELS = Dict{Tuple{Int,Int},Any}()
+"Generated K-contiguous GEMV kernels, keyed by (NROWS, BLOCK, SUB). Compiled once each."
+const GEMV_KERNELS = Dict{Tuple{Int,Int,Int},Any}()
 
 """
-    gemv_kcontig_kernel(NROWS, BLOCK) -> kernel
+    gemv_kcontig_kernel(NROWS, BLOCK, SUB) -> kernel
 
 `C[n] = sum_k A[k] * B[k, n]`, one workgroup per `NROWS` output columns.
 
@@ -140,10 +140,14 @@ The name is deterministic, not a `gensym` — `frozen_key` hashes
 `string(nameof(F))`, so a per-session counter would miss the frozen cache on
 every load.
 """
-function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int)
-    get!(GEMV_KERNELS, (NROWS, BLOCK)) do
-        nsub = BLOCK ÷ 32
-        kname = Symbol("gemvk_", NROWS, "_", BLOCK)
+function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
+    get!(GEMV_KERNELS, (NROWS, BLOCK, SUB)) do
+        # CEIL, and at least one: a workgroup narrower than a subgroup is still one
+        # subgroup, partly filled. `BLOCK ÷ SUB` gives zero there, which sizes
+        # `parts` to nothing and makes the final loop run zero times — C stays at
+        # whatever it was.
+        nsub = cld(BLOCK, SUB)
+        kname = Symbol("gemvk_", NROWS, "_", BLOCK, "_", SUB)
         @eval begin
             @kernel cpu=false unsafe_indices=true function $kname(
                     C, @Const(A), @Const(B), K::Int, N::Int)
@@ -153,8 +157,12 @@ function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int)
                 tid = @index(Local, Linear) - 1
                 grp = @index(Group, Linear) - 1
                 n0 = grp * $NROWS
-                lane = tid % 32
-                sub = tid ÷ 32
+                # The HARDWARE's subgroup width, not 32. `sub_group_reduce_add`
+                # below reduces over whatever the device actually uses, so
+                # partitioning by any other number makes several lanes think they
+                # are leaders of the same subgroup and each write the whole sum.
+                lane = tid % $SUB
+                sub = tid ÷ $SUB
 
                 Base.Cartesian.@nexprs $NROWS r -> acc_r = 0.0f0
 
@@ -391,7 +399,7 @@ function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::Ab
     pn, pb = gemv_config(K, N, workgrouplimit(B))
     nr = nrows === nothing ? pn : nrows
     bl = block === nothing ? pb : block
-    kern = gemv_kcontig_kernel(nr, bl)
+    kern = gemv_kcontig_kernel(nr, bl, subgroupwidth(B))
     k = Base.invokelatest(kern, backend)     # `@eval`ed: world age, both halves
     Base.invokelatest(k, C, A, B, K, N;
                       ndrange = cld(N, nr) * bl, workgroupsize = bl)
@@ -477,9 +485,19 @@ worse one.
 """
 const GEMV_PREGENERATED_LIMITS = (64, 128, 256, 512, 1024)
 
+"""
+Subgroup widths worth pregenerating for, same reasoning as the limits above: it
+is a device property and there is no device at load time.
+
+Both real values, and BOTH are needed — 32 on NVIDIA, Metal and Intel, 64 on AMD.
+Generating only 32 is what the kernel used to assume outright, and on AMD it
+returned exactly twice the right answer.
+"""
+const GEMV_PREGENERATED_SUBGROUPS = (32, 64)
+
 for L in GEMV_PREGENERATED_LIMITS
-    for K in (1, 4096), N in (1, 4096)
-        gemv_kcontig_kernel(gemv_config(K, N, L)...)
+    for K in (1, 4096), N in (1, 4096), S in GEMV_PREGENERATED_SUBGROUPS
+        gemv_kcontig_kernel(gemv_config(K, N, L)..., S)
     end
     gemv_ncontig_kernel(gemv_ncontig_config(1, 1, L)...)
 end
