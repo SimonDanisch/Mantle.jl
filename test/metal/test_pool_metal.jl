@@ -126,7 +126,7 @@ const MTL = Metal.MTL
 
             # And a token that a submission WILL signal is unpassed until it
             # does. One empty submission, through the same verbs a replay uses.
-            sub = Mantle.opensubmit!(d4, MTL.MTLBuffer[])
+            sub = Mantle.opensubmit!(d4)
             tok = Mantle.closesubmit!(d4, sub)
             @test tok == f1
             @test Mantle.waitfor(d4, tok)

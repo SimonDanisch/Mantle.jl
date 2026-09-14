@@ -113,12 +113,14 @@ end
 
 @testset "a submission is opened and closed, on every generation" begin
     for d in seamdevices()
-        # What a submission touches is an argument to OPENING it, because the two
-        # generations need it at different moments and only one of those is
-        # expressible after the fact: legacy declares on the encoder
-        # (`useResource`, which is hazard tracking as much as residency), MTL4
-        # must have its residency set complete before the command buffer names it.
-        sub = Mantle.opensubmit!(d, MTLm.MTLBuffer[])
+        # Opening a submission takes NO resource list. It used to, because legacy
+        # declared them on the encoder with `useResource` while MTL4 needed its
+        # residency set complete beforehand — so the list went in here and each
+        # generation did what it needed. Both were paying per frame for something
+        # permanent: `ensureresident!` grants residency where the list is built,
+        # which is only when a block comes or goes. Taking no list is the point,
+        # since a list that had not been granted could not then be passed.
+        sub = Mantle.opensubmit!(d)
         @test Mantle.encoder(sub) isa Union{MTLm.MTLComputeCommandEncoder,
                                          MTLm.MTL4ComputeCommandEncoder}
         before = d.queue.next

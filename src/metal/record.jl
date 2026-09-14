@@ -490,7 +490,7 @@ struct MetalRecording
     # `MetalEncodedCommand`.
     encoded::Vector{MetalEncodedCommand}
     # What the replay declares to its encoder, and the pool's block GENERATION it
-    # was built at — see `replayresources!`.
+    # was built at — see `ensureresident!`.
     resources::Vector{MTL.MTLBuffer}
     nblocks::Base.RefValue{Int}
 end
@@ -1143,7 +1143,7 @@ of one, a pool holds a handful of blocks where a plan holds thousands of resourc
 and a block covers its tenants exactly. Rebuilt only when the pool has grown, so a
 steady frame is one `useResources:` call over a vector that already exists.
 """
-function replayresources!(d::MetalDevice, rec::MetalRecording)
+function ensureresident!(d::MetalDevice, rec::MetalRecording)
     p = pool(d)
     # ONE comparison, and not the pool's lock: `blockgen` is bumped where a block
     # is created or destroyed, so a frame asks whether the list it cached is still
@@ -1168,6 +1168,17 @@ function replayresources!(d::MetalDevice, rec::MetalRecording)
     push!(rec.resources, rec.rangebuf)
     push!(rec.resources, rec.gridbuf)
     push!(rec.resources, rec.templ.data[])
+    # Residency granted HERE, where the list is built, and nowhere per frame.
+    #
+    # This is a cache miss: the early return above means it runs only when a block
+    # was created or destroyed, so a steady frame does none of it. Doing it per
+    # submission instead — either as `MTL.use!` on the encoder or as this same call
+    # in `opensubmit!` — is what bounded a Metal frame. Profiled on a plan of one
+    # dispatch of one element, with the command buffer's own timestamps: the GPU
+    # was idle for 42 of every 56 us waiting for the next command buffer, and
+    # `kernelStart -> kernelEnd` fell from 19.4 us to 7.9 us once the per-frame
+    # declaration went away.
+    foreach(Metal.make_persistently_resident!, rec.resources)
     rec.nblocks[] = n
     return rec.resources
 end
@@ -1188,7 +1199,11 @@ function replay!(d::MetalDevice, rec::MetalRecording)
     # `Metal/research/mtl4_icb_stall.jl` for the reproducer with the knobs that
     # rule each cause out.
     canrun(d.queue, rec) || refusereplay(d.queue)
-    sub = opensubmit!(d, replayresources!(d, rec))
+    # Residency first, and for its EFFECT: everything this replay reaches by
+    # address has to be in the queue's set before the submission names the set.
+    # Cheap — it returns on a pointer comparison unless a block came or went.
+    ensureresident!(d, rec)
+    sub = opensubmit!(d)
     if canreplay(d.queue)
         for s in rec.segments
             executesegment!(d, sub, rec, s)

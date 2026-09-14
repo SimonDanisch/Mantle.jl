@@ -370,7 +370,7 @@ end
 # generation changes. `replay!` in `record.jl` is written against them and names
 # no generation at all.
 #
-#     s   = opensubmit!(d, buffers)   # what it touches, and an encoder for it
+#     s   = opensubmit!(d)            # an encoder to put this frame on
 #     ...encode...
 #     tok = closesubmit!(d, s)        # end, commit, and the fence it will signal
 #
@@ -389,7 +389,7 @@ end
 """The compute encoder a submission records into."""
 encoder(s::LegacySubmission) = s.enc
 
-opensubmit!(d::MetalDevice, bufs) = opensubmit!(d.queue, d.dev, bufs)
+opensubmit!(d::MetalDevice) = opensubmit!(d.queue, d.dev)
 
 # The task-local BATCHED queue rather than `q.mtl`: it is the one every ordinary
 # kernel launch goes through, and a replay has to stay ordered against the
@@ -400,11 +400,20 @@ opensubmit!(d::MetalDevice, bufs) = opensubmit!(d.queue, d.dev, bufs)
 # `useResource` is not only about residency: it is how the driver's hazard
 # tracking learns that this work read and wrote those bytes, so it has to name
 # the encoder and therefore happens here rather than before.
-function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
-    bq = q.bq
-    enc = Metal.compute_encoder(bq)
-    MTL.use!(enc, bufs, MTL.ReadWriteUsage)
-    return LegacySubmission(bq, enc)
+function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice)
+    # NOTHING per submission, and it takes no buffer list precisely so that it
+    # cannot be handed one that is not resident yet. `ensureresident!` owns that,
+    # and grants only when the list is rebuilt — a block created or destroyed.
+    #
+    # This used to be `MTL.use!(enc, bufs, ReadWriteUsage)`, a driver call per
+    # resource per frame, and it was what bounded a Metal frame rather than
+    # anything the GPU did. Profiled on a plan of ONE dispatch of ONE element with
+    # the command buffer's own timestamps: driver prep `kernelStart -> kernelEnd`
+    # 19.4 us, GPU execute 14.2 us, and 42 us of every 56 spent with the GPU IDLE
+    # waiting for the next command buffer. Removing the per-frame declaration took
+    # driver prep to 7.9 us and the frame interval to 16.5 us, which is the floor
+    # for one command buffer and one encoder on this hardware.
+    return LegacySubmission(q.bq, Metal.compute_encoder(q.bq))
 end
 
 function executesegment!(::LegacyQueue, s::LegacySubmission, rec, seg)
@@ -663,20 +672,21 @@ function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
     return nothing
 end
 
-function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
-    # BEFORE the command buffer names the set, not after. There is no
-    # `useResource` on an MTL4 encoder, so residency is membership of a set, and
-    # a set the command buffer has already declared does not pick up an
-    # allocation added afterwards: the replay reads unmapped memory and writes
-    # nothing, with no error anywhere. It cost a day. Under
-    # `MTL_SHADER_VALIDATION=1` it does not reproduce, because GPU validation
-    # makes everything resident — so the first frame was correct under the
-    # debug layer and silently empty without it.
+function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice)
+    # Everything this frame reaches is resident ALREADY, and it matters that it
+    # happened before this call rather than inside it. There is no `useResource` on an MTL4 encoder, so
+    # residency is membership of a set, and a set the command buffer has already
+    # declared does not pick up an allocation added afterwards: the replay reads
+    # unmapped memory and writes nothing, with no error anywhere. It cost a day.
+    # Under `MTL_SHADER_VALIDATION=1` it does not reproduce, because GPU
+    # validation makes everything resident — so the first frame was correct under
+    # the debug layer and silently empty without it.
     #
-    # `make_persistently_resident!` is Metal.jl's own dedup: a set never gives an
-    # allocation back, so "already added" is permanent and a steady frame is one
-    # pointer lookup per block rather than a driver call.
-    foreach(Metal.make_persistently_resident!, bufs)
+    # `ensureresident!` grants it, and `replay!` calls it immediately above this.
+    # It grants only when the list is rebuilt, so a steady
+    # frame does nothing at all here — where this used to re-grant every block
+    # every frame, which is a lock and a hash per block for an answer that cannot
+    # change (a residency set never gives an allocation back).
     q.slot = q.slot == length(q.allocs) ? 1 : q.slot + 1
     f = q.at[q.slot]
     # Zero means the slot has never been used. Otherwise this is the one place
