@@ -148,25 +148,33 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # gated dispatch where the replay writes two. Three sends per dispatch against one
 # per segment: about 27 us of host time for a forty-dispatch plan.
 #
-# What each costs in situ is NOT settled, and the numbers below are recorded so
-# that the next person does not repeat the measurement and draw the conclusion
-# this note briefly carried. Interleaved A/B in one process, trivial plan (one
-# dispatch, one segment), 4 blocks of 500 frames:
+# What each costs, measured three times over because the first two attempts drew
+# opposite conclusions from uncontrolled sweeps. Read the method before the
+# numbers: this machine's frame timing is only stable when the variants are
+# ALTERNATED inside one process, and even then the replay is not stable.
 #
-#   legacy, ICB replay      32.3 us/frame   (31-106)
-#   MTL4, encoded           60.9 us/frame   (60-63, very stable)
+# One alternating sweep, 10 rounds of 200 frames, trivial plan (one dispatch, one
+# segment), min/median/max:
 #
-# So REPLAY WINS on this plan, and the case for encoding is the stall it routes
-# around, not speed.
+#   encoder + commit, no ICB        8.2 /  8.7 /  12.7 us
+#   + executeCommandsInBuffer:     70.6 / 74.5 / 268.5 us
+#   full Mantle frame              66.7 / 72.2 / 134.2 us
 #
-# A bare loop around the same ICB says the opposite and is not to be trusted:
-# command buffer + encoder + commit is 9.0 us, and adding one
-# `executeCommandsInBuffer:` of one command takes it to 72.8 us, which would make
-# the replay a fixed ~70 us toll per segment. Both figures reproduce. They cannot
-# both describe a real frame, because the real frame above does strictly more work
-# than the bare loop and takes 32.3 us — so the bare loop measures something the
-# submission path does not pay, and what that is has not been found. Do not quote
-# the 70 us as the cost of a segment.
+# So `executeCommandsInBuffer:` costs about 66 us over the bare submit, and Mantle
+# adds NOTHING on top of it (-2.3 us, i.e. noise). The frame is the ICB call.
+#
+# But the replay is BIMODAL across sweeps and the cause is unfound: full legacy
+# frames have measured 28-100 us, medians of 32.4, 40.4, 69.7 and 72.2, on the same
+# code in the same session. Sweeps that alternate DEVICES come out at the low end
+# and sweeps that do not at the high end, consistently, which is backwards from
+# what the extra `adoptqueue!` drain should cost. Do not quote a single number for
+# the replay.
+#
+# The encode path, by contrast, is boringly reproducible: 60.9, 61.4 and 62.3 us
+# medians in three independent sweeps, ranges a couple of microseconds wide. So
+# MTL4 is not obviously faster than a good legacy frame, and is clearly faster than
+# a bad one — and it is the PREDICTABLE one, which for a frame budget is worth as
+# much as the median.
 #
 # It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
 # depth 8, hardware traversal — the case that used to stall at the sixth or
