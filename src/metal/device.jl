@@ -477,17 +477,26 @@ opensubmit!(d::MetalDevice, bufs) = opensubmit!(d.queue, d.dev, bufs)
 # the encoder and therefore happens here rather than before.
 function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
     enc = Metal.compute_encoder(q.bq)
-    # `useResource` is HAZARD TRACKING, not just residency, and that is why it is
-    # here per submission and not folded into `ensureresident!`.
+    # DECLARE what this submission touches. Not a policy this backend decides —
+    # the list is `ensureresident!`'s, derived from the recording — but the driver
+    # needs it stated, and on Metal stating it is also what orders one frame's
+    # command buffer against the next on the bytes they share.
     #
-    # Residency it also provides, and `ensureresident!` covers that permanently —
-    # which made this call look redundant. It is not. Undeclared, the driver sees
-    # no dependency between one frame's command buffer and the next and is free to
-    # OVERLAP them; declared, it orders them on the bytes they share. With Metal.jl
-    # capping the queue at three in flight the overlap window was too small to
-    # matter, so removing this passed the 9781-assertion suite and rendered the
-    # crown correctly. Raise the cap and the crown goes BLACK — that is what
-    # finally caught it, not any test.
+    # Residency alone is covered permanently by `ensureresident!`, which made this
+    # look redundant. It is not: undeclared, the driver sees no dependency between
+    # consecutive frames and is free to OVERLAP them. With Metal.jl capping the
+    # queue at three in flight the window was too small to notice, so removing
+    # this passed the 9781-assertion suite and rendered the crown correctly. Raise
+    # the cap and the crown loses accumulations — a 4-sample frame comes out as
+    # the 1-sample image.
+    #
+    # Worth saying where the seam actually is: "successive runs of a plan do not
+    # overlap" is a CORE fact, and core does not state it anywhere. It derives
+    # intra-frame dependencies (`passbarriers` -> `emitbarriers!`) and stops at the
+    # command buffer boundary. Metal gets the cross-frame half from this
+    # declaration plus an in-order queue; Vulkan's `submit!` passes no `waits` and
+    # leans on submission order. Two different accidents, neither written down as
+    # a requirement — which is why deleting this line looked safe.
     MTL.use!(enc, bufs, MTL.ReadWriteUsage)
     return LegacySubmission(q.bq, enc)
 end
