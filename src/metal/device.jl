@@ -98,12 +98,21 @@ end
 """
 How many command buffers this backend keeps in flight.
 
-Metal.jl defaults to THREE and blocks in `flush!` beyond it, which is a
-throughput cliff for a graph submitting one command buffer per `run!`. Measured
-on an M5, one-dispatch plan, median us per frame:
+Metal.jl defaults to THREE and blocks in `flush!` beyond it. Measured on an M5,
+median us per frame:
 
-    inflight     3     8    16
-    us/frame    74    22    21
+    inflight              3     8    16
+    one-dispatch plan    74    22    21
+
+DO NOT read that as a frame-rate win. RayDemo's crown is unchanged by it — 1.0x
+at every configuration measured, from 800x800 at 16 samples (1826 ms against
+1835) down to 400x400 at one sample and depth four (29.8 ms against 29.9). Those
+frames are 30 to 1800 ms of GPU work, so tens of microseconds of submission
+overhead is 0.02% of them and invisible.
+
+What the depth buys is a lower floor for work that submits many small plans, and
+it costs nothing where it does not help. It is kept on that basis, not as a
+speedup.
 
 Eight is the perf knee, not a safety limit: with the declaration in place the
 crown is correct at 8, 16, 32 and 64 (0.7964 at every one). What bounds the
