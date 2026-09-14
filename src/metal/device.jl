@@ -181,9 +181,23 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 #   one burst, then 20 quiet blocks          steady 70      and it does not persist either
 #
 # So it needs ONGOING activity elsewhere on the device and decays inside a block.
-# That is power or scheduler state, which nothing here can observe, and it means a
-# frame-overhead number measured by a benchmark doing nothing but tiny frames is
-# the PESSIMISTIC end of a 2x range. A real scene is at the other end.
+#
+# And the command buffer's own timestamps say what changes, which is better than
+# naming a mechanism. Same recording, same one-element dispatch, medians per
+# command buffer over 300, three alternating rounds:
+#
+#                      driver prep   kernelEnd->GPUStart   GPU EXECUTE
+#   slow mode            12.9 us          113 us            12.6 us
+#   fast mode            12.0 us          116 us             4.8 us
+#
+# The GPU executes THE SAME COMMAND BUFFER 2.6x faster, lower in all three rounds.
+# That is not driver bookkeeping and not scheduling — the work is identical, so the
+# device is running it at a different rate. Driver prep does not move, and the
+# scheduling gap is large but does not reproduce a direction.
+#
+# Which means a frame-overhead number from a benchmark doing nothing but tiny
+# frames is the PESSIMISTIC end of a 2x range: such a benchmark never gives the
+# device a reason to run fast. A real scene does.
 #
 # The encode path, by contrast, is boringly reproducible: 60.9, 61.4 and 62.3 us
 # medians in three independent sweeps, ranges a couple of microseconds wide. So
