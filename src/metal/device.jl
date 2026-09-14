@@ -96,48 +96,25 @@ function LegacyQueue(dev::MTL.MTLDevice)
 end
 
 """
-How many command buffers this backend may keep in flight, PINNED.
+How many command buffers this backend keeps in flight.
 
-Three, and it is load-bearing rather than a tuning choice. Metal.jl's own default
-is three and Mantle was silently relying on it: `JULIA_METAL_COMMAND_BATCHING_INFLIGHT`
-or the matching preference would have raised it under us. Pinned here so that
-cannot happen.
+Metal.jl defaults to THREE and blocks in `flush!` beyond it, which is a
+throughput cliff for a graph submitting one command buffer per `run!`. Measured
+on an M5, one-dispatch plan, median us per frame:
 
-Raising it corrupts the crown. On a FRESH scene at 400x400, four samples, the
-solid part of the evidence:
+    inflight     3     8    16
+    us/frame    74    22    21
 
-    inflight 3   mean luma 0.7365      inflight 8   mean luma 0.0 (black)
+Eight is the knee. It is only safe because `opensubmit!` declares what a
+submission touches with `useResource` — see there. Without that declaration the
+driver overlaps frames and a deeper pipeline corrupts them: the crown renders
+BLACK at eight, while the whole suite still passes. The two go together; do not
+raise this without that.
 
-reproducible in both orders — depth 8 is black even when it renders first, so it
-is not warm-up. The whole 9781-assertion suite passes throughout, so nothing
-smaller catches it.
-
-WHY is NOT established, and four candidates are ruled out by experiment, each
-with the cap put back to three afterwards to confirm the arm moved: the pool
-recycling a region under an in-flight frame (disabled `passed` outright — still
-black); the readback wait (forced `device_synchronize` into `awaitwrites` — still
-black); hardware ray tracing (the software BVH corrupts too); and a host `GPURef`
-store racing an in-flight replay (a recorded plan updating a ref every frame is
-correct at eight). Do not repeat those four.
-
-A further sweep suggested the damage grows monotonically with depth and shrinks
-with sample count, and that one sample renders black even at three — but it was
-taken on a reused scene in a session that afterwards failed to build an
-acceleration structure at all, so treat it as a lead and re-measure in a fresh
-process rather than as a result.
-
-And it costs real throughput, which is the tempting part. A one-dispatch plan,
-median us per frame:
-
-    inflight     3     4     6     8    16    24    64
-    us/frame  74.9  55.6  28.8  22.4  20.8  16.1  17.2
-
-So there is a 3x frame-rate win behind this, and it is NOT available until the
-per-frame mutable state a replay reads — the plan's argument memory, and the
-recording's own range and grid buffers — is either multi-buffered per frame in
-flight or ordered against the host writes that touch it. Until then, three.
+Pinned rather than inherited so a `JULIA_METAL_COMMAND_BATCHING_INFLIGHT` set for
+some other purpose cannot silently change how deep this backend pipelines.
 """
-pinpipeline!(bq) = Metal.inflight!(bq, 3)
+pinpipeline!(bq) = Metal.inflight!(bq, 8)
 
 """
     metalqueue(mtldevice) -> queue
@@ -468,7 +445,7 @@ end
 # generation changes. `replay!` in `record.jl` is written against them and names
 # no generation at all.
 #
-#     s   = opensubmit!(d)            # an encoder to put this frame on
+#     s   = opensubmit!(d, buffers)   # what it touches, and an encoder for it
 #     ...encode...
 #     tok = closesubmit!(d, s)        # end, commit, and the fence it will signal
 #
@@ -487,7 +464,7 @@ end
 """The compute encoder a submission records into."""
 encoder(s::LegacySubmission) = s.enc
 
-opensubmit!(d::MetalDevice) = opensubmit!(d.queue, d.dev)
+opensubmit!(d::MetalDevice, bufs) = opensubmit!(d.queue, d.dev, bufs)
 
 # The task-local BATCHED queue rather than `q.mtl`: it is the one every ordinary
 # kernel launch goes through, and a replay has to stay ordered against the
@@ -498,20 +475,21 @@ opensubmit!(d::MetalDevice) = opensubmit!(d.queue, d.dev)
 # `useResource` is not only about residency: it is how the driver's hazard
 # tracking learns that this work read and wrote those bytes, so it has to name
 # the encoder and therefore happens here rather than before.
-function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice)
-    # NOTHING per submission, and it takes no buffer list precisely so that it
-    # cannot be handed one that is not resident yet. `ensureresident!` owns that,
-    # and grants only when the list is rebuilt — a block created or destroyed.
+function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
+    enc = Metal.compute_encoder(q.bq)
+    # `useResource` is HAZARD TRACKING, not just residency, and that is why it is
+    # here per submission and not folded into `ensureresident!`.
     #
-    # This used to be `MTL.use!(enc, bufs, ReadWriteUsage)`, a driver call per
-    # resource per frame, and it was what bounded a Metal frame rather than
-    # anything the GPU did. Profiled on a plan of ONE dispatch of ONE element with
-    # the command buffer's own timestamps: driver prep `kernelStart -> kernelEnd`
-    # 19.4 us, GPU execute 14.2 us, and 42 us of every 56 spent with the GPU IDLE
-    # waiting for the next command buffer. Removing the per-frame declaration took
-    # driver prep to 7.9 us and the frame interval to 16.5 us, which is the floor
-    # for one command buffer and one encoder on this hardware.
-    return LegacySubmission(q.bq, Metal.compute_encoder(q.bq))
+    # Residency it also provides, and `ensureresident!` covers that permanently —
+    # which made this call look redundant. It is not. Undeclared, the driver sees
+    # no dependency between one frame's command buffer and the next and is free to
+    # OVERLAP them; declared, it orders them on the bytes they share. With Metal.jl
+    # capping the queue at three in flight the overlap window was too small to
+    # matter, so removing this passed the 9781-assertion suite and rendered the
+    # crown correctly. Raise the cap and the crown goes BLACK — that is what
+    # finally caught it, not any test.
+    MTL.use!(enc, bufs, MTL.ReadWriteUsage)
+    return LegacySubmission(q.bq, enc)
 end
 
 function executesegment!(::LegacyQueue, s::LegacySubmission, rec, seg)
@@ -771,7 +749,7 @@ function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
     return nothing
 end
 
-function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice)
+function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     # Everything this frame reaches is resident ALREADY, and it matters that it
     # happened before this call rather than inside it. There is no `useResource` on an MTL4 encoder, so
     # residency is membership of a set, and a set the command buffer has already

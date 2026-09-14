@@ -83,21 +83,21 @@ end
 # saying so, which meant `JULIA_METAL_COMMAND_BATCHING_INFLIGHT` — or the matching
 # preference — could raise it under us.
 #
-# Raising it renders BLACK. Measured at eight: the crown comes out at mean luma
-# 0.0 against 0.74, reproducibly, alternating 8/3/8/3 in one process. The host
-# runs ahead of the GPU and mutates state an in-flight replay is still reading.
-# Nothing in this suite caught it — all 9781 assertions passed while the image was
-# black — so the invariant is pinned directly instead.
+# Eight, and it is only safe because `opensubmit!` declares what a submission
+# touches with `useResource`. That call is hazard tracking, not just residency:
+# without it the driver overlaps frames and the crown renders BLACK at eight while
+# this whole suite still passes. Depth and declaration go together, so the depth is
+# pinned here and the reason is written at `opensubmit!`.
 @testset "the in-flight depth is pinned, not inherited" begin
     for d in seamdevices()
-        @test M.batchqueue(d).inflight == 3
+        @test M.batchqueue(d).inflight == 8
     end
     # Even when Metal.jl's own default has been raised.
     was = Metal.command_batching_inflight()
     try
         @eval Metal command_batching_inflight() = 32
         q = Base.invokelatest(Mantle.LegacyQueue, Metal.device())
-        @test M.batchqueue(q).inflight == 3
+        @test M.batchqueue(q).inflight == 8
     finally
         @eval Metal command_batching_inflight() = $was
     end
@@ -140,14 +140,12 @@ end
 
 @testset "a submission is opened and closed, on every generation" begin
     for d in seamdevices()
-        # Opening a submission takes NO resource list. It used to, because legacy
-        # declared them on the encoder with `useResource` while MTL4 needed its
-        # residency set complete beforehand — so the list went in here and each
-        # generation did what it needed. Both were paying per frame for something
-        # permanent: `ensureresident!` grants residency where the list is built,
-        # which is only when a block comes or goes. Taking no list is the point,
-        # since a list that had not been granted could not then be passed.
-        sub = Mantle.opensubmit!(d)
+        # Opening a submission takes what it touches, because the two generations
+        # need it at different moments: legacy declares it on the encoder with
+        # `useResource`, which is HAZARD TRACKING as much as residency and is what
+        # orders one frame's command buffer against the next; MTL4 has no such call
+        # and needs its residency set complete before the command buffer names it.
+        sub = Mantle.opensubmit!(d, MTLm.MTLBuffer[])
         @test Mantle.encoder(sub) isa Union{MTLm.MTLComputeCommandEncoder,
                                          MTLm.MTL4ComputeCommandEncoder}
         before = d.queue.next

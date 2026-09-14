@@ -1202,8 +1202,7 @@ function replay!(d::MetalDevice, rec::MetalRecording)
     # Residency first, and for its EFFECT: everything this replay reaches by
     # address has to be in the queue's set before the submission names the set.
     # Cheap — it returns on a pointer comparison unless a block came or went.
-    ensureresident!(d, rec)
-    sub = opensubmit!(d)
+    sub = opensubmit!(d, ensureresident!(d, rec))
     if canreplay(d.queue)
         for s in rec.segments
             executesegment!(d, sub, rec, s)
