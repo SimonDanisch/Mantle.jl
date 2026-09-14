@@ -640,6 +640,17 @@ const BACKEND_VOCABULARY = (
     :compiledraw, :compile_dispatch, :passbarriers,
     :argbytes, :indirectslot,
     :makeprofiler, :Profiler,
+    # Asked of whatever `compile_dispatch` returned. DECLARED, because core
+    # dispatches through them and a backend must answer: undeclared, they were
+    # contract points the ratchets below could not see. They exist at all only
+    # because the Metal backend defines `MetalRecordedDispatch` instead of using
+    # core's `CompiledDispatch`, which already carries these three fields under
+    # different names — a backend defining a graph type, which is the thing this
+    # vocabulary exists to prevent. They should disappear, not grow.
+    :argsize, :devicesized, :indirectindex,
+    # Likewise declared rather than left implicit: core defines each of these and
+    # a backend overrides it.
+    :retire!, :blocksize, :copy_target!, :gpupasstime!,
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitbarriers!, :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
