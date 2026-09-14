@@ -103,11 +103,28 @@ is three and Mantle was silently relying on it: `JULIA_METAL_COMMAND_BATCHING_IN
 or the matching preference would have raised it under us. Pinned here so that
 cannot happen.
 
-Raising it is a correctness bug, not a slow path. Measured at eight, the crown
-renders BLACK — mean luma 0.0 against 0.74, reproducibly, alternating 8/3/8/3 in
-one process — while the whole 9781-assertion suite still passes, so no test
-catches it. The host runs ahead of the GPU and mutates state an in-flight replay
-is still reading; three deep, the block inside `flush!` was hiding that.
+Raising it corrupts the crown. On a FRESH scene at 400x400, four samples, the
+solid part of the evidence:
+
+    inflight 3   mean luma 0.7365      inflight 8   mean luma 0.0 (black)
+
+reproducible in both orders — depth 8 is black even when it renders first, so it
+is not warm-up. The whole 9781-assertion suite passes throughout, so nothing
+smaller catches it.
+
+WHY is NOT established, and four candidates are ruled out by experiment, each
+with the cap put back to three afterwards to confirm the arm moved: the pool
+recycling a region under an in-flight frame (disabled `passed` outright — still
+black); the readback wait (forced `device_synchronize` into `awaitwrites` — still
+black); hardware ray tracing (the software BVH corrupts too); and a host `GPURef`
+store racing an in-flight replay (a recorded plan updating a ref every frame is
+correct at eight). Do not repeat those four.
+
+A further sweep suggested the damage grows monotonically with depth and shrinks
+with sample count, and that one sample renders black even at three — but it was
+taken on a reused scene in a session that afterwards failed to build an
+acceleration structure at all, so treat it as a lead and re-measure in a fresh
+process rather than as a result.
 
 And it costs real throughput, which is the tempting part. A one-dispatch plan,
 median us per frame:
