@@ -163,12 +163,27 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # So `executeCommandsInBuffer:` costs about 66 us over the bare submit, and Mantle
 # adds NOTHING on top of it (-2.3 us, i.e. noise). The frame is the ICB call.
 #
-# But the replay is BIMODAL across sweeps and the cause is unfound: full legacy
-# frames have measured 28-100 us, medians of 32.4, 40.4, 69.7 and 72.2, on the same
-# code in the same session. Sweeps that alternate DEVICES come out at the low end
-# and sweeps that do not at the high end, consistently, which is backwards from
-# what the extra `adoptqueue!` drain should cost. Do not quote a single number for
-# the replay.
+# But the replay is STATE-DEPENDENT, and the state is not ours. The same code in
+# one process measures 30 to 240 us a frame depending on what the GPU has been
+# doing: medians of 32.4, 39.6, 40.4, 45.7, 69.7, 70.4, 72.2, 73.6. Sweeps that
+# interleave blocks of work on ANOTHER queue land near 40; sweeps that only run
+# tiny frames land near 70; and both halves reproduce exactly when their sweep is
+# repeated, so it is not drift.
+#
+# Six hypotheses tested and refuted, each by alternating the variants in one
+# process, 10 rounds of 200 frames:
+#
+#   a device drain before the block          70.3 vs 66.4   no effect
+#   GPU kept busy on the SAME queue          71.7 vs 70.8   no effect
+#   the `adoptqueue!` switch itself          73.6 vs 73.2   no effect
+#   200 empty submits on a second queue      70.4 vs 66.6   min fell to 34, median did not
+#   ~39 ms of work on a second queue         45.7 vs 42.8   BOTH arms fast — it is not per-block
+#   one burst, then 20 quiet blocks          steady 70      and it does not persist either
+#
+# So it needs ONGOING activity elsewhere on the device and decays inside a block.
+# That is power or scheduler state, which nothing here can observe, and it means a
+# frame-overhead number measured by a benchmark doing nothing but tiny frames is
+# the PESSIMISTIC end of a 2x range. A real scene is at the other end.
 #
 # The encode path, by contrast, is boringly reproducible: 60.9, 61.4 and 62.3 us
 # medians in three independent sweeps, ranges a couple of microseconds wide. So
