@@ -148,20 +148,25 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # gated dispatch where the replay writes two. Three sends per dispatch against one
 # per segment: about 27 us of host time for a forty-dispatch plan.
 #
-# And encoding is the CHEAPER of the two, which is the opposite of what this note
-# said until it was measured. `executeCommandsInBuffer:` is not a few microseconds:
-# on this M5 it is a FIXED ~70 us per call, whatever it replays. Interleaved A/B in
-# one process, same encoder pattern, 6 blocks of 200 submissions:
+# What each costs in situ is NOT settled, and the numbers below are recorded so
+# that the next person does not repeat the measurement and draw the conclusion
+# this note briefly carried. Interleaved A/B in one process, trivial plan (one
+# dispatch, one segment), 4 blocks of 500 frames:
 #
-#   command buffer + encoder + commit                    9.2 us   (9.0-9.0)
-#   ... plus executeCommandsInBuffer: of ONE command     84.2 us  (72-122)
+#   legacy, ICB replay      32.3 us/frame   (31-106)
+#   MTL4, encoded           60.9 us/frame   (60-63, very stable)
 #
-# and replaying more does not cost more — 1 command 72.2 us, 10 commands 74.7 us,
-# 40 commands 55.3 us. It is a per-SEGMENT toll, so a plan with several gated
-# segments pays it several times a frame, and a plan whose GPU work is small pays
-# almost nothing else. That is what bounds a Metal frame at ~73 us; it is not the
-# residency declaration, which was the first suspect and is worth only 12 us of
-# driver prep.
+# So REPLAY WINS on this plan, and the case for encoding is the stall it routes
+# around, not speed.
+#
+# A bare loop around the same ICB says the opposite and is not to be trusted:
+# command buffer + encoder + commit is 9.0 us, and adding one
+# `executeCommandsInBuffer:` of one command takes it to 72.8 us, which would make
+# the replay a fixed ~70 us toll per segment. Both figures reproduce. They cannot
+# both describe a real frame, because the real frame above does strictly more work
+# than the bare loop and takes 32.3 us — so the bare loop measures something the
+# submission path does not pay, and what that is has not been found. Do not quote
+# the 70 us as the cost of a segment.
 #
 # It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
 # depth 8, hardware traversal — the case that used to stall at the sixth or
