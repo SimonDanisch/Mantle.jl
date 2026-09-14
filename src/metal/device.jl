@@ -148,62 +148,58 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # gated dispatch where the replay writes two. Three sends per dispatch against one
 # per segment: about 27 us of host time for a forty-dispatch plan.
 #
-# What each costs, measured three times over because the first two attempts drew
-# opposite conclusions from uncontrolled sweeps. Read the method before the
-# numbers: this machine's frame timing is only stable when the variants are
-# ALTERNATED inside one process, and even then the replay is not stable.
+# What a Metal frame costs, and why the ICB is not the thing to blame. Measured by
+# ALTERNATING the variants inside one process — comparing across runs on this
+# machine is worthless, identical code has measured 36.8 and 56.3 us.
 #
-# One alternating sweep, 10 rounds of 200 frames, trivial plan (one dispatch, one
-# segment), min/median/max:
-#
-#   encoder + commit, no ICB        8.2 /  8.7 /  12.7 us
-#   + executeCommandsInBuffer:     70.6 / 74.5 / 268.5 us
-#   full Mantle frame              66.7 / 72.2 / 134.2 us
-#
-# So `executeCommandsInBuffer:` costs about 66 us over the bare submit, and Mantle
-# adds NOTHING on top of it (-2.3 us, i.e. noise). The frame is the ICB call.
-#
-# But the replay is STATE-DEPENDENT, and the state is not ours. The same code in
-# one process measures 30 to 240 us a frame depending on what the GPU has been
-# doing: medians of 32.4, 39.6, 40.4, 45.7, 69.7, 70.4, 72.2, 73.6. Sweeps that
-# interleave blocks of work on ANOTHER queue land near 40; sweeps that only run
-# tiny frames land near 70; and both halves reproduce exactly when their sweep is
-# repeated, so it is not drift.
-#
-# Six hypotheses tested and refuted, each by alternating the variants in one
-# process, 10 rounds of 200 frames:
-#
-#   a device drain before the block          70.3 vs 66.4   no effect
-#   GPU kept busy on the SAME queue          71.7 vs 70.8   no effect
-#   the `adoptqueue!` switch itself          73.6 vs 73.2   no effect
-#   200 empty submits on a second queue      70.4 vs 66.6   min fell to 34, median did not
-#   ~39 ms of work on a second queue         45.7 vs 42.8   BOTH arms fast — it is not per-block
-#   one burst, then 20 quiet blocks          steady 70      and it does not persist either
-#
-# So it needs ONGOING activity elsewhere on the device and decays inside a block.
-#
-# And the command buffer's own timestamps say what changes, which is better than
-# naming a mechanism. Same recording, same one-element dispatch, medians per
+# The device also has two performance states, and the numbers only mean something
+# once you say which. Same recording, same one-element dispatch, medians per
 # command buffer over 300, three alternating rounds:
 #
 #                      driver prep   kernelEnd->GPUStart   GPU EXECUTE
-#   slow mode            12.9 us          113 us            12.6 us
-#   fast mode            12.0 us          116 us             4.8 us
+#   idled down           12.9 us          113 us            12.6 us
+#   kept busy            12.0 us          116 us             4.8 us
 #
-# The GPU executes THE SAME COMMAND BUFFER 2.6x faster, lower in all three rounds.
-# That is not driver bookkeeping and not scheduling — the work is identical, so the
-# device is running it at a different rate. Driver prep does not move, and the
-# scheduling gap is large but does not reproduce a direction.
+# The GPU runs THE SAME COMMAND BUFFER 2.6x faster when it has had recent work, in
+# all three rounds. Identical bytes, so that is the device's rate, not our
+# overhead — and a benchmark doing nothing but tiny frames never gives it a reason
+# to run fast. Warm numbers below; cold ones are roughly double.
 #
-# Which means a frame-overhead number from a benchmark doing nothing but tiny
-# frames is the PESSIMISTIC end of a 2x range: such a benchmark never gives the
-# device a reason to run fast. A real scene does.
+# WARM, one command buffer per frame, 8 rounds of 200, medians:
 #
-# The encode path, by contrast, is boringly reproducible: 60.9, 61.4 and 62.3 us
-# medians in three independent sweeps, ranges a couple of microseconds wide. So
-# MTL4 is not obviously faster than a good legacy frame, and is clearly faster than
-# a bad one — and it is the PREDICTABLE one, which for a frame budget is worth as
-# much as the median.
+#   empty command buffer, no work         9.2 us
+#   one dispatch, hand-encoded           36.1 us
+#   one dispatch, executeCommandsInBuffer 35.0 us
+#   FULL MANTLE FRAME                    37.1 us
+#
+# So the ICB replay is NOT the cost: encoding the dispatch by hand costs the same
+# (36.1 vs 35.0, and 74.2 vs 71.2 cold). What costs is a command buffer that
+# executes ANYTHING rather than nothing. Split three ways, warm:
+#
+#   encoder + commit                        8.2 us
+#   + pipeline and buffer bound, no dispatch  8.4 us   (+0.2 — binding is free)
+#   + one dispatch                         30.0 us   (+21.6)
+#
+# Encoding is free; the 22 us is the command buffer having work to run. And it is
+# paid ONCE: dispatches two through sixteen cost ~1.3 us each. So it is not a
+# per-launch cost but a scheduling round-trip that a command buffer only makes if
+# it contains work at all — which the timestamps agree with, since GPU execute is
+# 4.8 us of it and the rest sits in `kernelEnd -> GPUStart`.
+#
+# Mantle adds about 2 us on top of that floor.
+#
+# And it is per COMMAND BUFFER, not per dispatch, so it amortises away entirely.
+# Dispatches packed into one buffer, warm:
+#
+#   0: 9.0 us    1: 37.5 us    2: 32.8    4: 31.6    8: 39.9    16: 49.8 us
+#                    (37.5/ea)     (16.4)     (7.9)      (5.0)       (3.1/ea)
+#
+# Which settles two things. A one-dispatch plan at ~37 us is the WORST case and a
+# microbenchmark artefact; a real frame pays the ~30 us once and under 2 us per
+# dispatch after that. And a legacy encode path — encoding a recorded plan's
+# dispatches instead of replaying them, which the note above weighs up — was
+# measured and buys NOTHING, because the ICB was never what the frame was paying
+# for. Do not build it.
 #
 # It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
 # depth 8, hardware traversal — the case that used to stall at the sixth or
