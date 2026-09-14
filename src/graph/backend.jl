@@ -604,7 +604,7 @@ const BACKEND_VOCABULARY = (
     :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
-    :upload!, :download, :devicecopy!, :hostspan, :resource_moved!, :arena_moved!, :release!,
+    :upload!, :download, :devicecopy!, :hostspan, :deviceaddress, :release!,
     :indexbuffer,
     # The recording primitives a submission channel needs — 2.3. Core owns the
     # free list and when a recording may be reused; these are the driver half.

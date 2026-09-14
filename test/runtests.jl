@@ -621,7 +621,7 @@ if _METAL_OK
                   "test_trace_metal.jl", "test_hwtlas_metal.jl",
                   "test_residency_metal.jl", "test_graphics_metal.jl",
                   "test_render_graph_metal.jl", "test_record_metal.jl",
-                  "test_device_metal.jl")
+                  "test_device_metal.jl", "test_recorded_move_metal.jl")
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end

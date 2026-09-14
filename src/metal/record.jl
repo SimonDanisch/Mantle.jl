@@ -222,8 +222,19 @@ function checkresident(buf::MTL.MTLBuffer)
         "it through the device's pool, whose blocks are megabytes."))
 end
 
-"""Write one dispatch's argument bytes into the plan's memory, once."""
-function pack_recorded!(ptr::Ptr{UInt8}, args::Vector{RecordedArg}, adapted::Tuple)
+"""
+Write one dispatch's argument bytes into the plan's memory, once.
+
+`pl`/`target` are given only when this is a dispatch being RECORDED, and then
+each packed argument is handed to `notepacked!`, which finds the device pointers
+inside it from its type and writes down where they landed. That table is what
+lets a `resize!` under a recorded plan be eight bytes rather than a re-record —
+and it is core's, so this backend states no policy about it and cannot get the
+offsets wrong. The writers' own arguments pass `nothing`: they address the
+recording's own buffers, which never move.
+"""
+function pack_recorded!(ptr::Ptr{UInt8}, args::Vector{RecordedArg}, adapted::Tuple,
+                        pl = nothing, target = nothing)
     i = 1
     for a in adapted
         T = typeof(a)
@@ -234,6 +245,7 @@ function pack_recorded!(ptr::Ptr{UInt8}, args::Vector{RecordedArg}, adapted::Tup
         r = Ref(a)
         GC.@preserve r unsafe_copyto!(ptr + rec.offset,
             convert(Ptr{UInt8}, Base.unsafe_convert(Ptr{T}, r)), rec.nbytes)
+        pl === nothing || Mantle.notepacked!(pl, T, ptr + rec.offset, target, rec.offset)
     end
     return nothing
 end
@@ -702,7 +714,7 @@ function Mantle.emitdispatch!(e::MetalRecorder, d::MetalRecordedDispatch,
     am === nothing && throw(ArgumentError(
         "record!: the plan has no argument memory, so a recorded command has " *
         "nowhere to bind its arguments from."))
-    pack_recorded!(am.ptr, d.args, (d.state, d.kernel.f, d.adapted...))
+    pack_recorded!(am.ptr, d.args, (d.state, d.kernel.f, d.adapted...), e.plan, am)
     encode!(e, d.kernel.pipeline, d.args, am.store,
             MTL.MTLSize(d.groups), MTL.MTLSize(d.nthreads))
     return nothing

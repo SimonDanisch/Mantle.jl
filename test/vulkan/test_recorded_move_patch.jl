@@ -6,7 +6,7 @@
 # written by `cmd_update_buffer` in the next run's own submission. The table
 # that says where each address landed is baked once, at `record!`, from the same
 # pack that wrote the blob (`recpatch!`); a move is announced where it happens
-# (`resize!` → `resource_moved!`, arena growth → `arena_moved!`), and
+# (`resize!` and arena growth both reach `notify_move!`), and
 # `notify_move!` turns it into pending patches. Nothing is walked per run.
 #
 # What cannot be patched is an image: the commands name the `VkImage` and its

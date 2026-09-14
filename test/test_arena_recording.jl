@@ -260,7 +260,7 @@ end
     #
     # Those addresses are not IN the command buffer — they are in the plan's
     # argument memory, at offsets the one pack recorded (`recpatch!`). So the
-    # growth announces itself (`arena_moved!` → `notify_move!`) and the next
+    # growth announces itself (`notify_move!`) and the next
     # run writes the new addresses as commands in its own submission: the same
     # recording answers, with the right numbers.
     dev = M.Device(TESTBACKEND)

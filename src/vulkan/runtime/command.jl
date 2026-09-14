@@ -123,6 +123,33 @@ recpatch!(owner, address::UInt64, at::Ptr{UInt8}) = nothing
 recpatch!(rec::Recording, address::UInt64, at::Ptr{UInt8}) =
     (push!(rec.patches, (address, at)); nothing)
 
+"""
+    notepacked!(owner, T, at)
+
+Note every device pointer inside a just-packed value of type `T` whose bytes are
+at `at`.
+
+WHICH fields those are is core's answer (`devicepointeroffsets`), not this
+backend's — the packer used to carry that knowledge itself, naming `x.ptr` by
+hand in one method and saying nothing in the next, so a plain struct holding a
+device array was packed and never patched. Asking core instead means the two
+backends cannot drift, and the one that answered nothing at all could not.
+
+The COLLECTION stays here: Vulkan notes host pointers into the recording and
+resolves them to `(region, offset)` when it seals (`patchtarget`), which a
+backend whose argument memory is not a pool region does differently.
+"""
+@inline function notepacked!(owner, ::Type{T}, at::Ptr{UInt8}) where {T}
+    fields = devicepointeroffsets(T)
+    isempty(fields) && return nothing
+    for f in fields
+        addr = unsafe_load(Ptr{UInt64}(at + f))
+        addr == 0 && continue
+        recpatch!(owner, addr, at + f)
+    end
+    return nothing
+end
+
 """One primary command buffer from the queue's pool. A recording keeps its for
 as long as it lives; a one-shot's stays with the one-shot, which the queue
 pools for ever."""

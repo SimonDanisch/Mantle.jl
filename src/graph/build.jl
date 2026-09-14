@@ -259,7 +259,6 @@ Base.length(t::TransientBuffer) = t.n
 """The device base address of a region's bytes. Core: a `Region` is `Pool`'s and
 a `BufferBlock`'s `address` is a plain `UInt64`, so the arithmetic names no
 driver type."""
-region_bda(r::Region) = r.block.memory.address + offset(r)
 
 # A window surface is open while its window is — core forwards, the backend's
 # `isopen(win)` answers.
@@ -1021,8 +1020,8 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                           makeprofiler(g.dev, c.passes, profile),
                           alias, coalesce, policy,
                           makeargmemory(g.dev, c.passes), nothing,
-                          Dict{UInt64,Vector{Tuple{Region,Int}}}(),
-                          Tuple{Region,Int,UInt64}[], hw, false)
+                          Dict{UInt64,Vector{Tuple{Any,Int}}}(),
+                          Tuple{Any,Int,UInt64}[], hw, false)
             # After construction, because a plan cannot be a tenant before it is a
             # plan — and the arena it was just placed into may grow for the NEXT
             # plan, which is when this registration earns its keep.

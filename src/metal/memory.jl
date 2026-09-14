@@ -87,3 +87,15 @@ which is why the portable interface has this hook at all. Metal decides what a
 buffer is for when it is bound, so there is nothing to declare.
 """
 bufferusage(::MetalDevice, ::Type) = nothing
+
+# ── Moves ────────────────────────────────────────────────────────────────────
+#
+# The one thing a move asks of this backend. Everything else about it — which
+# recorded plans hold an address in the moved range, where inside their argument
+# memory it landed, and when the patch may be written — is core's.
+#
+# This did not exist until 2026-09-14, and its absence was silent: core's
+# `resource_moved!` hook defaulted to `nothing`, so `resize!`ing a buffer a
+# recorded plan reads left the recording on the retired storage. It read plausible
+# stale values rather than faulting, because a retired region is not freed.
+Mantle.deviceaddress(::MetalDevice, buf::MTL.MTLBuffer) = UInt64(buf.gpuAddress)

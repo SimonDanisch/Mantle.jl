@@ -290,17 +290,15 @@ deviceview(::LavaDevice, a::DeviceArray{T,N}) where {T,N} =
 
 # ── Moves ────────────────────────────────────────────────────────────────────
 #
-# The backend half of `resource_moved!` / `arena_moved!`: the addresses are this
-# backend's buffer device addresses, so the range math lives here. What a
-# recorded plan packed for a resource is `bda_address` of the view the kernel
-# was given, and a move shifts every address in the old range by the same delta.
+# One line, and it is the whole of what a move asks this backend. Which region
+# moved, by how much, and which recorded plans packed an address inside it are
+# core's questions, answered once in `notify_move!` for every backend.
 
-resource_moved!(dev::LavaDevice, old::DeviceArray, fresh::DeviceArray) =
-    notify_move!(pool(dev), bda_address(deviceview(dev, old)),
-                 bda_address(deviceview(dev, fresh)), length(old.region))
-
-arena_moved!(dev::LavaDevice, kind, old::Region, fresh::Region) =
-    notify_move!(pool(dev), region_bda(old), region_bda(fresh), length(old))
+# Typed on the BLOCK, not left generic: core derives a region's address from this
+# one, so a method generic in the memory is ambiguous with that derivation. An
+# images arena never reaches here — it has no addresses to patch and its
+# recordings are dropped instead.
+deviceaddress(::LavaDevice, mem::BufferBlock) = UInt64(mem.address)
 
 upload!(d::LavaDevice, a::DeviceArray{T}, first::Integer,
                data::AbstractVector) where {T} =
@@ -1651,7 +1649,7 @@ function closerecording!(e::Emitter{<:Recording}, pl::Plan)
     rec = e.owner
     seal!(rec)
     for (addr, at) in rec.patches
-        push!(get!(Vector{Tuple{Region,Int}}, pl.patchtab, addr),
+        push!(get!(Vector{Tuple{Any,Int}}, pl.patchtab, addr),
               patchtarget(pl, rec, at))
     end
     empty!(rec.patches)

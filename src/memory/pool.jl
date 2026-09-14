@@ -827,7 +827,7 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     end
     # A recorded plan's commands hold the region's addresses. For a buffers
     # arena every one of those is a BDA in the plan's argument memory, which
-    # `arena_moved!` patches below — the recording survives the growth. For an
+    # `notify_move!` below patches — the recording survives the growth. For an
     # IMAGES arena the commands name the image handles themselves and there is
     # nothing to patch: the recording is invalidated, and the next `run!`
     # writes it again before it submits. A tenant that is not a plan has no patch table, so it still
@@ -859,15 +859,11 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     # packed out of the old region shifts by the same delta. Images have no
     # addresses to patch — their recordings were dropped above. A backend
     # without BDA patching answers `nothing` here.
-    old === nothing || kind isa Images || arena_moved!(dev, kind, old, fresh)
+    old === nothing || kind isa Images ||
+        notify_move!(pool, deviceaddress(dev, old), deviceaddress(dev, fresh), length(old))
     return fresh
     end
 end
-
-"""An arena's shared region moved from `old` to `fresh`; a backend with
-recorded plans patches their argument memory (see `notify_move!`). `nothing`
-where there are no device addresses to patch."""
-arena_moved!(dev, kind, old, fresh) = nothing
 
 """
     tenant!(pool, kind, x) -> x
@@ -954,6 +950,99 @@ dropped; a plan with no recording holds no addresses worth patching."""
 function unlisten_moves!(pool::Pool, pl)
     lock(pool.lock) do
         filter!(wr -> wr.value !== nothing && wr.value !== pl, pool.movelisteners)
+    end
+    return nothing
+end
+
+"""
+    deviceaddress(dev, memory) -> UInt64
+
+Where a backend allocation begins in the GPU's address space.
+
+The ONE thing core cannot work out for itself about a move, and therefore the
+whole of what a move asks a backend for: Vulkan answers `memory.address`, Metal
+`buf.gpuAddress`, and there is no third answer either could give. Everything
+built on it — which region moved, by how much, and which recorded plans hold an
+address inside it — is core's, below.
+
+It replaced `resource_moved!`/`arena_moved!`, which asked a backend to do that
+bookkeeping itself and defaulted to `nothing` when it did not. Metal never did,
+so a recorded plan quietly kept reading a resized buffer's old storage. A hook
+that can be a silent no-op and still look implemented is the shape of that bug;
+this one has a single right answer and no room for a second.
+"""
+function deviceaddress end
+
+deviceaddress(dev, r::Region) = deviceaddress(dev, memoryof(r)) + UInt64(offset(r))
+
+"""Recurse a packed type for device-pointer fields. Depth-limited: a scene
+structure several aggregates deep is invalidated on a move, not patched — which is
+the rule Vulkan's packer already stated for the same reason."""
+function devptroffsets!(offs::Vector{Int}, S::Type, base::Int, depth::Int)
+    # DIRECT fields only. Both backends' device arrays carry their address as a
+    # first-level field, and going deeper would silently start patching scene
+    # structures — which Vulkan's packer deliberately does not: a move under one of
+    # those invalidates the plan and it is re-recorded, rather than having a
+    # half-updated copy of itself written into it.
+    depth > 1 && return offs
+    for i in 1:fieldcount(S)
+        F = fieldtype(S, i)
+        off = base + Int(fieldoffset(S, i))
+        if F <: Core.LLVMPtr || F <: Ptr
+            push!(offs, off)
+        elseif isstructtype(F) && isbitstype(F)
+            devptroffsets!(offs, F, off, depth + 1)
+        end
+    end
+    return offs
+end
+
+"""
+    devicepointeroffsets(T) -> NTuple{N,Int}
+
+Byte offsets of every device pointer inside a packed argument of type `T`.
+
+A property of the TYPE, so it is resolved once when the packer specialises and
+costs nothing per dispatch — the tuple is a literal by the time it runs, and a
+`T` holding none constant-folds the loop over it away entirely.
+
+This is what lets the patch table be core's. A backend's packer used to be asked
+to report each pointer it wrote (`recpatch!` on Vulkan), and a backend that never
+reported — Metal — silently had no table and no patching. Nothing is asked now:
+the pointers are found from the type, so a backend cannot answer wrongly and
+cannot answer not at all.
+
+`Core.LLVMPtr` is Metal's device pointer and `Ptr` is Vulkan's; both are the
+whole 64-bit address, which is what `notify_move!` re-keys on.
+"""
+@generated function devicepointeroffsets(::Type{T}) where {T}
+    offs = Int[]
+    isbitstype(T) && isstructtype(T) && devptroffsets!(offs, T, 0, 1)
+    return :($(Tuple(offs)))
+end
+
+"""
+    notepacked!(plan, T, at, target, off)
+
+Record where the device pointers of a just-packed argument of type `T` landed:
+its bytes are at host address `at`, which is byte `off` of `target`.
+
+Reads the addresses back out of the bytes the packer has already written rather
+than re-boxing the value — so this allocates nothing beyond the table entries
+themselves, and for a `T` with no device pointers the whole call compiles to
+nothing.
+
+Consumed only by [`notify_move!`](@ref), and only if something moves. A plan
+whose buffers never resize pays this once per argument at RECORD time and
+nothing per run.
+"""
+@inline function notepacked!(pl, ::Type{T}, at::Ptr{UInt8}, target, off::Int) where {T}
+    fields = devicepointeroffsets(T)
+    isempty(fields) && return nothing
+    for f in fields
+        addr = unsafe_load(Ptr{UInt64}(at + f))
+        addr == 0 && continue
+        push!(get!(Vector{Tuple{Any,Int}}, pl.patchtab, addr), (target, off + f))
     end
     return nothing
 end

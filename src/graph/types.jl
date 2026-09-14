@@ -502,8 +502,14 @@ mutable struct Plan{D,H<:Tuple}
     # `pending_patches`, and the next `run!` writes the new addresses as
     # commands in the run's own submission. Neither is ever walked per run.
     # See `notify_move!`.
-    patchtab::Dict{UInt64,Vector{Tuple{Region,Int}}}
-    pending_patches::Vector{Tuple{Region,Int,UInt64}}
+    # `Any` target, not `Region`: what a patch is written INTO is whatever this
+    # backend's `emitinline!` accepts — a pool region on Vulkan, the plan's own
+    # argument memory on a backend that allocates it outside the pool. Typing it
+    # as `Region` was Vulkan's shape leaking into core and is why Metal, whose
+    # argument store is a bare buffer, could not have a patch table at all. Cold:
+    # nothing reads either of these unless something moved.
+    patchtab::Dict{UInt64,Vector{Tuple{Any,Int}}}
+    pending_patches::Vector{Tuple{Any,Int,UInt64}}
     # Every `Buffer` and `GPURef` a pass declares, as a tuple typed by its
     # elements: what a host store (`ref[] = x`, `buf[r] = data`) can be waiting
     # on. `run!` walks it before submitting — a dirty one lands as a command in

@@ -463,7 +463,7 @@ copy: it has been recorded, not necessarily run, and handing those bytes to the
 next caller on the strength of having recorded a read of them is the same
 use-after-free in a different costume.
 
-The store MOVING is announced (`resource_moved!`): a recorded plan packed with
+The store MOVING is announced (`notify_move!`): a recorded plan packed with
 the old address is patched, not re-recorded — its next run writes the new
 address into the plan's argument memory as a command in that run's own
 submission. So a plan survives its buffers resizing.
@@ -476,14 +476,10 @@ function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
     old = b.store
     b.store, b.capacity = fresh, n
     retire!(pool(b.dev), region(old))
-    resource_moved!(b.dev, old, fresh)
+    notify_move!(pool(b.dev), deviceaddress(b.dev, region(old)),
+                 deviceaddress(b.dev, region(fresh)), length(old.region))
     return b
 end
-
-"""A persistent resource's storage moved from `old` to `fresh`; a backend with
-recorded plans patches their argument memory (see `notify_move!`). `nothing`
-where there are no device addresses to patch."""
-resource_moved!(dev, old, fresh) = nothing
 
 """
     free!(r::Buffer) / free!(r::GPURef)

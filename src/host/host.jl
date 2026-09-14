@@ -161,6 +161,11 @@ Mantle.alignment(::HostDevice, ::Mantle.TransientBuffer) = 64
 Mantle.rawalloc(d::HostDevice, ::Mantle.Buffers, bytes::Int, constraint) =
     zeros(UInt8, max(bytes, 1))
 Mantle.rawfree(::HostDevice, mem) = nothing
+# Host memory IS its own device memory, so the atom a move asks for is the slab's
+# own pointer. Answered rather than defaulted: core has no fallback for this, on
+# purpose — a backend that cannot say where its memory is cannot have a recorded
+# plan patched when it moves, and silence used to look like success.
+Mantle.deviceaddress(::HostDevice, mem::Vector{UInt8}) = UInt64(pointer(mem))
 # Host memory is not VRAM: a 64 MiB block would fault in pages nobody asked for,
 # and an allocation here is cheap enough that a small block is the right trade.
 Mantle.blocksize(::HostDevice) = 1 << 20

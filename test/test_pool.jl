@@ -25,6 +25,11 @@ end
 FakeDev() = FakeDev(Int[])
 
 M.rawalloc(d::FakeDev, kind, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+# Every device the pool drives has to answer `deviceaddress` — there is no core
+# default, which is the point of it: the hook it replaced could be left
+# unimplemented and a moved buffer then silently kept its old address. A fake
+# whose memory is a `Vector` answers with the vector's own pointer.
+M.deviceaddress(::FakeDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
 M.rawfree(::FakeDev, mem) = nothing
 M.constraintof(::FakeDev, kind, ts) = kind          # kind IS the constraint here
 M.compatible(::FakeDev, a, b) = a === b
@@ -409,6 +414,7 @@ struct BitDev
 end
 BitDev() = BitDev(Int[])
 M.rawalloc(d::BitDev, kind, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
+M.deviceaddress(::BitDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
 M.rawfree(::BitDev, mem) = nothing
 M.constraintof(::BitDev, kind, ts) = ts === nothing ? UInt32(0) : UInt32(ts)
 M.compatible(::BitDev, blk::UInt32, req::UInt32) = (blk & req) == req

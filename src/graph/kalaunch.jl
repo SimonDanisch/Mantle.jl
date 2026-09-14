@@ -484,7 +484,7 @@ function emitpatches!(e, pl::Plan)
         p = pl.pending_patches
         # A run with nothing pending allocates nothing — the empty check is
         # under the lock because the append happens under it (notify_move!).
-        isempty(p) ? nothing : (pl.pending_patches = Tuple{Region,Int,UInt64}[]; p)
+        isempty(p) ? nothing : (pl.pending_patches = Tuple{Any,Int,UInt64}[]; p)
     end
     patches === nothing && return nothing
     for (r, off, val) in patches
@@ -723,3 +723,21 @@ end
 emitdraw!(::Immediate, handle, d) =
     (record_draw!(handle, d.compiled, d.args, d.count); nothing)
 endrender!(::Immediate, handle) = (end_render_pass!(handle); nothing)
+
+"""
+A pointer patch into the plan's own argument memory, written by the host.
+
+The `Immediate` front is what a backend opens when its runs are already ordered
+against each other before core gets here — Metal drains the device in `openrun`
+when the plan has a recording — so the eight bytes can simply be stored. A
+backend that pipelines instead orders the patch by putting it IN the submission,
+which is what `emitinline!` on a real command emitter does.
+
+`ArgMemory` carries its own host pointer, so nothing is asked of the backend at
+all: unified memory or not, a plan's argument memory is host-written — that is
+how it was packed in the first place.
+"""
+function emitinline!(::Immediate, am::ArgMemory, off::Int, p::Ptr{Cvoid}, n::Int)
+    unsafe_copyto!(am.ptr + off, convert(Ptr{UInt8}, p), n)
+    return nothing
+end
