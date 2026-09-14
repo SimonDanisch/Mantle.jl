@@ -335,3 +335,71 @@ end
     isempty(hits) || @info "0.7b backend-only bindings named in the shared test layer" hits
     @test isempty(hits)
 end
+
+# ── 0.8 a hook whose default is a silent no-op ───────────────────────────────
+#
+# The shape that produced the worst bug this backend has had. `resource_moved!`
+# was a vocabulary verb with a PERMISSIVE CORE DEFAULT — one accepting any
+# argument, returning `nothing` — that Vulkan implemented and Metal did not. Core
+# announced every buffer move through it; on Metal the announcement went nowhere,
+# so a recorded plan kept reading a `resize!`d buffer's old storage. Silently: a
+# retired region is not freed, so it returned well-formed stale numbers, and the
+# whole suite was green throughout. A passing suite is NOT evidence against this
+# class, which is exactly why it wants a ratchet.
+#
+# What this pins is the SET, not zero. Some of these are legitimate — a capability
+# one backend has, or machinery only one submission model uses — and the honest
+# state is a list that does not grow without someone looking. Audited 2026-09-14,
+# all by design:
+#
+#   emitpreparebarrier!, emitkernel!, workgroupsize
+#       the device-sized-dispatch prepare. Metal records a `DeviceRange` at its
+#       CEILING and bounds-checks in the kernel, so there is no indirect command
+#       to write and no prepare to order — see `recordedrange`.
+#   hold!, holdleaves!, stampof
+#       `SubmitChannel`, which is Vulkan's submission model. Metal holds through
+#       its batch's roots instead (`retire!(::Pool, ::MTLBuffer)`).
+#   supports_*  capability questions, where the answer legitimately differs.
+#
+# A NEW name here is the thing to look at: ask whether the backend that does not
+# implement it reaches the call, and whether the default is right when it does.
+@testset "0.8 hooks that default to silence are a known set" begin
+    corefile(f) = startswith(string(f), joinpath(ROOT, "src")) &&
+                  !any(d -> occursin(joinpath("src", d), string(f)), BACKEND_DIRS)
+
+    # `unwrap_unionall`: a parametric method's `sig` IS a `UnionAll` and has no
+    # `.parameters` at all.
+    permissive(m) = corefile(m.file) &&
+        all(t -> t === Any || t isa UnionAll || t === Mantle.Device,
+            collect(Base.unwrap_unionall(m.sig).parameters)[2:end])
+
+    # Read the backend TREES, not the loaded methods. Only one backend is compiled
+    # into any build (chosen at parse time), so `methods()` can never see the other
+    # one — and "exactly one backend answers" would then be trivially true for
+    # everything. Both source trees are on disk either way, so the answer here is
+    # the same on a Metal build and a Vulkan one, which is what a ratchet needs.
+    defines(dir, nm) = any(readdir(joinpath(ROOT, "src", dir); join = true)) do f
+        isdir(f) && return any(g -> endswith(g, ".jl") &&
+                                    occursin(Regex("(^|\n)\\s*(function\\s+)?(Mantle\\.)?\\Q$(nm)\\E\\("),
+                                             read(g, String)),
+                               [joinpath(r, x) for (r, _, xs) in walkdir(f) for x in xs])
+        endswith(f, ".jl") && occursin(Regex("(^|\n)\\s*(function\\s+)?(Mantle\\.)?\\Q$(nm)\\E\\("),
+                                       read(f, String))
+    end
+
+    lonely = Symbol[]
+    for nm in Mantle.BACKEND_VOCABULARY
+        (isdefined(Mantle, nm) && getglobal(Mantle, nm) isa Function) || continue
+        ms = collect(methods(getglobal(Mantle, nm)))
+        (isempty(ms) || !any(permissive, ms)) && continue
+        answered = [d for d in BACKEND_DIRS if defines(d, nm)]
+        length(answered) == 1 && push!(lonely, nm)
+    end
+    sort!(lonely; by = string)
+
+    @info "0.8 vocabulary verbs with a permissive core default and ONE backend tree implementing" count=length(lonely) lonely
+    # 26 on both builds, 2026-09-14. Reading the trees rather than the loaded
+    # methods is what makes that number the same in each; if it ever differs by
+    # build, this test has drifted back to asking about the compiled backend.
+    @test length(lonely) <= 26
+end
