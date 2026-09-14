@@ -146,8 +146,22 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # each dispatch's pipeline, arguments, grid and barrier, so capturing them costs
 # record time and nothing per frame, and `emitwriter!` writes three `UInt32` per
 # gated dispatch where the replay writes two. Three sends per dispatch against one
-# per segment: about 27 us of host time for a forty-dispatch plan where the replay
-# is 4 us.
+# per segment: about 27 us of host time for a forty-dispatch plan.
+#
+# And encoding is the CHEAPER of the two, which is the opposite of what this note
+# said until it was measured. `executeCommandsInBuffer:` is not a few microseconds:
+# on this M5 it is a FIXED ~70 us per call, whatever it replays. Interleaved A/B in
+# one process, same encoder pattern, 6 blocks of 200 submissions:
+#
+#   command buffer + encoder + commit                    9.2 us   (9.0-9.0)
+#   ... plus executeCommandsInBuffer: of ONE command     84.2 us  (72-122)
+#
+# and replaying more does not cost more — 1 command 72.2 us, 10 commands 74.7 us,
+# 40 commands 55.3 us. It is a per-SEGMENT toll, so a plan with several gated
+# segments pays it several times a frame, and a plan whose GPU work is small pays
+# almost nothing else. That is what bounds a Metal frame at ~73 us; it is not the
+# residency declaration, which was the first suspect and is worth only 12 us of
+# driver prep.
 #
 # It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
 # depth 8, hardware traversal — the case that used to stall at the sixth or
