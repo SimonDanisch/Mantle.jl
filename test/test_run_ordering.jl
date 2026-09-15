@@ -39,9 +39,13 @@ using KernelAbstractions: @kernel, @index, @Const
     @inbounds dst[i] = k[1]
 end
 
-@kernel function ord_accumulate!(acc, @Const(src))
+# `sums`, and not the obvious `acc`: guard 0.7b asks whether a shared test names
+# a binding only one backend defines, by token, and `acc` is one of them
+# (`src/vulkan/lowering.jl` has `acc(x) = VK.AccessFlag2(x)`). Over-approximate
+# on purpose, and cheaper to rename than to weaken.
+@kernel function ord_accumulate!(sums, @Const(src))
     i = @index(Global)
-    @inbounds acc[i] += src[i]
+    @inbounds sums[i] += src[i]
 end
 
 @testset "successive runs of two plans do not overlap" begin
@@ -49,20 +53,18 @@ end
     # Large enough that a frame is real GPU work and there is room to overlap.
     n = 1 << 20
     mid = M.Buffer(dev, zeros(Float32, n))
-    acc = M.Buffer(dev, zeros(Float32, n))
+    sums = M.Buffer(dev, zeros(Float32, n))
     k   = M.GPURef(dev, 1.0f0)
 
     ga = M.Graph(dev)
-    M.dispatch!(ga, ord_fill!, (mid,
-                                   k), n; name = "write")
+    M.dispatch!(ga, ord_fill!, (mid, k), n; name = "write")
     gb = M.Graph(dev)
-    M.dispatch!(gb, ord_accumulate!, (acc,
-                                         mid), n; name = "read")
+    M.dispatch!(gb, ord_accumulate!, (sums, mid), n; name = "read")
     pa = M.record!(M.Plan(ga))
     pb = M.record!(M.Plan(gb))
 
     nrounds = 64                      # 16 is too few to overlap; 64 reproduces
-    M.update!(acc, zeros(Float32, n))
+    M.update!(sums, zeros(Float32, n))
     M.waitfor!(pb)
     for i in 1:nrounds
         k[] = Float32(i)
@@ -72,7 +74,7 @@ end
     M.waitfor!(pb)
 
     want = Float32(sum(1:nrounds))
-    got = Array(M.storage(acc))
+    got = Array(M.storage(sums))
     @test minimum(got) == want
     @test maximum(got) == want        # the failing case reads HIGH, not low
     @test count(!=(want), got) == 0

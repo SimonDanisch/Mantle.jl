@@ -463,6 +463,12 @@ include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 # `KernelInterface.HostMeshOutput` runs what a mesh stage runs and shows the
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
+# Under `test/vulkan/` and guarded, because it is that backend's: it builds a
+# `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
+# default and no other backend's answer. It sat in the section above, whose
+# stated assertion is that its files need no GPU, so on a machine with no Vulkan
+# driver it threw from the first line of its testset rather than being skipped.
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_gemv_splitk.jl"))
 include(joinpath(@__DIR__, "test_core_names_no_backend.jl"))
 # The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
 # written before the refactor deletes anything, so each one fails today and
@@ -528,6 +534,24 @@ foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
 # never reaches the host, so the Host backend cannot pin the half that matters.
 foreachbackend(joinpath(@__DIR__, "test_devicerange.jl"))
 foreachbackend(joinpath(@__DIR__, "test_run_ordering.jl"))
+# A dispatch's kernel is a plain Julia function, and one core predicate decides
+# whether it is that or a `@kernel` constructor. Per-backend because the decision
+# was being made three times and the three did not agree.
+foreachbackend(joinpath(@__DIR__, "test_declared_kernel.jl"))
+# And a library call declared as a pass member: `mul!` with no ndrange. The two
+# GPU backends answer `runscalls` differently and the file asserts both sides.
+foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
+# And once on the host, which is where the file's other half runs: the host has
+# no `KI.kernel_function` at all, so what it pins is the named refusal. Driven
+# separately because `eachbackend()` reports GPU backends.
+for path in (joinpath(@__DIR__, "test_declared_kernel.jl"),
+             joinpath(@__DIR__, "test_declared_call.jl"))
+    @eval Main MANTLE_TEST_BACKEND = $(Mantle.KernelAbstractions.CPU())
+    @eval Main module $(gensym(:HostDeclared))
+        using Test
+        include($path)
+    end
+end
 # And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.
@@ -957,6 +981,8 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_run_allocates_nothing.jl"))
             include(joinpath(VULKAN_TESTS, "test_download_readback.jl"))
             include(joinpath(VULKAN_TESTS, "test_traced_usages.jl"))
+
+            include(joinpath(VULKAN_TESTS, "test_partitioned_recording.jl"))
             include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
             include(joinpath(VULKAN_TESTS, "test_backend_vocabulary.jl"))
             # No open command buffer on the queue: every call closes and submits

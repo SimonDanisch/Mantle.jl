@@ -150,6 +150,70 @@ liveness interval has to widen to include the pass doing the touching.
 """
 touch!(g, x) = (resourceid(g, x); x)
 
+# ── recording an ordinary kernel launch into a pass ──────────────────────────
+#
+# The capture path was HERE, and is gone: `RECORDING_PASS`, `recordingpass`,
+# `record_into`, `LaunchPasses`, `capture_launch!`, `capture_call!`, `recordarg`,
+# `usagekey`, `useleaves!`, `usefields!` and `Rebound`, deleted 2026-09-15.
+#
+# It let a caller that drives an existing kernel library get a graph without
+# writing one: open a scope, and the backend's launch checks it. The reason it
+# goes is that the only caller was code we own. `DNNKernels` has the whole ATen
+# graph — every op, its inputs, its output, their shapes and their live ranges —
+# and was executing it while a scope collected the launches, which cost exactly
+# what it was built to avoid:
+#
+#   * a pass per launch, with `useleaves!` declaring every reachable array
+#     `read = true, write = true`, because by interception time the operand and
+#     the destination are indistinguishable. Two passes that only READ the same
+#     weight serialised.
+#   * passes discovered by RUNNING, so placement could not happen before the
+#     ops ran — which is why `DNNKernels` grew its own placer, its own bump
+#     arena for op scratch, and 17 loose `KA.allocate` sites.
+#   * `usagekey` mapping a view back to its storage: recovering the parent a
+#     declared graph states outright.
+#
+# Declared, none of that exists. The kernel says which argument is which,
+# `Transient.Buffer` makes the intermediates Mantle's to place and alias, and a
+# library call is a `Dispatch` whose kernel is a callable — which is what a
+# backend's `compile_dispatch` already does with a non-`KA.Kernel`.
+
+# ── a fill and a copy, as dispatches ─────────────────────────────────────────
+#
+# A backend reaches memory with more than kernels: a fill is a memset, a
+# device-to-device copy is a blit or a memcpy, and neither is a launch. Those are
+# the better instructions for an ad hoc `fill!(a, 0)` and stay in `fill!` and
+# `copyto!`.
+#
+# What a GRAPH needs is the same two as dispatches, because a pass is made of
+# dispatches: `dispatch!(g, fill_kernel!, (a, v), n)` is how a zeroed accumulator
+# is declared, and nothing about it is special.
+#
+# CORE's because every backend needs exactly the same two: Lava had both (one
+# top-level, one nested inside its `fill!`) and the ROCm extension had them again,
+# four copies of two kernels.
+
+"""
+    d2dcopy_kernel!(dst, src, doff, soff, n)
+
+`n` elements from `src` at `soff` into `dst` at `doff`, as a dispatch. Offsets
+are ZERO-based, so a caller passes `first - 1`.
+"""
+@kernel function d2dcopy_kernel!(dst, @Const(src), doff::Int64, soff::Int64, n::Int64)
+    i = @index(Global, Linear)
+    if i <= n
+        @inbounds dst[doff + i] = src[soff + i]
+    end
+end
+
+"""    fill_kernel!(a, v)
+
+`v` into every element of `a`, as a dispatch."""
+@kernel function fill_kernel!(a, v)
+    i = @index(Global, Linear)
+    @inbounds a[i] = v
+end
+
 """
     dispatch!(pass, kernel, args, ndrange; group = nothing)
 
@@ -178,6 +242,72 @@ function dispatch!(p, kernel, args, ndrange; group = nothing)
     n === nothing || indirectcount!(p, n)
     push!(dispatches(passof(p)), Dispatch(kernel, args, ndrange, group))
 end
+
+"""
+    dispatch!(graph, call, args; name = nothing)
+
+Declare a CALL: something that submits its own work, ordered by what it reads
+and writes like anything else in a graph.
+
+    dispatch!(g, mul!, (Write(C), Read(A), Read(B)))
+
+No ndrange, and that is the whole of the distinction. An ndrange is what Mantle
+needs in order to divide work into workgroups and launch it; a `mul!` has none,
+because the thing on the other side — rocBLAS on ROCm, this backend's own GEMM
+on Vulkan — decides its own launch. So the absence of an ndrange IS the
+statement "you are not launching this, you are calling it", and no second verb
+name or trait is needed to say so.
+
+**Which is also why this costs no boilerplate per operation.** `mul!` on a
+device array already routes correctly in every ecosystem: `LinearAlgebra.mul!`
+reaches rocBLAS through AMDGPU.jl and this backend's cooperative-matrix GEMM
+through its own `mul!`. Mantle resolves the arguments, orders the call against
+everything that touches those bytes, and calls the function the caller named.
+Nothing here knows what a GEMM is, and an `fft!`, a `cudnn` convolution or a
+`sort!` arrives by the same route.
+
+What the caller still has to state is the direction of each argument, because
+that is the thing no library announces — and the only place in the API that
+still says it, since everything with a body has its read off the body. An
+argument that states nothing is read+write, which is safe and is why
+`Write(C)` is what keeps two calls writing disjoint outputs from a shared
+weight from serialising.
+
+## Not every backend can run one
+
+`runscalls(device)` is the question, and it is asked at compile: a plan
+declaring a call on a backend that answers `false` is refused there with a
+message naming what to declare instead, rather than running and quietly
+computing the wrong thing.
+
+Two shapes say yes. A backend that WALKS its plans calls the function in order,
+which is what the host backend does. A backend whose recording is a stream
+CAPTURE gets it for free, because the library's own submission lands in the
+capture — that is ROCm, where a `mul!` becomes the rocBLAS kernels the graph
+then replays without rocBLAS being involved again.
+
+A backend that builds a command buffer itself and submits only that says no. The
+Vulkan backend is the case: `run!` submits a recording and a Lava plan has no
+walk path at all, so a host call would run once at record time, submit its work
+outside the buffer, and be missing from every replay. Silently. Closing it there
+means declaring that backend's own dispatches for the operation — a GEMM on
+Vulkan is `coopmat_gemm!`, which records like any other dispatch. That is one
+verb per operation on one backend, which is a great deal less than one verb per
+operation everywhere, and it is what this form buys.
+"""
+function dispatch!(p, call, args)
+    refuserefs(args)
+    push!(dispatches(passof(p)), Dispatch(call, args, nothing, nothing))
+end
+
+"""
+    iscall(d::Dispatch) -> Bool
+
+Whether this record is a call rather than a launch. See the three-argument
+[`dispatch!`](@ref): no ndrange means there is nothing for Mantle to divide, so
+the thing submits its own work.
+"""
+iscall(d::Dispatch) = d.ndrange === nothing
 
 """
     indirectcount!(pass, count)

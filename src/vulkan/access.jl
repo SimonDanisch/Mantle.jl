@@ -28,11 +28,19 @@ a two-dimensional ndrange and a one-dimensional one give different
 different code.
 """
 function kerneltouches(dev::LavaDevice, kernel, args::Tuple, ndrange, group)
+    argT = map(a -> devicetype(dev, a), args)
+    # The same split `compile_dispatch` makes, and for the same reason: what a
+    # dispatch MEANS is core's question (`buildskernel`), and a macro-free kernel
+    # is compiled at its arguments alone — no constructor, no iteration context.
+    if !buildskernel(kernel, backend(dev))
+        interp = Lava.kernelinterpreter(kernel, Tuple{argT...})
+        return accessof(interp, kernel, argT; cache = accesscache(dev))[2:end]
+    end
     obj  = kernelfor(kernel, group, backend(dev))
-    iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), nothing, dev.ctx)
-    tt   = (typeof(iter.ka_ctx), map(a -> devicetype(dev, a), args)...)
+    iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev.ctx)
+    tt   = (typeof(iter.ka_ctx), argT...)
     interp = Lava.kernelinterpreter(obj.f, Tuple{tt...}; workgroup_size = iter.ws_3d)
-    return accessof(interp, obj.f, tt)[3:end]
+    return accessof(interp, obj.f, tt; cache = accesscache(dev))[3:end]
 end
 
 isdevicearray(::LavaArray) = true

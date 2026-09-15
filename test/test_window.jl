@@ -1024,7 +1024,7 @@ else
     # reads. Without this the tests below fail one time in several, and the size
     # assertion still passes — it is only the pixels that are missing.
     function resize_and_settle!(dev, plan, win, w, h)
-        GLFW.SetWindowSize(win.win.handle, w, h)
+        GLFW.SetWindowSize(win.handle, w, h)
         for _ in 1:200
             M.run!(plan)
             size(win) == (w, h) && break
@@ -1134,7 +1134,7 @@ else
         M.run!(plan)                              # same size: fine
         KernelAbstractions.synchronize(M.backend(dev))
 
-        GLFW.SetWindowSize(win.win.handle, 1200, 900)
+        GLFW.SetWindowSize(win.handle, 1200, 900)
         sleep(0.2)
         @test_throws ErrorException M.run!(plan)  # bigger window, same depth target
         close(win)
@@ -1178,12 +1178,12 @@ else
         M.waitidle(dev)
 
         M.beforeframe!(dev, plan)                  # poll, sync at 800x600, acquire
-        acquired = win.win.acquired
+        acquired = win.acquired
         @test acquired
         if acquired
-            GLFW.SetWindowSize(win.win.handle, 1200, 900)
+            GLFW.SetWindowSize(win.handle, 1200, 900)
             t0 = time()
-            fbsize() = (fb = GLFW.GetFramebufferSize(win.win.handle); (Int(fb[1]), Int(fb[2])))
+            fbsize() = (fb = GLFW.GetFramebufferSize(win.handle); (Int(fb[1]), Int(fb[2])))
             while fbsize() != (1200, 900) && time() - t0 < 5; sleep(0.01); end
             @test fbsize() == (1200, 900)          # X has applied it; the swapchain has not
             M.refit!(plan)

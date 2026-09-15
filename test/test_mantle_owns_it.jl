@@ -41,6 +41,71 @@ function sourcefiles()
     return core, backend
 end
 
+"""
+Every name DEFINED in a set of files or directories: a method, or a type.
+
+Crude on the same terms as 0.8, and for the same reason: a definition is a
+top-level `NAME(` or a top-level `struct`/`abstract type`/`primitive type NAME`,
+at column zero. In-tree backends spell a method without a module prefix because
+they are included INTO `Mantle`; an extension spells it `Mantle.NAME`. Leading
+macros are skipped, which is not cosmetic: `supports_tessellation`'s core
+default is `@doc (@doc supports_geometry_stage) supports_tessellation(b) = false`
+and a pattern anchored on `function` or the bare name misses it.
+
+Types are here because five vocabulary entries ARE types (`Framebuffer`,
+`Sampler`, `Texture2D`, `Window`, `Profiler`), declared abstract in core and
+constructed per backend. A method-table view could not see that: an abstract
+type is not a `Function`, so the loop that asked `f isa Function` skipped all
+five, and `methods(Framebuffer)` shows only the one backend's outer constructor.
+
+A call at column zero would be read as a definition, which over-approximates
+towards saying a name IS answered, so it can hide a hole but never invent one.
+"""
+function definednames(paths)
+    mac = raw"(?:@[\w.]+(?:\s*\([^\n]*\))?\s+)*"
+    pat = Regex("^" * mac * raw"(?:function\s+)?(?:Mantle\.)?([A-Za-z_][\w!]*)\s*\(", "m")
+    tpat = Regex("^" * mac * raw"(?:mutable\s+struct|struct|abstract\s+type|primitive\s+type)\s+([A-Za-z_]\w*)", "m")
+    out = Set{Symbol}()
+    for p in paths
+        fs = isdir(p) ? [joinpath(d, f) for (d, _, ns) in walkdir(p) for f in ns
+                         if endswith(f, ".jl")] : [p]
+        for f in fs
+            code = codeonly(read(f, String))
+            for r in (pat, tpat), m in eachmatch(r, code)
+                push!(out, Symbol(m.captures[1]))
+            end
+        end
+    end
+    return out
+end
+
+"""
+Each backend's files, keyed by backend: the trees under `src/`, plus every
+extension that answers `caps`.
+
+`caps` is the marker because it is the one verb a backend must answer to be a
+device at all, so asking for it needs no vendor name and admits a future
+extension that is not a backend without breaking this guard.
+
+Files rather than method tables, which is the correction: this question is about
+the REPO, and a method table only shows the backends this process loaded. Metal
+never loads on the machines the Vulkan backend is tested on and the ROCm
+extension loads on neither, so a method-table answer changes per machine and
+`KNOWN_LONELY` could not be a ratchet against it. It also read a method in
+`ext/` as core's answer for everyone, which is how `caps`, `closerecording!`,
+`defaultdevice!`, `devicename` and `devices` came to look portable.
+"""
+function backendsources()
+    d = Dict{String,Vector{String}}(b => [joinpath(ROOT, "src", b)] for b in BACKEND_DIRS)
+    extdir = joinpath(ROOT, "ext")
+    for f in (isdir(extdir) ? readdir(extdir) : String[])
+        endswith(f, ".jl") || continue
+        p = joinpath(extdir, f)
+        :caps in definednames([p]) && (d[f] = [p])
+    end
+    return d
+end
+
 # ── 0.1 No vendor name in the portable vocabulary ────────────────────────────
 #
 # `BACKEND_VOCABULARY` is the list of core functions a backend may extend, so a
@@ -69,34 +134,89 @@ end
 
 const NOT_PORTABLE = Set{Symbol}()
 
+# The 53 that are lonely TODAY, so the guard can fail on a 54th.
+#
+# Five names left this list when the guard started reading FILES: `caps`,
+# `closerecording!`, `defaultdevice!`, `devicename` and `devices` are answered
+# by all three backends and always were. They were on it because the guard
+# asked method tables, and neither Metal nor the ROCm extension loads on the
+# machine this suite runs on, so both looked silent.
+#
+# `@test_broken isempty(lonely)` could never do that: a list of 58 passes as
+# "still broken" whether it holds 58 or 580, so the guard reported the number and
+# detected nothing. `emitkernel!` is the entry that proves the cost — a verb
+# `graph/backend.jl` declares and only Lava answers, which was noted in two
+# docstrings of the ROCm extension and then worked around instead of
+# implemented, because a HIP capture made a different verb produce the right
+# behaviour. A guard that named it as new would have been read; one naming it
+# among 57 others was not.
+#
+# So: a name here is a known hole, and the test fails on anything NOT here —
+# and also on anything here that has been fixed without being removed, so the
+# list can only shrink.
+const KNOWN_LONELY = Set{Symbol}([
+    :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
+    :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
+    :blittarget, :build_accel!, :colorimage, :compile_draw, :currentimage,
+    :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
+    :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,
+    :end_render_pass!, :imageusage, :indirectslot, :initbackend!, :layout,
+    :makeimage, :makerecording, :present_frame!, :readback_framebuffer,
+    :readback_window, :record_draw!, :recorder, :refit_tlas!,
+    :release_batch_queue!, :remakeimage!, :reset_device!, :resetrecording!,
+    :screenshot, :set_anyhit_pipeline!, :set_viewport!, :setviewport!,
+    :stages, :storebytes!, :submit!, :trace_closest_hits!,
+    :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
+    :trace_closest_hits_indirect!, :trace_rays!, :trace_rays_indirect!,
+    :transition_image!, :use_bindings!
+])
+
 @testset "0.2 a vocabulary name has a core default or every backend" begin
-    # A backend is `@static include`d into Mantle now, not an extension, so
-    # "is one here" is a question about files rather than about modules.
-    hasbackend = any(methods(Mantle.caps)) do m
-        any(b -> occursin(joinpath("src", b), string(m.file)), BACKEND_DIRS)
+    bysrc = backendsources()
+    defs = Dict(b => definednames(ps) for (b, ps) in bysrc)
+    core, _ = sourcefiles()
+    coredefs = definednames(core)
+    backendfiles = reduce(vcat, values(bysrc))
+    isbackendfile(f) = any(b -> occursin(b, string(f)), backendfiles)
+
+    # Two questions, each asked of the source that can answer it.
+    #
+    # "Does every backend answer this name" is about the REPO, so it reads
+    # files: Metal does not load on the machines the Vulkan backend is tested
+    # on, and a method-table answer would therefore call every graphics verb
+    # unanswered on Linux and answered on a Mac. `KNOWN_LONELY` cannot ratchet
+    # against a number that moves per machine.
+    #
+    # "Is there a default for everyone" is NOT only about this repo: `caps`,
+    # `supports`, `bestshape`, `matrix_shapes` and `wggranularity` are
+    # `import`ed from KernelInterface, so whatever fallback they have is in a
+    # package that loads whenever Mantle does. That one reads the method table,
+    # and reads it safely — an unloaded backend contributes no methods, so it
+    # can never make a name look defaulted when it is not.
+    function hasdefault(n)
+        n in coredefs && return true
+        isdefined(Mantle, n) || return false
+        v = getglobal(Mantle, n)
+        (v isa Function || v isa Type) || return false
+        return any(m -> !isbackendfile(m.file), methods(v))
     end
-    if !hasbackend
-        @info "0.2 no backend loaded; nothing to check"
-    else
-        lonely = Symbol[]
-        for n in Mantle.BACKEND_VOCABULARY
-            n in NOT_PORTABLE && continue
-            isdefined(Mantle, n) || continue
-            f = getglobal(Mantle, n)
-            f isa Function || continue
-            ms = collect(methods(f))
-            infile(pat) = any(m -> occursin(pat, string(m.file)), ms)
-            # A method outside both backend trees is core's answer for everyone.
-            hascore = any(m -> !occursin(joinpath("src", "vulkan"), string(m.file)) &&
-                               !occursin(joinpath("src", "metal"), string(m.file)), ms)
-            hascore && continue
-            answered = [b for b in BACKEND_DIRS if infile(joinpath("src", b))]
-            length(answered) == length(BACKEND_DIRS) || push!(lonely, n)
-        end
-        isempty(lonely) ||
-            @info "0.2 vocabulary names with no core default and not every backend" count = length(lonely) lonely
-        @test_broken isempty(lonely)
+
+    lonely = Symbol[]
+    for n in Mantle.BACKEND_VOCABULARY
+        n in NOT_PORTABLE && continue
+        hasdefault(n) && continue
+        all(d -> n in d, values(defs)) || push!(lonely, n)
     end
+    backends = sort(collect(keys(defs)))
+    new = sort(collect(setdiff(Set(lonely), KNOWN_LONELY)); by = string)
+    fixed = sort(collect(setdiff(KNOWN_LONELY, Set(lonely))); by = string)
+    isempty(new) || @info "0.2 NEW vocabulary names with no default and not every \
+        backend — implement them, or add them to KNOWN_LONELY with the \
+        reason" backends new
+    isempty(fixed) || @info "0.2 names in KNOWN_LONELY that are now answered \
+        everywhere — delete them from the list" backends fixed
+    @test isempty(new)
+    @test isempty(fixed)
 end
 
 # ── 0.3 A method in a backend touches the driver ─────────────────────────────
@@ -401,5 +521,65 @@ end
     # 26 on both builds, 2026-09-14. Reading the trees rather than the loaded
     # methods is what makes that number the same in each; if it ever differs by
     # build, this test has drifted back to asking about the compiled backend.
-    @test length(lonely) <= 26
+    #
+    # 28 after the recording verbs were declared, 2026-09-15: 25 of the 26, plus
+    # the three below. `Surface` left the set in the same merge — the portable
+    # `Window(width, height)` and `color_format` work made both trees answer it.
+    #
+    # The three, each looked at as the note above this testset asks:
+    #
+    #   submitrecording!, callgroup
+    #       ARTIFACTS of `permissive`, not holes. Their core methods take
+    #       `RecordingParts` and `KernelAbstractions.Kernel` — parametric types
+    #       named without their parameters, so each is a `UnionAll` and the
+    #       predicate reads it as "accepts anything". Neither accepts anything:
+    #       a `Call` or a `Launch` matches neither. Tightening the predicate
+    #       would mean deciding that a bare `::Plan` is specific while `::Any`
+    #       is not, which is a judgement this ratchet should not make silently,
+    #       so they are recorded here instead.
+    #   abandonrecording!
+    #       REAL, and narrow. `abandonrecording!(::Device, e) = nothing` is a
+    #       no-op default; Vulkan and the ROCm extension release the recording,
+    #       Metal does not implement it. `recordparts!` calls it when a
+    #       partition throws part way through, so on Metal that path leaks the
+    #       open indirect command buffer. An error path, and a leak rather than
+    #       a wrong answer — but it is the `resource_moved!` shape and the fix
+    #       is one method on `MetalRecorder`, on a machine that can run it.
+    @test length(lonely) <= 28
+end
+
+# ── 0.9 An extension extends the vocabulary and nothing else ─────────────────
+#
+# `BACKEND_VOCABULARY` is the list of core functions a backend may extend, so a
+# backend method on a name outside it is a decision taken in the wrong package:
+# either core has no opinion where it should have one, or the backend is
+# answering a question core never asked. The in-tree backends are checked by
+# 0.2 and 0.3 from their method tables; a backend that ships as a package
+# EXTENSION has no method table here, because the package it weakly depends on
+# is not installed on most machines this suite runs on.
+#
+# So this reads the files. Crude on purpose: a top-level `Mantle.NAME(` or
+# `function Mantle.NAME(` is a definition, and every other mention is a call.
+# That is enough, because the thing being hunted is a `Mantle.foo(...) = ...`
+# for a `foo` that no other backend answers and core never declared — which is
+# how an extension grows its own private API on Mantle's namespace and how the
+# pair of `resource_moved!`/`arena_moved!` methods that were DEFINING two dead
+# functions survived as long as they did.
+#
+# No extension is named here and none is special-cased: the directory is the
+# subject. Starts green and is a ratchet.
+@testset "0.9 an extension defines only vocabulary names" begin
+    voc = Set(Mantle.BACKEND_VOCABULARY)
+    dir = joinpath(ROOT, "ext")
+    hits = Tuple{String,Vector{Symbol}}[]
+    for f in (isdir(dir) ? readdir(dir) : String[])
+        endswith(f, ".jl") || continue
+        src = codeonly(read(joinpath(dir, f), String))
+        named = Symbol[Symbol(m.captures[1]) for m in
+                       eachmatch(r"^(?:@inline\s+)?(?:function\s+)?Mantle\.([A-Za-z_][\w!]*)\s*\("m, src)]
+        bad = sort(unique(filter(n -> !(n in voc), named)); by = string)
+        isempty(bad) || push!(hits, (f, bad))
+    end
+    isempty(hits) || @info "0.9 extension methods outside the vocabulary" hits
+    @test isempty(hits)
 end

@@ -19,6 +19,7 @@
 #     `llvmcall` and the module is named by a `GlobalRef` rather than inline.
 using Test, Mantle, KernelAbstractions, Lava
 import Atomix, Adapt
+import KernelInterface as KI
 const M = Mantle
 const TESTBACKEND = M.VulkanAPI()
 
@@ -139,6 +140,28 @@ end
     # `spare` would all answer whatever any one of them got.
     @test touches(dev, acc_map!, (acc_inner!, Int32(n), dst, src, spare), n) ==
           ["--", "--", "-W", "R-", "--"]
+end
+
+# A kernel calling an intrinsic this backend does not implement — which is what
+# `KI.localmemory` WAS, before its signature grew a call-site id. Every path
+# through the body throws, so it infers to `Union{}` and its IR is unreachable
+# from the first statement on.
+function acc_missing_intrinsic end
+
+function acc_uninferable!(dst, n::Int)
+    i = KI.get_global_id().x
+    v = acc_missing_intrinsic(Float32(i))
+    @inbounds dst[i] = v
+    return
+end
+
+@testset "inferred access: a kernel that does not infer is not untouched" begin
+    dev = M.Device(TESTBACKEND)
+    n = 64
+    dst = M.devicearray(dev, Float32, n)
+    # "No store" is the one answer that must never be a guess — it is the answer
+    # that removes a barrier. An unreachable body says nothing, not nothing-done.
+    @test touches(dev, acc_uninferable!, (dst, n), n) == ["RW", "RW"]
 end
 
 @testset "inferred access: the unknown widens, it does not vanish" begin

@@ -1060,10 +1060,26 @@ at run time. A run only applies what this queued.
 """
 function notify_move!(pool::Pool, old_base::UInt64, new_base::UInt64, nbytes::Int)
     old_base == new_base && return nothing
+    # Collected here and invalidated AFTER the walk, not during it.
+    # `invalidate!` reaches `unlisten_moves!`, which `filter!`s the very vector
+    # being iterated — and a `filter!` mid-iteration skips whatever shifts down
+    # past the cursor. With one listener that is invisible; with several, a plan
+    # that should have been invalidated keeps a recording naming freed storage,
+    # which is the failure this path exists to prevent.
+    drop = Any[]
     lock(pool.lock) do
         filter!(wr -> wr.value !== nothing, pool.movelisteners)
         for wr in pool.movelisteners
             pl = wr.value
+            # A backend whose recording cannot be rewritten gets it thrown away
+            # instead. Before this, such a plan fell through the `isempty(tab)`
+            # test below — it has no patch table, because there is nowhere for
+            # one to point — and kept running commands that named the old
+            # storage. See `patchable`.
+            if !patchable(pl.graph.dev)
+                push!(drop, pl)
+                continue
+            end
             tab = pl.patchtab
             isempty(tab) && continue
             moved = [a for a in keys(tab) if old_base <= a < old_base + nbytes]
@@ -1077,6 +1093,9 @@ function notify_move!(pool::Pool, old_base::UInt64, new_base::UInt64, nbytes::In
             end
         end
         nothing
+    end
+    for pl in drop
+        invalidate!(pl)
     end
     return nothing
 end

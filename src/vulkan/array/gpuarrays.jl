@@ -628,6 +628,10 @@ end
 # is only a wrapper — and `download_typed!` already called it directly with a
 # user array's pointer. So do these. `GC.@preserve` keeps the host array alive
 # across the call, which is exactly what the wrapper was doing for its temporary.
+# The device-to-device copy is `Mantle.d2dcopy_kernel!` in `runtime/dispatch.jl`
+# now — every backend needs the same one, and this file had the only copy of it
+# while the ROCm extension had a second. See the recording branch below.
+
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::Array{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
@@ -663,6 +667,12 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
         copyto!(dest, doffs, staging, 1, n)
         return dest
     end
+    # The kernel detour for a copy inside a recording was here, deleted
+    # 2026-09-15 with the capture path. `cmd_copy_buffer!` is a transfer command
+    # rather than a dispatch, so a capture could not see it and the copy had to be
+    # done as `d2dcopy_kernel!` instead. A graph that wants a copy declares that
+    # kernel itself; this function is the ad hoc `copyto!` again, and
+    # `vkCmdCopyBuffer` is the better instruction for it.
     # Direct GPU→GPU copy via vkCmdCopyBuffer (no CPU staging roundtrip).
     src_offset = pool_offset(src.buf[]) + src.offset + (Int(soffs) - 1) * sizeof(T)
     dst_offset = pool_offset(dest.buf[]) + dest.offset + (Int(doffs) - 1) * sizeof(T)
@@ -685,6 +695,11 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     # both are held here as well as inside the copy. Every kernel argument
     # already gets exactly this lifetime through `LavaAdaptor`; only the copy
     # path was holding a level too low.
+    # The `openrecording()` consult was here, deleted 2026-09-15 with `batched!`
+    # for the same reason as the one in `ka_backend.jl`: which command buffer a
+    # copy landed in came from task-global state rather than from an argument. A
+    # graph that wants this copy declares `d2dcopy_kernel!`; outside one it is a
+    # command buffer and a submit, which is what an ad hoc `copyto!` is.
     oneshot!(bq; tag = :copy) do e
         hold!(e, src)
         hold!(e, dest)
@@ -703,10 +718,7 @@ end
 function Base.fill!(a::LavaArray{T}, val) where T
     length(a) == 0 && return a
     v = convert(T, val)
-    @kernel cpu=false function fill_kernel!(A, v)
-        I = @index(Global)
-        @inbounds A[I] = v
-    end
+    # `fill_kernel!` is core's, beside `d2dcopy_kernel!`, for the same reason.
     # From the array, not the global context. `fill!` on an array belonging to a
     # second device was dispatching on whichever context was global: the write
     # landed on the wrong queue, the array read back as zeros, and Lava's own

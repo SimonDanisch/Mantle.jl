@@ -11,7 +11,11 @@
 # `maybe_trim_pool!` adds an absolute-capacity trigger so dead capacity is
 # released on its own terms.
 
-using Test, Lava, KernelAbstractions
+# `Mantle`, not `Lava`: `LavaBackend` is Mantle's and `Lava` does not export it,
+# so the first line of the first testset threw `UndefVarError` — this file has not
+# run since the tests were moved onto Mantle's names.
+using Test, Mantle, KernelAbstractions
+using Mantle: LavaBackend
 const KA = KernelAbstractions
 
 @testset "empty pool blocks are trimmed without an OOM" begin
@@ -119,4 +123,46 @@ end
     before = Mantle.gpu_live_bytes()
     Mantle.maybe_trim_pool!(ctx)                # must be a no-op, not a stall
     @test Mantle.gpu_live_bytes() == before
+end
+
+# The other rate limit, and the one that was missing: a soft-cap collection is
+# spaced by what it COSTS, not only by how often it may run.
+#
+# `gc_mingap` is 20 ms. An incremental collection on a heap holding a couple of
+# GiB of GPU-backed arrays takes ~63 ms, so the gap alone permitted spending
+# three quarters of the clock inside the allocator — and it did: RIFE at
+# 1920x1152 sits at 2094.6 MiB against the 2048 MiB default cap, collected six
+# times a run, and 142 ms of work was reported as a p50 of 519 ms with a spread
+# out to 912. The pool was 2% over the cap the whole time, so there was nothing
+# to win either.
+@testset "a soft-cap collection is limited by what it cost" begin
+    ctx = Mantle.vk_context()
+    p = Mantle.mempolicy(ctx)
+    bq = ctx.default_bq
+    was = (p.gc_last, p.gc_lastcost, p.gc_budget)
+    try
+        # A collection that cost 100 ms, on a 5% budget, is a 2 s gap — so one
+        # 20 ms after it is refused, where `gc_mingap` alone would allow it.
+        p.gc_budget = 0.05
+        p.gc_lastcost = 0.1
+        p.gc_last = time() - 0.02
+        @test !Mantle.collect_for_pool!(bq)
+        # Past the cost-derived gap it runs again.
+        p.gc_last = time() - 2.5
+        @test Mantle.collect_for_pool!(bq)
+        # …and what it just cost is remembered, which is what spaces the next one.
+        @test p.gc_lastcost > 0.0
+        # `gc_mingap` still applies when a collection was cheap: the budget can
+        # only ever make the gap LONGER, never shorter.
+        p.gc_lastcost = 0.0
+        p.gc_last = time()
+        @test !Mantle.collect_for_pool!(bq)
+        # A budget of 1 is no bound at all, which is what this did before.
+        p.gc_budget = 1.0
+        p.gc_lastcost = 0.1
+        p.gc_last = time() - 0.15
+        @test Mantle.collect_for_pool!(bq)
+    finally
+        p.gc_last, p.gc_lastcost, p.gc_budget = was
+    end
 end

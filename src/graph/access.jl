@@ -68,6 +68,46 @@ function usagetype(t::Touch, kind::ResourceKind)
     return (t.write && t.atomic) ? Unordered{S} : S
 end
 
+# ── Stating an access, for the one thing that cannot be read ─────────────────
+
+"""
+    Read(x)
+    Write(x)
+    ReadWrite(x)
+
+What a CALL does to an argument, stated because there is nothing to read it off.
+
+A dispatch has a kernel and the walk below answers from its body. A call —
+`dispatch!(g, mul!, (Write(C), Read(A), Read(B)))` — hands work to a library
+that submits its own, and `mul!` disappears into rocBLAS or into this backend's
+GEMM. There is no body on this side of that boundary, so the direction of each
+argument is the one thing the caller has to say.
+
+The alternative is not "no declaration", it is read+write on everything, which
+is what an unwrapped argument to a call gets: safe, and it serialises two calls
+that write disjoint outputs from a shared weight.
+
+A wrapper and not a verb on a pass handle, because `dispatch!` takes a graph and
+there is no handle to pass. It resolves to `x` everywhere else — `storage`,
+`resolve` and the leaf walk all forward through it — so what the library is
+handed is the argument, not the wrapper.
+"""
+struct Declared{T}
+    value::T
+    touch::Touch
+end
+
+Read(x) = Declared(x, READ)
+Write(x) = Declared(x, WRITE)
+ReadWrite(x) = Declared(x, Touch(true, true, false))
+
+"""What a declared argument states, and `nothing` for one that states nothing."""
+declaredtouch(d::Declared) = d.touch
+declaredtouch(@nospecialize(x)) = nothing
+
+undeclare(d::Declared) = d.value
+undeclare(@nospecialize(x)) = x
+
 # ── Which values can reach memory ────────────────────────────────────────────
 
 """
@@ -263,12 +303,25 @@ function accessof(interp, @nospecialize(f), @nospecialize(argtypes);
     return touches === nothing ? fill(OPAQUE, length(argtypes) + 1) : touches
 end
 
-"""IR for one signature, through the backend's interpreter or Julia's own."""
+"""
+IR for one signature, through the backend's interpreter or Julia's own.
+
+`nothing` for anything the walk must not read as an answer:
+
+  * more than one method, or none — a dynamic call site, not ours to guess;
+  * a signature that infers to `Union{}`, which means every path through it
+    throws. The IR is then all unreachable and the walk finds no store — and
+    "no store" is the one answer that must never be a guess, because it is the
+    one that removes a barrier. A kernel that does not infer does not compile
+    either, so the plan is going to fail; it should fail saying THAT.
+"""
 function irfor(w::Walk, @nospecialize(sig))
     irs = w.interp === nothing ? Base.code_ircode_by_type(sig) :
                                  Base.code_ircode_by_type(sig; interp = w.interp)
-    length(irs) == 1 || return nothing          # a dynamic call site: not ours to guess
-    return first(irs[1])
+    length(irs) == 1 || return nothing
+    ir, rt = irs[1]
+    rt === Union{} && return nothing
+    return ir
 end
 
 """Per-argument `Touch` for a whole signature, or `nothing` if it cannot be seen."""

@@ -126,6 +126,21 @@ same sequence in another order segfaulted instead. `Mantle.Pool` inherits that
 requirement — one pool per `LavaDevice`, one `LavaDevice` per `VkContext`, which
 is what `DEVICES` is for.
 """
+mutable struct MemoryStats
+    # Estimated maximum bytes available to us on the device-local heap.
+    # Probed lazily from `ctx.memory_properties` and refreshed every 10s.
+    @atomic size::Int
+    @atomic last_updated::Float64
+
+    # Last `maybe_collect` run + the rolling cost of that GC.
+    @atomic last_time::Float64
+    @atomic last_gc_time::Float64
+    # Bytes freed by the most recent `maybe_collect`-triggered GC.
+    @atomic last_freed::Int
+end
+
+MemoryStats() = MemoryStats(0, 0.0, 0.0, 0.0, 0)
+
 mutable struct MemoryPolicy
     # ── Policy. These were eleven module-level `Ref`s, which is the same mistake
     # as the caches one level up: a second device would have been trimmed,
@@ -138,6 +153,11 @@ mutable struct MemoryPolicy
     trim_full_gc_interval::Float64
     gc_mingap::Float64
     gc_full_mingap::Float64
+    # Share of wall time a soft-cap collection may take. `gc_mingap` bounds how
+    # OFTEN it runs; this bounds what it COSTS, which on a heap of GPU-backed
+    # arrays is the half that matters — see `collect_for_pool!`. `1.0` is no
+    # bound at all and is what the code did before this existed.
+    gc_budget::Float64
     track_allocs::Bool
 
     # ── Bookkeeping: when this pool last trimmed or collected, and how long it
@@ -148,6 +168,18 @@ mutable struct MemoryPolicy
     gc_last::Float64
     gc_full_last::Float64
     gc_seconds::Float64
+    # What the last soft-cap collection cost, in seconds. `collect_for_pool!`
+    # spaces itself by this and not only by `gc_mingap`: the gap says how often,
+    # and on a heap of GPU-backed arrays the cost is the half that matters.
+    gc_lastcost::Float64
+    # Whether the pressure-driven `maybe_collect` runs at all, and the state it
+    # rate-limits itself with. Both were module-level — `EAGER_GC` a `Ref{Bool}`
+    # and `MEMORY_STATS` a `MemoryStats()` — which made a BACKEND read
+    # process-global state to decide what to do while the context sat in its
+    # argument list. The comment at the top of this struct describes the same fix
+    # being made for eleven other `Ref`s; these were the twelfth and thirteenth.
+    eager_gc::Bool
+    stats::MemoryStats
 
     # ── Accounting for buffers that own their memory: staging, mapped, and
     # anything whose usage flags the pool cannot host. The SUBALLOCATED bytes are

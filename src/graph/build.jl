@@ -41,6 +41,39 @@ function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
 end
 
 """
+    dispatch!(graph, call, args; name = nothing)
+
+Declare a CALL: something that submits its own work, ordered by what it reads
+and writes like anything else.
+
+    dispatch!(g, mul!, (Write(C), Read(A), Read(B)))
+
+No ndrange, and that is the whole of the distinction — an ndrange is what Mantle
+needs in order to divide work into workgroups, and a `mul!` has none because the
+thing on the other side decides its own launch. See the four-argument form above
+for what a dispatch is, and `runscalls(device)` for which backends can run one.
+
+The arguments are the one place a call needs words a dispatch does not.
+`mul!` disappears into rocBLAS, so there is no body to read the direction off,
+and [`Read`](@ref)/[`Write`](@ref) state it. An argument that states nothing is
+read+write: safe, and coarse enough that two calls sharing a weight matrix will
+not overlap.
+"""
+function dispatch!(g::Graph, call, args::Tuple; name = nothing)
+    refuserefs(args)
+    p = newpass(g, name === nothing ? string(nameof(call)) : String(name), :compute)
+    push!(passes(g), p)
+    h = handle(g, p)
+    declare!(h, args, calltouches(args))
+    push!(dispatches(p), Dispatch(call, args, nothing, nothing))
+    return p
+end
+
+"""What each argument of a call states, or read+write where it states nothing."""
+calltouches(args::Tuple) =
+    Touch[something(declaredtouch(a), OPAQUE) for a in args]
+
+"""
 What to call the pass a bare `dispatch!` makes.
 
 The kernel's own name, except for a higher-order kernel — a queue mapper whose
@@ -71,7 +104,7 @@ function declare!(h, args::Tuple, touches::Vector{Touch})
     for (a, t) in zip(args, touches)
         touched(t) || continue
         empty!(leaves)
-        resourceleaves!(leaves, a)
+        resourceleaves!(leaves, g, a)
         for r in leaves
             push!(p.usages, resourceid(g, r) => usagetype(t, resourcekind(r)))
             # The PARENT is what liveness has to see touched: a slice's interval
@@ -83,35 +116,44 @@ function declare!(h, args::Tuple, touches::Vector{Touch})
 end
 
 """
-    resourceleaves!(acc, x) -> acc
+    resourceleaves!(acc, graph, x) -> acc
 
 Every device buffer reachable from `x`, appended to `acc`.
 
 A `Resource` and a backend's array are leaves; anything else that can reach
-memory is opened up and its fields walked. That covers a work queue, a struct of
-arrays and a tuple of either without naming any of them here — the three
-containers a consumer was reimplementing this walk for.
-"""
-resourceleaves!(acc, x::Resource) = (push!(acc, x); acc)
-resourceleaves!(acc, x::BufferRange) = (push!(acc, x); acc)
-resourceleaves!(acc, @nospecialize(x)) = resourceleaves!(acc, x, Base.IdSet{Any}(), 0)
+memory is opened up and its fields walked. The graph is threaded through for the
+one leaf that is not a resource the caller named: a `ResourceView` declares the
+SLICE of its parent that it covers, and a slice is interned per graph.
 
-resourceleaves!(acc, x::Resource, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
-resourceleaves!(acc, x::BufferRange, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
+The walk covers a work queue, a struct of arrays and a tuple of either without
+naming any of them here — the three containers a consumer was reimplementing
+this walk for.
+"""
+resourceleaves!(acc, g, x::Declared, seen::Base.IdSet{Any}, depth::Int) =
+    resourceleaves!(acc, g, x.value, seen, depth)
+
+# A VIEW is what the kernel gets; what the pass touches is the parent, scoped to
+# the elements the view covers — which is a slice, and a slice needs the graph to
+# be the same resource every time it is named.
+resourceleaves!(acc, g, v::ResourceView, seen::Base.IdSet{Any}, depth::Int) =
+    (push!(acc, slice(g, v.parent, elementrange(v))); acc)
+
+resourceleaves!(acc, g, x::Resource, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
+resourceleaves!(acc, g, x::BufferRange, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
+resourceleaves!(acc, g, @nospecialize(x)) = resourceleaves!(acc, g, x, Base.IdSet{Any}(), 0)
 
 # An attribute is not a leaf and not a container: `Attribute(p, x)` already
 # declared it, as `Vertices`, which is a different usage from the storage read a
 # shader argument is. Declaring it again from the draw would say the vertex
 # stage reads it as storage, which is not how a vertex buffer is fetched.
-resourceleaves!(acc, ::Attr, seen::Base.IdSet{Any}, depth::Int) = acc
-resourceleaves!(acc, ::Attr) = acc
+resourceleaves!(acc, g, ::Attr, seen::Base.IdSet{Any}, depth::Int) = acc
 
 # The walk is over an object graph, not a tree, and a device object reaches its
 # pool, which reaches its device. Both guards are needed: identity for the cycle,
 # and a depth for a structure deep enough that nothing useful is left below it.
 const LEAFDEPTH = 16
 
-function resourceleaves!(acc, @nospecialize(x), seen::Base.IdSet{Any}, depth::Int)
+function resourceleaves!(acc, g, @nospecialize(x), seen::Base.IdSet{Any}, depth::Int)
     isdevicearray(x) && return (push!(acc, x); acc)
     depth > LEAFDEPTH && return acc
     T = typeof(x)
@@ -123,7 +165,7 @@ function resourceleaves!(acc, @nospecialize(x), seen::Base.IdSet{Any}, depth::In
     end
     for i in 1:fieldcount(T)
         isdefined(x, i) || continue
-        resourceleaves!(acc, getfield(x, i), seen, depth + 1)
+        resourceleaves!(acc, g, getfield(x, i), seen, depth + 1)
     end
     return acc
 end
@@ -410,9 +452,66 @@ Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, n
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 
-# A transient buffer's length is what it was declared with — core, because a
-# `TransientBuffer` is core and its count is not a driver's.
-Base.length(t::TransientBuffer) = t.n
+# ── A declared view of a resource ────────────────────────────────────────────
+
+"""
+    viewof(parent, dims...; offset = 0) -> ResourceView
+
+A `dims`-shaped window onto `parent`, `offset` elements in. Declares nothing by
+itself — handing it to a dispatch is what tells the graph about it, as a slice
+of the parent covering the view's elements.
+"""
+viewof(parent, dims::Integer...; offset::Integer = 0) =
+    viewof(parent, map(Int, dims); offset)
+function viewof(parent, dims::Dims{N}; offset::Integer = 0) where {N}
+    # Checked here, because here is where it is checkable: a declaration knows
+    # the parent's extent, and a view past the end is otherwise a read of
+    # someone else's bytes at run time with nothing to point at it.
+    prod(dims) + Int(offset) <= length(parent) || throw(ArgumentError(
+        "viewof: a $(dims) view at offset $(offset) covers " *
+        "$(prod(dims) + Int(offset)) elements of a parent that has " *
+        "$(length(parent)) ($(describe(parent)))"))
+    return ResourceView{eltype(parent),N,typeof(parent)}(parent, dims, Int(offset))
+end
+
+# A view of a view is a view of the SAME resource, one offset further in, and
+# never a nested one. A view's whole content is `(resource, dims, offset)`, so
+# composing costs an addition; nesting would mean walking the chain in `storage`
+# and in `use` — and `use` forwards a `range` to its parent, which the
+# `ResourceView` method has no way to take. An ATen graph reshapes a reshape
+# (`view_9` of `view_8` of a convolution's output), so this is the ordinary case.
+viewof(parent::ResourceView, dims::Dims{N}; offset::Integer = 0) where {N} =
+    viewof(parent.parent, dims; offset = parent.offset + Int(offset))
+
+Base.size(v::ResourceView) = v.dims
+Base.size(v::ResourceView, d::Integer) = d <= ndims(v) ? v.dims[d] : 1
+Base.ndims(::ResourceView{<:Any,N}) where {N} = N
+Base.eltype(::ResourceView{T}) where {T} = T
+Base.length(v::ResourceView) = prod(v.dims)
+Base.parent(v::ResourceView) = v.parent
+describe(v::ResourceView{T}) where {T} = "view($T, $(v.dims)) of $(describe(v.parent))"
+
+"""The elements of the parent this view covers, which is what scopes the
+barrier: two disjoint views of one buffer are disjoint claims."""
+elementrange(v::ResourceView) = (v.offset + 1):(v.offset + length(v))
+
+# The shaped array itself, over storage the parent owns. Two methods rather than
+# a backend verb: a device array answers `GPUArrays.derive`, which is the
+# GPUArrays contract for exactly this and which every backend array here already
+# implements, and a host array is a `reshape` of a `view`.
+storage(v::ResourceView{T}) where {T} = deriveview(T, storage(v.parent), v.dims, v.offset)
+deriveview(::Type{T}, a::GPUArrays.AbstractGPUArray, dims::Dims, off::Int) where {T} =
+    GPUArrays.derive(T, a, dims, off)
+deriveview(::Type{T}, a::AbstractArray{T}, dims::Dims, off::Int) where {T} =
+    reshape(view(a, (off + 1):(off + prod(dims))), dims)
+
+# A transient buffer's shape is what it was declared with — core, because a
+# `TransientBuffer` is core and its extents are not a driver's.
+Base.length(t::TransientBuffer) = prod(t.dims)
+Base.size(t::TransientBuffer) = t.dims
+Base.size(t::TransientBuffer, d::Integer) = d <= ndims(t) ? t.dims[d] : 1
+Base.ndims(::TransientBuffer{<:Any,N}) where {N} = N
+Base.eltype(::TransientBuffer{T}) where {T} = T
 
 """The device base address of a region's bytes. Core: a `Region` is `Pool`'s and
 a `BufferBlock`'s `address` is a plain `UInt64`, so the arithmetic names no
@@ -437,13 +536,14 @@ depthclear(::LoadOp) = nothing
 depthclear(c::Clear) = Float32(c.value)
 
 """What to call a transient in an error, since it has no name of its own."""
-describe(t::TransientBuffer{T}) where {T} = "Transient.Buffer($T, $(t.n))"
+describe(t::TransientBuffer{T}) where {T} =
+    "Transient.Buffer($T, $(ndims(t) == 1 ? only(t.dims) : t.dims))"
 
-count(t::TransientBuffer) = t.n
+count(t::TransientBuffer) = prod(t.dims)
 
 stride(::TransientBuffer) = 1
 
-nbytes(t::TransientBuffer{T}) where {T} = t.n * sizeof(T)
+nbytes(t::TransientBuffer{T}) where {T} = prod(t.dims) * sizeof(T)
 
 # Asked of the device, not of the transient: both backends place the same
 # `TransientBuffer`, and what they need it aligned to differs. 256 is Vulkan's
@@ -495,6 +595,22 @@ frame.
 """
 function refit!(pl::Plan)
     moved = false
+    # MEASURED 2026-09-14: this loop allocates 96 bytes per transient per frame,
+    # and it is the only thing that allocates in a recorded `run!` — a 64-link
+    # chain came to 6,144 bytes a run against zero for everything else, on both
+    # backends. It is not either method's body: `refit!(dev, t)` on a
+    # concretely-typed vector of the SAME transients allocates nothing, and a
+    # single-method function called the same way allocates nothing. It is the
+    # dynamic dispatch of a TWO-method function over
+    # `Vector{TransientResource}`, whose answer gets boxed per call.
+    #
+    # Not fixed here, because the two fixes that exist are both decisions.
+    # Collapsing the methods into one with an `isa` inside trades multiple
+    # dispatch for a type test; keeping the dispatch means the graph holding its
+    # tracking transients in a concretely-typed container of their own, which is
+    # a change to `Graph` and to every `Transient.*` constructor — and which
+    # would also stop walking the ones that cannot track. A graph whose
+    # transients are all buffers refits nothing and pays for the walk anyway.
     for t in pl.graph.transients
         moved |= refit!(pl.graph.dev, t)
     end
@@ -783,6 +899,11 @@ end
 # `BufferRange` is Mantle's now — see `src/graph/types.jl`.
 
 storage(v::BufferRange) = storage(v.parent)
+
+# A declaration is about the ARGUMENT, not a thing of its own: what the library
+# is handed, what the plan resolves and what liveness sees is the value inside.
+storage(d::Declared) = storage(d.value)
+rootresource(d::Declared) = rootresource(d.value)
 
 # An attribute is a BINDING of a resource, not a resource — its storage is
 # whatever it was made from. Beside `BufferRange` for the same reason: both are
@@ -1078,9 +1199,28 @@ function overlapping(g::Graph, a::Int, b::Int)
     !isempty(intersect(ra.range, rb.range))
 end
 
-"""Give a placed transient its storage."""
+"""Give a placed transient its storage.
+
+Two shapes of answer, and the split is not per backend. A backend whose
+placement needs the buffer IDENTITY keeps the block — a Vulkan buffer barrier
+scopes to (VkBuffer, offset, size), which an array view cannot name — and builds
+the array in `storage` on demand. A backend driving KernelAbstractions builds it
+once, here, and `storage` hands it straight back.
+
+The second of those is THIS method, over [`deviceslice`](@ref), and it used to be
+one copy per backend: three bodies that each wrote `(t.n,)` for the extents, so a
+transient arrived at every kernel flattened and giving it a shape meant editing
+three backends for a property that is core's. What differs between them is which
+array type wraps the memory, and that is the one line they now answer.
+"""
 function materialize!(::Device, t::TransientBuffer, blk::BufferBlock, offset::Int)
     t.block, t.offset = blk, offset
+    return t
+end
+
+function materialize!(dev::Device, t::TransientBuffer{T}, mem, offset::Int) where {T}
+    t.block = deviceslice(dev, T, size(t), mem, offset)
+    t.offset = offset
     return t
 end
 
@@ -1217,7 +1357,7 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                           a.offsets, a.peak, a.naive,
                           makeprofiler(g.dev, c.passes, profile),
                           alias, coalesce, policy,
-                          makeargmemory(g.dev, c.passes), nothing,
+                          makeargmemory(g.dev, c.passes), nothing, 0,
                           Dict{UInt64,Vector{Tuple{Any,Int}}}(),
                           Tuple{Any,Int,UInt64}[], hw, false)
             # After construction, because a plan cannot be a tenant before it is a
@@ -1244,8 +1384,25 @@ Graph(dev::Device) =
                        Dict{Int,TransientResource}(), IdTable(),
                        Dict{Tuple{Int,UnitRange{Int}},Any}())
 
-function Transient.Buffer(g::Graph, ::Type{T}, n::Integer) where {T}
-    t = TransientBuffer{T}(Int(n), typemax(Int), 0, nothing, 0)
+"""
+    Transient.Buffer(graph, T, dims...) -> TransientBuffer
+
+A buffer the graph owns: the placer decides where it lives and which other
+transient it may share those bytes with, and it has no storage until `Plan` has
+run.
+
+Shaped, and the one-argument form is the N = 1 case rather than a different
+thing — a kernel gets `size(t)` extents and does not have to be told them
+separately. See the note on the struct for why a DECLARED graph needs this:
+`use` interns by object identity, so the shape has to live on the handle rather
+than on a view of it.
+"""
+Transient.Buffer(g::Graph, ::Type{T}, n::Integer) where {T} =
+    Transient.Buffer(g, T, (Int(n),))
+Transient.Buffer(g::Graph, ::Type{T}, dims::Integer...) where {T} =
+    Transient.Buffer(g, T, map(Int, dims))
+function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N}) where {T,N}
+    t = TransientBuffer{T,N}(dims, typemax(Int), 0, nothing, 0)
     push!(g.transients, t)
     t
 end

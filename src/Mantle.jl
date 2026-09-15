@@ -168,6 +168,12 @@ using Raycore: Ray
 # as supertypes, so a qualified path has to resolve.
 import Raycore
 
+# No `ScopedValues` import: as of 2026-09-15 Mantle holds no task-local state at
+# all. `record_into` and `OPEN_RECORDING` were the two, and both let a backend
+# decide what to do with a dispatch by reading ambient state instead of being
+# told — see the notes where they were deleted.
+
+
 include("memory/interval.jl")
 include("memory/model.jl")
 include("memory/bound.jl")
@@ -284,7 +290,7 @@ export upload!, download, deviceview, bufferusage, devicecopy!, Persistent, Unif
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints
 export readproblem
 
-export Backend, VulkanAPI, MetalAPI, WebGPUAPI, HostAPI
+export Backend, VulkanAPI, MetalAPI, WebGPUAPI, HostAPI, ROCmAPI
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Predicated, Uniform, Sampled, Present, Undefined
@@ -391,6 +397,7 @@ export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, GPURef, Surface, Attribute, draw!, dispatch!, render!
 export DrawBinding, rebind!
+export ResourceView, viewof
 # Its own verb because the two APIs differ at allocation; see `memory/resources.jl`.
 export indexbuffer
 # `repeat!` and its vocabulary: a loop recorded once, whose trip count the device
@@ -398,6 +405,8 @@ export indexbuffer
 # names the type; `supportspredicate` because a caller may want to pick between
 # `repeat!` and a host loop rather than be thrown at.
 export repeat!, Predicate, supportspredicate
+# What a CALL states about its arguments, because a library has no body to read.
+export Read, Write, ReadWrite
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive

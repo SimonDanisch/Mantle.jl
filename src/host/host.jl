@@ -182,12 +182,13 @@ shared — see [`hostview`](@ref) for why it is a wrapper and not a reinterpret.
 The view goes in `block`, which is the field every backend keeps its placed
 storage in.
 """
-function Mantle.materialize!(::HostDevice, t::Mantle.TransientBuffer{T}, slab::Vector{UInt8},
-                             offset::Int) where {T}
-    t.block = Mantle.hostview(T, pointer(slab), length(slab), offset, (t.n,))
-    t.offset = offset
-    return t
-end
+# The whole of what placement asks here: core's `materialize!` decides the
+# extents, the element type and the offset, and this says what a host array over
+# them is. `hostview` bounds-checks against the slab, which is why it takes its
+# length rather than trusting the offset.
+Mantle.deviceslice(::HostDevice, ::Type{T}, dims::Dims, slab::Vector{UInt8},
+                   offset::Int) where {T} =
+    Mantle.hostview(T, pointer(slab), length(slab), offset, dims)
 
 # ── what differs on a CPU ─────────────────────────────────────────────────────
 #
@@ -226,6 +227,15 @@ earlier step wrote is already visible. Overriding this is what keeps the shared
 Mantle.awaitwrites(::HostDevice) = nothing
 
 """
+`true`: a call runs here, because this backend WALKS its plans.
+
+`openrecording` answers `nothing`, so `run!` executes the plan's compiled
+dispatches in order on this thread — and a call is one of them. There is no
+command buffer for the call's work to be missing from.
+"""
+Mantle.runscalls(::HostDevice) = true
+
+"""
 Yes, trivially: nothing here is recorded. A GPU discards a predicated iteration
 with conditional rendering because its commands are already written; this
 backend interprets the plan on every run, so "discard" is `withpredicate`
@@ -256,7 +266,14 @@ run on this thread, over the arrays `resolve` produced. `nothing` for the
 interpreter is what says so.
 """
 function Mantle.kerneltouches(d::HostDevice, kernel, args::Tuple, ndrange, group)
-    obj = Mantle.kernelfor(kernel, group, Mantle.backend(d))
+    be = Mantle.backend(d)
+    # A macro-free kernel is the function itself: no constructor to call and no
+    # iteration context to lead its arguments.
+    if !Mantle.buildskernel(kernel, be)
+        argT = map(a -> Mantle.devicetype(d, a), args)
+        return Mantle.accessof(nothing, kernel, argT; cache = d.accesses)[2:end]
+    end
+    obj = Mantle.kernelfor(kernel, group, be)
     ndr, _ws, iterspace, dynamic = KA.launch_config(obj, Mantle.dispatchrange(ndrange), nothing)
     # The same five-argument `mkcontext` a CPU launch calls per block — the block
     # index does not change the context's TYPE, which is all the walk needs, but

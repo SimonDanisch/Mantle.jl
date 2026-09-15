@@ -7,9 +7,18 @@ version = "0.1.0"
 # package now. `MantleLavaExt` is gone with them — an extension exists so a
 # package can depend on something optionally, and this no longer does.
 #
-# `MantleHostExt` stays an extension. It is the CPU backend and is genuinely
-# optional, which is what makes it the shape a future Metal backend should take
-# rather than this one.
+# The HOST backend is not an extension either: it is `src/host/host.jl`,
+# included like any other file, because it needs nothing that is not already a
+# hard dependency.
+#
+# The ROCm backend IS one, and it is the only one. AMDGPU.jl is a 2.8 GB install
+# with a HIP runtime behind it, so a machine with no AMD GPU should not pay for
+# it, and that is what an extension is for. It was missing from this file
+# entirely — `ext/MantleROCmExt.jl` existed, `test/rocm/` ran against it, and
+# nothing ever loaded it, because `[weakdeps]` and `[extensions]` were both
+# absent. Every session that used the ROCm backend had `include`d the file by
+# hand into `Main`, which defines its methods in the wrong module and leaves
+# `Base.get_extension(Mantle, :MantleROCmExt)` answering `nothing`.
 [deps]
 Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
 Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
@@ -42,6 +51,12 @@ UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
 # `narrow_phase.jl` all write `@kernel`. KA is a plain dependency now and the
 # host backend is `src/host/host.jl`, included like any other file.
 
+
+[weakdeps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+
+[extensions]
+MantleROCmExt = "AMDGPU"
 
 [sources]
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}

@@ -681,6 +681,25 @@ function oneshot!(f, ch::SubmitChannel; tag = nothing)
     return handover!(ch, token, r; tag)
 end
 
+# `OPEN_RECORDING`, `openrecording` and `batched!` were here, deleted
+# 2026-09-15.
+#
+# A `ScopedValue` every immediate launch on the task consulted to decide where
+# its commands went: set, and a thousand launches landed in one command buffer
+# submitted once at the end instead of a one-shot each — 7.17 us per dispatch
+# against 2.58, and 190 ms against 163 on a 64-layer decode.
+#
+# The same shape as `record_into`, which went for the same reason: a backend
+# must not read task-global state to decide what to do with a dispatch. The plan,
+# the graph and the device are arguments at every call site, and a caller that
+# can say what its work touches should declare a graph — which this function's
+# own docstring said, and which is now the only way.
+#
+# It also had no callers. Both names were exported and referenced by nothing but
+# their own definitions, so the measurement above was never on any live path;
+# the graph it points at gets the same batching by construction, one command
+# buffer per recording rather than per launch.
+
 """
     handover!(ch, token, recording; tag = nothing) -> token
 

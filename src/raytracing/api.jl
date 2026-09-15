@@ -174,7 +174,7 @@ supports_rt_pipeline(a::AdaptedAccel) = supports_rt_pipeline(a.hwtlas)
 # carried, with their pins and scratch". A sixth register of one fact.
 #
 # `pintrace!` was the one that reached core, and only because an acceleration
-# structure travels as a kernel argument: `use(p, tlas)` does not exist, so the
-# graph never sees the TLAS -> BLAS edge and `Raycore.sync!` can swap a BLAS out
+# structure travels as a kernel argument and the graph reads no BLAS edge out of
+# one, so `Raycore.sync!` can swap a BLAS out
 # from under a running trace. Phase 2.4 declares them instead, and then there is
 # nothing left for a pin to guard.

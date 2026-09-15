@@ -289,6 +289,10 @@ persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
 
 Base.length(b::Buffer) = b.len
 Base.size(b::Buffer) = size(b.store)
+# The per-dimension form, which `Base` gives an `AbstractArray` for free and a
+# `Buffer` is not one. `1` past the rank, as Base does, so shape arithmetic that
+# indexes a fixed number of axes works on a resource of any rank.
+Base.size(b::Buffer, d::Integer) = d <= ndims(b) ? size(b)[d] : 1
 Base.ndims(::Buffer{T,N}) where {T,N} = N
 Base.length(::GPURef) = 1
 # `stride` zero means "one value shared by every element", so a `GPURef` and a

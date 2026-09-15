@@ -262,19 +262,49 @@ end
         #   * `sub_group_barrier` is `OpControlBarrier Subgroup Subgroup`; Lava's
         #     only barrier is workgroup-scoped, and aliasing them would
         #     synchronise the wrong set of invocations while appearing to work.
-        #   * `localmemory` has no per-call-site id in KI's signature, so the
-        #     only key is `(T, Dims)` and two identical calls in one kernel would
-        #     silently share one buffer. `KA.@localmem` carries the id and works.
+        #
+        # `localmemory` WAS on this list, and it was the one entry whose reason
+        # was KI's signature rather than Vulkan's: with no per-call-site id the
+        # only key was `(T, Dims)`, so two identical calls in one kernel would
+        # have shared one buffer. KI takes the id now and Lava overrides it, so
+        # it moved out of this testset and into the one below.
         @testset "gaps stay gaps" begin
             for f in (KI.get_local_size, KI.get_global_size, KI.get_max_sub_group_size)
                 @test isempty(methods(f))        # KI declares these with no body
                 @test !overridden(f)
             end
-            for f in (KI.sub_group_barrier, KI.localmemory)
+            for f in (KI.sub_group_barrier,)
                 @test !overridden(f)
                 @test all(m -> m.module === KI, methods(f))
             end
             @test_throws ErrorException KI.sub_group_barrier()
+        end
+
+        # The id has to REACH the global's name, or the parameter is decoration
+        # and two buffers are still one. Asked of the override's signature
+        # because the alternative is compiling a kernel and comparing tiles,
+        # which is `test_declared_kernel.jl`'s job on the Mantle side.
+        @testset "workgroup memory is keyed by its call site" begin
+            @test overridden(KI.localmemory)
+            # Three arguments: the element type, the shape, and the id. Two of
+            # them would be the old signature, under which two buffers of one
+            # type and shape are one buffer and the second write lands on the
+            # first tile.
+            #
+            # Read out of the OVERLAY table, like `overridden` above: a
+            # `@lava_device_override` is not in `methods()`, so filtering that
+            # by module finds nothing at all — which is a passing `isempty` and
+            # an assertion about nothing.
+            over = filter(Base.MethodList(Lava.lava_method_table)) do m
+                Base.unwrap_unionall(m.sig).parameters[1] === typeof(KI.localmemory)
+            end
+            @test !isempty(over)
+            @test all(m -> m.nargs == 4, over)
+            # Off-device it is still KI's, which is what the override must not
+            # replace: a size query on the host has to say so rather than
+            # emitting an intrinsic.
+            @test_throws ErrorException KI.localmemory(Float32, (2, 2), 1)
+            @test all(m -> m.module === KI, methods(KI.localmemory))
         end
     end
 end

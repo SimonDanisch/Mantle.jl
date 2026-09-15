@@ -142,6 +142,13 @@ end
 
 GPUArrays.storage(a::LavaArray) = a.buf
 
+# `usagekey(a::LavaArray) = a.buf[]` was here, deleted 2026-09-15 with the
+# capture path. It mapped a derived window back to the buffer it shared, so an
+# INTERCEPTED launch's hazard landed on the storage rather than on a view object
+# with no stable identity. A declared graph names the parent outright — a view
+# handed to a dispatch declares the slice of its parent it covers — so there is
+# nothing to recover.
+
 function GPUArrays.derive(::Type{T}, a::LavaArray, dims::Dims{N}, offset::Int) where {T,N}
     ref = copy(a.buf)
     # `offset` arrives in units of T (GPUArrays contract); a.offset is bytes.

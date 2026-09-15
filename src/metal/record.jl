@@ -312,7 +312,15 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     raw = map(a -> Mantle.resolve(dev, a), d.args)
     args = map(Metal.mtlconvert, raw)
     nd = recordedrange(d.ndrange)
-    ndrange, workgroupsize, iterspace, _ = KA.launch_config(obj, nd, nothing)
+    # `callgroup`, not `nothing`: a kernel whose workgroup is `DynamicSize` was
+    # launched with `workgroupsize = wg` and carries the size nowhere else, so
+    # dropping it here sends the autotune below to pick a different one — and a
+    # kernel body that reads its own workgroup size from a `Val` argument then
+    # strides by a number the dispatch did not use. See `callgroup` in
+    # `graph/kalaunch.jl`; `test/vulkan/test_captured_launch_fidelity.jl` pins it
+    # on the backend it was found on.
+    ndrange, workgroupsize, iterspace, _ = KA.launch_config(obj, nd,
+                                                            Mantle.callgroup(obj, d.group))
     ctx = KA.mkcontext(obj, ndrange, iterspace)
     entry = icb_name(string(nameof(typeof(obj.f))), argoff)
     adapted = (Metal.mtlconvert(ctx), args...)
