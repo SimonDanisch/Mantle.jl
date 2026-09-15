@@ -390,6 +390,7 @@ export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
 export Buffer, GPURef, Surface, Attribute, draw!, dispatch!, render!
+export DrawBinding, rebind!
 # Its own verb because the two APIs differ at allocation; see `memory/resources.jl`.
 export indexbuffer
 # `repeat!` and its vocabulary: a loop recorded once, whose trip count the device

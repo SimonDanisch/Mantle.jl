@@ -94,8 +94,14 @@ PIXELS.
 what `runtime/format.jl` documents as the portable name for it. Naming it here
 was said to be impossible for three separate reasons, all of which read
 "ColorTypes is not a dependency of Mantle"; it is, and this method is what was
-missing because of that. A caller who wants another type reaches for
-`MetalWindow(T, w, h)`.
+missing because of that.
+
+`color_format` is the portable keyword — `src/vulkan/graphics/window.jl` documents
+`Mantle.Window(backend, w, h; color_format = BGRA{N0f8})` as the spelling, and
+Vulkan forwards it. Metal took the default and did not accept the keyword at all,
+so a portable caller passing it got a MethodError here and nowhere else. That is
+the third keyword this session found missing from one backend's copy of a shared
+verb: the vocabulary pins the NAME and nothing pins the keyword list.
 
 The GLFW window is asked for in POINTS while the drawable is in PIXELS, so the
 request is divided by the display's content scale. Ask for 1600x900 on a Retina
@@ -105,12 +111,13 @@ neither case what the caller asked for. It cost a smeared, distorted frame once,
 because the composite pass indexed `hdr[py * 1600 + px]` over a 2940-wide target.
 """
 function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
-                       title::AbstractString = "", vsync::Bool = false)
+                       title::AbstractString = "", vsync::Bool = false,
+                       color_format::Type = BGRA{N0f8})
     GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
     gw = GLFW.CreateWindow(Int(width), Int(height), String(title))
     sx, sy = GLFW.GetWindowContentScale(gw)
     GLFW.SetWindowSize(gw, round(Int, width / sx), round(Int, height / sy))
-    w = attach!(MetalWindow(BGRA{N0f8}, width, height; vsync), gw)
+    w = attach!(MetalWindow(color_format, width, height; vsync), gw)
     # `attach!` ADOPTS whatever the layer could be given, so this is a real
     # check and not a restatement: a window that reports an extent its drawables
     # do not have breaks every pass that strides a buffer by hand.
@@ -258,6 +265,14 @@ function Mantle.readback_window(w::MetalWindow{T}) where {T}
     unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
     return out
 end
+
+# `screenshot` is the portable name for the same thing, and the vocabulary entry
+# this backend did not answer at all. Same constraint as `readback_window`: it
+# reads the drawable in flight, so it belongs INSIDE a frame. On Vulkan the
+# swapchain image outlives the present and a screenshot may be taken after one;
+# here the drawable goes back to the compositor, and keeping a copy would cost a
+# blit on every frame to serve a call that is made in tests.
+Mantle.screenshot(w::MetalWindow) = Mantle.readback_window(w)
 
 # A frame that failed after its drawable was taken: dropping the reference is
 # all Metal needs — a `CAMetalDrawable` that is never presented is simply

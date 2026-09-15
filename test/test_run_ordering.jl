@@ -19,6 +19,12 @@
 #
 # Check EVERY element. The first one was correct in a failing run; only the spread
 # showed it.
+#
+# Both backends pass it today: Metal by the declaration above, Vulkan on an
+# RX 7900 XTX (RADV) twice in a fresh session. Passing is NOT proof Vulkan is
+# ordered by construction — its `submit!` passes no `waits`, so it may simply not
+# overlap on this driver. That is the point of stating the requirement here: if a
+# driver ever does overlap, this says so instead of a scene going wrong.
 
 using Test
 import Mantle

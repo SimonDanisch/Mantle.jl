@@ -434,7 +434,8 @@ time the pipeline is used, not from inside a shader compilation.
 """
 function Mantle.compile_draw(d::MetalDevice,
                              p::Mantle.GeometryPipeline,
-                             color_formats, depth_format, vert_args, frag_args)
+                             color_formats, depth_format, vert_args, frag_args;
+                             bindings = nothing)
     mesh = StageArgs(vert_args)
     frag = StageArgs(frag_args)
     Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), buffer_types(mesh))
@@ -461,6 +462,13 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
         "the instance would go on its second axis, which needs a portable name for " *
         "`instance_index()` inside a mesh stage; there is none yet and nothing in " *
         "tree instances a geometry pipeline.")
+
+    # Same as the vertex path: bind what THIS frame handed over, not what was
+    # baked at compile. A Makie `lines!` or `scatter!` is a geometry pipeline and
+    # so comes through here rather than through `MetalCompiledDraw`, which is why
+    # rebinding a camera moved everything on screen except the plots.
+    isempty(d.mesh.device) || rebake!(d.mesh, args)
+    isempty(d.frag.device) || rebake!(d.frag, args)
 
     lowered = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = indices !== nothing)
     # The index buffer as the mesh stage's LAST argument, which is where

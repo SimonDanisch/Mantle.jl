@@ -28,11 +28,99 @@ struct WindowSurface <: Resource
     win::Any
 end
 
+"""
+What a draw re-reads every frame, as a cell the host may rewrite between runs.
+
+A plan freezes what it COMPILES — the pipeline, the argument layout, whether the
+draw is indexed — and that is the point of compiling it. It also froze the
+argument values, the count, the index buffer and the instance count, which is
+four things too many: `emitdraw!` hands all of them to `record_draw!` on every
+frame anyway, so the backend re-reads them every frame regardless. They were
+constant only because the fields they live in are.
+
+That mattered the moment a plotting frame arrived. A camera matrix is an
+argument and a tick count is a vertex count, so zooming changed values the plan
+had baked, and the only way to see the new camera was to build a new plan — 50
+ms of graph for two matrices and an integer the GPU would have re-read for free.
+With a binding, a plan is rebuilt for what it actually fixes: a plot appearing or
+disappearing, a pipeline changing, a window opening.
+
+The type parameters are not decoration. `CompiledDraw` is concrete throughout
+because a dynamic field access in the per-draw record path was where a frame's
+allocations came from, and a cell of `Any` would put one back. They are the
+resolved argument tuple, the count and the index buffer, so [`rebind!`](@ref) can
+only store the same shapes — a different one means a different pipeline or a
+different KIND of draw, and belongs to a different plan.
+"""
+mutable struct DrawBinding{A<:Tuple,C,I}
+    args::A
+    count::C
+    indices::I
+    instances::Int
+end
+
+"""
+    DrawBinding(device, args, count; indices = nothing, instances = 1)
+
+A rebindable cell holding what one draw re-reads each frame, resolved for
+`device`.
+"""
+DrawBinding(dev, args::Tuple, count; indices = nothing, instances::Integer = 1) =
+    DrawBinding(map(a -> resolve(dev, a), args), count,
+                indices === nothing ? nothing : resolve(dev, indices), Int(instances))
+
+"""
+    rebind!(binding, device, args, count; indices = nothing, instances = 1)
+
+Put this frame's values in `binding`, for the next run of every plan drawing
+from it.
+
+Rebinding does NOT recompile: the types are the binding's, so the pipeline, the
+layout and the packing are the ones already compiled. A value of a different
+type is refused rather than converted, because that is a different pipeline or a
+different kind of draw.
+"""
+function rebind!(b::DrawBinding{A,C,I}, dev, args::Tuple, count;
+                 indices = nothing, instances::Integer = 1) where {A,C,I}
+    b.args = convert(A, map(a -> resolve(dev, a), args))
+    b.count = convert(C, count)
+    b.indices = convert(I, indices === nothing ? nothing : resolve(dev, indices))
+    b.instances = Int(instances)
+    return b
+end
+
+# One spelling for both, so nothing downstream asks which it has. A plain tuple
+# is a draw that re-reads nothing, which is most of them.
+@inline drawargs(t::Tuple) = t
+@inline drawargs(b::DrawBinding) = b.args
+@inline boundcount(::Tuple, c) = c
+@inline boundcount(b::DrawBinding, _) = b.count
+@inline boundindices(::Tuple, i) = i
+@inline boundindices(b::DrawBinding, _) = b.indices
+@inline boundinstances(::Tuple, n) = n
+@inline boundinstances(b::DrawBinding, _) = b.instances
+
 struct DrawCall
     shader::Any
-    args::Tuple
+    # A `Tuple`, or a [`DrawBinding`](@ref) cell the host rewrites between runs.
+    args::Any
     count::Any
     frag_args::Tuple
+    # `nothing` to take the pass's, which is the whole target. A draw carries its
+    # own because a plotting frame is many draws into ONE pass, each clipped to a
+    # different rectangle — an axis. Declared here rather than set imperatively
+    # between draws, so a pass stays a description the scheduler may reorder.
+    viewport::Any
+    # What this draw samples, `nothing` for a draw that samples nothing. On the
+    # draw rather than the pass because a pipeline that samples is compiled
+    # around its bindings on one backend, so the compile needs them and the
+    # compile is per draw.
+    bindings::Any
+    # An indexed draw names its index buffer and `count` is then the INDEX count.
+    # A Makie frame is mostly these — a line strip, a mesh — so a graph that
+    # cannot say it cannot draw a figure.
+    indices::Any
+    instances::Int
 end
 
 """
@@ -82,6 +170,10 @@ mutable struct Pass
     depth::Any                          # render only, and only if one was given
     depth_load::Union{Nothing,LoadOp}
     dst::Any                            # copy only
+    # The viewport every draw in this pass takes unless it names its own, and
+    # `nothing` for "the whole target", which is what a pass that never mentions
+    # one wants.
+    viewport::Any
     draws::Vector{DrawCall}
     usages::Vector{Pair{Int,Type}}
     dispatches::Vector{Any}
@@ -270,7 +362,7 @@ struct BufferRange
     range::UnitRange{Int}
 end
 
-struct CompiledDraw{P,S,A<:Tuple,C}
+struct CompiledDraw{P,S,A,C,V,B,I}
     # Concrete throughout: `Any` here made every field access in the per-draw
     # record path a dynamic lookup, which is where the frame's allocations were.
     # `P` and `S` are what the backend compiled — a `VulkanCompiledGraphicsPipeline`
@@ -280,6 +372,14 @@ struct CompiledDraw{P,S,A<:Tuple,C}
     shader::S
     args::A
     count::C
+    # Carried through from the `DrawCall`, and PARAMETERS for the same reason the
+    # four above are: each is `Nothing` or one concrete thing per draw, so a
+    # field access in the record path stays a load rather than becoming the
+    # dynamic lookup the sentence above is about.
+    viewport::V           # `NTuple{4,Float32}`, already resolved against the pass
+    bindings::B
+    indices::I            # `nothing`, or the device index buffer; `count` is then indices
+    instances::Int
     # Where this draw's arguments live inside a slot of the plan's argument
     # memory. Fixed at compile time, because the set of draws and the size of
     # each one's arguments are.
