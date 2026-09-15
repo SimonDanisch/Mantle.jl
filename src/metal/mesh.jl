@@ -463,6 +463,13 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
         "`instance_index()` inside a mesh stage; there is none yet and nothing in " *
         "tree instances a geometry pipeline.")
 
+    # Same as the vertex path: bind what THIS frame handed over, not what was
+    # baked at compile. A Makie `lines!` or `scatter!` is a geometry pipeline and
+    # so comes through here rather than through `MetalCompiledDraw`, which is why
+    # rebinding a camera moved everything on screen except the plots.
+    isempty(d.mesh.device) || rebake!(d.mesh, args)
+    isempty(d.frag.device) || rebake!(d.frag, args)
+
     lowered = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = indices !== nothing)
     # The index buffer as the mesh stage's LAST argument, which is where
     # `GeometryAsMesh` reads it. Converted the same way every other argument is,

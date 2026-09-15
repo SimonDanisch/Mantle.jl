@@ -156,18 +156,6 @@ A window, which is Mantle's because the frame loop is: `isopen` has to be a
 predicate rather than a thing that also pumps events, and `run!` is the one call
 per frame that can pump them.
 """
-struct LavaWindow <: Window
-    win::VulkanWindow
-end
-
-# The no-backend spelling opens on the process default device; it is the
-# window-shaped member of the same convenience family as `LavaBackend()`.
-Window(width::Integer, height::Integer; title::AbstractString = "", vsync::Bool = false) =
-    LavaWindow(VulkanWindow(width, height; ctx = vk_context(), title = String(title), vsync))
-
-Base.isopen(w::LavaWindow) = isopen(w.win)
-Base.close(w::LavaWindow) = close(w.win)
-Base.size(w::LavaWindow) = size(w.win)
 """
 What is on the window now, as a `(width, height)` matrix of BGRA byte tuples.
 
@@ -176,7 +164,7 @@ counts or sums pixels, so it has never mattered, but a Julia image is indexed
 `(row, column)`, and handing this straight to `save` writes the picture rotated a
 quarter turn with no complaint. `permutedims` first if it is going to be looked at.
 """
-screenshot(w::LavaWindow) = readback_window(w.win)
+screenshot(w::VulkanWindow) = readback_window(w)
 
 # ── persistent resources ──────────────────────────────────────────────────────
 #
@@ -312,7 +300,6 @@ devicecopy!(d::LavaDevice, dst::DeviceArray, src::DeviceArray,
 # `WindowSurface` is Mantle's now — see `src/graph/types.jl`.
 
 # ↑ moved to src/graph/build.jl
-Surface(g, w::LavaWindow) = Surface(g, w.win)
 
 # A render pass targets either the window or an offscreen framebuffer. These four
 # are the only places that difference shows.
@@ -1010,7 +997,7 @@ backend's.
 """
 function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     ad = adaptor(c.graph.dev.bq)
-    args = devargs(ad, rawargs(d.args))
+    args = devargs(ad, rawargs(drawargs(d.args)))
     vtt = typeof(convert_args(args))
     ftt = typeof(convert_args(devargs(ad, rawargs(d.frag_args))))
     vfn, vtt, ffn, ftt = resolve_shader_pair(d.shader, vtt, ftt)
@@ -1028,10 +1015,15 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # is the usual answer; a fullscreen pass whose vertex stage takes nothing
     # and whose fragment stage reads a g-buffer is the other one.
     isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment; ctx = c.graph.dev.ctx))
-    packed = isempty(d.frag_args) ? d.args : d.frag_args
+    # The CELL when there is one, so a rebind reaches the packer — and
+    # `packdraw!` refuses it for a RECORDING, which freezes its bytes by
+    # definition.
+    packed = packedargs(d.args, d.args, d.frag_args)
     info = shader.push_info
     nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes)
-    return CompiledDraw(compiled, shader, packed, d.count, argoff, nbytes)
+    indices = d.indices === nothing ? nothing : resolve(c.graph.dev, d.indices)
+    return CompiledDraw(compiled, shader, packed, d.count, drawviewport(p, d),
+                        d.bindings, indices, d.instances, argoff, nbytes)
 end
 
 """
@@ -1165,9 +1157,20 @@ function packdraw!(e::Emitter, d::CompiledDraw)
     info = d.shader.push_info
     pack_args_direct!(e.owner, am.ptr + off, am.address + off, info.arg_offsets,
                       info.arg_buffer_size, info.byval_llvm_sizes,
-                      devargs(adaptor(e), rawargs(d.args)))
+                      devargs(adaptor(e), rawargs(recordedargs(d.args))))
     return nothing
 end
+
+# A recording writes these bytes ONCE and the command buffer holds their address
+# for the plan's life, so a cell whose whole purpose is to be rewritten between
+# runs cannot be honoured here — and honouring it silently, by freezing whatever
+# it held at `record!`, is the failure this says out loud.
+@inline recordedargs(t::Tuple) = t
+recordedargs(::DrawBinding) = throw(ArgumentError(
+    "a recorded plan cannot take rebindable draw arguments: a recording packs them " *
+    "once and holds their address for its life, so a later `rebind!` would be " *
+    "written to memory nothing reads. Pass a plain tuple, or leave the plan " *
+    "unrecorded — an unrecorded plan re-packs every run, which is what a cell is for."))
 
 """
 Pack a trace's arguments into the plan's slot. The counterpart of `packdispatch!`.
@@ -1802,24 +1805,47 @@ for as long as the recording lives.
 """
 function emitdraw!(e::Emitter, ::Nothing, d::CompiledDraw)
     packdraw!(e, d)
-    # No viewport, no scissor, no pin: the pass set the first two once, and the
-    # plan holds the pipeline for longer than any frame.
-    emit_draw!(e, d.compiled, d.count, e.args.address + d.argoff)
+    # The pass set a viewport covering the whole target once; a draw that named
+    # its own overrides it for itself, which is how several axes share a pass.
+    # No pin either way: the plan holds the pipeline for longer than any frame.
+    d.viewport === nothing || set_viewport!(e, d.viewport...)
+    d.bindings === nothing || use_bindings!(e, d.compiled, d.bindings)
+    emit_draw!(e, d.compiled, d.count, e.args.address + d.argoff, d.indices, d.instances)
 end
 
 # Where the counts come from, decided once by type rather than per frame by a
 # branch. The indirect one emits the same command whatever the numbers are,
 # which is why nothing has to be read back to record a frame.
+#
+# The index buffer is a dispatch argument for the same reason: `CompiledDraw`
+# carries it as a type parameter, so whether a draw is indexed is settled when
+# the plan is recorded and never asked again.
 
-emit_draw!(e, pipe, n::Integer, addr::UInt64) =
-    draw_in_pass!(e, pipe, n; push_bda = addr)
+emit_draw!(e, pipe, n::Integer, addr::UInt64, ::Nothing, inst::Int) =
+    draw_in_pass!(e, pipe, n; push_bda = addr, instances = inst)
 
-emit_draw!(e, pipe, x, addr::UInt64) =
-    draw_in_pass!(e, pipe, count(x); push_bda = addr)
+emit_draw!(e, pipe, x, addr::UInt64, ::Nothing, inst::Int) =
+    draw_in_pass!(e, pipe, count(x); push_bda = addr, instances = inst)
 
-emit_draw!(e, pipe, c::Commands, addr::UInt64) =
+emit_draw!(e, pipe, c::Commands, addr::UInt64, ::Nothing, ::Int) =
     draw_indirect_in_pass!(e, pipe, storage(c.resource);
                            push_bda = addr)
+
+# `hold!` HERE and not once per frame: the recording names this buffer for as
+# long as it lives, which is exactly what the one-shot path spells per submit.
+# The offset is the view's, because an index buffer may be a slice of a pool.
+function emit_draw!(e, pipe, n, addr::UInt64, indices, inst::Int)
+    hold!(e, indices)
+    mb = indices.buf[]::VkManagedBuffer
+    draw_indexed_in_pass!(e, pipe, drawcount(n); push_bda = addr, instances = inst,
+                          indices_buffer = mb.buffer,
+                          indices_offset = UInt64(pool_offset(mb) + indices.offset))
+end
+
+# An indexed draw's count is an index count, so the same two spellings the
+# vertex ones take: a number, or something with a length.
+drawcount(n::Integer) = n
+drawcount(x) = count(x)
 
 """
 Write one dispatch's arguments into the plan's argument memory, and answer with

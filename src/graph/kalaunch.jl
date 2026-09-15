@@ -313,14 +313,69 @@ workgroupsize(::CompiledTrace) = UInt32(1)
 # compiled FOR a set of attachments, and taking them from anywhere else is how a
 # pipeline ends up compiled for a target it is never drawn into — and a
 # dispatch is the `Launch` above.
+"""
+The rectangle a draw is clipped to, resolved once at compile rather than left
+for the emitter to fall back on.
+
+Resolved HERE because a draw has to be self-contained: an emitter that sets a
+viewport only when the draw names one leaks the previous draw's rectangle into
+the next draw that names none, and which draw came before depends on an
+ordering the scheduler is free to change. After this, `nothing` means nothing in
+the pass ever asked, which is the one case where whatever the backend opened the
+pass with is the right answer.
+
+That leaves one shape that cannot be resolved and is therefore rejected: some
+draws naming a rectangle, others not, and no default on the pass. The extent the
+others want is the whole target, but its SIGN is a convention the caller owns —
+a backend that mirrors y wants a negative height to undo the mirror — so core
+declines to guess and asks for `render!(...; viewport = ...)`.
+"""
+function drawviewport(p::Pass, d)
+    d.viewport === nothing || return d.viewport
+    p.viewport === nothing || return p.viewport
+    any(o -> o.viewport !== nothing, p.draws) && throw(ArgumentError(
+        "pass \"$(p.name)\": some draws set a viewport and this one does not, " *
+        "so its rectangle would be whichever draw happened to run before it. " *
+        "Give the pass a default with render!(...; viewport = (x, y, w, h))."))
+    return nothing
+end
+
+"""
+Which of a draw's two argument lists gets packed — a pipeline has one push
+constant range, so exactly one of them does.
+
+A [`DrawBinding`](@ref) always wins, and that is not a preference: it is the
+only one of the three that a `rebind!` can reach. Picking the resolved
+`frag_args` tuple instead left the cell compiled-in but never read, so a plan
+was correctly reused across a zoom and correctly drew the same picture every
+time — the failure that looks most like success.
+
+Otherwise it is whichever list is non-empty, and when both are the same list
+(every Makie render object) either answers.
+"""
+@inline packedargs(b::DrawBinding, _, _) = b
+@inline packedargs(::Tuple, vargs, fargs) = isempty(fargs) ? vargs : fargs
+
 function compiledraw(c::Compile, p::Pass, d, argoff::Int)
     dev = c.graph.dev
     color_formats = [attachment_format(t) for t in p.targets]
     depth_format  = p.depth === nothing ? nothing : attachment_format(p.depth)
-    vargs = map(a -> resolve(dev, a), d.args)
+    # `drawargs` first: a rebindable cell is already resolved, and `resolve` on a
+    # resolved argument is the identity, so this is the same tuple either way.
+    # What the COMPILE sees is the cell's contents at this moment, which is right
+    # — its types are what the pipeline is built around, and `rebind!` cannot
+    # change them.
+    vargs = map(a -> resolve(dev, a), drawargs(d.args))
     fargs = map(a -> resolve(dev, a), d.frag_args)
-    compiled = compile_draw(dev, d.shader, color_formats, depth_format, vargs, fargs)
-    return CompiledDraw(compiled, d.shader, (vargs..., fargs...), bakedcount(c, d.count), argoff, 0)
+    compiled = compile_draw(dev, d.shader, color_formats, depth_format, vargs, fargs;
+                            bindings = d.bindings)
+    indices = d.indices === nothing ? nothing : resolve(dev, d.indices)
+    # ONE list, the way the Vulkan front picks `packed`. Concatenating was the
+    # same thing while one of the two was always empty; with both stages allowed
+    # the same list it would pack every argument twice.
+    stageargs = packedargs(d.args, vargs, fargs)
+    return CompiledDraw(compiled, d.shader, stageargs, bakedcount(c, d.count),
+                        drawviewport(p, d), d.bindings, indices, d.instances, argoff, 0)
 end
 compile_dispatch(c::Compile, d::Dispatch, ::Int, ::Int) = bake(c, d)
 
@@ -720,8 +775,17 @@ function beginrender!(::Immediate, pl::Plan, pp::PassPlan)
     depth = p.depth === nothing ? nothing : target_view(p.depth)
     return begin_render_pass!(pl.graph.dev, targets, p.loads, depth, p.depth_load)
 end
-emitdraw!(::Immediate, handle, d) =
-    (record_draw!(handle, d.compiled, d.args, d.count); nothing)
+function emitdraw!(::Immediate, handle, d)
+    d.viewport === nothing || setviewport!(handle, d.viewport...)
+    d.bindings === nothing || use_bindings!(handle, d.compiled, d.bindings)
+    # Every one of these through the binding when there is one: a tick count is a
+    # vertex count and a relaid-out plot is a new index buffer, so freezing them
+    # would rebuild a plan for a zoom just as surely as freezing the camera did.
+    record_draw!(handle, d.compiled, drawargs(d.args), boundcount(d.args, d.count);
+                 instances = boundinstances(d.args, d.instances),
+                 indices = boundindices(d.args, d.indices))
+    return nothing
+end
 endrender!(::Immediate, handle) = (end_render_pass!(handle); nothing)
 
 """

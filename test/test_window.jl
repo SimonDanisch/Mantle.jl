@@ -1922,6 +1922,128 @@ else
         @test litbands() == 1          # and it shrinks, so nothing is stale
     end
 
+    @testset "a draw is clipped to its own viewport" begin
+        # A plotting frame is many draws into ONE pass, each clipped to a
+        # different rectangle — an axis. Before this the rectangle could only be
+        # set imperatively between draws, which the graph has no place for: it
+        # reorders passes, so "whatever the previous draw set" is not a value.
+        #
+        # `BANDS` with one band is a quad over the whole clip volume, so where
+        # the white lands is the viewport and nothing else.
+        N, q = 64, 16
+        # Makie's pixel convention, which is also the one a negative height is
+        # for: `y` names the BOTTOM edge and the height is negative, so clip +y
+        # is at the top on every backend.
+        mk(x, y, w, h) = (Float32(x), Float32(y + h), Float32(w), -Float32(h))
+        whole = mk(0, 0, N, N)
+
+        function quadrants(vps; passvp = whole)
+            dev = M.Device(TESTBACKEND)
+            g = M.Graph(dev)
+            img = M.Transient.Image(g, RGBA{N0f8}, (N, N))
+            out = M.Transient.Buffer(g, UInt32, N * N)
+            M.render!(g, "split", img => M.Clear((0f0, 0f0, 0f0, 1f0));
+                      viewport = passvp) do p
+                for vp in vps
+                    M.draw!(p, BANDS, (Int32(1),), 6; viewport = vp)
+                end
+            end
+            M.copy!(g, "read", out, img)
+            plan = M.record!(M.Plan(g))
+            M.run!(plan)
+            KernelAbstractions.synchronize(M.backend(dev))
+            px = reshape(Array(M.storage(out)), N, N)      # row major, so [x, y]
+            lit(x, y) = px[x, y] != 0xff000000
+            (tl = lit(q, q), tr = lit(3q, q), bl = lit(q, 3q), br = lit(3q, 3q))
+        end
+
+        # A viewport covering the target lights all of it, whichever way the
+        # height is signed: the sign is orientation, not extent.
+        @test quadrants([whole]) == (tl = true, tr = true, bl = true, br = true)
+        @test quadrants([(0f0, 0f0, Float32(N), Float32(N))]) ==
+              (tl = true, tr = true, bl = true, br = true)
+
+        # One quarter each, and TOGETHER in one pass: neither draw's rectangle
+        # reaches the other. The two are diagonal, so the result also pins the
+        # orientation rather than only the clipping.
+        lo, hi = mk(0, 0, 32, 32), mk(32, 32, 32, 32)
+        @test quadrants([lo]) == (tl = true, tr = false, bl = false, br = false)
+        @test quadrants([hi]) == (tl = false, tr = false, bl = false, br = true)
+        @test quadrants([lo, hi]) == (tl = true, tr = false, bl = false, br = true)
+        @test quadrants([hi, lo]) == (tl = true, tr = false, bl = false, br = true)
+
+        # A draw that names none takes the pass's.
+        @test quadrants([nothing]; passvp = lo) ==
+              (tl = true, tr = false, bl = false, br = false)
+
+        # The one shape that cannot be resolved: some draws name a rectangle,
+        # others do not, and the pass has no default. The extent the others want
+        # is the whole target but its SIGN is the caller's convention, so core
+        # asks rather than guesses — silently inheriting whichever draw ran
+        # before is the bug this whole mechanism exists to rule out.
+        dev = M.Device(TESTBACKEND)
+        g = M.Graph(dev)
+        img = M.Transient.Image(g, RGBA{N0f8}, (N, N))
+        M.render!(g, "mixed", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, BANDS, (Int32(1),), 6; viewport = lo)
+            M.draw!(p, BANDS, (Int32(1),), 6)
+        end
+        @test_throws "some draws set a viewport" M.record!(M.Plan(g))
+    end
+
+    @testset "a graph draw can be indexed and instanced" begin
+        # The other two things a Makie frame is made of. A line strip and a mesh
+        # are INDEXED, and sprites are INSTANCED; the graph could express
+        # neither, so an overlay had to be recorded by hand — which is also why
+        # RayMakie kept its own submission path.
+        N = 64
+        # One unit quad in the lower-left quarter of clip space, shifted a full
+        # quarter to the right per instance, so the lit AREA reads off as how
+        # many instances ran and how much of the quad the indices named.
+        function quad_vertex(_::Int32)
+            v = vertex_index() - Int32(1)
+            i = instance_index() - Int32(1)
+            fx = (v == Int32(1) || v == Int32(2)) ? 1f0 : 0f0
+            fy = (v == Int32(2) || v == Int32(3)) ? 1f0 : 0f0
+            (position = Vec4f(-1f0 + fx + Float32(i), -1f0 + fy, 0.5f0, 1f0),
+             color = Vec4f(1, 1, 1, 1))
+        end
+        QUAD = Rasterizer(; vertex = VertexShader(quad_vertex; outputs = (color = Vec4f,)),
+                            fragment = FragmentShader(band_fragment),
+                            topology = TriangleList(), blend = Opaque(),
+                            cull = NoCull(), depth = DepthOff())
+
+        function litcount(ninst, idx)
+            dev = M.Device(TESTBACKEND)
+            g = M.Graph(dev)
+            img = M.Transient.Image(g, RGBA{N0f8}, (N, N))
+            out = M.Transient.Buffer(g, UInt32, N * N)
+            ib = M.indexbuffer(dev, idx)
+            M.render!(g, "geo", img => M.Clear((0f0, 0f0, 0f0, 1f0));
+                      viewport = (0, 0, N, N)) do p
+                M.draw!(p, QUAD, (Int32(0),), length(idx);
+                        indices = ib, instances = ninst)
+            end
+            M.copy!(g, "read", out, img)
+            plan = M.record!(M.Plan(g))
+            M.run!(plan)
+            KernelAbstractions.synchronize(M.backend(dev))
+            count(!=(0xff000000), Array(M.storage(out)))
+        end
+
+        quad = UInt32[0, 1, 2, 0, 2, 3]
+        one = litcount(1, quad)
+        @test one == (N ÷ 2)^2               # exactly the quarter of clip space it names
+        @test litcount(2, quad) == 2one      # the second instance drew, and elsewhere
+
+        # HALF the indices is half the quad, so `count` is an index count and not
+        # a vertex count. Not exact: the two triangles share a diagonal and both
+        # fill rules put those pixels somewhere, so the halves are ~N/2 apart.
+        tri = litcount(1, UInt32[0, 1, 2])
+        @test 0.4one < tri < 0.6one
+        @test litcount(2, UInt32[0, 1, 2]) == 2tri
+    end
+
     @testset "an aliased region waits for what the old tenant last did" begin
         # The handover barrier is the one transition no per-resource sequence can
         # produce: the hazard is between two transients that never mention each

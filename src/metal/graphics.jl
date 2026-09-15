@@ -953,7 +953,11 @@ it persistently resident and that is a setup cost. A `Ref` used to be kept as a
 `Ref` and re-read per frame; `refuserefs` refuses one at the declaration now,
 and a value that changes between frames is a `GPURef`.
 """
-struct StageArgs
+mutable struct StageArgs
+    # What this was baked FROM, for the identity check in `rebake!`. A plan that
+    # never rebinds hands back the same tuple every frame, so the bake happens
+    # once and this field is what says so.
+    source::Tuple
     device::Tuple      # what gets bound, byte for byte
     buffers::Vector{MTLm.MTLBuffer}
 end
@@ -964,12 +968,40 @@ bakearg(a) = Metal.mtlconvert(a)
 argdevtype(a) = typeof(a)
 
 function StageArgs(args)
+    t = Tuple(args)
     bufs = MTLm.MTLBuffer[]
-    for a in args
+    for a in t
         b = metal_buffer(a)
         b === nothing || push!(bufs, b)
     end
-    return StageArgs(map(bakearg, Tuple(args)), bufs)
+    return StageArgs(t, map(bakearg, t), bufs)
+end
+
+"""
+Re-bake `a` from `args`, unless it already was.
+
+`record_draw!` used to bind what it baked at COMPILE and ignore the arguments it
+was handed, on the reasoning that a plan's arguments never change. They can now
+— a [`Mantle.DrawBinding`](@ref) is a plan's way of saying which of its values
+are re-read each frame — and a backend that ignores them turns a rebind into a
+silent no-op: the plan is correctly reused, the draw correctly recorded, and the
+picture is last frame's. A zoomed axis whose scatter does not move.
+
+Guarded by `===` on the tuple the bake came from, so a draw that does not rebind
+pays one pointer comparison and the per-frame bake this was avoiding stays
+avoided. A rebind assigns a fresh tuple, so it never matches.
+"""
+function rebake!(a::StageArgs, args)
+    t = Tuple(args)
+    a.source === t && return a
+    a.source = t
+    a.device = map(bakearg, t)
+    empty!(a.buffers)
+    for x in t
+        b = metal_buffer(x)
+        b === nothing || push!(a.buffers, b)
+    end
+    return a
 end
 
 """One draw's compiled pipeline and its baked arguments."""
@@ -1055,8 +1087,12 @@ end
 
 function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count;
                              instances::Integer = 1, indices = nothing)
-    # `args` is what Mantle resolved; this backend baked their device form at
-    # compile time (see `StageArgs`), so what gets bound comes from `d`.
+    # `args` is what Mantle resolved for THIS frame. A stage compiled with a
+    # non-empty list re-bakes from it — see `rebake!`, which is a no-op unless
+    # the tuple actually changed — and a stage compiled with none has nothing to
+    # take from it. Core packs ONE list, so the non-empty stages share it.
+    isempty(d.vert.device) || rebake!(d.vert, args)
+    isempty(d.frag.device) || rebake!(d.frag, args)
     c = d.pipeline
     MTLm.set_pipeline!(h.encoder, c.state)
     c.depth_state === nothing ||
@@ -1195,8 +1231,11 @@ function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
         ibuf = metal_buffer(indices)
         ibuf === nothing &&
             error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
-        MTLm.use!(enc, ibuf, MTLm.ReadUsage,
-                  MTLm.MTLRenderStages(MTLm.MTLRenderStageVertex))
+        # `MTLRenderStageVertex` IS an `MTLRenderStages`; the constructor takes
+        # an `Integer`, so wrapping it was a `MethodError` for every indexed
+        # draw. Never reached until a graph could express one — the geometry
+        # lowering has its own `record_draw!` and goes nowhere near here.
+        MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageVertex)
         MTLm.draw_indexed_primitives!(enc, c.primitive, n,
                                       MTLm.MTLIndexTypeUInt32, ibuf,
                                       byteoffset(indices), instances)

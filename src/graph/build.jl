@@ -243,11 +243,20 @@ initial_state(::Any) = nothing
 
 initial_state(s::WindowSurface) = initial_usage(s)
 
-DrawCall(shader, args, count) = DrawCall(shader, args, count, ())
+DrawCall(shader, args, count) =
+    DrawCall(shader, args, count, (), nothing, nothing, nothing, 1)
+
+# One type for every viewport, so `CompiledDraw`'s `V` parameter is the same
+# whether the caller wrote integers or floats. Both APIs take a float rect, and
+# the HEIGHT keeps its sign — a negative one is how a caller says "clip +y at the
+# top", and rounding it into an unsigned extent is the bug that spelling exists
+# to avoid.
+asviewport(::Nothing) = nothing
+asviewport(v) = NTuple{4,Float32}(v)
 
 # `Pass` is Mantle's now — see `src/graph/types.jl`.
 
-Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing,
+Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing, nothing,
                         DrawCall[], Pair{Int,Type}[], Any[], nothing)
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
@@ -502,9 +511,10 @@ because there is nothing else to take it from. Its fragment shader returns
         draw!(p, DEPTHONLY, args, drawcmd)
     end
 """
-function render!(f, g::Graph, name::AbstractString, attachments...)
+function render!(f, g::Graph, name::AbstractString, attachments...; viewport = nothing)
     isempty(attachments) && throw(ArgumentError("a render pass needs a target"))
     p = Pass(name, :render)
+    p.viewport = asviewport(viewport)
     push!(g.passes, p)
     for a in attachments
         tgt = a isa Pair ? first(a) : a
@@ -570,18 +580,48 @@ function indirectcount!(p::PassHandle, n)
     Commands(n)
 end
 
-function draw!(p::PassHandle, shader, args, n; frag_args = ())
-    refuserefs(args)
+"""
+    draw!(pass, shader, binding; frag_args, viewport, bindings)
+
+Declare a draw whose count, indices, instances and argument values all come from
+a [`DrawBinding`](@ref) the host rewrites between runs.
+
+The binding's CURRENT contents are what the plan compiles against — their types
+fix the pipeline and the layout — and every run after that reads whatever the
+cell holds then.
+"""
+draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing,
+      bindings = nothing) =
+    draw!(p, shader, b, b.count; frag_args, viewport, bindings,
+          indices = b.indices, instances = b.instances)
+
+function draw!(p::PassHandle, shader, args, n; frag_args = (),
+               viewport = nothing, bindings = nothing, indices = nothing,
+               instances::Integer = 1)
+    # Through `drawargs`, so a rebindable cell is checked by its CONTENTS: what
+    # a shader is handed is the tuple inside it, and that is what these two
+    # questions are about.
+    va = drawargs(args)
+    refuserefs(va)
     refuserefs(frag_args)
-    # Here rather than at compile: the pipeline has one push constant range, so a
-    # draw with arguments on both stages is a mistake in the call, and by the time
-    # a shader is compiled it surfaces as one stage failing to take an argument it
+    # Here rather than at compile: the pipeline has one push constant range, so
+    # two DIFFERENT argument lists are a mistake in the call, and by the time a
+    # shader is compiled it surfaces as one stage failing to take an argument it
     # never declared.
-    isempty(args) || isempty(frag_args) || throw(ArgumentError(
-        "draw!: arguments were given to both stages, and a pipeline has one push " *
-        "constant range. Put them on the stage that reads them and pass what the " *
-        "other needs as a varying."))
-    push!(p.pass.draws, DrawCall(shader, args, drawover(p, n), frag_args))
+    #
+    # The SAME list on both stages is not that mistake and is refused nowhere
+    # else: one range, two stages declaring the same layout over it. Every Makie
+    # render object is shaped that way — a scatter's fragment stage reads the
+    # colormap its vertex stage indexed — which is why the hand-recorded path
+    # spells `compile_draw(dev, p, …, args, args)`. Refusing it made the graph
+    # unable to draw a figure while `pass!` could.
+    isempty(va) || isempty(frag_args) || va == frag_args || throw(ArgumentError(
+        "draw!: two DIFFERENT argument lists were given to the two stages, and a " *
+        "pipeline has one push constant range. Put them on the stage that reads " *
+        "them and pass what the other needs as a varying, or give both stages the " *
+        "same list."))
+    push!(p.pass.draws, DrawCall(shader, args, drawover(p, n), frag_args,
+                                 asviewport(viewport), bindings, indices, Int(instances)))
 end
 
 # `BufferRange` is Mantle's now — see `src/graph/types.jl`.

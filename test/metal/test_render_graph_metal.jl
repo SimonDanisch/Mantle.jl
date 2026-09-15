@@ -18,6 +18,11 @@ Three things had to become portable for it, and each is asserted below:
 """
 
 using Test, Mantle, Metal, ColorTypes, KernelAbstractions
+# Named here rather than borrowed from the `Main` that `runtests.jl` includes
+# every one of these files into. Without it the TYPE is still right and only
+# its printed form shortens differently, so the one assertion that compares a
+# `describe` string failed and the eleven around it passed.
+using ColorTypes.FixedPointNumbers: N0f8
 using Metal: vertex_index
 using GeometryBasics: Vec4f, Vec3f
 const M = Mantle

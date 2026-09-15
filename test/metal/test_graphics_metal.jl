@@ -12,8 +12,9 @@ backend — a `GraphicsPipeline` of two Julia functions plus state, pointed at a
 `OffscreenTarget` — and gets the right pixels.
 """
 
-using Test, Mantle, Metal
+using Test, Mantle, Metal, KernelAbstractions
 using Metal: vertex_index
+using Mantle: Vec2f, Vec3f, Vec4f
 # The composite format's colorant, for the readback assertions.
 using ColorTypes: RGBA, BGRA
 using ColorTypes.FixedPointNumbers: N0f8
@@ -777,6 +778,55 @@ end
     @test any(v -> 0.2 < v < 0.8, lin)
     # …and the ends still read as the texels themselves.
     @test lin[1, 8] < 0.1 && lin[end, 8] > 0.9
+end
+
+"""The same sampling quad, drawn through the render GRAPH rather than by hand."""
+function tex_graph(data; n = 4, filter = :nearest)
+    be = Metal.MetalBackend()
+    dev = Mantle.todevice(be)
+    tex = Mantle.Texture2D(be, data)
+    sampler = Mantle.Sampler(be; filter, wrap = :clamp)
+    bindings = Mantle.bind_textures([Mantle.SampledTexture(tex, sampler)])
+    g = Mantle.Graph(dev)
+    img = Mantle.Transient.Image(g, RGBA{N0f8}, (n, n))
+    out = Mantle.Transient.Buffer(g, UInt32, n * n)
+    # No `compile_draw` and no `bindings!` here: the draw carries what it samples
+    # and the plan does both, which is the whole difference from `tex_draw`.
+    Mantle.render!(g, "sample", img => Mantle.Clear((0f0, 0f0, 0f0, 1f0));
+                   viewport = (0, 0, n, n)) do p
+        Mantle.draw!(p, tex_pipeline(), (), 3; bindings)
+    end
+    Mantle.copy!(g, "read", out, img)
+    plan = Mantle.record!(Mantle.Plan(g))
+    Mantle.run!(plan)
+    KernelAbstractions.synchronize(be)
+    px = reshape(Array(Mantle.storage(out)), n, n)
+    # RGBA8 packed little-endian, so component 0 is the low byte; second index
+    # counts from the top and `uv.y = 0` is the bottom, as in `tex_draw`.
+    return [Float32(px[x, n + 1 - y] & 0xff) / 255 for x in 1:n, y in 1:n]
+end
+
+@testset "a graph draw samples what it was given" begin
+    # Bindings used to be reachable only from `pass!`, so a renderer that samples
+    # anything had to record its passes by hand and could not be a graph at all.
+    # They travel with the COMPILE as well as with the bind — Vulkan builds the
+    # pipeline layout around the descriptor set layout — so the plan has to hand
+    # them to `compile_draw` too, and a test that only checked the bind would
+    # pass on this backend and fail on the other.
+    #
+    # Asserted against the hand-recorded path rather than against numbers: the
+    # claim is that routing a draw through the graph changes nothing, and two
+    # independent expectations could drift apart while both stayed green.
+    #
+    # `Float32.` only because the two readbacks divide in different precisions;
+    # both come from the same byte, so the comparison is still exact.
+    data = Float32[(16 * (x - 1) + 2 * (y - 1)) / 100 for x in 1:4, y in 1:2]
+    @test tex_graph(data) == Float32.(tex_draw(data))
+    # And with filtering on, where the texture unit rather than the shader
+    # decides the value, so a wrong sampler would show.
+    two = Float32[0f0 1f0]'
+    @test tex_graph(two; n = 16, filter = :linear) ==
+          Float32.(tex_draw(two; n = 16, filter = :linear))
 end
 
 @testset "a negative viewport height flips what it draws" begin

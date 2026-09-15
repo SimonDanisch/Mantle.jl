@@ -266,6 +266,14 @@ function Mantle.readback_window(w::MetalWindow{T}) where {T}
     return out
 end
 
+# `screenshot` is the portable name for the same thing, and the vocabulary entry
+# this backend did not answer at all. Same constraint as `readback_window`: it
+# reads the drawable in flight, so it belongs INSIDE a frame. On Vulkan the
+# swapchain image outlives the present and a screenshot may be taken after one;
+# here the drawable goes back to the compositor, and keeping a copy would cost a
+# blit on every frame to serve a call that is made in tests.
+Mantle.screenshot(w::MetalWindow) = Mantle.readback_window(w)
+
 # A frame that failed after its drawable was taken: dropping the reference is
 # all Metal needs — a `CAMetalDrawable` that is never presented is simply
 # released, and the next `nextDrawable` hands out another.

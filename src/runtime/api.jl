@@ -100,6 +100,15 @@ abstract type Window end
 # constructor, answered by whichever backend is loaded — see `Framebuffer` in
 # `graphics/resources.jl` for why the backend is the first argument.
 
+# The no-backend spelling opens on `defaultbackend()`, and is CORE's because
+# deciding which backend that is, is core's job. It lived in the Vulkan backend
+# and named `vk_context()` directly, so on a machine with only Metal every
+# portable caller of `Window(w, h)` was a `MethodError` — which is how
+# `test/test_window.jl`, a file whose whole point is that it names no backend,
+# turned out to be Vulkan-only anyway.
+Window(width::Integer, height::Integer; kw...) =
+    Window(defaultbackend(), width, height; kw...)
+
 """
     backend(device)
 
