@@ -36,10 +36,13 @@ One launch, resolved as far as a launch can be.
 splat over an abstract tuple. The one thing left for run time is the one that
 means nothing otherwise — a device-computed count.
 """
-struct Launch{K,A<:Tuple,N,D}
+struct Launch{K,A<:Tuple,N,G,D}
     kernel::K
     args::A
     ndrange::N
+    # The workgroup size, or `nothing` when the kernel already carries one in its
+    # type. See `callgroup`.
+    group::G
     # Carried so a deferred count can ask the right backend to settle before it
     # is read — see `ndrangeof`.
     device::D
@@ -99,15 +102,109 @@ awaitwrites(dev::Device) = KernelAbstractions.synchronize(backend(dev))
 # backend does with it — an indirect dispatch of zero workgroups is a no-op
 # there. Without this, KA gets an empty ndrange, and a wavefront round whose
 # queue emptied is the ordinary case rather than an edge.
-function (l::Launch{K,A,N})() where {K,A,N}
+function (l::Launch{K,A,N,G})() where {K,A,N,G}
     nd = ndrangeof(l.device, l.ndrange)
     nd == 0 && return nothing
-    l.kernel(l.args...; ndrange = nd)
+    if G === Nothing
+        l.kernel(l.args...; ndrange = nd)
+    else
+        l.kernel(l.args...; ndrange = nd, workgroupsize = l.group)
+    end
     return nothing
+end
+
+"""
+    buildskernel(f, backend) -> Bool
+
+Does `f` BUILD a kernel for `backend`, or is it one already?
+
+`@kernel` generates a constructor: `f(backend)` returns the launchable object,
+which is what `kernelfor` calls. A macro-free kernel is the function itself and
+has no such method, so the question is exactly `hasmethod(f, Tuple{backend})`.
+The two cannot be told apart by `isa Function`, because the macro generates a
+function too.
+
+One predicate, in core, because this is a decision about what a dispatch MEANS
+and not about any backend's machinery. It was being made three times: Lava asked
+it in `compile_dispatch`, the ROCm extension asked it as `kifunction`, and
+`bake` below did not ask it at all, so a declared macro-free dispatch was a
+`MethodError: no method matching ew2!(::CPU)` on the host. Deletes itself with
+the last `@kernel`.
+"""
+buildskernel(f, backend) = hasmethod(f, Tuple{typeof(backend)})
+
+"""
+    kibackend(dev) -> backend
+
+The backend object that compiles `KernelInterface` kernels for `dev`.
+
+`backend(dev)` by default, and a verb of its own because it is not always the
+same object: a device can speak both interfaces through two different types, as
+ROCm does, where `backend(dev)` is the KernelAbstractions backend and the KI one
+is a distinct type in another module. Which type `KI.kernel_function` is defined
+on is the backend's own fact, so a caller asks for it rather than knowing it.
+
+A backend with no KI implementation answers the KA one, and [`kikernel`](@ref)
+then refuses a macro-free kernel there by name.
+"""
+kibackend(dev) = backend(dev)
+
+"""
+    kisupported(dev, f) -> Bool
+
+Can `dev` compile the macro-free kernel `f` at all?
+"""
+kisupported(dev, f) =
+    hasmethod(KI.kernel_function, Tuple{typeof(kibackend(dev)), typeof(f), Type})
+
+"""
+    kikernel(f, dev, args) -> KI.Kernel
+
+The compiled kernel for a macro-free `f`, against the types its arguments will
+arrive as.
+
+`tt` is built from the ARGCONVERTED arguments because that is what the backend
+passes at the launch, and a kernel compiled for the unconverted types is a
+different kernel: a device array reaches the body as the backend's device-side
+representation, not as the host wrapper.
+"""
+function kikernel(f, dev, args)
+    be = kibackend(dev)
+    kisupported(dev, f) || error(
+        "Mantle: `dispatch!` was given `$f`, which is a macro-free kernel, and " *
+        "$(typeof(be)) implements no `KI.kernel_function`. The backend answers " *
+        "`KernelAbstractions` and not `KernelInterface`, so it can run an " *
+        "`@kernel` but cannot compile a plain function.")
+    tt = Base.to_tuple_type(map(a -> Core.Typeof(KI.argconvert(be, a)), args))
+    return KI.kernel_function(be, f, tt)
 end
 
 kernelfor(k, ::Nothing, backend) = k(backend)
 kernelfor(k, group, backend) = k(backend, group)
+
+"""
+    callgroup(kernel, group) -> group or nothing
+
+The workgroup size a launch still has to pass at the CALL, having built `kernel`
+with [`kernelfor`](@ref).
+
+`nothing` for a kernel that carries its workgroup in its TYPE: KA reads it from
+there, and passing it again keys a second, identical iteration plan for the same
+launch. That was the whole rule, and it is wrong for the other kind. A kernel
+whose workgroup is `DynamicSize` was launched as
+`k(backend)(args...; ndrange, workgroupsize = wg)` — the size is in the call and
+nowhere else, and an intercepted launch that drops it gets KA's default instead.
+
+Silently, and only for kernels that also read their own workgroup size from a
+`Val` argument, which the broadcast kernels here do: a body compiled for
+`Val(256)` dispatched in groups of 64 writes `base = (g-1)*256 + l` for `l` in
+`1:64`, so **one element in four** is written and the rest keep whatever was in
+the buffer. The rest of the graph replays bit-exact, which is what made it look
+like a hazard.
+"""
+callgroup(::KernelAbstractions.Kernel{<:Any,<:KernelAbstractions.NDIteration.StaticSize},
+          group) = nothing
+callgroup(::KernelAbstractions.Kernel, group) = group
 
 # A `Launch` resolved its count at `bake`: a `DeviceRange` with a ceiling became
 # the ceiling, one without became a `DeferredRange`. Neither is sized on the
@@ -116,10 +213,55 @@ devicesized(::Launch) = false
 
 # A function barrier: `args` is concrete inside `Launch`, which is what makes
 # the call in `(l::Launch)()` specialise.
+"""
+What a CALL compiles to: the function and its resolved arguments.
+
+Nothing else. A call has no kernel to build, no launch geometry to work out and
+no argument memory to lay out — the library on the other side does all three —
+so what the plan holds is the call itself, which is why `argsize` and
+`indirectindex` are zero and `devicesized` is false.
+
+Core's, and one type rather than one per backend: the ROCm extension had a
+`ROCmCallDispatch` that was this with an `ndrange` keyword bolted on for the old
+callable-kernel convention, and it became unreachable the moment
+[`buildskernel`](@ref) started routing every non-`@kernel` to the
+KernelInterface path.
+"""
+struct Call{F,A<:Tuple}
+    f::F
+    args::A
+end
+
+(c::Call)() = (c.f(c.args...); nothing)
+argsize(::Call) = 0
+indirectindex(::Call) = 0
+devicesized(::Call) = false
+
 function bake(c::Compile, d::Dispatch)
     dev = c.graph.dev
-    Launch(kernelfor(d.kernel, d.group, backend(dev)),
-           map(a -> resolve(dev, a), d.args), bakedrange(c, d.ndrange), dev)
+    be = backend(dev)
+    args = map(a -> resolve(dev, a), d.args)
+    # A call is compiled by resolving its arguments and nothing else — and
+    # refused here, once, rather than by each backend, because whether a call
+    # can run is one question with one answer per backend.
+    if iscall(d)
+        runscalls(dev) || throw(ArgumentError(
+            "dispatch!: `$(d.kernel)` was declared as a call (no ndrange), and " *
+            "$(typeof(dev)) cannot run one: its `run!` submits a recording it " *
+            "built as a command buffer, and a host call cannot be written into " *
+            "one. Declare the operation as dispatches instead — on this backend " *
+            "a GEMM is `coopmat_gemm!`, which records like any other dispatch."))
+        return Call(d.kernel, args)
+    end
+    # A `KI.Kernel` is callable with the same `ndrange`/`workgroupsize` keywords
+    # a `KA.Kernel` is (KI's `Kernel` docstring states that contract), so the
+    # only difference here is which object gets built, and `(l::Launch)()` needs
+    # to know nothing about it.
+    buildskernel(d.kernel, be) || return Launch(kikernel(d.kernel, dev, args), args,
+                                                bakedrange(c, d.ndrange), d.group, dev)
+    let k = kernelfor(d.kernel, d.group, be)
+        Launch(k, args, bakedrange(c, d.ndrange), callgroup(k, d.group), dev)
+    end
 end
 
 bakedrange(::Compile, n) = n
@@ -617,16 +759,29 @@ half that is internal and has a family to be consistent with.
 """
 function emitplan!(e, pl::Plan)
     emithead!(e, pl)
+    emitpasses!(e, pl, eachindex(pl.passes))
+    return nothing
+end
+
+"""
+The passes at `range`, with the profiler's timestamps around each if the plan has
+one.
+
+Separate from [`emitplan!`](@ref) because a PARTITIONED recording emits a slice
+into each of its pieces and the head into the first only — see
+[`recordparts!`](@ref). One walk, sliced; not a second walk.
+"""
+function emitpasses!(e, pl::Plan, range)
     # Two loops rather than one with a branch in it: a frame that is not being
     # profiled must not pay a comparison per pass.
     if pl.profiler === nothing
-        for pp in pl.passes
-            emitpass!(e, pl, pp)
+        for i in range
+            emitpass!(e, pl, pl.passes[i])
         end
     else
-        for (i, pp) in enumerate(pl.passes)
+        for i in range
             profiled!(pl, e, i) do
-                emitpass!(e, pl, pp)
+                emitpass!(e, pl, pl.passes[i])
             end
         end
     end
@@ -712,25 +867,143 @@ Not yet for plans with a surface: a swapchain image is a different image every
 frame and a recording names one. Headless plans have no such thing.
 
 It does NOT run the plan. `bake!`, which this replaced, did.
+
+`maxpasses=N` splits the baked commands into submissions of at most N passes,
+preserving the full plan's ordering and barriers, on any backend that records at
+all — the chunked walk is [`recordparts!`](@ref) and the pieces are
+[`RecordingParts`](@ref), both core's, so a backend answers `submitrecording!`
+for one piece and needs nothing else. The default zero keeps one submission. Use
+this for long workloads that exceed the device's submission timeout; pass count
+is not a runtime guarantee, and a single long-running dispatch still needs to be
+split by its caller. The partition is retained if resource movement invalidates
+the recording.
 """
-function record!(pl::Plan)
+function record!(pl::Plan; maxpasses::Int = pl.record_maxpasses)
+    maxpasses >= 0 || throw(ArgumentError("record!: maxpasses must be nonnegative"))
+    pl.recording !== nothing && maxpasses != pl.record_maxpasses &&
+        throw(ArgumentError("record!: free the existing recording before changing maxpasses"))
     pl.recording === nothing || return pl
     recordable(pl) || throw(ArgumentError(
         "record!: this plan draws to a surface. A swapchain image is a different " *
         "image every frame and a recording names one, so a windowed plan needs a " *
         "recording per swapchain image — which is not built yet. Headless plans " *
         "record today."))
-    e = openrecording(pl.graph.dev, pl)
-    e === nothing && return pl
+    recordplan!(pl.graph.dev, pl, maxpasses)
+    # After the record, so the field holds the last partition that WORKED. A
+    # backend that cannot partition throws from `recordplan!`, and writing the
+    # requested value first left that plan asking for the same refused partition
+    # on every later `record!(pl)` — the default reads this field.
+    pl.record_maxpasses = maxpasses
+    return pl
+end
+
+function recordplan!(dev, pl::Plan, maxpasses::Int)
+    e = openrecording(dev, pl)
+    if e === nothing
+        # A backend with no command buffers to build: `run!` walks the plan
+        # instead, which is the same walk. Asking for a partition of it is a
+        # different matter — the caller wants submission boundaries and there
+        # are no submissions — so that is refused rather than ignored.
+        maxpasses == 0 || throw(ArgumentError(
+            "record!: maxpasses = $maxpasses, and this backend does not record: " *
+            "`openrecording` declined the plan, so there is nothing to partition. " *
+            "`run!` walks it per frame."))
+        return pl
+    end
     # Where every device address the pack writes lands, keyed by the address —
     # derived once, from this one pack, by `closerecording!`; consulted only by
-    # `notify_move!`, never per run.
+    # `notify_move!`, never per run. A partition fills it from every piece.
     empty!(pl.patchtab)
     empty!(pl.pending_patches)
-    emitplan!(e, pl)
-    pl.recording = closerecording!(e, pl)
+    if maxpasses == 0
+        emitplan!(e, pl)
+        pl.recording = closerecording!(e, pl)
+    else
+        pl.recording = recordparts!(dev, pl, e, maxpasses)
+    end
     listen_moves!(pool(pl.graph.dev), pl)
     return pl
+end
+
+"""
+    recordparts!(device, plan, emitter, maxpasses) -> RecordingParts
+
+The chunked walk: at most `maxpasses` passes into each piece, `emithead!` into
+the first only, and every piece kept reachable so a throw part way through
+releases all of them rather than leaking a command buffer per chunk.
+
+`emitter` is the already-open first piece, because `recordplan!` has to open one
+to find out whether this backend records at all.
+
+Nothing here is a driver call, which is why it is core's: the arithmetic that
+picks the chunks is the same everywhere, and a piece is whatever this backend's
+`closerecording!` hands back. It was the Vulkan backend's until 2026-09-14, and
+`HorizonRunner`'s prefill — the only caller that asks for a partition, because a
+512-token prefill is over 20 seconds in one submission — could therefore only be
+recorded on that backend.
+"""
+function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
+    parts = Any[]
+    e = emitter
+    try
+        # `max(…, 1)`: a plan with no passes still records one (empty) piece, so
+        # `run!` has something to submit and the plan is recorded rather than
+        # walked.
+        for firstpass in 1:maxpasses:max(length(pl.passes), 1)
+            e === nothing && (e = openrecording(dev, pl))
+            firstpass == 1 && emithead!(e, pl)
+            emitpasses!(e, pl, firstpass:min(firstpass + maxpasses - 1, length(pl.passes)))
+            push!(parts, closerecording!(e, pl))
+            e = nothing                 # closed, and now `parts`' business
+        end
+    catch
+        # The open one is not in `parts` and cannot be released as a recording:
+        # it was never closed.
+        e === nothing || abandonrecording!(dev, e)
+        foreach(release!, parts)
+        empty!(pl.patchtab)
+        rethrow()
+    end
+    # Narrowed from `Any[]`: the pieces are all one backend type, and
+    # `submitrecording!` over them should specialise.
+    return RecordingParts(identity.(parts))
+end
+
+"""
+The baked pieces of one plan, in the order they are submitted.
+
+`record!(pl; maxpasses = N)` writes the walk into several recordings of at most N
+passes each instead of one, so a workload that would exceed the driver's
+submission timeout has completion points inside it. They remain ONE plan: the
+barriers between the pieces are the ones the graph derived, and a piece is
+submitted only after the one before it has been.
+
+The type is core's and so is the partition that builds it — see
+[`recordparts!`](@ref). A backend answers `submitrecording!` for ONE piece and
+gets the sequence for free.
+"""
+struct RecordingParts{R}
+    parts::Vector{R}
+end
+
+release!(rec::RecordingParts) = (foreach(release!, rec.parts); nothing)
+
+"""
+    submitrecording!(ctx, recording, emitter) -> token
+
+Submit one baked piece, or in this method the sequence a partition made of one.
+
+The iteration is core's; what a submission IS belongs to the backend, which
+answers the same name for its own recording type. The run's own emitter rides
+with the FIRST piece — it carries this run's host stores and address patches,
+which have to land before any baked command reads them — and the rest go alone.
+"""
+function submitrecording!(ctx, rec::RecordingParts, e)
+    tok = submitrecording!(ctx, first(rec.parts), e)
+    for part in Iterators.drop(rec.parts, 1)
+        tok = submitrecording!(ctx, part, nothing)
+    end
+    return tok
 end
 
 """Whether this plan's commands can be written once, or have to be emitted per

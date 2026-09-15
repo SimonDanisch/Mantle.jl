@@ -151,11 +151,16 @@ that method.
 caps(dev::LavaDevice) = caps(dev.ctx)
 
 # ── window ────────────────────────────────────────────────────────────────────
-"""
-A window, which is Mantle's because the frame loop is: `isopen` has to be a
-predicate rather than a thing that also pumps events, and `run!` is the one call
-per frame that can pump them.
-"""
+#
+# `Window(width, height; …)` is CORE's now (`runtime/api.jl`), which is what its
+# docstring here was attached to; the docstring went with the concept to the
+# abstract type, where it already said the same thing about `isopen` and `run!`.
+#
+# Left behind as an orphan, this file did not parse: two docstrings in a row is
+# "cannot document the following expression", because the first one's target is
+# the second STRING. Only a Vulkan build sees it — the backend is chosen at
+# parse time, so a Metal build never includes this file, which is why it could
+# land green.
 """
 What is on the window now, as a `(width, height)` matrix of BGRA byte tuples.
 
@@ -365,7 +370,6 @@ graph is built, so liveness is not a separate declaration that could disagree.
 
 # `TransientBuffer` is Mantle's now — see `src/graph/types.jl`.
 
-Base.eltype(::TransientBuffer{T}) where {T} = T
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
 # ↑ moved to src/graph/build.jl
@@ -660,8 +664,8 @@ end
 # `src/graph/build.jl`. Written as `storage(t::TransientBuffer{T})` it was the
 # same signature as core's and overwrote it, taking Metal and the host backend
 # with it.
-storage(t::TransientBuffer{T}, block::BufferBlock) where {T} =
-    LavaArray{T,1}(copy(block.ref), (t.n,); offset = t.offset)
+storage(t::TransientBuffer{T,N}, block::BufferBlock) where {T,N} =
+    LavaArray{T,N}(copy(block.ref), size(t); offset = t.offset)
 
 # What a draw or a dispatch hands the shader: the device-side form, not the host
 # handle.
@@ -1055,6 +1059,17 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
     # backend now that it is core's (`graph/kalaunch.jl`), which is what makes it
     # answerable by a backend at all; this call site kept the old arity and threw
     # a `MethodError` on the first dispatch a plan compiled.
+    # A CALL first: no ndrange, so there is nothing to compile or launch and
+    # core's `bake` resolves the arguments into a `Call`. See the three-argument
+    # `dispatch!`, and `openrecording` below for what this backend then cannot
+    # do with the plan.
+    iscall(d) && return bake(c, d)
+    # KERNELINTERFACE next, for a kernel that is a plain function rather than a
+    # `@kernel`-generated constructor. `buildskernel` is core's predicate for
+    # that, and asking it here rather than restating it is the point: this is a
+    # decision about what a dispatch means, so a backend reads it.
+    buildskernel(d.kernel, backend(dev)) ||
+        return kicompile_dispatch(c, dev, d, argoff, indirect)
     obj = kernelfor(d.kernel, d.group, backend(dev))
     isempty(fieldnames(typeof(obj.f))) ||
         throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
@@ -1064,15 +1079,51 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
     raw = rawargs(d.args)
     args = devargs(adaptor(dev.bq), raw)
     nd = dispatchrange(d.ndrange)
-    # `nothing` for the workgroup size, not `d.group`: a group given to
-    # `dispatch!` is baked into the kernel's type by `kernelfor`, and KA reads it
-    # from there. Passing it here as well made a second, differently keyed
-    # iteration plan for the same launch.
-    iter = get_or_build_iter_plan(obj, nd, nothing, dev.ctx)
+    # `callgroup`, not `nothing` and not `d.group`. A group given to `dispatch!`
+    # is baked into the kernel's type by `kernelfor` and KA reads it from there,
+    # so passing it again keys a second, identical iteration plan; a kernel whose
+    # workgroup is `DynamicSize` carries it nowhere but the call, so dropping it
+    # dispatches the wrong group size. See `callgroup` in `graph/kalaunch.jl`.
+    wgs = callgroup(obj, d.group)
+    iter = get_or_build_iter_plan(obj, nd, wgs, dev.ctx)
     tlas = find_tlas_in_args(raw)
     all_args = (obj.f, iter.ka_ctx, args...)
     launch = launch_plan(dev.bq, obj.f, all_args, iter.ws_3d, tlas !== nothing)
-    CompiledDispatch(launch, iter, nd, obj, obj.f, d.args, d.ndrange,
+    CompiledDispatch(launch, iter, nd, obj, wgs, obj.f, d.args, d.ndrange,
+                     tlas !== nothing, argoff, launch.total_size, indirect)
+end
+
+"""
+    kicompile_dispatch(compile, dev, dispatch, argoff, indirect) -> CompiledDispatch
+
+Compile a macro-free kernel — a plain function using `KernelInterface`'s
+intrinsics — into the same `CompiledDispatch` the KA path produces.
+
+Three differences from that path, and all three are the same fact: a KI kernel is
+a plain function, so there is no `KA.Kernel` object to carry anything.
+
+  * no `CompilerMetadata`, so `iter.ka_ctx` is `nothing` and `all_args[1]` is the
+    ghost slot `ka_launch!` drops (`Base.tail`) and `pack_args_direct!` skips.
+    The immediate KI launch passes `nothing` there for exactly this reason.
+  * no type-level workgroup size, so the extents come from
+    [`ki_launch_extents`](@ref) — the same function the immediate launch uses —
+    rather than from `KA.launch_config`, and `callgroup` has nothing to decide.
+  * `obj` is the `KI.Kernel`, which is what a moved ndrange would be re-planned
+    through.
+"""
+function kicompile_dispatch(c::Compile{LavaDevice}, dev::LavaDevice, d::Dispatch,
+                            argoff::Int, indirect::Int)
+    be = backend(dev)
+    raw = rawargs(d.args)
+    args = devargs(adaptor(dev.bq), raw)
+    nd = dispatchrange(d.ndrange)
+    wg, blocks = ki_launch_extents(be, nd, d.group === nothing ? () : d.group, ())
+    kern = kikernel(d.kernel, dev, args)
+    iter = IterPlan(nothing, pad_to_3d(dev.ctx, blocks), wg, prod(blocks))
+    tlas = find_tlas_in_args(raw)
+    all_args = (nothing, args...)
+    launch = launch_plan(dev.bq, d.kernel, all_args, iter.ws_3d, tlas !== nothing)
+    CompiledDispatch(launch, iter, nd, kern, nothing, d.kernel, d.args, d.ndrange,
                      tlas !== nothing, argoff, launch.total_size, indirect)
 end
 
@@ -1155,6 +1206,8 @@ function packdraw!(e::Emitter, d::CompiledDraw)
     am = e.args
     off = d.argoff
     info = d.shader.push_info
+    raw = rawargs(d.args)
+    holdleaves!(e.owner, raw)
     pack_args_direct!(e.owner, am.ptr + off, am.address + off, info.arg_offsets,
                       info.arg_buffer_size, info.byval_llvm_sizes,
                       devargs(adaptor(e), rawargs(recordedargs(d.args))))
@@ -1449,15 +1502,12 @@ The one barrier a fused prepare is followed by: its shader writes, made visible
 to the command processor's read of the workgroup counts and to the dispatches
 behind it.
 
-The same value for every pass of every plan — it names no handle, only masks —
-so it is built once and kept. Memoised rather than `const` because constructing
-it calls into Vulkan.jl's wrapper types, and this module precompiles on machines
-with no driver.
+The same value for every pass of every plan — it names no handle, only masks.
+A function rather than a `const` because constructing it calls into Vulkan.jl's
+wrapper types, and this module precompiles on machines with no driver.
 """
 function preparebarrier()
-    b = PREPARE_BARRIER[]
-    b === nothing || return b
-    b = VK._DependencyInfo(
+    return VK._DependencyInfo(
         [VK._MemoryBarrier2(;
             src_stage_mask = VK.PipelineStageFlag2(VK.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
             src_access_mask = VK.AccessFlag2(VK.ACCESS_2_SHADER_WRITE_BIT),
@@ -1467,11 +1517,15 @@ function preparebarrier()
                               VK.AccessFlag2(VK.ACCESS_2_SHADER_WRITE_BIT) |
                               VK.AccessFlag2(VK.ACCESS_2_INDIRECT_COMMAND_READ_BIT))],
         VK._BufferMemoryBarrier2[], VK._ImageMemoryBarrier2[])
-    PREPARE_BARRIER[] = b
-    return b
 end
 
-const PREPARE_BARRIER = Ref{Any}(nothing)
+# `const PREPARE_BARRIER = Ref{Any}(nothing)` memoised the value above, and is
+# deleted 2026-09-15: a backend must not read process-global state to decide what
+# to emit, and this one had no reason to be global even by its own argument — the
+# `Emitter` carries its context. Built per call instead of moved onto the context,
+# because what it saves is three small allocations of a pure value struct, once
+# per device-sized dispatch per recording. `refit!` costs 6,144 bytes on a
+# 64-transient plan every RUN; this is noise beside it, and a global is not.
 
 # ── plan ─────────────────────────────────────────────────────────────────────
 # ↑ moved to src/graph/build.jl
@@ -1487,11 +1541,15 @@ An ndrange that has not moved reuses the iteration plan the pipeline was built
 with; one that has costs a lookup keyed on the shape, which is not keyed on the
 world and so still cannot reach the compiler.
 """
-function emitdispatch!(e::Emitter, d::CompiledDispatch{K,A,I},
-                       name::AbstractString) where {K,A,I}
+# The four parameters in DECLARATION order: `CompiledDispatch{L,K,A,I}`, so `I`
+# is the iteration plan. Written `{K,A,I}` it bound `I` to the ARGUMENT tuple
+# type, and the `::I` below would have thrown a `TypeError` the first time an
+# ndrange moved under a recorded plan.
+function emitdispatch!(e::Emitter, d::CompiledDispatch{L,K,A,I},
+                       name::AbstractString) where {L,K,A,I}
     nd = dispatchrange(d.ndrange)
     it = nd == d.nd0 ? d.iter :
-         get_or_build_iter_plan(d.obj, nd, nothing, e.ctx)::I
+         get_or_build_iter_plan(d.obj, nd, d.group, e.ctx)::I
     it.nblocks == 0 && return nothing
     am = e.args
     tlas = packdispatch!(e, d, it)
@@ -1634,6 +1692,26 @@ recording and the unmodelled path — see `packtrace!`.
 """
 openrecording(dev::LavaDevice, pl::Plan) = Emitter(recording!(dev.bq), pl.args)
 
+# `runscalls` is `false` here, which is core's default, so there is no method
+# for it and this comment is the record of WHY.
+#
+# A recording on this backend is a `VkCommandBuffer` built by a second walk over
+# the plan, and `run!` submits that recording and nothing else — a Lava plan has
+# no walk path at all (`execute!` throws on an unrecorded plan). A host call
+# would therefore run once, at record time, submitting its work outside the
+# buffer, and every replay would be missing it. So a call is refused at compile,
+# by core, with a message naming `coopmat_gemm!` as what to declare instead.
+
+# `RecordingSequence`, `release!` for it, and the chunked `recordplan!` that built
+# it were HERE until 2026-09-14. None of the three contained a driver call: the
+# chunk arithmetic is the same on every device, a piece is whatever this
+# backend's `closerecording!` returns, and the sequence's `release!` and
+# `submitrecording!` were a `foreach` and a loop. They are `RecordingParts` and
+# `recordparts!` in `graph/kalaunch.jl` now, which is also what lets the ROCm
+# backend partition a capture into several graphs. What is left here is the one
+# piece: `submitrecording!(bq, ::Recording, e)` below, and
+# `abandonrecording!` for one that will never be submitted.
+
 """
     closerecording!(e::Emitter, plan) -> Recording
 
@@ -1729,7 +1807,10 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         seal!(e.owner)
         return present_frame!(bq, win, e.owner)
     end
-    rec = pl.recording::Recording
+    return submitrecording!(bq, pl.recording, e)
+end
+
+function submitrecording!(bq, rec::Recording, e)
     if e === nothing
         # Nothing to store this run: the recording alone, and nothing of it is
         # given back — it is submitted again next run, and the plan owns it.
@@ -1749,6 +1830,11 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
     handover!(bq, tok, front; tag = :run)
     return tok
 end
+
+"""A recording whose walk threw: its command buffer, regions, holds and
+descriptor sets go back to the channel. `release!(::Recording)` is the same call
+`free!` on a plan makes; what this adds is that it may be an UNSEALED one."""
+abandonrecording!(::LavaDevice, e::Emitter) = (release!(e.owner::Recording); nothing)
 
 """What was written goes with the buffer: sealed so it can be begun again, and
 given back to core with the holds it took."""
@@ -1861,6 +1947,11 @@ function packdispatch!(e::Emitter, d::CompiledDispatch, it)
     off = d.argoff
     lp = d.launch
     raw = rawargs(d.args)
+    # Adapt is deliberately pure. As on the immediate launch path, retain the
+    # original leaves AND register their buffers for submission stamps/waits.
+    # Without this a host-mapped input can be overwritten during a replay.
+    holdleaves!(e.owner, d.kernel)
+    holdleaves!(e.owner, raw)
     args = devargs(adaptor(e), raw)
     pack_args_direct!(e.owner, am.ptr + off, am.address + off, lp.offsets,
                            lp.arg_buffer_size, lp.byval_sizes,

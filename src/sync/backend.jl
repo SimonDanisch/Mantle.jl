@@ -19,6 +19,18 @@ struct MetalAPI <: Backend end
 struct WebGPUAPI <: Backend end
 
 """
+Execution on HIP, through AMDGPU.jl — the backend in `ext/MantleROCmExt.jl`.
+
+A marker here rather than in the extension, beside `WebGPUAPI`, which has no
+backend in tree either: what a marker is for is the `needs_transition` answer
+below and the `Device(api)` spelling, and both are core vocabulary. It also
+keeps the two ROCm facts that are not AMDGPU.jl's — that this is one in-order
+stream, and what that means for barriers — in the file that states the same
+thing about the host and about WebGPU.
+"""
+struct ROCmAPI <: Backend end
+
+"""
 Execution on the host, through KernelAbstractions' CPU backend.
 
 Compute only: no `render!`, no `Window`, no `Surface` — missing methods, which is
@@ -52,3 +64,16 @@ a backend whose `passbarriers` would lower every transition to nothing should
 say. If host passes are ever run concurrently, this is where the join goes.
 """
 needs_transition(::HostAPI, ::ResourceKind, before::Type, after::Type) = false
+
+"""
+Nor has a single HIP stream. Work submitted to one stream runs in issue order
+and a kernel's writes are visible to the next kernel on that stream, so the
+scheduled order IS the synchronisation — the host backend's argument, with a
+queue instead of a calling thread.
+
+It is a claim about ONE stream, which is what `ROCmDevice` holds and what
+AMDGPU.jl launches on. A backend that spread a plan's passes over several
+streams to overlap them would have to answer `true` here and emit events
+between them, and that is the change this method would have to be revisited by.
+"""
+needs_transition(::ROCmAPI, ::ResourceKind, before::Type, after::Type) = false

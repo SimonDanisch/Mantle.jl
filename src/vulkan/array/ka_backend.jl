@@ -552,6 +552,11 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
             return relaunch_dynamic(obj, args, ndrange)
         end
     end
+    # The capture check was here, deleted 2026-09-15: a launch on a task with a
+    # graph pass open used to be diverted into that pass instead of submitted. A
+    # graph is DECLARED now — `dispatch!(p, kernel, args, ndrange)` — so a launch
+    # reaching this function is an immediate launch and nothing else, which is
+    # what it always looked like.
     bq = obj.backend.dispatch_bq
 
     # Auto-discover HWTLAS for ray-query kernels — extract BEFORE Adapt strips
@@ -656,20 +661,31 @@ end
     block_dims = plan.block_dims
     ws_3d      = plan.ws_3d
 
+    # The `openrecording()` consult was here, deleted 2026-09-15 with
+    # `batched!`: an open batch on this task was joined instead of opening a
+    # command buffer, which meant where a launch's commands landed depended on
+    # task-global state this function was never told about. Its own comment gave
+    # the answer it was measuring against — a graph gives one submit AND the
+    # barriers, 153 ms against 204 — so a declared graph is the batching, and an
+    # immediate launch is now just an immediate launch.
     oneshot!(bq; tag = :launch) do e
-        owner = e.owner
-        # Side-effect pass: pin every LavaArray leaf in the closure + args into
-        # the one-shot's `pinned`, once, via @generated walker (zero alloc,
-        # straight-line code).  `Adapt.adapt` below is pure — it only strips.
-        holdleaves!(owner, obj.f)
-        holdleaves!(owner, args)
-        adaptor = LavaAdaptor(owner)
-        converted_f = Adapt.adapt(adaptor, obj.f)
-        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
-        all_args = (converted_f, ka_ctx, converted_args...)
-        ka_launch!(e, converted_f, all_args, block_dims, ws_3d, tlas)
+        emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
     end
     return nothing
+end
+
+# The body both paths share: pin every LavaArray leaf in the closure and the
+# args into the recording (a `@generated` walker, zero alloc), then launch.
+# `Adapt.adapt` is pure — it only strips.
+@inline function emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
+    owner = e.owner
+    holdleaves!(owner, obj.f)
+    holdleaves!(owner, args)
+    adaptor = LavaAdaptor(owner)
+    converted_f = Adapt.adapt(adaptor, obj.f)
+    converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+    all_args = (converted_f, ka_ctx, converted_args...)
+    ka_launch!(e, converted_f, all_args, block_dims, ws_3d, tlas)
 end
 
 # Vulkan dispatch is max 3D. pad_to_3d maps the N-D block grid to a 3D dispatch,

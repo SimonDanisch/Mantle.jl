@@ -2236,6 +2236,129 @@ than taste:
     return (tm * SGEMM_BM) * (tn * SGEMM_BN) <= SGEMM_MAXWASTE * M * N
 end
 
+# ── split-K GEMV ─────────────────────────────────────────────────────────────
+#
+# `N == 1` is the whole of autoregressive decode: one token against the weights,
+# so every projection is a matrix-vector product. `staged_gemm_ok` declines it
+# (a 64-wide tile for one useful column busts `SGEMM_MAXWASTE`) and it lands in
+# `strided_gemm_kernel!`, which launches ONE INVOCATION PER OUTPUT ROW. That is
+# the whole problem: a GEMV reads M*K bytes and does nothing else, so it should
+# run at memory bandwidth, and instead its throughput tracks M.
+#
+# Measured on a Radeon 8060S, fp16 weights, one invocation per row:
+#
+#     shape (M x K)                 GB/s
+#     26624 x  5120  gate/up       220.8     <- saturates
+#    250624 x  5120  lm_head       210.9     <- saturates
+#      8192 x  5120  q_proj        105.0
+#      5120 x  8192  o_proj         71.3
+#      5120 x 26624  down           62.5
+#      1024 x  5120  k_proj         23.4
+#
+# A plain read kernel on this device reaches 211 GB/s, so the two big shapes are
+# already AT the limit and the rest are not bandwidth-bound at all — they are
+# latency-bound, with too few waves in flight to cover the load latency. `down`
+# is the one that matters: 4.36 ms of a 9.72 ms per-layer GEMV budget.
+#
+# So split the reduction. Thread `(m, s)` sums its own K-chunk into an `M x S`
+# fp32 plane and a second pass adds the planes. The access pattern is unchanged
+# — consecutive lanes still walk consecutive `m`, one cache line per wave per
+# k-step — only the launch gets S times wider.
+#
+# The accumulator is fp32 regardless of the destination, and the planes are
+# summed in fp32 before a single conversion on store, so this is also strictly
+# more accurate than the single-pass kernel it replaces for an fp16 `C`.
+
+# Rows above which the single-pass kernel already fills the device and splitting
+# only adds a reduction. Measured: `26624 x 5120` runs at 206 GB/s unsplit and
+# 145-200 split, and `250624 x 5120` is flat from 209. Below it throughput tracks
+# the launch width, not the bytes.
+const GEMV_NOSPLIT_ROWS = 16384
+
+# Threads to aim for when a split IS needed. 40 CUs x 4 SIMDs x ~8 waves x 64
+# lanes is ~82k, and the sweep is flat from ~64k; going higher only shortens the
+# chunks and pays more reduction for no more parallelism.
+#
+#     shape (M x K)        S=1   S=2   S=4   S=8  S=16  S=32  S=64
+#      8192 x  5120         86   143   149   147   141   155   153
+#      1024 x  5120         12    21    29    51    50    75    74
+#      5120 x  8192         57    94   126   159   155   151   170
+#     26624 x  5120        206   200   145   198   194   187   187
+#      5120 x 26624         61    96   133   208   194   205   172
+#    250624 x  5120        209   218   216   211   211   208   204
+const GEMV_TARGET_THREADS = 1 << 16
+
+# Shortest K-chunk worth giving a thread. Below this the per-thread prologue and
+# the extra plane cost more than the parallelism buys.
+const GEMV_MIN_CHUNK = 64
+
+"""
+    gemv_split(M, K) -> S
+
+How many K-chunks to split a GEMV into. `1` means the single-pass kernel already
+has enough rows to fill the device, which is the case from `GEMV_NOSPLIT_ROWS`.
+"""
+@inline function gemv_split(M::Int, K::Int)
+    M >= GEMV_NOSPLIT_ROWS && return 1
+    S = 1
+    while S * M < GEMV_TARGET_THREADS && cld(K, 2S) >= GEMV_MIN_CHUNK
+        S *= 2
+    end
+    S
+end
+
+@kernel cpu=false function gemv_splitk_kernel!(P, @Const(A), @Const(B),
+                                               ao, ar, ac, bo, br,
+                                               M::Int32, K::Int32, KC::Int32, ntot::Int32)
+    lin = @index(Global, Linear)
+    if lin <= ntot
+        l = Int32(lin) - Int32(1)
+        i = l % M + Int32(1)        # row; consecutive lanes -> consecutive rows
+        s = l ÷ M                   # 0-based split
+        @inbounds begin
+            k1 = min(s * KC + KC, K)
+            ai = ao + (i - Int32(1)) * ar
+            # FOUR INDEPENDENT ACCUMULATORS, not one. `acc = muladd(_, _, acc)`
+            # serialises on the FMA latency and a GEMV has no other arithmetic to
+            # hide it behind; the unroll in `strided_gemm_kernel!` shortens the
+            # loop but keeps the chain. Summed pairwise at the end.
+            a0 = 0f0; a1 = 0f0; a2 = 0f0; a3 = 0f0
+            k = s * KC
+            while k + Int32(4) <= k1
+                a0 = muladd(Float32(A[ai + k * ac]), Float32(B[bo + k * br]), a0)
+                k1_ = k + Int32(1)
+                a1 = muladd(Float32(A[ai + k1_ * ac]), Float32(B[bo + k1_ * br]), a1)
+                k2_ = k + Int32(2)
+                a2 = muladd(Float32(A[ai + k2_ * ac]), Float32(B[bo + k2_ * br]), a2)
+                k3_ = k + Int32(3)
+                a3 = muladd(Float32(A[ai + k3_ * ac]), Float32(B[bo + k3_ * br]), a3)
+                k += Int32(4)
+            end
+            while k < k1
+                a0 = muladd(Float32(A[ai + k * ac]), Float32(B[bo + k * br]), a0)
+                k += Int32(1)
+            end
+            P[lin] = (a0 + a1) + (a2 + a3)
+        end
+    end
+end
+
+@kernel cpu=false function gemv_reduce_kernel!(C, @Const(P), co, cr,
+                                               M::Int32, S::Int32, α, β)
+    i = @index(Global, Linear)
+    if i <= M
+        @inbounds begin
+            acc = P[i]
+            for s in Int32(1):(S - Int32(1))
+                acc += P[i + s * M]
+            end
+            ci = co + (Int32(i) - Int32(1)) * cr
+            C[ci] = eltype(C)(iszero(β) ? acc * Float32(α) :
+                              muladd(acc, Float32(α), Float32(C[ci]) * Float32(β)))
+        end
+    end
+end
+
 function gemmlaunch!(C, A, B, M, N, K, α, β)
     a = gemmstrides(A)
     a === nothing && (a = gemmstrides(densify(A)))
@@ -2244,6 +2367,22 @@ function gemmlaunch!(C, A, B, M, N, K, α, β)
     c = gemmstrides(C)
     # See the note in `mul!` above: the backend comes from the destination.
     backend = KernelAbstractions.get_backend(c[1])
+    # Before `staged_gemm_ok`, which declines `N == 1` anyway — this is the
+    # decode path and it wants a kernel of its own. See the block above.
+    if N == 1
+        S = gemv_split(M, K)
+        if S > 1
+            KC = cld(K, S)
+            P = splitscratch(C, M, 1, S)
+            gemv_splitk_kernel!(backend, 256)(
+                P, a[1], b[1], a[2], a[3], a[4], b[2], b[3],
+                Int32(M), Int32(K), Int32(KC), Int32(M * S); ndrange = M * S)
+            gemv_reduce_kernel!(backend, 256)(
+                c[1], P, c[2], c[3], Int32(M), Int32(S),
+                eltype(C)(α), eltype(C)(β); ndrange = M)
+            return C
+        end
+    end
     if staged_gemm_ok(C, A, B, M, N)
         nblk_m = cld(M, SGEMM_BM)
         nblk_n = cld(N, SGEMM_BN)

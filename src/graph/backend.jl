@@ -231,6 +231,53 @@ refuses a recordable plan that was never `record!`ed.
 recordsplans(::Device) = false
 
 """
+    runscalls(device) -> Bool
+
+Whether this device can run a CALL: a pass member with no ndrange, which submits
+its own work rather than being launched. See the three-argument `dispatch!`.
+
+Beside `recordsplans` above because it is the same shape of question — what this
+device's RUN path can do — and the two are related without being the same. Two
+shapes answer yes:
+
+  * a backend that WALKS its plans calls the function in order;
+  * a backend whose recording is a stream CAPTURE gets it for free, because the
+    library's own submission lands in the capture.
+
+A backend that builds a command buffer itself and submits only that answers no.
+The call would run on the host once, at record time, submit its work somewhere
+other than the buffer being built, and be missing from every replay after that —
+silently. So the answer is no rather than yes-with-a-caveat, and the operation
+is declared as dispatches there instead.
+
+`false` by default: the answer is about a run path, and core cannot infer it.
+"""
+runscalls(::Device) = false
+
+"""
+    patchable(device) -> Bool
+
+Whether a moved address can be written INTO this backend's recording, or whether
+the recording has to be thrown away and made again.
+
+`true` by default, which is the Vulkan answer and the one the pool's move path
+assumed outright: a recorded command holds a device address as eight bytes in
+the plan's argument memory, so `notify_move!` queues a patch and the recording
+survives. `false` is a backend whose recording is opaque — a captured HIP graph
+holds its kernel arguments where only `hipGraphExecKernelNodeSetParams` could
+reach them, and capture does not hand back the node handles that would need.
+Such a plan is [`invalidate!`](@ref)d instead, and the next `run!` records it
+again before it submits.
+
+Asked rather than assumed for the reason [`deviceaddress`](@ref) replaced
+`resource_moved!`: a backend that cannot patch and is never asked is a recording
+that quietly keeps reading the old storage. The images-arena path already had to
+invalidate rather than patch; this is the same fact stated as a property of the
+BACKEND rather than of one arena kind.
+"""
+patchable(::Device) = true
+
+"""
     openrun(device, plan) -> emitter
     closerun!(device, plan, emitter) -> token
     abandonrun!(device, emitter)
@@ -256,6 +303,28 @@ function closerun!(dev, pl, ::Immediate)
     return nothing
 end
 abandonrun!(dev, ::Immediate) = nothing
+
+"""
+    abandonrecording!(device, emitter)
+
+A recording that was opened and will not be closed, because the walk threw.
+
+[`abandonrun!`](@ref)'s counterpart for `record!` rather than `run!`, and a
+separate verb because the two are different objects: a run's emitter owns a
+one-shot buffer the channel lends it for that submission, a recording's owns one
+the PLAN holds for as long as it lives. The Vulkan backend's `abandonrun!` asserts
+the first of those, so it cannot stand in for this.
+
+A partitioned recording is what made this reachable with pieces already closed
+(`recordparts!` releases those and abandons this one), but the need is not the
+partition's: an unpartitioned `record!` whose walk threw leaked a command buffer
+before this existed.
+
+The default is `nothing`, for the backends whose `openrecording` hands back
+nothing and so never have one open. **A backend that records must answer it**,
+or a failed `record!` leaks a command buffer per attempt.
+"""
+abandonrecording!(::Device, e) = nothing
 abandonframe!(dev, pl) = nothing
 
 """
@@ -601,10 +670,12 @@ const BACKEND_VOCABULARY = (
     # for humans: which GPU this is
     :devicename,
     # devices, memory, resources
-    :Device, :backend, :batchqueue, :capacity, :caps, :maxalloc, :pool, :bestshape,
+    :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
+    :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
-    :upload!, :download, :devicecopy!, :hostspan, :deviceaddress, :release!,
+    :deviceslice,
+    :upload!, :download, :devicecopy!, :hostspan, :deviceaddress, :patchable, :release!,
     :indexbuffer,
     # The recording primitives a submission channel needs — 2.3. Core owns the
     # free list and when a recording may be reused; these are the driver half.
@@ -630,7 +701,7 @@ const BACKEND_VOCABULARY = (
     # the queue and its tokens
     :devices, :defaultdevice!,
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
-    :waitfor, :waitfor!, :passed, :fence, :reset_device!,
+    :waitfor, :waitfor!, :passed, :fence, :reset_device!, :awaitwrites,
     # sync lowering
     :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
     # DELETED in phase 1.7: `:vkformat`. A vendor-named entry in the list of
@@ -639,6 +710,12 @@ const BACKEND_VOCABULARY = (
     :syncbackend,
     :compiledraw, :compile_dispatch, :passbarriers,
     :argbytes, :indirectslot,
+    # What core asks a backend's OWN compiled dispatch — the type
+    # `compile_dispatch` returned. Core answers it for its own
+    # `CompiledDispatch`, `Launch` and `Call`, so a backend that reuses those
+    # says nothing; one that returns its own type has to. The other three of the
+    # four are listed below, once.
+    :callgroup,
     :makeprofiler, :Profiler,
     # Asked of whatever `compile_dispatch` returned. DECLARED, because core
     # dispatches through them and a backend must answer: undeclared, they were
@@ -657,7 +734,12 @@ const BACKEND_VOCABULARY = (
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
-    :recordsplans, :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    :recordsplans, :runscalls,
+    :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
+    # Submitting ONE baked piece, and giving one back that will never be
+    # submitted. Core owns the sequence a partition makes of them
+    # (`RecordingParts`) and the walk that builds it.
+    :submitrecording!, :abandonrecording!,
     # DELETED in phase 1.2: `:recycle!`. Its one implementation contained no
     # driver call at all.
     :beginframe!,

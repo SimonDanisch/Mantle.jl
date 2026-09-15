@@ -192,8 +192,20 @@ end
 
 abstract type TransientResource <: Resource end
 
-mutable struct TransientBuffer{T} <: TransientResource
-    n::Int
+mutable struct TransientBuffer{T,N} <: TransientResource
+    # SHAPED, since 2026-09-15. It was a scalar `n`, so a transient arrived at a
+    # kernel flattened and every index had to be recomputed from extents the
+    # kernel was told separately — the same fault `Buffer(dev, T, dims)` was
+    # fixed for one level up, and `test_arena_recording.jl`'s "an N-dimensional
+    # buffer reaches the GPU with its shape" is that fix's test.
+    #
+    # It matters more here than it did there, because a shaped transient is what
+    # lets a graph be DECLARED: `use(p, x)` interns by object identity
+    # (`IdTable`'s `IdDict`), so `use(p, reshape(t, dims))` mints a fresh id per
+    # view and the hazard between two views of one transient goes unseen. The
+    # handle has to be the transient itself, which means the transient has to
+    # carry the shape.
+    dims::NTuple{N,Int}
     first::Int
     last::Int
     # Where in the pool this landed. The BLOCK is kept, not just the fused
@@ -362,6 +374,33 @@ struct BufferRange
     range::UnitRange{Int}
 end
 
+"""
+A shaped window onto a resource: what a kernel receives, over bytes the parent
+owns.
+
+[`BufferRange`](@ref)'s complement, and the two differ in which half they change.
+A range declares what a pass TOUCHES and the kernel still gets the whole buffer;
+a view is what the kernel GETS and the pass still touches the parent. So
+`use(p, v)` names the parent — scoped to the view's elements, so two disjoint
+views of one buffer still get no barrier between them — and hands back the view
+for the dispatch to carry.
+
+This is what lets a graph be declared over an exported model. Every reshape,
+permute and slice in a torch export is already a buffer of kind `:view` naming
+its parent and the op that derived it; the runtime used to rebuild each one as a
+Julia wrapper (`PermutedDimsArray -> ReshapedArray -> SubArray -> array`) over
+the parent's storage, which is why it then needed a walk back DOWN the stack to
+recover the parent, the offset and the strides it had stated in the first place.
+Declared, the descriptor is the thing, and there is nothing to recover.
+
+`offset` is in elements of `T`, from the parent's first element.
+"""
+struct ResourceView{T,N,P}
+    parent::P
+    dims::NTuple{N,Int}
+    offset::Int
+end
+
 struct CompiledDraw{P,S,A,C,V,B,I}
     # Concrete throughout: `Any` here made every field access in the per-draw
     # record path a dynamic lookup, which is where the frame's allocations were.
@@ -405,7 +444,7 @@ singleton — checked when the plan is built, because a closure over device arra
 would be resolved once here and then go stale the first time an argument is
 renamed.
 """
-struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O}
+struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O,G}
     # Concrete throughout, for the reason `CompiledDraw` is: an `Any` field turns
     # every access in the per-dispatch record path into a dynamic lookup. `L` is
     # the backend's launch plan.
@@ -413,6 +452,10 @@ struct CompiledDispatch{L,K,A<:Tuple,I,N,R,O}
     iter::I                             # IterPlan for `nd0`
     nd0::N                              # the ndrange the iteration plan was built for
     obj::O                              # the KA kernel, for an ndrange that moves
+    # …and the workgroup that kernel needs at the CALL, or `nothing` when it
+    # carries one in its type. Only `obj` is re-planned, so only `obj` needs it.
+    # See `callgroup`.
+    group::G
     kernel::K
     args::A
     ndrange::R
@@ -591,6 +634,13 @@ mutable struct Plan{D,H<:Tuple}
     # [`ArgMemory`](@ref) and [`GPURef`](@ref)), so there is one set of addresses
     # and one command buffer holding them.
     recording::Any
+    # Explicit submission partition, retained when an arena move invalidates
+    # the recording. Zero keeps the entire plan in one submission. A field and
+    # not just an argument to `record!` BECAUSE of that retention: the default is
+    # this value, so a plan whose recording was thrown away is recorded again
+    # with the same split instead of collapsing to one submission and hitting
+    # the timeout the split was asked for.
+    record_maxpasses::Int
     # Where every device address the recording's arguments hold was written:
     # recorded address → the (region, offset inside it) of its eight bytes.
     # The region is usually the plan's `ArgMemory` store, but a prepare kernel

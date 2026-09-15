@@ -352,6 +352,45 @@ end
     M.free!(b)
 end
 
+# The same property as the `Buffer` test above, one level down: a TRANSIENT is
+# shaped too, so a kernel indexes it N-dimensionally instead of being handed a
+# flat region plus the extents as scalars.
+#
+# It carried a scalar `n` until 2026-09-15. That is also what blocked declaring a
+# graph rather than capturing one: `use` interns by object identity, so
+# `use(p, reshape(t, dims))` mints a fresh id per view and two views of one
+# transient show the barrier phase no hazard at all — the handle has to be the
+# transient, so the transient has to carry the shape.
+@kernel function nd_shape!(a)
+    i, j = @index(Global, NTuple)
+    @inbounds a[i, j] = Float32(10 * i + j)
+end
+
+@testset "an N-dimensional transient reaches the GPU with its shape" begin
+    dev = M.Device(TESTBACKEND)
+    # …and the one-argument form is still the N = 1 case, not a different thing.
+    # Its own graph, because an unused transient has no interval to place and
+    # `Liveness` says so rather than placing it anyway.
+    @test size(M.Transient.Buffer(M.Graph(dev), Float32, 8)) == (8,)
+    g = M.Graph(dev)
+    t = M.Transient.Buffer(g, Float32, 3, 4)
+    @test size(t) == (3, 4)
+    @test length(t) == 12
+    @test ndims(t) == 2
+    @test eltype(t) === Float32
+    M.compute!(g, "shape") do p
+        M.dispatch!(p, nd_shape!, (M.use(p, t; write = true),), size(t))
+    end
+    pl = M.Plan(g)
+    @test M.storage(t) isa AbstractArray{Float32,2}
+    @test size(M.storage(t)) == (3, 4)
+    M.record!(pl)
+    M.run!(pl)
+    M.waitidle(dev)
+    @test Array(M.storage(t)) == Float32[10i + j for i in 1:3, j in 1:4]
+    M.free!(pl)
+end
+
 # Slow enough that a submission is still in flight when the next line runs:
 # every element spins, and the total is far past what a fence poll sees pass.
 @kernel function arena_slow!(a)

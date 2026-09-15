@@ -180,12 +180,13 @@ shared — see [`hostview`](@ref) for why it is a wrapper and not a reinterpret.
 The view goes in `block`, which is the field every backend keeps its placed
 storage in.
 """
-function Mantle.materialize!(::HostDevice, t::Mantle.TransientBuffer{T}, slab::Vector{UInt8},
-                             offset::Int) where {T}
-    t.block = Mantle.hostview(T, pointer(slab), length(slab), offset, (t.n,))
-    t.offset = offset
-    return t
-end
+# The whole of what placement asks here: core's `materialize!` decides the
+# extents, the element type and the offset, and this says what a host array over
+# them is. `hostview` bounds-checks against the slab, which is why it takes its
+# length rather than trusting the offset.
+Mantle.deviceslice(::HostDevice, ::Type{T}, dims::Dims, slab::Vector{UInt8},
+                   offset::Int) where {T} =
+    Mantle.hostview(T, pointer(slab), length(slab), offset, dims)
 
 # ── what differs on a CPU ─────────────────────────────────────────────────────
 #
@@ -222,6 +223,15 @@ earlier step wrote is already visible. Overriding this is what keeps the shared
 `ndrangeof` free here while it synchronises on a GPU — see `graph/kalaunch.jl`.
 """
 Mantle.awaitwrites(::HostDevice) = nothing
+
+"""
+`true`: a call runs here, because this backend WALKS its plans.
+
+`openrecording` answers `nothing`, so `run!` executes the plan's compiled
+dispatches in order on this thread — and a call is one of them. There is no
+command buffer for the call's work to be missing from.
+"""
+Mantle.runscalls(::HostDevice) = true
 
 """
 Yes, trivially: nothing here is recorded. A GPU discards a predicated iteration

@@ -168,6 +168,20 @@ on more than one device the process default is not necessarily that device.
 """
 function materialize! end
 
+"""
+    deviceslice(device, T, dims, memory, offset) -> array
+
+`memory` at `offset` as a `dims`-shaped array of `T`, borrowed: the memory
+belongs to the pool and this never frees it.
+
+The whole of what [`materialize!`](@ref) asks a KernelAbstractions backend, and
+deliberately the whole: the extents, the element type, the offset and which
+region to carve are core's decisions, so what is left is the array type. A
+backend that keeps the block instead — because its barriers need the buffer
+identity — implements no method here.
+"""
+function deviceslice end
+
 """Passes in execution order — the scheduled order once Schedule has run,
 declaration order before that."""
 ordered(c) = (o = analysis(c).order; isempty(o) ? passes(c) : passes(c)[o])
@@ -328,6 +342,28 @@ end
 struct Liveness <: Phase end
 
 """
+The transient a usage id belongs to, through a slice or a view if that is what
+the pass named.
+
+A usage recorded with `range` — or through a [`ResourceView`](@ref), which is a
+range plus a shape — is interned as the `BufferRange`, not as the buffer, because
+that is what gives disjoint slices disjoint ids and the hazard set for free. The
+interval, though, belongs to the PARENT: the bytes the placer hands out are the
+whole transient's, and a pass touching any part of it keeps all of it live.
+
+Without this the parent got no interval at all and `Liveness` threw "never used
+by any pass" for a transient two passes were writing. It was latent because
+`range` had only been used on persistent buffers, which are not placed.
+"""
+function transientfor(c, byid, id)
+    t = get(byid, id, nothing)
+    t === nothing || return t
+    r = get(c.graph.ids.by_id, id, nothing)
+    r isa BufferRange || return nothing
+    return get(byid, get(c.graph.ids.ids, r.parent, 0), nothing)
+end
+
+"""
 Intervals come from which passes touched a resource, recorded as the graph was
 built. Liveness is therefore never a second statement that could disagree with
 use.
@@ -346,7 +382,7 @@ function run!(::Liveness, c)
         t.first, t.last = typemax(Int), 0
     end
     for (pos, p) in enumerate(ordered(c)), (id, _) in usages(p)
-        t = get(byid, id, nothing)
+        t = transientfor(c, byid, id)
         t === nothing && continue
         t.first = min(t.first, pos)
         t.last = max(t.last, pos)

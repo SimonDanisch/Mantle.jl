@@ -102,39 +102,38 @@ const BDA_POISON = UInt64(0)
 # there is nothing to do. `maybe_trim_pool!` did exactly that and declined to
 # trim a pool holding 1.3 GB.
 
-mutable struct MemoryStats
-    # Estimated maximum bytes available to us on the device-local heap.
-    # Probed lazily from `ctx.memory_properties` and refreshed every 10s.
-    @atomic size::Int
-    @atomic last_updated::Float64
+# `MemoryStats` moved to `coretypes.jl`, beside the `MemoryPolicy` field that
+# holds one.
 
-    # Last `maybe_collect` run + the rolling cost of that GC.
-    @atomic last_time::Float64
-    @atomic last_gc_time::Float64
-    # Bytes freed by the most recent `maybe_collect`-triggered GC.
-    @atomic last_freed::Int
-end
-
-MemoryStats() = MemoryStats(0, 0.0, 0.0, 0.0, 0)
-
-const MEMORY_STATS = MemoryStats()
-
-const EAGER_GC = Ref{Bool}(true)
+# `const MEMORY_STATS = MemoryStats()` and `const EAGER_GC = Ref{Bool}(true)`
+# were here, deleted 2026-09-15. Both were process-global state a BACKEND read to
+# decide what to do, which it has no business doing: the context is an argument at
+# every call site, `MemoryPolicy` is already per-pool, and the comment on that
+# struct describes this exact mistake being fixed for eleven other module-level
+# `Ref`s — "module-level, these were one number for two heaps, so the pressure
+# ratio, the trim threshold and the OOM retry all read the SUM of both devices
+# against ONE device's capacity". `MEMORY_STATS` was the twelfth and survived the
+# fix, so a busy discrete GPU still drove collection on an idle integrated one
+# through the heap-size probe and the GC rate limiter.
+#
+# They are `mempolicy(ctx).stats` and `mempolicy(ctx).eager_gc` now.
 
 """
-    eager_gc!(flag::Bool)
+    eager_gc!(ctx, flag::Bool)
 
-Enable/disable the pressure-driven `maybe_collect`.  Useful when benchmarking,
-to take the allocator's GC hooks out of the measurement.
+Enable/disable the pressure-driven `maybe_collect` for THIS context. Useful when
+benchmarking, to take the allocator's GC hooks out of the measurement.
 """
-eager_gc!(flag::Bool) = (EAGER_GC[] = flag)
+eager_gc!(ctx::VkContext, flag::Bool) = (mempolicy(ctx).eager_gc = flag)
+eager_gc!(flag::Bool) = eager_gc!(vk_context(), flag)
 
-function reset_memory_stats!()
-    @atomic MEMORY_STATS.size = 0
-    @atomic MEMORY_STATS.last_updated = 0.0
-    @atomic MEMORY_STATS.last_time = 0.0
-    @atomic MEMORY_STATS.last_gc_time = 0.0
-    @atomic MEMORY_STATS.last_freed = 0
+function reset_memory_stats!(ctx::VkContext = vk_context())
+    st = mempolicy(ctx).stats
+    @atomic st.size = 0
+    @atomic st.last_updated = 0.0
+    @atomic st.last_time = 0.0
+    @atomic st.last_gc_time = 0.0
+    @atomic st.last_freed = 0
     return
 end
 
@@ -303,8 +302,9 @@ function trim_gpu_pool!(ctx::VkContext = vk_context())
 end
 
 function maybe_collect(ctx::VkContext; blocking::Bool=false)
-    EAGER_GC[] || return
-    stats = MEMORY_STATS
+    p = mempolicy(ctx)
+    p.eager_gc || return
+    stats = p.stats
     current_time = time()
 
     # Runs before the ratio gate below: dead pool capacity has to be returned on
@@ -951,10 +951,13 @@ const POOL_ALIGN = 256
 
 # Defaults live here, next to the policy they configure, rather than in eleven
 # module-level `Ref`s. `2 GiB` soft cap, trim above 1 GiB and no more than every
-# 5 s, a full GC no more than every 30 s.
+# 5 s, a full GC no more than every 30 s, and at most 5% of wall time in
+# soft-cap collections — the same share `maybe_collect` gives the
+# pressure-driven path.
 MemoryPolicy() = MemoryPolicy(false, 2 * 1024^3, 1024 * 1024 * 1024,
-                              5.0, 30.0, 0.02, 0.5, false,
-                              0.0, 0.0, 0.0, 0.0, 0.0,
+                              5.0, 30.0, 0.02, 0.5, 0.05, false,
+                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                              true, MemoryStats(),
                               Threads.Atomic{Int}(0), Set{VkManagedBuffer}(),
                               Threads.Atomic{Int}(0),
                               Threads.Atomic{Bool}(false))
@@ -1126,7 +1129,21 @@ than back to the pool, and until it is drained the memory is dead to everyone.
 function collect_for_pool!(bq::VulkanBatchQueue)
     p = mempolicy(ctxof(bq))
     now = time()
-    now - p.gc_last < p.gc_mingap && return false
+    # The gap is `gc_mingap`, or what the LAST collection cost divided by the
+    # share of wall time this is allowed to take, whichever is longer.
+    #
+    # `gc_mingap` alone bounds how OFTEN this runs and says nothing about what it
+    # costs, and the two are not related: an incremental collection on a heap
+    # holding a couple of GiB of GPU-backed arrays takes ~63 ms here, so a 20 ms
+    # gap permits spending three quarters of the clock inside the allocator.
+    # Measured on RIFE at 1920x1152, whose steady state is 2094.6 MiB against
+    # this cap's 2048 MiB default: six collections a run, 142 ms of work
+    # reported as a p50 of 519 ms and a spread out to 912, and the pool 2% over
+    # the cap the whole time so there was nothing to win. `maybe_collect` has had
+    # a wall-time budget (`max_gc_rate`) since it was written; this is the same
+    # idea, and the only reason it was missing here is that the soft cap arrived
+    # when a collection was cheap.
+    now - p.gc_last < max(p.gc_mingap, p.gc_lastcost / p.gc_budget) && return false
     t0 = time_ns()
     GC.gc(false)
     drain!(bq)
@@ -1136,7 +1153,8 @@ function collect_for_pool!(bq::VulkanBatchQueue)
         p.gc_full_last = now
     end
     p.gc_last = time()
-    p.gc_seconds += (time_ns() - t0) / 1e9
+    p.gc_lastcost = (time_ns() - t0) / 1e9
+    p.gc_seconds += p.gc_lastcost
     Threads.atomic_add!(p.gc_count, 1)
     return true
 end
@@ -1357,6 +1375,11 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
                      host_ptr::Ptr{UInt8}, nbytes::Integer; offset::Integer=0)
     nbytes == 0 && return
     @assert direction === :upload || direction === :download  "direction must be :upload or :download"
+    # A guard against a host transfer inside a launch capture was here, deleted
+    # 2026-09-15: it could not be replayed, because the host moves the bytes and
+    # no command in the buffer does. A declared graph states a host write as an
+    # update pass (`Update`, `hostwritten!`), which IS in the plan, so there is no
+    # longer a way to ask for the unreplayable thing.
     buf_offset = pool_offset(managed) + Int(offset)
 
     # BAR fast-path: host-visible mapped memory — direct memcpy, no staging.
