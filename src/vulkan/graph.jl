@@ -1013,7 +1013,21 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
                                                     color_format = VK.Format[target_format(t) for t in p.targets],
                                                     depth_format = p.depth === nothing ?
                                                         VK.FORMAT_UNDEFINED :
-                                                        target_format(p.depth))
+                                                        target_format(p.depth),
+                                                    # What the draw samples, which
+                                                    # `DrawCall.bindings` exists to carry: a
+                                                    # pipeline whose fragment stage declares a
+                                                    # texture and whose layout declares no set
+                                                    # is a SPIR-V referencing a binding the
+                                                    # layout does not have. The hand-recorded
+                                                    # path passed this and the graph did not, so
+                                                    # the first sampled draw declared into a
+                                                    # graph — every Makie line, which samples its
+                                                    # dash pattern — segfaulted the driver inside
+                                                    # `vkCreateGraphicsPipelines`.
+                                                    descriptor_set_layout =
+                                                        d.bindings === nothing ? nothing :
+                                                        d.bindings.layout)
     # The block is laid out to whichever stage's shader reads it.
     # `ensure_compiled_with_shader!` hands back the vertex shader because that
     # is the usual answer; a fullscreen pass whose vertex stage takes nothing
