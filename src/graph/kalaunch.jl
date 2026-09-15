@@ -884,6 +884,11 @@ function record!(pl::Plan; maxpasses::Int = pl.record_maxpasses)
         throw(ArgumentError("record!: free the existing recording before changing maxpasses"))
     pl.recording === nothing || return pl
     recordable(pl) || throw(ArgumentError(
+        isempty(pl.graph.surfaces) ?
+        "record!: this plan holds a rebindable draw binding. A recording packs a " *
+        "draw's arguments once and holds their address for its life, so a later " *
+        "`rebind!` would be written to memory nothing reads. Leave the plan " *
+        "unrecorded — it re-packs every run, which is what a cell is for." :
         "record!: this plan draws to a surface. A swapchain image is a different " *
         "image every frame and a recording names one, so a windowed plan needs a " *
         "recording per swapchain image — which is not built yet. Headless plans " *
@@ -1006,11 +1011,34 @@ function submitrecording!(ctx, rec::RecordingParts, e)
     return tok
 end
 
-"""Whether this plan's commands can be written once, or have to be emitted per
-run. One reason left, and step 9 removes it: a plan drawing to a SURFACE names a
-swapchain image inside its recorded commands, and that is a different image
-every frame."""
-recordable(pl::Plan) = isempty(pl.graph.surfaces)
+"""
+Whether this plan's commands can be written once, or have to be emitted per run.
+
+Two reasons they cannot, and both are the same shape — something inside the
+commands differs between runs:
+
+  * a plan drawing to a SURFACE names a swapchain image, and that is a different
+    image every frame (step 9 removes this one);
+  * a plan holding a [`DrawBinding`](@ref) names the bytes it packed, and a cell
+    whose whole purpose is to be rewritten between runs cannot be frozen into
+    them.
+
+The second one was enforced in the PACKER, which refused a cell whether it was
+packing a recording or a run — so `record!` told a caller to leave the plan
+unrecorded, and `execute!` then refused to run the unrecorded plan. A Makie
+frame, whose every draw is a cell, could neither be recorded nor run. Refusing
+here instead is one answer in one place: this plan cannot be recorded, so it is
+emitted per run, and the packer re-reads every cell on the way.
+"""
+recordable(pl::Plan) = isempty(pl.graph.surfaces) && !hasrebindable(pl)
+
+"""Does any draw in this plan take its arguments from a cell the host rewrites?"""
+function hasrebindable(pl::Plan)
+    for p in pl.graph.passes, d in p.draws
+        d.args isa DrawBinding && return true
+    end
+    return false
+end
 
 # ── The immediate emitter ────────────────────────────────────────────────────
 #

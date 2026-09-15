@@ -1033,9 +1033,8 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # is the usual answer; a fullscreen pass whose vertex stage takes nothing
     # and whose fragment stage reads a g-buffer is the other one.
     isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment; ctx = c.graph.dev.ctx))
-    # The CELL when there is one, so a rebind reaches the packer — and
-    # `packdraw!` refuses it for a RECORDING, which freezes its bytes by
-    # definition.
+    # The CELL when there is one, so a rebind reaches the packer. A plan holding
+    # one is not `recordable`, so it is never frozen into a recording.
     packed = packedargs(d.args, d.args, d.frag_args)
     info = shader.push_info
     nbytes = info.arg_buffer_size + compute_inline_extra_from_byval(info.byval_llvm_sizes)
@@ -1214,30 +1213,31 @@ end
 
 """
 Pack a draw's arguments into the plan's slot: the counterpart of `packdispatch!`
-and `packtrace!`, and like them written once, at `record!`.
+and `packtrace!`.
+
+Once at `record!` for a recorded plan, and once per run for an unrecorded one —
+which is the whole of what a [`DrawBinding`](@ref) needs, and why nothing here
+asks which it is. `drawargs` reads the cell's CONTENTS at the moment of packing,
+so a `rebind!` between runs lands in the next run's bytes.
+
+A recording could not honour that — it writes these bytes once and its command
+buffer holds their address for the plan's life — and it does not have to: a plan
+holding a cell is not `recordable`, so `record!` refuses it before anything gets
+here. That refusal used to live in this function instead, where it also caught
+the unrecorded path it was never meant to: every Makie frame, whose every draw
+is a cell, could neither be recorded nor run.
 """
 function packdraw!(e::Emitter, d::CompiledDraw)
     am = e.args
     off = d.argoff
     info = d.shader.push_info
-    raw = rawargs(d.args)
+    raw = rawargs(drawargs(d.args))
     holdleaves!(e.owner, raw)
     pack_args_direct!(e.owner, am.ptr + off, am.address + off, info.arg_offsets,
                       info.arg_buffer_size, info.byval_llvm_sizes,
-                      devargs(adaptor(e), rawargs(recordedargs(d.args))))
+                      devargs(adaptor(e), raw))
     return nothing
 end
-
-# A recording writes these bytes ONCE and the command buffer holds their address
-# for the plan's life, so a cell whose whole purpose is to be rewritten between
-# runs cannot be honoured here — and honouring it silently, by freezing whatever
-# it held at `record!`, is the failure this says out loud.
-@inline recordedargs(t::Tuple) = t
-recordedargs(::DrawBinding) = throw(ArgumentError(
-    "a recorded plan cannot take rebindable draw arguments: a recording packs them " *
-    "once and holds their address for its life, so a later `rebind!` would be " *
-    "written to memory nothing reads. Pass a plain tuple, or leave the plan " *
-    "unrecorded — an unrecorded plan re-packs every run, which is what a cell is for."))
 
 """
 Pack a trace's arguments into the plan's slot. The counterpart of `packdispatch!`.
@@ -1822,6 +1822,23 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         return present_frame!(bq, win, e.owner)
     end
     return submitrecording!(bq, pl.recording, e)
+end
+
+"""
+No recording: everything this run does is in the one-shot the walk just filled.
+
+Headless AND unrecorded, which is a plan holding a rebindable cell — `recordable`
+says why. The windowed branch above is the other unrecorded case and has always
+worked, which is why this one was missing: `submitrecording!` was reached with
+`nothing` and there was no method, so a headless frame could be built, compiled
+and emitted, and then had nowhere to go.
+"""
+function submitrecording!(bq, ::Nothing, e::Emitter)
+    front = e.owner::OneShot
+    seal!(front)
+    tok = submit!(bq, front)
+    handover!(bq, tok, front; tag = :run)
+    return tok
 end
 
 function submitrecording!(bq, rec::Recording, e)
