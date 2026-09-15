@@ -408,12 +408,37 @@ Mantle.supports_mesh_pipeline(::MetalDevice) = true
 # `GraphicsPipeline` carries it in its type: `Nothing` or a `GeometryShader`.
 
 """One draw of a lowered geometry pipeline: the description, and the baked arguments."""
-struct MetalCompiledGeometryDraw
-    pipeline::Mantle.GraphicsPipeline
-    color_formats::Vector{MTLm.MTLPixelFormat}
-    depth_format::Union{Nothing,MTLm.MTLPixelFormat}
-    mesh::StageArgs
-    frag::StageArgs
+mutable struct MetalCompiledGeometryDraw
+    const pipeline::Mantle.GraphicsPipeline
+    const color_formats::Vector{MTLm.MTLPixelFormat}
+    const depth_format::Union{Nothing,MTLm.MTLPixelFormat}
+    const mesh::StageArgs
+    const frag::StageArgs
+    # The lowered mesh pipeline, remembered per INDEXEDNESS — the one thing about
+    # it that is the draw's rather than the pipeline's. `lower_geometry_to_mesh`
+    # is a pure function of the two and was being called again for every draw of
+    # every frame: 47 KB and 836 allocations a frame on a figure with a `lines!`
+    # and a `scatter!`, for a `MeshPipeline` identical to the last one.
+    #
+    # Here rather than in a global table beside the function, because this is
+    # where the answer's inputs already live and a draw is exactly its scope.
+    lowered_plain::Any
+    lowered_indexed::Any
+end
+
+MetalCompiledGeometryDraw(p, cf, df, mesh, frag) =
+    MetalCompiledGeometryDraw(p, cf, df, mesh, frag, nothing, nothing)
+
+"""The lowered mesh pipeline for this draw, lowered once."""
+function loweredmesh(d::MetalCompiledGeometryDraw, indexed::Bool)
+    if indexed
+        d.lowered_indexed === nothing &&
+            (d.lowered_indexed = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = true))
+        return d.lowered_indexed
+    end
+    d.lowered_plain === nothing &&
+        (d.lowered_plain = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = false))
+    return d.lowered_plain
 end
 
 """
@@ -470,7 +495,7 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
     isempty(d.mesh.device) || rebake!(d.mesh, args)
     isempty(d.frag.device) || rebake!(d.frag, args)
 
-    lowered = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = indices !== nothing)
+    lowered = loweredmesh(d, indices !== nothing)
     # The index buffer as the mesh stage's LAST argument, which is where
     # `GeometryAsMesh` reads it. Converted the same way every other argument is,
     # so what the shader sees is the device array and not a raw address.
@@ -496,7 +521,13 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
         # indices are read by a shader, and an address the encoder was never told
         # about reads as zeros rather than faulting.
         MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageMesh)
-        bind_arg!(MTLm.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1)
+        # The mesh stage's scratch: the index buffer is one more of its
+        # arguments, so it stages the same way the rest do. Sized explicitly
+        # because `scratchsize` only ever saw the stage's OWN arguments, and an
+        # index buffer being narrower than a 4x4 matrix is luck, not a contract.
+        length(d.mesh.scratch) < sizeof(typeof(ix)) &&
+            resize!(d.mesh.scratch, sizeof(typeof(ix)))
+        bind_arg!(MTLm.set_mesh_bytes!, enc, ix, length(d.mesh.device) + 1, d.mesh.scratch)
     end
     bind_stage!(enc, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
 
