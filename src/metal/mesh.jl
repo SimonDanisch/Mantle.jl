@@ -434,7 +434,8 @@ time the pipeline is used, not from inside a shader compilation.
 """
 function Mantle.compile_draw(d::MetalDevice,
                              p::Mantle.GeometryPipeline,
-                             color_formats, depth_format, vert_args, frag_args)
+                             color_formats, depth_format, vert_args, frag_args;
+                             bindings = nothing)
     mesh = StageArgs(vert_args)
     frag = StageArgs(frag_args)
     Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), buffer_types(mesh))
