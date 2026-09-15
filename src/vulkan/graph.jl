@@ -151,11 +151,10 @@ that method.
 caps(dev::LavaDevice) = caps(dev.ctx)
 
 # ── window ────────────────────────────────────────────────────────────────────
-"""
-A window, which is Mantle's because the frame loop is: `isopen` has to be a
-predicate rather than a thing that also pumps events, and `run!` is the one call
-per frame that can pump them.
-"""
+#
+# `LavaWindow` is gone with `Window(w, h)`, which is core's — what documented it
+# went with it. Two docstrings cannot stack: the second has nothing between it
+# and the first to attach to, and Julia refuses the file.
 """
 What is on the window now, as a `(width, height)` matrix of BGRA byte tuples.
 
