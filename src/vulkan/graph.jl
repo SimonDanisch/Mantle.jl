@@ -1710,11 +1710,22 @@ openrecording(dev::LavaDevice, pl::Plan) = Emitter(recording!(dev.bq), pl.args)
 # for it and this comment is the record of WHY.
 #
 # A recording on this backend is a `VkCommandBuffer` built by a second walk over
-# the plan, and `run!` submits that recording and nothing else — a Lava plan has
-# no walk path at all (`execute!` throws on an unrecorded plan). A host call
-# would therefore run once, at record time, submitting its work outside the
-# buffer, and every replay would be missing it. So a call is refused at compile,
-# by core, with a message naming `coopmat_gemm!` as what to declare instead.
+# the plan, and `run!` submits that recording and nothing else. A host call would
+# therefore run once, at record time, submitting its work outside the buffer, and
+# every replay would be missing it.
+#
+# An UNRECORDED plan is walked per run here now — that is what a rebindable draw
+# needs — so "no walk path at all" is no longer the reason, and the answer is
+# still no. The walk fills one one-shot and submits it at the END, so a host call
+# made during the walk submits its own work BEFORE any of the commands the walk
+# is still writing: the barriers the graph derived would order the dispatches
+# against each other and nothing against the call. The host backend can run one
+# because it executes each pass as it walks; ROCm can because the library's own
+# submission lands inside the stream capture. This backend would have to split
+# its submission at every call, which is a design, not an oversight.
+#
+# So a call is refused at compile, by core, with a message naming
+# `coopmat_gemm!` as what to declare instead.
 
 # `RecordingSequence`, `release!` for it, and the chunked `recordplan!` that built
 # it were HERE until 2026-09-14. None of the three contained a driver call: the
