@@ -1172,9 +1172,39 @@ caller has to know about, which is the thing this package exists to remove.
 
 Nothing extra is asked of the allocation: `drawIndexedPrimitives` takes any
 buffer, which is why the usage bits Vulkan needs have no counterpart here.
+
+The STORAGE is the one this backend's pool already declares for buffers, and
+that is the whole reason it is spelled rather than defaulted. `MtlVector` gives
+private storage, into which a host write stages through a temporary shared
+buffer, blits and frees: 122 us for 4096 `Vec3f` against a `memcpy` too fast to
+time. An index buffer is rewritten from the host every time a plot relayouts, so
+that was most of what a zoomed axis cost.
 """
-Mantle.indexbuffer(::MetalDevice, indices::AbstractVector{UInt32}) =
-    Metal.MtlVector{UInt32}(indices)
+Mantle.indexbuffer(d::MetalDevice, indices::AbstractVector{UInt32}) =
+    buffercopy(d, indices)
+
+"""
+    devicearray(backend, data) -> MtlVector
+
+An array of `data` on Metal, in the storage this backend gives buffers.
+
+The portable fallback is `KernelAbstractions.allocate` plus a copy, which has no
+way to ask for a storage mode and so gets the private default — see
+`indexbuffer` above for what that costs a host write.
+"""
+Mantle.devicearray(be::Metal.MetalBackend, data::AbstractArray) =
+    buffercopy(Mantle.todevice(be), data)
+
+# The storage mode is a TYPE PARAMETER on `MtlArray`, not a keyword — there is no
+# `MtlArray{T}(undef, dims; storage = …)`, and asking for one is a `MethodError`
+# that RayMakie's per-plot error handling turns into a blank figure rather than a
+# stack trace.
+function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}
+    S = constraintof(d, Buffers(), T)
+    a = Metal.MtlArray{T,N,S}(undef, size(data))
+    copyto!(a, data)
+    return a
+end
 
 Mantle.colorimage(fb::MetalFramebuffer) = fb.color
 Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
