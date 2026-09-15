@@ -49,18 +49,11 @@ function random_graph(dev, rng, n, passes; policy = M.Overlap(), coalesce = true
         a = sources[rand(rng, 1:length(sources))]
         b = sources[rand(rng, 1:length(sources))]
         dst = bufs[i]
-        M.compute!(g, "p$i") do p
-            ra = M.use(p, a; read = true)
-            rb = M.use(p, b; read = true)
-            w = M.use(p, dst; write = true)
-            M.dispatch!(p, mix!, (w, ra, rb, Float32(i)), n)
-        end
+        M.dispatch!(g, mix!, (dst, a, b, Float32(i)), n; name = "p$i")
         push!(sources, dst)
     end
-    M.compute!(g, "out") do p
-        M.dispatch!(p, keep!, (M.use(p, out; write = true),
-                               M.use(p, bufs[end]; read = true)), n)
-    end
+    M.dispatch!(g, keep!, (out,
+                               bufs[end]), n; name = "out")
     (; g, seed, out, bufs, plan = M.record!(M.Plan(g; policy, coalesce)))
 end
 
@@ -97,7 +90,11 @@ function check(dev, seed; n = 4096, passes = 12, policy = M.Overlap())
     function once(graph)
         M.update!(graph.seed, fill(1.0f0, n))
         M.run!(graph.plan)
-        Mantle.flush!(dev.bq, dev.ctx.device)
+        # Wait for THIS plan, not for the queue: `flush!(bq, device)` here still
+        # passed the raw `VK.Device` the portable signature stopped taking, so
+        # every fuzz run through this harness died on a `MethodError` before it
+        # compared anything.
+        M.waitfor!(graph.plan)
         Array(M.storage(graph.out))
     end
     reference = once(u)
