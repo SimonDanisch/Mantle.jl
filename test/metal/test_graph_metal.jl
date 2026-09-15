@@ -33,17 +33,8 @@ end
     out = Mantle.Buffer(dev, zeros(Float32, n))
     mid = Mantle.Transient.Buffer(g, Float32, n)
 
-    Mantle.compute!(g, "scale") do p
-        Mantle.use(p, inp; read = true)
-        Mantle.use(p, mid; write = true)
-        Mantle.dispatch!(p, _scale!, (mid, inp, 3.0f0), n)
-    end
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, mid; read = true)
-        Mantle.use(p, inp; read = true)
-        Mantle.use(p, out; write = true)
-        Mantle.dispatch!(p, _add!, (out, mid, inp), n)
-    end
+    Mantle.dispatch!(g, _scale!, (mid, inp, 3.0f0), n; name = "scale")
+    Mantle.dispatch!(g, _add!, (out, mid, inp), n; name = "add")
 
     @test length(Mantle.passes(g)) == 2
     @test length(g.transients) == 1
@@ -95,17 +86,8 @@ end
     out = Mantle.Buffer(dev, zeros(Float32, n))
     mid = Mantle.Transient.Buffer(g, Float32, n)
 
-    Mantle.compute!(g, "producer") do p
-        Mantle.use(p, inp; read = true)
-        Mantle.use(p, mid; write = true)
-        Mantle.dispatch!(p, _scale!, (mid, inp, 5.0f0), n)
-    end
-    Mantle.compute!(g, "consumer") do p
-        Mantle.use(p, mid; read = true)
-        Mantle.use(p, inp; read = true)
-        Mantle.use(p, out; write = true)
-        Mantle.dispatch!(p, _add!, (out, mid, inp), n)
-    end
+    Mantle.dispatch!(g, _scale!, (mid, inp, 5.0f0), n; name = "producer")
+    Mantle.dispatch!(g, _add!, (out, mid, inp), n; name = "consumer")
 
     plan = Mantle.Plan(g)
     Mantle.run!(plan)
@@ -132,11 +114,7 @@ end
 
     src = Mantle.Buffer(dev, zeros(Float32, n))
     dst = Mantle.Buffer(dev, zeros(Float32, n))
-    Mantle.compute!(g, "copy") do p
-        Mantle.use(p, src; read = true)
-        Mantle.use(p, dst; write = true)
-        Mantle.dispatch!(p, _scale!, (dst, src, 1.0f0), n)
-    end
+    Mantle.dispatch!(g, _scale!, (dst, src, 1.0f0), n; name = "copy")
     plan = Mantle.Plan(g)
 
     # The update pass is a pass, dispatchless or not, and it is FIRST — that

@@ -47,11 +47,7 @@ end
     trips = Mantle.GPURef(dev, Int32(1))          # the loop runs ONE of its two iterations
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, 2, trips) do i
-        Mantle.compute!(g, "bump-$i") do p
-            Mantle.use(p, out; read = true, write = true)
-            Mantle.use(p, count; read = true)
-            Mantle.dispatch!(p, dip_bump!, (out, count), Mantle.DeviceRange(count); group = 64)
-        end
+        Mantle.dispatch!(g, dip_bump!, (out, count), Mantle.DeviceRange(count); group = 64, name = "bump-$i")
     end
     pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))
 

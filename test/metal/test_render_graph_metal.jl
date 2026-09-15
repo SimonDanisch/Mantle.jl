@@ -285,9 +285,7 @@ end
     g = M.Graph(RG_DEV)
     color = M.Transient.Image(g, RGBA{N0f8}, (64, 64))
     cmd = M.Buffer(RG_DEV, M.DrawIndirectCommand, 1)
-    M.compute!(g, "count") do p
-        M.dispatch!(p, rg_setcount!, (M.use(p, cmd; write = true), Int32(3)), 1)
-    end
+    M.dispatch!(g, rg_setcount!, (cmd, Int32(3)), 1; name = "count")
     M.render!(g, "tri", color => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
         M.draw!(p, RG_PIPE, (RG_TRI,), cmd)
     end
@@ -310,9 +308,7 @@ end
         g2 = M.Graph(RG_DEV)
         color2 = M.Transient.Image(g2, RGBA{N0f8}, (64, 64))
         cmd2 = M.Buffer(RG_DEV, M.DrawIndirectCommand, 1)
-        M.compute!(g2, "count") do p
-            M.dispatch!(p, rg_setcount!, (M.use(p, cmd2; write = true), Int32(3)), 1)
-        end
+        M.dispatch!(g2, rg_setcount!, (cmd2, Int32(3)), 1; name = "count")
         M.render!(g2, "tri", color2 => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
             M.draw!(p, RG_PIPE, (RG_TRI,), cmd2)
         end
@@ -643,9 +639,7 @@ end
     M.render!(g, "before", a => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
         M.draw!(p, RG_PIPE, (RG_TRI,), 3)
     end
-    M.compute!(g, "between") do p
-        M.dispatch!(p, rg_touch!, (M.use(p, scratch; write = true),), 16)
-    end
+    M.dispatch!(g, rg_touch!, (scratch,), 16; name = "between")
     M.render!(g, "after", a => M.Keep) do p
         M.draw!(p, RG_PIPE, (RG_TRI,), 3)
     end

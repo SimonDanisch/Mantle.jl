@@ -109,7 +109,6 @@ begin # ── packages: their own block, so the macros below are expandable ─
     handover!(attr) = (attr[:plot][]; nothing)
 
     function draw_scatter!(p, attr, mvp)
-        M.use(p, mvp; read = true)
         b = buffers(attr)
         col, siz = M.Attribute(p, b[:color]), M.Attribute(p, b[:markersize])
         args = (M.Attribute(p, b[:positions]), col, siz, mvp, M.stride(col), M.stride(siz))
@@ -133,12 +132,7 @@ begin # ── packages: their own block, so the macros below are expandable ─
 
     # left: the graph owns the simulation, so this plot never hands anything over
     simvel = M.Buffer(dev, drift(n))
-    M.compute!(graph, "advect") do p
-        x = M.use(p, buffers(sim)[:positions]; read = true, write = true)
-        v = M.use(p, simvel; read = true, write = true)
-        M.use(p, dtref; read = true)
-        M.dispatch!(p, advect!, (x, v, dtref, 1.4f0), n)
-    end
+    M.dispatch!(graph, advect!, (buffers(sim)[:positions], simvel, dtref, 1.4f0), n; name = "advect")
 
     # middle: the same kernel on the device, outside the graph
     gpupos, gpuvel = M.Buffer(dev, copy(b)), M.Buffer(dev, drift(n))

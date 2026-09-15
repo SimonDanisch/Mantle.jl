@@ -250,12 +250,10 @@ function seam_gatedplan(dev, n, iters)
     b = M.Buffer(dev, fill(1.0f0, n))
     flag = M.Buffer(dev, Int32[iters])
     M.repeat!(g, iters; while_nonzero = flag) do i
-        M.compute!(g, "it-$i") do p
-            M.dispatch!(p, seam_gatecount!,
-                        (M.use(p, a; read = true, write = true),
-                         M.use(p, b; read = true),
-                         M.use(p, flag; read = true, write = true)), n)
-        end
+        M.dispatch!(g, seam_gatecount!,
+                        (a,
+                         b,
+                         flag), n; name = "it-$i")
     end
     return M.record!(M.Plan(g)), a, flag
 end
@@ -377,10 +375,8 @@ end
         g = M.Graph(dev)
         a = M.Buffer(dev, zeros(Float32, 64))
         b = M.Buffer(dev, fill(2.0f0, 64))
-        M.compute!(g, "fill") do p
-            M.dispatch!(p, seam_adopt!, (M.use(p, a; read = true, write = true),
-                                         M.use(p, b; read = true)), 64)
-        end
+        M.dispatch!(g, seam_adopt!, (a,
+                                         b), 64; name = "fill")
         pl = M.record!(M.Plan(g))
         # THE FIRST RUN is the whole test.
         M.run!(pl); M.waitfor!(pl)
@@ -416,12 +412,10 @@ end
         b = M.Buffer(dev, fill(1.0f0, 256))
         flag = M.Buffer(dev, Int32[4])
         M.repeat!(g, 4; while_nonzero = flag) do i
-            M.compute!(g, "it-$i") do p
-                M.dispatch!(p, seam_gatecount!,
-                            (M.use(p, a; read = true, write = true),
-                             M.use(p, b; read = true),
-                             M.use(p, flag; read = true, write = true)), 256)
-            end
+            M.dispatch!(g, seam_gatecount!,
+                            (a,
+                             b,
+                             flag), 256; name = "it-$i")
         end
         pl = M.Plan(g)
         @test Metal.adopted_queue[] === Mantle.batchqueue(DEV_SEAM)
@@ -468,12 +462,10 @@ end
     b = M.Buffer(DEV_SEAM, fill(1.0f0, n))
     flag = M.Buffer(DEV_SEAM, Int32[iters])
     M.repeat!(g, iters; while_nonzero = flag) do i
-        M.compute!(g, "it-$i") do p
-            M.dispatch!(p, seam_gate!,
-                        (M.use(p, a; read = true, write = true),
-                         M.use(p, b; read = true),
-                         M.use(p, flag; read = true, write = true)), n)
-        end
+        M.dispatch!(g, seam_gate!,
+                        (a,
+                         b,
+                         flag), n; name = "it-$i")
     end
     plan = M.record!(M.Plan(g))
     @test count(s -> s.slot >= 0, plan.recording.segments) == iters
@@ -514,11 +506,9 @@ end
         a = M.Buffer(DEV_SEAM, zeros(Float32, n))
         b = M.Buffer(DEV_SEAM, fill(1.0f0, n))
         for i in 1:8
-            M.compute!(g, "add-$i") do p
-                M.dispatch!(p, seam_chain!,
-                            (M.use(p, a; read = true, write = true),
-                             M.use(p, b; read = true)), n)
-            end
+            M.dispatch!(g, seam_chain!,
+                            (a,
+                             b), n; name = "add-$i")
         end
         pl = M.record!(M.Plan(g))
         # The FIRST run is the one that catches it: that is when the plan's host

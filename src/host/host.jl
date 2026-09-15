@@ -35,8 +35,10 @@ import KernelAbstractions as KA
 struct HostDevice <: Mantle.Device
     backend::Any
     pool::Mantle.Pool          # the device owns it; nothing about it reaches the caller
+    accesses::Mantle.AccessCache
 end
-HostDevice(backend) = HostDevice(backend, Mantle.Pool())
+HostDevice(backend) = HostDevice(backend, Mantle.Pool(), Mantle.AccessCache())
+Mantle.accesscache(d::HostDevice) = d.accesses
 Mantle.pool(d::HostDevice) = d.pool
 """
     Device(HostAPI())              # KA.CPU()
@@ -232,3 +234,35 @@ array the gate kernel just wrote on this very thread.
 """
 Mantle.supportspredicate(::HostDevice) = true
 Mantle.syncbackend(::HostDevice) = Mantle.HostAPI()
+
+# ── what a kernel does to its arguments ───────────────────────────────────────
+#
+# Nothing is adapted on the way in — a launch here passes `resolve` itself — so
+# the default `devicetype` is already right and only the transient case is
+# stated, as the `Array` `materialize!` wraps the slab in.
+
+Mantle.devicebuffertype(::HostDevice, ::Type{T}) where {T} = Array{T,1}
+
+# On a CPU every array IS device memory, and `materialize!` hands a transient a
+# plain `Array` over the arena's bytes. A `StructArray` is not one: it is a
+# container of them, and the walk opens it up like any other struct.
+Mantle.isdevicearray(::Array) = true
+
+"""
+The same walk, through Julia's own method table.
+
+There is no overlay here and no adaptation: a CPU kernel IS the Julia function,
+run on this thread, over the arrays `resolve` produced. `nothing` for the
+interpreter is what says so.
+"""
+function Mantle.kerneltouches(d::HostDevice, kernel, args::Tuple, ndrange, group)
+    obj = Mantle.kernelfor(kernel, group, Mantle.backend(d))
+    ndr, _ws, iterspace, dynamic = KA.launch_config(obj, Mantle.dispatchrange(ndrange), nothing)
+    # The same five-argument `mkcontext` a CPU launch calls per block — the block
+    # index does not change the context's TYPE, which is all the walk needs, but
+    # the arity does: `Kernel{CPU}` has no three-argument method.
+    block = first(KA.NDIteration.blocks(iterspace))
+    ctx = KA.mkcontext(obj, block, ndr, iterspace, dynamic)
+    tt  = (typeof(ctx), map(a -> Mantle.devicetype(d, a), args)...)
+    return Mantle.accessof(nothing, obj.f, tt; cache = d.accesses)[3:end]
+end

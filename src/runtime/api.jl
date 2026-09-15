@@ -111,8 +111,14 @@ to an `Update`.
 
 Inside a graph, `dispatch!` is the way: the graph then knows the kernel wrote
 that buffer, and orders the passes that read it.
+
+A backend is its own answer, so this is `todevice`'s inverse and the pair
+normalises in both directions. That is what lets every verb take either handle
+instead of each one picking a side.
 """
 function backend end
+
+backend(b::KernelAbstractions.Backend) = b
 
 """
     screenshot(window) -> Matrix
@@ -173,8 +179,7 @@ takes nothing, and its fragment shader reads a g-buffer per pixel.
 
     render!(g, "light", screen => Discard) do p
         draw!(p, LIGHTING, (), 3;
-              frag_args = (use(p, albedo; read = true), use(p, depth; read = true),
-                           inverse_vp, Int32(w), Int32(h)))
+              frag_args = (albedo, depth, inverse_vp, Int32(w), Int32(h)))
     end
 
 A fragment shader takes its varyings first and these after, which is why `shade`
@@ -194,7 +199,7 @@ function render! end
     dispatches(pass)           -> where its recorded work goes
     passes(graph)              -> the graph's passes, in declaration order
 
-The four things a backend has to say about passes, so that `compute!` and
+The four things a backend has to say about passes, so that `dispatch!` and
 `render!` do not have to exist twice.
 
 They had become identical: make a pass, push it, hand a block the pass handle,
@@ -276,7 +281,7 @@ A copy as a graph pass, so its layouts and ordering are derived rather than
 stated.
 """
 function copy! end
-# `compute!` is a graph verb and lives with the graph, in `graph/build.jl`.
+# `dispatch!` is a graph verb and lives with the graph, in `graph/build.jl`.
 
 function run! end
 function npipelines end

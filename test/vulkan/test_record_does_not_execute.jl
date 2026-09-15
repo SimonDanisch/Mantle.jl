@@ -54,10 +54,7 @@ The plan under test: four passes, each adding one to the same counter.
 function _bumpplan(dev, counter, n)
     g = Mantle.Graph(dev)
     for k in 1:4
-        Mantle.compute!(g, "bump$k") do p
-            Mantle.use(p, counter; read = true, write = true)
-            Mantle.dispatch!(p, capture_bump!, (counter,), n)
-        end
+        Mantle.dispatch!(g, capture_bump!, (counter,), n; name = "bump$k")
     end
     Mantle.Plan(g)
 end

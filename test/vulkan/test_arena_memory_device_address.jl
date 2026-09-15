@@ -37,14 +37,8 @@ function _arenaplan(dev, out, n)
     g = Mantle.Graph(dev)
     seed = Mantle.Buffer(dev, zeros(Float32, n))
     t = Mantle.Transient.Buffer(g, Float32, n)
-    Mantle.compute!(g, "in") do p
-        s = Mantle.use(p, seed; read = true); d = Mantle.use(p, t; write = true)
-        Mantle.dispatch!(p, arena_copy!, (d, s), n)
-    end
-    Mantle.compute!(g, "out") do p
-        s = Mantle.use(p, t; read = true); d = Mantle.use(p, out; write = true)
-        Mantle.dispatch!(p, arena_copy!, (d, s), n)
-    end
+    Mantle.dispatch!(g, arena_copy!, (t, seed), n; name = "in")
+    Mantle.dispatch!(g, arena_copy!, (out, t), n; name = "out")
     (Mantle.record!(Mantle.Plan(g)), seed)
 end
 

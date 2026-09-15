@@ -33,10 +33,8 @@ function buildhostchain(dev, n::Integer, links::Integer = 3)
     t = [M.Transient.Buffer(g, Float32, n) for _ in 1:links]
     prev = src
     for (k, dst) in enumerate(t)
-        M.compute!(g, "chain$k") do p
-            M.dispatch!(p, hostscale!, (M.use(p, dst; write = true),
-                                        M.use(p, prev; read = true), 2.0f0), n)
-        end
+        M.dispatch!(g, hostscale!, (dst,
+                                        prev, 2.0f0), n; name = "chain$k")
         prev = dst
     end
     return g, t
@@ -121,10 +119,8 @@ end
     # the pass sees. `dispatch!` says the same thing and says it in a form the
     # graph can model.
     dst = M.Buffer(dev, zeros(Float32, 4))
-    M.compute!(g, "read it") do p
-        M.dispatch!(p, hostcopy!, (M.use(p, dst; write = true),
-                                   M.use(p, b; read = true)), 4)
-    end
+    M.dispatch!(g, hostcopy!, (dst,
+                                   b), 4; name = "read it")
     plan = M.Plan(g)
     # Both declared buffers are what a store can be waiting on, and the update
     # pass that lands one is a pass, FIRST — that ordering is what makes the
@@ -186,11 +182,7 @@ end
     out = M.Buffer(dev, zeros(Int32, n))
     kref = M.GPURef(dev, Int32(0))
     g = M.Graph(dev)
-    M.compute!(g, "add") do p
-        M.use(p, out; read = true, write = true)
-        M.use(p, kref; read = true)
-        M.dispatch!(p, host_addref!, (out, kref), n)
-    end
+    M.dispatch!(g, host_addref!, (out, kref), n; name = "add")
     plan = M.Plan(g)
     for k in steps
         kref[] = k
@@ -202,9 +194,7 @@ end
     M.run!(plan)
     @test Array(out) == fill(sum(steps) + steps[end], n)
     # A `Ref` is refused at the declaration, on this backend as on the other.
-    M.compute!(g, "refused") do p
-        @test_throws ArgumentError M.dispatch!(p, host_addref!, (out, Ref(Int32(1))), n)
-    end
+    @test_throws ArgumentError M.dispatch!(g, host_addref!, (out, Ref(Int32(1))), n)
 end
 
 # ── the thing that used to be silently broken ─────────────────────────────────
@@ -260,13 +250,9 @@ end
     n = M.Buffer(dev, Int32[0])
     dst = M.Transient.Buffer(g, Float32, 16)
 
-    M.compute!(g, "count") do p
-        M.dispatch!(p, hostcount!, (M.use(p, n; write = true),
-                                    M.use(p, src; read = true), 9.5f0), 16)
-    end
-    M.compute!(g, "fill") do p
-        M.dispatch!(p, hostfill!, (M.use(p, dst; write = true),), M.DeviceRange(n))
-    end
+    M.dispatch!(g, hostcount!, (n,
+                                    src, 9.5f0), 16; name = "count")
+    M.dispatch!(g, hostfill!, (dst,), M.DeviceRange(n); name = "fill")
 
     plan = M.Plan(g)
     M.run!(plan)
@@ -283,9 +269,7 @@ end
     g = M.Graph(dev)
     n = M.Buffer(dev, Int32[4])
     dst = M.Transient.Buffer(g, Float32, 8)
-    M.compute!(g, "fill") do p
-        M.dispatch!(p, hostfill!, (M.use(p, dst; write = true),), M.DeviceRange(n))
-    end
+    M.dispatch!(g, hostfill!, (dst,), M.DeviceRange(n); name = "fill")
     # The usage the graph recorded for the count is `Indirect` — not a storage
     # read, because the stage and access it implies are different and a backend
     # emitting a storage barrier for it would order the wrong thing.
@@ -315,14 +299,10 @@ end
         src = M.Buffer(dev, Float32[i for i in 1:16])
         n = M.Buffer(dev, Int32[0])
         dst = M.Transient.Buffer(g, Float32, 16)
-        M.compute!(g, "count") do p
-            M.dispatch!(p, hostcount!, (M.use(p, n; write = true),
-                                        M.use(p, src; read = true), 9.5f0), 16)
-        end
-        M.compute!(g, "fill") do p
-            M.dispatch!(p, hostfill!, (M.use(p, dst; write = true),),
-                        M.DeviceRange(n; max = ceiling))
-        end
+        M.dispatch!(g, hostcount!, (n,
+                                        src, 9.5f0), 16; name = "count")
+        M.dispatch!(g, hostfill!, (dst,),
+                        M.DeviceRange(n; max = ceiling), name = "fill")
         (M.Plan(g), dst)
     end
 
@@ -391,13 +371,9 @@ end
 
     g = M.Graph(dev)
     t = M.Transient.Buffer(g, HostPadded, n)      # and the materialize! path
-    M.compute!(g, "write") do p
-        M.dispatch!(p, hostwritepadded!, (M.use(p, t; write = true),), n)
-    end
-    M.compute!(g, "copy") do p
-        M.dispatch!(p, hostcopypadded!, (M.use(p, b; write = true),
-                                         M.use(p, t; read = true)), n)
-    end
+    M.dispatch!(g, hostwritepadded!, (t,), n; name = "write")
+    M.dispatch!(g, hostcopypadded!, (b,
+                                         t), n; name = "copy")
     plan = M.Plan(g)
     M.run!(plan)
     @test Array(b) == [HostPadded(Int64(i), Int8(i % 100)) for i in 1:n]

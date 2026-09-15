@@ -51,3 +51,10 @@ function RayTracingPipeline(; raygen, closest_hit, miss, any_hit=nothing,
     RayTracingPipeline(raygen, chits, miss, any_hit, payload_type,
                        chit_miss_take_args)
 end
+
+# Every shader the pipeline runs, flattened. The order is the SBT's — raygen,
+# the hit groups, miss, any-hit — which is also the order `shadertouches`
+# answers in and the order `packtrace!` pins them in.
+shaders(p::RayTracingPipeline) =
+    (p.raygen_func, p.closesthit_funcs..., p.miss_func,
+     (p.anyhit_func === nothing ? () : (p.anyhit_func,))...)

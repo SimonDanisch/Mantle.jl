@@ -735,6 +735,11 @@ mutable struct DeviceCaches
     # recorded point into the old buffer and its finalizer would pull it out
     # from under them.
     gemm_split_retired::Vector{Any}
+    # What each kernel signature does to its arguments — see `Mantle.AccessCache`.
+    # Keyed by signature and not by device, like the pipeline caches above, and a
+    # field for the same reason: the answers are derived through THIS device's
+    # method table and its target features.
+    accesses::Any
 end
 
 # `MemoryPolicy()` resolves at call time, long after `memory.jl` is loaded.
@@ -746,4 +751,4 @@ DeviceCaches() = DeviceCaches(
     Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     nothing, 0, 1.0, Any[],
     Dict{Tuple{DataType,DataType,Any},Any}(), nothing,
-    IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[])
+    IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[], AccessCache())

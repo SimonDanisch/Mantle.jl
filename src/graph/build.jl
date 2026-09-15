@@ -5,25 +5,162 @@
 # the vocabulary the graph is built out of, not the graph itself.
 
 """
-    compute!(f, graph, name) -> pass
+    dispatch!(graph, kernel, args, ndrange; group = nothing, name = nothing)
 
-A pass whose work is `dispatch!` calls. `f` receives the pass handle and declares
-what it touches.
+One kernel launch, as a pass of its own, ordered against everything else by what
+the kernel does to `args`.
+
+    dispatch!(g, shade!, (radiance, queue, materials), n)
+
+There is nothing else to write. What each argument is read or written by is
+inferred from the kernel body — see [`kerneltouches`](@ref) — so the launch and
+the declaration cannot disagree, which is what they did every time a kernel grew
+an output and its call site did not.
+
+`name` is what the pass is called in a profile, and defaults to the kernel's own
+name. `group` is the workgroup size, worth giving for anything image-shaped: the
+default partitions an ndrange along its first axis, which for a 2-D range makes a
+workgroup one long row, and a pass that reads row-major and writes column-major
+then has one of the two uncoalesced — 1.06 ms against 0.12 ms at 1280x800 on the
+machine this was measured on.
+
+`ndrange` may be a [`DeviceRange`](@ref), for a count that only exists on the
+device; the dispatch is then ordered after whatever wrote that count.
 """
-function compute!(f, g::Graph, name::AbstractString)
-    p = newpass(g, name, :compute)
+function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
+                   group = nothing, name = nothing)
+    refuserefs(args)
+    p = newpass(g, name === nothing ? passname(kernel, args) : String(name), :compute)
     push!(passes(g), p)
-    f(handle(g, p))
-    # A pass that traces makes its shader accesses from a ray-tracing pipeline,
-    # which is a stage of its own — see `Traced`. Decided here, after the body,
-    # because `use` runs before `trace!` in every body that has both.
-    if any(d -> d isa Trace, dispatches(p))
-        for (i, (id, U)) in enumerate(p.usages)
-            p.usages[i] = id => traced(U)
+    h = handle(g, p)
+    declare!(h, args, kerneltouches(g.dev, kernel, args, ndrange, group))
+    n = countresource(ndrange)
+    n === nothing || indirectcount!(h, n)
+    push!(dispatches(p), Dispatch(kernel, args, ndrange, group))
+    return p
+end
+
+"""
+What to call the pass a bare `dispatch!` makes.
+
+The kernel's own name, except for a higher-order kernel — a queue mapper whose
+first argument is the kernel it runs over the queue — where the caller's name for
+the pass is the INNER one. Every stage of a wavefront tracer is
+`workqueue_map_kernel!` otherwise, and a profile of twenty identically named
+passes says nothing.
+"""
+passname(kernel, args::Tuple) =
+    (!isempty(args) && first(args) isa Function) ? string(nameof(first(args))) :
+    string(nameof(kernel))
+
+"""
+    declare!(pass, args, touches)
+
+Register what a dispatch does, one usage per device buffer reachable from each
+argument.
+
+The LEAVES and not the argument: a barrier is scoped to a buffer, and a kernel
+is handed containers — a work queue is a payload plus its atomic counter, and on
+the struct-of-arrays path that payload is one buffer per field of the work item,
+several levels down. An argument's `Touch` applies to all of its leaves, which is
+the granularity the call sites that wrote this by hand already used.
+"""
+function declare!(h, args::Tuple, touches::Vector{Touch})
+    g, p = graphof(h), passof(h)
+    leaves = Any[]
+    for (a, t) in zip(args, touches)
+        touched(t) || continue
+        empty!(leaves)
+        resourceleaves!(leaves, a)
+        for r in leaves
+            push!(p.usages, resourceid(g, r) => usagetype(t, resourcekind(r)))
+            # The PARENT is what liveness has to see touched: a slice's interval
+            # is its buffer's, and a transient sliced by one pass is live there.
+            touch!(g, rootresource(r))
         end
     end
     return p
 end
+
+"""
+    resourceleaves!(acc, x) -> acc
+
+Every device buffer reachable from `x`, appended to `acc`.
+
+A `Resource` and a backend's array are leaves; anything else that can reach
+memory is opened up and its fields walked. That covers a work queue, a struct of
+arrays and a tuple of either without naming any of them here — the three
+containers a consumer was reimplementing this walk for.
+"""
+resourceleaves!(acc, x::Resource) = (push!(acc, x); acc)
+resourceleaves!(acc, x::BufferRange) = (push!(acc, x); acc)
+resourceleaves!(acc, @nospecialize(x)) = resourceleaves!(acc, x, Base.IdSet{Any}(), 0)
+
+resourceleaves!(acc, x::Resource, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
+resourceleaves!(acc, x::BufferRange, seen::Base.IdSet{Any}, depth::Int) = (push!(acc, x); acc)
+
+# An attribute is not a leaf and not a container: `Attribute(p, x)` already
+# declared it, as `Vertices`, which is a different usage from the storage read a
+# shader argument is. Declaring it again from the draw would say the vertex
+# stage reads it as storage, which is not how a vertex buffer is fetched.
+resourceleaves!(acc, ::Attr, seen::Base.IdSet{Any}, depth::Int) = acc
+resourceleaves!(acc, ::Attr) = acc
+
+# The walk is over an object graph, not a tree, and a device object reaches its
+# pool, which reaches its device. Both guards are needed: identity for the cycle,
+# and a depth for a structure deep enough that nothing useful is left below it.
+const LEAFDEPTH = 16
+
+function resourceleaves!(acc, @nospecialize(x), seen::Base.IdSet{Any}, depth::Int)
+    isdevicearray(x) && return (push!(acc, x); acc)
+    depth > LEAFDEPTH && return acc
+    T = typeof(x)
+    carries(T) || return acc
+    isstructtype(T) || return acc
+    if ismutabletype(T)
+        x in seen && return acc
+        push!(seen, x)
+    end
+    for i in 1:fieldcount(T)
+        isdefined(x, i) || continue
+        resourceleaves!(acc, getfield(x, i), seen, depth + 1)
+    end
+    return acc
+end
+
+"""
+    vertextouches(device, shader, args) -> Vector{Touch}
+    fragmenttouches(device, shader, args) -> Vector{Touch}
+
+What each stage of a draw does to the arguments that stage was given.
+
+Two verbs and not one with a stage argument, because they are two different
+signatures: the vertex stage is compiled at the draw's `args`, the fragment
+stage at its `frag_args` — and the fragment's own function takes the varyings as
+a leading argument that no caller passes. A backend answers both the way it
+answers [`kerneltouches`](@ref), through whatever it will actually compile.
+"""
+function vertextouches end
+function fragmenttouches end
+
+"""
+    isdevicearray(x) -> Bool
+
+Whether `x` is one of this backend's arrays — memory the graph can order
+accesses to, rather than a container holding some. A backend answers for its own
+array type; everything else is walked into.
+"""
+isdevicearray(@nospecialize(x)) = false
+
+# `compute!(f, graph, name) do p … end` was here, and it is gone with `use`.
+#
+# It existed to give a body a pass handle to declare into, and to group several
+# dispatches so that no barrier fell between them. Nothing needs the first any
+# more. The second was always an assertion the author made and the graph could
+# not check — "these two write the same buffer and do not collide" — and it is
+# now derived from the same place as everything else: two dispatches that append
+# to one queue at atomically claimed indices are `Unordered` against each other
+# and get no barrier, whether or not anyone thought to group them.
 
 """
     repeat!(f, graph, maxiters, count) -> passes
@@ -61,7 +198,23 @@ of that overhead.
 
 The body may not allocate transients that outlive their iteration: every
 iteration names the same resources, which is what makes one recording legal.
+
+A loop whose body is ONE dispatch needs no body at all:
+
+    repeat!(g, bump!, (queue, film), DeviceRange(queue.size); max = 8,
+            while_nonzero = queue.size)
+
+which is the same thing with the `do` block written out, and reads as what it is
+— a dispatch that runs until the device says stop.
 """
+function repeat!(g::Graph, kernel, args::Tuple, ndrange;
+                 max::Integer, count = nothing, while_nonzero = nothing,
+                 group = nothing, name = nothing)
+    repeat!(g, max, count; while_nonzero) do _
+        dispatch!(g, kernel, args, ndrange; group, name)
+    end
+end
+
 function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
                  while_nonzero = nothing)
     maxiters >= 1 || throw(ArgumentError("repeat!: maxiters must be at least 1, got $maxiters"))
@@ -83,14 +236,10 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
     pred = Buffer(g.dev, [Predicate(0)])
     out = Pass[]
     for i in 1:n
-        compute!(g, "repeat!/gate-$i") do p
-            use(p, src; read = true)
-            use(p, pred; write = true)
-            if count === nothing
-                dispatch!(p, gate_nonzero!, (pred, src), 1)
-            else
-                dispatch!(p, gate_count!, (pred, src, Int32(i)), 1)
-            end
+        if count === nothing
+            dispatch!(g, gate_nonzero!, (pred, src), 1; name = "repeat!/gate-$i")
+        else
+            dispatch!(g, gate_count!, (pred, src, Int32(i)), 1; name = "repeat!/gate-$i")
         end
         first_new = length(passes(g)) + 1
         f(i)
@@ -573,6 +722,9 @@ end
 function draw!(p::PassHandle, shader, args, n; frag_args = ())
     refuserefs(args)
     refuserefs(frag_args)
+    dev = graphof(p).dev
+    isempty(args) || declare!(p, args, vertextouches(dev, shader, args))
+    isempty(frag_args) || declare!(p, frag_args, fragmenttouches(dev, shader, frag_args))
     # Here rather than at compile: the pipeline has one push constant range, so a
     # draw with arguments on both stages is a mistake in the call, and by the time
     # a shader is compiled it surfaces as one stage failing to take an argument it
@@ -596,47 +748,49 @@ storage(a::Attr) = storage(a.resource)
 resourcekind(::BufferRange) = BufferKind()
 
 
+"""
+    slice(graph, x, range) -> BufferRange
+
+`range` elements of `x`, as a resource of its own.
+
+What a dispatch is HANDED is still the whole buffer — a slice is a claim about
+which part of it the pass touches, not a different pointer — so two passes over
+disjoint slices get no barrier between them, and one that names a slice gets a
+barrier scoped to those bytes.
+
+One object per `(resource, range)` per graph, so the same slice named twice is
+the same resource and stays ordered against itself.
+"""
 function slice(g::Graph, x, range::UnitRange{Int})
     # `length`, not `length(storage(x))`: a transient has no storage until the
     # placer gives it some, and a range is declared while the graph is built.
     n = length(x)
     (first(range) >= 1 && last(range) <= n) || throw(ArgumentError(
-        "use(): range $range is outside the buffer's 1:$n."))
+        "slice(): range $range is outside the buffer's 1:$n."))
     pid = resourceid(g, x)
     get!(g.views, (pid, range)) do
         BufferRange(x, range)
     end
 end
 
-"""
-    use(pass, x; read, write, range = nothing, unordered = false)
-
-The ordinary case: this pass reads or writes this resource. Named usages survive
-only where the role can be picked wrongly.
-
-`range` narrows the claim to a slice, in elements. Two passes that name disjoint
-slices of one buffer get no barrier between them, and one that does name a slice
-gets a barrier scoped to exactly those bytes.
-
-`unordered` says the order of this access against another unordered one does not
-change the result — commutative atomics, or writes to disjoint elements. Two
-passes that BOTH say it get no barrier between them however much they overlap;
-anything else still does, so forgetting it anywhere gives the barrier back rather
-than producing a race. A wavefront tracer's per-pixel radiance is the case it
-exists for: half a dozen stages do nothing to it but `atomic +=`, and ordering
-them against each other serialises passes whose queues are disjoint.
-"""
-function use(p::PassHandle, x; read::Bool = false, write::Bool = false,
-                    range::Union{Nothing,UnitRange{Int}} = nothing,
-                    unordered::Bool = false)
-    read || write || throw(ArgumentError("use() needs read, write, or both"))
-    S = Storage{BufferKind, Access{read, write}}
-    U = unordered ? Unordered{S} : S
-    r = range === nothing ? x : slice(p.graph, x, range)
-    push!(p.pass.usages, resourceid(p.graph, r) => U)
-    # The parent is what the kernel gets, and what liveness has to see touched.
-    touch!(p.graph, x)
-end
+# `use(pass, x; read, write, range, unordered)` was here, and it is gone.
+#
+# It was the only way to say what a pass touched, and it was a SECOND source for
+# something the kernel already stated: the call site said `write = true` and the
+# body did the storing, and when one of them changed the other did not. Every
+# usage is now derived — `dispatch!` from the kernel, `draw!` from its two
+# stages, `trace!` from every shader in the pipeline — by the walk in
+# `graph/access.jl`.
+#
+# Its three arguments went three ways:
+#
+#   * `read`/`write` are read off the body.
+#   * `unordered` is too: a write at an index claimed from an atomic is disjoint
+#     from every other invocation's, which is what a work queue's append is and
+#     what `accumulates!` used to assert by hand.
+#   * `range` is not an access at all — it is which part of a buffer a pass
+#     touches — so it became an ARGUMENT: `slice(g, b, 1:128)` is what a pass is
+#     handed, and the pass is recorded as touching that slice.
 
 # Whether a dispatch was given a workgroup size is a type, not a branch: the
 # launch is per pass per frame and this keeps the call site one expression.

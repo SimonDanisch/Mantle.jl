@@ -824,39 +824,25 @@ function showcase_plan(dev, screenof; profile::Bool = false)
     bloomA = M.Transient.Buffer(graph, Vec4f, BW * BH)
     bloomB = M.Transient.Buffer(graph, Vec4f, BW * BH)
 
-    M.compute!(graph, "clear count") do p
-        M.dispatch!(p, reset_counter!, (M.use(p, counter; write = true),), 1)
-        M.dispatch!(p, reset_counter!, (M.use(p, suncounter; write = true),), 1)
-    end
-    M.compute!(graph, "lights") do p
-        M.use(p, timeref; read = true)
-        M.dispatch!(p, move_lights!, (M.use(p, lightpos; write = true),
-                                      M.use(p, centers; read = true, write = true),
-                                      M.use(p, params; read = true, write = true),
-                                      M.use(p, lighthome; read = true),
-                                      M.use(p, lightcol; read = true),
-                                      timeref, Int32(NSHARD)), NLIGHT)
-    end
-    M.compute!(graph, "cull") do p
-        M.use(p, cullref; read = true)
-        M.dispatch!(p, cull!, (M.use(p, visible; write = true),
-                               M.use(p, counter; read = true, write = true),
-                               M.use(p, centers; read = true), cullref), NINST)
-    end
-    M.compute!(graph, "sun cull") do p
-        M.use(p, sunvpref; read = true)
-        M.dispatch!(p, cull!, (M.use(p, sunvisible; write = true),
-                               M.use(p, suncounter; read = true, write = true),
-                               M.use(p, centers; read = true), sunvpref), NINST)
-    end
-    M.compute!(graph, "draw count") do p
-        M.dispatch!(p, write_draw!, (M.use(p, drawcmd; write = true),
-                                     M.use(p, counter; read = true), UInt32(VPB)), 1)
-        M.dispatch!(p, write_draw!, (M.use(p, sundrawcmd; write = true),
-                                     M.use(p, suncounter; read = true), UInt32(VPB)), 1)
-    end
+    M.dispatch!(graph, reset_counter!, (counter,), 1; name = "clear count")
+    M.dispatch!(graph, reset_counter!, (suncounter,), 1; name = "clear count")
+    M.dispatch!(graph, move_lights!, (lightpos,
+                                      centers,
+                                      params,
+                                      lighthome,
+                                      lightcol,
+                                      timeref, Int32(NSHARD)), NLIGHT; name = "lights")
+    M.dispatch!(graph, cull!, (visible,
+                               counter,
+                               centers, cullref), NINST; name = "cull")
+    M.dispatch!(graph, cull!, (sunvisible,
+                               suncounter,
+                               centers, sunvpref), NINST; name = "sun cull")
+    M.dispatch!(graph, write_draw!, (drawcmd,
+                                     counter, UInt32(VPB)), 1; name = "draw count")
+    M.dispatch!(graph, write_draw!, (sundrawcmd,
+                                     suncounter, UInt32(VPB)), 1; name = "draw count")
     M.render!(graph, "shadow", shadow => M.Clear(1f0)) do p
-        M.use(p, sunvpref; read = true)
         args = (M.Attribute(p, pp), M.Attribute(p, sunvisible), M.Attribute(p, centers),
                 M.Attribute(p, sizes), sunvpref)
         M.draw!(p, SHADOW, args, sundrawcmd)
@@ -865,7 +851,6 @@ function showcase_plan(dev, screenof; profile::Bool = false)
     M.render!(graph, "gbuffer", albedo => M.Clear((0f0, 0f0, 0f0, 1f0)),
                                 matter => M.Discard, normal => M.Discard,
                                 zbuf => M.Clear(1f0)) do p
-        M.use(p, vpref; read = true)
         args = (M.Attribute(p, pp), M.Attribute(p, pn), M.Attribute(p, visible),
                 M.Attribute(p, centers), M.Attribute(p, sizes), M.Attribute(p, colors),
                 M.Attribute(p, params), vpref)
@@ -875,72 +860,36 @@ function showcase_plan(dev, screenof; profile::Bool = false)
     M.copy!(graph, "read matter", matter_px, matter)
     M.copy!(graph, "read normal", normal_px, normal)
     M.copy!(graph, "read depth", depth_px, zbuf)
-    M.compute!(graph, "tiles") do p
-        M.use(p, invref; read = true)
-        M.use(p, lightref; read = true)
-        M.dispatch!(p, tile_lights!, (M.use(p, tilelights; write = true),
-                                      M.use(p, tilecount; write = true),
-                                      M.use(p, depth_px; read = true),
-                                      M.use(p, lightpos; read = true), invref,
+    M.dispatch!(graph, tile_lights!, (tilelights,
+                                      tilecount,
+                                      depth_px,
+                                      lightpos, invref,
                                       Int32(W), Int32(H), Int32(TILE), Int32(NTX),
-                                      lightref, Int32(PERTILE)), (NTX, NTY); group = (8, 8))
-    end
-    M.compute!(graph, "ssao") do p
-        M.use(p, vpref; read = true)
-        M.use(p, invref; read = true)
-        M.use(p, eyeref; read = true)
-        M.use(p, aoradius; read = true)
-        M.use(p, aobias; read = true)
-        M.dispatch!(p, ssao!, (M.use(p, aoraw; write = true), M.use(p, depth_px; read = true),
-                               M.use(p, normal_px; read = true), vpref, invref, eyeref,
+                                      lightref, Int32(PERTILE)), (NTX, NTY); group = (8, 8), name = "tiles")
+    M.dispatch!(graph, ssao!, (aoraw, depth_px,
+                               normal_px, vpref, invref, eyeref,
                                Int32(W), Int32(H), Int32(AOW), Int32(AOH),
-                               aoradius, aobias, Int32(AOSAMPLES)), (AOW, AOH); group = (16, 16))
-    end
-    M.compute!(graph, "ao blur") do p
-        M.dispatch!(p, ao_blur!, (M.use(p, aomap; write = true), M.use(p, aoraw; read = true),
-                                  Int32(AOW), Int32(AOH), 900f0), (AOW, AOH); group = (16, 16))
-    end
-    M.compute!(graph, "light") do p
-        M.use(p, invref; read = true)
-        M.use(p, eyeref; read = true)
-        M.use(p, sundirref; read = true)
-        M.use(p, suncolref; read = true)
-        M.use(p, sunvpref; read = true)
-        M.use(p, fogref; read = true)
-        M.use(p, emitref; read = true)
-        M.use(p, sbiasref; read = true)
-        M.use(p, aoref; read = true)
-        args = (M.use(p, hdr; write = true),
-                M.use(p, albedo_px; read = true), M.use(p, matter_px; read = true),
-                M.use(p, normal_px; read = true), M.use(p, depth_px; read = true),
-                M.use(p, lightpos; read = true), M.use(p, lightcol; read = true),
-                M.use(p, tilelights; read = true), M.use(p, tilecount; read = true),
-                M.use(p, shadow_px; read = true), M.use(p, aomap; read = true),
-                invref, eyeref, sundirref, suncolref, sunvpref,
-                Int32(W), Int32(H), Int32(TILE), Int32(NTX), Int32(PERTILE), fogref, emitref,
-                Int32(SMAP), 2f0 * SEXTENT / Float32(SMAP), sbiasref,
-                aoref)
-        M.dispatch!(p, shade!, args, (W, H); group = (TILE, TILE))
-    end
-    M.compute!(graph, "bright") do p
-        M.use(p, threshold; read = true)
-        M.dispatch!(p, bright!, (M.use(p, bloomA; write = true), M.use(p, hdr; read = true),
+                               aoradius, aobias, Int32(AOSAMPLES)), (AOW, AOH); group = (16, 16), name = "ssao")
+    M.dispatch!(graph, ao_blur!, (aomap, aoraw,
+                                  Int32(AOW), Int32(AOH), 900f0), (AOW, AOH); group = (16, 16), name = "ao blur")
+    M.dispatch!(graph, shade!,
+                (hdr, albedo_px, matter_px, normal_px, depth_px, lightpos, lightcol,
+                 tilelights, tilecount, shadow_px, aomap,
+                 invref, eyeref, sundirref, suncolref, sunvpref,
+                 Int32(W), Int32(H), Int32(TILE), Int32(NTX), Int32(PERTILE), fogref, emitref,
+                 Int32(SMAP), 2f0 * SEXTENT / Float32(SMAP), sbiasref,
+                 aoref),
+                (W, H); group = (TILE, TILE), name = "light")
+    M.dispatch!(graph, bright!, (bloomA, hdr,
                                  Int32(W), Int32(H), Int32(BW), Int32(BSHIFT), threshold),
-                    (BW, BH); group = (16, 16))
-    end
-    M.compute!(graph, "blur x") do p
-        M.dispatch!(p, blur!, (M.use(p, bloomB; write = true), M.use(p, bloomA; read = true),
-                               Int32(BW), Int32(BH), Int32(1), Int32(0)), (BW, BH); group = (16, 16))
-    end
-    M.compute!(graph, "blur y") do p
-        M.dispatch!(p, blur!, (M.use(p, bloomA; write = true), M.use(p, bloomB; read = true),
-                               Int32(BW), Int32(BH), Int32(0), Int32(1)), (BW, BH); group = (16, 16))
-    end
+                    (BW, BH); group = (16, 16), name = "bright")
+    M.dispatch!(graph, blur!, (bloomB, bloomA,
+                               Int32(BW), Int32(BH), Int32(1), Int32(0)), (BW, BH); group = (16, 16), name = "blur x")
+    M.dispatch!(graph, blur!, (bloomA, bloomB,
+                               Int32(BW), Int32(BH), Int32(0), Int32(1)), (BW, BH); group = (16, 16), name = "blur y")
     M.render!(graph, "composite", screen => M.Discard) do p
-        M.use(p, exposure; read = true)
-        M.use(p, bloomamt; read = true)
         M.draw!(p, COMPOSITE, (), 3;
-                frag_args = (M.use(p, hdr; read = true), M.use(p, bloomA; read = true),
+                frag_args = (hdr, bloomA,
                              Int32(W), Int32(H), Int32(BW), Int32(BH), Int32(BSHIFT),
                              exposure, bloomamt))
     end

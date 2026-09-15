@@ -725,8 +725,8 @@ queueof(e::Emitter{O}) where {O<:Closed} = queueof(e.owner)
 Write one compute dispatch. Bind, push the argument address, dispatch — and
 nothing else.
 
-**No barrier.** A plan already knows: `use(p, x; read/write)` says what each
-pass touches, the compile derives the hazards, and `emitpass!` emits exactly
+**No barrier.** A plan already knows: what each pass touches is read off its
+kernels, the compile derives the hazards, and `emitpass!` emits exactly
 those. Between independent passes it emits nothing and the GPU pipelines them.
 The unmodelled path gets the one barrier a closed buffer opens with
 ([`headbarrier!`](@ref)), because nothing has told it what its kernels touch.

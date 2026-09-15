@@ -127,6 +127,9 @@ include("kernels/instance_writer.jl")
 # Last, because they are written against everything above.
 include("lowering.jl")
 include("graph.jl")
+# After `graph.jl`: the access analysis names `LavaDevice`, `adaptor` and the
+# iteration plan, all of which are declared there.
+include("access.jl")
 # After `graph.jl`: the hand-recorded pass opens a one-shot on a `LavaDevice`,
 # which is declared there.
 include("graphics/record.jl")

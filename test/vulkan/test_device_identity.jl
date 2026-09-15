@@ -66,11 +66,7 @@ end
                 out = Mantle.Buffer(cpudev, zeros(Int32, n))
                 cnt = Mantle.Buffer(cpudev, Int32[n])
                 g = Mantle.Graph(cpudev)
-                Mantle.compute!(g, "bump") do p
-                    Mantle.use(p, out; read = true, write = true)
-                    Mantle.use(p, cnt; read = true)
-                    Mantle.dispatch!(p, di_bump!, (out, cnt), Mantle.DeviceRange(cnt); group = 64)
-                end
+                Mantle.dispatch!(g, di_bump!, (out, cnt), Mantle.DeviceRange(cnt); group = 64, name = "bump")
                 pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))
                 before_gpu = Mantle.driver(gpu.default_bq).next_timeline
                 Mantle.run!(pl); Mantle.waitfor!(pl)

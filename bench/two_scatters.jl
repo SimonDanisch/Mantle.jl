@@ -76,7 +76,6 @@ struct Scatter{P,C,S}
 end
 
 function bind(p, s::Scatter, mvp)
-    M.use(p, mvp; read = true)
     pos = M.Attribute(p, s.positions)
     col = M.Attribute(p, s.color)
     siz = M.Attribute(p, s.markersize)
@@ -103,13 +102,9 @@ function build(dev, win, na, nb)
     g = M.Graph(dev)
     screen = M.Surface(g, win)
 
-    M.compute!(g, "advect") do p
-        M.use(p, dt; read = true)
-        for (s, vel) in ((a, a_vel), (b, b_vel))
-            x = M.use(p, s.positions; read = true, write = true)
-            v = M.use(p, vel; read = true, write = true)
-            M.dispatch!(p, advect!, (x, v, dt, 1.6f0), length(s.positions))
-        end
+    for (s, vel) in ((a, a_vel), (b, b_vel))
+        M.dispatch!(g, advect!, (s.positions, vel, dt, 1.6f0), length(s.positions);
+                    name = "advect")
     end
 
     M.render!(g, "scatters", screen => M.Clear((0.02f0, 0.02f0, 0.04f0, 1.0f0))) do p

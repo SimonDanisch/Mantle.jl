@@ -335,7 +335,7 @@ A store retains what it is given and marks the resource dirty. It copies
 nothing, touches no command buffer and may be made from any thread, which is
 what lets an observable's handler or a render loop's caller feed a plan without
 holding a queue. The bytes land at the update pass of the next `run!` of any
-plan that declares the resource — `use(p, x; read = true)`, an `Attribute`, a
+plan that declares the resource — a dispatch argument, an `Attribute`, a
 slice — as a command in that run's own submission, ordered ahead of every pass
 that reads them by the barriers the graph derives from the `CopyDst` the plan
 registered for it (see `hostwritten!`).

@@ -58,21 +58,13 @@ function markplan(dev, cap::Int, want::Int, nmark::Int)
     src = M.Buffer(dev, Float32[k <= want ? 1.0f0 : 0.0f0 for k in 1:cap])
     n = M.Buffer(dev, Int32[0])
     ts = [M.Buffer(dev, zeros(Float32, cap)) for _ in 1:nmark]
-    M.compute!(g, "count") do p
-        M.dispatch!(p, pio_count!, (M.use(p, n; write = true),
-                                    M.use(p, src; read = true), 0.5f0), 1)
+    M.dispatch!(g, pio_count!, (n,
+                                    src, 0.5f0), 1; name = "count")
+    for k in 1:nmark
+        M.dispatch!(g, pio_zero!, (ts[k],), cap; name = "zero$k")
     end
     for k in 1:nmark
-        M.compute!(g, "zero$k") do p
-            M.dispatch!(p, pio_zero!, (M.use(p, ts[k]; write = true),), cap)
-        end
-    end
-    M.compute!(g, "mark") do p
-        for k in 1:nmark
-            M.dispatch!(p, pio_mark!, (M.use(p, ts[k]; write = true),
-                                       M.use(p, n; read = true)),
-                        M.DeviceRange(n; max = cap))
-        end
+        M.dispatch!(g, pio_mark!, (ts[k], n), M.DeviceRange(n; max = cap); name = "mark")
     end
     (plan = M.record!(M.Plan(g)), outs = ts, count = n, src = src)
 end

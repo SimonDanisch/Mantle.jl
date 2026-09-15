@@ -36,11 +36,7 @@ end
 """A plan that adds `kref`'s current value to `out`, and submits only when asked."""
 function _waitplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "bump") do p
-        Mantle.use(p, out; read = true, write = true)
-        Mantle.use(p, kref; read = true)
-        Mantle.dispatch!(p, waitidle_bump!, (out, kref), n)
-    end
+    Mantle.dispatch!(g, waitidle_bump!, (out, kref), n; name = "bump")
     Mantle.record!(Mantle.Plan(g))
 end
 

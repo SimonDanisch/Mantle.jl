@@ -173,7 +173,6 @@ include("memory/model.jl")
 include("memory/bound.jl")
 include("memory/placement.jl")
 include("memory/pool.jl")
-include("memory/array.jl")
 include("memory/csv.jl")
 
 include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
@@ -182,10 +181,12 @@ include("sync/transition.jl")
 include("runtime/backends.jl")
 include("runtime/format.jl")
 include("runtime/api.jl")
+include("memory/array.jl")    # names `Device` and `backend`, both from api.jl
 include("runtime/dispatch.jl")
 include("phases.jl")
 # The graph itself: one set of data structures, shared by every backend.
 include("graph/types.jl")
+include("graph/access.jl")   # what a kernel does to its arguments, read off the kernel
 # Before `lifetime.jl`: a `SubmitChannel` holds the outstanding list this declares.
 include("graph/submission.jl")
 # After it: `SubmitChannel` holds the `Outstanding` list that file declares, and
@@ -388,7 +389,7 @@ export CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope
 export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.
-export Buffer, GPURef, Surface, Attribute, draw!, dispatch!, render!, compute!
+export Buffer, GPURef, Surface, Attribute, draw!, dispatch!, render!
 # Its own verb because the two APIs differ at allocation; see `memory/resources.jl`.
 export indexbuffer
 # `repeat!` and its vocabulary: a loop recorded once, whose trip count the device

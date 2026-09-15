@@ -57,13 +57,9 @@ end
     g = Mantle.Graph(REC_DEV)
     a = Mantle.Buffer(REC_DEV, zeros(Float32, n))
     b = Mantle.Buffer(REC_DEV, fill(2.0f0, n))
-    Mantle.compute!(g, "fill") do p
-        Mantle.dispatch!(p, rec_fill!, (Mantle.use(p, a; write = true), 1.0f0), n)
-    end
-    Mantle.compute!(g, "add") do p
-        Mantle.dispatch!(p, rec_add!, (Mantle.use(p, a; read = true, write = true),
-                                       Mantle.use(p, b; read = true)), n)
-    end
+    Mantle.dispatch!(g, rec_fill!, (a, 1.0f0), n; name = "fill")
+    Mantle.dispatch!(g, rec_add!, (a,
+                                       b), n; name = "add")
     plan = Mantle.record!(Mantle.Plan(g))
     @test plan.recording !== nothing
 
@@ -90,10 +86,8 @@ end
     g = Mantle.Graph(REC_DEV)
     dst = Mantle.Buffer(REC_DEV, zeros(Float32, n))
     s = Mantle.GPURef(REC_DEV, 1.0f0)
-    Mantle.compute!(g, "scale") do p
-        Mantle.dispatch!(p, rec_scale_ref!, (Mantle.use(p, dst; write = true),
-                                             Mantle.use(p, s; read = true)), n)
-    end
+    Mantle.dispatch!(g, rec_scale_ref!, (dst,
+                                             s), n; name = "scale")
     plan = Mantle.record!(Mantle.Plan(g))
 
     # The recording holds the ref's ADDRESS, not its value — that is the whole
@@ -115,11 +109,9 @@ end
         counter = Mantle.Buffer(REC_DEV, Float32[0])
         flag = Mantle.Buffer(REC_DEV, Int32[start])
         Mantle.repeat!(g, 4; while_nonzero = flag) do i
-            Mantle.compute!(g, "bump-$i") do p
-                Mantle.dispatch!(p, rec_bump!,
-                                 (Mantle.use(p, counter; read = true, write = true),
-                                  Mantle.use(p, flag; read = true, write = true)), 1)
-            end
+            Mantle.dispatch!(g, rec_bump!,
+                                 (counter,
+                                  flag), 1; name = "bump-$i")
         end
         plan = Mantle.record!(Mantle.Plan(g))
 
@@ -158,11 +150,9 @@ end
     g = Mantle.Graph(REC_DEV)
     dst = Mantle.Buffer(REC_DEV, zeros(Float32, cap))
     n = Mantle.Buffer(REC_DEV, Int32[77])
-    Mantle.compute!(g, "mark") do p
-        Mantle.dispatch!(p, rec_mark!, (Mantle.use(p, dst; write = true),
-                                        Mantle.use(p, n; read = true)),
-                         Mantle.DeviceRange(n; max = cap))
-    end
+    Mantle.dispatch!(g, rec_mark!, (dst,
+                                        n),
+                         Mantle.DeviceRange(n; max = cap), name = "mark")
     plan = Mantle.record!(Mantle.Plan(g))
     @test plan.recording !== nothing
     Mantle.run!(plan)
@@ -176,11 +166,9 @@ end
     g = Mantle.Graph(REC_DEV)
     dst = Mantle.Buffer(REC_DEV, zeros(Float32, 64))
     n = Mantle.Buffer(REC_DEV, Int32[8])
-    Mantle.compute!(g, "mark") do p
-        Mantle.dispatch!(p, rec_mark!, (Mantle.use(p, dst; write = true),
-                                        Mantle.use(p, n; read = true)),
-                         Mantle.DeviceRange(n))
-    end
+    Mantle.dispatch!(g, rec_mark!, (dst,
+                                        n),
+                         Mantle.DeviceRange(n); name = "mark")
     plan = Mantle.Plan(g)
     # Refused, and the message says what to do about it. The plan still RUNS —
     # core's interpreted launch reads the count on the host — which is why this
@@ -236,12 +224,10 @@ end
         d = Mantle.Buffer(REC_DEV, dirs)
         hits = Mantle.Buffer(REC_DEV, zeros(Int32, n))
         ts = Mantle.Buffer(REC_DEV, zeros(Float32, n))
-        Mantle.compute!(g, "trace") do p
-            Mantle.dispatch!(p, rec_hw_probe!,
-                             (Mantle.use(p, hits; write = true),
-                              Mantle.use(p, ts; write = true),
-                              Mantle.use(p, d; read = true), accel, O), n)
-        end
+        Mantle.dispatch!(g, rec_hw_probe!,
+                             (hits,
+                              ts,
+                              d, accel, O), n; name = "trace")
         plan = Mantle.Plan(g)
         record && Mantle.record!(plan)
         Mantle.run!(plan)
@@ -284,11 +270,9 @@ end
         a = Mantle.Buffer(REC_DEV, zeros(Float32, n))
         b = Mantle.Buffer(REC_DEV, fill(1.0f0, n))
         for i in 1:k
-            Mantle.compute!(g, "add-$i") do p
-                Mantle.dispatch!(p, rec_chain!,
-                                 (Mantle.use(p, a; read = true, write = true),
-                                  Mantle.use(p, b; read = true)), n)
-            end
+            Mantle.dispatch!(g, rec_chain!,
+                                 (a,
+                                  b), n; name = "add-$i")
         end
         return Mantle.record!(Mantle.Plan(g))
     end

@@ -317,27 +317,16 @@ depth_px  = M.Transient.Buffer(graph, Float32, NPX)
 tilelights = M.Transient.Buffer(graph, UInt32, NTILE * PERTILE)
 tilecount  = M.Transient.Buffer(graph, UInt32, NTILE)
 
-M.compute!(graph, "clear count") do p
-    M.dispatch!(p, reset_counter!, (M.use(p, counter; write = true),), 1)
-end
-M.compute!(graph, "cull") do p
-    M.use(p, cullref; read = true)
-    M.dispatch!(p, cull!, (M.use(p, visible; write = true),
-                           M.use(p, counter; read = true, write = true),
-                           M.use(p, centers; read = true), cullref), NBOX)
-end
-M.compute!(graph, "draw count") do p
-    M.dispatch!(p, write_draw!, (M.use(p, drawcmd; write = true),
-                                 M.use(p, counter; read = true), UInt32(VPB)), 1)
-end
-M.compute!(graph, "lights") do p
-    M.use(p, timeref; read = true)
-    M.dispatch!(p, move_lights!, (M.use(p, lightpos; write = true),
-                                  M.use(p, lighthome; read = true), timeref), NLIGHT)
-end
+M.dispatch!(graph, reset_counter!, (counter,), 1; name = "clear count")
+M.dispatch!(graph, cull!, (visible,
+                           counter,
+                           centers, cullref), NBOX; name = "cull")
+M.dispatch!(graph, write_draw!, (drawcmd,
+                                 counter, UInt32(VPB)), 1; name = "draw count")
+M.dispatch!(graph, move_lights!, (lightpos,
+                                  lighthome, timeref), NLIGHT; name = "lights")
 M.render!(graph, "gbuffer", albedo => M.Clear((0f0, 0f0, 0f0, 1f0)),
                             normal => M.Discard, zbuf => M.Clear(1f0)) do p
-    M.use(p, vpref; read = true)
     args = (M.Attribute(p, cubepos), M.Attribute(p, cubenrm), M.Attribute(p, visible),
             M.Attribute(p, centers), M.Attribute(p, sizes), M.Attribute(p, colors), vpref)
     M.draw!(p, GBUFFER, args, drawcmd)
@@ -345,27 +334,20 @@ end
 M.copy!(graph, "read albedo", albedo_px, albedo)
 M.copy!(graph, "read normal", normal_px, normal)
 M.copy!(graph, "read depth", depth_px, zbuf)
-M.compute!(graph, "tiles") do p
-    M.use(p, invref; read = true)
-    M.use(p, lightref; read = true)
-    M.dispatch!(p, tile_lights!, (M.use(p, tilelights; write = true),
-                                  M.use(p, tilecount; write = true),
-                                  M.use(p, depth_px; read = true),
-                                  M.use(p, lightpos; read = true), invref,
+M.dispatch!(graph, tile_lights!, (tilelights,
+                                  tilecount,
+                                  depth_px,
+                                  lightpos, invref,
                                   Int32(W), Int32(H), Int32(TILE), Int32(NTX),
-                                  lightref, Int32(PERTILE)), (NTX, NTY); group = (8, 8))
-end
+                                  lightref, Int32(PERTILE)), (NTX, NTY); group = (8, 8), name = "tiles")
 # Discard, not Clear: the triangle covers every pixel, so loading the old
 # contents is work with nothing to show for it.
 M.render!(graph, "light", screen => M.Discard) do p
-    M.use(p, invref; read = true)
-    M.use(p, eyeref; read = true)
-    M.use(p, exposure; read = true)
     M.draw!(p, LIGHTING, (), 3;
-            frag_args = (M.use(p, albedo_px; read = true), M.use(p, normal_px; read = true),
-                         M.use(p, depth_px; read = true), M.use(p, lightpos; read = true),
-                         M.use(p, lightcol; read = true), M.use(p, tilelights; read = true),
-                         M.use(p, tilecount; read = true), invref, eyeref,
+            frag_args = (albedo_px, normal_px,
+                         depth_px, lightpos,
+                         lightcol, tilelights,
+                         tilecount, invref, eyeref,
                          Int32(W), Int32(H), Int32(TILE), Int32(NTX), Int32(PERTILE), exposure))
 end
 plan = M.Plan(graph; profile = true)

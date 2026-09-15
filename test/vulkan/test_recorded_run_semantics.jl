@@ -54,11 +54,7 @@ end
 """The graph under test: adds `kref`'s current value to `out` on every run."""
 function _refplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, out; read = true, write = true)
-        Mantle.use(p, kref; read = true)
-        Mantle.dispatch!(p, baked_addref!, (out, kref), n)
-    end
+    Mantle.dispatch!(g, baked_addref!, (out, kref), n; name = "add")
     Mantle.Plan(g)
 end
 
@@ -71,11 +67,7 @@ _plan(f, args...) = Base.invokelatest(f, args...)
 function _twopassplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
     for name in ("a", "b")
-        Mantle.compute!(g, name) do p
-            Mantle.use(p, out; read = true, write = true)
-            Mantle.use(p, kref; read = true)
-            Mantle.dispatch!(p, baked_addref!, (out, kref), n)
-        end
+        Mantle.dispatch!(g, baked_addref!, (out, kref), n; name = name)
     end
     Mantle.Plan(g)
 end
@@ -83,10 +75,7 @@ end
 """The same graph with a constant where the `GPURef` was: nothing can move."""
 function _constplan(dev, out, n)
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, out; read = true, write = true)
-        Mantle.dispatch!(p, baked_addk!, (out, Int32(5)), n)
-    end
+    Mantle.dispatch!(g, baked_addk!, (out, Int32(5)), n; name = "add")
     Mantle.Plan(g)
 end
 
@@ -266,27 +255,24 @@ end
     n = 32
     out = Mantle.Buffer(dev, zeros(Int32, n))
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, out; read = true, write = true)
-        @test_throws ArgumentError Mantle.dispatch!(p, baked_addk!, (out, Ref(Int32(5))), n)
-        @test_throws ArgumentError Mantle.dispatch!(p, baked_addk!, (out, (Ref(Int32(5)),)), n)
-        @test_throws ArgumentError Mantle.dispatch!(p, baked_addk!, (out, (k = Ref(Int32(5)),)), n)
-        @test_throws ArgumentError Mantle.dispatch!(p, baked_addk!, (out, RefHolder(Ref(Int32(5)))), n)
-        # …and the message names the replacement.
-        err = try
-            Mantle.dispatch!(p, baked_addk!, (out, Ref(Int32(5))), n)
-            nothing
-        catch e
-            e
-        end
-        @test err isa ArgumentError && occursin("GPURef", err.msg)
-        # A value is accepted; so is a resource, whose insides are its own, and
-        # so is a mutable handle — even one that references itself.
-        Mantle.dispatch!(p, baked_addk!, (out, Int32(5)), n)
-        handle = CyclicHandle(nothing, Ref(Int32(5)))
-        handle.self = handle
-        Mantle.dispatch!(p, baked_addk!, (out, handle), n)
+    @test_throws ArgumentError Mantle.dispatch!(g, baked_addk!, (out, Ref(Int32(5))), n)
+    @test_throws ArgumentError Mantle.dispatch!(g, baked_addk!, (out, (Ref(Int32(5)),)), n)
+    @test_throws ArgumentError Mantle.dispatch!(g, baked_addk!, (out, (k = Ref(Int32(5)),)), n)
+    @test_throws ArgumentError Mantle.dispatch!(g, baked_addk!, (out, RefHolder(Ref(Int32(5)))), n)
+    # …and the message names the replacement.
+    err = try
+        Mantle.dispatch!(g, baked_addk!, (out, Ref(Int32(5))), n)
+        nothing
+    catch e
+        e
     end
-    @test length(only(g.passes).dispatches) == 2
+    @test err isa ArgumentError && occursin("GPURef", err.msg)
+    # A value is accepted; so is a resource, whose insides are its own, and
+    # so is a mutable handle — even one that references itself.
+    Mantle.dispatch!(g, baked_addk!, (out, Int32(5)), n)
+    handle = CyclicHandle(nothing, Ref(Int32(5)))
+    handle.self = handle
+    Mantle.dispatch!(g, baked_addk!, (out, handle), n)
+    @test sum(length(p.dispatches) for p in g.passes) == 2
     Mantle.free!(out)
 end

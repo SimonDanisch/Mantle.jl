@@ -41,16 +41,9 @@ end
 function _repeatplan(dev, x, count, src, maxiters, n)
     g = Mantle.Graph(dev)
     # The count itself is produced by a kernel, so the host never supplies it.
-    Mantle.compute!(g, "decide") do p
-        Mantle.use(p, src; read = true)
-        Mantle.use(p, count; write = true)
-        Mantle.dispatch!(p, repeat_decide!, (count, src), 1)
-    end
+    Mantle.dispatch!(g, repeat_decide!, (count, src), 1; name = "decide")
     Mantle.repeat!(g, maxiters, count) do i
-        Mantle.compute!(g, "step-$i") do p
-            Mantle.use(p, x; read = true, write = true)
-            Mantle.dispatch!(p, repeat_step!, (x,), n)
-        end
+        Mantle.dispatch!(g, repeat_step!, (x,), n; name = "step-$i")
     end
     Mantle.record!(Mantle.Plan(g))
 end
@@ -140,11 +133,7 @@ end
 
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, maxiters; while_nonzero = budget) do i
-        Mantle.compute!(g, "drain-$i") do p
-            Mantle.use(p, x; read = true, write = true)
-            Mantle.use(p, budget; read = true, write = true)
-            Mantle.dispatch!(p, repeat_drain!, (x, budget), n)
-        end
+        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
     end
     pl = Mantle.record!(Mantle.Plan(g))
 
@@ -192,11 +181,7 @@ end
 
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, maxiters; while_nonzero = budget) do i
-        Mantle.compute!(g, "drain-$i") do p
-            Mantle.use(p, x; read = true, write = true)
-            Mantle.use(p, budget; read = true, write = true)
-            Mantle.dispatch!(p, repeat_drain!, (x, budget), n)
-        end
+        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
     end
     pl = Mantle.record!(Mantle.Plan(g))
     @test length(pl.passes) > 64          # the old boundary is crossed
@@ -274,17 +259,9 @@ end
         count = Mantle.Buffer(dev, zeros(Int32, 1))
         src = Mantle.Buffer(dev, Int32[3])
         g = Mantle.Graph(dev)
-        Mantle.compute!(g, "decide") do p
-            Mantle.use(p, src; read = true)
-            Mantle.use(p, count; write = true)
-            Mantle.dispatch!(p, repeat_decide!, (count, src), 1)
-        end
+        Mantle.dispatch!(g, repeat_decide!, (count, src), 1; name = "decide")
         Mantle.repeat!(g, maxiters, count) do i
-            Mantle.compute!(g, "step-$i") do p
-                Mantle.use(p, x; read = true, write = true)
-                Mantle.use(p, nbuf; read = true)
-                Mantle.dispatch!(p, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf))
-            end
+            Mantle.dispatch!(g, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf); name = "step-$i")
         end
         pl = Mantle.record!(Mantle.Plan(g))
         Mantle.run!(pl)

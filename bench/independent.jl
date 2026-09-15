@@ -44,11 +44,7 @@ function build_interleaved(dev, n, chains, stages; coalesce = true, alias = true
     g = M.Graph(dev)
     bufs = [[M.Transient.Buffer(g, Float32, n) for _ in 1:(stages + 1)] for _ in 1:chains]
     for s in 1:stages, c in 1:chains
-        M.compute!(g, "c$c s$s") do p
-            src = M.use(p, bufs[c][s]; read = true)
-            dst = M.use(p, bufs[c][s + 1]; write = true)
-            M.dispatch!(p, stir!, (dst, src, 1.001f0), n)
-        end
+        M.dispatch!(g, stir!, (bufs[c][s + 1], bufs[c][s], 1.001f0), n; name = "c$c s$s")
     end
     (; g, bufs, plan = M.record!(M.Plan(g; coalesce, alias)))
 end

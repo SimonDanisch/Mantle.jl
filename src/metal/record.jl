@@ -858,8 +858,8 @@ if that iteration is discarded the gate does not run, its range stays zero from
 answer, because a discarded iteration writes nothing the gate reads and so the gate
 would have said the same thing. Once closed, a `repeat!` loop stays closed.
 
-Asked of what the pass WRITES rather than of its name: `repeat!` declares
-`use(p, pred; write = true)` on its gate, and a pass that happens to be scheduled
+Asked of what the pass WRITES rather than of its name: `repeat!`'s gate kernel
+writes the predicate, and a pass that happens to be scheduled
 between two iterations without touching the flag is real work and ends the segment.
 """
 function gatesopen(e::MetalRecorder)

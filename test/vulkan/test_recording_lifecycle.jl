@@ -56,15 +56,10 @@ end
 function _stepplan(dev, a, d, n)
     g = Mantle.Graph(dev)
     for k in 1:20
-        Mantle.compute!(g, "add$k") do p
-            Mantle.use(p, a; read = true, write = true)
-            Mantle.dispatch!(p, reclife_add!, (a, 1.0f0), n)
-        end
+        Mantle.dispatch!(g, reclife_add!, (a, 1.0f0), n; name = "add$k")
     end
-    Mantle.compute!(g, "scale") do p
-        Mantle.dispatch!(p, reclife_scale!, (Mantle.use(p, d; write = true),
-                                             Mantle.use(p, a; read = true), 2.0f0), n)
-    end
+    Mantle.dispatch!(g, reclife_scale!, (d,
+                                             a, 2.0f0), n; name = "scale")
     Mantle.Plan(g)
 end
 

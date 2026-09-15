@@ -31,11 +31,7 @@ end
 """out[i] = src[i], n lanes, as a recordable one-pass plan."""
 function _movepatch_plan(dev, src, out, n)
     g = M.Graph(dev)
-    M.compute!(g, "copy") do p
-        s = M.use(p, src; read = true)
-        d = M.use(p, out; write = true)
-        M.dispatch!(p, _movepatch_copy!, (d, s), n)
-    end
+    M.dispatch!(g, _movepatch_copy!, (out, src), n; name = "copy")
     M.record!(M.Plan(g))
 end
 
@@ -50,21 +46,12 @@ function _movepatch_chainplan(dev, n, nstage)
     g = M.Graph(dev)
     seed = M.Buffer(dev, zeros(Float32, n))
     t = [M.Transient.Buffer(g, Float32, n) for _ in 1:(nstage + 1)]
-    M.compute!(g, "seed") do p
-        s = M.use(p, seed; read = true); d = M.use(p, t[1]; write = true)
-        M.dispatch!(p, _movepatch_bump!, (d, s), n)
-    end
+    M.dispatch!(g, _movepatch_bump!, (t[1], seed), n; name = "seed")
     for k in 1:nstage
-        M.compute!(g, "s$k") do p
-            s = M.use(p, t[k]; read = true); d = M.use(p, t[k + 1]; write = true)
-            M.dispatch!(p, _movepatch_bump!, (d, s), n)
-        end
+        M.dispatch!(g, _movepatch_bump!, (t[k + 1], t[k]), n; name = "s$k")
     end
     out = M.Buffer(dev, zeros(Float32, n))
-    M.compute!(g, "out") do p
-        s = M.use(p, t[end]; read = true); d = M.use(p, out; write = true)
-        M.dispatch!(p, _movepatch_bump!, (d, s), n)
-    end
+    M.dispatch!(g, _movepatch_bump!, (out, t[end]), n; name = "out")
     (; out, plan = M.record!(M.Plan(g)), keep = (seed, t))
 end
 
@@ -74,14 +61,8 @@ function _movepatch_fatplan(dev, n)
     seed = M.Buffer(dev, zeros(Float32, 16))
     t1 = M.Transient.Buffer(g, Float32, n)
     t2 = M.Transient.Buffer(g, Float32, n)
-    M.compute!(g, "a") do p
-        s = M.use(p, seed; read = true); d = M.use(p, t1; write = true)
-        M.dispatch!(p, _movepatch_bump!, (d, s), 16)
-    end
-    M.compute!(g, "b") do p
-        s = M.use(p, t1; read = true); d = M.use(p, t2; write = true)
-        M.dispatch!(p, _movepatch_bump!, (d, s), 16)
-    end
+    M.dispatch!(g, _movepatch_bump!, (t1, seed), 16; name = "a")
+    M.dispatch!(g, _movepatch_bump!, (t2, t1), 16; name = "b")
     (; plan = M.record!(M.Plan(g)), keep = (seed, t1, t2))
 end
 

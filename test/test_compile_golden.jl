@@ -50,16 +50,12 @@ function buildprobe(dev, n::Integer)
     t = [M.Transient.Buffer(g, Float32, n) for _ in 1:5]
     chain = (src, t[1], t[2], t[3])
     for k in 1:3
-        M.compute!(g, "chain$k") do p
-            M.dispatch!(p, goldenscale!, (M.use(p, chain[k + 1]; write = true),
-                                          M.use(p, chain[k]; read = true), 2.0f0), n)
-        end
+        M.dispatch!(g, goldenscale!, (chain[k + 1],
+                                          chain[k], 2.0f0), n; name = "chain$k")
     end
     for (k, dsti) in enumerate((4, 5))
-        M.compute!(g, "branch$k") do p
-            M.dispatch!(p, goldenscale!, (M.use(p, t[dsti]; write = true),
-                                          M.use(p, src; read = true), Float32(k)), n)
-        end
+        M.dispatch!(g, goldenscale!, (t[dsti],
+                                          src, Float32(k)), n; name = "branch$k")
     end
     return g
 end
@@ -160,14 +156,10 @@ function buildtemptation(dev, big::Integer, small::Integer)
     src = M.Buffer(dev, fill(1.0f0, big))
     t = M.Transient.Buffer(g, Float32, big)
     u = M.Transient.Buffer(g, Float32, small)
-    M.compute!(g, "fill") do p
-        M.dispatch!(p, goldenscale!, (M.use(p, t; write = true),
-                                      M.use(p, src; read = true), 2.0f0), big)
-    end
-    M.compute!(g, "drain") do p
-        M.dispatch!(p, goldenscale!, (M.use(p, u; write = true),
-                                      M.use(p, t; read = true), 3.0f0), small)
-    end
+    M.dispatch!(g, goldenscale!, (t,
+                                      src, 2.0f0), big; name = "fill")
+    M.dispatch!(g, goldenscale!, (u,
+                                      t, 3.0f0), small; name = "drain")
     return g
 end
 

@@ -109,11 +109,7 @@ end
     kref = Mantle.GPURef(dev, Int32(2))
     out = Mantle.Buffer(dev, zeros(Int32, n))
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, out; read = true, write = true)
-        Mantle.use(p, kref; read = true)
-        Mantle.dispatch!(p, ccb_add!, (out, kref), n)
-    end
+    Mantle.dispatch!(g, ccb_add!, (out, kref), n; name = "add")
     pl = Base.invokelatest(Mantle.Plan, g)
     r = observe(bq) do
         Mantle.record!(pl)

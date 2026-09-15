@@ -41,7 +41,6 @@ function build_targets(dev, n; alias = true, points = cloud(n))
 
     g = M.Graph(dev)
     scatter(p) = begin
-        M.use(p, mvp; read = true)
         M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
                              M.Attribute(p, siz), mvp,
                              Int32(1), Int32(0)), pos)
@@ -57,12 +56,10 @@ function build_targets(dev, n; alias = true, points = cloud(n))
     M.copy!(g, "read A", ra, a)
     M.render!(scatter, g, "B", b => M.Clear((0.04f0, 0.02f0, 0.02f0, 1f0)))
     M.copy!(g, "read B", rb, b)
-    M.compute!(g, "combine") do p
-        M.dispatch!(p, combine!, (M.use(p, out; write = true),
-                                  M.use(p, ra; read = true),
-                                  M.use(p, rb; read = true),
-                                  Int32(W), Int32(H)), (W, H); group = (16, 16))
-    end
+    M.dispatch!(g, combine!, (out,
+                                  ra,
+                                  rb,
+                                  Int32(W), Int32(H)), (W, H); group = (16, 16), name = "combine")
     (; g, a, b, out, mvp, plan = M.record!(M.Plan(g; alias)))
 end
 

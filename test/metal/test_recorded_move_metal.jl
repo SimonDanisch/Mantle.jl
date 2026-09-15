@@ -34,10 +34,8 @@ end
     a = M.Buffer(dev, zeros(Float32, n))
     b = M.Buffer(dev, fill(1.0f0, n))
     g = M.Graph(dev)
-    M.compute!(g, "add") do p
-        M.dispatch!(p, seam_move_add!, (M.use(p, a; read = true, write = true),
-                                        M.use(p, b; read = true)), n)
-    end
+    M.dispatch!(g, seam_move_add!, (a,
+                                        b), n; name = "add")
     pl = M.record!(M.Plan(g))
 
     # The table is core's and is built from the packed arguments' types, so it is

@@ -237,11 +237,7 @@ else
         g = M.Graph(dev)
         pos = M.Buffer(dev, cloud(n))
         vel = M.Buffer(dev, drift(n))
-        M.compute!(g, "advect") do p
-            x = M.use(p, pos; read = true, write = true)
-            v = M.use(p, vel; read = true, write = true)
-            M.dispatch!(p, advect!, (x, v, 1f0 / 60, 1.4f0), n)
-        end
+        M.dispatch!(g, advect!, (pos, vel, 1f0 / 60, 1.4f0), n; name = "advect")
         (plan = M.record!(M.Plan(g)), pos = pos)
     end
 
@@ -436,13 +432,9 @@ else
         win = M.Window(64, 64; title = "every frame", vsync = false)
         g = M.Graph(dev)
         cnt, tally = M.Buffer(dev, UInt32[0]), M.Buffer(dev, UInt32[0])
-        M.compute!(g, "clear") do p
-            M.dispatch!(p, clear_and_tally!, (M.use(p, cnt; write = true),
-                                              M.use(p, tally; read = true, write = true)), 1)
-        end
-        M.compute!(g, "accumulate") do p
-            M.dispatch!(p, bump_counter!, (M.use(p, cnt; read = true, write = true),), 512)
-        end
+        M.dispatch!(g, clear_and_tally!, (cnt,
+                                              tally), 1; name = "clear")
+        M.dispatch!(g, bump_counter!, (cnt,), 512; name = "accumulate")
         screen = M.Surface(g, win)
         M.render!(g, "present", screen => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
         end
@@ -462,6 +454,15 @@ else
         @inbounds dst[base + i] = v
     end
 
+    # A real reader: it takes the span it reads and puts the result somewhere
+    # else, so what the pass does to `src` is a read and nothing more. A kernel
+    # that only loaded would be one whose accesses the graph still has to order —
+    # and one an optimiser is free to delete.
+    @kernel function sum_span!(out, @Const(src), base::Int32)
+        i = @index(Global)
+        @inbounds out[i] = src[base + i]
+    end
+
     @testset "disjoint slices of one buffer are not ordered against each other" begin
         # Ported from Vulkan-ValidationLayers,
         # tests/unit/sync_val_positive.cpp: PositiveSyncVal.BufferCopyNonOverlappedRegions —
@@ -479,16 +480,10 @@ else
         build(ranged) = begin
             g = M.Graph(dev)
             b = M.Buffer(dev, zeros(Float32, n))
-            M.compute!(g, "lower") do p
-                w = ranged ? M.use(p, b; write = true, range = 1:128) :
-                             M.use(p, b; write = true)
-                M.dispatch!(p, fill_span!, (w, Int32(0), 1f0), 128)
-            end
-            M.compute!(g, "upper") do p
-                w = ranged ? M.use(p, b; write = true, range = 129:256) :
-                             M.use(p, b; write = true)
-                M.dispatch!(p, fill_span!, (w, Int32(128), 2f0), 128)
-            end
+            lo = ranged ? M.slice(g, b, 1:128) : b
+            hi = ranged ? M.slice(g, b, 129:256) : b
+            M.dispatch!(g, fill_span!, (lo, Int32(0), 1f0), 128; name = "lower")
+            M.dispatch!(g, fill_span!, (hi, Int32(128), 2f0), 128; name = "upper")
             (; b, plan = M.record!(M.Plan(g)))
         end
         # The update pass every plan with a declared buffer has is excluded — it
@@ -530,16 +525,11 @@ else
         readerwaits(ranged) = begin
             g = M.Graph(dev)
             b = M.Buffer(dev, zeros(Float32, n))
-            M.compute!(g, "write low") do p
-                w = ranged ? M.use(p, b; write = true, range = 1:128) :
-                             M.use(p, b; write = true)
-                M.dispatch!(p, fill_span!, (w, Int32(0), 3f0), 128)
-            end
-            M.compute!(g, "read high") do p
-                r = ranged ? M.use(p, b; read = true, range = 129:256) :
-                             M.use(p, b; read = true)
-                M.dispatch!(p, fill_span!, (r, Int32(128), 4f0), 128)
-            end
+            out = M.Buffer(dev, zeros(Float32, 128))
+            lo = ranged ? M.slice(g, b, 1:128) : b
+            hi = ranged ? M.slice(g, b, 129:256) : b
+            M.dispatch!(g, fill_span!, (lo, Int32(0), 3f0), 128; name = "write low")
+            M.dispatch!(g, sum_span!, (out, hi, Int32(128)), 128; name = "read high")
             reader = only(pp for pp in M.Plan(g).passes if pp.pass.name == "read high")
             any(t -> t.from === SW, reader.pre)
         end
@@ -553,10 +543,8 @@ else
         gs = M.Graph(dev)
         bs = M.Buffer(dev, zeros(Float32, n))
         for nm in ("first", "second")
-            M.compute!(gs, nm) do p
-                M.dispatch!(p, fill_span!, (M.use(p, bs; write = true, range = 1:128),
-                                            Int32(0), 5f0), 128)
-            end
+            M.dispatch!(gs, fill_span!, (M.slice(gs, bs, 1:128), Int32(0), 5f0), 128;
+                        name = nm)
         end
         @test length(touched(M.Plan(gs))) == 1
 
@@ -566,18 +554,12 @@ else
         # atomic-segment partition exists for: the cuts fall at 1, 64, 129, 201.
         gp = M.Graph(dev)
         bp = M.Buffer(dev, zeros(Float32, n))
-        M.compute!(gp, "low") do p
-            M.dispatch!(p, fill_span!, (M.use(p, bp; write = true, range = 1:128),
-                                        Int32(0), 6f0), 128)
-        end
-        M.compute!(gp, "mid") do p
-            M.dispatch!(p, fill_span!, (M.use(p, bp; write = true, range = 64:200),
-                                        Int32(63), 7f0), 137)
-        end
-        M.compute!(gp, "tail") do p
-            M.dispatch!(p, fill_span!, (M.use(p, bp; write = true, range = 201:256),
-                                        Int32(200), 8f0), 56)
-        end
+        M.dispatch!(gp, fill_span!, (M.slice(gp, bp, 1:128), Int32(0), 6f0), 128;
+                    name = "low")
+        M.dispatch!(gp, fill_span!, (M.slice(gp, bp, 64:200), Int32(63), 7f0), 137;
+                    name = "mid")
+        M.dispatch!(gp, fill_span!, (M.slice(gp, bp, 201:256), Int32(200), 8f0), 56;
+                    name = "tail")
         pp = M.Plan(gp)
         segs(name) = Set(t.resource for p in pp.passes if p.pass.name == name
                          for t in p.pre)
@@ -596,15 +578,10 @@ else
         gm = M.Graph(dev)
         bm = M.Buffer(dev, zeros(Float32, n))
         for (k, r) in enumerate((1:64, 65:128, 129:192, 193:256))
-            M.compute!(gm, "part $k") do p
-                M.dispatch!(p, fill_span!, (M.use(p, bm; write = true, range = r),
-                                            Int32(first(r) - 1), Float32(k)), length(r))
-            end
+            M.dispatch!(gm, fill_span!, (M.slice(gm, bm, r), Int32(first(r) - 1),
+                                         Float32(k)), length(r); name = "part $k")
         end
-        M.compute!(gm, "whole") do p
-            M.dispatch!(p, fill_span!, (M.use(p, bm; read = true, write = true),
-                                        Int32(0), 9f0), n)
-        end
+        M.dispatch!(gm, fill_span!, (bm, Int32(0), 9f0), n; name = "whole")
         pm = M.Plan(gm)
         whole = only(pp for pp in pm.passes if pp.pass.name == "whole")
         @test length(whole.pre) == 4                                   # four segments
@@ -614,9 +591,7 @@ else
         # Out of bounds is still a mistake worth naming.
         g2 = M.Graph(dev)
         b2 = M.Buffer(dev, zeros(Float32, n))
-        @test_throws ArgumentError M.compute!(g2, "past the end") do p
-            M.use(p, b2; write = true, range = 200:400)
-        end
+        @test_throws ArgumentError M.slice(g2, b2, 200:400)
 
         # A sliced *transient* still gets its handover. The handover is derived
         # per transient and looked its usage up by that transient's own id, so a
@@ -627,22 +602,13 @@ else
         g3 = M.Graph(dev)
         a3 = M.Transient.Buffer(g3, Float32, n)
         b3 = M.Transient.Buffer(g3, Float32, n)
-        M.compute!(g3, "fill a") do p
-            M.dispatch!(p, fill_span!, (M.use(p, a3; write = true), Int32(0), 1f0), n)
-        end
-        M.compute!(g3, "read a") do p
-            M.dispatch!(p, fill_span!, (M.use(p, a3; read = true), Int32(0), 1f0), n)
-        end
-        M.compute!(g3, "slice of b") do p
-            M.dispatch!(p, fill_span!, (M.use(p, b3; write = true, range = 1:128),
-                                        Int32(0), 2f0), 128)
-        end
+        M.dispatch!(g3, fill_span!, (a3, Int32(0), 1f0), n; name = "fill a")
+        keep3 = M.Buffer(dev, zeros(Float32, n))
+        M.dispatch!(g3, sum_span!, (keep3, a3, Int32(0)), n; name = "read a")
+        M.dispatch!(g3, fill_span!, (M.slice(g3, b3, 1:128), Int32(0), 2f0), 128;
+                    name = "slice of b")
         out3 = M.Buffer(dev, zeros(Float32, n))
-        M.compute!(g3, "drain") do p
-            M.dispatch!(p, fill_span!, (M.use(p, out3; write = true),
-                                        Int32(0), 3f0), n)
-            M.use(p, b3; read = true)
-        end
+        M.dispatch!(g3, sum_span!, (out3, b3, Int32(0)), n; name = "drain")
         p3 = M.Plan(g3; alias = true)
         # `b` takes over `a`'s bytes, and the pass that first writes it names only
         # a slice. The handover is the transition with no resource of its own.
@@ -850,15 +816,11 @@ else
             out = M.Buffer(dev, zeros(Float32, n))
             ts = [M.Transient.Buffer(g, Float32, n) for _ in 1:6]
             for i in 1:6
-                M.compute!(g, "draw$(i-1)") do p
-                    M.dispatch!(p, sched_write!, (M.use(p, ts[i]; write = true), Float32(i)), n)
-                end
+                M.dispatch!(g, sched_write!, (ts[i], Float32(i)), n; name = "draw$(i-1)")
             end
             for i in 1:6
-                M.compute!(g, "blt$(i-1)") do p
-                    M.dispatch!(p, sched_accum!, (M.use(p, out; read = true, write = true),
-                                                  M.use(p, ts[i]; read = true)), n)
-                end
+                M.dispatch!(g, sched_accum!, (out,
+                                                  ts[i]), n; name = "blt$(i-1)")
             end
             M.Plan(g; policy = pol)
         end
@@ -890,13 +852,9 @@ else
             g = M.Graph(dev)
             out = M.Buffer(dev, zeros(Float32, n))
             ts = [M.Transient.Buffer(g, Float32, n) for _ in 1:6]
-            dr = (id, i) -> M.compute!(g, "$id") do p
-                M.dispatch!(p, sched_write!, (M.use(p, ts[i]; write = true), Float32(id)), n)
-            end
-            bl = (id, i) -> M.compute!(g, "$id") do p
-                M.dispatch!(p, sched_accum!, (M.use(p, out; read = true, write = true),
-                                              M.use(p, ts[i]; read = true)), n)
-            end
+            dr = (id, i) -> M.dispatch!(g, sched_write!, (ts[i], Float32(id)), n;
+                                        name = "$id")
+            bl = (id, i) -> M.dispatch!(g, sched_accum!, (out, ts[i]), n; name = "$id")
             for i in 1:6; dr(i - 1, i); end
             for i in 1:6; bl(i + 5, i); end
             if hoist                                    # RPS: every draw, then every blt
@@ -938,10 +896,8 @@ else
             g = M.Graph(dev)
             bufs = [[M.Transient.Buffer(g, Float32, 1 << 12) for _ in 1:5] for _ in 1:6]
             for s in 1:4, c in 1:6
-                M.compute!(g, "c$c s$s") do p
-                    M.dispatch!(p, stir!, (M.use(p, bufs[c][s + 1]; write = true),
-                                           M.use(p, bufs[c][s]; read = true), 1.0f0), 1 << 12)
-                end
+                M.dispatch!(g, stir!, (bufs[c][s + 1],
+                                           bufs[c][s], 1.0f0), 1 << 12; name = "c$c s$s")
             end
             M.Plan(g; policy = pol)
         end
@@ -974,10 +930,8 @@ else
             g = M.Graph(dev)
             bufs = [M.Transient.Buffer(g, Float32, 1 << 12) for _ in 1:12]
             for i in 2:12
-                M.compute!(g, "p$i") do p
-                    M.dispatch!(p, stir!, (M.use(p, bufs[i]; write = true),
-                                           M.use(p, bufs[i - 1]; read = true), 1.0f0), 1 << 12)
-                end
+                M.dispatch!(g, stir!, (bufs[i],
+                                           bufs[i - 1], 1.0f0), 1 << 12; name = "p$i")
             end
             M.Plan(g; alias = al)
         end
@@ -1346,7 +1300,6 @@ else
             mvp = M.GPURef(dev, camera(0f0))
             pos = M.Buffer(dev, pts); col = M.Buffer(dev, tint.(pts)); siz = M.GPURef(dev, 3f0)
             M.render!(g, "p", img => op) do p
-                M.use(p, mvp; read = true)
                 M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
                                      M.Attribute(p, siz), mvp, Int32(1), Int32(0)), pos)
             end
@@ -1542,11 +1495,7 @@ else
         sim, gpu, cpu = mk(a), mk(b), mk(c)
 
         simvel = M.Buffer(dev, drift(n))
-        M.compute!(g, "advect") do p
-            x = M.use(p, sim.positions; read = true, write = true)
-            v = M.use(p, simvel; read = true, write = true)
-            M.dispatch!(p, advect!, (x, v, dt, 1.4f0), n)
-        end
+        M.dispatch!(g, advect!, (sim.positions, simvel, dt, 1.4f0), n; name = "advect")
 
         gpuvel = M.Buffer(dev, drift(n))
         cpupos, cpuvel = copy(c), drift(n)
@@ -1779,10 +1728,8 @@ else
         used = M.Transient.Buffer(g, Float32, 1 << 10)
         M.Transient.Buffer(g, Float32, 1 << 9)          # declared, never used
         src = M.Buffer(dev, rand(Float32, 1 << 10))
-        M.compute!(g, "c") do p
-            M.dispatch!(p, stir!, (M.use(p, used; write = true),
-                                   M.use(p, src; read = true), 2.0f0), 1 << 10)
-        end
+        M.dispatch!(g, stir!, (used,
+                                   src, 2.0f0), 1 << 10; name = "c")
         @test_throws "is never used by any pass" M.Plan(g)
     end
 
@@ -1820,11 +1767,9 @@ else
             g = M.Graph(dev)
             a = M.Buffer(dev, src)
             out = M.Buffer(dev, zeros(Float32, w * h))
-            M.compute!(g, "transpose") do p
-                M.dispatch!(p, transpose_scale!,
-                            (M.use(p, out; write = true), M.use(p, a; read = true),
-                             Int32(w), Int32(h), 2.0f0), (w, h); group)
-            end
+            M.dispatch!(g, transpose_scale!,
+                            (out, a,
+                             Int32(w), Int32(h), 2.0f0), (w, h); group, name = "transpose")
             M.run!(M.record!(M.Plan(g)))
             KernelAbstractions.synchronize(M.backend(dev))
             Array(out)
@@ -1850,7 +1795,7 @@ else
         out = M.Transient.Buffer(g, UInt32, N * N)
         M.render!(g, "light", img => M.Discard) do p
             M.draw!(p, RAMP, (), 3;
-                    frag_args = (M.use(p, src; read = true), Int32(N), Int32(N)))
+                    frag_args = (src, Int32(N), Int32(N)))
         end
         M.copy!(g, "read", out, img)
         plan = M.record!(M.Plan(g))
@@ -1871,7 +1816,7 @@ else
         other = M.Transient.Image(h, RGBA{N0f8}, (N, N))
         @test_throws "both stages" M.render!(h, "both", other => M.Discard) do p
             M.draw!(p, RAMP, (M.Attribute(p, src),), 3;
-                    frag_args = (M.use(p, src; read = true), Int32(N), Int32(N)))
+                    frag_args = (src, Int32(N), Int32(N)))
         end
     end
 
@@ -1893,10 +1838,7 @@ else
         cmds = M.Buffer(dev, Mantle.DrawIndirectCommand, 1)
         img = M.Transient.Image(g, RGBA{N0f8}, (N, N))
         out = M.Transient.Buffer(g, UInt32, N * N)
-        M.compute!(g, "count") do p
-            M.use(p, kref; read = true)
-            M.dispatch!(p, set_draw!, (M.use(p, cmds; write = true), kref), 1)
-        end
+        M.dispatch!(g, set_draw!, (cmds, kref), 1; name = "count")
         M.render!(g, "bands", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
             M.draw!(p, BANDS, (Int32(NB),), cmds)
         end
@@ -1948,18 +1890,11 @@ else
             M.render!(g, "clear", img => M.Clear((0.25f0, 0f0, 0f0, 1f0))) do p
             end
             M.copy!(g, "read", raw, img)
-            M.compute!(g, "consume") do p          # the last thing raw sees
-                M.dispatch!(p, frombytes!, (M.use(p, mid; write = true),
-                                            M.use(p, raw; read = true)), N * N)
-            end
-            M.compute!(g, "fill") do p             # later takes raw's bytes here
-                M.dispatch!(p, scaleby!, (M.use(p, later; write = true),
-                                          M.use(p, mid; read = true), 2f0), N * N)
-            end
-            M.compute!(g, "out") do p
-                M.dispatch!(p, scaleby!, (M.use(p, out; write = true),
-                                          M.use(p, later; read = true), 1f0), N * N)
-            end
+            # the last thing raw sees
+            M.dispatch!(g, frombytes!, (mid, raw), N * N; name = "consume")
+            # later takes raw's bytes here
+            M.dispatch!(g, scaleby!, (later, mid, 2f0), N * N; name = "fill")
+            M.dispatch!(g, scaleby!, (out, later, 1f0), N * N; name = "out")
             (; plan = M.record!(M.Plan(g)), out)
         end
 
@@ -1973,14 +1908,9 @@ else
             M.render!(g, "clear", img => M.Clear((0.25f0, 0f0, 0f0, 1f0))) do p
             end
             M.copy!(g, "read", raw, img)           # the last thing raw sees
-            M.compute!(g, "fill") do p             # later takes raw's bytes here
-                M.dispatch!(p, scaleby!, (M.use(p, later; write = true),
-                                          M.use(p, seed; read = true), 2f0), N * N)
-            end
-            M.compute!(g, "out") do p
-                M.dispatch!(p, scaleby!, (M.use(p, out; write = true),
-                                          M.use(p, later; read = true), 1f0), N * N)
-            end
+            # later takes raw's bytes here
+            M.dispatch!(g, scaleby!, (later, seed, 2f0), N * N; name = "fill")
+            M.dispatch!(g, scaleby!, (out, later, 1f0), N * N; name = "out")
             (; plan = M.record!(M.Plan(g)), out)
         end
 

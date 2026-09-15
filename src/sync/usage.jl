@@ -66,7 +66,7 @@ struct TraceBuild <: Usage end
 No contents. What a transient is in before anything writes it, and what one
 becomes when another takes over its bytes.
 
-It is a state and never a declaration: `use(p, x; ...)` cannot produce it. Its
+It is a state and never a declaration: no kernel's access infers to it. Its
 value is that "undefined" then travels through the same tracking as every other
 state instead of being a special case at the point a barrier is emitted, so a
 first write and a write after aliasing lower identically.
@@ -181,9 +181,9 @@ the pass that filled its queue had finished, and the pass after it could read
 the queue it was still writing. Bit-identical images almost always, and one
 `VK_ERROR_DEVICE_LOST` on a medium-heavy scene when it was not.
 
-Applied by `compute!` to every shader usage of a pass that holds a [`Trace`](@ref)
-(see [`traced`](@ref)), so no call site names it — a `use(p, x; read = true)`
-inside a trace pass IS a traced read. Outermost is `Unordered`, when both apply.
+Applied by [`trace!`](@ref) to every shader usage of the pass it makes (see
+[`traced`](@ref)), so no call site names it — a buffer a raygen reads IS a traced
+read. Outermost is `Unordered`, when both apply.
 """
 struct Traced{U<:Usage} <: Usage end
 

@@ -52,6 +52,12 @@ No transient means no liveness rule to satisfy, so a pass may read, write or do
 both to any buffer in any order — which is what makes every hazard kind appear.
 Never run: the point is the emitted set, and an uninitialised read would only
 make the bytes undefined, not the barriers.
+
+What the generator varies is which buffers a pass takes, in which order, and
+which slice of each. The read/write pattern is `touchN!`'s — it writes its first
+argument and reads the rest — so one buffer landing in position 1 of one pass and
+position 3 of another is what produces a write-after-read, a read-after-write and
+a write-after-write between them.
 """
 function usage_graph(dev, rng, bufs, npasses; n = 256, coalesce = true,
                      policy = M.Overlap(), slicing = 0.0)
@@ -63,9 +69,6 @@ function usage_graph(dev, rng, bufs, npasses; n = 256, coalesce = true,
     for i in 1:npasses
         k = rand(rng, 1:min(4, length(bufs)))
         picks = shuffle(rng, collect(eachindex(bufs)))[1:k]
-        flags = [(rand(rng, Bool), rand(rng, Bool)) for _ in picks]
-        # A usage has to be at least one of the two.
-        flags = [(r || w) ? (r, w) : (true, false) for (r, w) in flags]
         ranges = map(_ -> if rand(rng) < slicing
                          a, b = rand(rng, cuts), rand(rng, cuts)
                          a > b && ((a, b) = (b, a))
@@ -73,13 +76,11 @@ function usage_graph(dev, rng, bufs, npasses; n = 256, coalesce = true,
                      else
                          nothing
                      end, picks)
-        M.compute!(g, "p$i") do p
-            args = ntuple(length(picks)) do j
-                M.use(p, bufs[picks[j]]; read = flags[j][1], write = flags[j][2],
-                      range = ranges[j])
-            end
-            M.dispatch!(p, TOUCH[length(picks)], args, n)
+        args = ntuple(length(picks)) do j
+            b = bufs[picks[j]]
+            ranges[j] === nothing ? b : M.slice(g, b, ranges[j])
         end
+        M.dispatch!(g, TOUCH[length(picks)], args, n; name = "p$i")
     end
     (; g, plan = M.Plan(g; coalesce, policy))
 end
@@ -97,18 +98,14 @@ function chain_graph(dev, rng, npasses; n = 256, alias = true, coalesce = true,
     for i in 1:npasses
         a = sources[rand(rng, 1:length(sources))]
         b = sources[rand(rng, 1:length(sources))]
-        M.compute!(g, "p$i") do p
-            M.dispatch!(p, touch3!, (M.use(p, bufs[i]; write = true),
-                                     M.use(p, a; read = true),
-                                     M.use(p, b; read = true)), n)
-        end
+        M.dispatch!(g, touch3!, (bufs[i],
+                                     a,
+                                     b), n; name = "p$i")
         push!(sources, bufs[i])
     end
     out = M.Buffer(dev, zeros(Float32, n))
-    M.compute!(g, "out") do p
-        M.dispatch!(p, touch2!, (M.use(p, out; write = true),
-                                 M.use(p, bufs[end]; read = true)), n)
-    end
+    M.dispatch!(g, touch2!, (out,
+                                 bufs[end]), n; name = "out")
     (; g, plan = M.Plan(g; alias, coalesce, policy))
 end
 

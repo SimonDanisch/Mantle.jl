@@ -28,21 +28,12 @@ function chainplan(dev, n, nstage)
     g = M.Graph(dev)
     seed = M.Buffer(dev, zeros(Float32, n))
     t = [M.Transient.Buffer(g, Float32, n) for _ in 1:(nstage + 1)]
-    M.compute!(g, "seed") do p
-        s = M.use(p, seed; read = true); d = M.use(p, t[1]; write = true)
-        M.dispatch!(p, bump!, (d, s), n)
-    end
+    M.dispatch!(g, bump!, (t[1], seed), n; name = "seed")
     for k in 1:nstage
-        M.compute!(g, "s$k") do p
-            s = M.use(p, t[k]; read = true); d = M.use(p, t[k + 1]; write = true)
-            M.dispatch!(p, bump!, (d, s), n)
-        end
+        M.dispatch!(g, bump!, (t[k + 1], t[k]), n; name = "s$k")
     end
     out = M.Buffer(dev, zeros(Float32, n))
-    M.compute!(g, "out") do p
-        s = M.use(p, t[end]; read = true); d = M.use(p, out; write = true)
-        M.dispatch!(p, bump!, (d, s), n)
-    end
+    M.dispatch!(g, bump!, (out, t[end]), n; name = "out")
     (; g, out, seed, plan = M.record!(M.Plan(g)), keep = (seed, t))
 end
 
@@ -54,14 +45,8 @@ function fatplan(dev, n)
     seed = M.Buffer(dev, zeros(Float32, 16))
     t1 = M.Transient.Buffer(g, Float32, n)
     t2 = M.Transient.Buffer(g, Float32, n)
-    M.compute!(g, "a") do p
-        s = M.use(p, seed; read = true); d = M.use(p, t1; write = true)
-        M.dispatch!(p, bump!, (d, s), 16)
-    end
-    M.compute!(g, "b") do p
-        s = M.use(p, t1; read = true); d = M.use(p, t2; write = true)
-        M.dispatch!(p, bump!, (d, s), 16)
-    end
+    M.dispatch!(g, bump!, (t1, seed), 16; name = "a")
+    M.dispatch!(g, bump!, (t2, t1), 16; name = "b")
     (; plan = M.record!(M.Plan(g)), keep = (seed, t1, t2))
 end
 
@@ -155,11 +140,7 @@ end
     a   = M.Buffer(dev, zeros(Float32, 1024))
     b   = M.Buffer(dev, zeros(Float32, 1024))
     out = M.Buffer(dev, zeros(Float32, 1024))
-    M.compute!(g, "read") do p
-        sa = M.use(p, a; read = true); sb = M.use(p, b; read = true)
-        d  = M.use(p, out; write = true)
-        M.dispatch!(p, add2!, (d, sa, sb), 1024)
-    end
+    M.dispatch!(g, add2!, (out, a, b), 1024; name = "read")
     plan = Base.invokelatest(M.Plan, g)
 
     pp = only(p for p in plan.passes if p.pass.name == "read")
@@ -294,10 +275,7 @@ end
     g = M.Graph(dev)
     seed = M.Buffer(dev, zeros(Float32, 64))
     out  = M.Buffer(dev, zeros(Float32, 64))
-    M.compute!(g, "only") do p
-        s = M.use(p, seed; read = true); d = M.use(p, out; write = true)
-        M.dispatch!(p, bump!, (d, s), 64)
-    end
+    M.dispatch!(g, bump!, (out, seed), 64; name = "only")
     profiled = Base.invokelatest(M.Plan, g; profile = true)
     M.record!(profiled)
     for _ in 1:4

@@ -59,19 +59,51 @@ be a [`DeviceRange`](@ref) for one that only exists on the device, and `args` ar
 laid out in the plan's argument memory at compile — which is what makes a traced
 plan bakeable. See [`Trace`](@ref) for why that last part is the point.
 
-    Mantle.trace!(p, rt_pipeline, accel, (queue_in, queue_out, film),
+    Mantle.trace!(g, rt_pipeline, accel, (queue_in, queue_out, film),
                   Mantle.DeviceRange(n_rays))
 
-Declare the resources with `use` as for any other pass. Nothing here inspects
-`args` for them: an argument is how the work reaches its data, a declaration is
-what the graph orders on, and a trace needs both said.
+Nothing is declared by hand here either. A trace has more shaders than a dispatch
+has kernels — a raygen, a closest-hit per material, a miss, sometimes an any-hit
+— so what the pass touches is the union over all of them, and what each one does
+to what it CAPTURED counts too: a per-material closest-hit closes over the
+arrays of the material it shades, and those are read by the trace as surely as
+its arguments are.
 """
-function trace!(p, pipeline, accel, args, ndrange)
+function trace!(g::Graph, pipeline, accel, args::Tuple, ndrange; name = nothing)
     refuserefs(args)
+    p = newpass(g, name === nothing ? "trace" : String(name), :compute)
+    push!(passes(g), p)
+    h = handle(g, p)
+    declare!(h, args, kerneltouches(g.dev, pipeline, args, ndrange, nothing))
+    declare!(h, shaders(pipeline), shadertouches(g.dev, pipeline, args))
     n = countresource(ndrange)
-    n === nothing || indirectcount!(p, n)
-    push!(dispatches(passof(p)), Trace(pipeline, accel, args, ndrange))
+    n === nothing || indirectcount!(h, n)
+    push!(dispatches(p), Trace(pipeline, accel, args, ndrange))
+    # Shader accesses from a ray-tracing pipeline are a stage of their own — see
+    # `Traced`. After the declarations, for the reason `compute!` said it: every
+    # usage this pass has belongs to the trace.
+    for (i, (id, U)) in enumerate(p.usages)
+        p.usages[i] = id => traced(U)
+    end
+    return p
 end
+
+"""
+    shaders(pipeline) -> Tuple
+
+Every shader a trace runs, as the closures they are. What they capture is
+declared from this — see [`shadertouches`](@ref) — and it is also the list the
+backend pins.
+"""
+function shaders end
+
+"""
+    shadertouches(device, pipeline, args) -> Vector{Touch}
+
+What each of `shaders(pipeline)` does to ITS OWN captured state, in the same
+order. A shader that captures nothing answers `NOTOUCH` and declares nothing.
+"""
+function shadertouches end
 
 """
     trace_closest_hits!(pipeline, tlas, rays, hits)

@@ -171,3 +171,31 @@ function devicearray(backend, data::AbstractArray)
     copyto!(a, data)
     return a
 end
+
+devicearray(d::Device, data::AbstractArray) = devicearray(backend(d), data)
+
+"""
+    devicearray(x, T, dims...) -> AbstractGPUArray
+
+An uninitialised device array, on a device or on the backend under one.
+
+The other half of the pair: the form above copies what it is given, this one
+allocates and leaves the contents to the kernel that fills them. It is what
+`KernelAbstractions.allocate(backend, T, dims)` was being used for at call sites
+that had a device to hand — and those call sites then had to know the backend,
+which is the coupling this removes.
+
+`unified` is forwarded, for a backend that can hand back host-visible storage.
+"""
+devicearray(x, ::Type{T}, dims::Dims; kw...) where {T} =
+    KernelAbstractions.allocate(backend(x), T, dims; kw...)
+
+devicearray(x, ::Type{T}, dims::Integer...; kw...) where {T} =
+    devicearray(x, T, Dims(dims); kw...)
+
+"""
+A device is accepted wherever the backend under it is, `Adapt` included: a scene
+adapted for `dev` and one adapted for `backend(dev)` are the same conversion,
+and a caller holding either handle should not have to convert to ask for it.
+"""
+Adapt.adapt_storage(d::Device, x) = Adapt.adapt_storage(backend(d), x)

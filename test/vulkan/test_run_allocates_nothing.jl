@@ -29,10 +29,7 @@ end
 function _allocfree_plan(dev, n)
     a = Mantle.Buffer(dev, zeros(Float32, n))
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "step") do p
-        Mantle.use(p, a; read = true, write = true)
-        Mantle.dispatch!(p, _allocfree_step!, (a,), n)
-    end
+    Mantle.dispatch!(g, _allocfree_step!, (a,), n; name = "step")
     pl = Mantle.Plan(g)
     Mantle.record!(pl)
     return pl, a

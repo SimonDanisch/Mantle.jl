@@ -48,20 +48,11 @@ function _chainplan(dev, out, n, npass)
     g = Mantle.Graph(dev)
     seed = Mantle.Buffer(dev, zeros(Float32, n))
     t = [Mantle.Transient.Buffer(g, Float32, n) for _ in 1:(npass + 1)]
-    Mantle.compute!(g, "seed") do p
-        s = Mantle.use(p, seed; read = true); d = Mantle.use(p, t[1]; write = true)
-        Mantle.dispatch!(p, trimchain_bump!, (d, s), n)
-    end
+    Mantle.dispatch!(g, trimchain_bump!, (t[1], seed), n; name = "seed")
     for k in 1:npass
-        Mantle.compute!(g, "s$k") do p
-            s = Mantle.use(p, t[k]; read = true); d = Mantle.use(p, t[k + 1]; write = true)
-            Mantle.dispatch!(p, trimchain_bump!, (d, s), n)
-        end
+        Mantle.dispatch!(g, trimchain_bump!, (t[k + 1], t[k]), n; name = "s$k")
     end
-    Mantle.compute!(g, "out") do p
-        s = Mantle.use(p, t[end]; read = true); d = Mantle.use(p, out; write = true)
-        Mantle.dispatch!(p, trimchain_bump!, (d, s), n)
-    end
+    Mantle.dispatch!(g, trimchain_bump!, (out, t[end]), n; name = "out")
     # `seed` is only reachable from the closure above, and the plan has to keep
     # it alive for as long as the recording names it.
     (Mantle.Plan(g), seed)

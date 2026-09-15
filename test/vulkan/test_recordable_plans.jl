@@ -86,10 +86,8 @@ end
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
     dst = M.Buffer(dev, zeros(Float32, n))
-    M.compute!(g, "copy") do p
-        M.dispatch!(p, s2g_copy!, (M.use(p, dst; write = true),
-                                   M.use(p, src; read = true)), n)
-    end
+    M.dispatch!(g, s2g_copy!, (dst,
+                                   src), n; name = "copy")
     pl = M.record!(M.Plan(g))
     @test Mantle.recordable(pl)
     # The store the plan was compiled against, so a rename would show up as a
@@ -112,10 +110,8 @@ end
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
     dst = M.Buffer(dev, zeros(Float32, n))
-    M.compute!(g, "copy") do p
-        M.dispatch!(p, s2g_copy!, (M.use(p, dst; write = true),
-                                   M.use(p, src; read = true)), n)
-    end
+    M.dispatch!(g, s2g_copy!, (dst,
+                                   src), n; name = "copy")
     pl = M.Plan(g)
     @test Mantle.recordable(pl)
     M.record!(pl)
@@ -137,10 +133,8 @@ end
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
     dst = M.Buffer(dev, zeros(Float32, n))
-    M.compute!(g, "copy") do p
-        M.dispatch!(p, s2g_copy!, (M.use(p, dst; write = true),
-                                   M.use(p, src; read = true)), n)
-    end
+    M.dispatch!(g, s2g_copy!, (dst,
+                                   src), n; name = "copy")
     pl = M.Plan(g)
     M.record!(pl)
     src[1:64] = fill(3f0, 64)

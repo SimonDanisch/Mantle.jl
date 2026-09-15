@@ -68,18 +68,12 @@ end
 
         # A transient's bytes are whatever the arena last held, so the count
         # below has to be of marks this run made.
-        M.compute!(g, "zero") do p
-            M.dispatch!(p, dr_zero!, (M.use(p, dst; write = true),), cap)
-        end
-        M.compute!(g, "count") do p
-            M.dispatch!(p, dr_setcount!, (M.use(p, n; write = true),
-                                          M.use(p, src; read = true), 0.5f0), 1)
-        end
-        M.compute!(g, "mark") do p
-            M.dispatch!(p, dr_mark!, (M.use(p, dst; write = true),
-                                      M.use(p, n; read = true)),
-                        M.DeviceRange(n; max = cap))
-        end
+        M.dispatch!(g, dr_zero!, (dst,), cap; name = "zero")
+        M.dispatch!(g, dr_setcount!, (n,
+                                          src, 0.5f0), 1; name = "count")
+        M.dispatch!(g, dr_mark!, (dst,
+                                      n),
+                        M.DeviceRange(n; max = cap), name = "mark")
 
         plan = M.record!(M.Plan(g))
         M.run!(plan)
@@ -98,18 +92,12 @@ end
     src = M.Buffer(dev, fill(1.0f0, 64))
     n = M.Buffer(dev, Int32[0])
     dst = M.Transient.Buffer(g, Float32, 64)
-    M.compute!(g, "zero") do p
-        M.dispatch!(p, dr_zero!, (M.use(p, dst; write = true),), 64)
-    end
-    M.compute!(g, "count") do p
-        M.dispatch!(p, dr_setcount!, (M.use(p, n; write = true),
-                                      M.use(p, src; read = true), 0.5f0), 1)
-    end
-    M.compute!(g, "mark") do p
-        M.dispatch!(p, dr_mark!, (M.use(p, dst; write = true),
-                                  M.use(p, n; read = true)),
-                    M.DeviceRange(n; max = 64))
-    end
+    M.dispatch!(g, dr_zero!, (dst,), 64; name = "zero")
+    M.dispatch!(g, dr_setcount!, (n,
+                                      src, 0.5f0), 1; name = "count")
+    M.dispatch!(g, dr_mark!, (dst,
+                                  n),
+                    M.DeviceRange(n; max = 64), name = "mark")
     # Declared, not hoped for: the second pass reads `n` as `Indirect`, which is
     # the edge that orders it after the pass that wrote it. Without it the
     # dispatch would size itself off whatever the buffer held last frame.
@@ -130,17 +118,11 @@ end
     src = M.Buffer(dev, Float32[k <= want ? 1.0f0 : 0.0f0 for k in 1:cap])
     n = M.Buffer(dev, Int32[0])
     dst = M.Transient.Buffer(g, Float32, cap)
-    M.compute!(g, "zero") do p
-        M.dispatch!(p, dr_zero!, (M.use(p, dst; write = true),), cap)
-    end
-    M.compute!(g, "count") do p
-        M.dispatch!(p, dr_setcount!, (M.use(p, n; write = true),
-                                      M.use(p, src; read = true), 0.5f0), 1)
-    end
-    M.compute!(g, "mark") do p
-        M.dispatch!(p, dr_mark_unguarded!, (M.use(p, dst; write = true),),
-                    M.DeviceRange(n; max = cap); group = group)
-    end
+    M.dispatch!(g, dr_zero!, (dst,), cap; name = "zero")
+    M.dispatch!(g, dr_setcount!, (n,
+                                      src, 0.5f0), 1; name = "count")
+    M.dispatch!(g, dr_mark_unguarded!, (dst,),
+                    M.DeviceRange(n; max = cap); group = group, name = "mark")
     M.run!(M.record!(M.Plan(g)))
     # How many invocations ran, observed through a kernel that does NOT bound
     # itself — which is the only way to see it, and why this kernel is named

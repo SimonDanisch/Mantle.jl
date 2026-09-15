@@ -53,7 +53,6 @@ function build_chain(dev, win, n)
     g = M.Graph(dev)
 
     M.render!(g, "points", fb => M.Clear((0.02f0, 0.02f0, 0.04f0, 1f0))) do p
-        M.use(p, mvp; read = true)
         M.draw!(p, SCATTER, (M.Attribute(p, pos), M.Attribute(p, col),
                              M.Attribute(p, siz), mvp,
                              Int32(1), Int32(0)), pos)
@@ -62,18 +61,10 @@ function build_chain(dev, win, n)
     raw = M.Transient.Buffer(g, UInt8, NPX * 4)
     stage = [M.Transient.Buffer(g, Vec4f, NPX) for _ in 1:(STAGES + 1)]
 
-    M.compute!(g, "unpack") do p
-        src = M.use(p, raw; read = true)
-        dst = M.use(p, stage[1]; write = true)
-        M.dispatch!(p, unpack!, (dst, src, Int32(W), Int32(H)), (W, H); group = (16, 16))
-    end
+    M.dispatch!(g, unpack!, (stage[1], raw, Int32(W), Int32(H)), (W, H); group = (16, 16), name = "unpack")
 
     for k in 1:STAGES
-        M.compute!(g, "blur $k") do p
-            src = M.use(p, stage[k]; read = true)
-            dst = M.use(p, stage[k + 1]; write = true)
-            M.dispatch!(p, blur!, (dst, src, Int32(W), Int32(H)), (W, H); group = (16, 16))
-        end
+        M.dispatch!(g, blur!, (stage[k + 1], stage[k], Int32(W), Int32(H)), (W, H); group = (16, 16), name = "blur $k")
     end
 
     (; g, fb, raw, out = stage[end], mvp, plan = M.record!(M.Plan(g)))

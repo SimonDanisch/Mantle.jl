@@ -47,15 +47,11 @@ end
     k   = M.GPURef(dev, 1.0f0)
 
     ga = M.Graph(dev)
-    M.compute!(ga, "write") do p
-        M.dispatch!(p, ord_fill!, (M.use(p, mid; write = true),
-                                   M.use(p, k; read = true)), n)
-    end
+    M.dispatch!(ga, ord_fill!, (mid,
+                                   k), n; name = "write")
     gb = M.Graph(dev)
-    M.compute!(gb, "read") do p
-        M.dispatch!(p, ord_accumulate!, (M.use(p, acc; read = true, write = true),
-                                         M.use(p, mid; read = true)), n)
-    end
+    M.dispatch!(gb, ord_accumulate!, (acc,
+                                         mid), n; name = "read")
     pa = M.record!(M.Plan(ga))
     pb = M.record!(M.Plan(gb))
 

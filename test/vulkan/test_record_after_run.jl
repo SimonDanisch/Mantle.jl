@@ -37,11 +37,7 @@ end
 """`out += kref[]` on every run, which is what makes a wrong value visible."""
 function _barplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, out; read = true, write = true)
-        Mantle.use(p, kref; read = true)
-        Mantle.dispatch!(p, ring_add!, (out, kref), n)
-    end
+    Mantle.dispatch!(g, ring_add!, (out, kref), n; name = "add")
     Mantle.record!(Mantle.Plan(g))
 end
 
@@ -89,11 +85,7 @@ end
     out = Mantle.Buffer(dev, zeros(Int32, n))
     kref = Mantle.GPURef(dev, Int32(1))
     g = Mantle.Graph(dev)
-    Mantle.compute!(g, "add") do p
-        Mantle.use(p, out; read = true, write = true)
-        Mantle.use(p, kref; read = true)
-        Mantle.dispatch!(p, ring_add!, (out, kref), n)
-    end
+    Mantle.dispatch!(g, ring_add!, (out, kref), n; name = "add")
     pl = Base.invokelatest(Mantle.Plan, g)
     @test !Mantle.recorded(pl)
     @test_throws ArgumentError Mantle.run!(pl)
