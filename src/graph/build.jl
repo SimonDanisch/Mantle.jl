@@ -33,7 +33,7 @@ function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
     p = newpass(g, name === nothing ? passname(kernel, args) : String(name), :compute)
     push!(passes(g), p)
     h = handle(g, p)
-    declare!(h, args, kerneltouches(g.dev, kernel, args, ndrange, group))
+    declare!(h, args, argument_usage(g.dev, kernel, args, ndrange, group))
     n = countresource(ndrange)
     n === nothing || indirectcount!(h, n)
     push!(dispatches(p), Dispatch(kernel, args, ndrange, group))
@@ -46,32 +46,29 @@ end
 Declare a CALL: something that submits its own work, ordered by what it reads
 and writes like anything else.
 
-    dispatch!(g, mul!, (Write(C), Read(A), Read(B)))
+    dispatch!(g, mul!, (C, A, B))
 
 No ndrange, and that is the whole of the distinction — an ndrange is what Mantle
 needs in order to divide work into workgroups, and a `mul!` has none because the
 thing on the other side decides its own launch. See the four-argument form above
 for what a dispatch is, and `runscalls(device)` for which backends can run one.
 
-The arguments are the one place a call needs words a dispatch does not.
-`mul!` disappears into rocBLAS, so there is no body to read the direction off,
-and [`Read`](@ref)/[`Write`](@ref) state it. An argument that states nothing is
-read+write: safe, and coarse enough that two calls sharing a weight matrix will
-not overlap.
+Nothing here says what it touches either, and for the same reason the four-
+argument form does not: the direction belongs to the function. `mul!` disappears
+into rocBLAS so there is no body to read it off, so it is DECLARED --
+[`argument_usage`](@ref), once, next to the function. A call with no declaration
+raises [`UndeclaredCall`](@ref) naming the method to write; it does not widen to
+read+write and call that an answer.
 """
 function dispatch!(g::Graph, call, args::Tuple; name = nothing)
     refuserefs(args)
     p = newpass(g, name === nothing ? string(nameof(call)) : String(name), :compute)
     push!(passes(g), p)
     h = handle(g, p)
-    declare!(h, args, calltouches(args))
+    declare!(h, args, argument_usage(g.dev, call, args, nothing, nothing))
     push!(dispatches(p), Dispatch(call, args, nothing, nothing))
     return p
 end
-
-"""What each argument of a call states, or read+write where it states nothing."""
-calltouches(args::Tuple) =
-    Touch[something(declaredtouch(a), OPAQUE) for a in args]
 
 """
 What to call the pass a bare `dispatch!` makes.
@@ -129,9 +126,6 @@ The walk covers a work queue, a struct of arrays and a tuple of either without
 naming any of them here — the three containers a consumer was reimplementing
 this walk for.
 """
-resourceleaves!(acc, g, x::Declared, seen::Base.IdSet{Any}, depth::Int) =
-    resourceleaves!(acc, g, x.value, seen, depth)
-
 # A VIEW is what the kernel gets; what the pass touches is the parent, scoped to
 # the elements the view covers — which is a slice, and a slice needs the graph to
 # be the same resource every time it is named.
@@ -907,8 +901,6 @@ storage(v::BufferRange) = storage(v.parent)
 
 # A declaration is about the ARGUMENT, not a thing of its own: what the library
 # is handed, what the plan resolves and what liveness sees is the value inside.
-storage(d::Declared) = storage(d.value)
-rootresource(d::Declared) = rootresource(d.value)
 
 # An attribute is a BINDING of a resource, not a resource — its storage is
 # whatever it was made from. Beside `BufferRange` for the same reason: both are

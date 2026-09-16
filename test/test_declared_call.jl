@@ -60,11 +60,37 @@ end
     C = M.Buffer(dev, zeros(Float32, n, n))
     tr = M.Buffer(dev, zeros(Float32, 1))
 
+    # `mul!` writes its first argument and reads the rest, declared once in
+    # `graph/access.jl` because that is true of rocBLAS, of a cooperative-matrix
+    # kernel and of Metal Performance Shaders alike. It was three `Write`/`Read`
+    # wrappers at this call site, which is `use` again: one fact, restated per
+    # call site, wrong at the N+1st. The five-argument form is what makes it
+    # concrete — `C = A*B*alpha + C*beta` reads `C` too.
+    @test M.argument_usage(mul!, (C, A, B)) === (M.WRITE, M.READ, M.READ)
+    @test M.argument_usage(mul!, (C, A, B, 1f0, 0f0))[1] === M.Touch(true, true, false)
+    @test M.argument_usage(mul!, (C, A, B, 1f0, 0f0))[4] === M.NOTOUCH
+
+    # A call nobody declared is refused, not guessed at. Widening to read+write
+    # would be safe for the barrier phase and indistinguishable from an answer,
+    # so a library entry point that grew an output would keep working and
+    # silently serialise everything sharing its inputs.
+    undeclared = try
+        M.dispatch!(M.Graph(dev), foldl, (C, A))
+        nothing
+    catch e
+        e
+    end
+    @test undeclared isa M.UndeclaredCall
+    msg = sprint(showerror, undeclared)
+    @test occursin("argument_usage", msg)
+    @test occursin("foldl", msg)
+    # The suggestion is per-argument, so it can be pasted rather than counted.
+    @test occursin("2 arguments", msg)
+
     g = M.Graph(dev)
     # No ndrange: `mul!` decides its own launch, so there is nothing for Mantle
-    # to divide. The directions are stated because a library has no body to read
-    # them off — this is the one place in the API that still says them.
-    M.dispatch!(g, mul!, (M.Write(C), M.Read(A), M.Read(B)); name = "gemm")
+    # to divide.
+    M.dispatch!(g, mul!, (C, A, B); name = "gemm")
     # A dispatch reading what the call wrote. `Barriers` derives the wait from
     # what each side touches; nothing here orders it by hand.
     M.dispatch!(g, tracesum!, (tr, C, n), 1; name = "trace")

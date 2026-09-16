@@ -117,45 +117,91 @@ function declaredsignature(@nospecialize(sig))
     return Touch[NOTOUCH, u...]
 end
 
-# ── Stating an access, for the one thing that cannot be read ─────────────────
+# ── The single entry point: declared, inferred, or refused ───────────────────
 
 """
-    Read(x)
-    Write(x)
-    ReadWrite(x)
+    argument_usage(device, f, args, ndrange, group) -> Vector{Touch}
 
-What a CALL does to an argument, stated because there is nothing to read it off.
+What `f` does to each of `args`, when dispatched on `device`. The one answer,
+and the one place that produces it.
 
-A dispatch has a kernel and the walk below answers from its body. A call —
-`dispatch!(g, mul!, (Write(C), Read(A), Read(B)))` — hands work to a library
-that submits its own, and `mul!` disappears into rocBLAS or into this backend's
-GEMM. There is no body on this side of that boundary, so the direction of each
-argument is the one thing the caller has to say.
+Two ways to get one and no third:
 
-The alternative is not "no declaration", it is read+write on everything, which
-is what an unwrapped argument to a call gets: safe, and it serialises two calls
-that write disjoint outputs from a shared weight.
+  * a DECLARATION, `argument_usage(f, args)` above, for a callable with no body
+    on this side of the boundary. `mul!` disappears into rocBLAS or into a
+    cooperative-matrix kernel, and there is nothing to read.
+  * INFERENCE, [`kerneltouches`](@ref), the taint walk over the same typed IR
+    the backend is about to compile.
 
-A wrapper and not a verb on a pass handle, because `dispatch!` takes a graph and
-there is no handle to pass. It resolves to `x` everywhere else — `storage`,
-`resolve` and the leaf walk all forward through it — so what the library is
-handed is the argument, not the wrapper.
+Anything else raises. It does not widen to read+write and call that an answer:
+that is safe for the barrier phase and wrong for everything else, because it is
+indistinguishable from a proof. A kernel that stops being analysable would keep
+compiling, pay a barrier per pass for ever, and nothing would say so.
+
+`Read`/`Write`/`ReadWrite` wrappers were here, one per argument at the call
+site. They went for the reason `use` went: N call sites restating one fact, and
+the N+1st getting it wrong. `mul!(C, A, B, α, β)` is the case that makes it
+concrete — `C = A*B*α + C*β`, so `C` is READ as well as written, and a call site
+that copied `Write(C)` from the three-argument form is a missing barrier rather
+than a compile error. The direction belongs to the function.
 """
-struct Declared{T}
-    value::T
-    touch::Touch
+function argument_usage(dev, @nospecialize(f), args::Tuple, ndrange, group)
+    declared = argument_usage(f, args)
+    declared === nothing || return Touch[declared...]
+    ndrange === nothing && throw(UndeclaredCall(f, args))
+    return kerneltouches(dev, f, args, ndrange, group)
 end
 
-Read(x) = Declared(x, READ)
-Write(x) = Declared(x, WRITE)
-ReadWrite(x) = Declared(x, Touch(true, true, false))
+"""
+A call with no declaration and no body to read: `dispatch!` was handed something
+that submits its own work, and nothing says which of its arguments it writes.
+"""
+struct UndeclaredCall <: Exception
+    f::Any
+    args::Tuple
+end
 
-"""What a declared argument states, and `nothing` for one that states nothing."""
-declaredtouch(d::Declared) = d.touch
-declaredtouch(@nospecialize(x)) = nothing
+function Base.showerror(io::IO, e::UndeclaredCall)
+    ts = join(map(a -> string(Core.Typeof(a)), e.args), ", ")
+    # One entry per argument, so the suggestion can be pasted: `WRITE` for the
+    # first because a destination-first call is the overwhelming case, and the
+    # sentence after says what the other two words are for.
+    us = join(["Mantle." * (i == 1 ? "WRITE" : "READ") for i in eachindex(e.args)],
+              ", ")
+    print(io, """
+        dispatch!: `$(e.f)` was declared as a call (no ndrange) and no
+        `argument_usage` says what it does to its $(length(e.args)) arguments.
 
-undeclare(d::Declared) = d.value
-undeclare(@nospecialize(x)) = x
+        A call hands work to something that submits its own, so there is no body
+        on this side of the boundary to read the direction off. Declare it once,
+        next to the function, rather than at each call site:
+
+            Mantle.argument_usage(::Type{typeof($(e.f))}, ::Type{<:Tuple{$ts}}) =
+                ($us)
+
+        One `Touch` per argument, in order, and the guess above is only a
+        shape. `Mantle.NOTOUCH` for a scalar, and `Mantle.Touch(true, true,
+        false)` for an argument that is read as well as written -- which is
+        `mul!`'s `C` in the five-argument form, where `beta` makes it an
+        accumulate.""")
+end
+
+"""
+`mul!` writes its first argument and reads the rest, on every backend that has
+one: rocBLAS, a cooperative-matrix kernel, Metal Performance Shaders. That is
+not a fact about a driver, which is why it is declared here and not in a backend.
+
+The five-argument form is the reason this dispatches on the argument types and
+not on `typeof(mul!)` alone. `mul!(C, A, B, α, β)` is `C = A*B*α + C*β`, so `C`
+is read as well as written whenever `β` is nonzero, and nothing here knows `β`.
+`α` and `β` are scalars, which is no access at all — the first arguments anything
+declares as `NOTOUCH`.
+"""
+argument_usage(::Type{typeof(LinearAlgebra.mul!)}, ::Type{<:Tuple{Any,Any,Any}}) =
+    (WRITE, READ, READ)
+argument_usage(::Type{typeof(LinearAlgebra.mul!)},
+               ::Type{<:Tuple{Any,Any,Any,Number,Number}}) =
+    (Touch(true, true, false), READ, READ, NOTOUCH, NOTOUCH)
 
 # ── Which values can reach memory ────────────────────────────────────────────
 

@@ -249,7 +249,7 @@ end
 Declare a CALL: something that submits its own work, ordered by what it reads
 and writes like anything else in a graph.
 
-    dispatch!(g, mul!, (Write(C), Read(A), Read(B)))
+    dispatch!(g, mul!, (C, A, B))
 
 No ndrange, and that is the whole of the distinction. An ndrange is what Mantle
 needs in order to divide work into workgroups and launch it; a `mul!` has none,
@@ -270,7 +270,7 @@ What the caller still has to state is the direction of each argument, because
 that is the thing no library announces — and the only place in the API that
 still says it, since everything with a body has its read off the body. An
 argument that states nothing is read+write, which is safe and is why
-`Write(C)` is what keeps two calls writing disjoint outputs from a shared
+`argument_usage(mul!)` is what keeps two calls writing disjoint outputs from a shared
 weight from serialising.
 
 ## Not every backend can run one
