@@ -663,9 +663,17 @@ pointerlike(ir, st::State, rest) =
 
 isaddress(st::State, @nospecialize(x)) = x isa Core.SSAValue && x.id in st.addresses
 
-"""The type an operand was inferred at, for `carries`."""
+"""
+The type an operand was inferred at, for `carries` and for `pointerlike`.
+
+`widen` on BOTH sides. This read `ir.argtypes[x.n]` raw, and an argument can be
+inferred as a `Core.Const` — so `pointerlike`'s `<: Ptr` was a `TypeError: in <:,
+expected Type, got a value of type Core.Const` on seven of MatAnyone's graphs.
+`operandtaint` widens the same field two functions above, which is why this
+survived: one of the two readers of `argtypes` did it and the other did not.
+"""
 function operandtype(ir, @nospecialize(x))
-    x isa Core.Argument && return ir.argtypes[x.n]
+    x isa Core.Argument && return widen(ir.argtypes[x.n])
     x isa Core.SSAValue && return widen(ir.stmts[x.id][:type])
     return typeof(x)
 end

@@ -1454,6 +1454,17 @@ Transient.Buffer(g::Graph, ::Type{T}, n::Integer) where {T} =
 Transient.Buffer(g::Graph, ::Type{T}, dims::Integer...) where {T} =
     Transient.Buffer(g, T, map(Int, dims))
 function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N}) where {T,N}
+    # An EMPTY transient has nothing to place and nothing can read it: a kernel
+    # over it would have a zero ndrange, which `refuseempty` refuses, so the
+    # declaration can only ever be an orphan. `Liveness` does report it, as
+    # "never used by any pass" -- which is a message about the allocator for a
+    # mistake made here, and does not say the shape was empty. torch produces
+    # empty tensors legitimately (SAM 2's decoder concatenates a `(1, 0, 256)` on
+    # the branch with no boxes), so the caller has to skip, and this is where it
+    # finds out.
+    prod(dims) == 0 && throw(ArgumentError(
+        "Transient.Buffer: $(dims) has no elements. An empty result needs no " *
+        "buffer and no pass -- skip it where the shape is decided."))
     t = TransientBuffer{T,N}(dims, typemax(Int), 0, nothing, 0)
     push!(g.transients, t)
     t
