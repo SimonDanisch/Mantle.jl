@@ -30,6 +30,7 @@ device; the dispatch is then ordered after whatever wrote that count.
 function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
                    group = nothing, name = nothing)
     refuserefs(args)
+    refuseempty(kernel, ndrange)
     p = newpass(g, name === nothing ? passname(kernel, args) : String(name), :compute)
     push!(passes(g), p)
     h = handle(g, p)
@@ -38,6 +39,29 @@ function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
     n === nothing || indirectcount!(h, n)
     push!(dispatches(p), Dispatch(kernel, args, ndrange, group))
     return p
+end
+
+"""
+Refuse an ndrange the caller already knows is empty.
+
+Not skipped: a pass that does nothing is indistinguishable from a pass that was
+meant to do something, and the graph would carry it for ever. Refusing names the
+kernel at `dispatch!`, where the shape was decided, instead of `DivideError`
+from inside `KernelAbstractions.partition` -- which is what a zero ndrange
+actually does, five frames below anything naming the op.
+
+Only a HOST ndrange. A [`DeviceRange`](@ref) is a count the host never sees and
+is legitimately zero at run time; that is the whole reason it exists, and the
+backend's own tail guard handles it.
+"""
+function refuseempty(@nospecialize(kernel), ndrange)
+    ndrange isa DeviceRange && return nothing
+    n = ndrange isa Tuple ? prod(ndrange) : ndrange
+    n isa Integer && n <= 0 && throw(ArgumentError(
+        "dispatch!: `$kernel` was given an ndrange of $ndrange, which is empty. " *
+        "A result with no elements needs no pass, so skip the dispatch where " *
+        "the shape is decided. A count only the device knows is a `DeviceRange`."))
+    return nothing
 end
 
 """
