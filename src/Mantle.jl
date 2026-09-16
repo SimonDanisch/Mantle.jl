@@ -408,8 +408,14 @@ export indexbuffer
 # names the type; `supportspredicate` because a caller may want to pick between
 # `repeat!` and a host loop rather than be thrown at.
 export repeat!, Predicate, supportspredicate
-# What a CALL states about its arguments, because a library has no body to read.
-export Read, Write, ReadWrite
+# `Read`, `Write` and `ReadWrite` were exported here: what a CALL stated about
+# each of its arguments, at each call site. They are gone -- the direction
+# belongs to the function, and `argument_usage` declares it once -- and this line
+# outlived them, which is exactly the failure
+# `test/vulkan/test_no_stale_exports.jl` exists for: exporting a name you do not
+# define is legal Julia, silent, and SHADOWS the real export of anything loaded
+# beside it. `ReadWrite` survived only because it is also the `Access` type
+# exported above, so the stale list read as two names rather than three.
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
