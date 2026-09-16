@@ -568,7 +568,11 @@ end
     #
     # So the note for whoever brings the walk to Metal: `kerneltouches` is not
     # one method, it is four, and `isdevicearray` is the one that fails quietly.
-    @test length(lonely) <= 31
+    #
+    # 30 after merging the Metal frame-allocation work in the same session: it
+    # answers `devicearray` in that tree, so the name left the set. Which is the
+    # direction this number is supposed to move.
+    @test length(lonely) <= 30
 end
 
 # ── 0.9 An extension extends the vocabulary and nothing else ─────────────────
