@@ -95,7 +95,14 @@ end
     # The `Pipelines` phase compiled the draw. It used to push an empty
     # `CompiledDraw[]` on this path, so a render pass in a graph did nothing at
     # all on any backend without a batch queue.
-    @test length(plan.passes) == 1
+    #
+    # TWO passes, and the first is the host-update one: a draw DECLARES what its
+    # stages touch now, so the vertex buffer is a usage of the render pass, and a
+    # pass that uses a host-writable resource gets the update pass that orders
+    # host stores against it. `test_window.jl` pins the same shape as
+    # `["updates", "plot"]`; this file kept expecting the one pass a draw that
+    # declared nothing produced.
+    @test [pp.pass.name for pp in plan.passes] == ["updates", "tri"]
     @test length(plan.passes[end].draws) == 1
 
     # Placed: a real texture, in device memory, out of a placement heap rather
@@ -406,8 +413,11 @@ end
     end
     ts = M.timings(plan)
     @test length(ts) == length(plan.passes)
-    @test [t.name for t in ts] == ["tri", "read"]
-    @test [t.kind for t in ts] == [:render, :copy]
+    # The host-update pass leads, for the same reason it does above: the draw
+    # declares its vertex buffer, and a host-writable resource a pass uses gets
+    # the pass that orders host stores against it.
+    @test [t.name for t in ts] == ["updates", "tri", "read"]
+    @test [t.kind for t in ts] == [:update, :render, :copy]
     @test all(t -> t.samples == 3, ts)
     @test all(t -> t.host_ms >= 0, ts)
     # This backend answers the GPU question too, without a single timestamp

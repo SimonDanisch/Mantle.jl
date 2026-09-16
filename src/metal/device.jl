@@ -39,6 +39,10 @@ mutable struct MetalDevice{Q} <: Device
     # runtime, which runs the Metal frontend and costs tens of milliseconds, so
     # it is built on first trace and kept for the life of the device.
     trace_pipeline::Union{Nothing,MTL.MTLComputePipelineState}
+    # What each kernel does to each of its arguments, keyed on the inferred
+    # signature. `Dag` asks per dispatch per build, and the answer is a property
+    # of the code rather than of the graph.
+    accesses::AccessCache
 end
 
 """
@@ -259,7 +263,8 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # residency set this queue had ever been given, which is what `adoptqueue!` is for.
 metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 
-MetalDevice(mtldev::MTL.MTLDevice, q) = MetalDevice(mtldev, q, Pool(), nothing, nothing)
+MetalDevice(mtldev::MTL.MTLDevice, q) =
+    MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache())
 MetalDevice(mtldev::MTL.MTLDevice = Metal.device()) = MetalDevice(mtldev, metalqueue(mtldev))
 
 # One device per process, cached: a second `MetalDevice` would mean a second

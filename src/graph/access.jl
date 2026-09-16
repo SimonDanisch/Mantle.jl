@@ -120,12 +120,22 @@ anything not fully described by its bits — and stops at the ones that cannot.
 
 Abstract types, `Union`s and `Any` answer `true`, because "cannot reach memory"
 is a claim and an unknown type does not support it.
+
+`Core.LLVMPtr` counts for exactly the same reason `Ptr` does, and has to be
+named separately because it is NOT a `Ptr`: it is its own primitive type, with
+no fields and `isbitstype`, so the field walk below reaches it and concludes a
+device array touches nothing. That is what a GPU device array IS on every
+backend that goes through GPUCompiler — Metal's `MtlDeviceArray` is an
+`LLVMPtr` and a `Dims` — so without this a kernel's every argument comes back
+`NOTOUCH`, the placer finds nothing uses its transients, and the graph refuses
+to build.
 """
 carries(@nospecialize(T)) = carries(T, 0)
 function carries(@nospecialize(T), depth::Int)
     depth > 8 && return true                    # deep enough to be unknowable
     T === Union{} && return false
     T <: Ptr && return true
+    T <: Core.LLVMPtr && return true
     isconcretetype(T) || return true
     isbitstype(T) || return true                # arrays, memory, mutables
     for F in fieldtypes(T)
@@ -519,6 +529,25 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     end
 
     head = stmt.head
+    # A CALL that infers to `Union{}` does not return: it throws, and the
+    # statement after it is `unreachable`. Nothing it did is observable, so it
+    # orders nothing and touches nothing.
+    #
+    # Without this, every bounds check poisons the array it guards.
+    # `throw_boundserror(::MtlDeviceVector, ::Tuple{Int})` is an `:invoke` with
+    # the array as an argument and no IR the walk can enter — `irfor` refuses a
+    # `Union{}` signature by design — so the fallback marked it read+write, and a
+    # vertex buffer a shader only READS came back written. The graph then put a
+    # host-update pass in front of a render pass that needed none.
+    #
+    # It is not the same question `irfor` answers. There, `Union{}` is the whole
+    # signature and "this kernel does not infer" must fail loudly rather than
+    # silently report no store. Here the caller infers fine and one callee is a
+    # throw. A function that stores and THEN throws would be missed, and that is
+    # accepted: the dispatch is a crash, and passes are not ordered around one.
+    if tt === Union{} && (head === :invoke || head === :call)
+        return Taint()
+    end
     if head === :invoke
         return invoketaint!(w, ir, touches, st, am, stmt, tt, depth)
     elseif head === :call

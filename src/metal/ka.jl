@@ -80,3 +80,109 @@ element type's natural alignment, and 16 covers every vector type MSL has.
 Over-aligning would waste arena space the placer could have packed.
 """
 alignment(::MetalDevice, ::TransientBuffer) = 16
+
+
+# ── What a pass touches, read off its kernels ────────────────────────────────
+#
+# Core walks the IR (`graph/access.jl`); what is here is the three things only a
+# Metal dispatch knows: that arguments are `mtlconvert`ed on their way to the
+# shader, that a `KernelAbstractions` kernel takes its iteration context as a
+# leading argument, and that the method table the kernel will be compiled
+# against is Metal.jl's, overlays and all.
+
+Mantle.argtype(::MetalDevice, @nospecialize(y)) = Core.Typeof(Metal.mtlconvert(y))
+
+# What `Adapt.adapt_storage(::Metal.Adaptor, ::MtlArray)` produces, which is what
+# a kernel handed a materialised transient receives.
+Mantle.devicebuffertype(::MetalDevice, ::Type{T}) where {T} =
+    Metal.MtlDeviceArray{T,1,Metal.AS.Device}
+
+Mantle.isdevicearray(::Metal.MtlArray) = true
+
+Mantle.accesscache(d::MetalDevice) = d.accesses
+
+"""
+The interpreter whose method table this backend's kernels are compiled against.
+
+Metal.jl's, not Julia's: `@device_override` puts `vertex_index`, `clip_y`,
+`sample_texture_2d` and the rest in an overlay table, and a walk through the
+host's would see the host bodies — which for those names are `error` calls, so
+every access they reach would be missed.
+"""
+function metalinterpreter(@nospecialize(f), @nospecialize(tt))
+    config = Metal.compiler_config(Metal.device())
+    source = GPUCompiler.methodinstance(Core.Typeof(f), tt)
+    return GPUCompiler.get_interpreter(GPUCompiler.CompilerJob(source, config))
+end
+
+"""
+What the kernel does to each dispatch argument, inferred through Metal's method
+table.
+
+The leading entries `accessof` reports are dropped the same way the Vulkan side
+drops them: index 1 is the function itself, and a KA kernel is compiled at
+`(ctx, args...)` where the iteration context is the kernel's own rather than
+anything the caller declared. A macro-free kernel has neither.
+
+`group` is threaded through because the context's TYPE depends on it — the same
+`launch_config`/`mkcontext` pair `compile_dispatch` uses, so the signature walked
+here is the signature compiled there.
+"""
+function Mantle.kerneltouches(dev::MetalDevice, kernel, args::Tuple, ndrange, group)
+    argT = map(a -> Mantle.devicetype(dev, a), args)
+    if !Mantle.buildskernel(kernel, Mantle.backend(dev))
+        interp = metalinterpreter(kernel, Tuple{argT...})
+        return Mantle.accessof(interp, kernel, argT; cache = Mantle.accesscache(dev))[2:end]
+    end
+    obj = Mantle.kernelfor(kernel, group, Mantle.backend(dev))
+    nd = Mantle.recordedrange(ndrange)
+    ndr, _ws, iterspace, _ = KA.launch_config(obj, nd, Mantle.callgroup(obj, group))
+    ctx = KA.mkcontext(obj, ndr, iterspace)
+    tt = (Core.Typeof(Metal.mtlconvert(ctx)), argT...)
+    interp = metalinterpreter(obj.f, Base.to_tuple_type(tt))
+    return Mantle.accessof(interp, obj.f, tt; cache = Mantle.accesscache(dev))[3:end]
+end
+
+
+"""
+What a vertex stage does to each of its arguments.
+
+The BODY, not the stage wrapper: `MetalVertexStage` exists to write the output
+struct, and what it stores through is the pointer the driver hands it, not
+anything the caller declared.
+
+A body that declares the leading `VertexIndex` is walked with one, because that
+is the signature it is compiled at — asked of the method table exactly as
+`stage_signatures` asks it, so the two cannot disagree. Its entry is dropped
+with the function's own.
+"""
+function Mantle.vertextouches(dev::MetalDevice, shader, args::Tuple)
+    f = Mantle.stagefunction(shader.vertex)
+    argT = map(a -> Mantle.devicetype(dev, a), args)
+    lead = KI.wantsvertexindex(f, argT) ? (KI.VertexIndex,) : ()
+    return stagetouches(dev, f, args; lead)
+end
+
+"""
+What a fragment stage does to each of its arguments.
+
+A fragment body's FIRST parameter is the varyings — `MetalFragmentStage` builds
+that NamedTuple from the interpolated values and the body reads it — so the
+signature walked here leads with `varying_type`, exactly as `stage_signatures`
+compiles it. Its entry is dropped with the function's own; a varying is a value
+the rasteriser produced, not a resource anyone declared.
+"""
+function Mantle.fragmenttouches(dev::MetalDevice, shader, args::Tuple)
+    f = Mantle.stagefunction(shader.fragment)
+    return stagetouches(dev, f, args; lead = (varying_type(shader),))
+end
+
+function stagetouches(dev::MetalDevice, f, args::Tuple; lead::Tuple = ())
+    argT = map(a -> Mantle.devicetype(dev, a), args)
+    tt = (lead..., argT...)
+    interp = metalinterpreter(f, Base.to_tuple_type(tt))
+    touches = Mantle.accessof(interp, f, tt; cache = Mantle.accesscache(dev))
+    # Index 1 is `f` itself, and everything in `lead` is the STAGE's rather than
+    # the caller's, so all of it goes together.
+    return touches[(2 + length(lead)):end]
+end
