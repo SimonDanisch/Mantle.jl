@@ -749,6 +749,13 @@ const BACKEND_VOCABULARY = (
     :draw_in_pass!, :draw_indexed_in_pass!, :draw_indirect_in_pass!, :set_viewport!,
     :use_bindings!, :bind_textures, :transition_image!, :readback_framebuffer,
     :readback_window, :target_extent, :target_format, :target_image, :target_view,
+    # What a pass touches, read off its kernels. Core owns the walk; a backend
+    # owns the SIGNATURE it walks — which interpreter compiles this kernel, what
+    # the device-side type of an argument is, and what leading arguments a kernel
+    # of its own has. `shadertouches` and the two draw stages are declared with no
+    # method at all, so they are not core functions a backend EXTENDS;
+    # `kerneltouches` is, because the host device answers it in `src/host/`.
+    :argtype, :devicebuffertype, :isdevicearray, :accesscache, :kerneltouches,
     # ray tracing
     # DELETED in phase 1.1: `:pin!`, `:blases`. See raytracing/api.jl.
     :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,

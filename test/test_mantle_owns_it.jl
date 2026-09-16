@@ -545,7 +545,30 @@ end
     #       open indirect command buffer. An error path, and a leak rather than
     #       a wrong answer — but it is the `resource_moved!` shape and the fix
     #       is one method on `MetalRecorder`, on a machine that can run it.
-    @test length(lonely) <= 28
+    #
+    # 31 after the access walk was declared, 2026-09-16: the 28 above plus
+    # `argtype`, `isdevicearray` and `accesscache`. Looked at together, because
+    # the same fact answers all three — **Metal does not implement
+    # `kerneltouches`**, so no part of the walk runs there and none of these
+    # three is reached on that build:
+    #
+    #   isdevicearray
+    #       The one with the `resource_moved!` shape if it were reachable.
+    #       `isdevicearray(x) = false` makes `resourceleaves!` descend into a
+    #       value's FIELDS instead of recording it, so a Metal array answering
+    #       the default would drop a declaration rather than raise anything.
+    #   argtype
+    #       `typeof(y)` is not a permissive default but the RIGHT answer for a
+    #       backend that hands a kernel what it resolved, which is what the host
+    #       does. Only a backend that adapts on the way to the shader has to
+    #       answer, and one that adapts has a `kerneltouches` to answer it from.
+    #   accesscache
+    #       `nothing` means "no cache", which costs the analysis again and
+    #       cannot be wrong. The host answers it; Metal need not.
+    #
+    # So the note for whoever brings the walk to Metal: `kerneltouches` is not
+    # one method, it is four, and `isdevicearray` is the one that fails quietly.
+    @test length(lonely) <= 31
 end
 
 # ── 0.9 An extension extends the vocabulary and nothing else ─────────────────

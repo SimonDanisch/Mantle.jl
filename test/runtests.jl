@@ -527,8 +527,10 @@ end
 _VULKAN_OK && include(joinpath(@__DIR__, "test_arena_recording.jl"))
 # What every declaration is derived from. Before the files that build plans,
 # because a wrong answer there is a wrong barrier in every one of them, and this
-# is the file that says what right looks like.
-_VULKAN_OK && include(joinpath(@__DIR__, "test_access.jl"))
+# is the file that says what right looks like. Split in two: the type questions
+# need no device, and the walk needs the interpreter a backend compiles with.
+include(joinpath(@__DIR__, "test_access.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.

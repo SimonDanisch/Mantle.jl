@@ -171,7 +171,7 @@ index is made of. That mattered twice: it made the whole of integer arithmetic
 an unknown call whose operands widen to read+write, and it dropped the claim
 that says a store lands where nothing else can.
 """
-function isintrinsic(@nospecialize(f))
+function iscoreintrinsic(@nospecialize(f))
     f isa Core.IntrinsicFunction && return true
     f isa GlobalRef || return false
     isdefined(f.mod, f.name) || return false
@@ -605,7 +605,7 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         t = fieldtaint(am, operandtaint(ir, st, rest[1]), rest[2])
         anyptr = any(a -> operandtype(ir, a) <: Ptr, rest)
         return (carries(tt) || anyptr) ? t : Taint()
-    elseif name in PURE_OPS || isintrinsic(f)
+    elseif name in PURE_OPS || iscoreintrinsic(f)
         # A claimed index is still a claimed index after the arithmetic that
         # turns it into an offset, so the claim rides along with the value.
         for a in rest
@@ -628,7 +628,7 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
 
     # A call the optimiser could not resolve, or a Base function we have no
     # summary for: whatever it was given, assume the worst about.
-    if isintrinsic(f)
+    if iscoreintrinsic(f)
         # An intrinsic that is not one of the memory operations above computes
         # on values and reaches nothing.
         return carries(tt) ? out : Taint()

@@ -75,8 +75,8 @@ Four things it gets right that a simpler walk does not:
 
 Everything it cannot see widens to read+write. That is the only safe direction —
 claiming an access that does not happen costs a barrier, missing one costs a
-race — and `test_access.jl` pins both halves: that known kernels come out exact,
-and that an opaque call comes out conservative.
+race — and `test/vulkan/test_access.jl` pins both halves: that known kernels come
+out exact, and that an opaque call comes out conservative.
 
 The answers are cached on the DEVICE, keyed by signature, and dropped whole when
 the world age moves. A wavefront stage is ten thousand statements after inlining
@@ -121,7 +121,8 @@ declaration follows the kernel that was actually compiled for this scene.
 | `src/raytracing/api.jl` | `trace!`, and the shaders a trace declares from |
 | `src/vulkan/access.jl` | the signatures: compute, ray tracing, and the two draw stages |
 | `src/host/host.jl` | the same through Julia's own method table |
-| `test/test_access.jl` | what right looks like |
+| `test/vulkan/test_access.jl` | what right looks like, on kernels |
+| `test/test_access.jl` | and what the walk decides from a type alone |
 
 ## Not built
 
