@@ -6,7 +6,11 @@
 # leading argument, and that the method table the kernel will be compiled
 # against is Lava's.
 
-argtype(dev::LavaDevice, @nospecialize(y)) = typeof(Adapt.adapt(adaptor(dev.bq), y))
+# `Core.Typeof`, for the reason core's default gives: a type-valued argument is
+# `Type{Float32}` in the signature the kernel is compiled at and `DataType` under
+# `typeof`, and the latter is not a dispatch tuple element.
+argtype(dev::LavaDevice, @nospecialize(y)) =
+    Core.Typeof(Adapt.adapt(adaptor(dev.bq), y))
 
 accesscache(dev::LavaDevice) = dev.ctx.caches.accesses::AccessCache
 

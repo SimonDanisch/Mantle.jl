@@ -182,10 +182,7 @@ end
 
     g = M.Graph(dev)
     out = M.Transient.Buffer(g, Float32, n)
-    M.compute!(g, "scaletyped") do p
-        M.dispatch!(p, scaletyped!,
-                    (M.use(p, out; write = true), n, Float32, *, 0.25f0), n)
-    end
+    M.dispatch!(g, scaletyped!, (out, n, Float32, *, 0.25f0), n; name = "scaletyped")
     pl = M.Plan(g)
     M.record!(pl)
     M.run!(pl)
@@ -204,8 +201,11 @@ end
     # ── a tuple of operands, packed and run ──────────────────────────────────
     #
     # One kernel, two arities, and the device addresses two levels inside the
-    # argument. `resolve(::Tuple)` is what gets the operands from graph handles
-    # to device arrays; the generic `pack_arg!` branch inlines the tuple and
+    # argument. Three walks have to treat the tuple as the argument list grouped:
+    # `resolve`/`storage` to get the operands from graph handles to device arrays,
+    # `resourceleaves!` to reach them from one `Touch` so the pass declares all
+    # three as read, and `devicepointeroffsets` to find their addresses inside
+    # the inlined aggregate. The generic `pack_arg!` branch inlines the tuple and
     # hands its TYPE to `recpatchfields!`, which is where the depth budget above
     # decides whether the addresses are noted at all.
     xs = M.Buffer(dev, collect(Float32, 1:n))
@@ -215,12 +215,10 @@ end
                          ((xs, ys, zs), [Float32(i) * 2 + 10 for i in 1:n]))
         g3 = M.Graph(dev)
         out3 = M.Transient.Buffer(g3, Float32, n)
-        M.compute!(g3, "combine") do p
-            M.dispatch!(p, combine!,
-                        (M.use(p, out3; write = true), n,
-                         map(o -> M.use(p, o; read = true), ops),
-                         length(ops) == 2 ? (*) : ((a, b, c) -> a * b + c)), n)
-        end
+        M.dispatch!(g3, combine!,
+                    (out3, n, ops,
+                     length(ops) == 2 ? (*) : ((a, b, c) -> a * b + c)), n;
+                    name = "combine")
         pl3 = M.Plan(g3)
         M.record!(pl3)
         M.run!(pl3)

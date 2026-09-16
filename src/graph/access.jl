@@ -773,8 +773,18 @@ adapted type, through the same `Adapt` rules the dispatch is packed with.
 
 One-argument dispatch on purpose: `devicetype` above has the two cases, so a
 backend never has to repeat the transient one and cannot be ambiguous with it.
+
+`Core.Typeof` and not `typeof`, here and in every backend's method. What the
+walk needs is the type the kernel is SPECIALISED at, and for a type-valued
+argument the two differ: `typeof(Float32)` is `DataType`, which is not a
+dispatch-tuple element, so `methodinstance` asserts
+`Base.isdispatchtuple(sig)` before anything is inferred. `Core.Typeof(Float32)`
+is `Type{Float32}`, which is what the kernel is actually compiled at and what
+GPUCompiler then drops as a compile-time constant — the same fact
+`graph/packing.jl` states from the other side, where writing a slot for it is a
+segfault. `kikernel` in `graph/kalaunch.jl` already built its `tt` this way.
 """
-argtype(::Device, @nospecialize(y)) = typeof(y)
+argtype(::Device, @nospecialize(y)) = Core.Typeof(y)
 
 """
     devicebuffertype(device, T) -> Type
