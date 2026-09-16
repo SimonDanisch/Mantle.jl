@@ -1880,6 +1880,16 @@ gemmstrides(A::Base.ReshapedArray{T,2,<:LavaArray}) where {T} =
 
 gemmstrides(::AbstractArray) = nothing
 
+# A DECLARED operand, which is not an array at all yet: a graph resource has no
+# storage until `Place` has run. Its strides are a function of `size` alone,
+# because all four of these are dense by construction — a `Buffer` and a
+# transient own a contiguous region, a `ResourceView` covers a contiguous span of
+# one, and a `BufferRange` is a range. That is the same tuple the
+# `LavaArray` methods above answer, with the resource where the array goes;
+# `resolve` turns it into that array when the dispatch is baked.
+gemmstrides(x::Union{Buffer,TransientBuffer,ResourceView,BufferRange}) =
+    (x, 1, 1, size(x, 1))
+
 # Last resort, for an operand that is not strided over a LavaArray at all — a
 # reshape of a permuted array, say, whose elements are genuinely not at a fixed
 # 2-D stride. Broadcast, not `copyto!`: `copyto!` on a wrapper falls into Base's
@@ -2049,14 +2059,39 @@ function splitscratch(C, M::Int, N::Int, splitk::Int)
     GPUArrays.derive(Float32, buf::LavaArray{Float32,1}, (M, N, splitk), 0)
 end
 
-"""
-    coopmat_gemm!(C, A, B, M, N, K) -> C
+# ── Tensor-core `C = A*B` ────────────────────────────────────────────────────
+#
+# Extents must already be multiples of `GEMM_TILE`; the caller pads (an im2col
+# matrix is built to size, and weights are padded once at load) because a
+# cooperative-matrix load has no bounds check.
 
-Tensor-core `C = A*B`. Extents must already be multiples of `GEMM_TILE`; the
-caller pads (an im2col matrix is built to size, and weights are padded once at
-load) because a cooperative-matrix load has no bounds check.
 """
-function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int;
+One launch of the cooperative-matrix GEMM: which kernel, its arguments, its
+ndrange and its workgroup.
+
+Selection and LAUNCHING are separate because there are two ways to launch. A
+`coopmat_gemm!` submits immediately; a graph DECLARES the same kernel with the
+same arguments through `dispatch!`. Written once, they cannot disagree about
+which tiling a shape takes — and which tiling a shape takes is measured, so two
+copies drifting is a performance regression nothing would report.
+"""
+struct GemmLaunch{K,A}
+    kern::K
+    args::A
+    ndrange::Int
+    group::Int
+end
+
+"""
+    coopmat_gemm_launches(C, A, B, M, N, K; …) -> Vector{GemmLaunch}
+
+What this shape's GEMM IS, as one or two launches and no side effects.
+
+Two when the plan splits K: the partial planes, then the reduction over them.
+`partials` is where the planes go and the caller owns it — a graph passes a
+declared transient, and an immediate call lets `splitscratch` allocate one.
+"""
+function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        nbatch::Int = 1,
                        blk_split = coopmat_gemm_shape(M, N, K; nbatch),
                        partials = nothing, reduce::Bool = true, bias = nothing,
@@ -2071,12 +2106,6 @@ function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int;
                        doublebuf::Bool = GEMM_DOUBLEBUF_DEFAULT,
                        vec4::Bool = GEMM_VEC4_DEFAULT,
                        tiling = nothing)
-    # `KA.get_backend(C)`, NOT `LavaBackend()`. An unpinned backend resolves
-    # its queue through `vk_context()`, so on a second device this dispatches on
-    # whichever context happens to be global — the work lands on the wrong GPU
-    # and the buffer's own device never sees it. `get_backend` derives the
-    # context from the array's buffer, which has always carried it.
-    backend = KernelAbstractions.get_backend(C)
     # A bias goes into the accumulator's initial value, so it must land exactly
     # once — with `splitk > 1` every plane would carry its own copy and the
     # reduction would sum them. The caller keeps its own epilogue there.
@@ -2113,10 +2142,8 @@ function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int;
         else
             get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c])
         end
-        kern(backend, wg)(
-            C, A, B, bias, epilogue, Val(M), Val(N), Val(K);
-            ndrange = (M ÷ gemm_bm(c)) * (N ÷ gemm_bn(c)) * wg)
-        return C
+        return [GemmLaunch(kern, (C, A, B, bias, epilogue, Val(M), Val(N), Val(K)),
+                           (M ÷ gemm_bm(c)) * (N ÷ gemm_bn(c)) * wg, wg)]
     end
     span = GEMM_TILE * blk
     ntiles = (M ÷ span) * (N ÷ span)
@@ -2127,17 +2154,63 @@ function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int;
     # The epilogue belongs to whoever reduces the planes.
     epilogue === identity || splitk == 1 ||
         throw(ArgumentError("coopmat_gemm!: an epilogue needs splitk == 1, got $splitk"))
-    GEMM_BLOCK_KERNELS[blk](backend, GEMM_WORKGROUP)(
-        dst, A, B, bias, epilogue, Val(M), Val(N), Val(K),
-        Val((K ÷ GEMM_TILE) ÷ splitk); ndrange = ntiles * splitk * 32 * nbatch)
-    splitk == 1 && return C
+    block = GemmLaunch(GEMM_BLOCK_KERNELS[blk],
+                       (dst, A, B, bias, epilogue, Val(M), Val(N), Val(K),
+                        Val((K ÷ GEMM_TILE) ÷ splitk)),
+                       ntiles * splitk * 32 * nbatch, GEMM_WORKGROUP)
+    splitk == 1 && return [block]
     # `reduce=false` hands the partial planes back untouched, for a caller whose
     # own epilogue can sum them — a convolution already reads every element of
     # the result to add bias and scatter it, so folding the sum in there saves a
     # dispatch and a full write-plus-read of `M*N*splitk` floats per convolution.
-    reduce || return dst
-    splitk_reduce_kernel!(backend)(C, dst, Val(splitk), M * N; ndrange = M * N * nbatch)
-    C
+    reduce || return [block]
+    return [block, GemmLaunch(splitk_reduce_kernel!,
+                              (C, dst, Val(splitk), M * N),
+                              M * N * nbatch, 0)]
+end
+
+"""
+    coopmat_gemm!(C, A, B, M, N, K; …) -> C
+
+Submit the launches [`coopmat_gemm_launches`](@ref) decided on, now.
+
+`KA.get_backend(C)` and NOT `LavaBackend()`: an unpinned backend resolves its
+queue through `vk_context()`, so on a second device this would dispatch on
+whichever context happens to be global — the work lands on the wrong GPU and the
+buffer's own device never sees it. `get_backend` derives the context from the
+array's buffer, which has always carried it.
+"""
+function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int; kw...)
+    backend = KernelAbstractions.get_backend(C)
+    for l in coopmat_gemm_launches(C, A, B, M, N, K; kw...)
+        # A group of 0 is "whatever the launcher picks", which is what
+        # `splitk_reduce_kernel!` was launched with.
+        k = l.group == 0 ? l.kern(backend) : l.kern(backend, l.group)
+        k(l.args...; ndrange = l.ndrange)
+    end
+    return C
+end
+
+"""
+    coopmat_gemm_dispatch!(g, C, A, B, M, N, K; name, …) -> C
+
+DECLARE the same launches into a graph: one pass each, ordered by what the
+kernels do to their arguments.
+
+The scratch a split-K plan needs is the caller's (`partials`), because a graph's
+scratch is a declared transient the placer aliases against everything else —
+see `scratch` in DNNKernels' `emit.jl`. An immediate `coopmat_gemm!` lets
+`splitscratch` allocate one instead.
+"""
+function coopmat_gemm_dispatch!(g, C, A, B, M::Int, N::Int, K::Int;
+                                name::AbstractString = "gemm", kw...)
+    ls = coopmat_gemm_launches(C, A, B, M, N, K; kw...)
+    for (i, l) in enumerate(ls)
+        dispatch!(g, l.kern, l.args, l.ndrange;
+                  group = l.group == 0 ? nothing : l.group,
+                  name = length(ls) == 1 ? name : "$name.$i")
+    end
+    return C
 end
 
 # A matrix-vector product is just the N == 1 case. `C` carries strides like the
@@ -2359,28 +2432,43 @@ end
     end
 end
 
-function gemmlaunch!(C, A, B, M, N, K, α, β)
+"""
+    scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing) -> Vector{GemmLaunch}
+
+What the scalar GEMM IS for this shape, as one or two launches and no side
+effects. Split from the launching for the reason
+[`coopmat_gemm_launches`](@ref) is: a graph declares these and an immediate
+`gemmlaunch!` submits them, and which kernel a shape takes is measured.
+
+Every operand must already be DENSE. `gemmlaunch!` used to call `densify` on one
+that was not, which allocates — a graph cannot hold a host allocation, so a
+declaration that needs one is refused here and the caller materialises the
+operand as a pass of its own. `gemmstrides` answering `nothing` is that case.
+
+`partials` is the split-K GEMV's scratch and the caller owns it, for the same
+reason.
+"""
+function scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing)
     a = gemmstrides(A)
-    a === nothing && (a = gemmstrides(densify(A)))
     b = gemmstrides(B)
-    b === nothing && (b = gemmstrides(densify(B)))
     c = gemmstrides(C)
-    # See the note in `mul!` above: the backend comes from the destination.
-    backend = KernelAbstractions.get_backend(c[1])
+    (a === nothing || b === nothing) && throw(ArgumentError(
+        "scalar_gemm_launches: an operand is not dense, and making it dense is " *
+        "an allocation a declaration cannot make. Materialise it into a " *
+        "transient first — `densify` is what the immediate path calls here."))
     # Before `staged_gemm_ok`, which declines `N == 1` anyway — this is the
-    # decode path and it wants a kernel of its own. See the block above.
+    # decode path and it wants a kernel of its own.
     if N == 1
         S = gemv_split(M, K)
         if S > 1
             KC = cld(K, S)
-            P = splitscratch(C, M, 1, S)
-            gemv_splitk_kernel!(backend, 256)(
-                P, a[1], b[1], a[2], a[3], a[4], b[2], b[3],
-                Int32(M), Int32(K), Int32(KC), Int32(M * S); ndrange = M * S)
-            gemv_reduce_kernel!(backend, 256)(
-                c[1], P, c[2], c[3], Int32(M), Int32(S),
-                eltype(C)(α), eltype(C)(β); ndrange = M)
-            return C
+            P = partials === nothing ? splitscratch(C, M, 1, S) : partials
+            return [GemmLaunch(gemv_splitk_kernel!,
+                        (P, a[1], b[1], a[2], a[3], a[4], b[2], b[3],
+                         Int32(M), Int32(K), Int32(KC), Int32(M * S)), M * S, 256),
+                    GemmLaunch(gemv_reduce_kernel!,
+                        (c[1], P, c[2], c[3], Int32(M), Int32(S),
+                         eltype(C)(α), eltype(C)(β)), M, 256)]
         end
     end
     if staged_gemm_ok(C, A, B, M, N)
@@ -2390,19 +2478,48 @@ function gemmlaunch!(C, A, B, M, N, K, α, β)
         # exact tiling in all three extents and unit row stride on every operand.
         fast = M % SGEMM_BM == 0 && N % SGEMM_BN == 0 && K % SGEMM_BK == 0 &&
                a[3] == 1 && b[3] == 1 && c[3] == 1
-        scalar_gemm_staged_kernel!(backend, SGEMM_WG)(
-            c[1], a[1], b[1], Val(M), Val(N), Val(K), Val(fast),
-            c[2], c[3], c[4], a[2], a[3], a[4], b[2], b[3], b[4],
-            eltype(C)(α), eltype(C)(β), nblk_m;
-            ndrange = nblk_m * nblk_n * SGEMM_WG)
-        return C
+        return [GemmLaunch(scalar_gemm_staged_kernel!,
+                    (c[1], a[1], b[1], Val(M), Val(N), Val(K), Val(fast),
+                     c[2], c[3], c[4], a[2], a[3], a[4], b[2], b[3], b[4],
+                     eltype(C)(α), eltype(C)(β), nblk_m),
+                    nblk_m * nblk_n * SGEMM_WG, SGEMM_WG)]
     end
-    strided_gemm_kernel!(backend)(c[1], a[1], b[1], Val(K),
-                                        c[2], c[3], c[4],
-                                        a[2], a[3], a[4],
-                                        b[2], b[3], b[4],
-                                        α, β, M, M * N; ndrange = M * N)
-    C
+    return [GemmLaunch(strided_gemm_kernel!,
+                (c[1], a[1], b[1], Val(K), c[2], c[3], c[4],
+                 a[2], a[3], a[4], b[2], b[3], b[4], α, β, M, M * N),
+                M * N, 0)]
+end
+
+"""
+Submit the scalar GEMM now, densifying a non-dense operand first — which is the
+one thing the declared form cannot do and therefore the one place the two
+differ. See the note in `mul!` above for why the backend comes from `C`.
+"""
+function gemmlaunch!(C, A, B, M, N, K, α, β)
+    Ad = gemmstrides(A) === nothing ? densify(A) : A
+    Bd = gemmstrides(B) === nothing ? densify(B) : B
+    backend = KernelAbstractions.get_backend(gemmstrides(C)[1])
+    for l in scalar_gemm_launches(C, Ad, Bd, M, N, K, α, β)
+        k = l.group == 0 ? l.kern(backend) : l.kern(backend, l.group)
+        k(l.args...; ndrange = l.ndrange)
+    end
+    return C
+end
+
+"""
+    scalar_gemm_dispatch!(g, C, A, B, M, N, K, α, β; name, partials = nothing) -> C
+
+DECLARE the scalar GEMM into a graph: one pass per launch.
+"""
+function scalar_gemm_dispatch!(g, C, A, B, M, N, K, α, β;
+                               name::AbstractString = "gemm", partials = nothing)
+    ls = scalar_gemm_launches(C, A, B, M, N, K, α, β; partials)
+    for (i, l) in enumerate(ls)
+        dispatch!(g, l.kern, l.args, l.ndrange;
+                  group = l.group == 0 ? nothing : l.group,
+                  name = length(ls) == 1 ? name : "$name.$i")
+    end
+    return C
 end
 
 # Disambiguation: Diagonal * matrix.
