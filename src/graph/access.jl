@@ -68,6 +68,55 @@ function usagetype(t::Touch, kind::ResourceKind)
     return (t.write && t.atomic) ? Unordered{S} : S
 end
 
+# ── Declaring an access, where there is no body to read it off ───────────────
+
+"""
+    argument_usage(f, args)          -> NTuple{N,Touch} or nothing
+    argument_usage(F::Type, A::Type) -> NTuple{N,Touch} or nothing
+
+What `f` does to each of `args`, where that is DECLARED rather than inferred.
+
+`nothing` means undeclared, which is not permission to guess: the caller either
+infers or refuses.
+
+Two places ask, and that is the point of it being one function. `dispatch!` asks
+about the callable it was handed, for a library call with no body on this side of
+the boundary — `mul!` disappears into rocBLAS or into a cooperative-matrix
+kernel. The taint walk asks about every call it is about to descend into, which
+is how a device intrinsic states what it does instead of having the LLVM its
+generator emitted sniffed for the word `load`.
+
+Stated on TYPES, because the walk has only types; the value form forwards through
+`Core.Typeof`, which is the type a kernel is specialised at.
+
+No `device` parameter, deliberately. `mul!(C, A, B)` writing `C`, and
+`coopmat_load` reading through its pointer, are not facts about a driver, and a
+backend able to specialise this would be deciding what a function MEANS.
+
+A declared callable must not close over device memory. The walk credits the
+function's own entry with `NOTOUCH`, because there is no body being read to see
+what it captured, and `dispatch!` already holds compute kernels to that rule.
+"""
+argument_usage(@nospecialize(F::Type), @nospecialize(A::Type)) = nothing
+argument_usage(@nospecialize(f), args::Tuple) =
+    argument_usage(Core.Typeof(f), Base.to_tuple_type(map(Core.Typeof, args)))
+
+"""
+The declared answer for a whole signature, shaped the way [`signaturetouches`](@ref)
+returns one: the function's own entry first, then one per argument.
+"""
+function declaredsignature(@nospecialize(sig))
+    sig isa DataType || return nothing
+    ps = sig.parameters
+    isempty(ps) && return nothing
+    u = argument_usage(ps[1], Tuple{ps[2:end]...})
+    u === nothing && return nothing
+    length(u) == length(ps) - 1 || throw(ArgumentError(
+        "argument_usage($(ps[1])) answered $(length(u)) touches for " *
+        "$(length(ps) - 1) arguments"))
+    return Touch[NOTOUCH, u...]
+end
+
 # ── Stating an access, for the one thing that cannot be read ─────────────────
 
 """
@@ -336,8 +385,20 @@ end
 
 """Per-argument `Touch` for a whole signature, or `nothing` if it cannot be seen."""
 function signaturetouches(w::Walk, @nospecialize(sig), depth::Int)
-    depth > w.maxdepth && return nothing
     haskey(w.summaries, sig) && return w.summaries[sig]
+    # A DECLARATION outranks the walk, and is checked before the depth limit and
+    # before the recursion guard: the whole reason to declare a callable is that
+    # reading it is either impossible or the wrong thing to read. A device
+    # intrinsic is the case — `coopmat_load`'s body is an `llvmcall` whose LLVM
+    # says `call @_lava_coopmat_load_f16_16x16_a`, and the only thing that knows
+    # a load is a read is whoever emitted that name. Cached like an inferred
+    # answer, since the lookup is a method dispatch per signature.
+    declared = declaredsignature(sig)
+    if declared !== nothing
+        w.summaries[sig] = declared
+        return declared
+    end
+    depth > w.maxdepth && return nothing
     sig in w.active && return nothing           # recursion: the caller widens
     any(p -> p isa Core.TypeofVararg, sig.parameters) && return nothing
     ir = irfor(w, sig)
@@ -682,6 +743,73 @@ function storetouch(ir, st::State, rest, target::Taint)
 end
 
 """
+    intrinsic_usage(name::Symbol) -> Touch or nothing
+
+What the external symbol an `llvmcall` calls does to the pointer it is handed.
+
+A backend spells a device intrinsic as a `declare` plus a `call`, so by the time
+the walk sees it there is no Julia callee left to ask — the `@generated` wrapper
+was inlined — and the module contains no memory instruction either. The NAME is
+the only thing left, and the only thing that knows what it means is whoever
+emitted it. So this is a declaration, like [`argument_usage`](@ref), and for the
+same reason: there is nothing to read.
+
+`nothing` means undeclared, which is not permission to guess.
+
+No device parameter: an intrinsic symbol is globally unique, and `_lava_*` is
+Lava's whatever asks. The default is untyped rather than `::Symbol` so that a
+backend's method ADDS to it instead of overwriting it, which is not permitted
+during precompilation and cost a silent fallback to running Mantle from source.
+"""
+intrinsic_usage(@nospecialize(name)) = nothing
+
+"""
+    llvmcallee(src) -> Symbol or nothing
+
+The one external symbol an `llvmcall`'s module declares, or `nothing` if it
+declares none or several.
+"""
+function llvmcallee(src::AbstractString)
+    ms = collect(eachmatch(r"declare[^@\n]*@([A-Za-z0-9_.$]+)\s*\(", src))
+    length(ms) == 1 || return nothing
+    return Symbol(ms[1].captures[1])
+end
+
+"""
+What an `llvmcall` carrying a tainted operand does to it.
+
+The INSTRUCTIONS in its module are authoritative and are read first: an
+`atomicrmw` or a `cmpxchg` is a commutative read-modify-write, which is the case
+`Unordered` exists for, and a `load` or `store` instruction is what it says.
+
+Matched as instructions, anchored to the start of a line, and not as substrings
+anywhere in the text. `declare i32 @_lava_coopmat_load_f16_16x16_a(i64, i32)`
+contains the word `load` and is not one: the test used to be `occursin("load ",
+src)`, which that name misses by a space, so every cooperative-matrix load fell
+through to read+write and `gemm_cm2!` declared its two `@Const` operands as
+WRITTEN. Had the space not been there it would have come out READ for the same
+bad reason.
+
+A module with no memory instruction at all is a `declare` plus a `call`, which is
+how every backend spells an intrinsic; what that symbol does is
+[`intrinsic_usage`](@ref)'s to say.
+"""
+const RMW_INSTR   = r"(?m)^\s*(%[^=\n]*=\s*)?(atomicrmw|cmpxchg)\s"
+const STORE_INSTR = r"(?m)^\s*store\s"
+const LOAD_INSTR  = r"(?m)^\s*%[^=\n]*=\s*load\s"
+
+function llvmcallusage(src)
+    src === nothing && return OPAQUE
+    occursin(RMW_INSTR, src) && return ATOMIC
+    occursin(STORE_INSTR, src) && return WRITE
+    occursin(LOAD_INSTR, src) && return READ
+    callee = llvmcallee(src)
+    callee === nothing && return OPAQUE
+    declared = intrinsic_usage(callee)
+    return declared === nothing ? OPAQUE : declared
+end
+
+"""
 `llvmcall` is where a backend's device intrinsics live, and the IR it carries is
 the only thing that says what they do. Two are worth reading rather than
 widening: an `atomicrmw` is a commutative read-modify-write — the case
@@ -692,17 +820,7 @@ function llvmcalltaint!(ir, touches, st::State, am::ArgMap, i::Int, rest)
     src = llvmsource(rest[1], ir)
     tainted = [a for a in rest if !isempty(operandtaint(ir, st, a))]
     isempty(tainted) && return Taint()
-    t = if src === nothing
-        OPAQUE
-    elseif occursin("atomicrmw", src) || occursin("cmpxchg", src)
-        ATOMIC
-    elseif occursin(" store ", src) || occursin("\nstore ", src)
-        OPAQUE
-    elseif occursin("load ", src)
-        READ
-    else
-        OPAQUE
-    end
+    t = llvmcallusage(src)
     for a in tainted
         record!(touches, am, operandtaint(ir, st, a), t)
         t === ATOMIC && union!(st.claims[i], operandtaint(ir, st, a))

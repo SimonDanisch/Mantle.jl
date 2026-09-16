@@ -110,3 +110,50 @@ function fragmenttouches(dev::LavaDevice, shader, args::Tuple)
     _, _, ffn, _ = resolve_shader_pair(shader, Tuple{}, tt)
     return accessof(Lava.kernelinterpreter(ffn, tt), ffn, argT; cache = accesscache(dev))[2:end]
 end
+
+# ── What Lava's device intrinsics do, declared ────────────────────────────────
+#
+# A cooperative-matrix load is a read of the buffer its pointer names, and the
+# only thing that knows so is the generator that emitted
+# `declare i32 @_lava_coopmat_load_f16_16x16_a(i64, i32)`. There is nothing for
+# the walk to read: the `@generated` wrapper is inlined by the time it sees the
+# IR, so the Julia callee is gone, and the module holds a `call` to an external
+# symbol and no memory instruction.
+#
+# It used to be classified by looking for `"load "` in the LLVM text, which that
+# name misses by a space, so it fell through to read+write. Measured on
+# `gemm_cm2!`: A and B came out `Touch(true, true, false)` with `@Const` on both
+# in the source, so every pass sharing a weight matrix with another got a
+# barrier it did not need.
+#
+# These belong in Lava, next to the generators, and cannot go there: Mantle
+# depends on Lava and not the other way round, so `Mantle.intrinsic_usage` is not
+# a name Lava can extend. This file is where the Vulkan backend already states
+# what only it knows about a Lava dispatch.
+#
+# Keyed on the OP, which is what both naming schemes put first and what Lava's
+# own emitter parses them back out as (`spirv/coopmat.jl`):
+#
+#     _lava_coopmat_<op>_<dtype>_<MxN>_<use><scope>[_row]
+#     _lava_tensor_<op>_<dim>_<clamp>[_<rest>]
+#
+# `load`, `loadw`, `loadw2`, `loadw4`, `loadv` are the loads and `store`,
+# `storew`, `storev` the stores, which a prefix covers exactly. Every other op --
+# `create`, `setdim`, `setstride`, `setclampvalue`, `slice`, `view`, `muladd` --
+# takes no pointer, so the walk short-circuits before asking. One that took a
+# pointer and was not named for what it does would answer `nothing` here, and
+# `nothing` is a refusal rather than a guess.
+
+function intrinsic_usage(name::Symbol)
+    s = String(name)
+    op = if startswith(s, "_lava_coopmat_")
+        SubString(s, ncodeunits("_lava_coopmat_") + 1)
+    elseif startswith(s, "_lava_tensor_")
+        SubString(s, ncodeunits("_lava_tensor_") + 1)
+    else
+        return nothing
+    end
+    startswith(op, "load") && return READ
+    startswith(op, "store") && return WRITE
+    return nothing
+end

@@ -217,3 +217,89 @@ end
     t = @elapsed M.kerneltouches(dev, acc_mixed!, (dst, src, src, 1f0), n, nothing)
     @test t < 0.1
 end
+
+@testset "inferred access: a device intrinsic declares what it does" begin
+    # `_lava_coopmat_load_f16_16x16_a` is not a `load` instruction, and the
+    # module it lives in has none: an `llvmcall` for a backend intrinsic is a
+    # `declare` plus a `call`, so there is nothing in the IR that says a load is
+    # a read. It was classified by `occursin("load ", src)`, which that name
+    # misses by a space, so it fell through to read+write.
+    #
+    # The op is what both of Lava's naming schemes put first and what Lava's own
+    # emitter parses them back out as, so a prefix covers every load and store
+    # exactly. An op that takes a pointer and is not named for what it does gets
+    # `nothing`, which is a refusal rather than a guess.
+    @test M.intrinsic_usage(:_lava_coopmat_load_f16_16x16_a) === M.READ
+    @test M.intrinsic_usage(:_lava_coopmat_loadw2_f16_16x16_b) === M.READ
+    @test M.intrinsic_usage(:_lava_coopmat_store_f32_16x16_acc) === M.WRITE
+    @test M.intrinsic_usage(:_lava_coopmat_storew_f16_16x16_acc) === M.WRITE
+    @test M.intrinsic_usage(:_lava_tensor_load_2_1_f16_16x16_a) === M.READ
+    @test M.intrinsic_usage(:_lava_tensor_loadv_2_1_f16_16x16_b) === M.READ
+    @test M.intrinsic_usage(:_lava_tensor_store_2_0_f32_16x16_acc) === M.WRITE
+    @test M.intrinsic_usage(:_lava_tensor_storev_2_0_f32_16x16_acc) === M.WRITE
+    # Not memory, so never asked — the walk short-circuits on an intrinsic with
+    # no tainted operand — and `nothing` if it ever is.
+    @test M.intrinsic_usage(:_lava_tensor_setstride_2_1) === nothing
+    @test M.intrinsic_usage(:_lava_coopmat_muladd_f16_16x16) === nothing
+    @test M.intrinsic_usage(:llvm_pow_f32) === nothing
+
+    # The classification reads INSTRUCTIONS, anchored, and not substrings
+    # anywhere in the text. The first of these is the shape every Lava intrinsic
+    # has and the name is the only thing in it that mentions loading.
+    ext = """
+        declare i32 @_lava_coopmat_load_f16_16x16_a(i64, i32) #0
+        define i32 @entry(i64 %p, i32 %o) #0 {
+            %r = call i32 @_lava_coopmat_load_f16_16x16_a(i64 %p, i32 %o)
+            ret i32 %r
+        }
+        """
+    @test M.llvmcallee(ext) === :_lava_coopmat_load_f16_16x16_a
+    @test M.llvmcallusage(ext) === M.READ
+    @test M.llvmcallusage("""
+        define i32 @entry(ptr %p) {
+            %r = load i32, ptr %p
+            ret i32 %r
+        }
+        """) === M.READ
+    @test M.llvmcallusage("""
+        define void @entry(ptr %p, i32 %v) {
+            store i32 %v, ptr %p
+            ret void
+        }
+        """) === M.WRITE
+    @test M.llvmcallusage("""
+        define i32 @entry(ptr %p, i32 %v) {
+            %r = atomicrmw add ptr %p, i32 %v acq_rel
+            ret i32 %r
+        }
+        """) === M.ATOMIC
+    # An intrinsic nobody declared, carrying a pointer: conservative, and the
+    # step this file is a staging post for turns it into a refusal.
+    @test M.llvmcallusage("""
+        declare i32 @_lava_mystery(i64) #0
+        define i32 @entry(i64 %p) #0 {
+            %r = call i32 @_lava_mystery(i64 %p)
+            ret i32 %r
+        }
+        """) === M.OPAQUE
+
+    # And the whole of it on the kernel that was wrong: `gemm_cm2!` takes
+    # `C, @Const(A), @Const(B)`, so the walk must agree with the `@Const` the
+    # author already wrote. It did not -- all three came out read+write, and
+    # every pass sharing a weight matrix with another got a barrier for it.
+    dev = M.Device(TESTBACKEND)
+    n = 64
+    C = M.devicearray(dev, zeros(Float16, n, n))
+    A = M.devicearray(dev, ones(Float16, n, n))
+    B = M.devicearray(dev, ones(Float16, n, n))
+    t = M.kerneltouches(dev, M.gemm_cm2!,
+                        (C, A, B, Int32(n), Int32(n), Int32(n),
+                         Val(32), Val(32), Val(16), Val(false), Val(0)),
+                        (32 * 2, 2), (32, 1))
+    @test t[1] === M.WRITE          # C
+    @test t[2] === M.READ           # A, @Const
+    @test t[3] === M.READ           # B, @Const
+    # The extents and the `Val`s are not accesses, which is the property the
+    # scalar cases above pin and which a coopmat kernel must not break.
+    @test all(u -> u === M.NOTOUCH, t[4:end])
+end

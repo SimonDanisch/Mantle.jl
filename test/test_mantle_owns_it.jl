@@ -572,7 +572,16 @@ end
     # 30 after merging the Metal frame-allocation work in the same session: it
     # answers `devicearray` in that tree, so the name left the set. Which is the
     # direction this number is supposed to move.
-    @test length(lonely) <= 30
+    #
+    # 31 for `intrinsic_usage`, and this one is not a permissive default at all:
+    # `nothing` means the symbol an `llvmcall` calls is UNDECLARED, which the
+    # walk treats as "assume the worst" and is on its way to refusing outright.
+    # A backend that spells its intrinsics as `llvmcall`s and does not answer
+    # gets conservative declarations, not silence -- barriers it does not need,
+    # never a missing one. Metal's intrinsics are `@device_override`s on real
+    # instructions rather than external symbols, so it may never need a method;
+    # if it does, the shape is Lava's in `src/vulkan/access.jl`.
+    @test length(lonely) <= 31
 end
 
 # ── 0.9 An extension extends the vocabulary and nothing else ─────────────────

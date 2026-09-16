@@ -714,6 +714,10 @@ const BACKEND_VOCABULARY = (
     # (`graph/packing.jl`); a backend adds `passedas` for its OWN allocation
     # handles and never restates the rule for what takes no slot at all.
     :passedas,
+    # What an `llvmcall`'s external symbol does to the pointer it is handed.
+    # A declaration and not a hook with a default answer: `nothing` means
+    # undeclared, which the walk refuses rather than guesses about.
+    :intrinsic_usage,
     # What core asks a backend's OWN compiled dispatch — the type
     # `compile_dispatch` returned. Core answers it for its own
     # `CompiledDispatch`, `Launch` and `Call`, so a backend that reuses those
