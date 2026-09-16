@@ -382,10 +382,20 @@ KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
     all(isconcretetype, ts) || return :(_find_tlas(args, nothing))
     expr = :(nothing)
     for (i, T) in enumerate(ts)
-        hasfield(T, :hwtlas) || continue
-        expr = :(let h = getfield(args[$i], :hwtlas)
-                     h === nothing ? $expr : h
-                 end)
+        if T <: Tuple
+            # A tuple argument is the argument list grouped, so it is walked
+            # through rather than treated as one value — the same transparency
+            # `storage`, `holdleaves!` and `nestinglevels` give it. Without this
+            # an accel inside one compiled with ray query disabled and failed in
+            # the emitter instead of at the call site.
+            expr = :(let h = find_tlas_in_args(args[$i])
+                         h === nothing ? $expr : h
+                     end)
+        elseif hasfield(T, :hwtlas)
+            expr = :(let h = getfield(args[$i], :hwtlas)
+                         h === nothing ? $expr : h
+                     end)
+        end
     end
     expr
 end

@@ -710,6 +710,10 @@ const BACKEND_VOCABULARY = (
     :syncbackend,
     :compiledraw, :compile_dispatch, :passbarriers,
     :argbytes, :indirectslot,
+    # Argument packing: core owns the classification and both walks
+    # (`graph/packing.jl`); a backend adds `passedas` for its OWN allocation
+    # handles and never restates the rule for what takes no slot at all.
+    :passedas,
     # What core asks a backend's OWN compiled dispatch — the type
     # `compile_dispatch` returned. Core answers it for its own
     # `CompiledDispatch`, `Launch` and `Call`, so a backend that reuses those

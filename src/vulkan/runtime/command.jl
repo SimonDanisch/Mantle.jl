@@ -261,7 +261,7 @@ function release!(rec::Recording)
     empty!(rec.sync)
     let p = pool(dev)
         for r in rec.regions
-            retire!(p, r)
+            retire!(p, dev, r)
         end
     end
     empty!(rec.regions)
@@ -1141,18 +1141,26 @@ function flush_stall_report(bq::VulkanBatchQueue, target::UInt64)
         err isa VK.VulkanError || rethrow()
         err
     end
-    println(io, "  timeline counter = ", cur isa Exception ? "unreadable ($cur)" : cur,
+    # `readable`, and NOT `cur !== nothing`: the `catch` above binds `cur` to the
+    # EXCEPTION, so it is never `nothing` and that guard was dead. Both
+    # comparisons below then ran `b.signal_value <= cur` against a
+    # `VK.VulkanError` — a `MethodError` from inside the report, on the one path
+    # that builds it: after a flush has stalled, on a device that may be lost,
+    # which is exactly when the counter read fails. The report the caller waited
+    # for was replaced by a crash in the reporter.
+    readable = cur isa Integer
+    println(io, "  timeline counter = ", readable ? cur : "unreadable ($cur)",
                 ", next_timeline = ", driver(bq).next_timeline,
                 ", outstanding = ", length(bq.outstanding))
     for (i, o) in enumerate(bq.outstanding)
         b = o.payload
         waits = [v for (_, v, _) in b.wait_semaphores]
-        done = cur !== nothing && b.signal_value <= cur
+        done = readable && b.signal_value <= cur
         println(io, "  submission $i: signals ", b.signal_value,
                     ", waits on ", isempty(waits) ? "nothing" : string(waits),
                     done ? "  [already signalled]" : "")
     end
-    if cur !== nothing && all(o -> o.token <= cur, bq.outstanding) && target > cur
+    if readable && all(o -> o.token <= cur, bq.outstanding) && target > cur
         println(io, "  >> every in-flight submission is already signalled and the target is not: ",
                     "the wait is on a value nothing will signal.")
     end

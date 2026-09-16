@@ -43,7 +43,12 @@ struct InstanceBatch{Tri}
     instance_buf::LavaArray{VulkanInstanceRecord, 1}
     n::Int
     instance_mask::UInt8
-    custom_index::UInt32      # low 24 bits of gl_InstanceCustomIndexEXT (mi_idx / instance_id)
+    # What the batch was pushed with, for a caller that asks. NOT what a refit
+    # writes: the records carry their own, because one field cannot represent
+    # the `instance_ids` vector form — see `update_instance_records_kernel!`.
+    # The CPU-record `addbatch!` cannot know it and passes `UInt32(0)`, so read
+    # the records if you need the truth for that path.
+    custom_index::UInt32
     handle::Raycore.TLASHandle
     triangles::Vector{Tri}
     # SBT hit-group offset every instance in the batch shares.  0 maps to the
@@ -516,14 +521,31 @@ end
 # GPU update kernel + update_transform!/update_transforms!
 # ============================================================================
 
+# The two packed words are READ BACK from the record rather than passed in, and
+# that is the fix for a silent wrong answer: they were scalar arguments taken
+# from the batch, so one refit flattened every instance in it to one
+# `custom_index`, one mask, one SBT offset and zero flags.
+#
+# `push!(hwtlas, mesh, transform; instance_id = 7)` put the 7 in the RECORD and
+# `UInt32(0)` in the batch (the CPU-record `addbatch!` hardcoded it), so the
+# first `update_transform!` reset `gl_InstanceCustomIndexEXT` to 0 with no
+# error. The vector form was worse: a batch field is one value and
+# `instance_ids` is a vector, so per-instance ids could not survive a refit even
+# in principle. Reading the record preserves whatever was written into it —
+# uniform or not — and preserves the 8 flag bits the scalar form always zeroed.
+#
+# Each workitem reads and writes only element `i`, so the read-before-write is
+# not a hazard.
 KA.@kernel cpu=false function update_instance_records_kernel!(
         records,
         @Const(transforms),
-        blas_address::UInt64,
-        cim::UInt32,
-        sof::UInt32)
+        blas_address::UInt64)
     i = @index(Global, Linear)
-    @inbounds records[i] = VulkanInstanceRecord(transforms[i], cim, sof, blas_address)
+    @inbounds old = records[i]
+    @inbounds records[i] = VulkanInstanceRecord(transforms[i],
+                                                old.custom_index_and_mask,
+                                                old.sbt_offset_and_flags,
+                                                blas_address)
 end
 
 """
@@ -580,12 +602,11 @@ Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transf
 
 function _apply_pending_update!(batch::InstanceBatch, transforms::LavaArray{Mat3x4f, 1})
     backend = KA.get_backend(batch.instance_buf)
-    cim = (batch.custom_index & 0x00FFFFFF) | (UInt32(batch.instance_mask) << 24)
-    # Preserve the batch's SBT hit-group offset across refits (8-bit flags = 0).
-    sof = batch.sbt_offset & 0x00FFFFFF
+    # No `cim`/`sof`: the kernel keeps each record's own. The BLAS address is
+    # still passed, because a rebuilt BLAS is a new address and the record has
+    # to follow it.
     update_instance_records_kernel!(backend)(
-        batch.instance_buf, transforms,
-        batch.blas.address, cim, sof;
+        batch.instance_buf, transforms, batch.blas.address;
         ndrange = batch.n)
 end
 

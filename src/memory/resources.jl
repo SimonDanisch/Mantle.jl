@@ -479,7 +479,7 @@ function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
     b.len > 0 && devicecopy!(b.dev, fresh, b.store, b.len)
     old = b.store
     b.store, b.capacity = fresh, n
-    retire!(pool(b.dev), region(old))
+    retire!(pool(b.dev), b.dev, region(old))
     notify_move!(pool(b.dev), deviceaddress(b.dev, region(old)),
                  deviceaddress(b.dev, region(fresh)), length(old.region))
     return b
@@ -503,7 +503,7 @@ already belong to somebody else.
 One method for both because they are one thing, a region and a length, and a
 caller that owns a mix should not have to remember which is which.
 """
-free!(r::Union{Buffer,GPURef}) = (retire!(pool(r.dev), region(r.store)); nothing)
+free!(r::Union{Buffer,GPURef}) = (retire!(pool(r.dev), r.dev, region(r.store)); nothing)
 
 """
     devicecopy!(dev, dst::DeviceArray, src::DeviceArray, n)

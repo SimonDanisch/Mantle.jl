@@ -63,6 +63,10 @@ Answering only the second question sends it down a path whose first call is
 `false` by default: a backend that has one says so.
 """
 supports_batch_queue(backend) = false
+# Asked of a device too: this backend answers for `VulkanAPI`, and a caller
+# holding the device would otherwise read the untyped `false`. See
+# `supports_graphics` in `graphics/commands.jl` for the class.
+supports_batch_queue(dev::Device) = supports_batch_queue(backend(dev))
 
 """
     batchqueue(device) -> SubmitChannel

@@ -225,7 +225,7 @@ end
     B = Mantle.Buffers()
     rs = [Mantle.acquire!(p, d, B, nothing, 256; blocksize = 1 << 22) for _ in 1:200]
     for r in rs
-        Mantle.retire!(p, r)
+        Mantle.retire!(p, d, r)
     end
     # First call stamps them with a fence this device has not passed. Asserted,
     # not assumed: if they were released here the measurement below would be of
@@ -257,7 +257,7 @@ end
     B = Mantle.Buffers()
     rs = [Mantle.acquire!(p, d, B, nothing, 256; blocksize = 1 << 22) for _ in 1:200]
     for r in rs
-        Mantle.retire!(p, r)
+        Mantle.retire!(p, d, r)
     end
     Mantle.reclaim!(p, d)
     Mantle.reclaim!(p, d)                   # warm the walk

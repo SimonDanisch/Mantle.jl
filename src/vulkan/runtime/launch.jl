@@ -271,6 +271,18 @@ end
         recpatchfields!(batch, T, mapped_ptr + inline_offset)
         return inline_offset + byval_size
     else
+        # The only thing this branch can honour is "the value's own bytes, at
+        # the slot", which is what core calls `InlineBytes`. A device
+        # allocation reaching here would store the HOST address of a boxed
+        # handle into a slot the kernel dereferences; `VkManagedBuffer` has its
+        # own method below and a new handle type needs one too. Constant-folded
+        # away for every type that is not one.
+        if passedas(T) isa DeviceAllocation
+            throw(LavaError("pack_arg!",
+                "no method for $T, which `passedas` declares a DeviceAllocation",
+                "add a `pack_arg!(::$T, ...)` that holds the allocation and writes " *
+                "its device address, as the `VkManagedBuffer` method does"))
+        end
         unsafe_store!(Ptr{T}(mapped_ptr + offset), x)
         return inline_offset
     end
@@ -291,6 +303,10 @@ end
     unsafe_store!(Ptr{UInt64}(mapped_ptr + offset), UInt64(p))
     return inline_offset
 end
+
+# The one argument on this backend whose slot binds an allocation instead of a
+# copy of the value's bytes; the method below is what binding means here.
+passedas(::Type{<:VkManagedBuffer}) = DeviceAllocation()
 
 @inline function pack_arg!(buf::VkManagedBuffer,
                            mapped_ptr::Ptr{UInt8}, arg_buf_bda::UInt64,
@@ -333,39 +349,16 @@ end
     return inline_offset + byval_size
 end
 
-"""
-Which positions in an argument tuple occupy a push-constant slot, in order.
-
-The one statement of the rule. Zero-size arguments take no bytes, and
-type-valued ones
-(`T = Float32` captured by an `@kernel`) are ghost in GPUCompiler's view even
-though `typeof(Float32) === DataType` has nonzero `sizeof` — packing into a slot
-that does not exist is a segfault.
-
-Returns `all_args` indices; the position in the returned vector is the LAYOUT
-index, which is what `offsets` and `byval_sizes` are indexed by.
-"""
-function slotpositions(types)
-    non_ghost = Int[]
-    for (i, Ti) in enumerate(types)
-        sizeof(Ti) == 0 && continue
-        Ti <: Type && continue
-        push!(non_ghost, i)
-    end
-    return non_ghost
-end
-
-"""
-Whether `pack_arg!` writes this type at its own offset and nowhere else.
-
-A by-value aggregate goes into the inline area past `base_size`, at a position
-that depends on every by-value argument before it, so it cannot be rewritten on
-its own. Everything else — primitives, pointers, buffer addresses — is a single
-store at `offsets[layout_i]`, which is what makes a per-argument update possible
-at all. Read off the branch in `pack_arg!` rather than restated: that method
-tests exactly `isbitstype(T) && !isprimitivetype(T)`.
-"""
-standalone_slot(::Type{T}) where {T} = !(isbitstype(T) && !isprimitivetype(T))
+# `slotpositions` was here: which positions in an argument tuple occupy a
+# push-constant slot. It is core's `passedslots` now, because Metal's
+# `recorded_args` asked the same question with a different and non-equivalent
+# rule; see `graph/packing.jl`.
+#
+# `standalone_slot` was here too, and was dead: nothing asked whether a type is
+# written at its own offset and nowhere else. The fact it stated is still true
+# of `pack_arg!` above (an aggregate goes into the inline area past `base_size`,
+# everything else is one store at `offsets[layout_i]`) and is read off that
+# method.
 
 """
     pack_args_direct!(owner, mapped_ptr, arg_buf_bda, offsets, base_size, byval_sizes, all_args)
@@ -384,9 +377,8 @@ was being written, and that batch's completion released them.
                                         offsets::Vector{Int}, base_size::Int,
                                         byval_sizes::Vector{Int},
                                         all_args::T) where {T <: Tuple}
-    non_ghost = slotpositions(T.parameters)
     exprs = Expr[]
-    for (layout_i, arg_i) in enumerate(non_ghost)
+    for (layout_i, arg_i) in enumerate(passedslots(T.parameters))
         push!(exprs, :(inline_offset = pack_arg!(
             all_args[$arg_i], mapped_ptr, arg_buf_bda,
             @inbounds(offsets[$layout_i]),

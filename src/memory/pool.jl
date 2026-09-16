@@ -649,10 +649,19 @@ the device. It only waits for what is already on its way.
 function waitfor end
 
 """
-    retire!(pool, r::Region)
+    retire!(pool, dev, r::Region)
 
 Give a region back from a context that must not touch a free list — a finalizer,
 which runs on whatever thread the GC picks.
+
+`dev` is taken and not derived, for the same reason [`reclaim!`](@ref) takes it:
+a `Pool` does not know its device (a device holds its pool by value, so the back
+reference would be circular), and a backend method on this verb needs one. The
+Metal backend's `retire!(::Pool, ::MTLBuffer)` reached `Device(MetalAPI())` — a
+process global — from inside a function that had been handed the pool, so on a
+second device the destroy was ordered against the wrong queue's completion and
+the bytes came back while a reader still named them. That is the failure
+`vulkan/runtime/coretypes.jl` records having already paid for once.
 
 Appends under a lock and does nothing else. [`release!`](@ref) inserts into a
 block's free list and coalesces its neighbours; a GC thread doing that while
@@ -663,7 +672,7 @@ The release itself is [`reclaim!`](@ref), from the owning thread. So this is not
 "free from a finalizer" — the finalizer never frees, it only says what is no
 longer wanted, and something on the owning thread decides when that is safe.
 """
-retire!(p::Pool, r::Region) = (lock(() -> push!(p.pending, r), p.lock); nothing)
+retire!(p::Pool, dev, r::Region) = (lock(() -> push!(p.pending, r), p.lock); nothing)
 
 """
     reclaim!(pool, dev) -> Int
@@ -854,7 +863,7 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     end
     # Retired, not released: the tenants were just copied OUT of these bytes by
     # a device copy, which has been recorded rather than run.
-    old === nothing || retire!(pool, old)
+    old === nothing || retire!(pool, dev, old)
     # The recordings follow the move. Range-keyed: every address a tenant
     # packed out of the old region shifts by the same delta. Images have no
     # addresses to patch — their recordings were dropped above. A backend
@@ -882,7 +891,7 @@ function tenant!(pool::Pool, kind, x)
 end
 
 """
-    untenant!(pool, kind, x)
+    untenant!(pool, dev, kind, x)
 
 Drop `x` from the arena, releasing the shared region once the last tenant goes.
 
@@ -890,7 +899,7 @@ The counterpart of [`tenant!`](@ref), called by `free!`. Refcounting by tenant
 list rather than by a number: the list already has to be walked for `remap!`, and
 a count that disagrees with it is a leak nobody can find.
 """
-function untenant!(pool::Pool, kind, x)
+function untenant!(pool::Pool, dev, kind, x)
     lock(pool.lock) do
     a = get(pool.arenas, kind, nothing)
     a === nothing && return nothing
@@ -900,7 +909,7 @@ function untenant!(pool::Pool, kind, x)
         # whether the device has finished running it — a plan freed right after
         # its final `run!` is the ordinary case, and its recording is still in
         # flight. This is why `free!(::Plan)` needs no precondition either.
-        retire!(pool, a.region)
+        retire!(pool, dev, a.region)
         a.region, a.bytes, a.constraint = nothing, 0, nothing
     end
     return nothing
@@ -975,77 +984,10 @@ function deviceaddress end
 
 deviceaddress(dev, r::Region) = deviceaddress(dev, memoryof(r)) + UInt64(offset(r))
 
-"""Recurse a packed type for device-pointer fields. Depth-limited: a scene
-structure several aggregates deep is invalidated on a move, not patched — which is
-the rule Vulkan's packer already stated for the same reason."""
-function devptroffsets!(offs::Vector{Int}, S::Type, base::Int, depth::Int)
-    # DIRECT fields only. Both backends' device arrays carry their address as a
-    # first-level field, and going deeper would silently start patching scene
-    # structures — which Vulkan's packer deliberately does not: a move under one of
-    # those invalidates the plan and it is re-recorded, rather than having a
-    # half-updated copy of itself written into it.
-    depth > 1 && return offs
-    for i in 1:fieldcount(S)
-        F = fieldtype(S, i)
-        off = base + Int(fieldoffset(S, i))
-        if F <: Core.LLVMPtr || F <: Ptr
-            push!(offs, off)
-        elseif isstructtype(F) && isbitstype(F)
-            devptroffsets!(offs, F, off, depth + 1)
-        end
-    end
-    return offs
-end
-
-"""
-    devicepointeroffsets(T) -> NTuple{N,Int}
-
-Byte offsets of every device pointer inside a packed argument of type `T`.
-
-A property of the TYPE, so it is resolved once when the packer specialises and
-costs nothing per dispatch — the tuple is a literal by the time it runs, and a
-`T` holding none constant-folds the loop over it away entirely.
-
-This is what lets the patch table be core's. A backend's packer used to be asked
-to report each pointer it wrote (`recpatch!` on Vulkan), and a backend that never
-reported — Metal — silently had no table and no patching. Nothing is asked now:
-the pointers are found from the type, so a backend cannot answer wrongly and
-cannot answer not at all.
-
-`Core.LLVMPtr` is Metal's device pointer and `Ptr` is Vulkan's; both are the
-whole 64-bit address, which is what `notify_move!` re-keys on.
-"""
-@generated function devicepointeroffsets(::Type{T}) where {T}
-    offs = Int[]
-    isbitstype(T) && isstructtype(T) && devptroffsets!(offs, T, 0, 1)
-    return :($(Tuple(offs)))
-end
-
-"""
-    notepacked!(plan, T, at, target, off)
-
-Record where the device pointers of a just-packed argument of type `T` landed:
-its bytes are at host address `at`, which is byte `off` of `target`.
-
-Reads the addresses back out of the bytes the packer has already written rather
-than re-boxing the value — so this allocates nothing beyond the table entries
-themselves, and for a `T` with no device pointers the whole call compiles to
-nothing.
-
-Consumed only by [`notify_move!`](@ref), and only if something moves. A plan
-whose buffers never resize pays this once per argument at RECORD time and
-nothing per run.
-"""
-@inline function notepacked!(pl, ::Type{T}, at::Ptr{UInt8}, target, off::Int) where {T}
-    fields = devicepointeroffsets(T)
-    isempty(fields) && return nothing
-    for f in fields
-        addr = unsafe_load(Ptr{UInt64}(at + f))
-        addr == 0 && continue
-        push!(get!(Vector{Tuple{Any,Int}}, pl.patchtab, addr), (target, off + f))
-    end
-    return nothing
-end
+# `devptroffsets!`, `devicepointeroffsets` and `notepacked!` were here, between
+# `deviceaddress` and `notify_move!`. They are what a PACKER calls, not what the
+# allocator calls, and they live in `graph/packing.jl` now, beside the rest of
+# the packing interface. `notify_move!` below is the allocator's half and stays.
 
 """
     notify_move!(pool, old_base, new_base, nbytes)

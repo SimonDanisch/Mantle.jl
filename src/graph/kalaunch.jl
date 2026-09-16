@@ -30,6 +30,32 @@ still exists so one with a different notion of "the array a kernel takes" can.
 resolve(::Device, x) = storage(x)
 
 """
+A TUPLE of graph arguments resolves element by element.
+
+Without this a nested tuple reached `storage`, which has no method for one — so
+an operand list could not be an argument, and a kernel over a variable number of
+operands had to be written once per arity. `ew1!`/`ew2!`/`ew3!` in DNNKernels
+were exactly that, and the arity limit was the API rather than the hardware.
+
+Recursing through `resolve` rather than letting `storage(::Tuple)` do it, so a
+backend that overrides `resolve` is consulted for the elements too. That is the
+only difference between the two; `rawargs`, which has no device, goes through
+`storage`.
+
+Two other walks had to learn the same thing, and only one of them was already
+right. `holdleaves!` does walk tuples to their leaves, so the resources stay
+held for the submission. `devicepointeroffsets` did NOT: it counted the tuple as
+a level of nesting and stopped one short of the device pointers inside it, so a
+tuple of operands got an empty patch table and a `resize!` under a recorded plan
+silently left the old address in place — see `nestinglevels` in
+`graph/packing.jl`. The packer itself needed nothing: its generic branch inlines
+any isbits aggregate and hands `recpatchfields!` the aggregate's TYPE.
+
+A tuple of plain values resolves to itself, since `storage(x) = x`.
+"""
+resolve(dev::Device, x::Tuple) = map(a -> resolve(dev, a), x)
+
+"""
 One launch, resolved as far as a launch can be.
 
 `K`, `A` and `N` are concrete, so the call inside is direct: no lookup and no

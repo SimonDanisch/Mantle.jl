@@ -557,11 +557,17 @@ foreachbackend(joinpath(@__DIR__, "test_declared_kernel.jl"))
 # And a library call declared as a pass member: `mul!` with no ndrange. The two
 # GPU backends answer `runscalls` differently and the file asserts both sides.
 foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
+# How each argument of a dispatch reaches the kernel: which take a slot, which
+# bind an allocation, which the compiled kernel has no parameter for at all. One
+# rule in core, checked against GPUCompiler's own, because it was two rules in
+# two backends and only ever one of them in a build.
+foreachbackend(joinpath(@__DIR__, "test_argument_packing.jl"))
 # And once on the host, which is where the file's other half runs: the host has
 # no `KI.kernel_function` at all, so what it pins is the named refusal. Driven
 # separately because `eachbackend()` reports GPU backends.
 for path in (joinpath(@__DIR__, "test_declared_kernel.jl"),
-             joinpath(@__DIR__, "test_declared_call.jl"))
+             joinpath(@__DIR__, "test_declared_call.jl"),
+             joinpath(@__DIR__, "test_argument_packing.jl"))
     @eval Main MANTLE_TEST_BACKEND = $(Mantle.KernelAbstractions.CPU())
     @eval Main module $(gensym(:HostDeclared))
         using Test

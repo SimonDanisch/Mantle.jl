@@ -207,46 +207,39 @@ end
 
 Base.size(fb::VulkanFramebuffer) = (fb.width, fb.height)
 
-"""Bytes per pixel for a Vulkan format."""
-function format_pixel_size(fmt::VK.Format)
-    fmt == VK.FORMAT_B8G8R8A8_SRGB    && return 4
-    fmt == VK.FORMAT_B8G8R8A8_UNORM   && return 4
-    fmt == VK.FORMAT_R8G8B8A8_SRGB    && return 4
-    fmt == VK.FORMAT_R8G8B8A8_UNORM   && return 4
-    fmt == VK.FORMAT_R32G32B32A32_SFLOAT && return 16
-    fmt == VK.FORMAT_R16G16B16A16_SFLOAT && return 8
-    fmt == VK.FORMAT_D32_SFLOAT       && return 4
-    error("Unknown pixel size for format $fmt")
-end
-
-"""Julia element type for readback of a Vulkan format."""
-function format_element_type(fmt::VK.Format)
-    fmt == VK.FORMAT_B8G8R8A8_SRGB      && return NTuple{4, UInt8}
-    fmt == VK.FORMAT_B8G8R8A8_UNORM     && return NTuple{4, UInt8}
-    fmt == VK.FORMAT_R8G8B8A8_SRGB      && return NTuple{4, UInt8}
-    fmt == VK.FORMAT_R8G8B8A8_UNORM     && return NTuple{4, UInt8}
-    fmt == VK.FORMAT_R32G32B32A32_SFLOAT && return NTuple{4, Float32}
-    fmt == VK.FORMAT_R16G16B16A16_SFLOAT && return NTuple{4, Float16}
-    # One component, not a tuple of one: a depth buffer reads back as the depth.
-    fmt == VK.FORMAT_D32_SFLOAT          && return Float32
-    error("Unknown element type for format $fmt")
-end
+# `format_pixel_size` and `format_element_type` were HERE, and they were a third
+# and fourth format table over the same seven formats.
+#
+# `format_element_type` answered `NTuple{4, UInt8}` where `eltypeof`
+# (`graphics/record.jl`) answers `RGBA{N0f8}` for the same
+# `FORMAT_R8G8B8A8_UNORM` — two functions in one backend disagreeing about what
+# a format stores, with `eltypeof` matching the table core documents in
+# `runtime/format.jl` and this one not. A caller that compared element types was
+# wrong and one that reinterpreted was right by accident, and readback handed
+# back `NTuple` here while Metal handed back a colorant for the same call.
+#
+# `format_pixel_size` is `pixelbytes(eltypeof(fmt))`, which is `sizeof` of the
+# element type — the identity `runtime/format.jl` exists to state. The seven
+# entries agreed with `sizeof` in every case, so nothing was gained by writing
+# them out.
 
 """
     readback_framebuffer(fb::VulkanFramebuffer) -> Matrix
 
-Read back the color attachment pixels to CPU memory.
-Returns a width x height matrix with element type matching the framebuffer format:
-- `FORMAT_B8G8R8A8_SRGB` / `_UNORM`: `NTuple{4, UInt8}` (BGRA bytes)
-- `FORMAT_R32G32B32A32_SFLOAT`: `NTuple{4, Float32}` (RGBA float)
-- `FORMAT_R16G16B16A16_SFLOAT`: `NTuple{4, Float16}` (RGBA half)
+Read back the color attachment pixels to CPU memory, as a `(width, height)`
+matrix of `eltypeof(fb.color_format)` — a ColorTypes colorant, so `p.r` and
+`p.b` name the channels and the Metal backend answers the same call with the
+same element type.
+
+`(width, height)`, not `(height, width)`: the first index is x, so a Julia image
+indexed `(row, column)` wants `permutedims` before it is saved or shown.
 """
 function readback_framebuffer(fb::VulkanFramebuffer)
     ctx = fb.ctx
     bq = ctx.default_bq
 
-    bpp = format_pixel_size(fb.color_format)
-    T = format_element_type(fb.color_format)
+    T = eltypeof(fb.color_format)
+    bpp = pixelbytes(T)
     nbytes = fb.width * fb.height * bpp
     # The caller's region: acquired here, read after the copy has passed, and
     # released here. `Readback`, host-cached: the host reads these bytes, and a
@@ -298,14 +291,14 @@ postprocessing pass that reads its input back through the CPU pays a full
 download and upload per frame. This writes straight into a buffer a kernel (or
 [`blit!`](@ref)) can read.
 
-`dst` must hold `width * height * format_pixel_size(fb.color_format)` bytes; the
+`dst` must hold `width * height * pixelbytes(eltypeof(fb.color_format))` bytes; the
 pixels land tightly packed in row order, so element `(x, y)` of a
 `(width, height)` view is at linear index `(y - 1) * width + x`.
 """
 function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
     ctx = fb.ctx
     bq = ctx.default_bq
-    nbytes = fb.width * fb.height * format_pixel_size(fb.color_format)
+    nbytes = fb.width * fb.height * pixelbytes(eltypeof(fb.color_format))
     length(dst) >= nbytes ||
         error("destination holds $(length(dst)) bytes, need $nbytes")
 
@@ -353,7 +346,7 @@ function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image
     # Any element type, because the copy moves bytes and the destination's is the
     # caller's way of saying what the pixels mean: `UInt8` for a BGRA target read
     # back as bytes, `Float32` for a depth target read back as depth.
-    nbytes = width * height * format_pixel_size(format)
+    nbytes = width * height * pixelbytes(eltypeof(format))
     sizeof(T) * length(dst) >= nbytes ||
         error("destination holds $(sizeof(T) * length(dst)) bytes, need $nbytes")
     managed = dst.buf[]
@@ -371,11 +364,14 @@ function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image
 end
 
 """
-    readback_window(win::VulkanWindow) -> Matrix{NTuple{4, UInt8}}
+    readback_window(win::VulkanWindow) -> Matrix{BGRA{N0f8}}
 
 Read back the current swapchain image to CPU memory.
 Must be called after rendering but BEFORE present_frame!.
-Returns a width x height matrix of BGRA byte tuples.
+
+A `(width, height)` matrix of `eltypeof(win.format)`, which for every swapchain
+format this backend picks is `BGRA{N0f8}` — the same element type the Metal
+backend returns, so a caller reading `p.r` is portable.
 """
 function readback_window(win::VulkanWindow)
     checkopen(win)
@@ -384,8 +380,8 @@ function readback_window(win::VulkanWindow)
     dev = ctx.device
 
     w, h = size(win)
-    bpp = format_pixel_size(win.format)
-    T = format_element_type(win.format)
+    T = eltypeof(win.format)
+    bpp = pixelbytes(T)
     nbytes = w * h * bpp
 
     # A presentable image may only be touched between acquire and present. Called

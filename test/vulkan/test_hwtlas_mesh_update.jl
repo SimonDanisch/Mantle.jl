@@ -136,6 +136,49 @@ end
     @test isapprox(r2.t, expected_t(1.5); atol=0.1f0)
 end
 
+# A refit must not flatten what `push!` wrote into each instance record.
+#
+# `update_instance_records_kernel!` used to REBUILD every record from scalars
+# taken off the batch: one `custom_index`, one mask, one SBT offset, and zero
+# flags. But `push!(hwtlas, mesh, transform; instance_id)` puts the id in the
+# RECORD, and the CPU-record `addbatch!` passed `UInt32(0)` for the batch's
+# field — so the first `update_transform!` reset `gl_InstanceCustomIndexEXT` to
+# 0 with no error, and a shader keyed on it silently read instance 0's
+# material. The vector form could not work even in principle: `instance_ids` is
+# per instance and a batch field is one value.
+#
+# Read back from the device rather than traced, because the point is the bytes:
+# a trace would only notice if the shader happened to read the field.
+@testset "HW HWTLAS — a refit preserves per-instance ids, masks and SBT offsets" begin
+    hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
+    ids = UInt32[7, 11, 23]
+    handle = push!(hwtlas, sphere_mesh(16),
+                   [translation(0, 0, Float32(k)) for k in 0:2];
+                   instance_ids = ids, instance_mask = UInt8(0x0f),
+                   sbt_offset = UInt32(2))
+    Raycore.sync!(hwtlas)
+
+    batch = Mantle.batchof(hwtlas.instances, handle)
+    unpack(r) = (r.custom_index_and_mask & 0x00FFFFFF,
+                 UInt8(r.custom_index_and_mask >> 24),
+                 r.sbt_offset_and_flags & 0x00FFFFFF)
+
+    before = unpack.(Array(batch.instance_buf))
+    @test [b[1] for b in before] == ids          # what push! wrote
+
+    # A bulk transform update, which is what goes through the refit kernel.
+    Raycore.update_transforms!(hwtlas, handle,
+        Mantle.LavaArray([Mantle.mat4_to_vk_transform(translation(0, 0, Float32(k) + 4f0))
+                          for k in 0:2]))
+    Raycore.sync!(hwtlas)
+
+    after = unpack.(Array(batch.instance_buf))
+    @test [a[1] for a in after] == ids           # the ids survived: was [0, 0, 0]
+    @test all(a -> a[2] == 0x0f, after)          # and the cull mask
+    @test all(a -> a[3] == 0x02, after)          # and the hit-group offset
+    @test before == after                        # nothing but the transform moved
+end
+
 @testset "HW HWTLAS — hw_accel + rt_pipeline reused across sync! rebuilds" begin
     # The HardwareAccel (and thus the RT pipeline compiled into the SBT) must
     # survive mesh swaps — one RT pipeline per VulkanTLAS, not per rebuild.

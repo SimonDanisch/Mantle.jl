@@ -66,7 +66,7 @@ Base.show(io::IO, a::DeviceArray{T,N}) where {T,N} =
 Suballocate `dims` elements of `T` out of the pool.
 
 The counterpart to [`acquire!`](@ref) for callers that want a typed handle rather
-than raw bytes. Handing it back is `retire!(pool, region(a))` — explicit, like
+than raw bytes. Handing it back is `retire!(pool, dev, region(a))` — explicit, like
 everything else here, and released by `reclaim!` once the device is done rather
 than on the spot, so no caller has to know what is in flight.
 """

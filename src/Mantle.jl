@@ -251,6 +251,9 @@ include("geometry/narrow_phase.jl")   # needs both
 #
 # Mantle owns the graph; this is the whole of what a backend answers for it.
 include("graph/backend.jl")
+# How a kernel argument reaches the kernel, and the walk over the ones that do.
+# One rule for both recording backends; it was three copies that disagreed.
+include("graph/packing.jl")
 
 # ── Ray tracing ───────────────────────────────────────────────────────────────
 include("raytracing/pipeline.jl")
@@ -463,6 +466,21 @@ implementation, in core, is the same rule that moved `Buffer` and the phases; a
 one-line method is not an exception to it.
 """
 storage(x) = x
+
+"""
+A TUPLE of graph arguments resolves element by element.
+
+A tuple argument is the argument list grouped, not a resource of its own:
+`ew!(out, dims, operands, strides, f)` takes its operands as one tuple so that
+one kernel covers every arity. Without this method the tuple reached the identity
+fallback above and its elements stayed graph handles — `Buffer{Float32,1}` in the
+compiled kernel's signature, which GPUCompiler refuses as a non-isbits argument
+four frames below the `dispatch!` that caused it.
+
+`rawargs` maps this over a dispatch's arguments and [`resolve`](@ref) defaults to
+it, so both the recording path and the launch path get the same answer.
+"""
+storage(x::Tuple) = map(storage, x)
 
 """
     capacity(dev) -> Int

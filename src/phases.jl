@@ -465,7 +465,7 @@ function run!(::Place, c)
 end
 
 """
-    giveup!(pool, regions, arenas, x)
+    giveup!(pool, dev, regions, arenas, x)
 
 Give up `x`'s claim on the arenas it was placed into.
 
@@ -480,9 +480,9 @@ Takes the two vectors rather than an `Analysis`, because a compiled plan keeps
 them and has thrown the analysis away. Both backends' `free!` were this, spelled
 out.
 """
-function giveup!(pool, regions, arenas, x)
+function giveup!(pool, dev, regions, arenas, x)
     for ar in arenas
-        untenant!(pool, ar, x)
+        untenant!(pool, dev, ar, x)
     end
     empty!(regions)
     empty!(arenas)

@@ -635,7 +635,7 @@ function refit!(pl::Plan)
     # released: `reclaim!` hands it back one submission boundary later, by which
     # point the frames that named it have run.
     let am = pl.args
-        am === nothing || retire!(pool(pl.graph.dev), am.store)
+        am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
     pl.args = makeargmemory(pl.graph.dev, c.passes)
     return true
@@ -1515,10 +1515,10 @@ function free!(pl::Plan)
     # and was left to the GC, which is what "the argument memory … the GC reclaims
     # those" above meant; there is one owner now and it is this call.
     let am = pl.args
-        am === nothing || retire!(pool(pl.graph.dev), am.store)
+        am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
     pl.args = nothing
-    giveup!(pool(pl.graph.dev), pl.slabs, pl.arenas, pl)
+    giveup!(pool(pl.graph.dev), pl.graph.dev, pl.slabs, pl.arenas, pl)
 end
 
 """Re-materialise this plan's transients of `kind` into the arena's new region.

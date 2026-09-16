@@ -42,8 +42,8 @@ end
                                  cull = NoCull(),
                                  depth = DepthOff())
         pixels = draw_and_readback(pip, 3)
-        @test all(p -> p[2] ≈ 1f0, pixels)  # all green
-        @test all(p -> p[4] ≈ 1f0, pixels)  # alpha = 1
+        @test all(p -> p.g ≈ 1f0, pixels)  # all green
+        @test all(p -> p.alpha ≈ 1f0, pixels)  # alpha = 1
     end
 
     @testset "clear color works" begin
@@ -56,7 +56,7 @@ end
                                  cull = NoCull(),
                                  depth = DepthOff())
         pixels = draw_and_readback(pip, 0; clear_color=(0.25f0, 0.5f0, 0.75f0, 1f0))
-        @test all(p -> p[1] ≈ 0.25f0 && p[2] ≈ 0.5f0 && p[3] ≈ 0.75f0, pixels)
+        @test all(p -> p.r ≈ 0.25f0 && p.g ≈ 0.5f0 && p.b ≈ 0.75f0, pixels)
     end
 
     # ── BDA arguments ──
@@ -77,7 +77,7 @@ end
         # Fullscreen triangle
         positions = LavaArray(Vec3f[Vec3f(-1,-1,0), Vec3f(3,-1,0), Vec3f(-1,3,0)])
         pixels = draw_and_readback(pip, 3; args=(positions,))
-        @test all(p -> p[1] ≈ 1f0, pixels)  # all red
+        @test all(p -> p.r ≈ 1f0, pixels)  # all red
     end
 
     @testset "vertex-to-fragment varying" begin
@@ -98,11 +98,11 @@ end
         pixels = draw_and_readback(pip, 3; width=8, height=8)
         # Center pixel should have UV ≈ (0.5, 0.5)
         center = pixels[4, 4]
-        @test center[1] ≈ 0.5f0 atol=0.15  # u
-        @test center[2] ≈ 0.5f0 atol=0.15  # v
+        @test center.r ≈ 0.5f0 atol=0.15  # u
+        @test center.g ≈ 0.5f0 atol=0.15  # v
         # Corner (0,0) should have UV near (0, 0)
-        @test pixels[1,1][1] < 0.2f0  # u near 0
-        @test pixels[1,1][2] < 0.2f0  # v near 0
+        @test pixels[1,1].r < 0.2f0  # u near 0
+        @test pixels[1,1].g < 0.2f0  # v near 0
     end
 
     @testset "fragment uses frag_coord" begin
@@ -126,8 +126,8 @@ end
         pixels = draw_and_readback(pip, 3)
         # Pixel at (8,8) should have frag_coord ≈ (8.5, 8.5) → normalized ≈ (0.53, 0.53)
         p = pixels[8, 8]
-        @test 0.4f0 < p[1] < 0.7f0
-        @test 0.4f0 < p[2] < 0.7f0
+        @test 0.4f0 < p.r < 0.7f0
+        @test 0.4f0 < p.g < 0.7f0
     end
 
     # ── Blend modes ──
@@ -150,8 +150,8 @@ end
         pixels = draw_and_readback(pip, 3; clear_color=(1f0, 1f0, 1f0, 1f0))
         # Result should be blended: red = 0.5*1 + 0.5*1 = 1, green = 0.5*0 + 0.5*1 = 0.5
         p = pixels[8, 8]
-        @test p[1] ≈ 1f0 atol=0.05  # red
-        @test p[2] ≈ 0.5f0 atol=0.05  # green (blended)
+        @test p.r ≈ 1f0 atol=0.05  # red
+        @test p.g ≈ 0.5f0 atol=0.05  # green (blended)
     end
 
     # ── Depth test ──
@@ -194,9 +194,13 @@ end
 
         pixels = readback_framebuffer(fb)
         # Blue should win (closer)
+        # `.b`/`.r`, not `p[3]`/`p[1]`: readback returns the element type
+        # `eltypeof` names — `RGBA{Float32}` here — so the channels have names.
+        # It used to return `NTuple{4, Float32}` from a second format table that
+        # disagreed with `eltypeof` about the same format.
         p = pixels[4, 4]
-        @test p[3] ≈ 1f0 atol=0.05  # blue channel
-        @test p[1] ≈ 0f0 atol=0.05  # red channel
+        @test p.b ≈ 1f0 atol=0.05
+        @test p.r ≈ 0f0 atol=0.05
 
         # The other order is the half that a per-draw depth clear could not fail:
         # near first, far second, and the far one must be rejected.
@@ -212,8 +216,8 @@ end
         Mantle.flush!(Mantle.Device())
 
         q = readback_framebuffer(fb2)[4, 4]
-        @test q[3] ≈ 1f0 atol=0.05  # still blue: the far draw failed the test
-        @test q[1] ≈ 0f0 atol=0.05
+        @test q.b ≈ 1f0 atol=0.05   # still blue: the far draw failed the test
+        @test q.r ≈ 0f0 atol=0.05
     end
 
     # ── Pipeline state vs. the compiled-pipeline cache ──
@@ -247,7 +251,7 @@ end
         bq = ctx.default_bq
         # Opaque first, so a shared cache entry would hand the additive draws
         # opaque blending.
-        @test draw_and_readback(opaque, 3)[4, 4][1] ≈ 0.25f0 atol=0.01
+        @test draw_and_readback(opaque, 3)[4, 4].r ≈ 0.25f0 atol=0.01
 
         fb = Mantle.Framebuffer(Mantle.defaultbackend(), 8, 8; depth=false,
             color_format=Vulkan.FORMAT_R32G32B32A32_SFLOAT)
@@ -255,7 +259,7 @@ end
         draw!(bq, additive, target, 3; clear_color=(0f0, 0f0, 0f0, 1f0))
         draw!(bq, additive, target, 3; clear_color=nothing)
         Mantle.flush!(ctx.default_bq)
-        @test readback_framebuffer(fb)[4, 4][1] ≈ 0.5f0 atol=0.01
+        @test readback_framebuffer(fb)[4, 4].r ≈ 0.5f0 atol=0.01
     end
 
     # ── Depth attachment vs. depth mode ──
@@ -301,8 +305,8 @@ end
             clear_color=nothing)                        # far red, drawn later
         Mantle.flush!(ctx.default_bq)
         p = readback_framebuffer(fb)[4, 4]
-        @test p[1] ≈ 1f0 atol=0.05                      # red: no depth test ran
-        @test p[3] ≈ 0f0 atol=0.05
+        @test p.r ≈ 1f0 atol=0.05                       # red: no depth test ran
+        @test p.b ≈ 0f0 atol=0.05
     end
 
     # ── Multiple outputs / instances ──
@@ -328,8 +332,8 @@ end
                                  depth = DepthOff())
         pixels = draw_and_readback(pip, 3; instances=2, width=32, height=32)
         # Should have some non-black pixels from both instances
-        has_red = any(p -> p[1] > 0.5f0, pixels)
-        has_green = any(p -> p[2] > 0.5f0, pixels)
+        has_red = any(p -> p.r > 0.5f0, pixels)
+        has_green = any(p -> p.g > 0.5f0, pixels)
         @test has_red
         @test has_green
     end
@@ -381,6 +385,6 @@ end
         blit!(dev, OffscreenTarget(fb), right)
         Mantle.flush!(Mantle.Device())
         px = readback_framebuffer(fb)
-        @test all(p -> p[2] > 0.9f0, px)
+        @test all(p -> p.g > 0.9f0, px)
     end
 end

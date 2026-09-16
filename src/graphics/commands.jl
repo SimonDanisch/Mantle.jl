@@ -149,17 +149,35 @@ Whether `backend` can rasterize: render passes, graphics pipelines, and the
 vertex/fragment stages the verbs above record into.
 
 `false` by default, so a backend opts in rather than inheriting a claim it
-cannot honour. Vulkan says `true`. Metal says `false` and will keep saying it
-for as long as Metal.jl compiles Julia to compute kernels only — there is no
-`MTLRenderPipelineState` wrapper and no vertex/fragment path for
-`@device_override`d Julia to compile into, so this is a missing capability in
-the toolchain, not a switch someone forgot to flip.
+cannot honour. Both GPU backends now say `true` — Metal.jl compiles graphics
+stages (see `metal/graphics.jl`), which it did not when this default was
+written.
 
 Callers that can degrade should ask. RayMakie composites its overlays through a
 graphics pipeline and has a direct-readback path for scenes with none, so it
 asks here and takes the readback path rather than failing on a Mac.
+
+## Ask it of a device or of a backend; core routes
+
+The `::Device` forwarder below is not a convenience. The default here is
+UNTYPED, so it matches anything a caller holds — and a handle no backend wrote a
+method for therefore gets a wrong ANSWER instead of a `MethodError`, which is
+the inverse of this package's rule about missing capabilities.
+
+That is not hypothetical: methods existed for `LavaBackend`, `VkContext`,
+`MetalBackend` and `MetalDevice`, and none for `LavaDevice` — so
+`supports_graphics(Device(VulkanAPI()))`, the portable spelling, answered
+`false` on a device that rasterises, and every caller that can degrade took the
+degrade path. `waitidle` had the same hole in the other direction and is
+documented in `vulkan/graph.jl`.
+
+One forwarder in core closes it for every backend at once and for every future
+one: a backend answers for its backend object, and the device question routes
+there. A backend that wants to answer differently for its device still can —
+its own method is more specific than this.
 """
 supports_graphics(backend) = false
+supports_graphics(dev::Device) = supports_graphics(backend(dev))
 
 """
     supports_geometry_stage(backend) -> Bool
@@ -185,6 +203,13 @@ question a caller holding a geometry body should ask instead.
 supports_geometry_stage(backend) = false
 @doc (@doc supports_geometry_stage) supports_tessellation(backend) = false
 
+# The `::Device` forwarders, for the reason spelled out under
+# `supports_graphics`: an untyped default answers a handle nobody wrote a method
+# for, so the portable spelling has to reach the backend's answer rather than
+# fall through to `false`.
+supports_geometry_stage(dev::Device) = supports_geometry_stage(backend(dev))
+supports_tessellation(dev::Device) = supports_tessellation(backend(dev))
+
 """
     supports_mesh_pipeline(backend) -> Bool
 
@@ -201,6 +226,7 @@ geometry stage is expressible on a mesh pipeline; the reverse is not, and
 `false` by default, so a backend opts in.
 """
 supports_mesh_pipeline(backend) = false
+supports_mesh_pipeline(dev::Device) = supports_mesh_pipeline(backend(dev))
 
 """
     use_bindings!(bq, pipeline, bindings)

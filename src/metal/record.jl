@@ -77,11 +77,17 @@ allocated outside the pool (`argbytes` above), and what defers it is the queue: 
 root of the open batch it is released when that batch's command buffer completes,
 and not before.
 """
-function Mantle.retire!(::Pool, buf::MTL.MTLBuffer)
+function Mantle.retire!(::Pool, dev::MetalDevice, buf::MTL.MTLBuffer)
     # The device's batch, not `Metal.global_queue`: the root has to be held by the
     # command buffer that actually reads these bytes, and that is the one Mantle
-    # submits to. `Device(MetalAPI())` is the process device this pool belongs to.
-    Metal.record_operation!(batchqueue(Device(MetalAPI())), buf)
+    # submits to.
+    #
+    # `dev`, not `Device(MetalAPI())`. This read a process global from inside a
+    # function it had been handed the pool of, so with two devices in one process
+    # the destroy was recorded on the wrong queue and the bytes came back while a
+    # command buffer still named them. Core passes the device now — see
+    # `retire!(::Pool, dev, ::Region)` in `memory/pool.jl`.
+    Metal.record_operation!(batchqueue(dev), buf)
     return nothing
 end
 
@@ -168,37 +174,45 @@ function icb_name(name::AbstractString, i::Int)
     return "mantle_" * cleaned * "_" * string(i)
 end
 
+# The two arguments on this backend whose slot binds an allocation rather than a
+# copy of the value's bytes. There is no `setBytes:` for an indirect command, so
+# a buffer is the only thing a recorded dispatch can be given; core asks which
+# arguments those are, and the answer is a type, not a walk.
+Mantle.passedas(::Type{<:MTL.MTLBuffer}) = Mantle.DeviceAllocation()
+Mantle.passedas(::Type{<:Metal.MtlPtr}) = Mantle.DeviceAllocation()
+
+"""Which buffer an argument core classified as a `DeviceAllocation` binds, and at
+which byte of it. Exhaustive by construction: these are the two types the
+`passedas` methods above name."""
+boundbuffer(b::MTL.MTLBuffer) = (b, 0)
+boundbuffer(p::Metal.MtlPtr) = (p.buffer, Int(p.offset))
+
 """
     recorded_args(adapted, argoff) -> (args, nbytes)
 
 Which binding slot each argument takes and where its bytes go.
 
-The same walk `encode_arguments!` does when it pushes a launch's arguments: a ghost
-type takes no slot, a buffer binds itself, and everything else is bytes. Done here,
-once, so that recording is a copy into the plan's memory and running is neither.
+The same walk `encode_arguments!` does when it pushes a launch's arguments, done
+here once so that recording is a copy into the plan's memory and running is
+neither. Which arguments take a slot and what each one binds is core's
+[`Mantle.eachpassedarg`](@ref); the offsets are this backend's, 256-byte aligned
+so any of them can back an indirect command.
 """
 function recorded_args(adapted::Tuple, argoff::Int)
     out = RecordedArg[]
     off = argoff
-    idx = 1
-    for a in adapted
-        T = typeof(a)
-        if T <: MTL.MTLBuffer
-            checkresident(a)
-            Metal.make_persistently_resident!(a)
-            push!(out, RecordedArg(idx, 0, 0, a, 0))
-        elseif T <: Metal.MtlPtr
-            checkresident(a.buffer)
-            Metal.make_persistently_resident!(a.buffer)
-            push!(out, RecordedArg(idx, 0, 0, a.buffer, Int(a.offset)))
-        elseif Metal.isghosttype(T) || Core.Compiler.isconstType(T)
-            continue                       # no slot at all, as at launch
+    Mantle.eachpassedarg(adapted) do slot, a, passing
+        if passing isa Mantle.DeviceAllocation
+            buf, bufoff = boundbuffer(a)
+            checkresident(buf)
+            Metal.make_persistently_resident!(buf)
+            push!(out, RecordedArg(slot, 0, 0, buf, bufoff))
         else
-            n = sizeof(T)
-            push!(out, RecordedArg(idx, off, n, nothing, 0))
+            n = sizeof(typeof(a))
+            push!(out, RecordedArg(slot, off, n, nothing, 0))
             off += Mantle.argalign(n)
         end
-        idx += 1
+        return nothing
     end
     return out, off - argoff
 end
@@ -235,17 +249,19 @@ recording's own buffers, which never move.
 """
 function pack_recorded!(ptr::Ptr{UInt8}, args::Vector{RecordedArg}, adapted::Tuple,
                         pl = nothing, target = nothing)
-    i = 1
-    for a in adapted
+    # The same walk `recorded_args` did, so `args[slot]` is the entry it made for
+    # this argument. It used to be a second copy of the skip rule with an index
+    # advanced by hand beside it: the two agreeing was a property of the source
+    # rather than of anything either function said.
+    Mantle.eachpassedarg(adapted) do slot, a, passing
+        passing isa Mantle.DeviceAllocation && return nothing   # binds itself
+        rec = args[slot]
         T = typeof(a)
-        (Metal.isghosttype(T) || Core.Compiler.isconstType(T)) && continue
-        rec = args[i]
-        i += 1
-        rec.buffer === nothing || continue        # a buffer binds itself
         r = Ref(a)
         GC.@preserve r unsafe_copyto!(ptr + rec.offset,
             convert(Ptr{UInt8}, Base.unsafe_convert(Ptr{T}, r)), rec.nbytes)
         pl === nothing || Mantle.notepacked!(pl, T, ptr + rec.offset, target, rec.offset)
+        return nothing
     end
     return nothing
 end

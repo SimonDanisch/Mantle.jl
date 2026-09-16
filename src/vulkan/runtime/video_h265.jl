@@ -408,7 +408,7 @@ function H265Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool = false
     let hc = Ref(C.VkVideoDecodeH265CapabilitiesKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR, C_NULL, C.StdVideoH265LevelIdc(0))),
         dc = Ref(C.VkVideoDecodeCapabilitiesKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR, Ptr{Cvoid}(rp(hc)), UInt32(0))),
         e0 = C.VkExtent2D(0, 0), cp = Ref(C.VkVideoCapabilitiesKHR(C.VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR, Ptr{Cvoid}(rp(dc)), UInt32(0), UInt64(0), UInt64(0), e0, e0, e0, UInt32(0), UInt32(0), C.VkExtensionProperties(ntuple(_ -> Cchar(0), 256), UInt32(0))))
-        GC.@preserve hc dc cp PIN ccall(Vk.function_pointer(ctx.instance, "vkGetPhysicalDeviceVideoCapabilitiesKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), ctx.physical_device.vks, Ptr{Cvoid}(pProf), pc(cp))
+        GC.@preserve hc dc cp PIN vkchk(ccall(Vk.function_pointer(ctx.instance, "vkGetPhysicalDeviceVideoCapabilitiesKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), ctx.physical_device.vks, Ptr{Cvoid}(pProf), pc(cp)), "vkGetPhysicalDeviceVideoCapabilitiesKHR")
         rHdr[] = cp[].stdHeaderVersion
         BSALIGN = Int(max(cp[].minBitstreamBufferOffsetAlignment,
                           cp[].minBitstreamBufferSizeAlignment, 1))
@@ -438,16 +438,16 @@ function H265Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool = false
     maxrefs = max(sps.dpbsize, 1)
     maxslots = UInt32(maxrefs + 2)
     sci = pin(Ref(C.VkVideoSessionCreateInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_SESSION_CREATE_INFO_KHR, C_NULL, w.qf, UInt32(0), pProf, fmt, C.VkExtent2D(CW, CH), fmt, maxslots, UInt32(maxrefs), rp(rHdr))))
-    rSess = Ref{C.VkVideoSessionKHR}(); GC.@preserve PIN ccall(dfp(w, "vkCreateVideoSessionKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), dev.vks, pc(sci), C_NULL, rp(rSess)); SESSION = rSess[]
-    let mc = Ref(UInt32(0)); ccall(dfp(w, "vkGetVideoSessionMemoryRequirementsKHR"), Int32, (Ptr{Cvoid}, C.VkVideoSessionKHR, Ptr{UInt32}, Ptr{Cvoid}), dev.vks, SESSION, mc, C_NULL)
+    rSess = Ref{C.VkVideoSessionKHR}(); GC.@preserve PIN vkchk(ccall(dfp(w, "vkCreateVideoSessionKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), dev.vks, pc(sci), C_NULL, rp(rSess)), "vkCreateVideoSessionKHR"); SESSION = rSess[]
+    let mc = Ref(UInt32(0)); vkchk(ccall(dfp(w, "vkGetVideoSessionMemoryRequirementsKHR"), Int32, (Ptr{Cvoid}, C.VkVideoSessionKHR, Ptr{UInt32}, Ptr{Cvoid}), dev.vks, SESSION, mc, C_NULL), "vkGetVideoSessionMemoryRequirementsKHR (count)")
         mreqs = [C.VkVideoSessionMemoryRequirementsKHR(C.VK_STRUCTURE_TYPE_VIDEO_SESSION_MEMORY_REQUIREMENTS_KHR, C_NULL, UInt32(0), C.VkMemoryRequirements(UInt64(0), UInt64(0), UInt32(0))) for _ in 1:Int(mc[])]
-        GC.@preserve mreqs ccall(dfp(w, "vkGetVideoSessionMemoryRequirementsKHR"), Int32, (Ptr{Cvoid}, C.VkVideoSessionKHR, Ptr{UInt32}, Ptr{Cvoid}), dev.vks, SESSION, mc, pointer(mreqs))
+        GC.@preserve mreqs vkchk(ccall(dfp(w, "vkGetVideoSessionMemoryRequirementsKHR"), Int32, (Ptr{Cvoid}, C.VkVideoSessionKHR, Ptr{UInt32}, Ptr{Cvoid}), dev.vks, SESSION, mc, pointer(mreqs)), "vkGetVideoSessionMemoryRequirementsKHR")
         binds = C.VkBindVideoSessionMemoryInfoKHR[]
         for mr in mreqs
             m = Vk.unwrap(Vk.allocate_memory(dev, mr.memoryRequirements.size, memtype(w, mr.memoryRequirements.memoryTypeBits, C.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))); pin(m)
             push!(binds, C.VkBindVideoSessionMemoryInfoKHR(C.VK_STRUCTURE_TYPE_BIND_VIDEO_SESSION_MEMORY_INFO_KHR, C_NULL, mr.memoryBindIndex, m.vks, UInt64(0), mr.memoryRequirements.size))
         end
-        GC.@preserve binds PIN ccall(dfp(w, "vkBindVideoSessionMemoryKHR"), Int32, (Ptr{Cvoid}, C.VkVideoSessionKHR, UInt32, Ptr{Cvoid}), dev.vks, SESSION, UInt32(length(binds)), pointer(binds))
+        GC.@preserve binds PIN vkchk(ccall(dfp(w, "vkBindVideoSessionMemoryKHR"), Int32, (Ptr{Cvoid}, C.VkVideoSessionKHR, UInt32, Ptr{Cvoid}), dev.vks, SESSION, UInt32(length(binds)), pointer(binds)), "vkBindVideoSessionMemoryKHR")
     end
     # session parameters: VPS + SPS + PPS with their pinned nested tables
     rPTL = pin(Ref(std_ptl(sps.ptl)))
@@ -461,7 +461,7 @@ function H265Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool = false
     h265c = pin(Ref(C.VkVideoDecodeH265SessionParametersCreateInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_SESSION_PARAMETERS_CREATE_INFO_KHR, C_NULL,
         UInt32(1), UInt32(1), UInt32(1), rp(add))))
     pci = pin(Ref(C.VkVideoSessionParametersCreateInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_SESSION_PARAMETERS_CREATE_INFO_KHR, Ptr{Cvoid}(rp(h265c)), UInt32(0), C_NULL, SESSION)))
-    rParams = Ref{C.VkVideoSessionParametersKHR}(); GC.@preserve PIN ccall(dfp(w, "vkCreateVideoSessionParametersKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), dev.vks, pc(pci), C_NULL, rp(rParams)); PARAMS = rParams[]
+    rParams = Ref{C.VkVideoSessionParametersKHR}(); GC.@preserve PIN vkchk(ccall(dfp(w, "vkCreateVideoSessionParametersKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), dev.vks, pc(pci), C_NULL, rp(rParams)), "vkCreateVideoSessionParametersKHR"); PARAMS = rParams[]
     # DPB pool + command buffer — identical to the h264 pool (NV12, decode+dpb usage)
     nslots = Int(maxslots)
     fmt_hl = Vk.Format(1000156003)
