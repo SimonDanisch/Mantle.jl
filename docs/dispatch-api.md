@@ -45,11 +45,18 @@ now derived like everything else.
 
 ## How the access is known
 
-`kerneltouches(device, kernel, args, ndrange, group)` answers one `Touch` per
+`argument_usage(device, kernel, args, ndrange, group)` answers one `Touch` per
 argument: read, write, and whether every write is one nothing can collide with.
-The backend supplies the SIGNATURE — which interpreter, what the device-side type
-of each argument is, what leading arguments the kernel has of its own — and core
-walks the IR.
+It has two sources and no third — a DECLARATION for a callable with no body on
+this side of the boundary, and INFERENCE for a kernel — and raises if neither
+applies.
+
+Inference is `kerneltouches`, where the backend supplies the SIGNATURE (which
+interpreter, what the device-side type of each argument is, what leading
+arguments the kernel has of its own) and core walks the IR. The signature is
+built at `Core.Typeof` and not `typeof`, because a type-valued argument is
+`Type{Float32}` in the signature the kernel is compiled at and `DataType` under
+`typeof`, which is not a dispatch-tuple element.
 
 It is the same typed IR the backend is about to compile, which is the only IR
 worth walking: a device array's `getindex` lives on the backend's method table
@@ -73,10 +80,33 @@ Four things it gets right that a simpler walk does not:
   invocation's, which is exactly what a work queue's append is. That is
   `Unordered`, and it is what `accumulates!` used to assert by hand.
 
-Everything it cannot see widens to read+write. That is the only safe direction —
-claiming an access that does not happen costs a barrier, missing one costs a
-race — and `test/vulkan/test_access.jl` pins both halves: that known kernels come
-out exact, and that an opaque call comes out conservative.
+**Everything it cannot see it REFUSES.** It used to widen to read+write, on the
+grounds that claiming an access that does not happen only costs a barrier while
+missing one costs a race. True, and beside the point: read+write is
+indistinguishable from a proof, so a kernel that stopped being analysable kept
+compiling and paid that barrier for ever with nothing to say so. Measured cost
+of that, on the hottest kernel in the tree: `gemm_cm2!` takes
+`C, @Const(A), @Const(B)` and declared all three read+write, because
+`@_lava_coopmat_load_f16_16x16_a` is not a `load` instruction and the classifier
+was looking for the substring `"load "`.
+
+Four of the five constructs that used to widen cannot reach a compiled kernel at
+all -- a `ccall` is C, SPIR-V forbids recursion, GPUCompiler rejects a dynamic
+call, and a signature that does not infer does not compile -- so refusing them
+moves an error that was going to happen anyway from `Pipelines` to `dispatch!`,
+where the message can name the argument. The fifth is an `llvmcall` whose symbol
+nothing declares, and `intrinsic_usage` is what answers that.
+
+One construct had to be learned rather than refused, and it is most kernels: a
+call that CANNOT RETURN. `throw_boundserror` and `throw_methoderror` infer to
+`Union{}` and are reached from the bounds check and the `setindex!` fallback of
+ordinary code. An abort path contributes nothing, and soundly — a store on the
+way to a throw cannot be observed by a later pass, because the invocation does
+not complete.
+
+`test/vulkan/test_access.jl` pins both halves: that known kernels come out
+exact, and that an undeclared intrinsic and an uninferable kernel are refused by
+name.
 
 The answers are cached on the DEVICE, keyed by signature, and dropped whole when
 the world age moves. A wavefront stage is ten thousand statements after inlining
@@ -97,6 +127,16 @@ Three things, because none of them is an access:
   argument: the slice is what the dispatch is handed and what the pass is
   recorded touching.
 
+Not at the call site, and this is the one that changed twice: what a CALL does to
+its arguments. It was `use`, then `Read`/`Write`/`ReadWrite` wrappers one per
+argument, and both are the same mistake — one fact restated at N call sites, with
+the N+1st getting it wrong. `mul!(C, A, B, α, β)` is `C = A*B*α + C*β`, so `C` is
+read as well as written, and a call site that copied `Write(C)` from the
+three-argument form is a missing barrier rather than a compile error. So the
+direction belongs to the function: `argument_usage(f, args)`, declared once next
+to it, and `mul!` is declared in core because writing its first argument is true
+of rocBLAS, of a cooperative-matrix kernel and of MPS alike.
+
 ## Consequences a reader should know about
 
 **More passes.** One dispatch is one pass, so a body that held four dispatches is
@@ -116,7 +156,7 @@ declaration follows the kernel that was actually compiled for this scene.
 
 | file | what |
 |---|---|
-| `src/graph/access.jl` | `Touch`, the taint walk, `accessof`, the device cache |
+| `src/graph/access.jl` | `Touch`, `argument_usage`, `intrinsic_usage`, the taint walk, `accessof`, the device cache |
 | `src/graph/build.jl` | `dispatch!`, `draw!`, `declare!`, `resourceleaves!`, `slice` |
 | `src/raytracing/api.jl` | `trace!`, and the shaders a trace declares from |
 | `src/vulkan/access.jl` | the signatures: compute, ray tracing, and the two draw stages |
