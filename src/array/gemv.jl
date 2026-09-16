@@ -420,27 +420,61 @@ written for a `(K, N)` matrix reading that one would stride the reduction axis b
 `C` and `x` may be any shape whose linear order is right — `(M, 1)` and `(K, 1)`
 are what a graph hands over, and reshaping them to vectors first would allocate.
 """
-function gemv!(C, x, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}};
-               bias = nothing, epilogue = identity,
-               tm::Union{Nothing,Int} = nothing, block::Union{Nothing,Int} = nothing,
-               unroll::Union{Nothing,Int} = nothing)
+function gemv!(C, x, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}}; kw...)
     W = parent(Wt)
-    M, K = size(W)
+    runlaunches!(get_backend(W),
+                 gemv_ncontig_launches(C, x, W, size(W)..., workgrouplimit(W); kw...))
+    return C
+end
+
+"""
+    gemv_ncontig_launches(C, x, W, M, K, limit; bias, epilogue, tm, block, unroll)
+
+What the `(M, K)`-layout GEMV IS for this shape, as one launch and no side
+effects. [`gemv!`](@ref) submits it; [`gemv_dispatch!`](@ref) declares it. See
+`array/launch.jl` for why those are two consumers of one function.
+
+`W` is the `(M, K)` matrix ITSELF, not the `Transpose` wrapper: the wrapper is
+the immediate call's dispatch between the two layouts (see the header), and a
+graph's operand is a resource that has no transpose. `M`, `K` and the workgroup
+`limit` are passed rather than read off `W` for the same reason — a resource
+answers neither `size` in the array sense nor `get_backend`, and the limit is a
+property of the device the plan is being built for.
+"""
+function gemv_ncontig_launches(C, x, W, M::Int, K::Int, limit::Int;
+                               bias = nothing, epilogue = identity,
+                               tm::Union{Nothing,Int} = nothing,
+                               block::Union{Nothing,Int} = nothing,
+                               unroll::Union{Nothing,Int} = nothing)
     length(x) == K || throw(DimensionMismatch(
-        "gemv!: x has $(length(x)) elements, expected K = $K"))
+        "gemv: x has $(length(x)) elements, expected K = $K"))
     length(C) == M || throw(DimensionMismatch(
-        "gemv!: C has $(length(C)) elements, expected M = $M"))
+        "gemv: C has $(length(C)) elements, expected M = $M"))
     bias === nothing || length(bias) == M || throw(DimensionMismatch(
-        "gemv!: bias has $(length(bias)) elements, expected M = $M"))
-    backend = get_backend(W)
-    ptm, pbl, pun = gemv_ncontig_config(M, K, workgrouplimit(W))
+        "gemv: bias has $(length(bias)) elements, expected M = $M"))
+    ptm, pbl, pun = gemv_ncontig_config(M, K, limit)
     t = tm === nothing ? ptm : tm
     bl = block === nothing ? pbl : block
     un = unroll === nothing ? pun : unroll
-    kern = gemv_ncontig_kernel(t, bl, un)
-    k = Base.invokelatest(kern, backend)     # `@eval`ed: world age, both halves
-    Base.invokelatest(k, C, W, x, bias, epilogue, M, K;
-                      ndrange = cld(M, t) * bl, workgroupsize = bl)
+    return [ArrayLaunch(gemv_ncontig_kernel(t, bl, un),
+                        (C, W, x, bias, epilogue, M, K), cld(M, t) * bl, bl)]
+end
+
+"""
+    gemv_dispatch!(g, C, x, W, M, K; name, …) -> C
+
+DECLARE the `(M, K)`-layout GEMV into a graph: one pass, with the bias and the
+epilogue folded into its store.
+
+This is the declared form of `MMGemvPlan` — the matrix-vector product every
+autoregressive decoder step is made of, and both of SAM 2's mask-token heads.
+Without it a graph containing one fell to the scalar split-K GEMV and paid two
+further passes for the bias and the activation.
+"""
+function gemv_dispatch!(g, C, x, W, M::Int, K::Int;
+                        name::AbstractString = "gemv", kw...)
+    dispatchlaunches!(g, gemv_ncontig_launches(C, x, W, M, K,
+                          caps(backend(g.dev)).workgrouplimit; kw...); name)
     return C
 end
 

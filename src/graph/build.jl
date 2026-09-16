@@ -34,11 +34,42 @@ function dispatch!(g::Graph, kernel, args::Tuple, ndrange;
     p = newpass(g, name === nothing ? passname(kernel, args) : String(name), :compute)
     push!(passes(g), p)
     h = handle(g, p)
-    declare!(h, args, argument_usage(g.dev, kernel, args, ndrange, group))
+    declare!(h, args, refusenothing(kernel, args,
+                 argument_usage(g.dev, kernel, args, ndrange, group)))
     n = countresource(ndrange)
     n === nothing || indirectcount!(h, n)
     push!(dispatches(p), Dispatch(kernel, args, ndrange, group))
     return p
+end
+
+"""
+Refuse a dispatch that touches nothing.
+
+A kernel launched over a non-empty ndrange exists in order to read or write
+something, so `NOTOUCH` for EVERY argument is not a declaration -- it is the
+walk having seen no memory access in a kernel that has one. "No store" is the
+single answer that must never be a guess, because it is the one that removes a
+barrier, and unlike the refusals in `graph/access.jl` this failure is SILENT:
+the walk returns a complete-looking summary.
+
+Found by it, on SAM 2's encoder: `coopmat_gemm_kernel_4!` came back untouched on
+all nine arguments, so its destination transient reached `Place` with no
+interval at all. The cooperative-matrix BLOCK kernels address their operands
+through intrinsics the walk does not yet know; `gemm_cm2!`, which uses the
+tensor intrinsics, comes out exactly right. Without this the declaration was
+merely wrong rather than refused.
+
+A dispatch whose arguments are genuinely all scalars is not a counterexample: it
+would compute nothing observable.
+"""
+function refusenothing(@nospecialize(kernel), args::Tuple, touches)
+    any(touched, touches) && return touches
+    throw(ArgumentError(
+        "dispatch!: `$kernel` is declared to touch none of its $(length(args)) " *
+        "arguments, which cannot be right for a kernel worth launching. Either " *
+        "it reads or writes something the access walk cannot see -- an intrinsic " *
+        "with no `intrinsic_usage`, most likely -- or the dispatch has no reason " *
+        "to exist."))
 end
 
 """

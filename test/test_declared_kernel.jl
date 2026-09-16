@@ -76,6 +76,56 @@ function twotiles!(out, n::Int, ::Val{WG}) where {WG}
     return
 end
 
+# Nothing to launch and nothing to touch: the two dispatches `dispatch!` refuses.
+#
+# A KA kernel rather than a macro-free one so this reaches every backend --
+# `kisupported` is false on the host, and the refusals are core's, not a
+# backend's. The body has to do something with its argument or the optimiser
+# deletes the whole kernel, and `donotdelete` is the cheapest way to say so
+# without touching memory.
+KernelAbstractions.@kernel function ka_touchesnothing!(n::Int)
+    i = @index(Global, Linear)
+    Base.donotdelete(i + n)
+end
+
+@testset "a dispatch with nothing to do is refused — $(nameof(typeof(BE)))" begin
+    dev = M.Device(BE)
+
+    # ── an empty ndrange ─────────────────────────────────────────────────────
+    #
+    # `KernelAbstractions.partition` divides by the group size and then by the
+    # ndrange, so a zero ndrange is a `DivideError` from inside the launch with
+    # nothing in the trace naming the dispatch. SAM 2's encoder has a `(1, 0,
+    # 256)` tensor and reached it.
+    g = M.Graph(dev)
+    out = M.Transient.Buffer(g, Float32, 4)
+    err = try
+        M.dispatch!(g, ka_bcast_f!, (out, out), 0; name = "empty")
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("empty", err.msg)
+
+    # ── a kernel the walk reports as touching nothing ────────────────────────
+    #
+    # "No store" is the one answer that must never be a guess, because it is the
+    # one that removes a barrier, and a walk that misses every access returns a
+    # complete-looking summary rather than refusing. `coopmat_gemm_kernel_4!`
+    # did exactly that (see `test_access.jl`): all nine arguments untouched,
+    # destination included, and its output transient reached `Place` with no
+    # interval.
+    err2 = try
+        M.dispatch!(g, ka_touchesnothing!, (32,), 32; name = "untouched")
+        nothing
+    catch e
+        e
+    end
+    @test err2 isa ArgumentError
+    @test occursin("touch none", err2.msg)
+end
+
 @testset "a plain function is a dispatch kernel — $(nameof(typeof(BE)))" begin
     # ── the predicate ────────────────────────────────────────────────────────
     #

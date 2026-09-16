@@ -209,6 +209,7 @@ include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases
 # there was a capability query routed through a `VkContext`; see
 # `test/vulkan/test_array_algorithm_portability.jl` for what is left to move and
 # what is deliberately staying.
+include("array/launch.jl")   # what a library routine IS, before it is submitted
 include("array/gemv.jl")
 include("array/fft.jl")
 

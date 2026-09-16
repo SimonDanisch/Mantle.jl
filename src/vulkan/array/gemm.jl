@@ -2066,24 +2066,7 @@ end
 # cooperative-matrix load has no bounds check.
 
 """
-One launch of the cooperative-matrix GEMM: which kernel, its arguments, its
-ndrange and its workgroup.
-
-Selection and LAUNCHING are separate because there are two ways to launch. A
-`coopmat_gemm!` submits immediately; a graph DECLARES the same kernel with the
-same arguments through `dispatch!`. Written once, they cannot disagree about
-which tiling a shape takes — and which tiling a shape takes is measured, so two
-copies drifting is a performance regression nothing would report.
-"""
-struct GemmLaunch{K,A}
-    kern::K
-    args::A
-    ndrange::Int
-    group::Int
-end
-
-"""
-    coopmat_gemm_launches(C, A, B, M, N, K; …) -> Vector{GemmLaunch}
+    coopmat_gemm_launches(C, A, B, M, N, K; …) -> Vector{ArrayLaunch}
 
 What this shape's GEMM IS, as one or two launches and no side effects.
 
@@ -2142,7 +2125,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
         else
             get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c])
         end
-        return [GemmLaunch(kern, (C, A, B, bias, epilogue, Val(M), Val(N), Val(K)),
+        return [ArrayLaunch(kern, (C, A, B, bias, epilogue, Val(M), Val(N), Val(K)),
                            (M ÷ gemm_bm(c)) * (N ÷ gemm_bn(c)) * wg, wg)]
     end
     span = GEMM_TILE * blk
@@ -2154,7 +2137,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
     # The epilogue belongs to whoever reduces the planes.
     epilogue === identity || splitk == 1 ||
         throw(ArgumentError("coopmat_gemm!: an epilogue needs splitk == 1, got $splitk"))
-    block = GemmLaunch(GEMM_BLOCK_KERNELS[blk],
+    block = ArrayLaunch(GEMM_BLOCK_KERNELS[blk],
                        (dst, A, B, bias, epilogue, Val(M), Val(N), Val(K),
                         Val((K ÷ GEMM_TILE) ÷ splitk)),
                        ntiles * splitk * 32 * nbatch, GEMM_WORKGROUP)
@@ -2164,7 +2147,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
     # the result to add bias and scatter it, so folding the sum in there saves a
     # dispatch and a full write-plus-read of `M*N*splitk` floats per convolution.
     reduce || return [block]
-    return [block, GemmLaunch(splitk_reduce_kernel!,
+    return [block, ArrayLaunch(splitk_reduce_kernel!,
                               (C, dst, Val(splitk), M * N),
                               M * N * nbatch, 0)]
 end
@@ -2181,13 +2164,8 @@ buffer's own device never sees it. `get_backend` derives the context from the
 array's buffer, which has always carried it.
 """
 function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int; kw...)
-    backend = KernelAbstractions.get_backend(C)
-    for l in coopmat_gemm_launches(C, A, B, M, N, K; kw...)
-        # A group of 0 is "whatever the launcher picks", which is what
-        # `splitk_reduce_kernel!` was launched with.
-        k = l.group == 0 ? l.kern(backend) : l.kern(backend, l.group)
-        k(l.args...; ndrange = l.ndrange)
-    end
+    runlaunches!(KernelAbstractions.get_backend(C),
+                 coopmat_gemm_launches(C, A, B, M, N, K; kw...))
     return C
 end
 
@@ -2204,12 +2182,7 @@ see `scratch` in DNNKernels' `emit.jl`. An immediate `coopmat_gemm!` lets
 """
 function coopmat_gemm_dispatch!(g, C, A, B, M::Int, N::Int, K::Int;
                                 name::AbstractString = "gemm", kw...)
-    ls = coopmat_gemm_launches(C, A, B, M, N, K; kw...)
-    for (i, l) in enumerate(ls)
-        dispatch!(g, l.kern, l.args, l.ndrange;
-                  group = l.group == 0 ? nothing : l.group,
-                  name = length(ls) == 1 ? name : "$name.$i")
-    end
+    dispatchlaunches!(g, coopmat_gemm_launches(C, A, B, M, N, K; kw...); name)
     return C
 end
 
@@ -2433,7 +2406,7 @@ end
 end
 
 """
-    scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing) -> Vector{GemmLaunch}
+    scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing) -> Vector{ArrayLaunch}
 
 What the scalar GEMM IS for this shape, as one or two launches and no side
 effects. Split from the launching for the reason
@@ -2463,10 +2436,10 @@ function scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing)
         if S > 1
             KC = cld(K, S)
             P = partials === nothing ? splitscratch(C, M, 1, S) : partials
-            return [GemmLaunch(gemv_splitk_kernel!,
+            return [ArrayLaunch(gemv_splitk_kernel!,
                         (P, a[1], b[1], a[2], a[3], a[4], b[2], b[3],
                          Int32(M), Int32(K), Int32(KC), Int32(M * S)), M * S, 256),
-                    GemmLaunch(gemv_reduce_kernel!,
+                    ArrayLaunch(gemv_reduce_kernel!,
                         (c[1], P, c[2], c[3], Int32(M), Int32(S),
                          eltype(C)(α), eltype(C)(β)), M, 256)]
         end
@@ -2478,13 +2451,13 @@ function scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing)
         # exact tiling in all three extents and unit row stride on every operand.
         fast = M % SGEMM_BM == 0 && N % SGEMM_BN == 0 && K % SGEMM_BK == 0 &&
                a[3] == 1 && b[3] == 1 && c[3] == 1
-        return [GemmLaunch(scalar_gemm_staged_kernel!,
+        return [ArrayLaunch(scalar_gemm_staged_kernel!,
                     (c[1], a[1], b[1], Val(M), Val(N), Val(K), Val(fast),
                      c[2], c[3], c[4], a[2], a[3], a[4], b[2], b[3], b[4],
                      eltype(C)(α), eltype(C)(β), nblk_m),
                     nblk_m * nblk_n * SGEMM_WG, SGEMM_WG)]
     end
-    return [GemmLaunch(strided_gemm_kernel!,
+    return [ArrayLaunch(strided_gemm_kernel!,
                 (c[1], a[1], b[1], Val(K), c[2], c[3], c[4],
                  a[2], a[3], a[4], b[2], b[3], b[4], α, β, M, M * N),
                 M * N, 0)]
@@ -2498,11 +2471,8 @@ differ. See the note in `mul!` above for why the backend comes from `C`.
 function gemmlaunch!(C, A, B, M, N, K, α, β)
     Ad = gemmstrides(A) === nothing ? densify(A) : A
     Bd = gemmstrides(B) === nothing ? densify(B) : B
-    backend = KernelAbstractions.get_backend(gemmstrides(C)[1])
-    for l in scalar_gemm_launches(C, Ad, Bd, M, N, K, α, β)
-        k = l.group == 0 ? l.kern(backend) : l.kern(backend, l.group)
-        k(l.args...; ndrange = l.ndrange)
-    end
+    runlaunches!(KernelAbstractions.get_backend(gemmstrides(C)[1]),
+                 scalar_gemm_launches(C, Ad, Bd, M, N, K, α, β))
     return C
 end
 
@@ -2513,12 +2483,8 @@ DECLARE the scalar GEMM into a graph: one pass per launch.
 """
 function scalar_gemm_dispatch!(g, C, A, B, M, N, K, α, β;
                                name::AbstractString = "gemm", partials = nothing)
-    ls = scalar_gemm_launches(C, A, B, M, N, K, α, β; partials)
-    for (i, l) in enumerate(ls)
-        dispatch!(g, l.kern, l.args, l.ndrange;
-                  group = l.group == 0 ? nothing : l.group,
-                  name = length(ls) == 1 ? name : "$name.$i")
-    end
+    dispatchlaunches!(g, scalar_gemm_launches(C, A, B, M, N, K, α, β; partials);
+                      name)
     return C
 end
 

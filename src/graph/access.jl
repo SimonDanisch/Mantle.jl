@@ -575,7 +575,7 @@ lattice is a handful of bits, so this settles in two or three rounds.
 function walkir(w::Walk, ir, am::ArgMap, depth::Int)
     touches = fill(NOTOUCH, am.nsig)
     nstmt = length(ir.stmts)
-    st = State([Taint() for _ in 1:nstmt], [Taint() for _ in 1:nstmt])
+    st = State([Taint() for _ in 1:nstmt], [Taint() for _ in 1:nstmt], BitSet())
 
     changed = true
     rounds = 0
@@ -585,10 +585,12 @@ function walkir(w::Walk, ir, am::ArgMap, depth::Int)
         for i in 1:nstmt
             stmt = ir.stmts[i][:stmt]
             T = ir.stmts[i][:type]
-            n, m = length(st.taints[i]), length(st.claims[i])
+            n, m, a = length(st.taints[i]), length(st.claims[i]),
+                      length(st.addresses)
             newtaint = stmttaint!(w, ir, touches, st, am, i, stmt, T, depth)
             union!(st.taints[i], newtaint)
-            (length(st.taints[i]) == n && length(st.claims[i]) == m) || (changed = true)
+            (length(st.taints[i]) == n && length(st.claims[i]) == m &&
+             length(st.addresses) == a) || (changed = true)
         end
     end
     return touches
@@ -605,6 +607,9 @@ touched, `claims` says whether the touch can collide with another invocation's.
 struct State
     taints::Vector{Taint}
     claims::Vector{Taint}
+    # SSA values that ARE a device address, whatever type they are inferred at.
+    # See `pointerlike`.
+    addresses::BitSet
 end
 
 """
@@ -627,6 +632,36 @@ function operandclaim(st::State, @nospecialize(x))
     x isa Core.SSAValue && return st.claims[x.id]
     return Taint()
 end
+
+"""
+Whether a pure computation is working on a device ADDRESS rather than on a value.
+
+`carries` asks what a TYPE can hold, and the answer for `UInt64` is nothing --
+which is right for a length and wrong for an address, because a pointer laundered
+through an integer is still the thing a store lands on. Provenance is the only
+thing that tells the two apart, so it is tracked: a result whose operands include
+a `Ptr`, or an integer already known to be an address, is an address too, and
+`st.addresses` carries that across the arithmetic in between.
+
+One hop of this was already here as a local `anyptr` test at the `getfield` and
+`PURE_OPS` branches, and one hop is not enough. Lava's cooperative-matrix
+intrinsics take their operand as `UInt64`:
+
+    %1018 = getfield(C, :ptr)::Ptr{Float16}   # taint from C
+    %1019 = bitcast(UInt64, %1018)            # kept: an operand is a `Ptr`
+    %1031 = add_int(%1019, %1028)             # DROPPED: both operands are UInt64
+            llvmcall(@_lava_coopmat_store_..., %1031, ...)
+
+so `llvmcalltaint!` found no tainted operand and recorded nothing. Every
+argument of `coopmat_gemm_kernel_4!` came back `NOTOUCH`, including its
+destination, and `Place` then saw its output transient with no interval at all.
+`gemm_cm2!` reads correctly because its intrinsics take a `Ptr` directly, which
+is why only the block kernels were affected.
+"""
+pointerlike(ir, st::State, rest) =
+    any(a -> operandtype(ir, a) <: Ptr || isaddress(st, a), rest)
+
+isaddress(st::State, @nospecialize(x)) = x isa Core.SSAValue && x.id in st.addresses
 
 """The type an operand was inferred at, for `carries`."""
 function operandtype(ir, @nospecialize(x))
@@ -682,32 +717,35 @@ end
 """
 One statement: what it does to memory, and what its result is tainted by.
 
-The result taint is only propagated when the statement's TYPE can reach memory
-(`carries`) — an integer derived from a pointer is not a way back to the bytes,
-and following it is what made a first version mark every argument whose length
-the kernel read.
+The result taint is propagated when the statement's TYPE can reach memory
+(`carries`) or its PROVENANCE says it is an address ([`pointerlike`](@ref)).
+Type alone is not enough and was the first version's bug in both directions:
+following every integer marked every argument whose length the kernel read, and
+following none of them lost a store through an address laundered into a `UInt64`.
 """
 function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
                     @nospecialize(stmt), @nospecialize(T), depth::Int)
     out = Taint()
     tt = widen(T)
 
-    if stmt isa Core.PhiNode
-        for i in eachindex(stmt.values)
-            isassigned(stmt.values, i) || continue     # an edge on which it is undefined
-            union!(out, operandtaint(ir, st, stmt.values[i]))
+    if stmt isa Core.PhiNode || stmt isa Core.PhiCNode
+        # Taint passes a phi unconditionally -- a merge is not a computation --
+        # but the address flag has to cross it too, or an address that arrives
+        # through a loop-carried value stops being one.
+        vals = Any[stmt.values[j] for j in eachindex(stmt.values)
+                   if isassigned(stmt.values, j)]   # unassigned: undefined on that edge
+        for v in vals
+            union!(out, operandtaint(ir, st, v))
         end
+        pointerlike(ir, st, vals) && push!(st.addresses, i)
         return out
     elseif stmt isa Core.PiNode
+        pointerlike(ir, st, (stmt.val,)) && push!(st.addresses, i)
         return operandtaint(ir, st, stmt.val)
     elseif stmt isa Core.UpsilonNode
-        return isdefined(stmt, :val) ? operandtaint(ir, st, stmt.val) : out
-    elseif stmt isa Core.PhiCNode
-        for i in eachindex(stmt.values)
-            isassigned(stmt.values, i) || continue
-            union!(out, operandtaint(ir, st, stmt.values[i]))
-        end
-        return out
+        isdefined(stmt, :val) || return out
+        pointerlike(ir, st, (stmt.val,)) && push!(st.addresses, i)
+        return operandtaint(ir, st, stmt.val)
     elseif stmt isa Core.ReturnNode || stmt isa Core.GotoNode ||
            stmt isa Core.GotoIfNot || stmt isa Nothing || stmt isa Core.SSAValue ||
            stmt isa Core.Argument
@@ -738,14 +776,15 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         return Taint()
     end
     if head === :invoke
-        return invoketaint!(w, ir, touches, st, am, stmt, tt, depth)
+        return invoketaint!(w, ir, touches, st, am, i, stmt, tt, depth)
     elseif head === :call
         return calltaint!(w, ir, touches, st, am, i, stmt.args, tt, depth)
     elseif head === :new || head === :splatnew
-        for a in stmt.args[2:end]
+        fields = stmt.args[2:end]
+        for a in fields
             union!(out, operandtaint(ir, st, a))
         end
-        return carries(tt) ? out : Taint()
+        return keptaddress!(st, i, ir, fields, tt) ? out : Taint()
     elseif head === :foreigncall
         # A `ccall` is C, and nothing here reads C. It is also not compilable for
         # any device this runs on, so refusing costs nothing a kernel could have
@@ -770,8 +809,8 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
 end
 
 """A call whose callee is resolved: walk into it and map its summary back."""
-function invoketaint!(w::Walk, ir, touches, st::State, am::ArgMap, stmt::Expr,
-                      @nospecialize(tt), depth::Int)
+function invoketaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
+                      stmt::Expr, @nospecialize(tt), depth::Int)
     ci = stmt.args[1]
     mi = ci isa Core.CodeInstance ? ci.def : ci
     sig = mi isa Core.MethodInstance ? mi.specTypes : nothing
@@ -813,7 +852,27 @@ function invoketaint!(w::Walk, ir, touches, st::State, am::ArgMap, stmt::Expr,
         end
         union!(out, at)
     end
-    return carries(tt) ? out : Taint()
+    # Same question as at the `PURE_OPS` branch: the callee's own accesses are
+    # recorded already, so what is left is whether its RESULT is an address.
+    # `pointer(A)` answers `Ptr` and `carries` covers it; a callee that hands the
+    # same address back as a `UInt64` needs the provenance.
+    return keptaddress!(st, i, ir, callargs, tt) ? out : Taint()
+end
+
+"""
+Whether the result of a pure computation keeps its operands' taint, noting it as
+an address when that is why.
+
+`carries(tt)` is the type-level question and [`pointerlike`](@ref) the
+provenance one; either is enough, and the second is the one that has to be
+remembered for the statements downstream.
+"""
+function keptaddress!(st::State, i::Int, ir, rest, @nospecialize(tt))
+    if pointerlike(ir, st, rest)
+        push!(st.addresses, i)
+        return true
+    end
+    return carries(tt)
 end
 
 """
@@ -853,8 +912,7 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         # The one place an element index is worth keeping: `Core.getfield(_5, 3)`
         # is how the expanded splat reaches the third vararg argument.
         t = fieldtaint(am, operandtaint(ir, st, rest[1]), rest[2])
-        anyptr = any(a -> operandtype(ir, a) <: Ptr, rest)
-        return (carries(tt) || anyptr) ? t : Taint()
+        return keptaddress!(st, i, ir, rest, tt) ? t : Taint()
     elseif name in PURE_OPS || iscoreintrinsic(f)
         # A claimed index is still a claimed index after the arithmetic that
         # turns it into an offset, so the claim rides along with the value.
@@ -864,13 +922,7 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     end
 
     if name in PURE_OPS
-        # `carries(tt)` decides, EXCEPT where a pointer is being laundered
-        # through an integer: `ptrtoint` of a device address answers `UInt64`,
-        # and taint that stopped there would lose the store that comes after the
-        # `inttoptr` back. An offset computed from a pointer keeps taint too,
-        # which costs a conservative answer only if it reaches something opaque.
-        anyptr = any(a -> operandtype(ir, a) <: Ptr, rest)
-        return (carries(tt) || anyptr) ? out : Taint()
+        return keptaddress!(st, i, ir, rest, tt) ? out : Taint()
     elseif name === :apply_type || name === :isa || name === :(===) ||
            name === :typeof || name === :not_int
         return Taint()
@@ -879,9 +931,10 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     # A call the optimiser could not resolve, or a Base function we have no
     # summary for: whatever it was given, assume the worst about.
     if iscoreintrinsic(f)
-        # An intrinsic that is not one of the memory operations above computes
-        # on values and reaches nothing.
-        return carries(tt) ? out : Taint()
+        # An intrinsic that is not one of the memory operations above computes on
+        # values -- but the values an address is computed FROM are addresses, so
+        # this is the same question as at the `PURE_OPS` branch above.
+        return keptaddress!(st, i, ir, rest, tt) ? out : Taint()
     end
     # Same as in `invoketaint!`: a call that cannot return is an abort path.
     # `Core.throw_methoderror` arrives here rather than there, because the
@@ -1059,7 +1112,14 @@ Its device type is a function of its element type alone, and a backend states
 that as [`devicebuffertype`](@ref).
 """
 devicetype(dev::Device, x) = argtype(dev, resolve(dev, x))
-devicetype(dev::Device, ::TransientBuffer{T}) where {T} = devicebuffertype(dev, T)
+# A transient's RANK is its own, not 1. `Place` gives it an array of the dims it
+# was declared with, so answering rank 1 made the walk infer the kernel against a
+# 1-D `getindex` where the dispatch is packed with a 2-D one -- which is the
+# regression `devicebuffertype`'s docstring claims not to have. Measured: every
+# GEMM whose operand was a transient declined the cooperative-matrix path,
+# because that path asks for a rank-2 operand and got told rank 1.
+devicetype(dev::Device, ::TransientBuffer{T,N}) where {T,N} =
+    devicebuffertype(dev, T, N)
 # A VIEW of a transient cannot go through `resolve` either, and for one step
 # further along the same reason: `storage(::ResourceView)` is
 # `deriveview(T, storage(parent), …)`, so it asks the parent for bytes that
