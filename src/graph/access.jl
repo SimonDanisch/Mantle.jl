@@ -1131,6 +1131,19 @@ devicetype(dev::Device, ::TransientBuffer{T,N}) where {T,N} =
 # answers to one question.
 devicetype(dev::Device, ::ResourceView{T,N}) where {T,N} = devicebuffertype(dev, T, N)
 
+# A RANGE is the other half of a view, and its answer is the PARENT's: a range
+# declares what a pass touches and the kernel still receives the whole buffer
+# (see `BufferRange`'s docstring). `storage(::BufferRange)` already says that on
+# the value side and this is its companion, so the two cannot disagree.
+#
+# Found by `refusenothing`: without it a range fell through to
+# `argtype(dev, resolve(dev, x))`, which answers the HANDLE type, so the walk
+# inferred the kernel against a `Mantle.BufferRange` that has no device
+# `setindex!` and saw no store at all. `test_window.jl`'s "disjoint slices of one
+# buffer are not ordered against each other" was passing for that reason and not
+# for the one it names -- an all-`NOTOUCH` declaration orders nothing.
+devicetype(dev::Device, r::BufferRange) = devicetype(dev, r.parent)
+
 # A CONTAINER of them, recursing through `devicetype` and not through `resolve`.
 # `resolve(::Tuple)` maps `resolve` over the elements, which is right for a
 # launch and wrong here for the same reason the two methods above exist: an

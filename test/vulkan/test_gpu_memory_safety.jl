@@ -78,7 +78,19 @@ end
         end
         drain!()
 
-        @test Mantle.gpu_live_bytes()      == baseline_bytes
+        # `<=` on the BYTES, `==` on the count, and the asymmetry is the point:
+        # a leak is GROWTH. This read `==` and failed at 40205521008 against a
+        # baseline of 40222298224 -- 16 MiB LESS live after the loop than before
+        # it, with the buffer count unchanged, which is a deferred free from the
+        # preceding file landing on the loop's first allocation rather than on
+        # the `drain!` above. Anything that changes when a batch retires moves
+        # that boundary, so pinning it exactly tests submission sequencing and
+        # not the allocator.
+        #
+        # The count stays exact because it is the stronger statement about a
+        # leak of the kind this file exists for: the 40 GiB regression was
+        # `pool_alloc` cutting a new block per cycle, which grows both numbers.
+        @test Mantle.gpu_live_bytes()      <= baseline_bytes
         @test Mantle.live_buffer_count()  == baseline_buffers
         # Pool blocks can grow once or twice under transient pressure but must
         # not keep growing — anything looser stops being a real leak test.
