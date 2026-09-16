@@ -960,6 +960,12 @@ mutable struct StageArgs
     source::Tuple
     device::Tuple      # what gets bound, byte for byte
     buffers::Vector{MTLm.MTLBuffer}
+    # Scratch the argument bytes are staged in on their way to the encoder.
+    # `setVertexBytes` takes a POINTER, and the only way to point at a Julia
+    # value is to put it somewhere addressable; that used to be a fresh
+    # `Base.RefValue` per argument per draw per frame — 145 KB and 811
+    # allocations a frame. One buffer per stage, reused, is the same bytes.
+    scratch::Vector{UInt8}
 end
 
 bakearg(a) = Metal.mtlconvert(a)
@@ -974,8 +980,13 @@ function StageArgs(args)
         b = metal_buffer(a)
         b === nothing || push!(bufs, b)
     end
-    return StageArgs(t, map(bakearg, t), bufs)
+    d = map(bakearg, t)
+    return StageArgs(t, d, bufs, Vector{UInt8}(undef, scratchsize(d)))
 end
+
+# The widest argument decides it; a rebake can only widen, never narrow, because
+# `rebind!` refuses a tuple of different types.
+scratchsize(d::Tuple) = isempty(d) ? 0 : maximum(sizeof(typeof(x)) for x in d)
 
 """
 Re-bake `a` from `args`, unless it already was.
@@ -996,6 +1007,8 @@ function rebake!(a::StageArgs, args)
     a.source === t && return a
     a.source = t
     a.device = map(bakearg, t)
+    n = scratchsize(a.device)
+    length(a.scratch) < n && resize!(a.scratch, n)
     empty!(a.buffers)
     for x in t
         b = metal_buffer(x)
@@ -1067,19 +1080,39 @@ function bind_stage!(enc, a::StageArgs, setbytes!, stage::MTLm.MTLRenderStages)
     for b in a.buffers
         MTLm.use!(enc, b, MTLm.ReadUsage, stage)
     end
-    for (i, arg) in enumerate(a.device)
-        bind_arg!(setbytes!, enc, arg, i)
-    end
+    bindall!(setbytes!, enc, a.device, a.scratch)
     return nothing
 end
 
-# A function barrier: the argument tuple is heterogeneous, so the loop above is
-# dynamic whatever happens, and one call per argument keeps the byte copy itself
-# concrete.
-function bind_arg!(setbytes!, enc, arg::T, i::Int) where {T}
-    ref = Base.RefValue(arg)
-    GC.@preserve ref begin
-        ptr = Base.unsafe_convert(Ptr{T}, ref)
+"""
+Bind every argument of a stage, unrolled.
+
+`StageArgs.device` is declared `::Tuple`, so iterating it boxes each element on
+its way to `bind_arg!` — 811 boxes and 145 KB a frame on a figure with an axis.
+ONE dynamic dispatch lands here, on the tuple's concrete type; everything after
+it is static, because `@generated` writes out the indices and each `d[i]` is
+then a typed field read.
+
+The loop this replaces carried a comment saying it was dynamic whatever
+happened. That was true of the loop and not of the problem.
+"""
+@generated function bindall!(setbytes!, enc, d::D, scratch) where {D<:Tuple}
+    Expr(:block, Expr(:meta, :inline),
+         (:(bind_arg!(setbytes!, enc, d[$i], $i, scratch)) for i in 1:fieldcount(D))...,
+         :(return nothing))
+end
+
+# One call per argument, so the byte copy itself is concrete: `T` is the
+# argument's own type here, which is what makes `sizeof` and the store static.
+#
+# Into the stage's `scratch` rather than a fresh `Ref`: the encoder copies these
+# bytes out before the call returns — that is what `setVertexBytes` IS, the path
+# for data too small to deserve a buffer — so one reused staging area is enough
+# and nothing has to outlive the store.
+function bind_arg!(setbytes!, enc, arg::T, i::Int, scratch::Vector{UInt8}) where {T}
+    GC.@preserve scratch begin
+        ptr = Base.unsafe_convert(Ptr{T}, pointer(scratch))
+        unsafe_store!(ptr, arg)
         setbytes!(enc, reinterpret(Ptr{Cvoid}, ptr), sizeof(T), i)
     end
     return nothing
@@ -1172,9 +1205,39 @@ caller has to know about, which is the thing this package exists to remove.
 
 Nothing extra is asked of the allocation: `drawIndexedPrimitives` takes any
 buffer, which is why the usage bits Vulkan needs have no counterpart here.
+
+The STORAGE is the one this backend's pool already declares for buffers, and
+that is the whole reason it is spelled rather than defaulted. `MtlVector` gives
+private storage, into which a host write stages through a temporary shared
+buffer, blits and frees: 122 us for 4096 `Vec3f` against a `memcpy` too fast to
+time. An index buffer is rewritten from the host every time a plot relayouts, so
+that was most of what a zoomed axis cost.
 """
-Mantle.indexbuffer(::MetalDevice, indices::AbstractVector{UInt32}) =
-    Metal.MtlVector{UInt32}(indices)
+Mantle.indexbuffer(d::MetalDevice, indices::AbstractVector{UInt32}) =
+    buffercopy(d, indices)
+
+"""
+    devicearray(backend, data) -> MtlVector
+
+An array of `data` on Metal, in the storage this backend gives buffers.
+
+The portable fallback is `KernelAbstractions.allocate` plus a copy, which has no
+way to ask for a storage mode and so gets the private default — see
+`indexbuffer` above for what that costs a host write.
+"""
+Mantle.devicearray(be::Metal.MetalBackend, data::AbstractArray) =
+    buffercopy(Mantle.todevice(be), data)
+
+# The storage mode is a TYPE PARAMETER on `MtlArray`, not a keyword — there is no
+# `MtlArray{T}(undef, dims; storage = …)`, and asking for one is a `MethodError`
+# that RayMakie's per-plot error handling turns into a blank figure rather than a
+# stack trace.
+function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}
+    S = constraintof(d, Buffers(), T)
+    a = Metal.MtlArray{T,N,S}(undef, size(data))
+    copyto!(a, data)
+    return a
+end
 
 Mantle.colorimage(fb::MetalFramebuffer) = fb.color
 Mantle.depthimage(fb::MetalFramebuffer) = fb.depth

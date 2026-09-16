@@ -58,7 +58,12 @@ const RG_TRI = M.Buffer(RG_DEV, NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0),
     @test size(color) == (64, 64)
     @test M.target_extent(color) == (64, 64)
     @test M.arena(color) === M.Images()
-    @test M.describe(color) == "Transient.Image(RGBA{N0f8}, (64, 64))"
+    # Interpolated on both sides, not spelled out: whether Julia prints the
+    # element type as `RGBA{N0f8}` or `RGBA{FixedPointNumbers.N0f8}` depends on
+    # which modules the session happens to have loaded, and what `describe` is
+    # for is the FORMAT around it.
+    @test M.describe(color) == "Transient.Image($(eltype(color)), (64, 64))"
+    @test occursin("N0f8", M.describe(color))
 
     # `Float32` is depth on every backend, and Metal's format table has to agree
     # with the portable one — it answered `R32Float`, a COLOUR format, while the
