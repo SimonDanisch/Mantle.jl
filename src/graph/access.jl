@@ -1060,6 +1060,26 @@ that as [`devicebuffertype`](@ref).
 """
 devicetype(dev::Device, x) = argtype(dev, resolve(dev, x))
 devicetype(dev::Device, ::TransientBuffer{T}) where {T} = devicebuffertype(dev, T)
+# A VIEW of a transient cannot go through `resolve` either, and for one step
+# further along the same reason: `storage(::ResourceView)` is
+# `deriveview(T, storage(parent), …)`, so it asks the parent for bytes that
+# `Place` has not handed out yet. `GPUArrays.derive` answers an array of the
+# view's own rank, which is why this asks for `N` and not `1`.
+#
+# Uniform over views rather than only transient-rooted ones: a view of a placed
+# `Buffer` derives to the same type, so distinguishing by root would be two
+# answers to one question.
+devicetype(dev::Device, ::ResourceView{T,N}) where {T,N} = devicebuffertype(dev, T, N)
+
+# A CONTAINER of them, recursing through `devicetype` and not through `resolve`.
+# `resolve(::Tuple)` maps `resolve` over the elements, which is right for a
+# launch and wrong here for the same reason the two methods above exist: an
+# element that is a transient, or a view of one, has no storage yet. The operand
+# tuple `ew!` takes is exactly this shape -- one kernel over any number of
+# operands -- so it is not a corner.
+devicetype(dev::Device, x::Tuple) = Tuple{map(a -> devicetype(dev, a), x)...}
+devicetype(dev::Device, x::NamedTuple{K}) where {K} =
+    NamedTuple{K, Tuple{map(a -> devicetype(dev, a), values(x))...}}
 
 """
     argtype(device, y) -> Type
@@ -1085,7 +1105,7 @@ segfault. `kikernel` in `graph/kalaunch.jl` already built its `tt` this way.
 argtype(::Device, @nospecialize(y)) = Core.Typeof(y)
 
 """
-    devicebuffertype(device, T) -> Type
+    devicebuffertype(device, T, N = 1) -> Type
 
 The device-side type of a one-dimensional buffer of `T` — what a kernel sees
 when it is handed a transient. `Place` produces exactly this type, and the
@@ -1093,3 +1113,6 @@ regression for it is that a materialised transient's `devicetype` and the type
 its dispatch is actually packed with are the same.
 """
 function devicebuffertype end
+# A transient is one-dimensional; a view of one carries its own rank. One
+# argument fewer at the common call site, and a backend answers the general form.
+devicebuffertype(dev, ::Type{T}) where {T} = devicebuffertype(dev, T, 1)

@@ -14,7 +14,7 @@ argtype(dev::LavaDevice, @nospecialize(y)) =
 
 accesscache(dev::LavaDevice) = dev.ctx.caches.accesses::AccessCache
 
-devicebuffertype(::LavaDevice, ::Type{T}) where {T} = LavaDeviceArray{T,1}
+devicebuffertype(::LavaDevice, ::Type{T}, N::Int) where {T} = LavaDeviceArray{T,N}
 
 """
 What the kernel does to each dispatch argument, inferred through Lava's method

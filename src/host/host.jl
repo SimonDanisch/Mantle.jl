@@ -251,7 +251,7 @@ Mantle.syncbackend(::HostDevice) = Mantle.HostAPI()
 # the default `devicetype` is already right and only the transient case is
 # stated, as the `Array` `materialize!` wraps the slab in.
 
-Mantle.devicebuffertype(::HostDevice, ::Type{T}) where {T} = Array{T,1}
+Mantle.devicebuffertype(::HostDevice, ::Type{T}, N::Int) where {T} = Array{T,N}
 
 # On a CPU every array IS device memory, and `materialize!` hands a transient a
 # plain `Array` over the arena's bytes. A `StructArray` is not one: it is a
