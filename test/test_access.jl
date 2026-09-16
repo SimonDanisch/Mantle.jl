@@ -8,11 +8,23 @@
 using Test, Mantle
 const M = Mantle
 
-@testset "inferred access: the unknown widens, it does not vanish" begin
-    # `accessof` on a signature nothing can be inferred for answers `OPAQUE` for
-    # every argument — never `NOTOUCH`, which would be a missing barrier.
-    ts = M.accessof(nothing, sin, (Any,))
-    @test all(t -> t.read && t.write, ts)
+@testset "inferred access: the unknown is refused, not guessed at" begin
+    # `accessof` on a signature nothing can be inferred for used to answer
+    # read+write for every argument. Safe for the barrier phase, and
+    # indistinguishable from a proof: a kernel that stopped being analysable kept
+    # compiling and paid a barrier per pass for ever with nothing to say so.
+    err = try
+        M.accessof(nothing, sin, (Any,))
+        nothing
+    catch e
+        e
+    end
+    @test err isa M.UnanalysableAccess
+    msg = sprint(showerror, err)
+    @test occursin("cannot say what", msg)
+    @test occursin("will not guess", msg)
+    # `OPAQUE` is still the usage a read+write argument has; what changed is that
+    # nothing produces it by giving up.
     @test M.usagetype(M.OPAQUE, M.BufferKind()) === Storage{BufferKind, ReadWrite}
 
     # And the pieces the walk decides with.

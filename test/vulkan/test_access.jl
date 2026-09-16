@@ -160,13 +160,26 @@ function acc_uninferable!(dst, n::Int)
     return
 end
 
-@testset "inferred access: a kernel that does not infer is not untouched" begin
+@testset "inferred access: a kernel that does not infer is refused" begin
     dev = M.Device(TESTBACKEND)
     n = 64
     dst = M.devicearray(dev, Float32, n)
     # "No store" is the one answer that must never be a guess — it is the answer
-    # that removes a barrier. An unreachable body says nothing, not nothing-done.
-    @test touches(dev, acc_uninferable!, (dst, n), n) == ["RW", "RW"]
+    # that removes a barrier. This used to widen to read+write, which is safe
+    # for the barrier phase and indistinguishable from a proof; the kernel does
+    # not compile either, so the refusal is the same error arriving earlier with
+    # the argument named.
+    err = try
+        touches(dev, acc_uninferable!, (dst, n), n)
+        nothing
+    catch e
+        e
+    end
+    @test err isa M.UnanalysableAccess
+    msg = sprint(showerror, err)
+    @test occursin("cannot infer", msg)
+    @test occursin("acc_uninferable!", msg)
+    @test occursin("will not guess", msg)
 end
 
 @testset "inferred access: a device array carries" begin
@@ -190,10 +203,31 @@ end
     @test p.name == "acc_mixed!"          # the kernel names its own pass
 
     # A container is declared by its LEAVES, which is what a barrier is scoped to.
-    q = AccPair(M.Buffer(dev, zeros(Float32, n)), M.Buffer(dev, zeros(Float32, n)))
+    #
+    # Built from `devicearray` and not from `Buffer`, and that is a real
+    # constraint rather than a preference: `resolve`/`storage` descends into a
+    # `Tuple` but not into a struct, so an `AccPair{Buffer}` reaches the walk
+    # with graph handles still inside it, `setindex!` has no method for one, and
+    # the kernel infers to nothing but its throw path. It cannot RUN either --
+    # the packer would be handed a non-isbits `AccPair{Buffer}` and GPUCompiler
+    # would refuse it -- so this assertion used to pass because the walk widened
+    # that throw path to read+write, on a dispatch that could never execute.
+    #
+    # Resolving a struct of resources elementwise is the remaining half of what
+    # `storage(::Tuple)` did; until then a container argument holds device
+    # arrays, which is what every consumer of this shape already passes.
+    qa = M.devicearray(dev, zeros(Float32, n))
+    qb = M.devicearray(dev, zeros(Float32, n))
+    q = AccPair(qa, qb)
     p2 = M.dispatch!(g, acc_struct!, (q, src), n; name = "struct")
-    @test M.resourceid(g, q.a) in first.(p2.usages)
-    @test M.resourceid(g, q.b) in first.(p2.usages)
+    @test M.resourceid(g, qa) in first.(p2.usages)
+    @test M.resourceid(g, qb) in first.(p2.usages)
+    # And `src` is only read, which is the half that the widening hid: with the
+    # container's write coming from a throw path, everything in the pass looked
+    # read+write.
+    byid2 = Dict(id => U for (id, U) in p2.usages)
+    @test byid2[M.resourceid(g, src)] === Storage{BufferKind, ReadOnly}
+    @test byid2[M.resourceid(g, qa)] === Storage{BufferKind, WriteOnly}
 
     # A slice is an argument, and it is the slice the pass is recorded touching.
     sl = M.slice(g, dst, 1:32)
@@ -273,15 +307,18 @@ end
             ret i32 %r
         }
         """) === M.ATOMIC
-    # An intrinsic nobody declared, carrying a pointer: conservative, and the
-    # step this file is a staging post for turns it into a refusal.
-    @test M.llvmcallusage("""
+    # An intrinsic nobody declared: `nothing`, and the walk refuses on it rather
+    # than widening to read+write, because read+write is indistinguishable from
+    # a proof.
+    mystery = """
         declare i32 @_lava_mystery(i64) #0
         define i32 @entry(i64 %p) #0 {
             %r = call i32 @_lava_mystery(i64 %p)
             ret i32 %r
         }
-        """) === M.OPAQUE
+        """
+    @test M.llvmcallee(mystery) === :_lava_mystery
+    @test M.llvmcallusage(mystery) === nothing
 
     # And the whole of it on the kernel that was wrong: `gemm_cm2!` takes
     # `C, @Const(A), @Const(B)`, so the walk must agree with the `@Const` the

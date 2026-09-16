@@ -327,7 +327,53 @@ struct Walk{I}
     summaries::IdDict{Any,Vector{Touch}}
     active::Base.IdSet{Any}
     maxdepth::Int
+    # The signature `accessof` was asked about, so a refusal deep in an inlined
+    # callee can name the kernel the caller dispatched rather than the frame it
+    # happened in.
+    top::Any
 end
+
+"""
+The walk reached something it cannot see through, on a value that leads to one of
+the arguments.
+
+Thrown rather than widened to read+write. Widening is safe for the barrier phase
+and indistinguishable from a proof, so a kernel that stopped being analysable
+would keep compiling and pay a barrier per pass for ever with nothing to say so.
+Four of the five constructs that used to widen cannot reach a compiled kernel at
+all — a `ccall` is C, SPIR-V forbids recursion, and GPUCompiler rejects a dynamic
+call — so this mostly moves an error that was going to happen anyway from
+`Pipelines` to `dispatch!`, where the message can name the argument.
+"""
+struct UnanalysableAccess <: Exception
+    top::Any
+    positions::Vector{Int}
+    reason::String
+    stmt::Any
+end
+
+function Base.showerror(io::IO, e::UnanalysableAccess)
+    # Position 1 of a signature is the function itself, so the caller's argument
+    # numbering is one lower: `argument_usage` hands back the tail. An empty
+    # `positions` is the whole-signature case, where naming them says less than
+    # saying that none of it was read.
+    args = isempty(e.positions) ? "any of its arguments" :
+           "argument(s) " * join(string.(max.(e.positions .- 1, 0)), ", ")
+    print(io, """
+        argument_usage: cannot say what `$(e.top)` does to $args.
+
+        The walk reached $(e.reason), and those arguments lead into it:
+
+            $(e.stmt)
+
+        It will not guess. If this is a construct the device cannot run either --
+        a `ccall`, recursion, a call the optimiser left dynamic -- the backend
+        was going to refuse it too, and the kernel is what needs changing. If it
+        is a device intrinsic, declare what it does with `Mantle.intrinsic_usage`;
+        if it is a callable with no body on this side, declare it with
+        `Mantle.argument_usage`.""")
+end
+
 
 """
 How the arguments of an inferred `IRCode` line up with the signature it was
@@ -346,6 +392,39 @@ function argmap(ir, @nospecialize(sig))
     nsig = length(sig.parameters)
     nir = length(ir.argtypes)
     return ArgMap(nsig, nir < nsig ? nir : 0)
+end
+
+"""Signature positions a taint reaches, so a refusal can name them."""
+function taintedpositions(am::ArgMap, taint::Taint)
+    ps = Int[]
+    for r in taint
+        a, e = unpack(r)
+        if a == am.tail && am.tail != 0
+            if e == 0
+                append!(ps, am.tail:am.nsig)
+            else
+                i = am.tail + e - 1
+                i <= am.nsig && push!(ps, i)
+            end
+        elseif a <= am.nsig
+            push!(ps, a)
+        end
+    end
+    return sort!(unique!(ps))
+end
+
+"""
+Refuse, unless the taint reaches no argument at all.
+
+The guard is the whole precision of this: a `ccall` over values none of the
+arguments lead to is invisible to the declaration, and erroring on it would
+refuse kernels for a construct that cannot affect the answer.
+"""
+function refuse!(w::Walk, am::ArgMap, taint::Taint, reason::AbstractString,
+                 @nospecialize(stmt))
+    ps = taintedpositions(am, taint)
+    isempty(ps) && return Taint()
+    throw(UnanalysableAccess(w.top, ps, reason, stmt))
 end
 
 """
@@ -402,10 +481,13 @@ exactly that entry.
 """
 function accessof(interp, @nospecialize(f), @nospecialize(argtypes);
                   maxdepth::Int = 24, cache = nothing)
-    w = Walk(interp, summaries!(cache), Base.IdSet{Any}(), maxdepth)
     sig = Tuple{typeof(f), argtypes...}
+    w = Walk(interp, summaries!(cache), Base.IdSet{Any}(), maxdepth, sig)
     touches = signaturetouches(w, sig, 0)
-    return touches === nothing ? fill(OPAQUE, length(argtypes) + 1) : touches
+    touches === nothing && throw(UnanalysableAccess(sig, Int[],
+        "a signature it cannot infer: either no single method applies, or every " *
+        "path through it throws", sig))
+    return touches
 end
 
 """
@@ -665,9 +747,12 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         end
         return carries(tt) ? out : Taint()
     elseif head === :foreigncall
-        # Opaque by construction: a `ccall` is C, and nothing here reads C.
+        # A `ccall` is C, and nothing here reads C. It is also not compilable for
+        # any device this runs on, so refusing costs nothing a kernel could have
+        # wanted. `llvmcall` does NOT come through here -- it is an intrinsic
+        # call, handled in `calltaint!` below.
         for a in stmt.args
-            record!(touches, am, operandtaint(ir, st, a), OPAQUE)
+            refuse!(w, am, operandtaint(ir, st, a), "a `ccall`, which is C", stmt)
         end
         return Taint()
     elseif head === :boundscheck || head === :aliasscope || head === :popaliasscope ||
@@ -677,7 +762,8 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     else
         for a in stmt.args
             a isa Core.SSAValue || a isa Core.Argument || continue
-            record!(touches, am, operandtaint(ir, st, a), OPAQUE)
+            refuse!(w, am, operandtaint(ir, st, a),
+                    "an expression head it has no case for, `:$head`", stmt)
         end
         return Taint()
     end
@@ -690,13 +776,41 @@ function invoketaint!(w::Walk, ir, touches, st::State, am::ArgMap, stmt::Expr,
     mi = ci isa Core.CodeInstance ? ci.def : ci
     sig = mi isa Core.MethodInstance ? mi.specTypes : nothing
     callargs = stmt.args[2:end]
+    # A call that CANNOT RETURN is an abort path, and contributes nothing.
+    # `throw_boundserror`, `throw_methoderror` and every other thrower infers to
+    # `Union{}`, and they are reached from the bounds check and the `setindex!`
+    # fallback of ordinary kernels -- so this is not an edge case, it is most
+    # kernels. Refusing here refused them all, and walking in refuses too: a
+    # thrower boxes its arguments into an error and raises through a
+    # `:foreigncall`, which is the construct above.
+    #
+    # Sound, not a convenience. A store that happens only on the way to a throw
+    # cannot be observed by a later pass, because the invocation does not
+    # complete and the graph's subsequent passes are reading a crashed kernel's
+    # output either way. A barrier for it buys nothing.
+    tt === Union{} && return Taint()
     inner = sig === nothing ? nothing : signaturetouches(w, sig, depth + 1)
     out = Taint()
     for (j, a) in enumerate(callargs)
         at = operandtaint(ir, st, a)
         isempty(at) && continue
-        t = inner === nothing ? OPAQUE : (j <= length(inner) ? inner[j] : OPAQUE)
-        record!(touches, am, at, t)
+        if inner === nothing
+            # No single method, a signature that infers to `Union{}`, recursion,
+            # or past the depth limit -- `signaturetouches` says which by
+            # returning nothing, and none of them is an answer.
+            refuse!(w, am, at,
+                    "a call to `$(sig === nothing ? "an unresolved callee" : sig)` " *
+                    "it could not summarise: no single method applies, every path " *
+                    "through it throws, it recurses, or it nests deeper than the " *
+                    "walk goes", stmt)
+        elseif j > length(inner)
+            refuse!(w, am, at,
+                    "a call whose summary is shorter than its argument list, " *
+                    "which means the signature and the IR disagree about arity",
+                    stmt)
+        else
+            record!(touches, am, at, inner[j])
+        end
         union!(out, at)
     end
     return carries(tt) ? out : Taint()
@@ -734,7 +848,7 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         union!(st.claims[i], t)
         return Taint()
     elseif name === :llvmcall
-        return llvmcalltaint!(ir, touches, st, am, i, rest)
+        return llvmcalltaint!(w, ir, touches, st, am, i, rest, args)
     elseif name === :getfield && length(rest) >= 2
         # The one place an element index is worth keeping: `Core.getfield(_5, 3)`
         # is how the expanded splat reaches the third vararg argument.
@@ -769,8 +883,15 @@ function calltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         # on values and reaches nothing.
         return carries(tt) ? out : Taint()
     end
+    # Same as in `invoketaint!`: a call that cannot return is an abort path.
+    # `Core.throw_methoderror` arrives here rather than there, because the
+    # optimiser leaves it unresolved.
+    tt === Union{} && return Taint()
     for a in rest
-        record!(touches, am, operandtaint(ir, st, a), OPAQUE)
+        refuse!(w, am, operandtaint(ir, st, a),
+                "a call to `$f` it has no summary for and could not resolve, " *
+                "which a device compiler rejects as a dynamic invocation",
+                Expr(:call, args...))
     end
     return carries(tt) ? out : Taint()
 end
@@ -845,14 +966,13 @@ const STORE_INSTR = r"(?m)^\s*store\s"
 const LOAD_INSTR  = r"(?m)^\s*%[^=\n]*=\s*load\s"
 
 function llvmcallusage(src)
-    src === nothing && return OPAQUE
+    src === nothing && return nothing
     occursin(RMW_INSTR, src) && return ATOMIC
     occursin(STORE_INSTR, src) && return WRITE
     occursin(LOAD_INSTR, src) && return READ
     callee = llvmcallee(src)
-    callee === nothing && return OPAQUE
-    declared = intrinsic_usage(callee)
-    return declared === nothing ? OPAQUE : declared
+    callee === nothing && return nothing
+    return intrinsic_usage(callee)
 end
 
 """
@@ -862,11 +982,25 @@ widening: an `atomicrmw` is a commutative read-modify-write — the case
 `Unordered` exists for — and an intrinsic that takes no tainted pointer at all
 (a workgroup id, a subgroup reduce) touches nothing.
 """
-function llvmcalltaint!(ir, touches, st::State, am::ArgMap, i::Int, rest)
+function llvmcalltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
+                        rest, args::Vector{Any})
     src = llvmsource(rest[1], ir)
     tainted = [a for a in rest if !isempty(operandtaint(ir, st, a))]
     isempty(tainted) && return Taint()
     t = llvmcallusage(src)
+    if t === nothing
+        callee = src === nothing ? "an `llvmcall` whose module could not be read" :
+                 "the intrinsic `$(something(llvmcallee(src), "(unnamed)"))`"
+        for a in tainted
+            refuse!(w, am, operandtaint(ir, st, a),
+                    "$callee, which nothing declares -- it carries no load, " *
+                    "store or atomic instruction, so its NAME is the only thing " *
+                    "that says what it does", Expr(:call, args...))
+        end
+        # `refuse!` is silent when the taint reaches no argument of the
+        # signature, and then there is nothing to record either.
+        return Taint()
+    end
     for a in tainted
         record!(touches, am, operandtaint(ir, st, a), t)
         t === ATOMIC && union!(st.claims[i], operandtaint(ir, st, a))
