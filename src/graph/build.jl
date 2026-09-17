@@ -852,11 +852,12 @@ Declare a draw whose count, indices, instances and argument values all come from
 a [`DrawBinding`](@ref) the host rewrites between runs.
 
 The binding's CURRENT contents are what the plan compiles against — their types
-fix the pipeline and the layout — and every run after that reads whatever the
-cell holds then.
+fix the pipeline, and its texture table fixes the descriptor set layout on a
+backend that needs one — and every run after that reads whatever the cell holds
+then.
 """
 draw!(p::PassHandle, shader, b::DrawBinding; frag_args = (), viewport = nothing,
-      bindings = nothing) =
+      bindings = b.bindings) =
     draw!(p, shader, b, b.count; frag_args, viewport, bindings,
           indices = b.indices, instances = b.instances)
 

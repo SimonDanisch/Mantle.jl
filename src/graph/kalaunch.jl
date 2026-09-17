@@ -1078,7 +1078,9 @@ function beginrender!(::Immediate, pl::Plan, pp::PassPlan)
 end
 function emitdraw!(::Immediate, handle, d)
     d.viewport === nothing || setviewport!(handle, d.viewport...)
-    d.bindings === nothing || use_bindings!(handle, d.compiled, d.bindings)
+    # Through the binding: a texture table is a per-frame value like the rest.
+    bind = boundbindings(d.args, d.bindings)
+    bind === nothing || use_bindings!(handle, d.compiled, bind)
     # Every one of these through the binding when there is one: a tick count is a
     # vertex count and a relaid-out plot is a new index buffer, so freezing them
     # would rebuild a plan for a zoom just as surely as freezing the camera did.

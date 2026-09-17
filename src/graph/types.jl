@@ -52,11 +52,18 @@ resolved argument tuple, the count and the index buffer, so [`rebind!`](@ref) ca
 only store the same shapes — a different one means a different pipeline or a
 different KIND of draw, and belongs to a different plan.
 """
-mutable struct DrawBinding{A<:Tuple,C,I}
+mutable struct DrawBinding{A<:Tuple,C,I,B}
     args::A
     count::C
     indices::I
     instances::Int
+    # What the draw SAMPLES, rebound like everything else here. Left baked, a
+    # glyph atlas that grows to hold a character it did not have — which is what
+    # zooming an axis into a new set of tick labels does — is invisible to a plan
+    # that already compiled the old texture in, so the labels keep rendering the
+    # glyphs they had. Carrying only `objectid(bindings)` in a cache key does not
+    # catch it either: the table is updated IN PLACE and stays the same object.
+    bindings::B
 end
 
 """
@@ -65,9 +72,11 @@ end
 A rebindable cell holding what one draw re-reads each frame, resolved for
 `device`.
 """
-DrawBinding(dev, args::Tuple, count; indices = nothing, instances::Integer = 1) =
+DrawBinding(dev, args::Tuple, count; indices = nothing, instances::Integer = 1,
+            bindings = nothing) =
     DrawBinding(map(a -> resolve(dev, a), args), count,
-                indices === nothing ? nothing : resolve(dev, indices), Int(instances))
+                indices === nothing ? nothing : resolve(dev, indices), Int(instances),
+                bindings)
 
 """
     rebind!(binding, device, args, count; indices = nothing, instances = 1)
@@ -80,12 +89,14 @@ layout and the packing are the ones already compiled. A value of a different
 type is refused rather than converted, because that is a different pipeline or a
 different kind of draw.
 """
-function rebind!(b::DrawBinding{A,C,I}, dev, args::Tuple, count;
-                 indices = nothing, instances::Integer = 1) where {A,C,I}
+function rebind!(b::DrawBinding{A,C,I,B}, dev, args::Tuple, count;
+                 indices = nothing, instances::Integer = 1,
+                 bindings = b.bindings) where {A,C,I,B}
     b.args = convert(A, map(a -> resolve(dev, a), args))
     b.count = convert(C, count)
     b.indices = convert(I, indices === nothing ? nothing : resolve(dev, indices))
     b.instances = Int(instances)
+    b.bindings = convert(B, bindings)
     return b
 end
 
@@ -99,6 +110,8 @@ end
 @inline boundindices(b::DrawBinding, _) = b.indices
 @inline boundinstances(::Tuple, n) = n
 @inline boundinstances(b::DrawBinding, _) = b.instances
+@inline boundbindings(::Tuple, x) = x
+@inline boundbindings(b::DrawBinding, _) = b.bindings
 
 struct DrawCall
     shader::Any
