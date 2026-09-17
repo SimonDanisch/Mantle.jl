@@ -22,8 +22,22 @@ const KA = KernelAbstractions
     be = LavaBackend()
     ctx = Mantle.vk_context()
 
-    # Grow the pool past the trim threshold, then drop every reference.
-    target = Mantle.mempolicy(Mantle.vk_context()).trim_threshold + 256 * 1024 * 1024
+    # Against this file's OWN baseline, not against zero.
+    #
+    # Run alone, `gpu_live_bytes` starts at nothing and an absolute assertion
+    # says the same thing. In the full suite it starts at ~40 GB: a hundred and
+    # seventy files before this one allocate `Mantle.Buffer`s and drop them, and
+    # a region is retired EXPLICITLY here ("still never called for you: skipping
+    # it is a leak the pool can report") so a dropped one stays live for the
+    # process. Measured against zero this testset then asserts something about
+    # the whole suite's bookkeeping rather than about the trim, and fails for a
+    # reason that has nothing to do with trimming.
+    #
+    # What it means to check is that the capacity THIS testset created comes
+    # back, so that is what it checks.
+    base = Mantle.gpu_live_bytes()
+    threshold = Mantle.mempolicy(Mantle.vk_context()).trim_threshold
+    target = base + threshold + 256 * 1024 * 1024
     let arrays = Mantle.LavaArray[]
         while Mantle.gpu_live_bytes() < target
             a = KA.allocate(be, Float32, 4_000_000)   # 16 MB each
@@ -35,7 +49,7 @@ const KA = KernelAbstractions
     end
 
     grown = Mantle.gpu_live_bytes()
-    @test grown >= Mantle.mempolicy(Mantle.vk_context()).trim_threshold
+    @test grown - base >= threshold
 
     # Defeat the rate limiter so the test doesn't depend on wall-clock timing.
     Mantle.mempolicy(Mantle.vk_context()).last_trim = 0.0
@@ -43,7 +57,7 @@ const KA = KernelAbstractions
 
     trimmed = Mantle.gpu_live_bytes()
     @test trimmed < grown                     # capacity actually came back
-    @test trimmed < Mantle.mempolicy(Mantle.vk_context()).trim_threshold
+    @test trimmed - base < threshold          # and it was THIS testset's
 
     # And the allocator still works afterwards — blocks were returned, not corrupted.
     b = KA.allocate(be, Float32, 1024)
@@ -78,6 +92,8 @@ end
     be = LavaBackend()
     ctx = Mantle.vk_context()
     Mantle.trim_gpu_pool!(ctx)                  # from a known floor
+    # …which is a floor and not zero in the full suite; see the first testset.
+    base2 = Mantle.gpu_live_bytes()
 
     @kernel function grind!(a)
         i = @index(Global)
@@ -100,7 +116,7 @@ end
     GC.gc(true)
 
     grown = Mantle.gpu_live_bytes()
-    @test grown > 256 * 1024 * 1024
+    @test grown - base2 > 256 * 1024 * 1024
     # The state the old gate mishandled — every block still counted as live even
     # though every reference to its contents is gone.
     @test !any(b -> isempty(b.live), Mantle.poolblocks(ctx))
@@ -108,7 +124,8 @@ end
     blocks, bytes = Mantle.trim_gpu_pool!(ctx)
     @test blocks > 0
     @test bytes > 0
-    @test Mantle.gpu_live_bytes() < grown ÷ 2
+    # Half of what THIS testset added, for the reason the first one gives.
+    @test Mantle.gpu_live_bytes() - base2 < (grown - base2) ÷ 2
 
     # And the allocator still works — blocks were returned, not corrupted.
     b = KA.allocate(be, Float32, 1024)

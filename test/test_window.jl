@@ -1017,10 +1017,12 @@ else
         # by 0.06 and the combine averages two 8-bit images, so a lit pixel is
         # around 0.05 and a fixed `> 0.5` would pass on a blank frame only by
         # counting alpha, which is 1 everywhere.
-        # `ColorTypes.green`, qualified and under another name: a colour is not
-        # indexable, and `green` as a local would shadow the accessor.
-        greens = [Float32(ColorTypes.green(p)) for p in got[1]]
-        @test count(>(minimum(greens) + 0.02f0), greens) > 1000
+        # `p[2]` and NOT `ColorTypes.green`: these pixels are `Vec{4,Float32}`
+        # from a transient target's readback, not the `BGRA{N0f8}` a screenshot
+        # gives, and a `Vec` is indexable. Changing both sites to the accessor
+        # broke this one.
+        green = [p[2] for p in got[1]]
+        @test count(>(minimum(green) + 0.02f0), green) > 1000
     end
 
     # A resize is asynchronous: the compositor applies it when it applies it, and
