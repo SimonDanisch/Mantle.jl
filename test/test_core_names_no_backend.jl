@@ -6,10 +6,10 @@ Core names nothing that only a backend defines.
 backend is the violation that a green single-device suite cannot see, because
 on that machine the name resolves.
 
-Policing an `import Mantle: …` list at the top of a backend extension is what
-this replaces. The backend is `@static include`d into `Mantle`, so there is no
-such list and no room for three bug classes: an import naming something Mantle
-does not declare, a method landing on a new local function
+There is no `import Mantle: …` list at the top of a backend extension to
+police: the backend is `@static include`d into `Mantle`, which leaves no room
+for three bug classes: an import naming something Mantle does not declare, a
+method landing on a new local function
 instead of extending core's, and a backend name shadowing a core one. None of
 them can happen inside one module. This one can, so it is what is left — and it
 got stricter in the move: "only a backend defines it" was module membership and
