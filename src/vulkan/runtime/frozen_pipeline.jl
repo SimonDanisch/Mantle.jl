@@ -94,11 +94,11 @@ function frozen_pipeline_cache(ctx::VkContext, key::AbstractString)
         # failure of the cache MEDIUM, so keep the session and drop the blob so
         # the next run does not retry it.
         #
-        # Only a driver refusal. This used to be a bare `catch`, which is the
-        # very thing `cache_io_error`'s docstring warns about applied to the
-        # Vulkan call instead of the deserializer: an OOM or a bug building the
-        # CreateInfo would be laundered into "blob rejected", the blob deleted,
-        # and every later run would silently pay a rebuild.
+        # Only a driver refusal, never a bare `catch`: that is the very thing
+        # `cache_io_error`'s docstring warns about applied to the Vulkan call
+        # instead of the deserializer. An OOM or a bug building the CreateInfo
+        # would be laundered into "blob rejected", the blob deleted, and every
+        # later run would silently pay a rebuild.
         ex isa VK.VulkanError || rethrow()
         @warn "Lava: frozen pipeline blob rejected by the driver; rebuilding from SPIR-V" path exception = ex maxlog = 1
         rm(path; force = true)
@@ -247,8 +247,8 @@ function frozen_prune!(; keep::Int = 2000, ctx::VkContext = vk_context())
         rm(joinpath(dir, replace(f, r"\.spirv$" => ".bin")); force = true)
         n += 1
     end
-    # Sweep `.bin` blobs whose `.spirv` is already gone. `frozen_clear!` used to
-    # leave these behind, and nothing else names them.
+    # Sweep `.bin` blobs whose `.spirv` is already gone: nothing else names
+    # them.
     live = Set(readdir(dir))
     for f in readdir(dir)
         endswith(f, ".bin") || continue

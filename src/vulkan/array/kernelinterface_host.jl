@@ -34,10 +34,10 @@ KI.supports_atomics(::LavaBackend) = true
 # be both, and KI's derived methods (`matrix_shapes(::Backend)` and the
 # `supports`/`bestshape` forwards beside it) do not reach it.
 #
-# So the forwards are written here. Three lines, and each is the SAME body KI
-# has — they are not a second implementation, they are the dispatch KI would have
-# done if the type hierarchies had been one. Everything they forward to,
-# including the `coopmat` gate, is still KI's and written once.
+# So the forwards are written here. Three lines, each the SAME body KI has: not
+# a second implementation, but the dispatch KI would do if the type hierarchies
+# were one. Everything they forward to, including the `coopmat` gate, is KI's and
+# written once.
 #
 # This block is deleted by the KernelAbstractions 0.10 upgrade, where
 # `KA.Backend` IS `KI.Backend` and the derivations apply directly. It is the

@@ -216,9 +216,9 @@ include("graphics/mesh.jl")        # needs the same state vocabulary
 # builds the other.
 include("graphics/lowering.jl")
 include("graphics/commands.jl")
-# Recording a pass by hand, over the same three primitives the graph uses. The
-# imperative verb family this replaces existed only on Vulkan, which is why
-# RayMakie's overlay could not composite on Metal at all.
+# Recording a pass by hand, over the same three primitives the graph uses, and
+# portable: an overlay compositor that named one backend's verbs could only
+# composite on that backend.
 include("graphics/record.jl")
 include("graphics/builtins.jl")
 
@@ -343,8 +343,7 @@ export DrawIndirectCommand
 # `supports_mesh_pipeline`; see `graphics/mesh.jl`.
 export MeshPipeline, meshconfig, objectconfig
 export supports_mesh_pipeline
-# The shader builtins were declared here and are now KernelInterface's, imported
-# and re-exported above: phase 1.4 deleted the file, see docs/mantle-owns-it.md.
+# The shader builtins are KernelInterface's, imported and re-exported above.
 export RayTracingPipeline, AdaptedAccel
 
 # Hardware ray tracing.

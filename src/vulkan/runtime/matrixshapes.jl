@@ -41,11 +41,9 @@ const VK_SCOPE_WORKGROUP = UInt32(2)
 
 The driver's cooperative-matrix table as [`MatrixShape`](@ref)s.
 
-Lava has always held this — `ctx.coopmat_shapes`, queried at device creation —
-and then thrown all but a boolean away: `caps` reported a single hardcoded tile.
-This is the same data in the vocabulary Mantle can also name, so a kernel picks
-its tile from what the device said rather than from a constant that happened to
-be right on the card it was written on.
+`ctx.coopmat_shapes` is queried at device creation, and this is that data in
+the vocabulary Mantle can also name, so a kernel picks its tile from what the
+device said rather than from a constant that happens to be right on one card.
 
 Entries whose component type Lava does not map are dropped rather than guessed.
 """
@@ -64,8 +62,8 @@ function matrixshapes(ctx::VkContext)
     return out
 end
 
-# `T` is the A/B operand type, and it used to be accepted and then ignored: the
-# match was on M, N and K alone. A device can report the same extents for
+# `T` is the A/B operand type and it is part of the match, not accepted and
+# ignored in favour of M, N and K. A device can report the same extents for
 # completely different component types — this one lists 16x16x16 for
 # (Float16 -> Float32), (Float16 -> Float16), (UInt8 -> Int32) and
 # (Int8 -> Int32) — so an extent-only match says "yes" for Float16 on hardware

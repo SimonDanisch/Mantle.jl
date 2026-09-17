@@ -1,7 +1,7 @@
 # The 3×4 affine transform every backend's instance descriptor carries.
 #
-# This was in `vulkan/raytracing/instance_record.jl`, beside the record whose
-# ABI it serves. The record stays there — `VulkanInstanceRecord` is a byte-exact
+# Core's, and not beside the record whose ABI it serves: that record is
+# genuinely the Vulkan backend's, because `VulkanInstanceRecord` is a byte-exact
 # mirror of `VkAccelerationStructureInstanceKHR` and Metal's
 # `MTLAccelerationStructureInstanceDescriptor` lays its fields out differently,
 # so that struct is genuinely the Vulkan backend's.

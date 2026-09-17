@@ -158,8 +158,8 @@ skipping the [`NotPassed`](@ref) ones, and return how many slots that was.
 `slot` counts only passed arguments, which is what makes this the whole of the
 agreement between a backend's two walks: the slot a compile assigns to an
 argument and the slot a record writes it into come from the same count, so they
-cannot drift. Metal's used to be two copies of the skip rule with a manually
-advanced index between them.
+cannot drift. Two copies of the skip rule with an index advanced by hand
+between them agree only by coincidence.
 
 Where the bytes of an [`InlineBytes`](@ref) argument go is deliberately not
 decided here. Vulkan's offsets are the SPIR-V entry wrapper's and are handed to
@@ -194,10 +194,10 @@ How many levels of aggregate an argument of type `T` is, for the depth budget in
 "a group of arguments", not structures with an identity of their own.
 `ew!(out, dims, operands, strides, f)` takes its operands as one tuple so that
 one kernel covers every arity, and those operands are top-level arguments that
-happen to travel together. Counting the tuple as a level put every device
+happen to travel together. Counting the tuple as a level puts every device
 pointer inside it one past the budget, so
-`devicepointeroffsets(Tuple{LavaDeviceArray,LavaDeviceArray})` answered `()`: a
-resize of an operand then left the recorded plan reading the old storage, with
+`devicepointeroffsets(Tuple{LavaDeviceArray,LavaDeviceArray})` answers `()` and
+a resize of an operand leaves the recorded plan reading freed storage, with
 nothing to see at the call site.
 
 A type you declared is **one**, which is what the budget was written against: a
@@ -243,11 +243,10 @@ A property of the TYPE, so it is resolved once when the packer specialises and
 costs nothing per dispatch — the tuple is a literal by the time it runs, and a
 `T` holding none constant-folds the loop over it away entirely.
 
-This is what lets the patch table be core's. A backend's packer used to be asked
-to report each pointer it wrote (`recpatch!` on Vulkan), and a backend that never
-reported — Metal — silently had no table and no patching. Nothing is asked now:
-the pointers are found from the type, so a backend cannot answer wrongly and
-cannot answer not at all.
+This is what lets the patch table be core's. Asking a backend's packer to
+report each pointer it writes lets a backend that reports none have no table and
+no patching, silently. Nothing is asked here: the pointers are found from the
+type, so a backend can neither answer wrongly nor fail to answer.
 
 `Core.LLVMPtr` is Metal's device pointer and `Ptr` is Vulkan's; both are the
 whole 64-bit address, which is what `notify_move!` re-keys on.

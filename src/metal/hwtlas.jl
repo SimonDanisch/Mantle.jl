@@ -375,14 +375,14 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
 
     # A TRANSFORM-only change is a REFIT, in place, keeping the structure and
     # therefore its `gpuResourceID` — which is the whole reason the structure is
-    # built `refittable`. Rebuilding here instead was the bug: a rebuild hands
-    # back a NEW `MTLAccelerationStructure`, so `scene_buf` holds a new resource
-    # ID and `static_tlas` is a new object, and anything holding the previous one
-    # keeps tracing the old geometry. Hikari's integrator does exactly that — it
-    # caches the adapted scene and drops it only on `accel.dirty`, because "a
-    # refit writes the same buffers in place and a recorded plan survives it".
-    # That is true of the Vulkan side, which refits; it was not true here, and
-    # `translate!` on a mesh produced a BYTE-IDENTICAL image.
+    # built `refittable`. Rebuilding instead hands back a NEW
+    # `MTLAccelerationStructure`, so `scene_buf` holds a new resource ID,
+    # `static_tlas` is a new object, and anything holding the previous one keeps
+    # tracing the previous geometry. Hikari's integrator does exactly that: it
+    # caches the adapted scene and drops it only on `accel.dirty`, because a
+    # refit writes the same buffers in place and a recorded plan survives it. So
+    # a rebuild here makes `translate!` on a mesh produce a BYTE-IDENTICAL
+    # image.
     if !t.dirty && t.built !== nothing && t.built.refittable &&
        t.built.count == Mantle.ninstances(t.instances) && t.static_tlas !== nothing
         refit_tlas!(t.device, t.built, instance_transforms(t))

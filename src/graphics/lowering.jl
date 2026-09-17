@@ -216,8 +216,8 @@ index buffer as its last argument, so the two are different shaders and a backen
 asks for the one its draw needs.
 
 The mesh stage's `outputs` are the geometry stage's verbatim, so the fragment
-stage is compiled against exactly what it was before — [`fragmentinputs`](@ref)
-answers the same thing for either pipeline.
+stage is compiled against the same interface either way and
+[`fragmentinputs`](@ref) answers the same thing for both pipelines.
 
 A backend with no geometry stage runs a geometry pipeline by lowering it, which
 is why `supports_geometry_stage` is not a question a renderer has to branch on.
@@ -301,8 +301,8 @@ function requirevertexindex(@nospecialize(f), @nospecialize(argtypes::Type))
                 …
             end
 
-        Keep the old spelling beside it if the shader also runs where the geometry
-        stage exists natively — the two are the same number:
+        Keep the index-free spelling beside it if the shader also runs where the
+        geometry stage exists natively — the two are the same number:
 
             $(nameof(f))(buffers...) = $(nameof(f))(VertexIndex(vertex_index()), buffers...)
 

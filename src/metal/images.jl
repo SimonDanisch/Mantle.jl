@@ -51,14 +51,14 @@ written by the rasteriser and read by a later pass, and `Shared` would ask for
 CPU-coherent memory nothing reads. Readback goes through `getBytes!`, which is
 the only way off an Apple render target anyway.
 
-`hazardTrackingMode = Tracked`, and that is not a default left alone — it was
-`Untracked` here, on the reasoning that Mantle's graph had already emitted the
-dependency. **It has not.** The graph's `Barriers` phase computes transitions,
-and the KernelAbstractions path this backend runs on does not consume them: no
-`MTLFence`, no `MTLEvent`, nothing. Untracked told the driver it was free to
-overlap a pass with the one that feeds it, and it did — a readback issued right
-after a render pass on the SAME queue came back with the texture untouched,
-clear colour and all, once per process and then never again.
+`hazardTrackingMode = Tracked`, and that is not a default left alone.
+`Untracked` would need Mantle's graph to have emitted the dependency, and it has
+not: the `Barriers` phase computes transitions, and the KernelAbstractions path
+this backend runs on does not consume them — no `MTLFence`, no `MTLEvent`,
+nothing. Untracked tells the driver it may overlap a pass with the one that
+feeds it, and it does: a readback issued right after a render pass on the SAME
+queue comes back with the texture untouched, clear colour and all, once per
+process and then never again.
 
 Committing to one queue orders when command buffers START; it does not stop the
 GPU overlapping them when it can see no dependency. Tracking is what makes the

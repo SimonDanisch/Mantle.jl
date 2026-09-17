@@ -1,11 +1,10 @@
 # The instances a top-level acceleration structure holds.
 #
-# This was written twice, once per backend, as `_register_batch!` plus three
-# fields — `instance_batches`, `handle_to_batch_idx`, `next_handle_id`. The two
-# had different signatures, so a scan for shared names called them private
-# helpers rather than duplication; reading both showed the same five steps:
-# allocate a handle, append a batch, record its index, look one up, drop one and
-# reindex what shifted.
+# Here and not per backend: a handle allocator, a batch list and a
+# handle-to-index map are the same five steps on any driver — allocate a handle,
+# append a batch, record its index, look one up, drop one and reindex what
+# shifted. Written per backend they differ in signature and not in content,
+# which is what makes a scan for shared names call them private helpers.
 #
 # None of that is a driver's. What a batch CONTAINS is — Vulkan's holds a
 # device-resident instance buffer and a BLAS, Metal's a transform list and an

@@ -133,9 +133,9 @@ function device_memory(ctx::VkContext, bytes::Integer, type_bits::Integer)
     # and the spec requires the memory it binds to have been allocated with the
     # matching flag.
     #
-    # It was not, and NVIDIA did not care: it returned a working address anyway,
-    # so every graph on that driver ran. RADV does care, and the failure is not
-    # an error at bind — it is a SIGSEGV inside the driver much later, in
+    # Without the flag NVIDIA returns a working address anyway, so every graph
+    # on that driver runs. RADV does not, and the failure is not an error at
+    # bind: it is a SIGSEGV inside the driver much later, in
     # `vkCreateRayTracingPipelinesKHR`, with nothing pointing back here. Only
     # `DebugConfig(validation = true)` names it.
     #
@@ -384,18 +384,18 @@ function readback_window(win::VulkanWindow)
     bpp = pixelbytes(T)
     nbytes = w * h * bpp
 
-    # A presentable image may only be touched between acquire and present. Called
-    # after a present, this used to transition an image it did not own, which
-    # synchronization validation reports as three separate errors and which the
-    # driver happens to tolerate: the pixels came back looking right for as long
-    # as nobody turned validation on.
+    # A presentable image may only be touched between acquire and present.
+    # Transitioning one this call does not own is three separate errors from
+    # synchronization validation, and a thing the driver happens to tolerate:
+    # the pixels come back looking right for as long as nobody turns validation
+    # on.
     #
     # So an image is acquired here, and note that it then holds an EARLIER
     # frame's contents, since acquire returns whichever image the presentation
     # engine has freed. A caller mid-frame — an image acquired and not yet
     # presented — has no command buffer to add a copy to: the frame's one-shot
-    # is `run!`'s, and it was submitted with the present. Read back after the
-    # frame is presented.
+    # is `run!`'s and goes out with the present. Read back after the frame is
+    # presented.
     win.acquired && error("readback_window: the window holds an acquired image; " *
                           "read back after the frame that owns it has been presented")
     acquire_next_image!(win)

@@ -818,15 +818,13 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
             # `2*(FrameNumOffset + frame_num)`, one less for a non-reference
             # picture, and FrameNumOffset absorbs the frame_num wrap.
             #
-            # This used to be `poc = dec.decoded`, a count of access units decoded
-            # ever. That is not a picture order count and is not even in the same
-            # units — a reference picture's POC advances by TWO — so the hardware
-            # was handed a dense 0,1,2,… as `PicOrderCnt` for every picture and
-            # every reference slot. x264 selects `pic_order_cnt_type = 2` whenever
-            # it emits no B-frames, which is precisely what `-bf 0` asks for and
-            # what VideoEditor's own mezzanine encodes with, so the editor's GPU
-            # preview decoded solid black for every clip it ever transcoded while
-            # the 128x96 B-pyramid fixture (type 0) stayed bit-exact.
+            # NOT a count of access units decoded: that is not a picture order
+            # count and not even in the same units, since a reference picture's
+            # POC advances by TWO, so the hardware would get a dense 0,1,2,… as
+            # `PicOrderCnt` for every picture and every reference slot. x264
+            # selects `pic_order_cnt_type = 2` whenever it emits no B-frames,
+            # which is what `-bf 0` asks for, so this path decodes solid black
+            # while a B-pyramid fixture (type 0) stays bit-exact.
             maxfn = 1 << (sps.log2fn + 4)
             fnoff = sh.idr ? 0 :
                     (dec.prevfn > sh.fnum ? dec.prevfnoff + maxfn : dec.prevfnoff)

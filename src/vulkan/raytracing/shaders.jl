@@ -1,7 +1,6 @@
-# `RayTracingPipeline` is Mantle's, in `src/raytracing/pipeline.jl`. It is a
-# pure description now — the compiled pipelines it used to cache in a field live
-# in `DeviceCaches.rt_pipelines`, beside the graphics ones, because a compiled
-# pipeline is a device object.
+# `RayTracingPipeline` is Mantle's, in `src/raytracing/pipeline.jl`, and a pure
+# description: the compiled pipelines live in `DeviceCaches.rt_pipelines`, beside
+# the graphics ones, because a compiled pipeline is a device object.
 
 # No-op: cache is tied to the current VkContext's lifetime.  On reset_device!,
 # the whole module should re-initialize its pipelines anyway.
@@ -88,11 +87,11 @@ buffer. The ownerless adaptor below exists only to drive `Adapt`: the signature
 has to be the post-adapt one, because that is what `pack_args_direct!` writes,
 and the strip is pure.
 
-Extracted so `trace_rays!`, `trace_rays_indirect!` and `compile_dispatch(::Trace)`
-share it. It was written out three times, and the third copy is the one that
-would have drifted: a modelled trace resolves the pipeline at COMPILE and records
-later, so a difference in how the key is built would show up as a second pipeline
-for the same work rather than as an error.
+Extracted so `trace_rays!`, `trace_rays_indirect!` and
+`compile_dispatch(::Trace)` share it. Three copies would drift silently: a
+modelled trace resolves the pipeline at COMPILE and records later, so a
+difference in how the key is built shows up as a second pipeline for the same
+work rather than as an error.
 """
 function rt_compiled_for(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipeline, args)
     ctx = ctxof(bq)

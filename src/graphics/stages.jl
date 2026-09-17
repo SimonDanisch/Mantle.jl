@@ -1,10 +1,10 @@
 # The stages a pipeline is made of.
 #
-# A pipeline used to be a flat list of keywords — `vertex`, `fragment`,
-# `geometry` as a `(func, GeometryConfig)` tuple, `tess_control`, `tess_eval`,
-# `varyings`, plus the fixed-function state — so one stage's function, its
-# configuration and its interface were three separate arguments that only
-# convention held together. A stage is one thing; this makes it one type.
+# A stage is one thing, so it is one type. As a flat list of keywords —
+# `vertex`, `fragment`, `geometry` as a `(func, GeometryConfig)` tuple,
+# `tess_control`, `tess_eval`, `varyings`, plus the fixed-function state — a
+# stage's function, its configuration and its interface are three separate
+# arguments held together by convention alone.
 #
 # ── Only outputs are declared ────────────────────────────────────────────────
 #
@@ -14,14 +14,12 @@
 # that has to be validated; declared once, there is nothing to disagree with.
 # [`stageinputs`](@ref) reads a consumer's inputs off its producer.
 #
-# ── The word `varyings` is gone ──────────────────────────────────────────────
+# ── One list per stage, not one `varyings` ───────────────────────────────────
 #
-# It named one interface, which was only ever enough because no pipeline in the
-# tree combined it with a geometry stage — RayMakie's two still use numbered
-# locations, precisely because the declarative form could not express the second
-# interface. A pipeline with a geometry stage has two: vertex → geometry and
-# geometry → fragment. One list per stage covers any number of them, and
-# `outputs` says what it is without knowing what OpenGL called it.
+# `varyings` names one interface, and a pipeline with a geometry stage has two:
+# vertex → geometry and geometry → fragment. One `outputs` list per stage covers
+# any number of them, and says what it is without knowing what OpenGL called
+# it.
 #
 # ── Flat ─────────────────────────────────────────────────────────────────────
 #
@@ -220,10 +218,9 @@ appear here.
 """
 function outputtype(s::ShaderStage)
     v = valuetypes(stageoutputs(s))
-    # `Vec4f`, because a clip position IS one. The Metal backend used to declare
-    # the field as `NTuple{4,Float32}` and absorb the difference in a `getfield`,
-    # which cost a conversion and a paragraph explaining why one thing had two
-    # spellings. Nothing needed the tuple: `mangle_varying` gives both the same
-    # string, which is all the two stages link by.
+    # `Vec4f`, because a clip position IS one, and both backends declare it that
+    # way: an `NTuple{4,Float32}` field costs a conversion in `getfield` for one
+    # thing with two spellings, and nothing needs the tuple. `mangle_varying`
+    # gives both the same string, which is all the two stages link by.
     return NamedTuple{(:position, keys(v)...), Tuple{Vec4f, values(v)...}}
 end

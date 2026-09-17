@@ -8,10 +8,8 @@
 # is: Vulkan became a hard dependency when the runtime moved here, so there is
 # nothing optional left to gate.
 #
-# The extension had a `VulkanAPI` alias here, for `Mantle.Vulkan` the BACKEND
-# MARKER as distinct from `Vulkan` the package. It is gone: the marker is
-# `VulkanAPI` now, so the two names no longer compete and the alias has nothing
-# left to disambiguate.
+# No alias for the backend marker either: the marker is `VulkanAPI`, so it does
+# not compete with `Vulkan` the package.
 import Vulkan as VK
 using ColorTypes: RGBA, BGRA
 using ColorTypes.FixedPointNumbers: N0f8
@@ -68,10 +66,9 @@ stages(::VulkanAPI, ::Type{Sampled}, _) = stage(SHADER_STAGES)
 # otherwise is mostly each pass waiting for the one before it to drain.
 #
 # It is kept because a sync layer whose every buffer barrier says "all commands"
-# has stopped deriving anything — and because narrowing it is what exposed the
-# aliasing barrier, which had been borrowing this mask for a meaning it does not
-# have. That barrier is now derived from what the vacating transient was actually
-# doing, so no usage in this file lowers to `ALL_COMMANDS` any more.
+# has stopped deriving anything. The aliasing barrier does not borrow this mask
+# either: it is derived from what the vacating transient was doing, so no usage
+# in this file lowers to `ALL_COMMANDS`.
 stages(::VulkanAPI, ::Type{<:Storage}, _) = stage(SHADER_STAGES)
 stages(::VulkanAPI, ::Type{CopySrc}, _) = stage(VK.PIPELINE_STAGE_2_COPY_BIT)
 stages(::VulkanAPI, ::Type{CopyDst}, _) = stage(VK.PIPELINE_STAGE_2_COPY_BIT)

@@ -4,12 +4,9 @@
 
 import GPUArraysCore: AbstractGPUArray, AbstractGPUVector, AbstractGPUMatrix
 
-# Exported, as `LavaBackend` is. It was Lava's export until the runtime moved
-# here, and the move left it defined but unexported — so 43 test files that say
-# `LavaArray` unqualified stopped resolving, each with an `UndefVarError` at
-# whatever line first names it rather than at load. The host array type of a
-# backend is part of its surface; the alternative is qualifying it in every one
-# of those files to say the same thing.
+# Exported, as `LavaBackend` is: the host array type of a backend is part of its
+# surface, and defined-but-unexported means an `UndefVarError` at whatever line
+# first names it rather than at load.
 export LavaArray
 
 """
@@ -166,9 +163,9 @@ end
 
 # ── similar ──
 
-# On the array's own device. `similar` of an array on a second device used to
-# allocate on the process default, so every broadcast result, `copy` and `map`
-# over a second-device array landed on the first device.
+# On the array's own device: allocating on the process default instead puts
+# every broadcast result, `copy` and `map` over a second-device array on the
+# first device.
 queueof(a::LavaArray) = (a.buf[].ctx::VkContext).default_bq
 Base.similar(a::LavaArray{T,N}) where {T,N} = LavaArray{T,N}(undef, a.dims; bq = queueof(a))
 Base.similar(a::LavaArray{T}, dims::Base.Dims{N}) where {T,N} = LavaArray{T,N}(undef, dims; bq = queueof(a))

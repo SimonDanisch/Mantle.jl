@@ -89,16 +89,15 @@ function submit! end
 
 Wait until the device has finished everything submitted on `bq`.
 
-It used to submit first, because a queue held an open batch that nothing had
-handed over; there is nothing to hand over now, so this is `waitfor!` on the
-newest submission and nothing else.
+Nothing is submitted first: a queue holds no open batch, so this is `waitfor!`
+on the newest submission and nothing else.
 """
 function flush! end
 
 # The channel already knows its device (`deviceof`), so the one-argument form is
-# the portable spelling and needs no backend method. Callers used to reach for
-# `Mantle.vk_device()` to fill the second argument, which is exactly the kind of
-# driver-shaped hole this file exists to close.
+# the portable spelling and needs no backend method: a caller reaching for
+# `Mantle.vk_device()` to fill the second argument is the driver-shaped hole this
+# file exists to close.
 flush!(ch::SubmitChannel) = flush!(ch, deviceof(ch))
 
 # And the device's own queue, for a caller that holds a device rather than a

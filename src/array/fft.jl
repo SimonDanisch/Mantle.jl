@@ -503,7 +503,7 @@ end
 #
 # So there are two kernels, deliberately. The power-of-two one is tuned and
 # measured (see the table at the top); this one is general and is not. Splitting
-# them keeps the tuning from being diluted by a shape it was never measured on —
+# them keeps the tuning from being diluted by a shape it was not measured on,
 # and `fft!` dispatches on `count_ones(N) == 1`, so the fast path stays the fast
 # path.
 #

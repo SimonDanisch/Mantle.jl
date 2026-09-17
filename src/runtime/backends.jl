@@ -1,10 +1,9 @@
 # Which backend to use when the caller did not say.
 #
 # Mantle is the portable API, so "the default device" cannot be a name from one
-# driver. It used to be, in every downstream caller: RayMakie's `ScreenConfig`
-# and its precompile workload both wrote `Mantle.LavaBackend()`, which is a
-# Vulkan type living in an extension — so the default was simultaneously the
-# wrong choice on a Mac and a name that did not resolve there.
+# driver. A caller writing `Mantle.LavaBackend()` for its default names a Vulkan
+# type that lives in an extension: the wrong choice on a Mac, and a name that
+# does not resolve there.
 #
 # A backend registers a probe when its extension loads. The probe returns the
 # backend object if this machine can actually use it and `nothing` if it cannot,

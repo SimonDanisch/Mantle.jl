@@ -14,10 +14,9 @@
 
 # ── Why an interpreted run needs no barriers, and a recorded one does ────────
 #
-# Two deleted comments gave opposite reasons for this backend emitting nothing
-# between passes, and both were wrong. It is not "every pooled allocation is
-# `Shared`" (images are `PrivateStorage`), and it is not the driver's hazard
-# tracking standing in for something unfinished.
+# Not because every pooled allocation is `Shared` (images are
+# `PrivateStorage`), and not because the driver's hazard tracking stands in for
+# something unfinished.
 #
 # It is COMMIT ORDER. Every render and copy pass opens its own
 # `MTLCommandBuffer` and commits it before the call returns, all on one queue,

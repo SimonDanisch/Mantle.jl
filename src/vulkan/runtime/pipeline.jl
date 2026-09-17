@@ -183,9 +183,9 @@ const COOPMAT_SUBGROUP = 32
 
 # The device's DEFAULT subgroup width, as opposed to the min/max it can be pinned
 # to. Queried once; cleared on device reset with the rest.
-# Per device, keyed by `ctx.id`. It was a single `Ref`, which is a property of
-# ONE device answered for all of them — 32 on this desktop and 64 on RDNA 3.5,
-# so a second context got the first's width.
+# Per device, keyed by `ctx.id`, and never a single `Ref`: the width is 32 on
+# this desktop and 64 on RDNA 3.5, so one answer for all of them hands a second
+# context the first's.
 #
 # This class differs from the handle caches in a way worth stating: a stale
 # pipeline is undefined behaviour and usually crashes, while a stale device
@@ -577,8 +577,8 @@ function create_compute_pipeline(dev::VK.Device, ci::VK.ComputePipelineCreateInf
         # a SUCCESS-class code, so `@check` inside VK.jl does not raise and
         # `unwrap` returns normally — with pPipelines[1] left at VK_NULL_HANDLE.
         # Dropping the code therefore hands back a null pipeline that segfaults
-        # later at vkCmdBindPipeline, a long way from the cause. This check used to
-        # exist only in the LARGE_STACK (Windows) branch above.
+        # later at vkCmdBindPipeline, a long way from the cause. Checked on both
+        # branches, not only the LARGE_STACK (Windows) one above.
         pipelines, code = @vk_checked "vkCreateComputePipelines" VK.create_compute_pipelines(dev, [ci]; pipeline_cache)
         if code == VK.PIPELINE_COMPILE_REQUIRED
             PIPELINE_COMPILES_REFUSED[] += 1

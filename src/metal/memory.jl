@@ -7,10 +7,9 @@
 
 # Where a `Shared` buffer is in the host address space. Core builds `hostview`
 # and the three transfer verbs over this — see `hostspan` in
-# `memory/resources.jl`. This backend used to carry its own copy of the checked
-# `unsafe_wrap`, character for character the host backend's, down to the reason
-# in the comment: `reinterpret` refuses a struct with padding, and Hikari's
-# `LightBVHNode` is 60 bytes holding 54 of fields.
+# `memory/resources.jl`, so the checked `unsafe_wrap` is written once and not
+# per backend. What it is checked against: `reinterpret` refuses a struct with
+# padding, and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields.
 Mantle.hostspan(::MetalDevice, buf::MTL.MTLBuffer) =
     (convert(Ptr{UInt8}, MTL.contents(buf)), Int(buf.length))
 
@@ -67,10 +66,10 @@ download(d::MetalDevice, a::DeviceArray) = Mantle.hostdownload(d, a)
 Copy `n` elements device-to-device.
 
 Through the mapped bytes rather than a blit encoder: both regions are `Shared`,
-so once outstanding work has landed this is a `memmove`. `resize!` on a `Buffer`
-is the caller that matters — it copies the old contents into a fresh region
-before releasing the old one, and a blit there would need a submission and a
-wait. Core's `hostdevicecopy!` does the waiting for the same reason `download`
+so once outstanding work has landed this is a `memmove`. `resize!` on a
+`Buffer` is the caller that matters: it copies the existing contents into a
+fresh region before releasing the previous one, and a blit there would need a
+submission and a wait. Core's `hostdevicecopy!` does the waiting for the same reason `download`
 does.
 """
 devicecopy!(d::MetalDevice, dst::DeviceArray{T}, src::DeviceArray{T}, n::Integer) where {T} =

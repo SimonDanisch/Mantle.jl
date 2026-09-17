@@ -121,12 +121,11 @@ convert_args(::Tuple{}) = ()
 """
 Resolve the vertex and fragment callables and their type tuples.
 
-Always wrapped, and there is no second path. `varyings_to_output_type` used to
-build this from a single `varyings` list, with an `else` branch for shaders that
-called `gfx_output`/`gfx_input` with numbered locations — two ways to declare one
-interface, and the numbered one could not express a pipeline with a geometry
-stage at all. `Mantle.outputtype` answers it from the stage that actually feeds
-the rasteriser, which is the geometry stage when there is one.
+Always wrapped, and there is no second path: a `varyings` list beside numbered
+`gfx_output`/`gfx_input` locations is two ways to declare one interface, and the
+numbered one cannot express a pipeline with a geometry stage at all.
+`Mantle.outputtype` answers it from the stage that actually feeds the
+rasteriser, which is the geometry stage when there is one.
 
 An empty output list is a real answer: a shadow pass writes only its clip
 position, and that is a pipeline whose fragment stage reads nothing.
@@ -350,9 +349,9 @@ available before colour attachment writes, signal render-finished for the
 present — and the frame slot's fence, which `acquire_next_image!` waits on
 before it reuses the slot. The one-shot must end with [`presentready!`](@ref).
 
-It used to take the open batch over and submit it by a second route, with its
-own list of sealed segments and its own bookkeeping of which of them a
-recording had lent it. There is one route now.
+One route: nothing takes an open batch over and submits it by a second one,
+with a list of sealed segments and bookkeeping of which of them a recording
+lent it.
 """
 function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow,
                              frame::OneShot)

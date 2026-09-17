@@ -151,10 +151,10 @@ Open a render pass over `target`, record `f` into it, and close it.
 `clear` is a colour to clear the attachment to, or `nothing` to draw on top of
 what is there — which is what compositing an overlay wants.
 
-The pass is closed on the way out of a throw as well as a return. The verb pair
-this replaces left that to the caller, and the one caller in tree did not do it:
-a shader that failed to compile mid-pass left the pass open, and the next frame's
-`begin_pass!` opened a second one on the same buffer.
+The pass is closed on the way out of a throw as well as a return, which a
+begin/end verb pair leaves to the caller: a shader that fails to compile
+mid-pass then leaves the pass open, and the next frame's `begin_pass!` opens a
+second one on the same buffer.
 """
 function pass!(f, device, target::RenderTarget; clear = nothing)
     dev = todevice(device)
@@ -171,10 +171,10 @@ end
 
 # ── blit: one device array onto a render target ──────────────────────────────
 #
-# A fullscreen triangle sampling `source` by fragment coordinate. It was 55 lines
-# in the Vulkan backend, and 50 of those were reaching into a target's fields
-# (`win.views[win.current_image_idx + 1]`, `fb.color_view`) and packing arguments
-# by hand. Over `pass!` the whole of it is the two shaders and one draw.
+# A fullscreen triangle sampling `source` by fragment coordinate. Over `pass!`
+# the whole of it is the two shaders and one draw, with no reaching into a
+# target's fields (`win.views[win.current_image_idx + 1]`, `fb.color_view`) and
+# no packing arguments by hand.
 
 """Where in the source a fragment at (x, y) is: column-major, as Julia stores it."""
 @inline blitindex(x::Int32, y::Int32, height::Int32) = x * height + y + Int32(1)
@@ -253,9 +253,8 @@ the whole of `target`.
 to, and the overlay compositor passes `false` because what is already there is
 the frame it is compositing onto.
 
-One implementation, in core. It was the Vulkan backend's, reached through
-`Base.get_extension` by RayMakie, and 50 of its 55 lines were the field access
-that `pass!` now does.
+One implementation, in core, so a portable caller does not reach for it through
+`Base.get_extension`. Almost all of it is the field access `pass!` does.
 """
 function blit!(device, target::RenderTarget, source; clear::Bool = true)
     dev = todevice(device)

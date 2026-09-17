@@ -4,14 +4,11 @@
 #
 #     reset_device!(debug = DebugConfig(gpu_av = true, pool_disabled = true))
 #
-# See `DebugConfig` and `reset_device!`. This file used to hold five preset
-# functions — `enable_gpu_av`, `disable_gpu_av`, `enable_debug_printf!`,
-# `disable_debug_printf!`, `activate_all_debugging` — over seven `LAVA_*`
-# environment variables. All twelve are deleted. Each preset encoded a slightly
-# different combination (`enable_gpu_av` defaulted to `pool_disabled = false`,
-# which its own docstring then explained was blind to the bugs you turn GPU-AV on
-# to find), so "which one do I call" was itself a way to end up instrumented for
-# something other than what you were hunting.
+# See `DebugConfig` and `reset_device!`. There are no preset functions and no
+# `LAVA_*` environment variables: each preset encodes a slightly different
+# combination (`enable_gpu_av` with `pool_disabled = false` is blind to the bugs
+# GPU-AV is turned on to find), so "which one do I call" is itself a way to end
+# up instrumented for something other than what is being hunted.
 #
 # What remains here is the one thing a config object cannot express, because it
 # is a measurement rather than a setting: **"GPU-AV is enabled" and "GPU-AV is

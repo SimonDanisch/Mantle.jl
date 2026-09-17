@@ -165,12 +165,10 @@ supports_rt_pipeline(::Any) = false
 supports_rt_pipeline(a::AdaptedAccel) = supports_rt_pipeline(a.hwtlas)
 
 #
-# `pin!`, `blases` and `pintrace!` are gone with the mechanism they served.
-# 35 call sites, all in one backend, all of them "hold this Julia object until
-# a submission completes" — which core already models as
-# `Outstanding(token, payload, tag)` in `graph/submission.jl`, whose own
-# docstring says the payload holds "the closed command buffers the submission
-# carried, with their pins and scratch". A sixth register of one fact.
+# There is no pinning verb here. "Hold this Julia object until a submission
+# completes" is `Outstanding(token, payload, tag)` in `graph/submission.jl`,
+# whose payload holds the closed command buffers the submission carried, with
+# their pins and scratch. One register of that fact, not one per backend.
 #
 # `pintrace!` was the one that reached core, and only because an acceleration
 # structure travels as a kernel argument and the graph reads no BLAS edge out of

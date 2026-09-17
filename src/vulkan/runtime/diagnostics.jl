@@ -1,9 +1,8 @@
 # Runtime diagnostics: what is on the device, and what it is holding.
 #
-# These were the tail of `Lava.jl` and moved here with everything else on
-# 2026-08-27. Every one of them reads a `VkContext` — live buffers, deferred
-# frees, argument slabs, the pipeline and kernel caches — so none of them could
-# stay with a compiler that no longer names one.
+# Every one of them reads a `VkContext` — live buffers, deferred frees, argument
+# slabs, the pipeline and kernel caches — so none of them can live with the
+# compiler, which names no Vulkan type at all.
 #
 # `allowscalar(false)` came too: it is a statement about the ARRAY type, and the
 # array type is here.

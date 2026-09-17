@@ -120,11 +120,10 @@ end
 # IR, so the Julia callee is gone, and the module holds a `call` to an external
 # symbol and no memory instruction.
 #
-# It used to be classified by looking for `"load "` in the LLVM text, which that
-# name misses by a space, so it fell through to read+write. Measured on
-# `gemm_cm2!`: A and B came out `Touch(true, true, false)` with `@Const` on both
-# in the source, so every pass sharing a weight matrix with another got a
-# barrier it did not need.
+# Classifying it by looking for `"load "` in the LLVM text misses that name by a
+# space, so it falls through to read+write. Measured on `gemm_cm2!`: A and B come
+# out `Touch(true, true, false)` with `@Const` on both in the source, so every
+# pass sharing a weight matrix with another gets a barrier it does not need.
 #
 # These belong in Lava, next to the generators, and cannot go there: Mantle
 # depends on Lava and not the other way round, so `Mantle.intrinsic_usage` is not

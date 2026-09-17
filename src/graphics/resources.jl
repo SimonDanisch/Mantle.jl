@@ -183,9 +183,9 @@ abstract type HWTLAS{Tri} <: Raycore.AbstractAccel end
 
 # ── Queues and interop ────────────────────────────────────────────────────────
 
-# A submission channel is `SubmitChannel` in `graph/lifetime.jl`. It was abstract
-# here with one backend-specific implementation, and thirty-one of its
-# forty-one fields turned out to be backend-independent scheduling state.
+# A submission channel is `SubmitChannel` in `graph/lifetime.jl`, concrete:
+# thirty-one of the forty-one fields a backend implementation would hold are
+# backend-independent scheduling state.
 
 """
     ExternalImage

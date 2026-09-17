@@ -6,8 +6,8 @@
 # writing `vk_draw_in_pass!` on a Mac would be naming the wrong API for the
 # hardware it is running on.
 #
-# Declared here, implemented per backend. The prefix is gone rather than swapped
-# for `mtl_`/`vk_` at the call site, which is the point: there is one verb.
+# Declared here, implemented per backend, and unprefixed: one verb, not a
+# `vk_`/`mtl_` pair a call site has to choose between.
 
 """
     begin_pass!(target; clear = nothing)
@@ -192,7 +192,7 @@ run — and the only way to find out was to compile it and read the error. A
 capability a caller cannot ask about is one they find out about from a shader
 compile, which is the wrong place and the wrong time.
 
-`supports_geometry_stage` answering `false` no longer means a geometry pipeline
+`supports_geometry_stage` answering `false` does not mean a geometry pipeline
 cannot be drawn: a backend with a mesh pipeline runs it through
 [`lower_geometry_to_mesh`](@ref), which is what Metal's `compile_draw` does. So
 this asks which STAGE a device has, and [`supports_mesh_pipeline`](@ref) is the

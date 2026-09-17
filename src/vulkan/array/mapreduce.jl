@@ -49,10 +49,10 @@ overhead at small sizes. One cell of BAR-mapped memory; its `mapped_ptr` stays
 valid for the lifetime of the context, which is now literally true — it is a
 field of the context, so it dies with it and no reset callback has to remember.
 
-It was an `IdDict` keyed by context, and the allocation went to `vk_context()`
-rather than to `ctx`, so with two devices live the entry stored under the SECOND
-context held a buffer belonging to the first. Keyed right, allocated wrong,
-which reads as correct until there are two devices.
+A field and not an `IdDict` keyed by context: keyed right and allocated from
+`vk_context()` rather than from `ctx`, the entry stored under the second context
+holds a buffer belonging to the first, which reads as correct until there are
+two devices.
 """
 @inline function reduce_scratch(ctx::VkContext)
     buf = ctx.caches.reduce_scratch
@@ -199,10 +199,10 @@ function mapreducedim_ak!(f::F, op::OP, R::LavaArray{T}, A;
     else
         # Partial reduction (dims=N) — determine which dim is being reduced.
         # AK.mapreduce needs a dense array, so wrappers (views, PermutedDimsArray,
-        # ...) get materialised — on the *device*, via broadcast. This used to be
-        # `convert(LavaArray, collect(A))`, i.e. a blocking download to the host
-        # followed by a re-upload; `sum(view(x, ...); dims=)` alone was 21% of a
-        # DNNKernels inference step.
+        # ...) get materialised — on the *device*, via broadcast.
+        # `convert(LavaArray, collect(A))` instead is a blocking download and a
+        # re-upload: `sum(view(x, ...); dims=)` alone is 21% of a DNNKernels
+        # inference step that way.
         A_arr = A isa LavaArray ? A : densify(A)
         rdim = find_reduced_dim(size(A_arr), size(R))
         if rdim !== nothing
@@ -308,15 +308,15 @@ end
 # ── Sort ──
 # There is deliberately no `AK.merge_sort_by_key!` override here.
 #
-# One used to exist, implementing sort-by-key as sortperm + permute, because
-# AK's block-level merge kernel reads shared-memory positions it never wrote
-# when `len < 2 * block_size`, and Vulkan leaves workgroup memory undefined.
-# That override was circular: AK implements `sortperm` *via* `merge_sort_by_key!`
-# (see AcceleratedKernels/src/sort/merge_sortperm.jl), so the two called each
-# other forever — a StackOverflowError, or 34 GB of pool growth and
-# ERROR_OUT_OF_DEVICE_MEMORY when the recursion allocated temporaries first.
+# Implementing sort-by-key as sortperm + permute is circular: AK implements
+# `sortperm` *via* `merge_sort_by_key!` (see
+# AcceleratedKernels/src/sort/merge_sortperm.jl), so the two call each other
+# forever — a StackOverflowError, or 34 GB of pool growth and
+# ERROR_OUT_OF_DEVICE_MEMORY when the recursion allocates temporaries first.
 #
-# The real defect was the uninitialized shared memory, and that is now fixed at
+# What such an override would be working around is AK's block-level merge kernel
+# reading shared-memory positions it never wrote when `len < 2 * block_size`,
+# with Vulkan leaving workgroup memory undefined. That is fixed at
 # the source: the Workgroup Block variable is emitted with an OpConstantNull
 # initializer (see `emit_workgroup_block!` in compiler/compilation.jl), so every
 # kernel starts with zeroed shared memory and AK's own implementation is correct.
