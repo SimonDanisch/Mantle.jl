@@ -13,8 +13,8 @@ Three separate claims, and the middle one is the reason the file exists.
 that THROWS rather than returning a `ResultTypes.Result`, unlike most of
 Vulkan.jl's API, which is why `device_memory` has no `unwrap` around it.
 `acquire_or_reclaim!` catches `VK.VulkanError` by name and re-raises anything
-else, so if either the type or the `code` field were wrong the escalation would
-never run and a lost device would be misreported as an OOM. Verified against a
+else, so with either the type or the `code` field wrong the escalation never
+runs and a lost device is misreported as an OOM. Verified against a
 real refusal rather than a constructed exception.
 
 **A refusal is a `LavaError` that says what happened**, after one escalation:

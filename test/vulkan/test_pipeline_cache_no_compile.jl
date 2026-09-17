@@ -35,8 +35,8 @@ end
 #
 # `Val{K}` with a per-run random `K` puts a different literal in the emitted
 # SPIR-V each time, so no cache anywhere can hold this module. A fixed body is
-# novel exactly ONCE PER MACHINE and silently stops firing after that — which is
-# what it had been doing on both vendors:
+# novel exactly ONCE PER MACHINE and silently stops firing after that, on both
+# vendors:
 #
 #   * NVIDIA RTX 4000 Ada: fired once, on the first run after an emitter change
 #     made its SPIR-V new again, and never afterwards.
@@ -66,8 +66,8 @@ end
     # `no_pipeline_compilation` does NOT throw, by design — `create_pipeline`
     # records the miss and retries without the flag, so a workload finishes and
     # reports EVERY miss instead of dying at the first. The instrument firing is
-    # therefore a recorded miss, not an exception, and this used to assert the
-    # exception. That assertion could only ever fail:
+    # therefore a recorded miss and not an exception. Asserting the exception
+    # could only ever fail:
     #
     #   * on Linux before 2026-08-02 it failed for a second reason too — the
     #     refusal was discarded entirely (`VK_PIPELINE_COMPILE_REQUIRED` is a

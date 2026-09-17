@@ -135,9 +135,9 @@ using GPUCompiler
     end
 
     # GPUCompiler 2.0 removed its disk cache entirely — `disk_cache_path` and
-    # `cache_file` no longer exist, and there is no `disk_cache` anywhere in
-    # 2.1.1 (the replacement direction is `cached_results`). This used to assert
-    # on `GPUCompiler.disk_cache_path()` and became an UndefVarError on the
+    # `cache_file` do not exist, and there is no `disk_cache` anywhere in 2.1.1
+    # (the replacement direction is `cached_results`). Asserting on
+    # `GPUCompiler.disk_cache_path()` is an UndefVarError on the
     # upgrade from 1.23.
     #
     # Nothing in Lava's src depended on it: Lava's own two-tier cache is

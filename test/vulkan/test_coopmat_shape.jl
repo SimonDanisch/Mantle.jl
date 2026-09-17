@@ -1,7 +1,7 @@
 # `coopmat_shape` must honour the operand type, not just the extents.
 #
-# It takes `::Type{T}` and used to ignore it entirely, matching on M, N and K
-# alone. A device reports the same extents for different component types — the
+# It takes `::Type{T}` and must not ignore it, matching on M, N and K alone: a
+# device reports the same extents for different component types — the
 # AMD Radeon 8060S lists 16x16x16 four ways: (Float16 -> Float32),
 # (Float16 -> Float16), (UInt8 -> Int32) and (Int8 -> Int32) — so an
 # extent-only match answers "yes" for Float16 on hardware that only implements

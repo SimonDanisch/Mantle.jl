@@ -9,10 +9,10 @@ it to read a device-written ray count between chunks, so the one stall in the
 render was invisible to Mantle and could never be replaced by a device-side
 count.
 
-The trap the first testset used to pin: `waitidle(::LavaDevice)` was
-`vkDeviceWaitIdle` alone, which waits for everything SUBMITTED — and a headless
-plan used to submit when something asked it to, so a run sitting in an open
-batch was neither submitted nor waited for. There is no open batch now: a run
+The trap the first testset pins: `waitidle(::LavaDevice)` as `vkDeviceWaitIdle`
+alone waits for everything SUBMITTED, and a headless plan that submits when
+something asks it to leaves a run in an open batch neither submitted nor waited
+for. There is no open batch: a run
 is submitted the moment `run!` is called, and the token it answers with is
 out before `run!` returns. So what is pinned is that — the token is the
 queue's newest the moment it exists — and that `waitidle` then waits for it

@@ -4,12 +4,12 @@
 # `record!`, `emitplan!` and `execute!` — a backend implementing a sequence.
 # That is not visible to a green suite that only exercises one device.
 #
-# The backend used to be an extension module, and the boundary was the module.
-# It is `@static include`d into `Mantle` now, so the boundary is the SOURCE TREE:
+# In an extension module the boundary would be the module. The backend is
+# `@static include`d into `Mantle`, so the boundary is the SOURCE TREE:
 # a method defined under `src/vulkan/` or `src/metal/` is a backend's, whatever
 # module it lands in. That is the stricter reading anyway, and it is the one that
-# survives the merge — a backend name colliding with a core one no longer makes a
-# separate binding, it silently adds a method to core's function, and a method on
+# holds here: a backend name colliding with a core one makes no separate
+# binding, it silently adds a method to core's function, and a method on
 # a core name outside the vocabulary is exactly what this asks about.
 using Test, Mantle
 

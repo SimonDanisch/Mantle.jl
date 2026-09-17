@@ -38,7 +38,7 @@ holders(buf) = @atomic Mantle.stampof(buf).holders
     end
     @test holders(buf) == 1
 
-    # The teardown that used to corrupt the one-shot.
+    # The teardown that corrupts the one-shot if the hold is not honoured.
     Mantle.unsafe_free!(a)
 
     # The request is recorded, not performed: nothing has been destroyed, and a

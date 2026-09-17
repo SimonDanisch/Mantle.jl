@@ -1,9 +1,9 @@
 """
-Workgroups above 256 used to write part of their output, silently.
+Workgroups above 256 must not write part of their output, silently.
 
-The recorded diagnosis was hardware: "above 256 this driver silently runs fewer
-invocations than the shader declares". It was wrong, and the way it was wrong is
-the reason these tests exist in this shape.
+That failure reads as hardware — "above 256 this driver silently runs fewer
+invocations than the shader declares" — and is not, which is the reason these
+tests exist in this shape.
 
 The cause was one line in `get_compute_pipeline`:
 
@@ -32,8 +32,8 @@ using Test, Lava, KernelAbstractions
 const KA = KernelAbstractions
 const Atomixwg = Lava.Atomix
 
-# 64 simultaneously live values — the body whose two modules collided. 32 and 128
-# did not, which is why the old cap could not be predicted from any statistic.
+# 64 simultaneously live values — the body whose two modules collide. 32 and 128
+# do not, which is why the apparent cap cannot be predicted from any statistic.
 @kernel cpu=false function wglimit_probe!(out, ::Val{K}) where {K}
     I = @index(Global, Linear)
     acc = ntuple(k -> Int32(I) * Int32(k) + Int32(k * k), Val(K))
@@ -106,7 +106,7 @@ end
     end
 
     @testset "compile order does not change the answer" begin
-        # 256 before 512 is the order that used to poison the cache.
+        # 256 before 512 is the order that poisons a sampling-hashed cache.
         @test groupcoverage(backend, 96, 256; static = false) == 1.0
         @test groupcoverage(backend, 96, 512; static = false) == 1.0
         @test groupcoverage(backend, 97, 512; static = false) == 1.0

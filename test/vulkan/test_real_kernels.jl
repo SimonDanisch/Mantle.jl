@@ -254,7 +254,7 @@ using StaticArrays
     # alloca's chosen integer element type (e.g. T=i8), hitting the decomposition branch that
     # only handled int→int.  Fix: pick_uniform_type bails when decomp would involve non-integer types.
     #
-    # Originally framed against `vp_sample_surface_direct_lighting_kernel!` which Hikari fused
+    # Framed against `vp_sample_surface_direct_lighting_kernel!`, which Hikari fused
     # into `vp_shade_surface_hits_kernel!` and then split per-material into `vp_shade_material_
     # kernel!{T}` once per concrete material type. The retype_allocas path is exercised the
     # same way — heavy struct access through Conductor{PiecewiseLinearSpectrum{56}}.
@@ -276,7 +276,7 @@ using StaticArrays
                                        T_size}
         # Shared hit queue (SOA): one device component array per top-level field
         # of VPHitSurfaceWorkItem, generated from the struct so this type tracks
-        # field changes automatically instead of drifting like the old spelling.
+        # field changes automatically instead of drifting.
         _hs_item = Hikari.VPHitSurfaceWorkItem
         _hs_cols = NamedTuple{fieldnames(_hs_item),
                               Tuple{map(F -> Lava.LavaDeviceArray{F, 1}, fieldtypes(_hs_item))...}}

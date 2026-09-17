@@ -486,7 +486,7 @@ end
 # declares one with `Mantle.lower_geometry_to_mesh` and compiles the mesh pipeline
 # that comes out. Nothing in the CALLER changes: the same description, the same
 # `pass!`, the same vertex count — which is the point, and the reason
-# `supports_geometry_stage` answering `false` no longer means an overlay is lost.
+# `supports_geometry_stage` answering `false` does not mean an overlay is lost.
 #
 # The lowering's own arithmetic is asserted on the host in `test/test_lowering.jl`,
 # over `HostMeshOutput`, where the emitted vertices and indices can be read back.
@@ -751,8 +751,8 @@ end
 
 @testset "a texture is bound as data[x, y]" begin
     # NON-SQUARE on purpose: 4 wide and 2 tall is the case a square atlas cannot
-    # tell apart, and it is the one both uploads used to get wrong — the Vulkan
-    # side read the dimensions one way round and copied the bytes the other, so
+    # tell apart, and it is the one an upload gets wrong by reading the
+    # dimensions one way round and copying the bytes the other, so
     # only a square texture or a single row came out whole.
     data = Float32[(16 * (x - 1) + 2 * (y - 1)) / 100 for x in 1:4, y in 1:2]
     got = tex_draw(data; n = 4)
@@ -807,8 +807,8 @@ function tex_graph(data; n = 4, filter = :nearest)
 end
 
 @testset "a graph draw samples what it was given" begin
-    # Bindings used to be reachable only from `pass!`, so a renderer that samples
-    # anything had to record its passes by hand and could not be a graph at all.
+    # Bindings reachable only from `pass!` would mean a renderer that samples
+    # anything records its passes by hand and cannot be a graph at all.
     # They travel with the COMPILE as well as with the bind — Vulkan builds the
     # pipeline layout around the descriptor set layout — so the plan has to hand
     # them to `compile_draw` too, and a test that only checked the bind would

@@ -2,9 +2,8 @@
 #
 # Both recording backends ask the same three questions of every argument of a
 # dispatch, twice each — once when the dispatch compiles (which slot, how many
-# bytes) and once when it is written (what to put there). Each used to answer
-# them itself, in three places between them, with two rules that are NOT
-# equivalent:
+# bytes) and once when it is written (what to put there). Answered per backend,
+# in three places between them, the two rules are NOT equivalent:
 #
 #   Vulkan  `slotpositions`   skipped `sizeof(Ti) == 0 || Ti <: Type`
 #   Metal   `recorded_args`   skipped `isghosttype(T) || isconstType(T)`
@@ -98,9 +97,9 @@ end
     @test M.notpassed(DataType)
     @test M.passedas(DataType) === M.NotPassed()
 
-    # Totality matters as much as agreement: the old Vulkan rule opened with
-    # `sizeof(Ti) == 0`, and `sizeof` throws for a type with no fixed size, so
-    # a `String` argument crashed the packer instead of being refused by the
+    # Totality matters as much as agreement: a rule opening with
+    # `sizeof(Ti) == 0` throws for a type with no fixed size, so a `String`
+    # argument crashes the packer instead of being refused by the
     # compiler.
     @test M.passedas(String) === M.InlineBytes()
     @test M.passedas(Float32) === M.InlineBytes()
@@ -139,20 +138,20 @@ end
     #
     # The table `notepacked!` builds is what makes a `resize!` under a recorded
     # plan a few stores instead of a re-record, and it is keyed off
-    # `devicepointeroffsets`, which walks the argument's TYPE. A tuple used to
-    # count as a level of nesting, which put every device pointer in a tuple
-    # argument one past the depth budget: `devicepointeroffsets` answered `()`,
-    # nothing was noted, and a move of an operand left the recorded plan reading
-    # the old storage with no error anywhere. That is the whole reason
-    # `elementwise!` could not take its operands as one tuple.
+    # `devicepointeroffsets`, which walks the argument's TYPE. Counting a tuple
+    # as a level of nesting puts every device pointer in a tuple argument one
+    # past the depth budget: `devicepointeroffsets` answers `()`, nothing is
+    # noted, and a move of an operand leaves the recorded plan reading freed
+    # storage with no error anywhere. That is what stops `elementwise!` taking
+    # its operands as one tuple.
     # Asked of a TYPE, so both backends' descriptors can be checked on either
     # build. `Ptr` is Vulkan's device pointer and `Core.LLVMPtr` is Metal's, and
     # `notify_move!` re-keys on the whole 64-bit address in both cases.
     for DA in (Descriptor{Ptr{Float32}}, Descriptor{Core.LLVMPtr{Float32,1}})
         @test M.devicepointeroffsets(DA) == (0,)
         n1 = sizeof(DA)
-        # A tuple of operands: each one found, exactly as if it had been a
-        # separate argument. These are the assertions that fail without
+        # A tuple of operands: each one found, exactly as if it were a separate
+        # argument. These are the assertions that fail without
         # `nestinglevels`.
         @test M.devicepointeroffsets(Tuple{DA,DA}) == (0, n1)
         @test M.devicepointeroffsets(Tuple{DA,DA,DA}) == (0, n1, 2n1)

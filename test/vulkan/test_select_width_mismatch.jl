@@ -4,8 +4,8 @@
 #     l = lid == 1     ? a[lid] : a[lid - 1]
 #     r = lid == STILE ? a[lid] : a[lid + 1]
 # is lowered by LLVM into an `OpSelect` between two Workgroup pointers (select the
-# base pointer, then access [0]). The emitter used to map the bitcast's pointee
-# `[N x T]` through the regular `map_type!` path while the shared global mapped it
+# base pointer, then access [0]). Mapping the bitcast's pointee `[N x T]`
+# through the regular `map_type!` path, while the shared global maps it
 # through `map_workgroup_type!`, minting two structurally-identical-but-distinct
 # `[N x T]` type ids. The OpSelect then had an operand whose type ≠ its result
 # type → SPIR-V validation error "Expected both objects to be of Result Type: Select".

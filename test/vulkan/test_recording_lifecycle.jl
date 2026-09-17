@@ -4,8 +4,9 @@ submit it.
 
 Three files stood here — `test_capture_replay.jl`, `test_capture_gc.jl` and
 `test_replay_interleaved.jl` — and all three drove `Mantle.capture(f, bq)` over ad
-hoc KernelAbstractions launches. That API is gone: `capture` recorded by running
-the ordinary recorder and collecting whatever `submit!` sealed on the way past,
+hoc KernelAbstractions launches. There is no such API: a `capture` that records
+by running the ordinary recorder and collecting whatever `submit!` seals on the
+way past
 which is why it also EXECUTED, why it needed `bq.capturing` for four separate
 decisions, and why `flush!` had to refuse while one was open. A plan's commands
 are written into a command buffer of its own now.
@@ -30,8 +31,8 @@ ruled out, so the next person does not re-run it: buffer lifetime (of the
 BDA changes), memory returning to the driver (`gpu_live_bytes` is identical
 across the GC), command-buffer recycling, and pool size.
 
-The interleaving case is a real bug this pins. Opening the old batch handed it
-`Mantle.driver(bq).next_timeline + 1` as its signal value, reserving it, and `submit!`
+The interleaving case is a real bug this pins. Opening a batch with
+`Mantle.driver(bq).next_timeline + 1` as its signal value reserves it, and `submit!`
 later asserts the reservation still holds; a submission path that bumped the same
 counter left any open batch with a stale reservation and the next `submit!` died
 with `AssertionError: batch signal desync: 859 vs 860`, naming neither. The shape

@@ -2,8 +2,9 @@
 #
 # Vulkan leaves Workgroup storage undefined at the start of a dispatch, so a
 # kernel that reads a slot it never wrote sees garbage. AcceleratedKernels'
-# block-level merge does exactly that when `len < 2 * block_size`, which used to
-# produce wrong results on Lava and forced an `AK.merge_sort_by_key!` override in
+# block-level merge does exactly that when `len < 2 * block_size`, which
+# produces wrong results without zero-init and forces an
+# `AK.merge_sort_by_key!` override in
 # array/mapreduce.jl. That override was circular — AK builds `sortperm` *on top
 # of* `merge_sort_by_key!` — so the two recursed until either a
 # StackOverflowError or 34 GB of pool growth and ERROR_OUT_OF_DEVICE_MEMORY.
@@ -62,6 +63,6 @@ end
     AK.sortperm!(ix, v)
     Mantle.flush!(Mantle.Device())
     @test h[Array(ix)] == sort(h)
-    # Recursion used to grow the pool by tens of GB before dying.
+    # Recursion through that override grows the pool by tens of GB before dying.
     @test Mantle.gpu_live_bytes() - before < 256_000_000
 end

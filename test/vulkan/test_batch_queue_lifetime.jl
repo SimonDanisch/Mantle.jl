@@ -3,8 +3,8 @@
 #
 # A `ManagedBuffer` records `last_write = (bq, value)`, and its finalizer asks
 # that queue's timeline semaphore whether the GPU has passed `value`. The queue
-# used to be reachable only from the buffers naming it, so when a caller (a
-# RayMakie Screen) and its buffers became garbage together, the SEMAPHORE's own
+# must not be reachable only from the buffers naming it: when a caller (a
+# RayMakie Screen) and its buffers become garbage together, the SEMAPHORE's own
 # finalizer could run first — and `vkGetSemaphoreCounterValue` on a destroyed
 # semaphore segfaults inside the driver rather than returning an error. That is
 # the crash RayMakie's runtests.jl documents as the reason

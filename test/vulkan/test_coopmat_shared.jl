@@ -223,8 +223,8 @@ end
 
 @testset "workgroup layout sizes and alignments for vectors" begin
     # The rule the fix encodes, checked without a GPU: packed size, and Vulkan's
-    # 2x/4x alignment. A vector was previously reported as 4 bytes whatever it
-    # was, which is why only the 2-wide fp16 case worked.
+    # 2x/4x alignment. A vector reported as 4 bytes whatever it is leaves only
+    # the 2-wide fp16 case working.
     LLVM.@dispose ctx = LLVM.Context() begin
         h = LLVM.HalfType(); f = LLVM.FloatType()
         for (ty, sz, al) in ((LLVM.VectorType(h, 2),  4,  4),

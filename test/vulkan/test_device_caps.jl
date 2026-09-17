@@ -117,8 +117,8 @@ import KernelAbstractions as KA
     end
 
     @testset "the shape table is the driver's, and tile is one entry of it" begin
-        # `tile` used to be the module constant `GEMM_TILE`, with a comment
-        # calling it "the cooperative-matrix tile this device implements" — a
+        # `tile` as a module constant `GEMM_TILE` described as "the
+        # cooperative-matrix tile this device implements" is a
         # device fact that no device had answered for. It is now read from the
         # table the driver reports, which Lava had queried all along and thrown
         # away down to a single boolean.

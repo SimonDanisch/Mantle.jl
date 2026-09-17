@@ -40,8 +40,8 @@ using Test, Lava, LinearAlgebra
 
     # ...and the MIRROR case, matrix * Diagonal. GPUArrays has a second method for
     # Diagonal on the right which is ambiguous against the dense GEMM in exactly
-    # the same way. Only the left case was covered here originally, so the right
-    # one shipped broken and GPUArrays' own linalg/diagonal testset caught it.
+    # the same way. Covering only the left case leaves the right one broken,
+    # which GPUArrays' own linalg/diagonal testset catches.
     #
     # Non-square on purpose: D scales COLUMNS here, so a square shape would hide a
     # rows/columns mix-up.

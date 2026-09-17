@@ -199,7 +199,7 @@ end
     # whole intersection — `Scalar` (Mantle's vs StaticArrays') collides and
     # appears only in comments, which is not a defect.
     # Every file, because a bare `using` anywhere in the tree binds for the whole
-    # module — which is the difference the extension split used to hide.
+    # module, which a per-file reading of the imports would miss.
     usings = Set{Symbol}()
     for (root, _, files) in walkdir(SRC), f in files
         endswith(f, ".jl") && union!(usings, bare_usings(joinpath(root, f)))

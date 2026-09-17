@@ -42,7 +42,7 @@ const KA = KernelAbstractions
 
     Mantle.reset_device!()
 
-    # The reset installs a NEW context, and retires the old one. Both halves
+    # The reset installs a NEW context, and retires the outgoing one. Both halves
     # matter: a fresh id is what every per-device cache keys on, and the flag is
     # what every finalizer gates on.
     ctx1 = Mantle.vk_context()

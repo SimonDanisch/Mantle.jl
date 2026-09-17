@@ -14,9 +14,8 @@ this driver: an MWE with an undeclared hazard — two launches, the second
 reading what the first wrote, no barrier anywhere — showed zero errors on
 RADV, and so did its positive control. So what is pinned is that the barrier
 is WRITTEN, counted on the context as it is emitted, once per closed buffer.
-And "no open command buffer" is pinned by the queue having nowhere to keep
-one: the fields that held it are gone, and every closed buffer the queue knows
-about is sealed.
+And "no open command buffer" is pinned by the queue having nowhere to keep one:
+it has no field for one, and every closed buffer it knows about is sealed.
 """
 
 using Test, Mantle, Lava, KernelAbstractions

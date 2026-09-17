@@ -594,7 +594,7 @@ else
         # pass naming only a slice answered `nothing` and the caller skipped the
         # barrier — losing the one hazard no per-resource sequence can see,
         # silently. `usage_of` counts a slice as naming its parent, and the wait
-        # set is gathered across every id the old tenant is tracked under.
+        # set is gathered across every id the vacating tenant is tracked under.
         g3 = M.Graph(dev)
         a3 = M.Transient.Buffer(g3, Float32, n)
         b3 = M.Transient.Buffer(g3, Float32, n)
@@ -678,9 +678,9 @@ else
         # thing being removed. The derivation would look perfect and the barrier
         # would still be a global one.
         #
-        # So this reads the emitted `VkDependencyInfo`. Since the mask tuples of
-        # step 0 of `docs/submission-refactor.md`, a pass lowers its transitions
-        # to one memory barrier per DISTINCT (stage, access) tuple and to no
+        # So this reads the emitted `VkDependencyInfo`. A pass lowers its
+        # transitions to one memory barrier per DISTINCT (stage, access) tuple
+        # and to no
         # buffer barrier at all: a recording names no `VkBuffer`, which is what
         # lets a buffer move under a recorded plan without invalidating it. Two
         # transitions that are the same hazard collapse into one barrier; two
@@ -770,9 +770,9 @@ else
         r = Base.invokelatest(fuzz, 1:20)
         @test r.disagreements == 0
         # Against the same graphs compiled with coalescing off, which is the
-        # question. `possible_total` was the old comparison and it is `passes - 1`:
-        # a plan is replayed, so the first pass needs a barrier against the
-        # previous frame and the real ceiling is one higher. It held only by a
+        # question, and NOT `possible_total`, which is `passes - 1`: a plan is
+        # replayed, so the first pass needs a barrier against the previous frame
+        # and the real ceiling is one higher. That comparison holds only by a
         # margin of one, and narrowing a stage mask — which reduces how much a
         # covering barrier subsumes — was enough to cross it.
         # Equal, not fewer: a scoped barrier cannot subsume another resource's, so
@@ -1042,7 +1042,8 @@ else
         # A resize is not reliably reported: OUT_OF_DATE is what a driver *may*
         # return, and SUBOPTIMAL is a success code that never reaches an error
         # branch. On this platform neither arrives — the window shrank and the
-        # swapchain kept presenting at the old size, which the compositor scales,
+        # swapchain keeps presenting at the previous size, which the compositor
+        # scales,
         # so it looks blurry and reads back at the wrong resolution. What notices
         # is comparing the framebuffer size against what the swapchain was built
         # for, every frame.
@@ -1148,7 +1149,7 @@ else
         # `GLFW.GetFramebufferSize` asks X directly, so a resize can land between
         # `beginframe!`'s sync and the acquire. The acquire's own sync then
         # rebuilt the swapchain UNDER a frame whose attachments were already
-        # refit for the old size: a 1200x900 colour target beside an 800x600
+        # refit for the previous size: a 1200x900 colour target beside an 800x600
         # depth target, which is VUID-VkRenderingInfo-pNext-06079 and, on
         # NVIDIA, a lost device two frames later. Measured 2026-09-07 with
         # `out/resize_race_mwe.jl`: about one resize cycle in three. The acquire
@@ -1259,9 +1260,9 @@ else
     end
 
     @testset "closing a window destroys what it owns" begin
-        # `close` used to destroy only the GLFW window, leaving the swapchain,
-        # its views and the surface to finalizers. Julia does not run finalizers
-        # at exit, so every process ended with
+        # `close` has to destroy the swapchain, its views and the surface as
+        # well as the GLFW window: Julia does not run finalizers at exit, so
+        # leaving them to one ends every process with
         # VUID-vkDestroyInstance-instance-00629 reporting a leaked VkSurfaceKHR,
         # and every resize leaked a swapchain's worth of image views.
         #
@@ -1283,7 +1284,7 @@ else
     @testset "each load op reaches its Vulkan attachment op" begin
         # Discard is the point of the exercise: inferring the op from whether a
         # clear colour was given can only ever pick CLEAR or LOAD, so a pass that
-        # covers every pixel used to pay for a load it discards.
+        # covers every pixel pays for a load it discards.
         E = Mantle
         @test Mantle.loadop(M.Keep) == Mantle.VK.ATTACHMENT_LOAD_OP_LOAD
         @test Mantle.loadop(M.Discard) == Mantle.VK.ATTACHMENT_LOAD_OP_DONT_CARE
@@ -1667,8 +1668,8 @@ else
     @testset "a store writes at the reserved position, whole or ranged" begin
         # Both write in place, inline in the command buffer, at the update pass
         # the graph placed ahead of the render that reads them. A whole-buffer
-        # store used to RENAME into a fresh store, which a recording cannot
-        # follow; nothing renames now, and a ranged store moves only its range.
+        # store that RENAMES into a fresh store is what a recording cannot
+        # follow; nothing renames, and a ranged store moves only its range.
         dev = M.Device(TESTBACKEND)
         win = M.Window(W, H; title = "store")
 
@@ -1737,25 +1738,22 @@ else
         @test_throws "is never used by any pass" M.Plan(g)
     end
 
-    # `custom!` stood here, with two testsets: a pass that declared what it
-    # touched but not how, whose body was a zero-argument callable run with the
-    # batch open, and a second one asserting that the launches INSIDE such a body
-    # were ordered against each other. Both are gone with the pass kind.
+    # There is no `custom!` pass to test: one that declares what it touches but
+    # not how, whose body is a zero-argument callable run with a command buffer
+    # open.
     #
-    # What made it untenable is the second testset's subject. The graph derives
-    # hazards between passes; inside an opaque body it derives nothing, so
-    # `record_pass_work!` had to hand the body a QUEUE and then arrange the
-    # queue's heuristics around it — lift the concurrent group so Lava's
-    # automatic per-dispatch barrier came back for the body's own launches, arm
-    # `next_skip_barrier` so the FIRST of them skipped the one the pass had
-    # already emitted, and disarm it afterwards in case the body launched
+    # The graph derives hazards between passes; inside an opaque body it derives
+    # nothing, so ordering the launches INSIDE one means handing the body a
+    # QUEUE and arranging that queue's heuristics around it — lift the
+    # concurrent group so the automatic per-dispatch barrier comes back for the
+    # body's own launches, arm a skip so the FIRST of them skips the one the
+    # pass already emitted, and disarm it afterwards in case the body launched
     # nothing. Three pieces of queue state, to compensate for a declaration that
-    # did not say what it was doing.
+    # does not say what it is doing.
     #
-    # Its one real user moved off it first: Hikari's hardware-RT pass is a
-    # `trace!` now, because a `custom!` body packs its own arguments while it
-    # runs and a recorded plan never runs the body again — see
-    # `Hikari/test/test_trace_pass_rebind.jl`. Nothing in `src/` used it.
+    # A hardware-RT pass is a `trace!` for the same reason: a `custom!` body
+    # packs its own arguments while it runs, and a recorded plan never runs the
+    # body again — see `Hikari/test/test_trace_pass_rebind.jl`.
 
     @testset "a dispatch takes a workgroup size" begin
         # The default partitions an ndrange along its first axis, so for anything
@@ -1990,12 +1988,12 @@ else
         @test litcount(2, UInt32[0, 1, 2]) == 2tri
     end
 
-    @testset "an aliased region waits for what the old tenant last did" begin
+    @testset "an aliased region waits for what the vacating tenant last did" begin
         # The handover barrier is the one transition no per-resource sequence can
         # produce: the hazard is between two transients that never mention each
-        # other. It used to be assumed — "wait for every stage, both directions"
-        # — which is correct and unfalsifiable. It is now assembled from what the
-        # placer says vacated the bytes and what the state walk says that
+        # other. Assumed — "wait for every stage, both directions" — it is
+        # correct and unfalsifiable. Assembled instead from what the placer says
+        # vacated the bytes and what the state walk says that
         # transient was last doing.
         #
         # So the discriminating question is whether the masks *follow* the old
@@ -2045,8 +2043,8 @@ else
         # taking `raw`'s bytes. Its `from` is what the vacating transient last
         # did. Read from the transition, not the lowered barrier masks, because
         # both graphs also carry the transfer barrier of a host-written buffer's
-        # store (`seed`/`mid`), which now puts the copy stage in a fill-pass
-        # barrier in EITHER case — so the masks no longer tell the two apart.
+        # store (`seed`/`mid`), which puts the copy stage in a fill-pass barrier
+        # in EITHER case, so the masks do not tell the two apart.
         aliashandover(plan) = only(t for pp in plan.passes if pp.pass.name == "fill"
                                    for t in pp.pre if t.resource == 0)
 
@@ -2055,13 +2053,13 @@ else
         @test M.peakbytes(a.plan) < M.naivebytes(a.plan)   # they really do share bytes
         @test M.peakbytes(b.plan) < M.naivebytes(b.plan)
 
-        # The handover tracks the old tenant: a copy wrote it in one, a shader
-        # read it in the other.
+        # The handover tracks the vacating tenant: a copy wrote it in one, a
+        # shader read it in the other.
         @test aliashandover(b.plan).from === M.CopyDst
         @test aliashandover(a.plan).from !== M.CopyDst
 
         # And neither of them, nor any other barrier in either frame, says
-        # "wait for everything" — which is what both used to say.
+        # "wait for everything", which is what an assumed handover says.
         for plan in (a.plan, b.plan)
             masks = filter(!isnothing, [passmasks(pp) for pp in plan.passes])
             @test !isempty(masks)
@@ -2096,8 +2094,8 @@ else
     end
 
     @testset "a render pass with only a depth target" begin
-        # A shadow map is a pass that writes depth and nothing else, which used to
-        # be "a render pass needs a colour target". The render area then has to
+        # A shadow map is a pass that writes depth and nothing else, so a render
+        # pass does not need a colour target. The render area then has to
         # come from the depth attachment, because there is nothing else to take it
         # from, and the fragment shader has to be allowed to write no attachment.
         N = 64

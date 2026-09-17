@@ -22,8 +22,8 @@ Metal backend does not have.
 them to core means widening that to `::AbstractGPUArray`, and doing that today
 would make Mantle claim `LinearAlgebra.mul!` for every GPU array type in the
 session, CUDA's included. That widening needs a second backend to be designed
-against — which is exactly what step 5 pairs the decision with ("prove a vendor
-override works"). The capability queries were the half that could be done blind.
+against, which is what pairs that decision with proving a vendor override
+works. The capability queries are the half that can be done blind.
 
 This file is the ratchet: the count may fall and may not rise. A new
 `vk_context(` in `fft.jl` is a regression whether or not anything fails.
@@ -46,21 +46,20 @@ const KA = KernelAbstractions
 # one is solvable: the entry points stay in the backend and the kernels move,
 # which is the shape a Metal backend would repeat.
 #
-# The real blocker WAS `AcceleratedMatrix`, and it is gone as of 2026-08-28.
+# `AcceleratedMatrix` is the type that had to move, and it has.
 #
-# The cooperative-matrix half of GEMM is written against it, and it used to be
-# **Lava's type**: the coopmat merge (step 2) took the vocabulary (`MatrixA`,
-# `Accumulator`, `MatrixShape`, `DeviceCaps`) and left the matrix type itself
-# behind, so core would have had to name a Lava type to hold these kernels —
-# the dependency the whole split exists to remove. A first attempt died exactly
-# there: `UndefVarError: AcceleratedMatrix not defined in Mantle`.
+# The cooperative-matrix half of GEMM is written against it. As a compiler's own
+# type — the vocabulary (`MatrixA`, `Accumulator`, `MatrixShape`, `DeviceCaps`)
+# in KI and the matrix type left behind — core would have to name a Lava type to
+# hold these kernels, which is the dependency the whole split exists to remove:
+# `UndefVarError: AcceleratedMatrix not defined in Mantle`.
 #
 # `CoopMatrix{T,M,N,Use,Scope}` and its `AcceleratedMatrix`/`WorkgroupMatrix`
 # aliases are `KernelInterface`'s now, beside the vocabulary that went ahead of
 # them. The type was always portable — one `Int32` SSA anchor, no element
 # storage — and what stayed in Lava is the 766 lines of `llvmcall` that lower
 # KI's nine `coopmat_*` operations to `OpCooperativeMatrix*`. `Mantle` names the
-# type through `using KernelInterface` and no longer needs Lava for it.
+# type through `using KernelInterface` and needs Lava for none of it.
 #
 # So the prerequisite is met and what remains for GEMM is the OTHER blocker, the
 # one this file already called solvable: `LinearAlgebra.mul!` is Base's, so the
@@ -118,8 +117,8 @@ const VULKAN_BUDGET = Dict(
         @test isdir(core)
         for f in ("gemv.jl", "fft.jl")
             src = read(joinpath(core, f), String)
-            # In CODE. The headers explain what they used to say, so the word
-            # itself is expected in prose.
+            # In CODE. The headers discuss these names, so the word itself is
+            # expected in prose.
             offenders = [l for l in split(src, '\n')
                          if occursin(r"\bLavaArray\b|\bLavaBackend\b|\bVkContext\b", l) &&
                             !startswith(strip(l), "#")]

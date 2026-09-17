@@ -50,8 +50,8 @@ end
     conflicting = sort([String(n) for n in shared
                         if getproperty(Lava, n) !== getproperty(Mantle, n)])
     @test conflicting == String[]
-    # …and the benign overlap is exactly the vocabulary, not something that drifted
-    # into being defined twice.
+    # …and the benign overlap is exactly the vocabulary, not a name defined
+    # twice.
     @test all(n -> parentmodule(getproperty(Mantle, n)) !== Mantle ||
                    getproperty(Lava, n) === getproperty(Mantle, n), shared)
 end

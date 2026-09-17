@@ -6,7 +6,7 @@
 # a race. Both halves are pinned here, on kernels small enough that the answer is
 # obvious by reading them.
 #
-# The cases are the ones that were wrong at some point while it was written:
+# The cases are the ones a walk over typed IR gets wrong:
 #
 #   * a scalar argument came back read+write, because an argument was tainted
 #     before its type was asked whether it could reach memory at all;
@@ -165,8 +165,8 @@ end
     n = 64
     dst = M.devicearray(dev, Float32, n)
     # "No store" is the one answer that must never be a guess — it is the answer
-    # that removes a barrier. This used to widen to read+write, which is safe
-    # for the barrier phase and indistinguishable from a proof; the kernel does
+    # that removes a barrier. Widened to read+write it is safe for the barrier
+    # phase and indistinguishable from a proof; the kernel does
     # not compile either, so the refusal is the same error arriving earlier with
     # the argument named.
     err = try
@@ -210,8 +210,8 @@ end
     # with graph handles still inside it, `setindex!` has no method for one, and
     # the kernel infers to nothing but its throw path. It cannot RUN either --
     # the packer would be handed a non-isbits `AccPair{Buffer}` and GPUCompiler
-    # would refuse it -- so this assertion used to pass because the walk widened
-    # that throw path to read+write, on a dispatch that could never execute.
+    # would refuse it -- so a walk that widens that throw path to read+write
+    # makes this assertion pass on a dispatch that can never execute.
     #
     # Resolving a struct of resources elementwise is the remaining half of what
     # `storage(::Tuple)` did; until then a container argument holds device
@@ -256,8 +256,8 @@ end
     # `_lava_coopmat_load_f16_16x16_a` is not a `load` instruction, and the
     # module it lives in has none: an `llvmcall` for a backend intrinsic is a
     # `declare` plus a `call`, so there is nothing in the IR that says a load is
-    # a read. It was classified by `occursin("load ", src)`, which that name
-    # misses by a space, so it fell through to read+write.
+    # a read. Classified by `occursin("load ", src)`, which that name misses by
+    # a space, it falls through to read+write.
     #
     # The op is what both of Lava's naming schemes put first and what Lava's own
     # emitter parses them back out as, so a prefix covers every load and store
@@ -320,7 +320,7 @@ end
     @test M.llvmcallee(mystery) === :_lava_mystery
     @test M.llvmcallusage(mystery) === nothing
 
-    # And the whole of it on the kernel that was wrong: `gemm_cm2!` takes
+    # And the whole of it on the kernel it matters for: `gemm_cm2!` takes
     # `C, @Const(A), @Const(B)`, so the walk must agree with the `@Const` the
     # author already wrote. It did not -- all three came out read+write, and
     # every pass sharing a weight matrix with another got a barrier for it.

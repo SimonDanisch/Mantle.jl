@@ -1,8 +1,8 @@
 """
 One `hold!` on a trace's acceleration structure covers both levels.
 
-`pintrace!` used to be core's statement that a trace holds the top level and
-every bottom level it instances, and it existed because the four Vulkan sites
+`pintrace!` as core's statement that a trace holds the top level and every
+bottom level it instances exists because the four Vulkan sites
 that trace — the recorded walk, `trace_rays!`, `trace_rays_indirect!` and
 `bindtlas!` — each wrote the walk out and could drift: a BLAS missing from one
 of them is a use-after-free that only shows when `Raycore.sync!` swaps a BLAS

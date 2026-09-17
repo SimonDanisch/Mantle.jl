@@ -1,7 +1,7 @@
 # A dispatch's kernel is a plain Julia function, on every backend.
 #
-# `dispatch!` used to require a `@kernel`, and not as a stated rule: the path
-# that compiled one was the only path there was. `kernelfor(k, nothing, backend)`
+# `dispatch!` requires no `@kernel`, which as an unstated rule is just "the path
+# that compiles one is the only path there is". `kernelfor(k, nothing, backend)`
 # is `k(backend)`, which is what KernelAbstractions' macro generates — a
 # CONSTRUCTOR that answers a backend and returns a launchable object. Hand it a
 # kernel written against `KernelInterface`'s intrinsics instead and the call is a
@@ -9,8 +9,8 @@
 # `dispatch!` that caused it.
 #
 # The predicate that separates the two is `buildskernel`, and it is ONE
-# predicate in core on purpose. It was three: Lava asked `hasmethod` in
-# `compile_dispatch`, the ROCm extension asked the same thing as `kifunction`,
+# predicate in core on purpose. Three of them is what it looks like otherwise:
+# `hasmethod` in `compile_dispatch`, the same question as `kifunction`,
 # and core's own `bake` did not ask at all, so the backend a graph fell back to
 # was the one that could not run the kernel. Three copies of a decision about
 # what a dispatch MEANS is the shape of thing `docs/mantle-owns-it.md` is about:

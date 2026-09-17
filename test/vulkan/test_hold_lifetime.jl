@@ -1,11 +1,10 @@
-# What a submission holds, and when it lets go — phase 2.2 of
-# `docs/mantle-owns-it.md`, from the outside.
+# What a submission holds, and when it lets go, from the outside.
 #
-# This was `test_phase1_pin.jl`, which asserted the mechanism: an `IdSet` of
-# pinned objects on the closed command buffer, a `pinned_refs` list of retained
-# `DataRef`s beside it, and `sync_access!` stamping `last_write_bq` at submit.
-# All three were the backend deciding a lifetime, and all three are gone. The
-# PROPERTY they existed for is the same and is what this file pins:
+# Asserted as a PROPERTY and not as a mechanism: an `IdSet` of pinned objects on
+# the closed command buffer, a `pinned_refs` list of retained `DataRef`s beside
+# it, and a backend stamping `last_write_bq` at submit are three ways for a
+# backend to decide a lifetime. What they are for is the same either way, and it
+# is what this file pins:
 #
 #   * while a submission that names an array is in flight, the buffer is held
 #     and cannot be destroyed;
@@ -33,8 +32,8 @@ holders(a) = @atomic Mantle.stampof(a).holders
 
 @testset "hold! — what a submission holds, and when it lets go" begin
 
-@testset "the deleted mechanism is gone" begin
-    # Not "renamed": these named a decision the backend was making.
+@testset "no backend-side pinning mechanism" begin
+    # Not "renamed": these name a decision the backend must not make.
     @test !isdefined(Mantle, :pin!)
     @test !isdefined(Mantle, :sync_access!)
     @test !isdefined(Mantle, :pin_leaves!)

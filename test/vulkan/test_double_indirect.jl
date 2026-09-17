@@ -7,8 +7,8 @@
 #     v    = face_v[best_idx]   # NTuple{3, Int32}
 #     vert = verts_m[v[1]]      # Vec3f
 #
-# It used to miscompile: the SPIR-V emit path constant-folded too aggressively and
-# wrote a fixed wrong byte pattern (Vec3f(0,0,0)) instead of the indexed value.
+# The failure it pins: a SPIR-V emit path that constant-folds too aggressively
+# writes a fixed byte pattern (Vec3f(0,0,0)) instead of the indexed value.
 # Discovered bringing up narrow_phase_kernel. The emit fixes that landed since
 # resolved it, but nothing guarded it: the original file was an MWE gated with
 # `@test_skip`, was never registered in runtests.jl, and had bit-rotted to the

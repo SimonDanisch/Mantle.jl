@@ -33,8 +33,8 @@ correctness and would otherwise go unnoticed.
 using Test, Lava, Mantle, KernelAbstractions
 
 # `compile_and_disasm` comes from Lava's SPIR-V test helpers, which moved to
-# `Lava/test/` with the emission suite. This file used to get it from whatever
-# had already been included by the time `runtests.jl` reached it — so it passed
+# `Lava/test/` with the emission suite. Taken from whatever has already been
+# included by the time `runtests.jl` reaches this file, it passes
 # in the full run and errored when run on its own. Included by name, with the
 # same `@isdefined` guard the other users have.
 if !@isdefined(SPIRVTestUtils)

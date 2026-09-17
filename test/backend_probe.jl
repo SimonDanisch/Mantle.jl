@@ -4,8 +4,8 @@
 # loader on a Mac, `Metal` has no device in a CI container or a VM. In either
 # case the suite must SKIP rather than error.
 #
-# It used to error. A bare `import Vulkan` at file scope took the whole run down
-# on a machine with no `libvulkan`, before it reached the Metal tests or the
+# A bare `import Vulkan` at file scope takes the whole run down on a machine
+# with no `libvulkan`, before it reaches the Metal tests or the
 # includes below it — the same failure mode the `HAVE_BENCH` note in
 # `runtests.jl` describes, where "the suite failed" hides "N files never ran".
 #

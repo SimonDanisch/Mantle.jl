@@ -1,13 +1,13 @@
 # Which plans can be recorded, and that both answers are right.
 #
 # `run!` records on the first run of any plan it can record, so "can it" has to be
-# decided somewhere and be right. ONE thing says no now — a SURFACE, since a
-# swapchain image is a different image every frame and a recording names one, and
-# step 4 renders into a fixed offscreen target instead.
+# decided somewhere and be right. ONE thing says no: a SURFACE, since a
+# swapchain image is a different image every frame and a recording names one.
 #
-# There were two. A whole-buffer `Update` used to land by RENAMING, which a
-# recording cannot follow because it holds the address it was written with, so a
-# ranged update recorded and a whole-buffer one did not. Both write in place now,
+# The other candidate is an `Update`. A whole-buffer one landing by RENAMING is
+# what a recording cannot follow, because it holds the address it was written
+# with, so a ranged update would record and a whole-buffer one would not. Both
+# write in place,
 # and the two testsets below pin that from the outside: same numbers, same
 # recording, and the store the plan was compiled against is still the store.
 #
@@ -73,9 +73,10 @@ end
     M.free!(pl)
 end
 
-# A whole-buffer store used to RENAME: the contents landed in a fresh store
-# and the resource was pointed at it, which a recording cannot follow, because it
-# holds the address it was written with. That made this plan unrecordable, and it
+# A whole-buffer store that RENAMES — the contents landing in a fresh store with
+# the resource pointed at it — is what a recording cannot follow, because it
+# holds the address it was written with. That would make this plan unrecordable,
+# and it
 # was one of the two reasons `record!` could refuse one.
 #
 # Both routes are in place now — see `emitstore!` — so the plan records and
@@ -152,4 +153,4 @@ end
 
 # The SURFACE half of `recordable` is not asserted here: it needs a real window,
 # and a window in the main suite is what `test_window.jl` runs in its own process
-# with a deadline for. `record!`'s refusal names it, and step 4 removes it.
+# with a deadline for. `record!`'s refusal names it.

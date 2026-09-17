@@ -8,8 +8,8 @@ those separately would add ~11 500 dispatches to an encode that currently makes
 1972 — the recording cost alone would swamp the tensor-core win.
 
 Batching is a decomposition of the subgroup index rather than a second kernel,
-so `nbatch = 1` must remain *exactly* the old arithmetic. The first testset is
-what pins that.
+so `nbatch = 1` must be *exactly* the unbatched arithmetic. The first testset
+is what pins that.
 """
 
 using Test, Lava, KernelAbstractions, LinearAlgebra

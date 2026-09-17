@@ -21,8 +21,8 @@
 # Requires AMDGPU.jl, which Mantle weak-depends on: `import AMDGPU` loads
 # `MantleROCmExt` and there is nothing else to do.
 #
-# This file used to `include` the extension file by hand, because `[weakdeps]`
-# and `[extensions]` were both missing from `Project.toml` and nothing loaded
+# `include`ing the extension file by hand is what a missing `[weakdeps]` /
+# `[extensions]` pair in `Project.toml` forces, since nothing loads
 # it otherwise. That include is not a substitute: it defines the extension's
 # methods in `Main`, so `Base.get_extension(Mantle, :MantleROCmExt)` answers
 # `nothing` and `Mantle.openrecording` ends up with TWO methods for two
@@ -245,8 +245,8 @@ end
     # …and the next run REFUSES, because re-recording is not enough: the
     # compiled dispatch holds the array it resolved at `Pipelines` time, not a
     # pointer into argument memory the way Vulkan's does, so the walk it would
-    # capture still names the old storage. Saying so beats replaying the old
-    # buffer's answer, which is what it did before `checkresolved`.
+    # capture still names the previous storage. Saying so beats replaying that
+    # buffer's answer, which is what happens without `checkresolved`.
     @test_throws ArgumentError M.run!(pl)
     # A plan built again against the resized buffer gives the new answer.
     g2 = M.Graph(dev)
@@ -295,8 +295,8 @@ end
     #
     # This backend implements no `recordplan!` and no sequence type: the chunked
     # walk is core's `recordparts!` and the sequence is core's `RecordingParts`,
-    # so all this backend answers is `submitrecording!` for ONE piece. It used to
-    # refuse a partition outright, because the walk lived in the Vulkan backend
+    # so all this backend answers is `submitrecording!` for ONE piece. Refusing a
+    # partition outright is what follows from the walk living in the Vulkan backend
     # and nothing portable built one — which is also why `HorizonRunner`, whose
     # prefill asks for 64, could only be recorded there.
     n, links = 1024, 8

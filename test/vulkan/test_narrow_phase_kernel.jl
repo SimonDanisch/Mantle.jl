@@ -63,8 +63,8 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
         # Four unit cubes (extents +/-1) at the corners of a 1.9-side square in the
         # XY plane.  Adjacent cubes overlap by 0.1 along one axis; diagonal cubes
         # overlap at a 0.1x0.1 corner -- ALL six C(4,2) pairs overlap.
-        # Verified by directly calling gjk() on each pair before this test was
-        # written (depth ≈ 0.1f0 in every case).
+        # Verified by calling gjk() on each pair directly (depth ≈ 0.1f0 in
+        # every case).
         transforms = [tx(0,0,0), tx(1.9,0,0), tx(0,1.9,0), tx(1.9,1.9,0)]
         pairs = [
             (Int32(1), Int32(2)),  # adjacent X

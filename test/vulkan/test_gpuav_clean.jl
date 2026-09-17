@@ -86,7 +86,7 @@ else
 
     # Regression for the GPU-AV fault-readback DEADLOCK.
     #
-    # The Vulkan debug-utils callback used to `@error`/`push!` (allocate + log)
+    # The Vulkan debug-utils callback must not `@error`/`push!` (allocate + log)
     # from inside the driver's GPU-AV error readback, which the layer invokes
     # re-entrantly during `vkWaitSemaphores`.  Logging there yields to the Julia
     # scheduler while the driver holds an internal lock, hanging the process
@@ -104,8 +104,8 @@ else
             @info "GPU-AV did not attach on this driver — skipping fault-readback test"
             @test_skip true
         else
-            # First caught fault must be reported (this is exactly the call that
-            # used to hang forever).
+            # First caught fault must be reported (this is the call that hangs
+            # if the callback allocates).
             @test Mantle.verify_gpu_av(timeout=30.0) == true
             # And we must be able to KEEP GOING: a second probe proves the
             # post-fault `reset_device!` left a usable, still-instrumented

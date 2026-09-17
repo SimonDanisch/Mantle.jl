@@ -3,7 +3,7 @@ Two devices in one process: the acceptance probe for `GUARDRAILS.md` §8.
 
     julia --project=<env> dev/Lava/test/twodevice_probe.jl
 
-**It passes**, and is in `runtests.jl`. It was held out while it segfaulted,
+**It passes**, and is in `runtests.jl`. A probe that segfaults is held out,
 because a segfault takes the whole suite with it.
 
 ## Why this is possible now, and was not before
@@ -98,11 +98,10 @@ below was visible until everything above it was fixed.
    rather than a bare dispatch, because a global that only some kernels touch is
    invisible to a probe that only runs one kernel.
 
-7. **`_REDUCE_SCRATCH`** — FIXED (now `ctx.caches.reduce_scratch`). It was an
-   `IdDict` keyed by context,
-   and still allocated its buffer on `vk_context()`. Keyed right, allocated
-   wrong — which reads as correct on any machine with one device, and is the
-   subtlest shape in this whole list.
+7. **`_REDUCE_SCRATCH`** — FIXED (now `ctx.caches.reduce_scratch`). As an
+   `IdDict` keyed by context it still allocated its buffer on `vk_context()`:
+   keyed right, allocated wrong, which reads as correct on any machine with one
+   device and is the subtlest shape in this whole list.
 
 8. **`WORKGROUP_LIMIT`** — FIXED (now `caps(ctx).workgrouplimit`). Listed here as
    "a policy limit, not a queried one", which was the whole defect: it was a

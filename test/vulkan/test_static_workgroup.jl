@@ -1,28 +1,21 @@
 """
-FIXED. A workgroup passed in the kernel's TYPE used to compute wrong global
-indices when it had an INTERIOR unit extent; it no longer does, verified with
-`Mantle.WORKGROUP_FALLBACK` switched OFF across every shape below.
+A workgroup passed in the kernel's TYPE computes the right global indices for
+every shape below, including the ones with an INTERIOR unit extent, verified
+with `Mantle.WORKGROUP_FALLBACK` switched OFF.
 
-The fault was: with such a workgroup baked into the kernel's type, the block
-index decode took the wrong divisor for dimension 2 and exactly
-`min(1, blocks[3] / blocks[2])` of the output was written, silently. A *trailing*
-unit extent was harmless, which is why ranks 1-3 looked clean. It was Lava's
-codegen, not KernelAbstractions': the same kernel, workgroup and ndrange were
-correct on `KA.CPU()`.
+What that guards against: with such a workgroup baked into the kernel's type, a
+block index decode taking the wrong divisor for dimension 2 writes exactly
+`min(1, blocks[3] / blocks[2])` of the output, silently. A *trailing* unit
+extent is harmless, which is why ranks 1-3 look clean, and it is a codegen
+fault rather than a KernelAbstractions one: the same kernel, workgroup and
+ndrange are correct on `KA.CPU()`. `permutedims!` uses the typed spelling, so
+`ndrange = (72, 256, 8, 16)` with `wg = (32, 4, 1, 1)` leaves 2 064 384 of
+2 359 296 destination elements never written, with no error anywhere.
 
-Found because `permutedims!` used the typed spelling: `ndrange = (72, 256, 8, 16)`
-with `wg = (32, 4, 1, 1)` left 2 064 384 of 2 359 296 destination elements never
-written, with no error anywhere.
-
-This file previously asserted the fault was STILL PRESENT with the guard off, so
-that nobody deleted a load-bearing guard. Those assertions now fail, which is how
-the fix was noticed — the file was never registered in runtests.jl, so nobody ran
-it. They are flipped to assert correctness.
-
-OPEN: `Mantle.WORKGROUP_FALLBACK` re-launches the affected shapes through the
-dynamic path at roughly 2x the cost of the static one. With the fault gone it is
-dead weight, but it has only been re-verified on one device (AMD 8060S / Windows).
-Confirm on the other drivers before removing it.
+`Mantle.WORKGROUP_FALLBACK` re-launches the affected shapes through the dynamic
+path at roughly 2x the cost of the static one. With the codegen correct it buys
+nothing, but that is so far verified on one device (AMD 8060S / Windows), so
+confirm on the other drivers before removing it.
 
 The API rule still holds and is still worth following:
 
@@ -107,27 +100,20 @@ end
         @test coverage((8, 8, 8, 8, 8), (8, 1, 1, 1, 1), :typed) == 1.0
     end
 
-    # ── the fault itself, with the guard OFF — REPAIRED ───────────────────────
+    # ── the decode itself, with the guard OFF ─────────────────────────────────
     #
-    # These three testsets pinned the codegen fault precisely so a repair would
-    # turn them red, and on 2026-09-04 they went red: every shape below covers
-    # its full ndrange with the guard OFF (RADV, this tree — the submission
-    # arc's emitter work, not a driver update; the same tree pinned the fault
-    # on 2026-07-31). They now pin the REPAIRED behaviour.
+    # Every shape below covers its full ndrange with `WORKGROUP_FALLBACK` off,
+    # which is what makes `trailing_unit_ndrange`, `interior_unit_workgroup` and
+    # the guard in `ka_backend.jl` deletable. The deletion is left for a
+    # driver-matrix pass: the guard on costs nothing and the emitter is so far
+    # proven on one driver.
     #
-    # What that buys: `trailing_unit_ndrange`, `interior_unit_workgroup` and the
-    # `WORKGROUP_FALLBACK` guard in `ka_backend.jl` are now deletable — a day
-    # of the failure law holding would have been the reason to keep them, and
-    # the law is gone. The deletion is left for a driver-matrix pass: the guard
-    # on costs nothing and the repair is so far proven on one driver.
-    #
-    # Lava was *correct* through all of this — the guard was on by default, and
-    # "WORKGROUP_FALLBACK makes the typed form correct everywhere" below covered
-    # the shipped behaviour.
+    # With the guard on the typed form is correct either way, which is what
+    # "WORKGROUP_FALLBACK makes the typed form correct everywhere" below covers.
 
-    @testset "workitems[3] == 1 was the trigger; no longer" begin
-        # Sharpest form of the bug, repaired. At rank 4 the typed spelling was
-        # wrong IFF the THIRD workgroup extent was 1; `wg[4]` was irrelevant.
+    @testset "workitems[3] == 1 is not a trigger" begin
+        # Sharpest form of the fault: at rank 4 the typed spelling is wrong IFF
+        # the THIRD workgroup extent is 1, and `wg[4]` is irrelevant.
         ND = (64, 256, 8, 2)
         for wg in ((32, 4, 2, 1), (32, 4, 4, 1))
             # 512 threads for the second: past the limit, and deliberately so.
@@ -138,17 +124,17 @@ end
         end
     end
 
-    @testset "an INTERIOR unit extent was the trigger; no longer" begin
-        # The same repair, generalised past rank 4.
+    @testset "an INTERIOR unit extent is not a trigger either" begin
+        # The same, generalised past rank 4.
         ND5 = (32, 128, 8, 4, 2)
         @test coverage(ND5, (16, 4, 1, 1, 1), :typed; fallback = false) == 1.0
         @test coverage(ND5, (16, 4, 2, 1, 1), :typed; fallback = false) == 1.0
         @test coverage(ND5, (16, 4, 2, 2, 1), :typed) == 1.0
     end
 
-    @testset "the failure law no longer fires" begin
-        # Was `min(1, b3/b2)` exactly — dimension 2 of the block grid decoded
-        # with dimension 3's extent as its divisor. Now every cell is whole.
+    @testset "the failure law does not fire" begin
+        # The law is `min(1, b3/b2)` exactly — dimension 2 of the block grid
+        # decoded with dimension 3's extent as its divisor. Every cell is whole.
         law(b2, b3) = coverage((64, 4b2, b3, 2), (32, 4, 1, 1), :typed; fallback = false)
         for (b2, b3) in ((2, 1), (4, 2), (8, 1), (16, 4), (64, 8),
                          (2, 2), (4, 4), (8, 16), (2, 8))
@@ -157,8 +143,8 @@ end
     end
 
     @testset "WORKGROUP_FALLBACK makes the typed form correct everywhere" begin
-        # The guard is the point of all the above. With it on, every shape that
-        # used to be silently wrong is right, and nothing that worked changes.
+        # The guard is the point of all the above: with it on, every shape here
+        # is right whatever the emitter does with the typed form.
         for (nd, wg) in (((64, 256, 8, 2), (32, 4, 1, 1)), ((64, 256, 8, 2), (32, 4, 1, 2)),
                          ((64, 256, 8, 2), (32, 1, 1, 1)), ((72, 256, 8, 16), (32, 4, 1, 1)),
                          ((72, 8, 1, 1), (32, 4, 1, 1)), ((32, 128, 8, 4, 2), (16, 4, 1, 1, 1)),
@@ -193,9 +179,9 @@ end
     @testset "no shaping rule may exceed the thread budget" begin
         # The one invariant that is not a performance preference: a workgroup
         # larger than `maxComputeWorkGroupInvocations` does not run slowly, it
-        # does not complete. `staticgroup` used to give every interior axis 2
-        # threads unconditionally — `2^(N-2)`, i.e. 65 536 at rank 18 — and
-        # GPUArrays' 18-d `permutedims` hung for the full 120 s flush timeout,
+        # does not complete. `staticgroup` giving every interior axis 2 threads
+        # unconditionally is `2^(N-2)`, i.e. 65 536 at rank 18, and GPUArrays'
+        # 18-d `permutedims` then hangs for the full 120 s flush timeout,
         # failing the 354 assertions that came after it.
         shapes = Any[]
         for n in 1:20

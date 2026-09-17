@@ -5,8 +5,8 @@ A backend knows which device it runs on, and pins it when it is built.
 `VulkanBatchQueue.ctx` and `Buffer.ctx`. The value is the name, not new state; a
 second copy of a fact the queue already holds could only disagree with it.
 
-`LavaBackend()` used to store `nothing` in both queue fields and resolve the
-process default at every property access, so that a module-level
+`LavaBackend()` storing `nothing` in both queue fields and resolving the process
+default at every property access is what makes a module-level
 `const BACKEND = LavaBackend()` survived `reset_device!`. That made "which
 device" a global lookup on every launch, and a backend handed to code that also
 held a second device dispatched on whichever was current. Every spelling pins

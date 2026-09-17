@@ -79,9 +79,8 @@ loop iteration as the divided-index shared store.** Tighter than "in scope".
 
 ## 2026-08-02, later: SETTLED — the module is valid and NVIDIA miscompiles it
 
-This section previously said the bug "cannot be settled on this machine", because
-"lavapipe reports `coopmat available: false` (subgroup size 8)". **That was wrong,
-and it closed the cheapest route for no reason.** lavapipe reports
+It can be settled on this machine, and "lavapipe reports `coopmat available:
+false` (subgroup size 8)" is not a reason it cannot: lavapipe reports
 `coopmat_available = true` with four 8x8x8 shapes, `Float16` among them, at
 subgroup scope. It is a second, independent cooperative-matrix consumer, and it
 was sitting on this box the whole time.
@@ -144,8 +143,7 @@ non-power-of-two `%` or `÷` — a division feeding a **global** address is fine
     attention.jl coopmat kernels    no        yes    n/a
     layernorm.jl, ops.jl            yes       no     no: `red[t+1]`, `sh[lt]`
 
-Two were affected and both are fixed. `flash.jl`'s was the one that had been
-sitting as a documented "unexplained" blocker.
+Two are affected and both are fixed.
 """
 
 using Test, Lava, KernelAbstractions
@@ -233,7 +231,7 @@ end
 # The second consumer, and the testset that settled where the dropped stores come
 # from. It needs no second card: the Vulkan loader enumerates lavapipe alongside
 # the real GPU on every machine here, and lavapipe DOES have cooperative matrices
-# — four 8x8x8 shapes — which is the fact this file previously got wrong.
+# — four 8x8x8 shapes — which is what makes the second consumer available.
 @testset "the same pattern on a second cooperative-matrix consumer" begin
     lp = try
         Mantle.VkContext(select = "llvmpipe")

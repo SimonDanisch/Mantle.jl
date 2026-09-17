@@ -121,8 +121,9 @@ relerr(got, want) = maximum(abs, got .- want) / maximum(abs, want)
 
         # Sizes with `reps > 1` in a stage are the ones that caught the
         # gather/scatter aliasing bug — a stage of radix r < Rmax has more
-        # butterflies than threads, and the second pass used to read slots the
-        # first had already overwritten. 96 and 400 both hit it; 40 did not,
+        # butterflies than threads, so the second pass reads slots the first has
+        # already overwritten unless they are staged. 96 and 400 both hit it; 40
+        # does not,
         # because its read and write sets happened to be disjoint. Keep all
         # three.
         for N in (6, 10, 12, 15, 20, 24, 40, 48, 60, 96, 120, 400, 480, 960)

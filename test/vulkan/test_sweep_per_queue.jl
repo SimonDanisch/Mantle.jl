@@ -2,8 +2,8 @@
 A queue's sweep asks THAT queue's timeline, not the device's.
 
 Every `VulkanBatchQueue` has its own timeline semaphore, and a token is a value
-on it. Core `sweep!` used to ask `passed(dev, token)`, which the Vulkan device
-answers with its DEFAULT queue's counter — so a submission on a second queue
+on it. A `sweep!` asking `passed(dev, token)` gets the DEFAULT queue's counter
+from the Vulkan device, so a submission on a second queue
 (RayMakie's graphics queue, which blits and draws overlays) was judged by the
 wrong timeline. The default queue is always far ahead of a queue that carries
 three submissions per frame, so the second queue's submissions were swept the
@@ -11,9 +11,9 @@ moment they were made: their one-shots went back to the pool while the GPU was
 still executing them, the next `oneshot` on that queue popped the SAME command
 buffer and began it again mid-flight, and the overlay came out blank
 (`test_overlay_compositing.jl`: 0 green pixels) or the device was lost. The
-old per-queue `sweep_retired!` had compared against `query_timeline(bq)`; the
-one record of what is in flight (backend-independence step 7) moved the sweep
-into core and inherited the device-shaped question.
+a per-queue sweep compares against `query_timeline(bq)`, and moving to one
+record of what is in flight puts the sweep in core, where the question is
+device-shaped.
 
 Deterministic rather than raced: the second queue's submission WAITS on a
 timeline the HOST signals, so it cannot complete until this file lets it;

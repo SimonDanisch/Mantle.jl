@@ -65,8 +65,8 @@ end
 
     # Ragged extents that DO reach the staged kernel. Asserting that is the point:
     # a shape can be ragged and still be too small to tile, in which case it goes
-    # to the per-element kernel and proves nothing about the guarded arm. Three of
-    # the shapes originally in this list did exactly that.
+    # to the per-element kernel and proves nothing about the guarded arm, which
+    # is what makes the shape list worth checking.
     @testset "ragged extents on the guarded arm" begin
         for (M, K, N) in ((193, 97, 257),        # ragged in all three
                           (1536, 384, 1370),     # ragged N only
@@ -204,8 +204,8 @@ end
     end
 
     # The per-element kernel reduces in `gemmaccum(eltype(C))`, not in `eltype(C)`.
-    # It used to do the latter, so an fp16 destination summed the whole K loop in
-    # fp16. That is reachable and not rare: `mul!`'s cooperative-matrix gate and
+    # Reducing in `eltype(C)` sums the whole K loop in fp16 for an fp16
+    # destination, which is reachable and not rare: `mul!`'s coopmat gate and
     # `staged_gemm_ok` both require an fp32 destination, so every fp16-into-fp16
     # product lands there. Instrumenting MatAnyone found 29 of its 132 `matmul!`
     # calls doing exactly this at K = 256..769.

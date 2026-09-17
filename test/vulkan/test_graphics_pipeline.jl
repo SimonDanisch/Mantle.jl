@@ -196,8 +196,8 @@ end
         # Blue should win (closer)
         # `.b`/`.r`, not `p[3]`/`p[1]`: readback returns the element type
         # `eltypeof` names — `RGBA{Float32}` here — so the channels have names.
-        # It used to return `NTuple{4, Float32}` from a second format table that
-        # disagreed with `eltypeof` about the same format.
+        # A second format table would return `NTuple{4, Float32}` here and
+        # disagree with `eltypeof` about the same format.
         p = pixels[4, 4]
         @test p.b ≈ 1f0 atol=0.05
         @test p.r ≈ 0f0 atol=0.05
@@ -342,7 +342,7 @@ end
         # A fragment shader that returns a tuple gets its varyings unpacked by
         # FragmentWrapper, and inlining that leaves an
         # llvm.experimental.noalias.scope.decl behind — a metadata declaration
-        # that emits no code and that the SPIR-V emitter used to reject as an
+        # that emits no code and that a SPIR-V emitter can reject as an
         # unsupported intrinsic. Found by a deferred renderer whose g-buffer pass
         # writes albedo and normals from one fragment.
         gbuf_vertex() = (position = Vec4f(0, 0, 0.5, 1),

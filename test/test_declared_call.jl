@@ -62,8 +62,8 @@ end
 
     # `mul!` writes its first argument and reads the rest, declared once in
     # `graph/access.jl` because that is true of rocBLAS, of a cooperative-matrix
-    # kernel and of Metal Performance Shaders alike. It was three `Write`/`Read`
-    # wrappers at this call site, which is `use` again: one fact, restated per
+    # kernel and of Metal Performance Shaders alike. `Write`/`Read` wrappers at
+    # this call site are `use` again: one fact, restated per
     # call site, wrong at the N+1st. The five-argument form is what makes it
     # concrete — `C = A*B*alpha + C*beta` reads `C` too.
     @test M.argument_usage(mul!, (C, A, B)) === (M.WRITE, M.READ, M.READ)

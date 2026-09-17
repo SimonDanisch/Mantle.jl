@@ -3,8 +3,9 @@
 
 `Base.mapreducedim!` routes every GPU-array destination to
 `GPUArrays.mapreducedim!`, but `transpose(::LavaArray)` is a `Transpose`, not a
-`LavaArray`, so it used to miss Lava's methods and hit GPUArrays' generic
-`error("Not implemented")`. The GPUArrays conformance suite reduces into
+`LavaArray`, so it misses any method written for one and hits GPUArrays'
+generic `error("Not implemented")`. The GPUArrays conformance suite reduces
+into
 `transpose(...)`/`adjoint(...)` for every eltype it tests, so this one gap
 accounted for all 133 errors it reported.
 

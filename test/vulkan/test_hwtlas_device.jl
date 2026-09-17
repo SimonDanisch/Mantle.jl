@@ -8,8 +8,8 @@ arrays. Each used the bare `LavaArray` constructor, whose queue defaults to the
 PROCESS-GLOBAL context — so a TLAS built for a second device put its instance
 records on the first, and the first cross-context use faulted (`submit!:
 buffer was last written on a VulkanBatchQueue from a DIFFERENT VkContext`, or a
-segfault). This was the leak that made a full RayMakie render on a non-default
-GPU fail while the isolated primitives all passed.
+segfault). That is the leak that makes a full RayMakie render on a non-default
+GPU fail while the isolated primitives all pass.
 
 Needs a second driver; every machine here has lavapipe beside the real GPU.
 """

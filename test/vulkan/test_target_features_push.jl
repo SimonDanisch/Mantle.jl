@@ -6,8 +6,8 @@ to decide whether a module may declare `ShaderInvocationReorderNV` or the
 ray-query capabilities. Declaring one the device lacks is a validation error, not
 a slow path, so what is ON that record has to be what the device actually said.
 
-It used to be a process global that `bind_context!` pushed, which answered for
-the BOUND device: a kernel compiled for a second device while the RTX was bound
+A process global pushed by `bind_context!` answers for the BOUND device: a
+kernel compiled for a second device while the RTX is bound
 was shaped by the RTX. Now each `VkContext` carries its own `features`, every
 compile the context runs passes it in the job, and every frozen key it reads
 mixes it in. Nothing is pushed and nothing is reset on unbind, because there is
@@ -25,7 +25,7 @@ using Test, Mantle, Lava
     @test ctx.features.ray_query === ctx.ray_query_available
     @test Lava.FROZEN_LOG_MISSES[] === ctx.diag.frozen_log_misses
 
-    # The global is gone, not merely unused.
+    # There is no such global, not merely an unused one.
     @test !isdefined(Lava, :targetfeatures)
     @test !isdefined(Lava, :targetfeatures!)
     @test !isdefined(Lava, :TARGET_FEATURES)

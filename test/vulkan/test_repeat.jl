@@ -155,25 +155,25 @@ end
 
 # A loop long enough to cross the queue's own submission threshold.
 #
-# The open batch's recorder used to end the command buffer whenever a dispatch
-# took it past its split or submit threshold. A conditional-rendering scope
-# spans a pass, so an end landing between its `begin` and its `end` left an
+# A recorder that ends the command buffer whenever a dispatch takes it past a
+# split or submit threshold is what breaks this. A conditional-rendering scope
+# spans a pass, so an end landing between its `begin` and its `end` leaves an
 # unmatched begin in the buffer that went and an unmatched end in the next —
 # and the GPU hung on it.
 #
 # Hikari found this before this test did: the fused sample ran at `max_depth` 8
-# (47 dispatches) and hung at 16 (~95), with the submit threshold at 64 in
-# between. The thresholds are gone with the open batch — a plan's recording is
-# one command buffer, whole, and nothing cuts it — and the loop below is sized
-# past where they used to sit, so this keeps pinning the same boundary.
+# (47 dispatches) and hung at 16 (~95), with a submit threshold at 64 in
+# between. A plan's recording is one command buffer, whole, and nothing cuts it;
+# the loop below is sized past where such thresholds sat, so this keeps pinning
+# the same boundary.
 #
 # **A regression here HANGS rather than fails.** The wait is a foreign call that
 # does not return and cannot be interrupted, so there is no error to catch and
 # nothing useful in a stack trace. That is what makes it worth pinning.
-@testset "repeat! survives a loop longer than any submission threshold was" begin
+@testset "repeat! survives a loop longer than any submission threshold" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
-    # Comfortably past both of the old thresholds (64 dispatches to submit,
-    # 3000 to split), where the recording used to want to end mid-scope.
+    # Comfortably past both thresholds (64 dispatches to submit, 3000 to
+    # split), which is where a recording would want to end mid-scope.
     maxiters = 2 * 64 + 8
     n = 32
     x = Mantle.Buffer(dev, zeros(Int32, n))
@@ -184,7 +184,7 @@ end
         Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
     end
     pl = Mantle.record!(Mantle.Plan(g))
-    @test length(pl.passes) > 64          # the old boundary is crossed
+    @test length(pl.passes) > 64          # the boundary is crossed
 
     for start in (3, maxiters - 1)
         copyto!(Mantle.storage(x), zeros(Int32, n))
@@ -270,8 +270,8 @@ end
         @test all(==(Int32(7)), Array(Mantle.storage(x)))
         Mantle.free!(pl)
 
-        # A gated pass with a host-sized dispatch cannot be discarded by the fold,
-        # and this backend can no longer discard it either: refused at build.
+        # A gated pass with a host-sized dispatch cannot be discarded by the
+        # fold, and this backend cannot discard it either: refused at build.
         @test_throws ArgumentError _repeatplan(dev, x, count, src, maxiters, n)
     finally
         ctx.conditional_rendering_available = had

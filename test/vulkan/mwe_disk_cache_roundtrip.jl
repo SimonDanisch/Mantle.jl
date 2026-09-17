@@ -2,8 +2,8 @@
 # behave like the freshly-compiled one it was serialized from?
 #
 # The "MCP restart" crash isolated to the SPIR-V disk cache load. But the
-# claim "AMDVLK can't handle previously-serialized SPIR-V" is implausible
-# — vkCreateShaderModule has been battle-tested for years. Much more
+# claim "AMDVLK can't handle serialized SPIR-V" is implausible —
+# vkCreateShaderModule has been shipping for years. Much more
 # likely there's a bug in how Lava reuses the deserialized kernel.
 #
 # This MWE exercises the serialize→deserialize roundtrip in one session,

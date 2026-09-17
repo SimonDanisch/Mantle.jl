@@ -24,8 +24,8 @@ using StaticArrays: SVector   # the kernels below say `SVector` unqualified
 # It takes the whole shape below to reproduce: a 5x5 neighbourhood with clamped
 # coordinates and TWO indexed reads of the table per tap. With less, LLVM either
 # folds the table away or materialises it inside the function, and the constant
-# expression is never emitted — a first attempt at this test "passed" for that
-# reason and pinned nothing.
+# expression is never emitted, and a test written that way "passes" while
+# pinning nothing.
 #
 # Found via Hikari's a-trous denoiser, whose 5x5 B-spline weights are exactly
 # this and which had therefore never compiled on any driver.

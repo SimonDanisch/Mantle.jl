@@ -3,7 +3,7 @@ using Raycore, Lava
 
 # ===============================================================================
 # Phase-C contract: `sync!(hwtlas)` removes the two unconditional
-# `KA.synchronize(hwtlas.backend)` calls that the old Raycore.TLAS had.
+# `KA.synchronize(hwtlas.backend)` calls a software TLAS needs.
 # What it does NOT remove is the fence wait inside `Mantle.as_build` — the
 # Vulkan AS-build step necessarily waits for its own build command to
 # complete (reads vertex/index data).  Queue-FIFO semantics mean that

@@ -1079,7 +1079,7 @@ if _VULKAN_OK
         end
 
 
-        # ── Previously unregistered test files ──
+        # ── Files registered late ──
         #
         # These existed in test/ but were never included here. That is not neutral:
         # of the files found unregistered, three characterised bugs that had since been
@@ -1285,8 +1285,8 @@ if _VULKAN_OK
             end
 
 
-            # Was never included, and had been throwing `UndefVarError` on the first
-            # line of every testset since the deferred-free list went per-VulkanBatchQueue.
+            # Ported to the per-channel deferred-free list; it names
+            # `drain_deferred_frees!(bq)` and not the module-level lists.
             @testset "rapid alloc/free" begin
                 include(joinpath(VULKAN_TESTS, "test_rapid_alloc_free.jl"))
             end
@@ -1383,16 +1383,16 @@ if _VULKAN_OK
                 include(joinpath(VULKAN_TESTS, "test_copyto_dropped_source.jl"))
             end
 
-            # Who owns a queue from `allocate_batch_queue!`. A dropped one used to
-            # let its timeline semaphore be finalized while buffers still named it,
+            # Who owns a queue from `allocate_batch_queue!`. A dropped one whose
+            # timeline semaphore is finalized while buffers still name it
             # and the buffer finalizer's `vkGetSemaphoreCounterValue` then segfaulted
             # inside the driver.
             @testset "batch queue lifetime" begin
                 include(joinpath(VULKAN_TESTS, "test_batch_queue_lifetime.jl"))
             end
 
-            # A `transpose(::LavaArray)` destination is not a `LavaArray` and used to
-            # miss every `mapreducedim!` method here. Its own file because the
+            # A `transpose(::LavaArray)` destination is not a `LavaArray`, so it
+            # misses every `mapreducedim!` method written for one. Its own file because the
             # assertions have to read the destination's parent storage, which is the
             # only place `adjoint`'s conjugation is visible.
             @testset "mapreducedim! into transposed destinations" begin

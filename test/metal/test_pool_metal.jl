@@ -20,9 +20,8 @@ const MTL = Metal.MTL
     d = Mantle.Device(Mantle.MetalAPI())
     # A pool of this testset's OWN, not the device's.
     #
-    # `Mantle.pool(d)` is process-wide, and once the second device cache was
-    # removed (phase 1.6) it really is one per process — so anything that
-    # rendered earlier in the session had already grown it, and three testsets
+    # `Mantle.pool(d)` is one per process, so anything that rendered earlier in
+    # the session has already grown it, and three testsets
     # here silently depended on running first: "a new block was allocated",
     # "the acquire lands at offset 0", "trim! leaves nothing reserved". None of
     # those is a statement about the pool; they are statements about being
@@ -81,8 +80,9 @@ const MTL = Metal.MTL
         # Metal generations disagree about, and this is the older answer. The
         # MTL4 counterpart is the testset below.
         d = Mantle.MetalDevice(Metal.device(), Mantle.LegacyQueue(Metal.device()))
-        # This testset used to assert the opposite — that a region retired with
-        # no command buffer recording is immediately reusable — on the reasoning
+        # NOT the opposite — that a region retired with no command buffer
+        # recording is immediately reusable — which would follow from the
+        # reasoning
         # that `fence` reports what the GPU has already finished. That reasoning
         # holds for Vulkan, where this backend owns the submission. It does not
         # hold here: compute goes out through Metal.jl's own queue, so nothing
@@ -154,9 +154,8 @@ end
     d = Mantle.Device(Mantle.MetalAPI())
     # A pool of this testset's OWN, not the device's.
     #
-    # `Mantle.pool(d)` is process-wide, and once the second device cache was
-    # removed (phase 1.6) it really is one per process — so anything that
-    # rendered earlier in the session had already grown it, and three testsets
+    # `Mantle.pool(d)` is one per process, so anything that rendered earlier in
+    # the session has already grown it, and three testsets
     # here silently depended on running first: "a new block was allocated",
     # "the acquire lands at offset 0", "trim! leaves nothing reserved". None of
     # those is a statement about the pool; they are statements about being

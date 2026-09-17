@@ -1,7 +1,8 @@
 # Empty pool blocks must be returned to the driver without waiting for an OOM.
 #
-# `GPU_LIVE_BYTES` tracks pool *capacity*, and blocks used to be handed back only
-# on an allocation-failure retry. `maybe_collect`'s gate is a ratio against the
+# `GPU_LIVE_BYTES` tracks pool *capacity*, and blocks handed back only on an
+# allocation-failure retry ratchet up. `maybe_collect`'s gate is a ratio against
+# the
 # device heap, so on an iGPU with a large shared heap a few GB of dead blocks is
 # only ~20 % and never trips it — the pool ratchets up to the high-water mark of
 # the largest workload and stays there. Across a multi-scene run that is
@@ -68,9 +69,9 @@ end
 # in-flight work takes a third branch onto core's retired list, released by the
 # drain in the same call.)
 #
-# `trim_gpu_pool!` used to gate on `any(b -> isempty(b.live), blocks)` *before*
-# that call — a precondition it establishes itself — so it returned `(0, 0)` and
-# kept everything. A graph evaluator is nothing but this shape, dispatches
+# `trim_gpu_pool!` gating on `any(b -> isempty(b.live), blocks)` *before* that
+# call — a precondition it establishes itself — returns `(0, 0)` and keeps
+# everything. A graph evaluator is nothing but this shape, dispatches
 # recorded and not flushed until the output is read: TRELLIS.2's 30-block torso
 # left 190 blocks and 12 410 MiB resident with 0 blocks empty, and 12 750 MiB of
 # it was reclaimable. Nothing had leaked; the trim was refusing to look.
@@ -108,7 +109,7 @@ end
 
     grown = Mantle.gpu_live_bytes()
     @test grown - base2 > 256 * 1024 * 1024
-    # The state the old gate mishandled — every block still counted as live even
+    # The state an early gate mishandles: every block still counts as live even
     # though every reference to its contents is gone.
     @test !any(b -> isempty(b.live), Mantle.poolblocks(ctx))
 

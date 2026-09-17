@@ -55,7 +55,7 @@ end
         @test all(Array(a) .== 1.0f0)
 
         # Same buffer, other channel: core's `crosswaits!` must derive a wait on
-        # bq1's timeline from the stamp. This is the wait that used to throw.
+        # bq1's timeline from the stamp. Without it this throws.
         xqfill!(b2, 64)(a, 2.0f0; ndrange = n)
         KA.synchronize(b2)
         @test all(Array(a) .== 2.0f0)

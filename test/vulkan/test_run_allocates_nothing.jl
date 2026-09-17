@@ -64,5 +64,5 @@ end
 # A plan that syncs MANY buffers is not buildable here: a `compute!` dispatch
 # names its external arrays by address and pins none (see the submission
 # refactor notes), so only a trace plan stamps dozens of buffers a run. That
-# zero — `sync_access!`'s stamp used to box 48 bytes a buffer — is pinned by
+# zero — a per-buffer stamp at submit boxes 48 bytes each — is pinned by
 # Hikari's `test_sample_is_one_run.jl` on a real ray-tracing plan.

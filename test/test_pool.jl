@@ -62,7 +62,7 @@ end
     @test M.offset(c) == 0
 end
 
-@testset "Pool: growth adds a block and does not move the old one" begin
+@testset "Pool: growth adds a block and moves nothing already placed" begin
     d, p = FakeDev(), M.Pool()
     held = M.acquire!(p, d, :buf, nothing, 3000; blocksize = 4096)
     where_it_was = M.offset(held)

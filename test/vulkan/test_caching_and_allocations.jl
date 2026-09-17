@@ -145,9 +145,9 @@ using KernelAbstractions
     end
 
     # ── 5. GC pressure tracking ──
-    # After the AMDGPU.jl-style refactor of `maybe_collect`, the byte counter
-    # `GPU_BYTES_SINCE_LAST_GC` is gone — pressure is read directly from
-    # `GPU_LIVE_BYTES / heap_size`.  Verify the live-bytes accounting still
+    # `maybe_collect` reads pressure directly from `GPU_LIVE_BYTES / heap_size`
+    # and keeps no byte counter since the last GC.  Verify the live-bytes
+    # accounting still
     # increments on `vk_alloc` and decrements on `vk_free!`.
     @testset "GC pressure tracking" begin
         @testset "live_bytes tracks vk_alloc / vk_free!" begin

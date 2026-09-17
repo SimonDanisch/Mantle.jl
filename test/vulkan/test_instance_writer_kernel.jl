@@ -1,7 +1,7 @@
 # Instance-record writer kernels for HW HWTLAS.
 #
-# The `write_meshscatter_instances_kernel` testset that used to live here was
-# removed: commit 9e0ec1d ("instance transform cleanup", 2026-05-06) deleted that
+# No `write_meshscatter_instances_kernel` testset: commit 9e0ec1d ("instance
+# transform cleanup", 2026-05-06) deleted that
 # kernel and its `_pervec` variant on purpose, replacing them with
 # `Raycore.update_transforms!` / `_apply_pending_update!`. The test kept importing
 # the deleted symbol and failed 8 assertions for three months without anyone

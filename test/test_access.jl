@@ -9,8 +9,8 @@ using Test, Mantle
 const M = Mantle
 
 @testset "inferred access: the unknown is refused, not guessed at" begin
-    # `accessof` on a signature nothing can be inferred for used to answer
-    # read+write for every argument. Safe for the barrier phase, and
+    # `accessof` on a signature nothing can be inferred for must not answer
+    # read+write for every argument: safe for the barrier phase, and
     # indistinguishable from a proof: a kernel that stopped being analysable kept
     # compiling and paid a barrier per pass for ever with nothing to say so.
     err = try

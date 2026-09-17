@@ -3,8 +3,8 @@
 #
 # This device reports 15 KHR shapes and EVERY ONE has M == 16, so a 64x16 matrix
 # is only legal because `flexible_dimensions` is enabled at device creation
-# (`PhysicalDeviceCooperativeMatrix2FeaturesNV`). It used to be rejected before
-# reaching the emitter, by a hard-coded ((16,16),(16,8),(8,8)) list in
+# (`PhysicalDeviceCooperativeMatrix2FeaturesNV`). A hard-coded
+# ((16,16),(16,8),(8,8)) list in
 # `KNOWN_INTRINSICS` — the GATE decided which shapes existed, not the hardware.
 #
 # The first assertion below is the one that matters and the easiest to fake: a

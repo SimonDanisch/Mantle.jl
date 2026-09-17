@@ -12,7 +12,7 @@
 # so nothing said so. It is included now. A test nothing runs is not a test.
 #
 # The replacements are the per-BQ API: `quiesce_before_reclaim!` for the flush +
-# GC + drain that `flush_deferred_frees!` used to do (the drain on its own is not
+# GC + drain that a module-level flush did (the drain on its own is not
 # safe with a batch open — see its docstring), and the two `deferred_*` lists
 # under the lock that guards them for the count.
 

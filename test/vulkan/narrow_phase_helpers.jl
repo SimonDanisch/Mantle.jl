@@ -1,7 +1,7 @@
 # Helpers shared between narrow-phase test files (test_gjk.jl, test_epa.jl,
 # test_narrow_phase_kernel.jl, test_narrow_phase_contacts.jl).  These tests
-# all run in `Main` via the top-level test runner, so we previously had
-# four files each defining the same `translation_transform` / `tx` /
+# all run in `Main` via the top-level test runner, so four files each defining
+# the same `translation_transform` / `tx` /
 # `rotation_z_transform` and the test runner would print a "Method
 # definition ... overwritten at ..." warning for every duplicate.
 #

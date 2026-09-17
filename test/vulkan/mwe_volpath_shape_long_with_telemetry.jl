@@ -181,7 +181,7 @@ function snapshot(bq, ctx, iter)
         deferred_as   = length(bq.retiring),
         # What a recording reads: blocks of the unified arena, and how many
         # regions of them are still handed out. Growth in either is the leak
-        # this MWE is looking for; the two slab rings it used to read are gone.
+        # this MWE is looking for. There are no slab rings to read.
         blocks        = length(Mantle.unifiedblocks(ctx)),
         live_regions  = sum(b -> length(b.live), Mantle.unifiedblocks(ctx); init = 0),
     )

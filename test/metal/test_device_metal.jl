@@ -360,7 +360,7 @@ end
 # read it. One wrong frame, every frame after it right, nothing reported.
 #
 # Both halves are pinned: the device below is built by name and allocated from
-# BEFORE it adopts anything, which is the order that used to fail.
+# BEFORE it adopts anything, which is the order that fails without the fix.
 
 @kernel function seam_adopt!(dst, @Const(src))
     i = @index(Global)
@@ -399,7 +399,7 @@ end
 # whose gates open onto a grid of zeros and which silently runs nothing at all.
 #
 # The device below is therefore built by name and NEVER adopted before `record!`,
-# which is the order that used to leave the blit on the wrong queue.
+# which is the order that leaves the blit on the wrong queue otherwise.
 
 @testset "recording adopts this device's queue too" begin
     mtldev = Metal.device()

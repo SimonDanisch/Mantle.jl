@@ -17,7 +17,7 @@ const M = Mantle
 # The backend this run is for. `runtests.jl` includes this file once per
 # available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
 # gets the default one. Nothing below names a backend, which is the point:
-# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+# these testsets check PORTABLE behaviour, on whichever backend is there.
 const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
     Main.MANTLE_TEST_BACKEND : M.defaultbackend()
 

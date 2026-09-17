@@ -30,8 +30,8 @@ using KernelAbstractions: @kernel, @index
 #   2. launch dispatch B (its own submission, args at a fresh region)
 #   3. wait (WITHOUT sweeping) until A's submission completes
 #   4. allocate → opportunistic sweep retires A → in_flight loses A →
-#      the old code reset the cursors HERE, with B's submission still
-#      holding its own region
+#      resetting the cursors HERE leaves B's submission holding its own
+#      region
 #   5. launch dispatch C then D
 #   6. synchronize: verify every dispatch wrote ITS OWN array
 
@@ -106,8 +106,8 @@ end
 # The same hazard, reached without any submit at all — which is the shape the
 # graphics path actually has. `pack_gfx_args` takes an arg buffer for a draw and
 # only then records the draw. With nothing in flight and no draw recorded yet,
-# a sweep used to reset the pool: the buffer just handed to draw k is handed out
-# again to draw k+1, and the frame submits with two draws pointing at one
+# a sweep that resets the pool hands the buffer just given to draw k out again
+# to draw k+1, and the frame submits with two draws pointing at one
 # argument buffer. On screen that is a null buffer device address and a GPUVM
 # fault at 0x0.
 #
@@ -122,7 +122,7 @@ end
     Mantle.flush!(ctx.default_bq)                      # nothing in flight, nothing recorded
 
     # A submission that has completed but has not been swept yet: that is what
-    # the sweep drains, and draining is what used to reset the cursors.
+    # the sweep drains, and draining is where a cursor reset would sit.
     backend = Mantle.defaultbackend()
     k! = fill_value_kernel!(backend, 256)
     e0 = KA.allocate(backend, Int32, 4)

@@ -20,7 +20,7 @@ const M = Mantle
 # The backend this run is for. `runtests.jl` includes this file once per
 # available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
 # gets the default one. Nothing below names a backend, which is the point:
-# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+# these testsets check PORTABLE behaviour, on whichever backend is there.
 const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
     Main.MANTLE_TEST_BACKEND : M.defaultbackend()
 
@@ -97,8 +97,8 @@ compileresult(g, plan) = (
     # `sync/backend.jl` asks exactly that of it, and reading the answer here rather
     # than assuming one is the difference between a portable assertion and one
     # backend's. Asked with a REAL pair of usages: a write followed by a read of the
-    # same buffer, which is the hazard this graph's chain is made of. It used to be
-    # asked with `Any, Any`, which only worked while every method ignored its
+    # same buffer, which is the hazard this graph's chain is made of. Asked with
+    # `Any, Any` it only works while every method ignores its
     # arguments — the portable rule in `sync/transition.jl` reads them.
     W = M.Storage{M.BufferKind, M.Access{false, true}}
     R = M.Storage{M.BufferKind, M.Access{true, false}}
@@ -128,9 +128,9 @@ end
 # from `touch!` during graph construction, not from deps, so the peak does not
 # move either.
 #
-# A first attempt at a discriminating probe declared the chain BACKWARDS and
-# asserted the scheduler would fix it. It does not, and should not: the
-# declaration is the program, as in RPS. That test was wrong and is not here.
+# A probe that declares the chain BACKWARDS and asserts the scheduler fixes it
+# is not here: it does not, and should not. The declaration is the program, as
+# in RPS.
 #
 # What discriminates is `Compact`, which actively reorders to save memory and so
 # needs the edges to know what it may not move past. That is the testset below.
@@ -191,8 +191,8 @@ end
 #   buildprobe under Compact  — same order (["branch1","branch2","chain1",…])
 #   buildtemptation, Compact  — same order (["fill","drain"])
 #
-# The last is the interesting one. It was built specifically so `Compact` would
-# want to hoist the pass that frees a megabyte, and it does not: reading a
+# The last is the interesting one, built specifically so `Compact` would want to
+# hoist the pass that frees a megabyte. It does not: reading a
 # transient nothing has written yet counts that transient as an ALLOCATION in the
 # memory term, so the illegal order already scores worst. The scoring disfavours
 # illegal schedules on its own, which makes the edges nearly unobservable

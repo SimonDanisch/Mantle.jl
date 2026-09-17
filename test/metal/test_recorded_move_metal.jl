@@ -8,7 +8,7 @@
 #
 # The cause was an abstraction that let a backend not answer. Core announced the
 # move through `resource_moved!`, whose default was `nothing`; Vulkan implemented
-# it, Metal never did, and nothing anywhere said so. Both halves are gone now: the
+# it, Metal never did, and nothing anywhere said so. Neither is asked now: the
 # address is `deviceaddress`, which has one right answer, and WHERE each packed
 # pointer landed is found by core from the argument's type (`notepacked!`), so a
 # backend is not asked and cannot forget.
@@ -46,7 +46,7 @@ end
     M.run!(pl); M.waitfor!(pl)
     @test Array(M.storage(a))[1] == 1.0f0
 
-    # Past capacity: new storage, and the old region retired rather than freed —
+    # Past capacity: new storage, and the previous region retired rather than freed —
     # which is exactly why an unpatched recording reads 1.0f0 here instead of
     # faulting.
     before = b.store.region

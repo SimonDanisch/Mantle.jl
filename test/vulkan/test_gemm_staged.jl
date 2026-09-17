@@ -104,8 +104,8 @@ end
     @testset "both staging widths accumulate every k-term, at every K" begin
         # `vec2` picks between scalar and `vec2` staging buffers, and both are
         # generated for every tiling — so both have to be swept, not just
-        # whichever is currently the default. Passed per call now; it used to be
-        # a global set inside a `try`.
+        # whichever is currently the default. Passed per call, so no global has
+        # to be set inside a `try`.
         for v2 in (false, true)
             for cfg in Mantle.GEMM_TILINGS,
                 K in (32, 64, 96, 128, 288, 576, 2304)
@@ -260,8 +260,8 @@ end
 @testset "the vec2 switch's other side still compiles and agrees" begin
     # `GEMM_VEC2` picks between two staged kernels, and `coopmat_gemm!` falls
     # back to the v1 one for any config with no v2 variant — so v1 is reachable
-    # in a default build, not only when the switch is flipped. It had been
-    # unreachable in practice for long enough that adding an argument to the
+    # in a default build, not only when the switch is flipped. Unreachable in
+    # practice, it is what adding an argument to the
     # kernel family missed it, and the miss surfaced as a `MethodError` at
     # launch: "no method matching ... ::typeof(identity), ::Val{288}".
     #

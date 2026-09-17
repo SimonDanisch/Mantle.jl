@@ -273,8 +273,8 @@ end
         a = Mantle.LavaArray(zeros(Float32, 64))
         drain!()
         # What the unified arena holds BEFORE the burst. Not zero, and asserting
-        # zero is what this used to do: a recorded plan owns its argument memory
-        # there for as long as it lives, so any plan an earlier file left alive
+        # zero is wrong: a recorded plan owns its argument memory there for as
+        # long as it lives, so any plan an earlier file left alive
         # makes an absolute count fail on file order. The claim is about these
         # 500 dispatches — their regions belong to batches, and every batch is
         # reclaimed — so it is a DELTA.

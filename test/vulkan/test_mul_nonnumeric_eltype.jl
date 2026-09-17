@@ -4,8 +4,9 @@
 Lava's GEMM kernels accumulate in the destination's element type and scale by it
 — `muladd(T(A[…]), T(B[…]), acc)` and `T(α)` — so they need `T` to be
 constructible from the operand and scalar types. `C = A * B` enters as
-`mul!(C, A, B, true, false)`, so a matrix of a plain two-field struct used to
-reach that and throw `MethodError: no method matching Duo{Float16}(::Bool)`.
+`mul!(C, A, B, true, false)`, so a matrix of a plain two-field struct reaches
+that and throws `MethodError: no method matching Duo{Float16}(::Bool)` unless
+the scalars are handled.
 
 The signature is bounded to `T<:Number` instead, which lets `LinearAlgebra.mul!`
 reach `GPUArrays.generic_matmatmul!` — a GPU kernel that multiplies with the

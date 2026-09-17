@@ -95,8 +95,8 @@ const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_ver
     @test rec !== nothing
 
     # Move the store out from under the recording, then change the CONTENTS, so
-    # a run that still read the old region reads the wrong numbers, not a copy
-    # of the right ones.
+    # a run that still reads the vacated region reads the wrong numbers, not a
+    # copy of the right ones.
     M.resize!(src, 4n)
     copyto!(M.storage(src), fill(2f0, 4n))
     M.run!(pl)

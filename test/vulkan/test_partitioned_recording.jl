@@ -95,8 +95,8 @@ end
     # deleted 2026-09-15 with the capture path: the host moves those bytes and no
     # command in the buffer does, so a capture could not replay them and
     # `copy_buffer!` refused. A declared graph states a host write as an update
-    # pass, which IS in the plan, so the unreplayable thing can no longer be
-    # asked for.
+    # pass, which IS in the plan, so the unreplayable thing cannot be asked
+    # for.
 end
 
 @testset "partitioned recording follows moved inputs" begin

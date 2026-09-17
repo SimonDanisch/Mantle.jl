@@ -1,15 +1,15 @@
 """
 `record!` writes commands. It does not run the plan.
 
-This was false under `bake!`, and the docstring on `capture` said so out loud —
-"Run `f` once, recording and executing it normally". Callers had to compensate:
+A recorder that runs what it records says so out loud — "Run `f` once,
+recording and executing it normally" — and makes every caller compensate:
 Hikari's note on why its volumetric path is not baked lists, among the traps,
 that "`bake!` RUNS the plan as it captures it (so the accumulate pass would
 contribute a spurious sample)". A graph that models every operation should not
 need the caller to correct for when they happen; deciding that is the graph's
 whole job.
 
-**It was never a Vulkan constraint.** `vkEndCommandBuffer` and `vkQueueSubmit`
+**Nothing about Vulkan forces it.** `vkEndCommandBuffer` and `vkQueueSubmit`
 are separate calls and a command buffer may be submitted zero times. The cause
 was ours: `capture` ran the ordinary recorder and collected whatever `submit!`
 sealed on the way past, so a recording was a side effect of executing. `record!`

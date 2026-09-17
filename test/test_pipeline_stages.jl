@@ -177,8 +177,7 @@ const STAGE_KI = parentmodule(M.MeshEmitter)
             @test n in names(Mantle)
         end
         # And the device-side half is KernelInterface's, not a copy: a second
-        # declaration here is what the graphics builtins used to be, bridged and
-        # drifting.
+        # declaration here would need a bridge, and would drift.
         for n in (:Flat, :MeshConfig, :GeometryConfig, :NativeEmitter, :MeshEmitter,
                   :emit!, :endprimitive!, :set_mesh_vertex!, :mesh_thread_index)
             @test getproperty(Mantle, n) === getproperty(STAGE_KI, n)

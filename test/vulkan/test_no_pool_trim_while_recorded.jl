@@ -9,8 +9,9 @@ as the plan is. Waiting does not change that.
 
 So the trim refuses outright. Not "flush harder": do not trim.
 
-**The question it asks changed, and the old one was wrong.** It used to read
-`bq.capturing !== nothing` — whether a capture was OPEN — which is true only
+**The question has to be about the recording, not about a capture in
+progress.** `bq.capturing !== nothing` — whether a capture is OPEN — is true
+only
 while `bake!` is running and false for every recording that had already been
 taken. So the guard covered the allocation `bake!` itself made and nothing
 afterwards. It asks the pool about its tenants now (`movable`), which is a

@@ -5,8 +5,8 @@ using KernelAbstractions: @kernel, @index, @Const
 
 # A plan's indirect commands belong to the plan.
 #
-# They used to come from a slab ring on the `BatchQueue`, rewound by
-# `reset_indirect_buffer_pool!` whenever the queue drained. A recording holds the
+# From a slab ring on the queue, rewound whenever it drained, they would move
+# under the recording that names them. A recording holds the
 # address of its `VkDispatchIndirectCommand` for as long as it can be submitted,
 # so the rewind put those bytes back on a free list under a live recording: two
 # recorded plans running in one frame would write each other's

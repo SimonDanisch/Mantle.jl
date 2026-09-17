@@ -11,8 +11,9 @@
 #      printf and warned. Same shape: the thing you asked for was not running.
 #
 # There is also exactly ONE way to apply a config, and this file pins that the
-# alternatives are gone: five preset functions (`enable_gpu_av`, `disable_gpu_av`,
-# `enable_debug_printf!`, `disable_debug_printf!`, `activate_all_debugging`) are
+# there are no alternatives: five preset functions (`enable_gpu_av`,
+# `disable_gpu_av`, `enable_debug_printf!`, `disable_debug_printf!`,
+# `activate_all_debugging`) are
 # deleted along with the env vars, because "which preset do I call" was itself a
 # way to end up instrumented for something other than what you were hunting.
 #
@@ -75,7 +76,7 @@ using Test, Lava, Mantle
         @test_throws ArgumentError DebugConfig(c; printf = true)
     end
 
-    @testset "there is one way in, and the presets are gone" begin
+    @testset "there is one way in, and no presets beside it" begin
         # `reset_device!` takes it; `VkContext` takes it. Nothing else does.
         # `any` over the method table, not `first`: `VkContext`'s first method is
         # the inner positional constructor, whose `kwarg_decl` is empty.

@@ -184,8 +184,9 @@ end
     end
 
     @testset "cooperative matrices" begin
-        # The vocabulary that used to be its own package. `matrix_shapes` is the
-        # backend hook it gained in the move, and it has to agree with the
+        # The vocabulary, in KI rather than a package of its own.
+        # `matrix_shapes` is the backend hook beside it, and it has to agree
+        # with the
         # `DeviceCaps` accessors rather than being a second opinion.
         c = Lava.caps(backend)
         shapes = KI.matrix_shapes(backend)
@@ -287,8 +288,8 @@ end
         @testset "workgroup memory is keyed by its call site" begin
             @test overridden(KI.localmemory)
             # Three arguments: the element type, the shape, and the id. Two of
-            # them would be the old signature, under which two buffers of one
-            # type and shape are one buffer and the second write lands on the
+            # them is not enough: two buffers of one type and shape would be
+            # one buffer and the second write would land on the
             # first tile.
             #
             # Read out of the OVERLAY table, like `overridden` above: a

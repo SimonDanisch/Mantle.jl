@@ -89,8 +89,8 @@ end
     Mantle.LAVA_DISK_CACHE_DIR[] = cachedir
     # …and the FROZEN cache is consulted before either, and never dumps.
     # Redirect all three so every kernel below really compiles and really
-    # writes to `dumpdir` — the assert used to go vacuously green the moment
-    # any cache answered.
+    # writes to `dumpdir`, since the assert goes vacuously green the moment any
+    # cache answers.
     frozendir = mktempdir()
     prevfrozen = Lava.FROZEN_CACHE_DIR[]
     Lava.FROZEN_CACHE_DIR[] = frozendir
@@ -176,8 +176,8 @@ end
     Mantle.LAVA_DISK_CACHE_DIR[] = cachedir
     # …and the FROZEN cache is consulted before either, and never dumps.
     # Redirect all three so every kernel below really compiles and really
-    # writes to `dumpdir` — the assert used to go vacuously green the moment
-    # any cache answered.
+    # writes to `dumpdir`, since the assert goes vacuously green the moment any
+    # cache answers.
     frozendir = mktempdir()
     prevfrozen = Lava.FROZEN_CACHE_DIR[]
     Lava.FROZEN_CACHE_DIR[] = frozendir

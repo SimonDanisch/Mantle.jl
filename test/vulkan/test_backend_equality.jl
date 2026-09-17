@@ -1,8 +1,9 @@
 """
 A backend equals every spelling of its DEVICE.
 
-`==` used to compare queues: `LavaBackend()` resolved its queues at each access,
-`LavaBackend(ctx)` pinned them, and the default `==` compared `nothing` against a
+`==` must not compare queues: with `LavaBackend()` resolving its queues at each
+access and `LavaBackend(ctx)` pinning them, the default `==` compares `nothing`
+against a
 queue, so an array allocated by the default backend did not belong to it as far
 as `==` could tell (RayMakie's meshscatter tests failed on exactly that).
 

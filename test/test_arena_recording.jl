@@ -414,8 +414,8 @@ end
     @test Array(b2) == fill(2f0, 4096)
     M.free!(b2)
 
-    # And the idle case, which is the one that must NOT wait. `fence` used to
-    # return `next_timeline + 1` unconditionally, so a region dropped by an
+    # And the idle case, which is the one that must NOT wait. `fence` returning
+    # `next_timeline + 1` unconditionally means a region dropped by an
     # application that then submits nothing more waited for a signal nobody
     # would ever raise — the same leak this path removes, wearing a hat.
     KernelAbstractions.synchronize(M.backend(dev))

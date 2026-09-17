@@ -138,7 +138,7 @@ end
 
 # A refit must not flatten what `push!` wrote into each instance record.
 #
-# `update_instance_records_kernel!` used to REBUILD every record from scalars
+# `update_instance_records_kernel!` must not REBUILD every record from scalars
 # taken off the batch: one `custom_index`, one mask, one SBT offset, and zero
 # flags. But `push!(hwtlas, mesh, transform; instance_id)` puts the id in the
 # RECORD, and the CPU-record `addbatch!` passed `UInt32(0)` for the batch's

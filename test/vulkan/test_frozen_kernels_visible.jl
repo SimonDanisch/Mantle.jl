@@ -7,8 +7,9 @@
 # `caches.frozen_mem` the only cache in play for the configuration that ships —
 # and `list_compiled_kernels` walked `caches.linked` alone.
 #
-# Measured on a Depth Anything forward before this: **0 kernels reported against
-# 45 live dispatch names**, taking `kernel_stats`, `pipeline_exec_stats` and
+# What it costs when they are not: on a Depth Anything forward, **0 kernels
+# reported against 45 live dispatch names**, taking `kernel_stats`,
+# `pipeline_exec_stats` and
 # every register/scratch number with it. A profiler that is blind precisely where
 # it is needed reports an absence that reads as a fact about the hardware — which
 # is how "AMD reports no pipeline statistics" got written down when RADV was in

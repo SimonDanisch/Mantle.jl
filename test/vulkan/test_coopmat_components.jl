@@ -148,7 +148,7 @@ end
         end
 
         @testset "a chain of component accesses spills the tile once" begin
-            # The emitter used to store the whole matrix into its `Function`
+            # The emitter must not store the whole matrix into its `Function`
             # variable before *every* `getcomp` and `setcomp`. What that costs is
             # covered in `coopmat_spill_once!`; what it must not do is change the
             # answer, and a coalescing peephole that reuses a stale variable

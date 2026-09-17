@@ -1,11 +1,9 @@
 # Regression test for a narrow-index miscompile.
 #
-# ── 2026-08-02: re-audited under Rule 0, and the earlier diagnosis was wrong ──
+# ── NVIDIA's shader compiler, established directly rather than by elimination ──
 #
-# The verdict "NVIDIA's shader compiler" **stands**, and it is now established by
-# the strongest instrument rather than by elimination. But every *mechanism* this
-# header used to assert has been disproved by direct measurement, so read the new
-# section, not the old story.
+# The verdict is the driver's, and every *mechanism* one might reach for instead
+# is disproved by direct measurement below.
 #
 # What settles it: the same computation **written by hand in GLSL and compiled by
 # glslangValidator 16.4.0** — not by Lava — over the same argument buffer, run
@@ -19,10 +17,9 @@
 #   Lava (this kernel)                    WRONG                       exact
 #   glslangValidator 16.4.0               WRONG                       exact
 #
-# The old two-driver argument had a hole — nobody had checked that lavapipe ran
-# the *same bytes*, and Lava's module generation is device-dependent. With a
-# hand-written GLSL module it is literally the same file on both, so the hole is
-# closed.
+# A two-driver argument over Lava's own modules has a hole, because module
+# generation is device-dependent and the two drivers need not run the same
+# bytes. With a hand-written GLSL module it is literally the same file on both.
 #
 # ── The wrong value, located exactly ──
 #
@@ -42,8 +39,8 @@
 #
 # ── Disproved, each by an experiment, not an argument ──
 #
-# All of these were previously asserted in this file. Each was tested by swapping
-# the *emitted module* under an otherwise identical dispatch and re-running:
+# Each was tested by swapping the *emitted module* under an otherwise identical
+# dispatch and re-running:
 #
 #   * **not the Int32 narrowing.** Turning `shl 32 / ashr 32` into `shl 0 /
 #     ashr 0` — the wide computation, same instruction count — is still wrong.
@@ -143,8 +140,8 @@ end
             reshape(Array(out), sz)
         end
         @test run(:wide) ≈ want              # 64-bit through Base: correct
-        # Base's `CartesianIndices` under a narrow index: was wrong, and the
-        # `@test_broken` announced the fix on 2026-09-04 (RADV, this tree).
+        # Base's `CartesianIndices` under a narrow index, which the
+        # `@test_broken` announced correct on 2026-09-04 (RADV, this tree).
         @test run(:narrowci) ≈ want
         # The two that isolate it. `:handdiv` is 32-bit AND divides and is exact,
         # which rules out both the width and the division; `:magic` is the form

@@ -3,8 +3,8 @@ using KernelAbstractions
 using GPUArrays: @allowscalar
 const AK = Mantle.AcceleratedKernels
 
-# Regression: `copy_buffer!` BAR fast-path ([runtime/memory.jl:678-697]) used to
-# call `wait_for_write(managed)` and memcpy without flushing the active batch.
+# Regression: `copy_buffer!`'s BAR fast path must not call
+# `wait_for_write(managed)` and memcpy without flushing outstanding work.
 # Since a buffer's stamp is only written at submit time, any
 # kernel that was recorded but not yet submitted was invisible to the wait —
 # the memcpy would read pre-kernel memory (which RADV zeros on alloc).

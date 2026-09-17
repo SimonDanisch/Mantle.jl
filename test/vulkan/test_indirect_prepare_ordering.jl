@@ -9,16 +9,16 @@ using KernelAbstractions: @kernel, @index
 # either touches — so `record_dispatch!` emits the barrier unconditionally, with
 # `INDIRECT_COMMAND_READ` in the destination access mask.
 #
-# It was conditional once, and this file is what that cost. A
-# `concurrent_dispatch_group` asserted by hand that the dispatches inside it were
+# Conditional, it costs what this file pins. A `concurrent_dispatch_group`
+# asserts by hand that the dispatches inside it are
 # independent and elided the barriers between them, which dropped exactly this
 # one. With a deep GPU pipeline the race was usually won (latent); with an empty
 # queue — right after a mid-pipeline flush — the indirect dispatch read stale
 # group counts and silently ran zero workgroups. Surfaced through Hikari's
 # volpath bounce loop (2026-06-10): `vp_shade_typed!` runs 12 prepare+indirect
 # pairs, and adding an early-exit synchronize made the race lose reliably and
-# dropped ~15% of shadow_bumpgold's energy. It was patched with a
-# `force_pre_barrier` flag — an exception to an exception — and the groups and
+# dropped ~15% of shadow_bumpgold's energy. A `force_pre_barrier` flag is an
+# exception to an exception, and the groups and
 # the flag are both deleted now.
 #
 # The chains below reproduced the race deterministically pre-fix (final count 0
@@ -90,8 +90,8 @@ end
 @testset "three indirect dispatches, each after its own prepare" begin
     # Same chain, but stage 2 fans out into THREE indirect dispatches. Items are
     # split modulo 3 across destination mids and re-merged, so a dropped or
-    # racing dispatch shows up as a wrong final count. This was the shape
-    # `concurrent_indirect_group` existed for — it deferred all three prepares,
+    # racing dispatch shows up as a wrong final count. This is the shape
+    # `concurrent_indirect_group` exists for: it defers all three prepares,
     # fused them into one dispatch and put one shared barrier behind them; a
     # plan does that from `emitprepares!`, and an undeclared launch does not get
     # to.

@@ -3,8 +3,8 @@
 # Split out of `test_window.jl`, which is 2,000 lines and reaches for
 # `MantleVulkanExt` in twenty-six places — sixteen of them raw `VK.` enums for
 # image layouts, load ops and aspects, which are genuinely that backend's and
-# belong under `test/vulkan/`. Splitting the rest is the remainder of phase 2.8;
-# until then the big file stays Vulkan-gated and this one runs per backend,
+# belong under `test/vulkan/`. Splitting the rest is still to do; until then the
+# big file stays Vulkan-gated and this one runs per backend,
 # because the property below is exactly the one that had no test on Metal.
 #
 # `Window(backend, w, h)` is in the BACKEND_VOCABULARY and was answered by Lava

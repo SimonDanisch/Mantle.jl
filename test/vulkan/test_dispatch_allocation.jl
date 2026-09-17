@@ -71,19 +71,17 @@ const KA = KernelAbstractions
     # four separate inference failures, and any one of them coming back blows
     # through this by a wide margin.
     #
-    # It was 250, and it moved because the machinery it was calibrated against is
-    # gone. An unmodelled launch used to take its argument bytes from a
-    # bump-pointer add into a slab ring on the queue; it takes a `Region` from the
+    # Calibrated against what the launch path actually does: an unmodelled launch
+    # takes a `Region` from the
     # pool now, and `Pool.acquire!` allocates 96 bytes doing it. Measured back to
     # back on this device, same harness: **162.8 B/dispatch** with the slab ring
     # and **258.9** with the pool, and `--track-allocation` puts the whole 96 on
     # two lines of `pool.jl` — `compatible(dev, blk.constraint, want)` and
     # `takespan!`.
     #
-    # That is the trade `docs/submission-refactor.md` step 1 authorises and
-    # measures: five fields of hand-rolled state, and a rewind that was a live
-    # bug, for one allocator call on the path step 5 deletes. So the number is
-    # recorded here rather than the test being left red or the ceiling quietly
+    # That is the trade: five fields of hand-rolled state, and a rewind that is
+    # a live bug, for one allocator call. So the number is recorded here rather
+    # than the test being left red or the ceiling quietly
     # widened — it is a design decision that has been made, not an inference
     # failure that has crept in.
     @test per < 400

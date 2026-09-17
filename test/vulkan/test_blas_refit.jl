@@ -9,7 +9,7 @@
 # That matters here specifically: rewriting the vertex BUFFER is easy to verify
 # and proves nothing, because the AS holds its own copy of the geometry. If
 # `refit_blas!` issued a malformed or ineffective build, the buffer check would
-# still pass and rays would keep hitting the old plane.
+# still pass and rays would keep hitting the stale plane.
 using Lava, Mantle
 using Vulkan
 using Test

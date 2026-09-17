@@ -80,7 +80,7 @@ end
     end
 
     @testset "Tuple Broadcast" begin
-        # This was the lavapipe segfault bug — regression test
+        # Regression test for the lavapipe segfault
         N = 10
         out = LavaArray(zeros(Float32, 3, N))
         arr = LavaArray(rand(Float32, 3, N))
