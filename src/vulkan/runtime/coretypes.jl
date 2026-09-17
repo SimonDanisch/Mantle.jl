@@ -1,29 +1,19 @@
 """
 The types `VkContext` has to name, hoisted ahead of it.
 
-Nothing here is new and nothing here has behaviour — these are the `struct`
-blocks that used to sit beside the functions that use them, moved so that
-`VkContext` can hold its per-device state in **concrete typed fields** instead of
-module-level dictionaries keyed by `ctx.id`.
+Definitions only, no behaviour: these `struct` blocks sit ahead of the functions
+that use them so `VkContext` can hold its per-device state in **concrete typed
+fields** rather than module-level dictionaries keyed by `ctx.id`. Such a
+dictionary's entries outlive the device they describe and need a reset hook to
+empty them; state owned by the context needs neither.
 
-That keying was the shortcut: it made two devices work without touching call
-sites, and the probe that followed found seven real defects. But it left twelve
-globals whose entries outlive the device they describe, and a `RESET_CALLBACKS`
-mechanism whose entire job was emptying them. State owned by the context needs
-neither.
+Only types have to be hoisted. Constructors and methods stay with their
+behaviour, because include order constrains types and not methods — Julia
+resolves a call at the first invocation, long after every file is loaded.
 
-Only the definitions moved. Every constructor, method and comment about
-*behaviour* stayed where it was, because include order constrains types and not
-methods — Julia resolves a call at the first invocation, long after every file
-is loaded.
-
-One `Any` field survives, and it predates this: `VkManagedBuffer.ctx` /
-`last_write`, because a `VkContext` is what owns the queue that owns the buffer.
-That is a genuine cycle; the rest were only ordering.
-
-`PoolBlock` used to be the second, and it is gone — with the size-class
-allocator it belonged to. A suballocation is a `Mantle.Region` now, which is the
-one Mantle already hands to every graph arena.
+One `Any` field: `VkManagedBuffer.ctx` / `last_write`, because a `VkContext`
+owns the queue that owns the buffer. That is a genuine cycle rather than an
+ordering problem.
 """
 
 """
@@ -104,11 +94,9 @@ When one device grows, trims and collects, and what it currently holds.
 context's `LavaDevice` — the same pool every graph arena is placed in, with one
 free list and one set of blocks for the whole device.
 
-This type used to be that pool as well: `blocks::Vector{PoolBlock}` and
-`free_lists`, a bump allocator with 153 size classes, sitting beside
-`Mantle.Pool` and invisible to it. Two allocators over one `VkDevice` meant the
-peak either could report was about its own bookkeeping, and an arena and an array
-could not reuse each other's bytes however idle one of them was.
+A second allocator here would mean two over one `VkDevice`: each peak would
+describe only its own bookkeeping, and an arena and an array could not reuse
+each other's bytes however idle one was.
 
 What is left is policy, and it stays per device for the reason the split of these
 fields out of eleven module-level `Ref`s was made in the first place: a second
@@ -216,12 +204,11 @@ end
 """
 Everything a dispatch needs that depends only on the *types* of its arguments.
 
-`ka_launch!` used to rebuild `Tuple{map(arg_sigtype, tail(all_args))...}` on
-every single dispatch and hand it to `GPUCompiler.methodinstance`: that interns
-a fresh `Type` object, does a method lookup, and then two hash lookups keyed on
-that type and a freshly built compiler config — all to rediscover a pipeline it
-had already compiled. Types hash and compare slowly, and at ~2000 dispatches per
-MatAnyone inference step this was the largest single host cost in the loop.
+Keyed on `typeof(all_args)` and not on a rebuilt
+`Tuple{map(arg_sigtype, tail(all_args))...}`: that interns a fresh `Type`, does
+a method lookup and then two hash lookups on slow-hashing types, all to
+rediscover an already-compiled pipeline. At ~2000 dispatches per MatAnyone
+inference step it is the largest single host cost in the loop.
 
 `typeof(all_args)` is available for free and types are interned, so an `IdDict`
 keyed on it is a pointer hash. Everything downstream — pipeline, arg layout,
@@ -394,13 +381,10 @@ After the second, call [`verify_gpu_av`](@ref). "GPU-AV is enabled" and "GPU-AV
 is catching errors" are not the same thing on every driver, and a clean run under
 an instrument that never fired reads exactly like a clean run.
 
-This was seven environment variables — `LAVA_VALIDATION`, `LAVA_GPU_AV`,
-`LAVA_GPU_AV_SAFE`, `LAVA_GPU_AV_SHADERS`, `LAVA_SYNC_VAL`, `LAVA_BEST`,
-`LAVA_DEBUG_PRINTF` — read here at instance creation. They are **deleted**, not
-deprecated, because the failure they produced was not occasional: setting one in
-an already-running session did nothing at all, and setting `LAVA_GPU_AV` without
-`LAVA_VALIDATION` produced a *clean run with the instrument switched off*, which
-reads exactly like "no fault found". Both are unrepresentable here.
+**No environment variables.** They are read at instance creation, so setting one
+in a running session does nothing, and an instrumentation flag without
+`validation` gives a *clean run with the instrument switched off* — which reads
+exactly like "no fault found". Neither is representable here.
 
 ## The two rules, enforced in the constructor rather than warned about
 
@@ -409,10 +393,9 @@ best practices and debug printf are all features **of** the Khronos validation
 layer, so asking for one turns the layer on. Passing `validation = true` alone
 means core spec checks with no shader instrumentation, which is the cheap mode.
 
-`gpu_av` and `printf` are mutually exclusive and **throw** together. The layer
-instruments shaders for each and cannot do both; the previous behaviour was to
-silently prefer printf and warn, which is one more way to get a clean run out of
-a disabled instrument.
+`gpu_av` and `printf` are mutually exclusive and **throw** together: the layer
+instruments shaders for each and cannot do both. Preferring one and warning
+gives a clean run out of a disabled instrument.
 
 ## Two settings that exist because GPU-AV crashes
 
@@ -517,9 +500,9 @@ end
 One device's validation messages: a slot ring the debug-utils callback fills on
 a driver thread, and the drained strings the main thread reads.
 
-**This was eight module-level globals, and that was a two-device bug rather than
-untidiness.** `create_vulkan_context` builds a *fresh* `VK.Instance` and
-`DebugUtilsMessengerEXT` per context — `VkContext` already holds both as fields —
+**Per context, not module-level: globals here are a two-device bug.**
+`create_vulkan_context` builds a *fresh* `VK.Instance` and
+`DebugUtilsMessengerEXT` per context — `VkContext` holds both as fields —
 so two contexts meant two messengers writing into ONE ring. Device A's validation
 errors surfaced in device B's `get_validation_messages()`, and
 `check_validation_errors!` would raise one device's fault at the other device's

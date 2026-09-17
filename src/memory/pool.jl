@@ -112,10 +112,9 @@ allocation are O(1): by where a span starts, by where it ends, and bucketed by
 how large it is.
 
 The obvious structure — one sorted `Vector{Span}`, first fit to carve,
-`insert!` and coalesce to release — is what this replaces, and it was adequate
-while the pool served only graph arenas: a handful of live regions per block,
-one free entry per plan, and `Place` had already packed the transients inside
-each one.
+`insert!` and coalesce to release — is adequate only while the pool serves graph
+arenas alone: a handful of live regions per block, one free entry per plan, with
+`Place` having packed the transients inside each one already.
 
 What it does not have is a bound. First fit scans the free list from the front,
 and `insert!`/`deleteat!` memmove half of it per release, so both are O(number of
@@ -380,10 +379,9 @@ addresses its regions have today, and nothing can rewrite a command buffer.
 the whole pool before destroying a buffer, which is the same hazard with no arena
 to name it against.
 
-It replaces a `bq.capturing !== nothing` read in the Vulkan backend, which asked
-whether a capture happened to be OPEN. That is a different question and it was
-answerable only while `bake!` was running — a recording that had already been
-taken pinned nothing, so the trim was free to destroy a block it named.
+Not "is a capture open" (`bq.capturing !== nothing`), which is a different
+question: that is true only while `bake!` runs, so a recording already taken
+pins nothing and the trim is free to destroy a block it names.
 """
 movable(p::Pool) =
     all(a -> all(wr -> remappable(wr.value), tenants!(a)), values(p.arenas))
@@ -433,9 +431,7 @@ what is left of its budget once everything this pool already holds is subtracted
 — plus whatever an existing block could absorb without allocating at all.
 
 In core rather than in a backend because only the pool knows what it has
-reserved, and the two device facts it needs are already primitives. The Lava
-extension used to compute this itself, against a per-arena allocation it grew by
-reallocating; blocks make the arithmetic simpler as well as the memory safer.
+reserved, and the two device facts it needs are already primitives.
 """
 headroom(p::Pool, dev, kind) =
     min(maxalloc(dev), max(capacity(dev) - reserved(p), 0) + largestfree(p, kind))
@@ -540,10 +536,9 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
     # has not been submitted, so the worst case is this falls through and grows,
     # which is what it would have done anyway.
     #
-    # Under the pool lock for the whole body, `blocksof` included. Two threads
-    # allocating used to walk and `push!` the same block vector, which is the
-    # `ConcurrencyViolationError` this codebase has already paid for once in a
-    # different allocator. `ReentrantLock`, so `reclaim!` below re-entering from
+    # Under the pool lock for the whole body, `blocksof` included: two threads
+    # allocating would otherwise walk and `push!` the same block vector, which
+    # is a `ConcurrencyViolationError`. `ReentrantLock`, so `reclaim!` re-entering from
     # this thread is fine — and so is a finalizer landing here, which reaches
     # only `retire!` and touches `pending` rather than any block.
     lock(pool.lock) do
@@ -722,11 +717,10 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
         # that fails ends the question for all of them. A frame that releases
         # nothing therefore asks `passed` ONCE, whatever is waiting behind it.
         #
-        # It used to walk the whole list and compact it. That is scanning for work
-        # in a codebase that marks it: with four dropped screens' worth of regions
-        # in the list — 600 of them, and on a backend whose timeline only advances
-        # on an explicit wait they stay — every still frame paid 600 comparisons to
-        # rediscover that there was nothing to do.
+        # Not a walk over the whole list: with four dropped screens' worth of
+        # regions in it — 600, and on a backend whose timeline advances only on
+        # an explicit wait they stay — every still frame would pay 600
+        # comparisons to rediscover there is nothing to do.
         freed = 0
         n = length(p.retiring)
         while freed < n
@@ -758,11 +752,10 @@ function trim!(pool::Pool, dev)
         for (kind, blks) in pool.blocks
             keep = Block[]
             for blk in blks
-                # "Nothing is out on loan", which is the question, said directly.
-                # It used to be asked of the free list — one entry spanning the
-                # whole block — which is the same fact only while coalescing is
-                # perfect, and makes the trim depend on the allocator's internals
-                # rather than on its ledger.
+                # "Nothing is out on loan", asked of the ledger. Asking the
+                # free list instead — one entry spanning the whole block — is
+                # the same fact only while coalescing is perfect, and makes the
+                # trim depend on the allocator's internals.
                 if isempty(blk.live)
                     rawfree(dev, blk.memory)
                 else
@@ -782,8 +775,8 @@ What a region is aligned to unless a tenant needs more.
 Named because two places need the same number: this is `reserve!`'s default,
 and the `Place` phase raises it to whatever its tenants ask for. Passing a
 tenant's alignment straight through would LOWER it — a Metal storage buffer
-wants 16 — and a region that used to start on a 256-byte boundary suddenly did
-not, which cost 19% on the ray-tracing benchmark before it was caught.
+wants 16 — and a region off its 256-byte boundary costs 19% on the ray-tracing
+benchmark.
 """
 const REGION_ALIGN = 256
 
