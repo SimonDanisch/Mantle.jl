@@ -73,14 +73,38 @@ end
 
     # Test that byval_llvm_sizes are populated during compilation
     @testset "byval_llvm_sizes populated" begin
-        # After running broadcasts above, linked cache should have entries.
-        # Two levels: the cache is keyed by device first, then by kernel.
-        @test !isempty(Mantle.linked_kernel_cache(Mantle.vk_context()))
-        # All byval_sizes should be non-negative. One level now: the cache is a
-        # field on the context, so there is no outer dict to iterate by mistake.
-        for (_, linked) in Mantle.vk_context().caches.linked
-            @test all(s -> s >= 0, linked.byval_sizes)
+        # The launch that makes the claim testable happens HERE, rather than
+        # being relied on from elsewhere. The broadcasts above put nothing in
+        # the linked cache -- on a cold session it is still empty at this line,
+        # every one of them having passed -- so asserting `!isempty` after them
+        # only ever held because some earlier FILE in the suite had compiled a
+        # kernel into this context. It read as a check on the broadcasts above
+        # and was a check on whatever happened to run first.
+        @kernel function byval_probe!(dst, src)
+            i = @index(Global)
+            @inbounds dst[i] = src[i]
         end
+        probe_src = Mantle.LavaArray(TestS12[TestS12(Float32(i), Float32(i + 0.5), Float32(i + 0.25))
+                                             for i in 1:16])
+        probe_dst = Mantle.LavaArray{TestS12}(undef, 16)
+        byval_probe!(Mantle.defaultbackend(), 16)(probe_dst, probe_src; ndrange = 16)
+        Mantle.flush!(Mantle.Device())
+        @test Array(probe_dst) == Array(probe_src)
+
+        # One level now: the cache is a field on the context, so there is no
+        # outer dict to iterate by mistake.
+        cache = Mantle.linked_kernel_cache(Mantle.vk_context())
+        @test !isempty(cache)
+
+        # All byval_sizes non-negative. Every entry is still checked, but as ONE
+        # assertion instead of one per entry: the cache holds whatever the
+        # session has compiled so far, so a `@test` inside a loop over it made
+        # this file's assertion count depend on which files ran before it --
+        # 1740, 1717, 1701 and 1663 across four runs of the same suite, never
+        # failing. A ratchet that cannot say how much it checked is not one.
+        # Collecting the offenders also names them, which the loop did not.
+        negative = [k for (k, linked) in cache if !all(s -> s >= 0, linked.byval_sizes)]
+        @test negative == []
     end
 end
 

@@ -198,16 +198,15 @@ end
     # Checked against what Mantle actually REFERENCES rather than against the
     # whole intersection — `Scalar` (Mantle's vs StaticArrays') collides and
     # appears only in comments, which is not a defect.
-    loadedmod(n) = (for (_, m) in Base.loaded_modules; nameof(m) === n && return m; end;
-                    nothing)
-
     # Every file, because a bare `using` anywhere in the tree binds for the whole
     # module — which is the difference the extension split used to hide.
     usings = Set{Symbol}()
     for (root, _, files) in walkdir(SRC), f in files
         endswith(f, ".jl") && union!(usings, bare_usings(joinpath(root, f)))
     end
-    others = filter(!isnothing, loadedmod.(setdiff(collect(usings), [:Mantle])))
+    # `require` rather than whichever of them this session has loaded, so the
+    # covered set does not depend on load order. See the same call below.
+    others = Module[Base.require(Mantle, d) for d in sort(collect(setdiff(usings, [:Mantle])))]
     both = union(Set{Symbol}(), (intersect(Set(names(Mantle)), Set(names(m)))
                                  for m in others)...)
     # Named with their files, so the failure says where to add the import.
@@ -239,18 +238,45 @@ end
 @testset "no new name shadows a dependency's" begin
     # `eval`, `include` and `__init__` are in every module by construction.
     universal = (:eval, :include, :__init__)
-    loadedmod(n) = (for (_, m) in Base.loaded_modules; nameof(m) === n && return m; end;
-                    nothing)
     usings = Set{Symbol}()
     for (root, _, files) in walkdir(SRC), f in files
         endswith(f, ".jl") && union!(usings, bare_usings(joinpath(root, f)))
     end
-    deps = filter(!isnothing, loadedmod.(setdiff(collect(usings), [:Mantle])))
+    # `require`, not "whichever of them this session happens to have loaded".
+    # Every module named by a bare `using` in src is a dependency and can be
+    # loaded; picking them out of `Base.loaded_modules` instead made the covered
+    # set depend on load order. `Metal` is the one that showed it: named under
+    # `@static if Sys.isapple()`, pulled in by an extension partway through the
+    # full suite, so it was checked there and silently not checked when this
+    # file ran on its own, and the two runs disagreed about what the ratchet
+    # covers. Sorted so the set is the same every run.
+    deps = Module[Base.require(Mantle, d) for d in sort(collect(setdiff(usings, [:Mantle])))]
 
-    # `binding_module`, not `parentmodule`: it answers for an imported binding
-    # as well as a defined one, and it does not throw on a union alias the way
-    # `parentmodule(Mantle.AnyLavaArray)` does.
-    defines(m, n) = isdefined(m, n) && Base.binding_module(m, n) === m &&
+    # "m defines n" is "m did not import n", asked of the binding's kind.
+    #
+    # NOT `binding_module(m, n) === m`, which was here before and says the same
+    # thing except when it cannot speak at all: a const reachable through more
+    # than one `using` has no single source module, and asking raises `Constant
+    # binding was imported from multiple modules`. Ten bindings in this
+    # dependency set are like that -- `Metal.Dispatch`, `.OS`, `.CoreFoundation`
+    # and `.Foundation`, `GPUCompiler.@error/@info/@warn/@debug`, and
+    # `GPUArrays.BLAS/.Broadcast` -- and `Dispatch` is one Mantle also defines,
+    # so the comprehension below reached it and threw. That was loud, an `Error
+    # During Test`, but it named `Dispatch` rather than anything this file is
+    # about and it aborted the testset before the `@test` ran. A ratchet that
+    # reports an error instead of checking is not checking.
+    #
+    # The kind answers for all of them, and agrees with `binding_module`
+    # everywhere it could answer: checked over all 38,665 (module, name) pairs
+    # in this dependency set, zero disagreements. It also answers for the union
+    # alias that `parentmodule(Mantle.AnyLavaArray)` throws on, which is why
+    # `binding_module` was chosen over `parentmodule` in the first place.
+    #
+    # `names(m; all = true)` is NOT the test: it lists re-exported imports too,
+    # so `Mantle.MeshConfig` (explicitly imported from KernelInterface and
+    # exported again) would count as Mantle's own.
+    defines(m, n) = isdefined(m, n) &&
+                    !Base.is_some_imported(Base.binding_kind(m, n)) &&
                     (v = getglobal(m, n); v isa Function || v isa Type)
     ours = [n for n in names(Mantle; all = true)
             if !startswith(String(n), "#") && !(n in universal) && defines(Mantle, n)]
@@ -260,12 +286,26 @@ end
     # a dependency also uses — `Backend` and `Window` are the documented ones,
     # `fence` is the timeline counter and not UnsafeAtomics' barrier. Reviewed
     # on 2026-09-11; `unsafe_free!` is NOT here, because it is imported now.
+    #
+    # The four Metal entries are not new collisions, they are newly VISIBLE: the
+    # predicate above used to throw on `Metal.Dispatch` and take the whole
+    # testset with it, so nothing Metal defines was ever reached. Reviewed on
+    # 2026-09-17 and all four are this same category. `device` and `gemv!` are
+    # already here against KernelAbstractions and LinearAlgebra, so Metal is
+    # just a third package spelling them; `flush!` is Mantle's submission
+    # vocabulary and `maybe_collect` its `VkContext` collector, both defined in
+    # core and Vulkan files that have nothing to do with Metal. Nothing is
+    # shadowed by accident: `src/metal/` says `Metal.flush!` and
+    # `Metal.device()` qualified wherever it wants Metal's, and neither
+    # `maybe_collect` nor `gemv!` is named there at all.
     known = [(:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Mat4f, :GeometryBasics), (:Pass, :LLVM), (:Window, :GLFW),
              (:alignment, :LLVM), (:allocate, :KernelAbstractions),
              (:backend, :KernelAbstractions), (:count, :AcceleratedKernels),
-             (:device, :KernelAbstractions), (:fence, :UnsafeAtomics),
-             (:free!, :LLVM), (:gemv!, :LinearAlgebra), (:offset, :LLVM),
+             (:device, :KernelAbstractions), (:device, :Metal),
+             (:fence, :UnsafeAtomics), (:flush!, :Metal), (:free!, :LLVM),
+             (:gemv!, :LinearAlgebra), (:gemv!, :Metal),
+             (:maybe_collect, :Metal), (:offset, :LLVM),
              (:overlaps, :GeometryBasics), (:register!, :LLVM), (:run!, :LLVM),
              (:storage, :GPUArrays), (:workgroupsize, :KernelAbstractions)]
     @test setdiff(shadows, known) == Tuple{Symbol,Symbol}[]
