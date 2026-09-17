@@ -52,15 +52,13 @@ Mantle does not own the submissions on this path. Compute goes out through a
 `Metal.BatchedCommandQueue`, so this backend never sees the command buffer that
 reads a pooled region and has nothing to signal an `MTLSharedEvent` from.
 
-The first version kept the Vulkan shape anyway — `next` beside a
-`signaledValue` — and since nothing ever advanced `next`, `fence` returned 0 and
-`passed(d, 0)` was `0 >= 0`: **every retired region looked finished the instant
-it was retired**, so the pool recycled memory that in-flight kernels were still
-reading. It only showed once a session allocated enough to reuse anything, which
-is why one scene rendered correctly and the next came out NaN.
+The Vulkan shape, `next` beside a `signaledValue`, cannot be kept: with nothing
+to advance `next`, `fence` returns 0 and `passed(d, 0)` is `0 >= 0`, so **every
+retired region looks finished the instant it was retired** and the pool recycles
+memory in-flight kernels are still reading.
 
 So this timeline counts *retirements*, not submissions, and the only thing that
-advances `completed` is a real `Metal.synchronize()`. That is conservative —
+advances `completed` is a real `Metal.synchronize()`. That is conservative,
 reuse costs a device sync — but it is the honest answer to "has the GPU finished
 with these bytes" from a queue this backend cannot observe. An `MTL4Queue` can
 answer it properly, because there Mantle does own the submission.
@@ -242,10 +240,9 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 # for. Do not build it.
 #
 # It is not a reduced path. RayDemo's crown, 800x800, sixteen samples per frame,
-# depth 8, hardware traversal — the case that used to stall at the sixth or
-# seventh submission — runs thirty consecutive frames on an MTL4 queue at a median
-# of 1817 ms, against 1842 ms for the same scene replaying on the legacy queue, and
-# the two images agree.
+# depth 8, hardware traversal, runs thirty consecutive frames on an MTL4 queue at
+# a median of 1817 ms, against 1842 ms for the same scene replaying on the legacy
+# queue, and the two images agree.
 #
 # So the default is legacy for the ONE remaining reason: every other Metal path in
 # this backend — render passes, blits, acceleration-structure builds, Metal.jl's
@@ -257,10 +254,10 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 #
 # A replayed segment is otherwise IDENTICAL on the two: one
 # `executeCommandsInBuffer:`, and the barrier bit a command carries is honoured on
-# both. That was measured rather than assumed — 40 chained dispatches, each adding
-# one, come out at exactly 40 on an MTL4 encoder from a single execute. A run that
-# read 9 was not a barrier being ignored; it was a replay reaching memory that no
-# residency set this queue had ever been given, which is what `adoptqueue!` is for.
+# both. That was measured rather than assumed: 40 chained dispatches, each adding
+# one, come out at exactly 40 on an MTL4 encoder from a single execute. A count
+# short of that is a replay reaching memory no residency set of this queue was
+# given, which is what `adoptqueue!` is for, and not a barrier being ignored.
 metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 
 MetalDevice(mtldev::MTL.MTLDevice, q) =
@@ -296,10 +293,10 @@ Make `d` the device this process hands out — and the one Metal.jl launches on.
 `adoptqueue!` HERE, and not in the constructor and not only in `openrun`. Not in
 the constructor, because a second `MetalDevice` built for a test or a capability
 query would take the queue away from the process device. Not only in `openrun`,
-because an upload is a blit: `Buffer(dev, data)` before the first run would go to
-whatever queue Metal.jl handed the running task, which is ordered against the
-replay by nothing at all — it read as a first frame that produced nothing while
-every frame after it was right.
+because an upload is a blit: `Buffer(dev, data)` before the first run would go
+to whatever queue Metal.jl handed the running task, which is ordered against the
+replay by nothing at all, and reads as a first frame that produces nothing while
+every frame after it is right.
 """
 defaultdevice!(d::MetalDevice) = (METAL_DEVICE[] = d; adoptqueue!(d); d)
 
@@ -385,8 +382,8 @@ device allocation, the caller picks the offsets, and two resources placed at
 overlapping offsets share the bytes — which is what the graph's aliasing pass
 decided when it gave two targets the same offset.
 
-`Automatic` would have been the easier heap type and is the wrong one: it
-chooses its own offsets, so the placement Mantle computed would be advisory.
+`Automatic` is the easier heap type and the wrong one: it chooses its own
+offsets, so the placement Mantle computed would be advisory.
 """
 function rawalloc(d::MetalDevice, ::Images, bytes::Int, storage)
     desc = MTL.MTLHeapDescriptor()
@@ -732,13 +729,13 @@ ranges were never written and stayed at the zeros `openrecording` left.
 
 So both directions are refused, symmetrically, rather than the first one only. A
 plan's device is fixed when it is recorded, so neither is reachable through the
-public API today — but the quiet one would be a black frame with nothing to read.
+public API, and the quiet one would be a black frame with nothing to read.
 """
 canrun(q, rec) = encodes(q) ? !isempty(rec.encoded) : isempty(rec.encoded)
 
 """Why this queue cannot run this recording, said where the generations are named."""
 refusereplay(::MTL4Queue) = throw(ArgumentError(
-    "Mantle: this recording holds nothing an MTL4 queue can run. It was recorded " *
+    "Mantle: this recording holds nothing an MTL4 queue can run. It is recorded " *
     "for a queue that replays an indirect command buffer, and an MTL4 queue cannot: " *
     "`executeCommandsInBuffer:` on an MTL4 compute encoder stops completing after " *
     "about a second of replayed GPU work, with no error from the commit feedback " *
@@ -785,11 +782,11 @@ function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     # validation makes everything resident — so the first frame was correct under
     # the debug layer and silently empty without it.
     #
-    # `ensureresident!` grants it, and `replay!` calls it immediately above this.
-    # It grants only when the list is rebuilt, so a steady
-    # frame does nothing at all here — where this used to re-grant every block
-    # every frame, which is a lock and a hash per block for an answer that cannot
-    # change (a residency set never gives an allocation back).
+    # `ensureresident!` grants it, and `replay!` calls it immediately above
+    # this. It grants only when the list is rebuilt, so a steady frame does
+    # nothing at all here: re-granting per block per frame is a lock and a hash
+    # for an answer that cannot change, since a residency set never gives an
+    # allocation back.
     q.slot = q.slot == length(q.allocs) ? 1 : q.slot + 1
     f = q.at[q.slot]
     # Zero means the slot has never been used. Otherwise this is the one place
@@ -849,10 +846,9 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     # ranges and the command processor stops on one that no longer names a valid
     # range — no error, no fault in the log, just a submission that never signals.
     #
-    # It took the crown to find, because it needs all three at once: a gated plan,
-    # several submissions in flight (a 16-sample frame issues them back to back),
-    # and frames long enough to actually overlap. Every one of those alone is
-    # fine, which is why the suite and every smaller scene passed.
+    # It needs all three at once to show: a gated plan, several submissions in
+    # flight (a 16-sample frame issues them back to back), and frames long enough
+    # to actually overlap.
     #
     # The cost is no cross-frame overlap on the GPU — which is exactly what the
     # legacy queue already does, so it is not a regression against it.
@@ -1096,17 +1092,10 @@ waitidle(::Metal.MetalBackend) = Metal.synchronize()
 waitidle(d::MetalDevice) = (Metal.synchronize(); nothing)
 
 # `supports_graphics` is answered in `graphics.jl`, where the rasterisation half
-# lives. It used to say `false` right here, because Metal.jl compiled Julia to
-# compute kernels only — no vertex or fragment stage existed for a shader to
-# become. It compiles both now.
+# lives. Metal.jl compiles vertex and fragment stages as well as compute.
 
-# It told the caller "Metal.jl has no graphics pipeline, check
-# `supports_graphics` and take the compute path" on a backend where
-# `supports_graphics` measurably answers `true`, fifteen lines below a comment
-# saying so.
-#
-# A second channel is a driver fact — Vulkan takes another `VkQueue` from the
-# family — and this backend has one queue, which `supports_batch_queue` is the
+# A second channel is a driver fact (Vulkan takes another `VkQueue` from the
+# family) and this backend has one queue, which `supports_batch_queue` is the
 # question for. Throwing is the answer to asking anyway.
 function allocate_batch_queue!(::Union{Metal.MetalBackend,MetalDevice})
     throw(ArgumentError(

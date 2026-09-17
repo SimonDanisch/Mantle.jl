@@ -3,35 +3,25 @@ module Mantle
 # The device vocabulary, shared with Lava. It lives in `KernelInterface`, which
 # exports nothing on purpose, so the names are listed.
 #
-# It went there while Lava could NOT be a dependency here — Mantle weak-depended
-# on it, so an edge back would have closed a cycle. That is no longer why: since
-# 2026-08-27 Mantle depends on Lava outright. It stays in KI because a Metal
-# backend has to name `MatrixShape` and `DeviceCaps` too, and making it import a
-# SPIR-V compiler for them would be absurd.
-#
-# `DeviceCaps` and the matrix types were each written twice, here and in Lava,
-# and bridged by a positional copy in `MantleLavaExt`. Both copies are deleted:
-# there is one type, and `caps` fills it in.
+# It is in KI and not here because a Metal backend has to name `MatrixShape` and
+# `DeviceCaps` too, and making it import a SPIR-V compiler for them would be
+# absurd. There is one of each type, and `caps` fills it in.
 # ColorTypes is a DEPENDENCY of Mantle, declared in Project.toml, and
 # `runtime/format.jl` documents `RGBA{N0f8}` and `BGRA{N0f8}` as the portable
-# way to name a pixel format. It was never `using`-ed, and three separate
-# comments concluded from that it was absent — which cost `mtlformat` a
-# structural match on `nameof(T)` (so any foreign type called `RGBA` was
-# accepted) and cost the Metal backend the portable `Window(backend, w, h)`
-# that is in the vocabulary and that Lava answers.
+# way to name a pixel format. The names are `using`-ed here so every backend can
+# match on the TYPE rather than on `nameof(T)`, which accepts any foreign type
+# that happens to be called `RGBA`.
 using ColorTypes: RGBA, BGRA, Colorant
 export RGBA, BGRA
 
 using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
     MatrixScope, SubgroupScope, WorkgroupScope, MatrixShape, DeviceCaps
-# The one device intrinsic core reaches for. `gemv.jl`'s inner loop reduces
-# across the subgroup, and it used to call Lava's `subgroup_add` — the single
-# thing keeping a compiler dependency in code that is otherwise portable. KI
-# owns the generic now and each backend maps it to its own instruction.
+# The one device intrinsic core reaches for: `gemv.jl`'s inner loop reduces
+# across the subgroup. KI owns the generic and each backend maps it to its own
+# instruction, so core needs no compiler dependency for it.
 using KernelInterface: sub_group_reduce_add
-# The cooperative-matrix type and the nine operations a backend lowers. These
-# were Lava's, and naming a SPIR-V compiler's type was the one thing blocking
-# GEMM's coopmat half from living in core — see
+# The cooperative-matrix type and the nine operations a backend lowers, in KI so
+# that GEMM's coopmat half names no SPIR-V compiler's type. Pinned by
 # `test/vulkan/test_array_algorithm_portability.jl`.
 using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
     matrixuse, matrixscope, coopmat_load, coopmat_store, coopmat_muladd,
@@ -100,11 +90,8 @@ using KernelInterface: primitivestride, primitivecount, firstinputvertex
 import KernelInterface: supports, bestshape, caps, matrix_shapes, wggranularity
 
 # `KI` is how the backends spell the module when they EXTEND its interface rather
-# than call into it — `KI.synchronize(::MetalBackend)` and the thirty methods
-# beside it in `src/metal/kernelinterface.jl`. It used to be a `const` in
-# `ext/MantleMetalExt.jl`; deleting that file when the backend stopped being an
-# extension took the binding with it, and the metal source has not loaded on this
-# platform since.
+# than call into it: `KI.synchronize(::MetalBackend)` and the thirty methods
+# beside it in `src/metal/kernelinterface.jl`.
 import KernelInterface
 const KI = KernelInterface
 
@@ -123,11 +110,9 @@ const KI = KernelInterface
 # not what stood between this package and a driverless machine.
 import Serialization
 import PrecompileTools
-# `@setup_workload` is PrecompileTools', re-exported. It used to reach callers
-# through the Vulkan backend's export list, which an extension cannot have —
-# and Hikari says `Mantle.@setup_workload`, so it belongs on the parent. The
-# device-taking `@compile_workload` is a different macro and stays with the
-# backend that needs a device to freeze kernels for.
+# `@setup_workload` is PrecompileTools', re-exported because Hikari says
+# `Mantle.@setup_workload`. The device-taking `@compile_workload` is a different
+# macro and stays with the backend that needs a device to freeze kernels for.
 using PrecompileTools: @setup_workload
 export @setup_workload, @compile_workload
 using GPUCompiler
@@ -152,12 +137,9 @@ using SPIRV_Tools_jll
 using LinearAlgebra
 using StaticArrays
 using GeometryBasics
-# Three more the extension used to hold, and that `src/metal/` uses: `KA` is only
-# `const`-defined in `src/vulkan/raytracing/hwtlas.jl`, which does not load on a
-# Mac, so the Metal source had no alias at all; `@propagate_inbounds` is
-# `hwtlas.jl`'s and `FixedPoint` is `graphics.jl`'s. `SVector`, `decompose` and
-# the GeometryBasics point types need nothing — core already imports both
-# packages wholesale above.
+# Three `src/metal/` needs and that no file loading on a Mac defines: `KA` is
+# otherwise `const`-defined in `src/vulkan/raytracing/hwtlas.jl`,
+# `@propagate_inbounds` is `hwtlas.jl`'s and `FixedPoint` is `graphics.jl`'s.
 const KA = KernelAbstractions
 using Base: @propagate_inbounds
 using ColorTypes.FixedPointNumbers: FixedPoint, N0f8
@@ -253,7 +235,7 @@ include("geometry/narrow_phase.jl")   # needs both
 # Mantle owns the graph; this is the whole of what a backend answers for it.
 include("graph/backend.jl")
 # How a kernel argument reaches the kernel, and the walk over the ones that do.
-# One rule for both recording backends; it was three copies that disagreed.
+# One rule for both recording backends.
 include("graph/packing.jl")
 
 # ── Ray tracing ───────────────────────────────────────────────────────────────
@@ -494,10 +476,8 @@ capacity(dev) = typemax(Int)
 
 
 # The host backend, last: every method in it is a method on something declared
-# above, and it says so — the file qualifies all 83 of them as `Mantle.x`,
-# because it was `ext/MantleHostExt.jl` until the KernelAbstractions weakdep
-# turned out to be unworkable. Left qualified rather than rewritten: it reads as
-# the backend-facing surface it is, and it stays trivially re-extractable.
+# above, and it says so: the file qualifies all 83 of them as `Mantle.x`, which
+# reads as the backend-facing surface it is and stays extractable.
 include("host/host.jl")
 
 # ── The GPU backend, chosen at parse time ─────────────────────────────────────
@@ -543,13 +523,11 @@ end
 
 The GPU of this machine, without naming an API.
 
-Core's, and it could not be before: the no-arg form used to live in the Vulkan
-backend and hardcode `VulkanAPI()`, because "on a machine with two loaded it
-would have to guess". With the backend chosen at parse time there is never more
-than one, so the guess is a platform fact and this is the one place allowed to
-state it. `Device(VulkanAPI())` and `Device(MetalAPI())` stay for a caller who
-wants to say which, and `devices`/`selectdevice`/`defaultdevice!` still choose
-among the GPUs of the one that is here.
+The backend is chosen at parse time, so there is never more than one loaded and
+no guess to make: this is the one place allowed to state which platform is
+which. `Device(VulkanAPI())` and `Device(MetalAPI())` are for a caller who wants
+to say which, and `devices`/`selectdevice`/`defaultdevice!` choose among the
+GPUs of the one that is here.
 """
 Device() = @static Sys.isapple() ? Device(MetalAPI()) : Device(VulkanAPI())
 
