@@ -1086,7 +1086,31 @@ end
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 # ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
+"""
+    copy!(g, name, dst, src) -> Pass
+
+A pass that reads an IMAGE and writes a buffer: a framebuffer readback, which is
+`vkCmdCopyImageToBuffer` and not a dispatch.
+
+`src` has to be something that answers `target_image` — a window, a framebuffer,
+a transient image. A BUFFER source is refused here, because the emitter would
+reach `target_image` on it and raise a `MethodError` about a function the caller
+never named, several phases after the declaration that caused it.
+
+There is deliberately no buffer-to-buffer form. `vkCmdCopyBuffer` is a transfer
+command, so it is not a pass whose accesses the walk can read off a kernel body,
+and a graph that wants those bytes moved declares the kernel that moves them —
+one `ew!` with `identity` is the whole of it, and then `Barriers` orders it like
+anything else. `copyto!` on two device arrays is the ad hoc form, outside a
+graph.
+"""
 function copy!(g::Graph, name::AbstractString, dst, src)
+    hasmethod(target_image, Tuple{typeof(src)}) || throw(ArgumentError(
+        "copy!: `$(name)`'s source is a $(typeof(src)), which is not an image " *
+        "attachment — only those answer `target_image`, and this pass records " *
+        "`vkCmdCopyImageToBuffer`. To move bytes between BUFFERS, declare the " *
+        "kernel that moves them: a dispatch is a pass whose accesses the walk " *
+        "reads off the body, and a transfer command is not."))
     p = Pass(name, :copy)
     push!(p.targets, src)
     p.dst = dst
