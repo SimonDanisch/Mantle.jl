@@ -409,14 +409,6 @@ export indexbuffer
 # names the type; `supportspredicate` because a caller may want to pick between
 # `repeat!` and a host loop rather than be thrown at.
 export repeat!, Predicate, supportspredicate
-# `Read`, `Write` and `ReadWrite` were exported here: what a CALL stated about
-# each of its arguments, at each call site. They are gone -- the direction
-# belongs to the function, and `argument_usage` declares it once -- and this line
-# outlived them, which is exactly the failure
-# `test/vulkan/test_no_stale_exports.jl` exists for: exporting a name you do not
-# define is legal Julia, silent, and SHADOWS the real export of anything loaded
-# beside it. `ReadWrite` survived only because it is also the `Access` type
-# exported above, so the stale list read as two names rather than three.
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive
@@ -436,12 +428,6 @@ export timings, PassTiming, NSAMPLES
 False by default, which is the honest answer for a backend that never builds
 one."""
 recorded(plan) = false
-
-# `rebind!` is gone. It re-read every `Ref` a recorded plan was given and wrote
-# the current value into the plan's argument memory, once per (entry, `Ref`)
-# pair, so that a recorded plan meant the same thing as an interpreted one. A
-# value that changes is a [`GPURef`](@ref) now: the commands hold its address,
-# one `Update` writes it, and there is nothing per-run for a backend to offer.
 
 function update! end
 function use end

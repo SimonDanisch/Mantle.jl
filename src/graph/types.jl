@@ -311,25 +311,6 @@ it, and plain host-visible memory where it does not.
 """
 struct Readback end
 
-# `Recycler` is gone with renaming. It held retired buffers by byte size and
-# handed them back once a completion token said the device was past the run that
-# read them — the free list an `Update` took its fresh store from. An update
-# writes its target IN PLACE now, so there is no outgoing store to hold and
-# nothing to recycle.
-
-# `ArgWrite` is gone, and with it the whole idea of a per-run host write into
-# argument memory. It held "this `Ref`'s bytes go at offset N of this entry's
-# argument region", one per (entry, `Ref`) pair — 602 of them on Hikari's fused
-# sample, to move the 268 bytes that actually changed, because every dispatch
-# carries its own COPY of every argument it is given.
-#
-# A [`GPURef`](@ref) removes the copies rather than making them cheaper to
-# rewrite: the argument each dispatch is packed with is the ref's device
-# ADDRESS, written once at `record!` and never again, and the value behind it is
-# one buffer that one store (`ref[] = x`) writes. 602 becomes 1, and it becomes a command
-# in the stream rather than a host store into memory a submission may still be
-# reading — which is what let the argument ring go.
-
 mutable struct Graph{D}
     dev::D
     passes::Vector{Pass}

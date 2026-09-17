@@ -371,12 +371,6 @@ function profiled!(f, pl::Plan, e, i::Integer)
     return r
 end
 
-# `rename!` is gone. It pointed a resource at a fresh store rather than
-# overwriting the one the GPU was reading, which is the one thing a RECORDING
-# cannot follow: the commands hold the address they were written with, so they
-# keep reading the store the update moved away from. It was one of the two
-# reasons `record!` could refuse a plan.
-
 """
     storebytes!(emitter, store, offset, ptr, nbytes)
 
@@ -386,15 +380,6 @@ the command buffer where the backend can carry the bytes, staged where it
 cannot; which is the backend's constraint, not a decision of the graph's.
 """
 function storebytes! end
-
-# `nextslot!` is gone with the argument ring. It advanced to the next of
-# `ARG_SLOTS` copies of a plan's arguments and waited when the host got that far
-# ahead of the device — the whole of the graph's pipelining policy, and all of it
-# in service of one thing: a run wrote argument bytes on the HOST while an
-# earlier run's submission could still be reading them. Nothing writes those
-# bytes after `record!` any more (see [`GPURef`](@ref)), so there is nothing to
-# rotate and nothing to wait for. A run is one `submit!` with no host stores and
-# no possibility of a stall in front of it.
 
 """
     waitfor!(device, token)

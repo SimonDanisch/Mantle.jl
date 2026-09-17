@@ -896,13 +896,6 @@ share an id" assertion, and this counter with it.
 """
 const VK_CONTEXT_COUNTER = Ref{UInt64}(0)
 
-# `RESET_CALLBACKS` was here: a list every later-included file pushed onto so
-# `reset_device!` could empty its module-level caches. Deleted rather than
-# emptied — its entries were the symptom this refactor was diagnosing. State
-# that outlives the device it describes has to be told to go away; state a
-# `VkContext` owns simply does not. The last four went with the pool accounting,
-# the dispatch counters, the capture handle and the timing records.
-
 """
     vk_context() -> VkContext
 

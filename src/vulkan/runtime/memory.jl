@@ -1071,23 +1071,6 @@ function reset_pool_gc_stats!(ctx::VkContext = vk_context())
     return
 end
 
-# A block-count watermark used to live here, reclaiming on the allocation path
-# once the pool passed 48 blocks. It is gone: [`maybe_trim_pool!`] does the same
-# job — return dead capacity to the driver — and does it better, because it is
-# limited by elapsed time rather than by allocation count and it only pays
-# `quiesce_before_reclaim!` when a block is actually empty. The watermark
-# version quiesced whether or not anything came back, which cost **2.83x** on
-# SAM 2's encoder (1 046 ms against 370) before a back-off was bolted on.
-#
-# Two mechanisms, two jobs, and they are not interchangeable:
-#
-#   * `soft_cap` stops the pool GROWING. On the allocation path, cheap,
-#     no queue drain — the memory comes back as free spans the caller takes
-#     immediately.
-#   * `trim_threshold` RELEASES capacity that is already dead, back to
-#     the driver. Periodic, expensive, and the only thing that helps when the
-#     pressure is on memory the rest of the machine needs.
-
 """
     mempolicy(ctx).soft_cap
 
@@ -1491,15 +1474,6 @@ minimum alignment via `vkGetBufferDeviceAddress`).
 @inline function bda_alignment_for(ctx::VkContext, scratch::Bool)
     return scratch ? ctx.as_scratch_align : UInt64(1)
 end
-
-# VkMappedBuffer / VkIndirectBuffer / alloc_indirect_slab / vk_alloc_mapped /
-# vk_alloc_unified: deleted.  Every GPU buffer allocation goes through
-# `vk_alloc(bq, nbytes; extra_usage, unified)` now.
-#
-# The two slab pools that stood beside them — the arg buffer ring and the
-# indirect dispatch ring, and `INDIRECT_SLAB_SIZE` with them — are gone as well.
-# What a recording reads is a `Region` of the `Unified` arena, owned by whoever
-# owns the recording: see `scratch!` in `runtime/launch.jl`.
 
 function find_memory_type_optional(ctx::VkContext, type_bits::UInt32, required_flags)
     mem_props = ctx.memory_properties

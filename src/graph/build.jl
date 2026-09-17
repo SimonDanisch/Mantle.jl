@@ -243,16 +243,6 @@ array type; everything else is walked into.
 """
 isdevicearray(@nospecialize(x)) = false
 
-# `compute!(f, graph, name) do p … end` was here, and it is gone with `use`.
-#
-# It existed to give a body a pass handle to declare into, and to group several
-# dispatches so that no barrier fell between them. Nothing needs the first any
-# more. The second was always an assertion the author made and the graph could
-# not check — "these two write the same buffer and do not collide" — and it is
-# now derived from the same place as everything else: two dispatches that append
-# to one queue at atomically claimed indices are `Unordered` against each other
-# and get no barrier, whether or not anyone thought to group them.
-
 """
     repeat!(f, graph, maxiters, count) -> passes
     repeat!(f, graph, maxiters; while_nonzero = flag) -> passes
@@ -996,25 +986,6 @@ function slice(g::Graph, x, range::UnitRange{Int})
     end
 end
 
-# `use(pass, x; read, write, range, unordered)` was here, and it is gone.
-#
-# It was the only way to say what a pass touched, and it was a SECOND source for
-# something the kernel already stated: the call site said `write = true` and the
-# body did the storing, and when one of them changed the other did not. Every
-# usage is now derived — `dispatch!` from the kernel, `draw!` from its two
-# stages, `trace!` from every shader in the pipeline — by the walk in
-# `graph/access.jl`.
-#
-# Its three arguments went three ways:
-#
-#   * `read`/`write` are read off the body.
-#   * `unordered` is too: a write at an index claimed from an atomic is disjoint
-#     from every other invocation's, which is what a work queue's append is and
-#     what `accumulates!` used to assert by hand.
-#   * `range` is not an access at all — it is which part of a buffer a pass
-#     touches — so it became an ARGUMENT: `slice(g, b, 1:128)` is what a pass is
-#     handed, and the pass is recorded as touching that slice.
-
 # Whether a dispatch was given a workgroup size is a type, not a branch: the
 # launch is per pass per frame and this keeps the call site one expression.
 
@@ -1129,11 +1100,6 @@ end
 
 argalign(n::Integer) = (Int(n) + 255) & ~255
 
-# `slotbase(am)` is gone with the argument ring. It was `(am.slot - 1) *
-# am.stride`, threaded through every emitter as `e.base` and added to every
-# address a recording held; with one copy of the arguments the base is zero
-# everywhere, so the field, the parameter and the addition all go.
-
 """
 One `VkDispatchIndirectCommand`'s worth of the plan's memory, 256-byte aligned so
 a device address derived from it satisfies every backend's indirect-buffer
@@ -1192,13 +1158,6 @@ end
 
 rawargs(args::Tuple) = map(storage, args)
 
-# `isdynamic`, `dynamicargs` and the three `rebinding` methods are gone. They
-# answered "can this argument hold a different value on the next run", which is
-# the question the per-run host rewrite existed to act on. Nothing rewrites
-# argument memory after `record!`, so the answer is no for every argument and
-# the predicate has no caller: a value that changes is a [`GPURef`](@ref), and
-# what its dispatches were packed with is an address that does not.
-
 devargs(ad, raw::Tuple) = map(a -> Adapt.adapt(ad, a), raw)
 
 """The resource a usage ultimately names: a slice and a vertex binding both
@@ -1208,13 +1167,6 @@ rootresource(x) = x
 rootresource(v::BufferRange) = rootresource(v.parent)
 
 rootresource(a::Attr) = rootresource(a.resource)
-
-# `renameable(g, r)` is gone. It answered "can a store to this resource move
-# it", which was true for a whole-buffer store and false for a ranged one, and
-# it had two consumers: the barrier phase widened a renameable resource's barrier
-# to a global one (step 0 made every barrier global, so that went), and `record!`
-# refused a plan holding one (step 3 deleted renaming, so that went too). Nothing
-# can move now, so the question has no answer worth having.
 
 Compile(g::Graph; alias = true, coalesce = true, policy = Overlap()) =
     Compile(g, alias, coalesce, policy, Analysis(), Transition[],

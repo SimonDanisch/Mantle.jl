@@ -244,11 +244,6 @@ struct LaunchPlan
     ray_query::Bool
 end
 
-# `PrepareIndirect` is gone with `fast_prepare_indirect!` — it held one
-# hand-cached compiled kernel, its offsets and its argument size, so that one
-# specific launch could skip the ordinary kernel-cache lookup. See
-# `ka_backend.jl` for why that launch is not on an inner loop any more.
-
 """
     VulkanCompiledGraphicsPipeline
 

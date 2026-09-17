@@ -453,27 +453,6 @@ function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroups
     return new_plan
 end
 
-# `barrier_elision` and the tracker behind it are gone: `bq.touched_ranges`, a
-# flat [lo₁,hi₁,lo₂,hi₂,…] of everything touched since the last barrier,
-# `bq.dispatch_ranges` as scratch, `barrier_needed!` to test overlap,
-# `reset_barrier_elision!` and `poison_barrier_elision!`.
-#
-# The idea was sound and the cost of being wrong was not. Two dispatches whose
-# argument address ranges are pairwise disjoint cannot alias, so the barrier
-# between them is unnecessary whichever side reads and whichever writes — no
-# read/write annotation needed. But only the KA launch path knows a dispatch's
-# buffers, and everything else recording into the same command buffer (a copy, a
-# prepare, Lava's own launches) writes memory the tracker never saw, so it needed
-# `poison_barrier_elision!` to cover them. Miss one and a later dispatch reading
-# what a copy just wrote finds no overlap and drops the barrier it needed: 0.024
-# of alpha on the MatAnyone step, which is the small plausible error a race gives
-# you. A declared graph reads what its kernels touch off the kernels, so the
-# answer is derived where it can be checked rather than recovered from a wrapper
-# after the fact.
-#
-# `range_leaves!` in `graph/lifetime.jl` went with it — it was the walk that
-# collected the ranges.
-
 """
     interior_unit_workgroup(W) -> Bool
 
@@ -940,14 +919,6 @@ function prepare_indirect_kernel(indirect::LavaDeviceArray{UInt32,1},
     indirect[3] = UInt32(1)      # groupCountZ
     return nothing
 end
-
-# `fast_prepare_indirect!` is gone, and with it `PrepareIndirect`,
-# `init_prepare_indirect_pipeline!` and the `ctx.caches.prepare_indirect` slot
-# it filled. It was `preparekernel`'s body written out a second time with the
-# pipeline hand-cached, to save "~30K lava_launch! calls per render" on a path
-# a modelled plan no longer takes: `emitprepares!` writes ONE fused prepare per
-# pass from `pp.indirect`, and what is left here is the unmodelled indirect
-# launch, which is not on anybody's inner loop.
 
 function prepare_indirect_dispatch!(e::Emitter,
                                     indirect::LavaArray{UInt32,1},

@@ -1328,10 +1328,6 @@ function cmd_copy_buffer!(e::Emitter, src, dst, nbytes::Integer;
     return nothing
 end
 
-# `signalof(e)` is gone with the recycler. It answered "the timeline value
-# covering what this emitter is writing", which only a batch could answer, and
-# its one caller was the rename route handing an outgoing store back against it.
-
 # ── Error Reporting ──
 
 """Throw a LavaError enriched with recent validation layer messages and dispatch log."""

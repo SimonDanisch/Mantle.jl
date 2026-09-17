@@ -331,9 +331,6 @@ const VulkanTransientImage{T} = TransientImage{T,VK.Format,VK.ImageUsageFlag,VK.
 alignment(::LavaDevice, ::TransientBuffer) = 256
 
 
-# `take!(::Recycler, …)` is gone with renaming — it handed out a fresh region for
-# a whole-buffer store to land in, recycled by byte size because the sizes repeat exactly.
-
 
 # `Graph(dev)` and `Transient.Buffer` are Mantle's — both were generic already.
 
@@ -1056,22 +1053,6 @@ function compile_dispatch(c::Compile{LavaDevice}, t::Trace, argoff::Int, indirec
     CompiledTrace(compiled, t.accel, t.args, t.ndrange, argoff, total, indirect)
 end
 
-# `argwrites`, `writearg!` and the `ArgWrite` they produced are gone.
-#
-# They were the write plan: at `record!`, walk every entry's argument tuple,
-# perform the real `pack_arg!` for each slot so the recorded offset was the one
-# the packer used, and keep an `ArgWrite` for every `Base.RefValue` — so a run
-# could rewrite exactly the bytes that could differ. 602 of them on Hikari's
-# fused sample, to move 268 bytes, because a dispatch carries its own COPY of
-# every argument.
-#
-# A per-run value is a [`GPURef`](@ref) now. What the dispatches were packed with
-# is its ADDRESS, which does not change, and the value behind it is written by
-# one store (`ref[] = x`) however many dispatches read it — so there is nothing to rewrite,
-# no offsets to record, and no host store into memory a submission may still be
-# reading. `verifywrites` went with them: it existed to prove those offsets
-# agreed with the packer's.
-
 """
 Pack a draw's arguments into the plan's slot: the counterpart of `packdispatch!`
 and `packtrace!`.
@@ -1408,20 +1389,6 @@ function emitdispatch!(e::Emitter, d::CompiledDispatch{L,K,A,I},
 end
 
 
-# `rebind!` is gone.
-#
-# It re-read every `Ref` a recorded plan was given and wrote the current value
-# into the plan's argument memory — one host store per (entry, `Ref`) pair, on
-# the slot `nextslot!` had just claimed, which is the only reason the argument
-# ring existed. It was the answer to "a recorded plan does not record, so how
-# does a sample index move", and the answer is now that the sample index is a
-# [`GPURef`](@ref): the dispatches hold its ADDRESS, and one store writes the
-# value as a command in the run's own submission.
-#
-# What that deletes is not just the loop. It is the write plan that fed it, the
-# verification that proved the write plan's offsets, the ring that made the
-# writes safe, and the wait at the top of every run that the ring needed.
-
 
 # `Device()` with no argument is core's — see `Mantle.jl`.
 
@@ -1480,10 +1447,6 @@ batchqueue(d::LavaDevice) = d.bq
 # Several are the backend half of hooks core declares in `graph/backend.jl`:
 # `inplace!`, `refit!`. Those were always meant to be
 # here; the portable halves of the same names stayed in core.
-
-# `takehost!` is gone with renaming — it was the staging buffer a fresh store was
-# filled from, recycled by NEGATIVE size so a host and a device region of the
-# same length never shared a free list.
 
 
 # `Graph` is Mantle's now — see `src/graph/types.jl`.
