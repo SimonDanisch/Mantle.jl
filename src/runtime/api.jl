@@ -24,20 +24,13 @@ the default. [`devices`](@ref) lists what `select` can name.
 """
 abstract type Device end
 abstract type Resource end
-# `Graph` is a concrete struct in `graph/types.jl`. It was abstract here with
-# one subtype per backend, which is exactly the duplication that made a second
-# backend mean a second scheduler.
-# `Plan` likewise — concrete, in `graph/types.jl`.
+# `Graph` and `Plan` are concrete structs in `graph/types.jl`. Abstract here,
+# with one subtype per backend, a second backend would mean a second scheduler.
 
-# `DeviceCaps` used to be defined here, together with `supports`/`bestshape` over
-# it, and its docstring argued that it belonged wherever every backend could name
-# it. It was written a second time in Lava, field for field, and `MantleLavaExt`
-# copied one into the other POSITIONALLY — which is why both copies carried a
-# comment warning that a field inserted in the middle would misalign silently.
-#
-# It lives in `KernelInterface` now. Neither package depends on the other, both
-# already implement KI, and the positional copy is gone with the second type.
-# `caps(device)` below is still the query; what left is the definition.
+# `DeviceCaps` is defined in `KernelInterface`, which every backend implements
+# and no backend depends on: two copies of it, field for field, can only be
+# bridged by a positional copy that misaligns silently when a field is inserted
+# in the middle. `caps(device)` below is the query, not the definition.
 
 # `caps(device) -> DeviceCaps` — what this device can do. A backend implements
 # it; nothing above it needs to know which backend answered.
@@ -48,8 +41,8 @@ abstract type Resource end
 # hardware and must not be able to answer differently. Which one a caller has
 # depends on whether it arrived through the graph or through a kernel launch.
 #
-# It used to be a Mantle function over a Mantle type, with the backend converting
-# its own identical struct into it field by field. Both are gone.
+# One function over one type, so no backend converts its own copy of the struct
+# into it field by field.
 
 """
     todevice(x) -> Device
@@ -142,9 +135,9 @@ function screenshot end
 What a render pass does with whatever is already in its target.
 
 Three answers, not two. `Keep` loads, `Clear` overwrites with a value, and
-`Discard` says the pass covers every pixel and the old contents are worth
-nothing. Only the last is free: it is `LOAD_OP_DONT_CARE`, and inferring the load
-op from "was a clear colour given" can never reach it.
+`Discard` says the pass covers every pixel and the previous contents are worth
+nothing. Only the last is free: it is `LOAD_OP_DONT_CARE`, and inferring the
+load op from "was a clear colour given" can never reach it.
 
 It is also the whole of `discards`, which is what lets a barrier into the target
 come from `UNDEFINED` and drop the read access bit. RPS derives the same thing

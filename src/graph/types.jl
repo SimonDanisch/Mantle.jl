@@ -206,13 +206,13 @@ end
 abstract type TransientResource <: Resource end
 
 mutable struct TransientBuffer{T,N} <: TransientResource
-    # SHAPED, since 2026-09-15. It was a scalar `n`, so a transient arrived at a
-    # kernel flattened and every index had to be recomputed from extents the
-    # kernel was told separately — the same fault `Buffer(dev, T, dims)` was
-    # fixed for one level up, and `test_arena_recording.jl`'s "an N-dimensional
-    # buffer reaches the GPU with its shape" is that fix's test.
+    # SHAPED, not a scalar `n`: flattened, a transient arrives at a kernel with
+    # every index to be recomputed from extents the kernel is told separately.
+    # `Buffer(dev, T, dims)` is the same statement one level up, and
+    # `test_arena_recording.jl`'s "an N-dimensional buffer reaches the GPU with
+    # its shape" pins both.
     #
-    # It matters more here than it did there, because a shaped transient is what
+    # It matters more here, because a shaped transient is what
     # lets a graph be DECLARED: a resource is interned by object identity
     # (`IdTable`'s `IdDict`), so `reshape(t, dims)` as a dispatch argument mints
     # a fresh id per view and the hazard between two views goes unseen. The
@@ -381,11 +381,11 @@ elements, so two disjoint views of one buffer still get no barrier between them
 
 This is what lets a graph be declared over an exported model. Every reshape,
 permute and slice in a torch export is already a buffer of kind `:view` naming
-its parent and the op that derived it; the runtime used to rebuild each one as a
-Julia wrapper (`PermutedDimsArray -> ReshapedArray -> SubArray -> array`) over
-the parent's storage, which is why it then needed a walk back DOWN the stack to
-recover the parent, the offset and the strides it had stated in the first place.
-Declared, the descriptor is the thing, and there is nothing to recover.
+its parent and the op that derived it. Rebuilding each one as a Julia wrapper
+(`PermutedDimsArray -> ReshapedArray -> SubArray -> array`) over the parent's
+storage means walking back DOWN the stack to recover the parent, the offset and
+the strides the export stated in the first place. Declared, the descriptor is
+the thing and there is nothing to recover.
 
 `offset` is in elements of `T`, from the parent's first element.
 """
@@ -501,12 +501,11 @@ as a command in the stream rather than a host store into memory a submission may
 still be reading.
 
 `token` is what covers the last run of this plan, or `nothing` before the first.
-Opaque here and handed straight back to `passed`/`waitfor` — it was a raw Vulkan
-timeline value, which made a plan's pipelining a Vulkan concept.
+Opaque here and handed straight back to `passed`/`waitfor`, so a plan's
+pipelining is not a Vulkan concept.
 
-`store` is the [`Unified`](@ref) region the plan owns. It was a device array from
-the backend's own allocator, which put the plan's arguments outside the one pool
-that is supposed to see every workload.
+`store` is the [`Unified`](@ref) region the plan owns, out of the same pool as
+every other workload and not out of a backend's own allocator.
 
 **The indirect commands are in here too**, past the arguments, one 256-byte block
 per device-sized dispatch. They belong to the plan for exactly the reason the
@@ -517,12 +516,10 @@ else is what the queue's third bump allocator was.
 `indirect[k]` is dispatch `k`'s view, built once here because building one per
 record is an allocation on the recording path and the offsets never move.
 
-This was a RING, `ARG_SLOTS` deep, with a `slot_token` per slot and a
-`nextslot!` that waited when the host got three runs ahead. It existed for one
-reason: a run wrote argument bytes on the HOST while an earlier run's submission
-could still be reading them. Nothing writes these bytes after `record!` any
-more, so there is nothing to race and nothing to rotate — and a plan's argument
-memory is a third of the size it was.
+Not a RING: a ring exists so a run can write argument bytes on the HOST while
+an earlier run's submission is still reading them, and nothing writes these
+bytes after `record!`. So there is nothing to race, nothing to rotate, and a
+plan's argument memory is a third of the size.
 """
 mutable struct ArgMemory{S}
     store::S
@@ -621,12 +618,10 @@ mutable struct Plan{D,H<:Tuple}
     args::Union{Nothing,ArgMemory}      # laid out at compile, written at record!
     # The plan's commands, written once, or `nothing` before `record!`.
     #
-    # ONE. It was a vector, one per argument slot, because a run rewrote argument
-    # bytes on the host and had to write them somewhere the device was not
-    # reading — so a recording belonged to the slot whose base offset was folded
-    # into every address it held. Nothing rewrites those bytes now (see
-    # [`ArgMemory`](@ref) and [`GPURef`](@ref)), so there is one set of addresses
-    # and one command buffer holding them.
+    # ONE, and not one per argument slot: a recording belongs to a slot only
+    # while a run rewrites argument bytes on the host, and nothing rewrites them
+    # (see [`ArgMemory`](@ref) and [`GPURef`](@ref)). So there is one set of
+    # addresses and one command buffer holding them.
     recording::Any
     # Explicit submission partition, retained when an arena move invalidates
     # the recording. Zero keeps the entire plan in one submission. A field and

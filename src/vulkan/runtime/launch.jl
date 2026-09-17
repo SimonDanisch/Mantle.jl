@@ -35,8 +35,8 @@ This device's compiled-kernel cache, created on first use.
 """
 @inline linked_kernel_cache(ctx) = ctx.caches.linked
 
-# No reset callback: arg slabs are per-BQ and die with the old ctx, and the
-# kernel cache is now a field on it, so a reset produces a fresh one.
+# No reset callback: arg slabs are per-BQ and die with their ctx, and the kernel
+# cache is a field on it, so a reset produces a fresh one.
 
 # ── Type signature helper ──
 #
@@ -498,14 +498,13 @@ SPIR-V because `hash(f, tt, workgroup_size)` doesn't change when the method
 body changes. Unlike `reset_device!()`, this keeps all existing
 `LavaArray`s and the Vulkan context alive.
 
-**Both** caches have to go. `caches.launchplans` holds its own `VkPipeline`
-and is consulted *before* `caches.linked` on every dispatch, so emptying
-only the latter left the old pipeline running with no symptom — the function
-silently did nothing. That is not hypothetical: it made a SPIR-V A/B harness
-report "no difference" for six variants on 2026-08-02, including one that had
-its `OpStore` deleted. The Revise path happened to work anyway, because a
-method redefinition moves the world counter and `launch_plan` rejects plans
-from a superseded world; a caller who only clears the cache had no such luck.
+**Both** caches have to go. `caches.launchplans` holds its own `VkPipeline` and
+is consulted *before* `caches.linked` on every dispatch, so emptying only the
+latter leaves the previous pipeline running with no symptom: a SPIR-V A/B then
+reports "no difference" for every variant, including one with its `OpStore`
+deleted. The Revise path survives that anyway, because a method redefinition
+moves the world counter and `launch_plan` rejects plans from a superseded world;
+a caller who only clears the cache has no such luck.
 """
 function clear_kernel_cache!(ctx::VkContext = vk_context())
     empty!(ctx.caches.linked)
@@ -703,12 +702,11 @@ is released, because until then it may be submitted again and read them again.
 `own!(bq, r)` stood in front of this and asked `bq.capturing` which of the two
 was the owner. The owner is now the argument, so there is nothing to ask.
 
-One `acquire!` per launch, where the two allocators this replaces did a
-bump-pointer add. That is deliberate and it is the cheap half of the trade: the
-only caller is the unmodelled launch path, which looks up a compiled kernel,
-adapts an argument tree and packs it on every call — and what the bump pointer
-bought was five fields of state that could rewind under a recording still holding
-the address. A modelled plan does not come through here at all.
+One `acquire!` per launch, against a bump-pointer add, and the cheap half of
+the trade: the only caller is the unmodelled launch path, which looks up a
+compiled kernel, adapts an argument tree and packs it on every call, while a
+bump pointer costs five fields of state that can rewind under a recording still
+holding the address. A modelled plan does not come through here at all.
 """
 @inline function scratch!(owner::O, nbytes::Integer) where {O<:Closed}
     bq = queueof(owner)

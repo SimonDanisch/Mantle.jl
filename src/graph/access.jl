@@ -340,10 +340,10 @@ the arguments.
 Thrown rather than widened to read+write. Widening is safe for the barrier phase
 and indistinguishable from a proof, so a kernel that stopped being analysable
 would keep compiling and pay a barrier per pass for ever with nothing to say so.
-Four of the five constructs that used to widen cannot reach a compiled kernel at
-all — a `ccall` is C, SPIR-V forbids recursion, and GPUCompiler rejects a dynamic
-call — so this mostly moves an error that was going to happen anyway from
-`Pipelines` to `dispatch!`, where the message can name the argument.
+Four of the five constructs that would be widened cannot reach a compiled
+kernel at all — a `ccall` is C, SPIR-V forbids recursion, and GPUCompiler rejects
+a dynamic call — so this mostly moves an error that was going to happen anyway
+from `Pipelines` to `dispatch!`, where the message can name the argument.
 """
 struct UnanalysableAccess <: Exception
     top::Any
@@ -643,9 +643,9 @@ thing that tells the two apart, so it is tracked: a result whose operands includ
 a `Ptr`, or an integer already known to be an address, is an address too, and
 `st.addresses` carries that across the arithmetic in between.
 
-One hop of this was already here as a local `anyptr` test at the `getfield` and
-`PURE_OPS` branches, and one hop is not enough. Lava's cooperative-matrix
-intrinsics take their operand as `UInt64`:
+One hop, as a local `anyptr` test at the `getfield` and `PURE_OPS` branches, is
+not enough. Lava's cooperative-matrix intrinsics take their operand as
+`UInt64`:
 
     %1018 = getfield(C, :ptr)::Ptr{Float16}   # taint from C
     %1019 = bitcast(UInt64, %1018)            # kept: an operand is a `Ptr`
@@ -1012,10 +1012,10 @@ The INSTRUCTIONS in its module are authoritative and are read first: an
 
 Matched as instructions, anchored to the start of a line, and not as substrings
 anywhere in the text. `declare i32 @_lava_coopmat_load_f16_16x16_a(i64, i32)`
-contains the word `load` and is not one: the test used to be `occursin("load ",
-src)`, which that name misses by a space, so every cooperative-matrix load fell
-through to read+write and `gemm_cm2!` declared its two `@Const` operands as
-WRITTEN. Had the space not been there it would have come out READ for the same
+contains the word `load` and is not one. `occursin("load ", src)` misses that
+name by a space, so every cooperative-matrix load falls through to read+write
+and `gemm_cm2!` declares its two `@Const` operands as WRITTEN; without the space
+it comes out READ for the same
 bad reason.
 
 A module with no memory instruction at all is a `declare` plus a `call`, which is

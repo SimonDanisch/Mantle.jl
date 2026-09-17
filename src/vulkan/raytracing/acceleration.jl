@@ -93,9 +93,8 @@ end
 # from whatever thread asked, and `reclaim!` calls `rawfree` once the submission
 # that named the storage has passed and no recording still holds it.
 #
-# What this replaces is `deferred_as_frees` — a second list beside
-# `deferred_frees`, sharing its lock, with its own drain function and its own
-# reading of the same stamp.
+# One list: a second one beside `deferred_frees` would share its lock, its drain
+# and its reading of the same stamp.
 
 function unsafe_free!(as::Union{LavaBLAS, LavaTLAS})
     # Idempotent: if `destroy_now!` already released `as.storage`'s DataRef
@@ -154,8 +153,8 @@ end
 # emit site therefore covers both levels, which is the property `pintrace!`
 # existed to patch in from outside.
 #
-# `blases(t)` was the accessor core reached that through, and it is gone with
-# `pintrace!`: the only reader left is inside this file, and it reads the field.
+# The only reader is in this file and it reads the field, so core needs no
+# accessor for it.
 
 function syncbuf!(owner::Closed, t::LavaTLAS)
     syncbuf!(owner, t.storage)
@@ -960,9 +959,9 @@ BLAS device addresses are available immediately after `build_blas` returns
 """
 function build_accel!(f, bq::SubmitChannel{<:VulkanQueue})
     # The builds go into a one-shot of their own, on the timeline like every
-    # other submission — it used to be a dedicated command buffer and a fence
-    # beside the queue, submitted by a second route. The one-shot opens with
-    # the global barrier, so the vertex, index and instance buffers prior
+    # other submission and not through a command buffer and fence of their own.
+    # The one-shot opens with the global barrier, so the vertex, index and
+    # instance buffers prior
     # dispatches wrote are visible to the build without the flush that stood
     # here.
     preserves = Any[]
@@ -983,9 +982,9 @@ function build_accel!(f, bq::SubmitChannel{<:VulkanQueue})
                            VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         )
     end
-    # Callers used to wait on the fence, so the build is complete when this
-    # returns: the token is what they wait for now — on `bq`'s timeline, which
-    # is the caller's queue and need not be the device's primary one.
+    # The build is complete once the token this returns has passed, on `bq`'s
+    # timeline, which is the caller's queue and need not be the device's primary
+    # one.
     waitfor!(bq, tok)
 
     # Inputs that must outlive the GPU submit (vertex/index for BLAS, instance

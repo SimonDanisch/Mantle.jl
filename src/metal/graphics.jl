@@ -191,9 +191,6 @@ lowers it the way `vkformat` does on the other side.
 function Mantle.Framebuffer(be::Metal.MetalBackend, width::Integer, height::Integer;
                             depth::Bool = true, color_format = nothing)
     dev = Device(be).dev
-    # DELETED in phase 1.7: "naming the Julia type here would need ColorTypes".
-    # ColorTypes is in Mantle's [deps]; it is simply never `using`-ed. What the
-    # default should be is phase 2.7's question.
     cfmt = color_format === nothing ? MTLm.MTLPixelFormatBGRA8Unorm :
                                       mtlformat(color_format)
     cdesc = MTLm.MTLTextureDescriptor(cfmt, width, height, false)
@@ -1178,12 +1175,11 @@ the sign is passed straight through and the two conventions meet without a
 special case. Only the SCISSOR is normalised, because a scissor rectangle has no
 orientation.
 
-Taking `abs(height)` and keeping `y` was the bug this replaces. A full-target
-overlay is recorded as `(0, h, w, -h)`, which reached the encoder as a viewport
-at `y = h` of height `h` — the whole rect one target BELOW the target. What came
-out was a figure at the wrong offset and scale with everything above the bottom
-edge missing: an axis frame, its ticks and its labels were simply outside. And
-relocating the rect without keeping the sign is not enough either: it lands in
+Taking `abs(height)` and keeping `y` is wrong on both counts. A full-target
+overlay is recorded as `(0, h, w, -h)`, which reaches the encoder as a viewport
+at `y = h` of height `h`: the whole rect one target BELOW the target, a figure
+at the wrong offset and scale with everything above the bottom edge outside it.
+Relocating the rect without keeping the sign is not enough either: it lands in
 the right place and draws upside down, because the mirror in the vertex stage is
 then never undone.
 """

@@ -319,11 +319,10 @@ end
 The one barrier that is never derived: everything before, against everything
 after, over all memory. At the head of every one-shot and every recording,
 because a closed command buffer knows nothing about what ran before it on the
-queue, and the queue no longer remembers either — the arena handover that was
-decided at record time from who ran last went with the open batch, since a
-cross-plan hazard cannot be derived and that barrier was wrong the moment two
-plans alternated. This is the honest answer, and it is one
-barrier per closed buffer rather than one per launch.
+queue, and the queue keeps no memory of it either: a cross-plan hazard cannot be
+derived, and a barrier decided at record time from who ran last is wrong the
+moment two plans alternate. This is the honest answer, and it is one barrier per
+closed buffer rather than one per launch.
 
 Raw `vkCmdPipelineBarrier` through the context's function pointer, with an
 isbits `VkMemoryBarrier`: the VK.jl wrapper allocates ~1.2 KB per call.
@@ -696,10 +695,9 @@ end
 # ── The emitter ─────────────────────────────────────────────────────────────
 #
 # Where commands go, and who keeps alive what they name. Every `emit_*` takes one
-# of these and never a queue, which is the whole of step 2: a queue is what
-# the split and submit thresholds, the elision tracker,
-# `next_skip_barrier` and `ranges_declared` were reached through, and none of them
-# can fire on something that has no queue to consult. Step 5 then deleted all
+# of these and never a queue, which is what keeps a split threshold, an elision
+# tracker or a skip-barrier flag from firing here: none of them can be reached
+# from something that has no queue to consult. That also deleted all
 # five outright, so what a queue can still decide is when to submit.
 
 """
@@ -713,10 +711,8 @@ is all an emitter asks of one.
 `args` is the plan's `ArgMemory`, or `nothing` off the plan path, where
 arguments come from a scratch region instead.
 
-A `base::Int` was carried here too — the byte offset of the argument SLOT the
-emitter was writing, added to every address it produced. There is one copy of a
-plan's arguments now, so the base is zero everywhere and the field is gone with
-the ring.
+No `base::Int` for the argument slot being written: there is one copy of a
+plan's arguments, so the base is zero everywhere.
 """
 struct Emitter{O,C,A}
     cmd::VK.CommandBuffer
@@ -1266,10 +1262,9 @@ end
 # (`graph/lifetime.jl`), and `syncbuf!` records the buffer so `crosswaits!` and
 # `stamp!` can order this submission against the other channels at `submit!`.
 #
-# `sync_access!` was the other half and is gone: it read `buf.last_write_bq`,
-# decided whether a wait was needed, pushed the semaphore itself and wrote the
-# new stamp — four decisions about submissions, in a backend, from two fields on
-# a buffer. Core makes all four now; what is left here is `stampof`, which says
+# Whether a wait is needed, which semaphore to push and what the new stamp is
+# are core's four decisions and not a backend's, so nothing here reads
+# `buf.last_write_bq` to make them. What is left here is `stampof`, which says
 # where the answer is stored, and `crosssemaphore`, which lowers it.
 #
 # A new resource kind needs `stampof(::MyRes)` only if it has device-visible

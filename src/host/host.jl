@@ -60,9 +60,9 @@ a KA launch, `render!` is a render pass, `trace!` is a hardware trace. A model
 uses `dispatch!` and never touches `render!` — same graph, same device, same pool
 as an editor's chain. There is nothing for a second backend to add.
 
-Dispatched on the backend TAG, never on the module. The Vulkan backend used to
-define `Device(::typeof(Lava))`, and `typeof(Lava)` is `Module` — so a
-`Device(::typeof(KernelAbstractions))` here would have been the SAME signature,
+Dispatched on the backend TAG, never on the module: `typeof(SomeModule)` is
+`Module` for every module, so `Device(::typeof(Lava))` and
+`Device(::typeof(KernelAbstractions))` would be the SAME signature,
 and whichever loaded second would silently replace the other. Both are markers
 now, `HostAPI()` and `VulkanAPI()`, which makes them different methods by
 construction.
@@ -81,8 +81,8 @@ Mantle.waitidle(::HostDevice) = nothing
 
 # ── persistent resources ──────────────────────────────────────────────────────
 #
-# `HostBuffer`/`HostScalar` are gone: `Mantle.Buffer` and `Mantle.GPURef` are core
-# types over pool regions, so a backend supplies four primitives and no type.
+# `Mantle.Buffer` and `Mantle.GPURef` are core types over pool regions, so a
+# backend supplies four primitives and no type of its own.
 
 Mantle.rawalloc(::HostDevice, ::Mantle.Persistent, bytes::Int, c) = zeros(UInt8, max(bytes, 1))
 
@@ -108,8 +108,8 @@ Mantle.waitfor(::HostDevice, _) = true
 
 # A slab IS the host address space, so this backend's whole answer is a pointer
 # and a length; `hostview`, `upload!`, `download` and `devicecopy!` are core's
-# over it (see `hostspan` in `memory/resources.jl`). What used to be `wrapbytes`
-# here, and `hostview` again in the Metal backend, is one function now.
+# over it (see `hostspan` in `memory/resources.jl`), so neither this backend nor
+# the Metal one spells that walk a second time.
 #
 # The bounds check it carries is worth naming once more, because this backend is
 # the one every other is checked against: two transients the placer put at
@@ -144,9 +144,8 @@ Mantle.alignment(::HostDevice, ::Mantle.TransientBuffer) = 64
 #
 # There is no graph here. `Graph`, `Pass`, `PassHandle`, `Compile` and `Plan` are
 # Mantle's, and so are `newpass`, `use`, `passes`, `handle`, `dispatches` and
-# `Update`. This backend used to define all of them a second time; the ones below
-# are what actually differs on a CPU.
-# `Graph`, `Transient.Buffer`, `Plan` and `overlapping` are all Mantle's now.
+# `Update`, as are `Graph`, `Transient.Buffer`, `Plan` and `overlapping`. The
+# ones below are what actually differs on a CPU.
 # Every one of them was identical here and in the Vulkan backend, or differed
 # only in a Vulkan-specific field that became a hook — see `makeprofiler` and
 # `makeargmemory` in `graph/backend.jl`.
@@ -166,7 +165,7 @@ Mantle.rawfree(::HostDevice, mem) = nothing
 # Host memory IS its own device memory, so the atom a move asks for is the slab's
 # own pointer. Answered rather than defaulted: core has no fallback for this, on
 # purpose — a backend that cannot say where its memory is cannot have a recorded
-# plan patched when it moves, and silence used to look like success.
+# plan patched when it moves, and silence would look like success.
 Mantle.deviceaddress(::HostDevice, mem::Vector{UInt8}) = UInt64(pointer(mem))
 # Host memory is not VRAM: a 64 MiB block would fault in pages nobody asked for,
 # and an allocation here is cheap enough that a small block is the right trade.
@@ -195,8 +194,7 @@ Mantle.deviceslice(::HostDevice, ::Type{T}, dims::Dims, slab::Vector{UInt8},
 # The whole execution path — `Launch`, `bake`, `ndrangeof`, `DeferredRange`,
 # `kernelfor`, the `Pipelines` phase and `run!(::Plan)` — is Mantle's, in
 # `graph/kalaunch.jl`. Every KernelAbstractions backend runs a plan the same
-# way, and this file used to be the only copy of it. What is left below is the
-# two answers a CPU gives differently.
+# way. What is left below is the two answers a CPU gives differently.
 
 """Nothing to emit. See `needs_transition(::HostAPI, …)` — the scheduled order is
 the synchronisation on this backend."""
