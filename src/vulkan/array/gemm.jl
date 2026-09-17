@@ -109,9 +109,8 @@ which is what identified the division. Replacing it with the magic-number form
 below makes every geometry exact at every K.
 
 `FastDiv32` is the same `init_fastdiv_values` port the broadcast path uses, so
-this costs nothing — a high multiply and a shift are cheaper than a divide, which
-is why it was ported in the first place. A power-of-two `N` keeps the mask and
-shift it would have had anyway.
+this costs nothing: a high multiply and a shift are cheaper than a divide. A
+power-of-two `N` keeps the mask and shift it would have had anyway.
 """
 @generated function splitidx(idx::Integer, ::Val{N}) where {N}
     ispow2(N) && return :((Int(idx) & $(N - 1), Int(idx) >> $(trailing_zeros(N))))
@@ -361,8 +360,7 @@ end
     # **The staged kernel does not split K** — it walks the whole of it and writes
     # one plane. If the caller's plan says otherwise it has allocated `splitk`
     # partial planes and will sum them, so the other planes' stale scratch lands
-    # in the result. Latent while `GEMM_STAGED` was off, and invisible on the
-    # shapes it was measured on because they all choose `splitk == 1`; at
+    # in the result. A shape that chooses `splitk == 1` cannot see it; at
     # 64x64x64 the plan picks 4 and the answer comes back 0.83 relative error.
     splitk == 1 || return nothing
     c = gemm_tiling(M, N, K; forced = tiling)
@@ -478,9 +476,9 @@ end
 # One kernel per register block, generated with the block size as a *literal*.
 # Writing a single kernel and gating the tiles on `i <= BLK` looks equivalent —
 # `BLK` is a `Val` parameter, so the branches fold — but it is not: a
-# cooperative matrix defined inside a conditional is no longer a plain SSA value
-# to the emitter, and every shape collapsed to ~0.15 ms, including the ones that
-# had been running at 4 TFLOP/s. The generated bodies have no branches at all.
+# cooperative matrix defined inside a conditional is not a plain SSA value to
+# the emitter, and every shape collapses to ~0.15 ms, including ones that
+# otherwise run at 4 TFLOP/s. The generated bodies have no branches at all.
 """
 Start an accumulator tile from `bias` rather than zero, so the bias add is free.
 
@@ -489,8 +487,8 @@ i.e. a broadcast of `bias[row]` across the tile's columns, which is exactly what
 `addmm` wants. Verified on the device (`test_coopmat_epilogue.jl`); the Vulkan
 specification does not say what stride 0 does, so it is measured, not assumed.
 
-The `Nothing` method is the old behaviour and is what attention and the
-convolution take — they have no bias and accumulate into fp32 partials.
+The `Nothing` method is what attention and the convolution take: they have no
+bias and accumulate into fp32 partials.
 """
 @inline accinit(::Nothing, ptr, off) = zero(AcceleratedMatrix{Float32,GEMM_TILE,GEMM_TILE,Accumulator})
 @inline function accinit(bias, ptr, off)
@@ -780,8 +778,8 @@ Narrow-index twins of `GEMM_STAGED_V2_KERNELS`: the ones `coopmat_gemm!`'s
 `Int`.
 
 Julia hands out `Int64` indices and Lava emits them as-is, but NVIDIA has no
-64-bit integer unit: adds and multiplies are emulated. The same narrowing was
-worth **1.56x** in `im2col_kernel!`, which is why it was tried here.
+64-bit integer unit: adds and multiplies are emulated. The same narrowing is
+worth **1.56x** in `im2col_kernel!`.
 
 It does **not** work the way that suggests. The register count goes *up*
 (118 -> 124) and the occupancy is unchanged at 2 workgroups an SM, so whatever it
@@ -805,7 +803,7 @@ Double-buffered twins of `GEMM_STAGED_V2N_KERNELS`, keyed the same way.
 
 Two alternating staging buffers, so the second `@synchronize` per k-block — the
 one that exists only to stop the next block's staging from overwriting a tile
-still being read — is gone, and the staging of block `k+1` overlaps the
+still being read — is not needed, and the staging of block `k+1` overlaps the
 arithmetic of block `k`. Costs 2x the shared memory (33792 B at 96x128, against a
 48 KB floor) and no occupancy, since 128 registers x 256 threads already binds at
 two workgroups per SM.
@@ -911,9 +909,8 @@ const GemmV2 = NTuple{2,VecElement{Float16}}
 """A 4-wide fp16 vector, i.e. `f16vec4` — 64-bit shared accesses.
 
 The staging width is **on the critical path**: scalar -> vec2 is worth +45% to
-+54% per shape against cuBLAS measured beside it, far more than the +9% this file
-used to record for it. SPIR-V vectors stop at 4 components, so this is the last
-notch available by this route."""
++54% per shape against cuBLAS measured beside it. SPIR-V vectors stop at 4
+components, so this is the last notch available by this route."""
 const GemmV4 = NTuple{4,VecElement{Float16}}
 
 for (ci, cfg) in enumerate(GEMM_TILINGS)
@@ -1455,9 +1452,9 @@ end
 What a GEMM reduces in, given its destination type. `Float16` widens to `Float32`
 and everything else keeps its own type.
 
-This is `DNNKernels`' `accum` under a local name, and it exists because the
-per-element kernel used to reduce in `eltype(C)`: an fp16 destination summed the
-whole K loop in fp16. Measured on MatAnyone, 29 of its 132 `matmul!` calls land
+This is `DNNKernels`' `accum` under a local name, and it exists because
+reducing in `eltype(C)` sums the whole K loop in fp16 for an fp16 destination.
+Measured on MatAnyone, 29 of its 132 `matmul!` calls land
 there with K between 256 and 769, which costs 12x to 20x the error of reducing in
 fp32 and storing once — in a model verified to 2.8e-4.
 
@@ -1493,9 +1490,9 @@ copy costs more than the tensor cores return. Hence widening here instead.
 # `K` is passed rather than read from `axes(A, 2)` for the same reason — the host
 # knows the extent, so the kernel need not query anything.
 
-# `gemmaccum` above is the accumulator width this kernel uses; it was found twice,
-# independently, from opposite ends. The table there is the arithmetic; the other
-# half of the evidence is the model: Whisper's `fc2` at K = 5120 measured 4.83e-2
+# `gemmaccum` above is the accumulator width this kernel uses. The table there
+# is the arithmetic; the other half of the evidence is the model: Whisper's
+# `fc2` at K = 5120 measured 4.83e-2
 # against an fp64 reference where the fixed path reads 2.13e-4 — 234x, and
 # `sqrt(K) * eps(Float16) / 2` predicts 3.49e-2, which is what makes it a
 # diagnosis rather than a correlation. It reaches the scalar kernel at all
@@ -1541,8 +1538,8 @@ copy costs more than the tensor cores return. Hence widening here instead.
         # is not an fp32 result, it is `mm3`'s fp32 ACCUMULATION rounded to an
         # fp16 store, so fp16 output rounding (~3e-4, eps(Float16)/2) is a floor
         # neither path beats. Both reductions run over identical fp16 operands
-        # against a Float64 reference; this is arithmetic, so it was measured on
-        # the host and holds wherever it runs.
+        # against a Float64 reference; this is arithmetic, measured on the host,
+        # and holds wherever it runs.
         #
         #        K   fp32 accum -> fp16   fp16 accum      ratio
         #       16            2.972e-04    9.429e-04       3.2x
@@ -1707,9 +1704,9 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
     # cost is a SPIR-V module per (M, N, K, FAST), which is what the coopmat path
     # already pays and what the frozen-kernel cache exists to absorb.
     #
-    # It does mean a RECORDED FROZEN CACHE IS STALE once this kernel starts being
-    # selected: every product that used to compile one `strided_gemm_kernel!`
-    # variant per K now compiles one of these per shape instead. Re-record in a
+    # It does mean a RECORDED FROZEN CACHE IS STALE once this kernel starts
+    # being selected: a product that compiled one `strided_gemm_kernel!` variant
+    # per K compiles one of these per shape instead. Re-record in a
     # cold session and check `Lava.frozen_stats().misses == 0`, or first use will
     # compile on the editor's hot path, which is the entire cost the freeze
     # exists to remove.
@@ -2063,7 +2060,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        blk_split = coopmat_gemm_shape(M, N, K; nbatch),
                        partials = nothing, reduce::Bool = true, bias = nothing,
                        epilogue = identity,
-                       # Kernel selection, previously four module-level `Ref`s.
+                       # Kernel selection, per call and not per process.
                        # Defaults are the measured winners; a benchmark that wants
                        # a different one passes it here rather than mutating the
                        # process.
@@ -2397,10 +2394,10 @@ effects. Split from the launching for the reason
 [`coopmat_gemm_launches`](@ref) is: a graph declares these and an immediate
 `gemmlaunch!` submits them, and which kernel a shape takes is measured.
 
-Every operand must already be DENSE. `gemmlaunch!` used to call `densify` on one
-that was not, which allocates — a graph cannot hold a host allocation, so a
-declaration that needs one is refused here and the caller materialises the
-operand as a pass of its own. `gemmstrides` answering `nothing` is that case.
+Every operand must already be DENSE. Densifying one that is not allocates, and
+a graph cannot hold a host allocation, so a declaration that needs one is
+refused here and the caller materialises the operand as a pass of its own.
+`gemmstrides` answering `nothing` is that case.
 
 `partials` is the split-K GEMV's scratch and the caller owns it, for the same
 reason.
@@ -2512,10 +2509,9 @@ end
 #
 # Same collision, other operand: GPUArrays has a second method
 # `mul!(::AbstractGPUVecOrMat, ::Union{AbstractGPUArray,Adjoint,Transpose}, ::Diagonal{<:Any,<:AbstractGPUArray}, α, β)`
-# which is equally ambiguous against Lava's dense GEMM. Fixing only the
-# Diagonal-on-the-left case left this one throwing, and the test for it only
-# covered the side that had been fixed — GPUArrays' own linalg/diagonal testset
-# is what caught it, for Float32 and ComplexF32.
+# which is equally ambiguous against Lava's dense GEMM, so both sides need a
+# method. GPUArrays' own linalg/diagonal testset covers each, for Float32 and
+# ComplexF32.
 #
 # `D` scales COLUMNS here (A[:,j] * d[j]), so the broadcast transposes `dd`.
 function LinearAlgebra.mul!(C::LavaArray{T,2},

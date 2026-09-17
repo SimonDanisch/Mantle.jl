@@ -21,8 +21,7 @@ an output and its call site did not.
 name. `group` is the workgroup size, worth giving for anything image-shaped: the
 default partitions an ndrange along its first axis, which for a 2-D range makes a
 workgroup one long row, and a pass that reads row-major and writes column-major
-then has one of the two uncoalesced — 1.06 ms against 0.12 ms at 1280x800 on the
-machine this was measured on.
+then has one of the two uncoalesced: 1.06 ms against 0.12 ms at 1280x800.
 
 `ndrange` may be a [`DeviceRange`](@ref), for a count that only exists on the
 device; the dispatch is then ordered after whatever wrote that count.
@@ -1466,7 +1465,7 @@ recorded(pl::Plan) = pl.recording !== nothing
 
 """Whether this plan is free of a recording whose baked addresses constrain the
 pool. `movable` asks it for the block trim: trimming destroys whole blocks, which
-patching cannot follow. Arena GROWTH no longer asks — a buffers arena patches
+patching cannot follow. Arena GROWTH does not ask — a buffers arena patches
 its recorded tenants (see `notify_move!`), an images arena re-records them."""
 remappable(pl::Plan) = pl.recording === nothing
 

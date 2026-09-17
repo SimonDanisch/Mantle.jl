@@ -13,9 +13,8 @@
 # Two candidates dropped out on inspection rather than becoming hooks:
 #
 #   * `isdepth` — whether an image is a depth target is decided by its element
-#     type, which is a Julia question. It is defined in core below. Vulkan's
-#     `aspect` is one line derived FROM it; it was the other way round, so the
-#     portable question was being answered by a `VK_IMAGE_ASPECT_*` comparison.
+#     type, which is a Julia question. It is defined in core below, and Vulkan's
+#     `aspect` is one line derived FROM it rather than the other way round.
 #   * `aspect` itself, which is then purely the Vulkan backend's and appears
 #     nowhere in Mantle.
 
@@ -68,9 +67,8 @@ function remakeimage! end
 
 The pixel dimensions of something a pass renders into.
 
-Returns a plain tuple. It used to return a `VK.Extent2D`, which put a driver
-type in the graph's arithmetic — the graph compares extents to check that every
-attachment in a pass agrees, and that comparison is not Vulkan's.
+Returns a plain tuple and not a driver type: the graph compares extents to check
+that every attachment in a pass agrees, and that comparison is not Vulkan's.
 """
 function target_extent end
 
@@ -92,9 +90,7 @@ function refit! end
 # answered here, once per backend. A backend that records (Vulkan) answers with
 # commands into an emitter it opened; one that does not (KernelAbstractions,
 # Metal) answers on the spot through the core `Immediate` emitter, and never
-# defines a method below. `record_pass!(graph, queue, passplan, derived, args;
-# suppress)` was the old shape, and the Vulkan backend then grew a whole second
-# copy of the walk around it.
+# defines a method below.
 
 """
     openrecording(device, plan) -> emitter or nothing
@@ -271,9 +267,9 @@ again before it submits.
 
 Asked rather than assumed for the reason [`deviceaddress`](@ref) replaced
 `resource_moved!`: a backend that cannot patch and is never asked is a recording
-that quietly keeps reading the old storage. The images-arena path already had to
-invalidate rather than patch; this is the same fact stated as a property of the
-BACKEND rather than of one arena kind.
+that quietly keeps reading the old storage. The images-arena path invalidates
+rather than patches, and this is the same fact as a property of the BACKEND
+rather than of one arena kind.
 """
 patchable(::Device) = true
 
@@ -315,10 +311,9 @@ one-shot buffer the channel lends it for that submission, a recording's owns one
 the PLAN holds for as long as it lives. The Vulkan backend's `abandonrun!` asserts
 the first of those, so it cannot stand in for this.
 
-A partitioned recording is what made this reachable with pieces already closed
-(`recordparts!` releases those and abandons this one), but the need is not the
-partition's: an unpartitioned `record!` whose walk threw leaked a command buffer
-before this existed.
+A partitioned recording reaches this with pieces already closed (`recordparts!`
+releases those and abandons this one), and an unpartitioned `record!` whose walk
+throws would otherwise leak a command buffer.
 
 The default is `nothing`, for the backends whose `openrecording` hands back
 nothing and so never have one open. **A backend that records must answer it**,
@@ -331,7 +326,7 @@ abandonframe!(dev, pl) = nothing
     emitinline!(emitter, region, offset, ptr, nbytes)
 
 `nbytes` from `ptr`, carried inside the command buffer, into `region` at
-`offset`. What a pointer patch is, and (step 5) a small store.
+`offset`. What a pointer patch is, and what a small host store is.
 """
 function emitinline! end
 
@@ -386,11 +381,9 @@ function storebytes! end
 
 Block until the device has finished the work `token` covers.
 
-It used to hand over an open batch first when the token was not out yet, and
-only then wait, because a headless plan submitted when something asked it to.
-Every token is out the moment it exists now — `submit!` is the only way work
-reaches the device and it goes at once — so this is the wait and nothing
-else, and a token nothing will signal is an error rather than a submit.
+Every token is out the moment it exists — `submit!` is the only way work
+reaches the device and it goes at once — so this is the wait and nothing else,
+and a token nothing will signal is an error rather than a submit.
 """
 function waitfor!(dev, tok)
     waitfor(dev, tok)
@@ -436,10 +429,10 @@ builds a query pool here, which is a device object. Without one the default
 below still answers: it times the host side of every pass, which is the whole
 of what `run!` can see and enough to say where a frame goes.
 
-That default matters. It used to be `nothing` unconditionally, so
-`Plan(g; profile = true)` on any backend but Vulkan silently produced a plan
-with no profiler and `timings` had nothing to report — a question asked and
-quietly dropped.
+That default matters: answering `nothing` unconditionally makes
+`Plan(g; profile = true)` on any backend but Vulkan a plan with no profiler and
+`timings` with nothing to report, which is a question asked and quietly
+dropped.
 """
 makeprofiler(dev::Device, passes, profile::Bool) =
     profile ? hostprofiler(passes) : nothing
@@ -488,9 +481,9 @@ The plan's argument memory, laid out once at compile so a frame only writes
 arguments: every draw's and dispatch's block at the offset `Pipelines` gave it,
 then one indirect command per device-sized dispatch, 256-byte aligned.
 
-**One copy.** It was a ring, `ARG_SLOTS` deep, because a run rewrote argument
-bytes on the host while an earlier run's submission could still be reading
-them. Nothing rewrites these bytes after `record!` — a value that changes
+**One copy, not a ring.** Nothing rewrites these bytes after `record!` — a
+run that rewrote them on the host could race an earlier run's submission still
+reading them, and a value that changes
 between runs is a [`GPURef`](@ref), and what a dispatch is packed with is its
 address — so there is nothing to race and nothing to rotate.
 
@@ -689,8 +682,8 @@ const BACKEND_VOCABULARY = (
     :waitfor, :waitfor!, :passed, :fence, :reset_device!, :awaitwrites,
     # sync lowering
     :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
-    # DELETED in phase 1.7: `:vkformat`. A vendor-named entry in the list of
-    # names every backend may implement; Metal's counterpart is `mtlformat`.
+    # Vendor-named verbs are not in this list: `vkformat` is the Vulkan
+    # backend's own and `mtlformat` is Metal's.
     # compile: the phases are core's, a backend answers these
     :syncbackend,
     :compiledraw, :compile_dispatch, :passbarriers,
@@ -733,8 +726,6 @@ const BACKEND_VOCABULARY = (
     # submitted. Core owns the sequence a partition makes of them
     # (`RecordingParts`) and the walk that builds it.
     :submitrecording!, :abandonrecording!,
-    # DELETED in phase 1.2: `:recycle!`. Its one implementation contained no
-    # driver call at all.
     :beginframe!,
     # graphics verbs, immediate and windowed
     :Framebuffer, :Window, :Surface, :Texture2D, :Sampler, :screenshot,
@@ -750,7 +741,6 @@ const BACKEND_VOCABULARY = (
     # `kerneltouches` is, because the host device answers it in `src/host/`.
     :argtype, :devicebuffertype, :isdevicearray, :accesscache, :kerneltouches,
     # ray tracing
-    # DELETED in phase 1.1: `:pin!`, `:blases`. See raytracing/api.jl.
     :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,

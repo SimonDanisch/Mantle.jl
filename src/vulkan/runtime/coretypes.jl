@@ -144,7 +144,7 @@ mutable struct MemoryPolicy
     # Share of wall time a soft-cap collection may take. `gc_mingap` bounds how
     # OFTEN it runs; this bounds what it COSTS, which on a heap of GPU-backed
     # arrays is the half that matters — see `collect_for_pool!`. `1.0` is no
-    # bound at all and is what the code did before this existed.
+    # bound at all.
     gc_budget::Float64
     track_allocs::Bool
 
@@ -182,11 +182,9 @@ mutable struct MemoryPolicy
     # `destroy_buffer!` is reachable from a finalizer.
     live_bytes::Threads.Atomic{Int}
     live_buffers::Set{VkManagedBuffer}
-    # `requested` / `rounded` / `nalloc` and the `accounting` flag that gated
-    # them are gone with the size classes. They existed to measure rounding
-    # waste — how much bigger a size class was than the request — and
-    # `Mantle.carve!` splits at exactly the requested length, so the ratio they
-    # reported is now 1.0 by construction. `pool_gc_stats` is what is left.
+    # No rounding-waste counters: `Mantle.carve!` splits at exactly the
+    # requested length, so there is no size class to be bigger than the
+    # request. `pool_gc_stats` is the accounting there is.
     gc_count::Threads.Atomic{Int}
     # Guards re-entry into reclamation through `flush!`'s own allocation path.
     # Per pool: one device quiescing must not make another's reclaim a no-op.
@@ -255,20 +253,16 @@ end
 Every debugging and instrumentation toggle Lava has, owned by the context they
 describe.
 
-**These were eighteen module-level `Ref`s.** They are the same mistake as the
-caches and the pool policy one level up, with a milder symptom: turning on
-allocation tracing or dispatch logging did it for *every* device in the process,
-and a second device could not be instrumented independently of the first. Two of
-them carry counters (`spirv_dump_counter`, `kernel_debug_counter`) whose values
-were shared across devices that emit different kernels.
+Per context and not per process, like the caches and the pool policy one level
+up: a module-level toggle turns allocation tracing or dispatch logging on for
+*every* device, so a second device cannot be instrumented independently of the
+first, and the counters two of them carry (`spirv_dump_counter`,
+`kernel_debug_counter`) would be shared across devices that emit different
+kernels. Two differently-instrumented runs at once are possible this way, and
+nothing has to be reset.
 
-`DNNKernels` did exactly this in its own step 3 — `OPTIMES`, `OPDOUBLE`,
-`OPDOUBLEFILTER`, `PLAN_MISSES` and `LAUNCH_PROBE` became `Ctx.diag` — and the
-argument there applies here: two differently-instrumented runs at once become
-possible, and nothing has to be reset.
-
-Off by default, and free when off: every read is a field load behind a branch the
-compiler hoists, which is what the `Ref`s cost too.
+Off by default, and free when off: every read is a field load behind a branch
+the compiler hoists.
 """
 mutable struct Diagnostics
     # ── allocation / free
@@ -450,8 +444,8 @@ struct DebugConfig
                 Pick one: `DebugConfig(gpu_av = true)` to hunt out-of-bounds accesses,
                 or `DebugConfig(printf = true)` to read `@lava_printf` output."""))
         end
-        # Implied, not required: every feature below is a feature OF the layer, so
-        # asking for one without it was the half-configuration that produced a
+        # Implied, not required: every feature below is a feature OF the layer,
+        # so asking for one without it is a half-configuration that reports a
         # clean run from a disabled instrument.
         validation |= gpu_av || sync_val || best_practices || printf
         new(validation, gpu_av, gpu_av_safe, collect(String, gpu_av_shaders),
@@ -482,9 +476,8 @@ The five pointers `debug_callback` needs, in a layout it can read off
 `isbits`, so that load is a plain memory read: the callback runs on a driver
 thread, re-entrantly from inside a blocking `ccall` (GPU-AV reads back during
 `vkWaitSemaphores` with driver locks held), where allocating or entering the
-Julia runtime deadlocks or corrupts. That constraint is why the ring was raw
-preallocated arrays — it is not a reason for them to be *module-level*, which is
-what this replaces.
+Julia runtime deadlocks or corrupts. That constraint is why the ring is raw
+preallocated arrays, and not a reason for them to be *module-level*.
 """
 struct ValidationRingRaw
     buf::Ptr{UInt8}
@@ -566,10 +559,10 @@ end
 """
 One cached `IterPlan` plus the `(ndrange, workgroupsize)` it was built for.
 
-**Why an entry type instead of a `Dict` key.** The cache was
-`Dict{Any,IterPlan}` keyed on `(typeof(obj), ndrange, workgroupsize)`, so every
-dispatch hashed a HETEROGENEOUS tuple — a `DataType` beside an `Int` beside a
-`Nothing` — through dynamic `hash`/`isequal`. Measured against the alternatives:
+**Why an entry type instead of a `Dict` key.** A `Dict{Any,IterPlan}` keyed on
+`(typeof(obj), ndrange, workgroupsize)` hashes a HETEROGENEOUS tuple per
+dispatch — a `DataType` beside an `Int` beside a `Nothing` — through dynamic
+`hash`/`isequal`. Measured against the alternatives:
 
     Dict{Any,IterPlan}       (heterogeneous key)   7.9 ns
     Dict{Any,IterPlan{Ctx}}  (concrete VALUES)     8.1 ns   <- values do not help
@@ -591,12 +584,9 @@ struct IterEntry{K}
     plan::Any
 end
 
-# `DeviceCaps` used to be defined here, together with `supports`/`bestshape` over
-# it. It moved to `KernelInterface`: it was written twice, field for field — once
-# here and once in Mantle — and bridged by a positional copy, because neither
-# could depend on the other. KI is the module both already implement, so the type
-# is there and `Lava.jl` imports it. `caps(ctx)` below still fills it in; what
-# left is the definition, not the query.
+# `DeviceCaps` and `supports`/`bestshape` are `KernelInterface`'s, the module
+# Lava and Mantle both implement, so there is one definition of the type and
+# `Lava.jl` imports it. `caps(ctx)` below fills it in.
 #
 # The docstring that stood here argued the case for the fields, and it went with
 # the type. Two Lava-specific notes it carried did not, so they are kept:
@@ -641,24 +631,18 @@ abstract type CompiledRTPipeline end
 
 Everything a `VkContext` caches, owned by the context that owns the handles.
 
-**These were twelve module-level globals.** Ten had been keyed by `ctx.id` to
-make two devices work, which fixed the sharing but not the ownership: entries
-outlived the device they described, `ctx.id` was a surrogate for "the object I
-should have stored this on", and `RESET_CALLBACKS` existed almost entirely to
-empty them. A field dies with its context, so none of that is needed.
+Fields and not module-level globals, keyed by `ctx.id` or otherwise: a cache
+holding a device-owned handle outlives the device it describes, which is the
+shape that produces the function-pointer crash and the memory-pool corruption. A
+field dies with its context, so nothing has to empty these on reset.
 
-`TIMESTAMP_POOL` was never keyed at all: a module-level `Ref` holding a
-device-owned handle, which is precisely the shape that produced the
-function-pointer crash and the memory-pool corruption; it survived only because
-the two-device probe's path (dispatch, reduction, GEMM) reaches neither graphics
-nor dispatch profiling. The `blit` field beside it was the same shape and went
-with the backend's blit: core's `BLIT_PIPELINE` is a pipeline DESCRIPTION and
-holds no handle, and the compiled pipeline it turns into is keyed on the device
-in `gfx_pipelines`, like every other draw.
+Core's `BLIT_PIPELINE` is a pipeline DESCRIPTION and holds no handle; the
+compiled pipeline it turns into is keyed on the device in `gfx_pipelines`, like
+every other draw.
 """
 mutable struct DeviceCaches
-    # Compute pipelines, keyed by SPIR-V content hash. The key no longer needs
-    # `ctx.id` mixed in: two devices cannot collide when they do not share a dict.
+    # Compute pipelines, keyed by SPIR-V content hash. No `ctx.id` in the key:
+    # two devices cannot collide when they do not share a dict.
     pipelines::Dict{UInt64,LavaComputePipeline}
     pipeline_order::Vector{UInt64}
     # `Dict{Any,…}` because GPUCompiler.cached_compilation derives the key itself.
@@ -695,15 +679,12 @@ mutable struct DeviceCaches
     # Ray-tracing pipelines, here for the same reason the graphics ones are: a
     # compiled pipeline is a device object, so it belongs to the device.
     #
-    # It used to be a `PIPELINE_CACHE` field on the user's `RayTracingPipeline`,
-    # which is the one place it could not correctly live — two identical
-    # pipelines compiled twice, and a pipeline outliving a `reset_device!` held
-    # handles from a dead device. The no-op `invalidate_stale_rt_cache!` beside
-    # it already said so: "cache is tied to the current VkContext's lifetime".
+    # Not on the user's `RayTracingPipeline`: one that outlives a
+    # `reset_device!` would hold handles from a dead device, and two identical
+    # pipelines would compile twice.
     #
-    # Keyed like `gfx_pipelines`: the shader identities plus the argument types.
-    # The per-object dict got away with keying on argument types alone because
-    # the object WAS the rest of the key.
+    # Keyed like `gfx_pipelines`: the shader identities plus the argument types,
+    # since the argument types alone do not identify a pipeline.
     #
     # `CompiledRTPipeline` and not `LavaRTPipeline`: see the supertype above for
     # why the concrete name cannot be spelled here.
