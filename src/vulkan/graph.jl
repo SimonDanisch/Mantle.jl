@@ -221,9 +221,7 @@ passed(d::LavaDevice, f) = passed(d.bq, f)
 """
 Wait for the timeline to reach `f`.
 
-`f > next_timeline` used to mean the value belonged to a batch still being
-recorded, and this declined rather than block on a submission nobody had made.
-Nothing recorded is unsubmitted now, so such a value is a token nothing will
+Nothing recorded is unsubmitted, so an `f > next_timeline` is a token nothing will
 ever signal, and waiting on it would hang in a foreign call: it is an error.
 """
 function waitfor(d::LavaDevice, f)
@@ -343,10 +341,9 @@ imageusage(::LavaDevice, ::Type{Float32}) = VK.IMAGE_USAGE_DEPTH_STENCIL_ATTACHM
                                             VK.IMAGE_USAGE_TRANSFER_SRC_BIT |
                                             VK.IMAGE_USAGE_SAMPLED_BIT
 
-# Vulkan's spelling of `Mantle.isdepth`, which is the portable question and now
-# the primary one. It used to be the other way round — `isdepth` was defined as
-# `aspect(x) == VK.IMAGE_ASPECT_DEPTH_BIT`, so the graph asked a portable
-# question by comparing a driver enum.
+# Vulkan's spelling of `Mantle.isdepth`, which is the primary one: defining
+# `isdepth` as `aspect(x) == VK.IMAGE_ASPECT_DEPTH_BIT` instead has the graph
+# ask a portable question by comparing a driver enum.
 aspect(x) = isdepth(x) ? VK.IMAGE_ASPECT_DEPTH_BIT : VK.IMAGE_ASPECT_COLOR_BIT
 
 """
@@ -493,8 +490,8 @@ swapchain image every frame), a pass's `_DependencyInfo` was built at compile,
 and `nothing` is a pass that waits for no one — which is the point, because that
 absence is what lets the GPU overlap two passes.
 
-`emit_pass_barrier!` was the second of these, taking a queue and reaching for its
-active batch. One function, dispatching on what it was given.
+One function, dispatching on what it is given, rather than a second that takes
+a queue and reaches for its active batch.
 """
 emit_barrier!(::Emitter, ::Nothing) = false
 
@@ -543,8 +540,8 @@ end
 # caller (copy_framebuffer!, a library) gets the handle it needs.
 #
 # On the BLOCK, which is this backend's `BufferBlock` — see `storage` in
-# `src/graph/build.jl`. Written as `storage(t::TransientBuffer{T})` it was the
-# same signature as core's and overwrote it, taking Metal and the host backend
+# `src/graph/build.jl`. Written as `storage(t::TransientBuffer{T})` this is the
+# same signature as core's and OVERWRITES it, taking Metal and the host backend
 # with it.
 storage(t::TransientBuffer{T,N}, block::BufferBlock) where {T,N} =
     LavaArray{T,N}(copy(block.ref), size(t); offset = t.offset)
@@ -561,9 +558,8 @@ storage(t::TransientBuffer{T,N}, block::BufferBlock) where {T,N} =
 # a case.
 #
 # The batch the adaptor carries is not used by the conversion — `adapt_storage`
-# is a pure strip, and the pin it used to do is a separate pass now. Lifetime is
-# the plan's: it holds every argument it names for as long as it lives, which is
-# what a per-frame pin would have been bookkeeping for.
+# is a pure strip. Lifetime is the plan's: it holds every argument it names for
+# as long as it lives, so no per-frame pin is needed.
 
 
 """
@@ -748,9 +744,8 @@ mergeconstraints(::LavaDevice, ::Readback, a::Integer, b::Integer) = a | b
 """
 Destroy a block's Vulkan objects.
 
-This used to be a no-op — "Lava frees its own" — which was true while the only
-blocks were graph arenas whose `VkBuffer` and `VkDeviceMemory` wrappers carried
-Julia finalizers and got collected eventually. "Eventually" stopped being good
+Not a no-op. Leaving it to the `VkBuffer` and `VkDeviceMemory` wrappers' Julia
+finalizers collects them eventually, and "eventually" is not good
 enough when this pool took over device allocation: `trim_gpu_pool!` exists so a
 caller can say "I have finished and want the VRAM back NOW", and a figure that
 depends on when the GC next runs is not an answer to that.
@@ -926,10 +921,8 @@ this is the only place a Mantle frame can compile one.
 """
 function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indirect::Int)
     dev = c.graph.dev
-    # Three arguments. `kernelfor` took two when it lived here and takes the
-    # backend now that it is core's (`graph/kalaunch.jl`), which is what makes it
-    # answerable by a backend at all; this call site kept the old arity and threw
-    # a `MethodError` on the first dispatch a plan compiled.
+    # Three arguments: `kernelfor` is core's (`graph/kalaunch.jl`) and takes the
+    # backend, which is what makes it answerable by a backend at all.
     # A CALL first: no ndrange, so there is nothing to compile or launch and
     # core's `bake` resolves the arguments into a `Call`. See the three-argument
     # `dispatch!`, and `openrecording` below for what this backend then cannot
@@ -1065,9 +1058,8 @@ so a `rebind!` between runs lands in the next run's bytes.
 A recording could not honour that — it writes these bytes once and its command
 buffer holds their address for the plan's life — and it does not have to: a plan
 holding a cell is not `recordable`, so `record!` refuses it before anything gets
-here. That refusal used to live in this function instead, where it also caught
-the unrecorded path it was never meant to: every Makie frame, whose every draw
-is a cell, could neither be recorded nor run.
+here, and not in this function, where it would also catch the unrecorded path:
+every Makie frame's draws are cells, and none could be recorded or run.
 """
 function packdraw!(e::Emitter, d::CompiledDraw)
     am = e.args
@@ -1204,9 +1196,8 @@ function profiled!(f, pl::Plan, e::Emitter, i::Integer)
     t0 = time_ns()
     r = f()
     sample!(prof.host_ns[i], Float64(time_ns() - t0))
-    # One command buffer, so the second timestamp goes where the first did. It
-    # used to re-open the batch here, with the comment "a pass may have split the
-    # batch" — which is exactly what a plan's own command buffer cannot do.
+    # One command buffer, so the second timestamp goes where the first did:
+    # a plan's own command buffer cannot split the way a queue's batch can.
     VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                     prof.pool, UInt32(2i - 1))
     r
@@ -1243,9 +1234,10 @@ end
 
 """Run `f` with this pass's work discarded unless its predicate is nonzero.
 
-The scope's `begin` and `end` have to be in ONE command buffer. That used to need
-`unsplittable!` around this whole block, because the work inside went through the
-queue's recorder and a dispatch could take the batch past its split or submit
+The scope's `begin` and `end` have to be in ONE command buffer, which a plan's
+own buffer gives for free. Going through the queue's recorder instead needs
+`unsplittable!` around the whole block, because a dispatch can take the batch
+past its split or submit
 threshold — Hikari's fused sample ran at `max_depth` 8 (47
 dispatches) and hung the GPU at 16 (~95), with the auto-submit threshold at 64
 sitting exactly between, and the failure was a foreign call that never returned.
@@ -1399,9 +1391,8 @@ end
 # `kernelfor` was here too, as `kernelfor(k, ::Nothing, ::LavaBackend) =
 # k(LavaBackend())` and its `group` twin. Core's `kernelfor(k, ::Nothing,
 # backend) = k(backend)` already answers that — `backend(::LavaDevice)` IS
-# `LavaBackend()` — so the pair was a second implementation of one rule, and the
-# more specific one was the worse of the two: it discarded the backend it was
-# handed and built a default, which drops the queue a `LavaBackend(bq)` pins.
+# `LavaBackend()`. A more specific method here would discard the backend it is
+# handed and build a default, dropping the queue a `LavaBackend(bq)` pins.
 adaptor(e::Emitter) = LavaAdaptor(e.owner)
 # At COMPILE, where there is nothing to emit into yet and the adaptor is used for
 # its pure half — `adapt_storage` is a strip, and the pinning is a separate walk
@@ -1412,9 +1403,8 @@ adaptor(::SubmitChannel{<:VulkanQueue}) = LavaAdaptor(nothing)
 # The portable constructors. A caller writes `Framebuffer(backend, w, h)` and
 # `Window(backend, w, h)` and never names a Vulkan type; these are where that
 # resolves on this backend.
-# On the backend's device: these used to drop the backend and fall through to a
-# `ctx = vk_context()` default, so a framebuffer asked of a second device's
-# backend was created on the first.
+# On the BACKEND's device: falling through to a `ctx = vk_context()` default
+# creates a framebuffer asked of a second device's backend on the first.
 Framebuffer(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; ctx = vk_context(b), kw...)
 Window(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanWindow(w, h; ctx = vk_context(b), kw...)
 Texture2D(b::LavaBackend, data::AbstractArray; kw...) = VulkanTexture2D(data; ctx = vk_context(b), kw...)
@@ -1458,9 +1448,8 @@ again.
 
 A recompile rather than a patch, because a different size is different offsets,
 different aliasing and therefore different barriers — the placer answers all
-three and there is nothing to salvage from the old answer. It costs what a
-compile costs, which is a fraction of a millisecond, and it happens when a human
-drags a window edge.
+three. It costs what a compile costs, a fraction of a millisecond, and it
+happens when a human drags a window edge.
 
 Safe to drop the old slabs here because `sync_swapchain!` waits for the device
 before it rebuilds, so nothing is still reading them.
@@ -1619,11 +1608,10 @@ end
 """
 No recording: everything this run does is in the one-shot the walk just filled.
 
-Headless AND unrecorded, which is a plan holding a rebindable cell — `recordable`
-says why. The windowed branch above is the other unrecorded case and has always
-worked, which is why this one was missing: `submitrecording!` was reached with
-`nothing` and there was no method, so a headless frame could be built, compiled
-and emitted, and then had nowhere to go.
+Headless AND unrecorded, which is a plan holding a rebindable cell —
+`recordable` says why. Without this method `submitrecording!` is reached with
+`nothing` and a headless frame can be built, compiled and emitted with nowhere
+to go. The windowed branch above is the other unrecorded case.
 """
 function submitrecording!(bq, ::Nothing, e::Emitter)
     front = e.owner::OneShot
@@ -1709,9 +1697,9 @@ function abandonframe!(dev::LavaDevice, pl::Plan)
 end
 
 # A frame's timestamps are pending from the SUBMISSION that writes them, once
-# per run. `profiled!(f, pl, e, i)` used to set this where it emitted the
-# timestamp commands, which for a recording is once: the first `collect!`
-# cleared it and every later frame of the plan went unread — `timings` said
+# per run — not from where the timestamp commands are emitted, which for a
+# recording happens once: the first `collect!` would clear it and every later
+# frame of the plan would go unread, with `timings` saying
 # `NaN` for a recorded plan's GPU time, which is every Hikari plan.
 
 """Bytes inside the command buffer, into a region or the array over one: a
@@ -1815,8 +1803,8 @@ does: core hands over an element count and knows nothing about workgroups, and
 the graph orders whatever wrote the count before this dispatch because
 `indirectcount!` registered it as an `Indirect` read.
 
-The prepare is NOT here any more. It was, and it consulted `bq.deferred_indirect`
-to decide whether to write it now or hand it to a group flush that would fuse it
+The prepare is NOT here. Doing it here means consulting `bq.deferred_indirect`
+to decide whether to write it now or hand it to a group flush that fuses it
 with the pass's others — a per-dispatch decision made from queue state about
 something the pass already knows. `emitprepares!` writes them all, once, before
 the first dispatch of the pass.
