@@ -500,7 +500,7 @@ M.passed(d::TimelineDev, f) = (d.asked += 1; UInt64(f) <= d.completed)
     d, p = TimelineDev(0, 0), M.Pool()
     rs = [M.acquire!(p, d, :buf, nothing, 256; blocksize = 1 << 20) for _ in 1:200]
     for r in rs
-        M.retire!(p, dev, r)
+        M.retire!(p, d, r)
     end
     @test M.reclaim!(p, d) == 0            # stamped, and nothing has passed
     @test length(p.retiring) == 200

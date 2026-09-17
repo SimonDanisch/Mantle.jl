@@ -82,7 +82,11 @@ end
 
 @testset "staged GEMM" begin
     backend = LavaBackend()
-    ws = DNNKernels.Workspace(backend)
+    # `nothing`, not a `Workspace`: the declared path deleted that bump
+    # allocator and `Ctx`'s `ws` defaults to `nothing`, where `scratch!`
+    # allocates directly. Same cross-repo staleness the comment in `gemmerr`
+    # describes, one refactor later -- DNNKernels' suite cannot see this file.
+    ws = nothing
 
     # Small shapes first, because they are the ones whose plan splits K.
     shapes = [(64, 64, 64), (64, 64, 32), (64, 64, 128), (128, 128, 64),

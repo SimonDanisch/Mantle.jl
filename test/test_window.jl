@@ -964,7 +964,11 @@ else
             for _ in 1:20; Mantle.GLFW.PollEvents(); M.run!(plan); end
             KernelAbstractions.synchronize(M.backend(dev))
             img = M.screenshot(win); close(win)
-            sum(Float64(p[1]) + p[2] + p[3] for p in img)
+            # A colour is not indexable: `p[1]` is a `MethodError` on
+            # `BGRA{N0f8}`, and ColorTypes' accessors are the way in. The sum is
+            # over all three channels, so it does not matter that BGRA stores
+            # them in the other order.
+            sum(Float64(red(p)) + Float64(green(p)) + Float64(blue(p)) for p in img)
         end
         la, lb, lo = lit(:a), lit(:b), lit(:both)
         @test lo > la
@@ -1013,8 +1017,10 @@ else
         # by 0.06 and the combine averages two 8-bit images, so a lit pixel is
         # around 0.05 and a fixed `> 0.5` would pass on a blank frame only by
         # counting alpha, which is 1 everywhere.
-        green = [p[2] for p in got[1]]
-        @test count(>(minimum(green) + 0.02f0), green) > 1000
+        # `ColorTypes.green`, qualified and under another name: a colour is not
+        # indexable, and `green` as a local would shadow the accessor.
+        greens = [Float32(ColorTypes.green(p)) for p in got[1]]
+        @test count(>(minimum(greens) + 0.02f0), greens) > 1000
     end
 
     # A resize is asynchronous: the compositor applies it when it applies it, and
