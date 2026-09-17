@@ -219,13 +219,9 @@ mutable struct VulkanQueue{C}
     raw_submits::Vector{VK.vk.VkSubmitInfo2}               # always length 1
 end
 
-# There is NO alias for this backend's channel type, deliberately. It was
-# `VulkanBatchQueue`, a name that read as a queue this backend owns and manages, and
-# queue management is core's: the type is `SubmitChannel` over the driver bundle
-# above, and core holds the outstanding list, the free recordings and the holds.
-# A name saying "BatchQueue" invited exactly the wrong reading of who is
-# responsible -- it was the old 41-field struct's name, kept after the struct
-# became core's. Written out where it is needed instead.
+# This backend's channel is core's `SubmitChannel` over the driver bundle above,
+# spelled out at each use rather than aliased: core owns queue management, so a
+# channel type named for this backend would say otherwise.
 #
 # The recording type pooled is `OneShot`; a plan's `Recording` keeps its own
 # lifetime (`release!`) and is never pooled. The payload of a submission is

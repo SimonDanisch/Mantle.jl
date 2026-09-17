@@ -13,7 +13,7 @@
 # core), so every kernel starts with zeroed shared memory.
 
 using Test, Lava, KernelAbstractions
-import AcceleratedKernels as AK
+const AK = Mantle.AcceleratedKernels
 const KA = KernelAbstractions
 
 @kernel function _read_unwritten_shared!(out)

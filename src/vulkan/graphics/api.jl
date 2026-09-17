@@ -338,15 +338,11 @@ end
 """
     submit_and_present!(bq, win, frame) -> token
 
-Submit the frame's one-shot and present. INTERNAL: the portable verb is
-`present_frame!(device, window)`, and this is the machinery under it.
+Submit the frame's one-shot and present.
 
-It was a third arity of `present_frame!` itself, which made the exported verb
-mean two different things -- `(device, window)` on Metal and on core's
-`closerun!`, `(channel, window, frame)` here -- so Vulkan never answered the
-portable one and `test_window_portable.jl` failed on a vocabulary gap. A caller
-outside this backend has no one-shot to pass and should not: which channel a
-frame submits on is Mantle's to decide, not the caller's.
+Internal to this backend: the portable verb is `present_frame!(device, window)`,
+which builds the one-shot and calls this. A caller outside the backend has no
+one-shot to pass, and which channel a frame submits on is Mantle's to decide.
 
 One submission, through the same `submit!` everything else goes through, with
 the two extra semaphores a swapchain image needs — wait for the image to be

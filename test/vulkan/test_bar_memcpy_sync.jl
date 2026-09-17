@@ -1,7 +1,7 @@
 using Test, Lava, Mantle
 using KernelAbstractions
 using GPUArrays: @allowscalar
-import AcceleratedKernels as AK
+const AK = Mantle.AcceleratedKernels
 
 # Regression: `copy_buffer!` BAR fast-path ([runtime/memory.jl:678-697]) used to
 # call `wait_for_write(managed)` and memcpy without flushing the active batch.

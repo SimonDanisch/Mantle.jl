@@ -76,7 +76,7 @@ end
 # AK.sort! end-to-end — the original corruption. Multi-pass merge sort is the
 # real exercise of the isless binary search across data sizes.
 @testset "AcceleratedKernels.sort! multiset preservation" begin
-    import AcceleratedKernels as AK
+    AK = Mantle.AcceleratedKernels
     backend = Mantle.defaultbackend()
     for nn in (1024, 4000, 100_000), T in (Float32, UInt32)
         cpu = rand(MersenneTwister(3), T, nn)

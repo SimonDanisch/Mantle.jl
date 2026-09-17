@@ -75,12 +75,8 @@ function reset_device! end
 
 Show what was drawn, once the work behind it completes.
 
-**The device, and never a channel.** This used to read "`submitter` is whatever
-this backend submits through -- a `SubmitChannel` on one, the device itself on
-the other", and one backend then answered only a three-argument form taking its
-channel and the frame's one-shot. A caller outside a backend has neither and
-should not: which channel a frame submits on, and when, is Mantle's to decide.
-A backend answers this from its device and finds its own channel.
+**The device, never a channel.** Which channel a frame submits on, and when, is
+Mantle's to decide; a backend answers this from its device and finds its own.
 
 Ordered behind the frame rather than issued immediately: presenting an image the
 GPU has not finished writing shows a torn frame, and nothing reports it.

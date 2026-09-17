@@ -50,7 +50,7 @@ end
 # AK.sortperm! end-to-end — the original corruption (indirect comparator does two
 # loads `v[ix] < v[iy]` from the value array per comparison).
 @testset "AcceleratedKernels.sortperm!" begin
-    import AcceleratedKernels as AK
+    AK = Mantle.AcceleratedKernels
     backend = Mantle.defaultbackend()
     for nn in (256, 1024, 4000, 100_000)
         v = rand(MersenneTwister(nn + 1), Float32, nn)

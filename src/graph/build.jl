@@ -928,15 +928,11 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
     # shader is compiled it surfaces as one stage failing to take an argument it
     # never declared.
     #
-    # And BEFORE the two `declare!`s below, which is the whole point of "here".
-    # Those walk each stage's arguments, and a stage handed an argument that
-    # belongs to the other one is exactly what the walk cannot infer: it refused
-    # `Tuple{VertexWrapper{typeof(fullscreen_vertex), ()}, LavaDeviceArray{…}}`
-    # -- a vertex stage declaring no arguments, handed one -- and that refusal
-    # masked this one. Same mistake, worse diagnosis: the walk says it cannot
-    # say what a signature does, where this says which call is wrong and how to
-    # fix it. Only `va` and `frag_args` are needed to tell, so nothing has to
-    # run first.
+    # And before the two `declare!`s below. Those walk each stage's arguments,
+    # and a stage handed an argument belonging to the other one is what the walk
+    # cannot infer, so it would refuse first with a message about a signature it
+    # cannot read rather than about the call. Telling needs only `va` and
+    # `frag_args`.
     #
     # The SAME list on both stages is not that mistake and is refused nowhere
     # else: one range, two stages declaring the same layout over it. Every Makie

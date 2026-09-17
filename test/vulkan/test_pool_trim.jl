@@ -22,19 +22,10 @@ const KA = KernelAbstractions
     be = LavaBackend()
     ctx = Mantle.vk_context()
 
-    # Against this file's OWN baseline, not against zero.
-    #
-    # Run alone, `gpu_live_bytes` starts at nothing and an absolute assertion
-    # says the same thing. In the full suite it starts at ~40 GB: a hundred and
-    # seventy files before this one allocate `Mantle.Buffer`s and drop them, and
-    # a region is retired EXPLICITLY here ("still never called for you: skipping
-    # it is a leak the pool can report") so a dropped one stays live for the
-    # process. Measured against zero this testset then asserts something about
-    # the whole suite's bookkeeping rather than about the trim, and fails for a
-    # reason that has nothing to do with trimming.
-    #
-    # What it means to check is that the capacity THIS testset created comes
-    # back, so that is what it checks.
+    # Against this file's own baseline, not zero: `gpu_live_bytes` is process
+    # wide, and every region another file retired without a trim is still live
+    # in it. What this checks is that the capacity THIS testset created comes
+    # back.
     base = Mantle.gpu_live_bytes()
     threshold = Mantle.mempolicy(Mantle.vk_context()).trim_threshold
     target = base + threshold + 256 * 1024 * 1024

@@ -278,19 +278,14 @@ target_image(w::VulkanWindow)  = w.images[w.current_image_idx + 1]
 target_extent(w::VulkanWindow) = (Int(w.extent.width), Int(w.extent.height))
 target_format(w::VulkanWindow) = w.format
 
-# The PIXEL type, which is a different question from `target_format`: that one is
-# the driver's enum, this one is what a shader writing the window writes and what
-# `attachment_format` reads to compile a pipeline for it.
+# The PIXEL type, a different question from `target_format`: that one is the
+# driver's enum, this is what a shader writing the window writes and what
+# `attachment_format` reads to compile a pipeline for it. `WindowSurface`
+# delegates here.
 #
-# `WindowSurface` already delegates here -- `Base.eltype(s::WindowSurface) =
-# eltype(s.win)`, with the comment "core cannot name `BGRA{N0f8}`, so the window
-# does" -- and the window did not answer, so it fell through to
-# `eltype(::Any) === Any`. `test_window_portable.jl` is what says so: it asks
-# every backend for `eltype(w)` and got `Any` from this one.
-#
-# Through `eltypeof`, which is the registered inverse of `vkformat`, rather than
-# naming `BGRA{N0f8}` again: the swapchain may hand back a format other than the
-# one asked for, so the answer has to come from `w.format`.
+# Through `eltypeof`, the registered inverse of `vkformat`, rather than naming
+# `BGRA{N0f8}`: the swapchain may hand back a format other than the one asked
+# for, so the answer comes from `w.format`.
 Base.eltype(w::VulkanWindow) = eltypeof(w.format)
 
 checkopen(win::VulkanWindow) =

@@ -9,7 +9,7 @@
 
 using Lava, Mantle
 using ImplicitBVH: BBox
-import AcceleratedKernels as AK
+const AK = Mantle.AcceleratedKernels
 import KernelAbstractions as KA
 
 backend = Mantle.defaultbackend()

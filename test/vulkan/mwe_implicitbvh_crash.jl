@@ -12,7 +12,7 @@
 
 using Lava, Mantle
 using ImplicitBVH: BoundingVolume, BBox
-import AcceleratedKernels as AK
+const AK = Mantle.AcceleratedKernels
 import KernelAbstractions as KA
 
 backend = Mantle.defaultbackend()

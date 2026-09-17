@@ -534,24 +534,14 @@ function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
     end
     GC.gc(true)
     drain!(bq)
-    # The POOL's retired regions too, and this is not the same call as above.
+    # The POOL's retired regions, which `drain!` above does not touch: that one
+    # is the channel's, for passed submissions and the destroys waiting on them.
+    # `reclaim!(::Pool, dev)` is the regions `retire!` queued, and without it a
+    # retired region stays on `pool.pending` and its block never becomes empty,
+    # so a trim finds nothing to return.
     #
-    # `drain!` is the CHANNEL's: `sweep!` for passed submissions and
-    # `reclaim!(::SubmitChannel)` for the destroys waiting on them.
-    # `reclaim!(::Pool, dev)` is a DIFFERENT method on a different type, for the
-    # regions `retire!` queued -- and nothing here was calling it. So a region a
-    # finalizer or a `free!` had retired stayed on `pool.pending` for the life of
-    # the process, its block never became empty, and both trims reported nothing
-    # to do with the memory for it sitting right there.
-    #
-    # `test_pool_trim.jl` is what says so: it grows the pool past the threshold,
-    # drops every reference and expects the trim to bring live bytes back under
-    # it. Both of its assertions have been failing, and by the time it runs in
-    # the full suite `gpu_live_bytes` is 37 GB of regions retired by the files
-    # before it. That reads as the pool hoarding; it is this line missing.
-    #
-    # `wait = true` because this function's contract is already "a flush, a wait
-    # and a drain" -- the caller is the explicit trim and pays the stall.
+    # `wait = true`: this function's contract is a flush, a wait and a drain, and
+    # its caller is the explicit trim, which pays the stall.
     let dev = lavadevice(ctxof(bq))
         reclaim!(pool(dev), dev; wait = true)
     end
