@@ -887,7 +887,11 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
     # colormap its vertex stage indexed — which is why the hand-recorded path
     # spells `compile_draw(dev, p, …, args, args)`. Refusing it made the graph
     # unable to draw a figure while `pass!` could.
-    isempty(va) || isempty(frag_args) || va == frag_args || throw(ArgumentError(
+    # `===` and not `==`: the question is whether this is the SAME list, and a
+    # tuple holding a NaN — or an array holding one — is not `==` to itself. That
+    # made `barplot` refuse to draw, because somewhere in a line's arguments
+    # there is a NaN and `va == va` was false.
+    isempty(va) || isempty(frag_args) || va === frag_args || throw(ArgumentError(
         "draw!: two DIFFERENT argument lists were given to the two stages, and a " *
         "pipeline has one push constant range. Put them on the stage that reads " *
         "them and pass what the other needs as a varying, or give both stages the " *
