@@ -32,9 +32,7 @@
     scan_unified_for_bda!(buf) -> Int
 
 Scan every block of the unified arena — the argument blocks and indirect commands
-a recording reads — for any UInt64 word matching `buf.address`. Named for what
-it scans: the arg slabs it was written against are gone, and the unified
-arena's blocks are where those bytes live now.  For each hit,
+a recording reads — for any UInt64 word matching `buf.address`. For each hit,
 append a record to `diag.freed_bda_scan_log` and overwrite the slot with 0 so the
 GPU faults cleanly on a null reference instead of touching the freed memory.
 Returns the number of hits found.
@@ -92,10 +90,10 @@ const BDA_POISON = UInt64(0)
 #     future GCs.
 #
 # What this device holds is `gpu_live_bytes(ctx)`, and every gate here reads
-# that rather than `mempolicy(ctx).live_bytes[]`. The two used to be the same
-# number; they are not any more. `live_bytes` counts only buffers that own their
-# memory — staging, mapped, unusual usage flags — while the suballocated bytes
-# are `Mantle.reserved(spans(ctx))`, and the total is the sum.
+# that rather than `mempolicy(ctx).live_bytes[]`, which is not the same number:
+# `live_bytes` counts only buffers that own their memory — staging, mapped,
+# unusual usage flags — while the suballocated bytes are
+# `Mantle.reserved(spans(ctx))`, and the total is the sum.
 #
 # Reading the counter alone is a live bug, not a nuance: it makes every threshold
 # here compare device pressure against a few megabytes of staging and conclude
@@ -276,19 +274,14 @@ capacity otherwise counts as live and makes a VRAM figure depend on GC timing
 rather than on demand.
 
 Runs a full collection and then `quiesce_before_reclaim!` — a flush, a wait and a
-drain — **unconditionally**, because that is the request. It used to return early
-unless some block already had nothing live in it, and that gate is a precondition
-the flush and the drain establish: a buffer pinned by a recording batch, or one
-already retired but not yet destroyed, holds its entry until then, and
-between them that is everything a graph evaluator allocates.
+drain — **unconditionally**, and NOT gated on some block already having nothing
+live in it: that is a precondition the flush and the drain establish. A buffer
+pinned by a recording batch, or retired but not yet destroyed, holds its entry
+until then, and between them that is everything a graph evaluator allocates.
 
-The measurement, on a plain KA workload of 60 dispatches never synchronised:
-15 blocks, 964 MiB live, **0** blocks empty, so the old code returned `(0, 0)`
-and kept all of it. Flushing first made 15 of 15 empty and handed back 960 MiB,
-leaving 4 MiB. TRELLIS.2's 30-block torso was the same fault at scale — 190
-blocks and 12 410 MiB resident, of which 12 750 MiB was reclaimable — and it is
-why a second model in one session hit the allocator's failure path with the
-memory for it free.
+Gating on it instead leaves the memory resident. On 60 unsynchronised dispatches
+that is 15 blocks and 964 MiB with 0 blocks empty; flushing first empties 15 of
+15 and hands back 960 MiB.
 
 The automatic path keeps the cheap gate; see [`reclaimable`](@ref). This one is
 the explicit "I have finished and want the memory back", so it pays the stall.
@@ -510,11 +503,10 @@ function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
     # into safety: it is submitted again next run, so a block its command buffer
     # names is live for as long as the plan is. Waiting does not change that.
     #
-    # It used to ask `bq.capturing !== nothing` — whether a capture was OPEN,
-    # which is true only during `bake!` and false for every recording that had
-    # already been taken. `movable` asks the pool about its tenants instead,
-    # which is the property, and it is the same one arena growth already refuses
-    # on.
+    # `movable` asks the pool about its tenants, which is the property that
+    # matters and the same one arena growth refuses on. "Is a capture open"
+    # (`bq.capturing !== nothing`) is true only during `bake!` and false for
+    # every recording already taken.
     #
     # Here and not at the two trim entry points, which is where this check went
     # first. Same effect, worse test: an entry point has three gates in front of
@@ -660,8 +652,7 @@ It does not destroy anything. A destroy requested while work naming the buffer
 may still be running is core's to schedule — `retire!` records it, `reclaim!`
 runs `rawfree` once the submission that named it has passed, and a buffer still
 held by a recording that has not been submitted waits for that too. That is the
-whole of what the old `pins` / `free_requested` / `deferred_frees` machinery
-did, and none of it was a driver's decision.
+whole of it, and none of it is a driver's decision.
 
 Callable from any thread, which is what the finalizer path needs: it flips one
 atomic and appends under a lock, and reads no timeline at all.
@@ -794,8 +785,8 @@ end
 arguments and its workgroup counts out of, and therefore the only place a stale
 device address can be sitting when the device runs.
 
-It was two slab lists on the queue. The blocks are what backs them now, so the
-scans below read the same bytes through the owner that has them."""
+The blocks are what backs the argument and indirect bytes, so the scans below
+read them through the owner that has them."""
 unifiedblocks(ctx::VkContext) = get(() -> Block[], spans(ctx).blocks, Unified())
 
 # Scanner method — reachable now that VkManagedBuffer + the channel are defined.
@@ -939,8 +930,7 @@ end
 """
 How large a block the pool cuts when it has to grow.
 
-64 MiB, unchanged: it is the size the old allocator used, the size `Place`
-already asks for, and `Mantle.blocksize` reports.
+64 MiB: the size `Place` asks for and `Mantle.blocksize` reports.
 """
 const POOL_BLOCK_SIZE = 64 * 1024 * 1024
 
@@ -1134,9 +1124,7 @@ function collect_for_pool!(bq::SubmitChannel{<:VulkanQueue})
     # this cap's 2048 MiB default: six collections a run, 142 ms of work
     # reported as a p50 of 519 ms and a spread out to 912, and the pool 2% over
     # the cap the whole time so there was nothing to win. `maybe_collect` has had
-    # a wall-time budget (`max_gc_rate`) since it was written; this is the same
-    # idea, and the only reason it was missing here is that the soft cap arrived
-    # when a collection was cheap.
+    # a wall-time budget (`max_gc_rate`) for the same reason.
     now - p.gc_last < max(p.gc_mingap, p.gc_lastcost / p.gc_budget) && return false
     t0 = time_ns()
     GC.gc(false)
@@ -1337,15 +1325,13 @@ end
 
 # ── Staging for CPU↔GPU transfers ──
 #
-# No staging buffer on the queue. There was one, reused across transfers, and
-# it was safe only because the open batch ordered every copy through it; with
-# each transfer its own submission, reusing it would race the previous transfer
-# still in flight. An upload's staging bytes are a `Unified` scratch region
-# owned by the one-shot that copies out of them (`scratch!`), released by the
-# sweep once the transfer has passed; a download's are a `Readback` region —
-# host-cached, not BAR — the caller acquires, waits for, reads and releases.
-# `host_buffer`, the allocation the old staging buffer was made of, went with
-# the staging buffer: `rawalloc(dev, ::Readback, …)` is that allocation, pooled.
+# No staging buffer shared across transfers: each transfer is its own
+# submission, so reusing one would race the previous transfer still in flight.
+# An upload's staging bytes are a `Unified` scratch region owned by the one-shot
+# that copies out of them (`scratch!`), released by the sweep once the transfer
+# has passed; a download's are a `Readback` region — host-cached, not BAR — that
+# the caller acquires, waits for, reads and releases. Both come from
+# `rawalloc(dev, ::Readback, …)`, pooled.
 
 """
     copy_buffer!(direction, managed, host_ptr, nbytes; offset=0)
@@ -1395,8 +1381,7 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     #
     # A download is recorded on the channel that last named the buffer, so the
     # copy piggy-backs on the producer's timeline and the host waits once
-    # instead of twice. `stampof` is where that fact is now; it was
-    # `last_write_bq`, read directly.
+    # instead of twice. `stampof` is which channel that was.
     bq = if direction === :upload
         (managed.ctx::VkContext).default_bq
     else

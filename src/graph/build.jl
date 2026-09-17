@@ -766,10 +766,9 @@ end
 
 touch!(g::Graph, x) = (resourceid(g, x); x)
 
-# `resourceid(g::Graph, r)` is NOT defined here. `resourceid(g::Graph, r)`
-# (runtime/dispatch.jl) is the same line, `Graph <: Graph`, and Mantle
-# exports it — so this was a SECOND function of the same name in this module,
-# agreeing with core's by coincidence rather than by construction.
+# `resourceid(g::Graph, r)` is NOT defined here: `runtime/dispatch.jl` has it,
+# and a second method of the same name in this module would agree with that one
+# only by coincidence.
 
 """
 What kind of resource an id names, so barrier tracking starts in the right state
@@ -1234,11 +1233,10 @@ scopes to (VkBuffer, offset, size), which an array view cannot name — and buil
 the array in `storage` on demand. A backend driving KernelAbstractions builds it
 once, here, and `storage` hands it straight back.
 
-The second of those is THIS method, over [`deviceslice`](@ref), and it used to be
-one copy per backend: three bodies that each wrote `(t.n,)` for the extents, so a
-transient arrived at every kernel flattened and giving it a shape meant editing
-three backends for a property that is core's. What differs between them is which
-array type wraps the memory, and that is the one line they now answer.
+The second of those is THIS method, over [`deviceslice`](@ref). A transient's
+extents are core's property, so they are written once here; what differs between
+backends is only which array type wraps the memory, and that is the one line
+each answers.
 """
 function materialize!(::Device, t::TransientBuffer, blk::BufferBlock, offset::Int)
     t.block, t.offset = blk, offset
@@ -1269,11 +1267,11 @@ end
 """
 Every id one resource is tracked under: itself, plus each slice of it.
 
-Built once per compile rather than rediscovered per handover. `lastuses` used to
-find these by scanning every tracked state and asking `overlapping`, which is
-O(resources) inside a per-pass loop — invisible on a twenty-pass render graph and
-1.75 s of a 2 s compile at fourteen hundred, which is the scale a model graph
-arrives at. Resources without slices get an empty entry and the O(1) path.
+Built once per compile rather than rediscovered per handover. Finding them by
+scanning every tracked state and asking `overlapping` is O(resources) inside a
+per-pass loop: invisible on a twenty-pass render graph, 1.75 s of a 2 s compile
+at the fourteen hundred a model graph arrives at. Resources without slices get
+an empty entry and the O(1) path.
 """
 function sliceindex(g::Graph)
     idx = Dict{Int,Vector{Int}}()
@@ -1323,11 +1321,9 @@ dispatchrange(x) = count(x)
 The thread count a `DeviceRange` kernel is COMPILED against, when it declares no
 `max` of its own.
 
-Here and not in the backend, which is where it stayed when the `dispatchrange`
-methods around it moved to core: it is a compile-time bound on a kernel's index
-space, and every backend needs the same one. Left behind it was an
-`UndefVarError` from core the first time anything dispatched over a device-side
-count — which is every Hikari frame, and nothing before that.
+Here and not in a backend: it is a compile-time bound on a kernel's index
+space, and every backend needs the same one. In a backend, core raises an
+`UndefVarError` the first time anything dispatches over a device-side count.
 """
 const INDIRECT_CEILING = 1024 * 1024
 
@@ -1532,9 +1528,7 @@ function free!(pl::Plan)
     # also takes the plan off the move listeners and drops its patch table.
     droprecording!(pl)
     # The argument memory is a region like the transients' are, so it goes back
-    # the same way. It used to be a device array from the backend's own allocator
-    # and was left to the GC, which is what "the argument memory … the GC reclaims
-    # those" above meant; there is one owner now and it is this call.
+    # the same way, and this call is its one owner.
     let am = pl.args
         am === nothing || retire!(pool(pl.graph.dev), pl.graph.dev, am.store)
     end
