@@ -121,9 +121,8 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
     # Every push! produces one batch; per-mesh push! batches simply have n=1.
     #
     # The order, the handles and the reindex on delete are core's
-    # (`raytracing/batches.jl`); this backend supplies only the batch type. The
-    # three fields this replaces — the list, a handle→index `Dict` and a
-    # monotone counter — existed once per backend.
+    # (`raytracing/batches.jl`); this backend supplies only the batch type, so
+    # the list, the handle→index `Dict` and the counter are not per backend.
     instances::InstanceBatches{InstanceBatch{Tri}}
 
     # Bounding box (CPU-side, updated on push!)
@@ -209,10 +208,10 @@ end
 # them via that path.  Without this stop, the @generated walker recurses into
 # VulkanTLAS → submit channel → ctx → submit channel → … and blows the stack.
 #
-# `::Closed`, not one concrete owner. It was the batch alone, from when a batch
-# was the only thing that could own a pin — so a `Recording` fell through to
-# the generic walker and a hardware-RT plan blew the stack the first time it
-# was RECORDED rather than launched. The stack was 53 320 frames of
+# `::Closed`, and not one concrete owner: a `Recording` owns pins as much as a
+# batch does, and naming only the batch lets a recorded hardware-RT plan fall
+# through to the generic walker and blow the stack. The stack was 53 320 frames
+# of
 # `holdleaves!(::Recording, ::VK.Instance)`, whose `destructor` field is a
 # closure over the instance itself. Every owner has to stop here, which is what
 # the abstract type is for.
@@ -281,9 +280,8 @@ function Raycore.instance_buffer(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle)
 end
 
 # RayMakie asks `isempty(hwtlas.instances)` and `length(hwtlas.instances)`, and
-# `InstanceBatches` answers both — of BATCHES, where the old view counted
-# INSTANCES. `HWTLASInstances` is what that view was, and it is gone with the
-# `getproperty` overload that produced it: the field is the batches now.
+# `InstanceBatches` answers both — of BATCHES, not of instances, because the
+# field IS the batches.
 
 # ============================================================================
 # wait_for_gpu!
@@ -365,8 +363,8 @@ end
 
 # What a Vulkan instance batch IS: a device-resident record buffer and the BLAS
 # every instance in it references. The list it goes into, the handle it gets and
-# the reindex when one is dropped are `Mantle.InstanceBatches` — this used to be
-# `_register_batch!` plus three fields, written once per backend.
+# the reindex when one is dropped are `Mantle.InstanceBatches`, so no part of
+# that is per backend.
 addbatch!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS,
           instance_buf::LavaArray{VulkanInstanceRecord, 1}, n::Int,
           triangles::Vector{Tri}, instance_mask::UInt8, custom_index::UInt32,
@@ -926,19 +924,17 @@ the commands that bind it.
 
 A [`Recording`](@ref) keeps ONE per (layout, acceleration structure) pair and
 holds its pool for as long as it can be submitted. A one-shot allocates a fresh
-one per dispatch and pins it, which is what both used to do.
+one per dispatch and pins it.
 
-Per-dispatch allocation was defended as removing a class of bug, and the bug was
-real: a cache keyed by `(layout, objectid(LavaTLAS))` grew without bound because
-`Raycore.sync!` makes a new `LavaTLAS` per rebuild, and its `WeakRef` eviction
-lagged Julia's GC, so pools were destroyed while their sets were still in flight.
-Both halves of that are about a cache with no owner. This one has exactly one:
-nothing evicts, and `release!` is the only thing that frees.
+Owned, and not cached under a key: a cache keyed by
+`(layout, objectid(LavaTLAS))` grows without bound, because `Raycore.sync!`
+makes a new `LavaTLAS` per rebuild, and `WeakRef` eviction lags Julia's GC, so
+pools are destroyed while their sets are still in flight. Here nothing evicts
+and `release!` is the only thing that frees.
 
-The recorded case is also where the per-dispatch version stopped being a lifetime
-fix at all — a recording bakes the set into its command buffer, so allocating a
-fresh set while writing it means N pools kept alive for one plan, all naming the
-same acceleration structure.
+Allocating per dispatch is not the alternative for a recording: the set is baked
+into the command buffer, so a fresh set per dispatch means N pools kept alive
+for one plan, all naming the same acceleration structure.
 """
 function tlasset!(rec::Recording, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
     layout = pipeline.descriptor_set_layout::VK.DescriptorSetLayout

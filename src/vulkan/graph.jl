@@ -150,10 +150,9 @@ screenshot(w::VulkanWindow) = readback_window(w)
 
 # ── persistent resources ──────────────────────────────────────────────────────
 #
-# `LavaBuffer`/`LavaScalar` are gone. `Buffer` and `GPURef` are core
-# types over pool regions, so this supplies primitives and no type — and their
-# memory now comes from the same pool as every transient, which is the point:
-# one allocator sees both.
+# `Buffer` and `GPURef` are core types over pool regions, so this file supplies
+# primitives and no type of its own, and their memory comes from the same pool as
+# every transient: one allocator sees both.
 
 extrausage(::Type{DrawIndirectCommand}) = UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
 # `repeat!`'s per-iteration flags, read by `vkCmdBeginConditionalRenderingEXT`.
@@ -172,10 +171,9 @@ bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 # Delegating to `alloc_index_buffer` rather than reimplementing it: that function
 # already sets `BUFFER_USAGE_INDEX_BUFFER_BIT` through `LavaArray`'s
 # `extra_usage`, and threading the same bit through `Mantle.Buffer` would mean
-# giving `persistentarray` a per-allocation usage argument it does not have. What
-# this replaces is the REACH: RayMakie called `alloc_index_buffer` through
-# `Base.get_extension` at five sites, which is a backend name in a package that
-# must not have one.
+# giving `persistentarray` a per-allocation usage argument it does not have. The
+# point is the REACH: a caller asking for an index buffer through
+# `Base.get_extension` would be naming a backend in a package that must not.
 Mantle.indexbuffer(dev::LavaDevice, indices::AbstractVector{UInt32}) =
     alloc_index_buffer(dev.bq, indices)
 
@@ -1021,7 +1019,7 @@ tlasof(t::VulkanTLAS) = t.hw_tlas
 tlasof(t::LavaTLAS) = t
 tlasof(::Nothing) = throw(ArgumentError(
     "trace!: the acceleration structure has no hardware TLAS. It was stripped " *
-    "before the pass ran, or the accel was built for a ray-query traversal, " *
+    "before the pass ran, or built for a ray-query traversal, " *
     "which `dispatch!` records rather than `trace!`."))
 
 """
@@ -1208,8 +1206,8 @@ end
 
 Before anything this plan emits: whatever ran last on this queue may still be
 reading the pool this plan is about to write, and a cross-plan hazard cannot be
-derived — so one global barrier, always, and the arena no longer remembers who
-ran. And the profiler's query pool reset, once per command buffer.
+derived — so one global barrier, always, and no arena memory of who ran. And
+the profiler's query pool reset, once per command buffer.
 """
 function emithead!(e::Emitter, pl::Plan)
     headbarrier!(e.cmd, e.ctx)
@@ -1451,8 +1449,8 @@ different aliasing and therefore different barriers — the placer answers all
 three. It costs what a compile costs, a fraction of a millisecond, and it
 happens when a human drags a window edge.
 
-Safe to drop the old slabs here because `sync_swapchain!` waits for the device
-before it rebuilds, so nothing is still reading them.
+Safe to drop the previous slabs here because `sync_swapchain!` waits for the
+device before it rebuilds, so nothing is still reading them.
 """
 # `refit!(::Plan)` is Mantle's now — see `src/graph/build.jl`. Every line of it
 # was the graph's: refit the transients, recompile, adopt the new placement,
@@ -1484,11 +1482,11 @@ openrecording(dev::LavaDevice, pl::Plan) = Emitter(recording!(dev.bq), pl.args)
 # therefore run once, at record time, submitting its work outside the buffer, and
 # every replay would be missing it.
 #
-# An UNRECORDED plan is walked per run here now — that is what a rebindable draw
-# needs — so "no walk path at all" is no longer the reason, and the answer is
-# still no. The walk fills one one-shot and submits it at the END, so a host call
-# made during the walk submits its own work BEFORE any of the commands the walk
-# is still writing: the barriers the graph derived would order the dispatches
+# An UNRECORDED plan is walked per run here, which a rebindable draw needs, and
+# that does not make a host call safe either. The walk fills one one-shot and
+# submits it at the END, so a host call made during the walk submits its own work
+# BEFORE any of the commands the walk is still writing: the barriers the graph
+# derived would order the dispatches
 # against each other and nothing against the call. The host backend can run one
 # because it executes each pass as it walks; ROCm can because the library's own
 # submission lands inside the stream capture. This backend would have to split
@@ -1572,7 +1570,7 @@ recordsplans(::LavaDevice) = true
 """
 A run's own command buffer: a one-shot. Opened by core only when the run has
 something to put in front of its recording, or for a windowed plan, which
-cannot be recorded until step 9 and is walked into it per frame. The plan's one
+cannot be recorded and is walked into it per frame. The plan's one
 surface already holds this frame's image — `beforeframe!` acquired it before
 the plan was refit — and nothing here may rebuild the swapchain.
 """

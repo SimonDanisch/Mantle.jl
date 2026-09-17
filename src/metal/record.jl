@@ -82,11 +82,11 @@ function Mantle.retire!(::Pool, dev::MetalDevice, buf::MTL.MTLBuffer)
     # command buffer that actually reads these bytes, and that is the one Mantle
     # submits to.
     #
-    # `dev`, not `Device(MetalAPI())`. This read a process global from inside a
-    # function it had been handed the pool of, so with two devices in one process
-    # the destroy was recorded on the wrong queue and the bytes came back while a
-    # command buffer still named them. Core passes the device now — see
-    # `retire!(::Pool, dev, ::Region)` in `memory/pool.jl`.
+    # `dev`, not `Device(MetalAPI())`: reading a process global inside a function
+    # handed the pool records the destroy on the wrong queue when two devices are
+    # live, and the bytes come back while a command buffer still names them. Core
+    # passes the device — see `retire!(::Pool, dev, ::Region)` in
+    # `memory/pool.jl`.
     Metal.record_operation!(batchqueue(dev), buf)
     return nothing
 end
@@ -249,10 +249,9 @@ recording's own buffers, which never move.
 """
 function pack_recorded!(ptr::Ptr{UInt8}, args::Vector{RecordedArg}, adapted::Tuple,
                         pl = nothing, target = nothing)
-    # The same walk `recorded_args` did, so `args[slot]` is the entry it made for
-    # this argument. It used to be a second copy of the skip rule with an index
-    # advanced by hand beside it: the two agreeing was a property of the source
-    # rather than of anything either function said.
+    # The same walk `recorded_args` does, so `args[slot]` is the entry it made
+    # for this argument. A second copy of the skip rule with an index advanced by
+    # hand would agree with it only by coincidence.
     Mantle.eachpassedarg(adapted) do slot, a, passing
         passing isa Mantle.DeviceAllocation && return nothing   # binds itself
         rec = args[slot]
@@ -350,8 +349,8 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     # dropping it here sends the autotune below to pick a different one — and a
     # kernel body that reads its own workgroup size from a `Val` argument then
     # strides by a number the dispatch did not use. See `callgroup` in
-    # `graph/kalaunch.jl`; `test/vulkan/test_captured_launch_fidelity.jl` pins it
-    # on the backend it was found on.
+    # `graph/kalaunch.jl`, pinned by
+    # `test/vulkan/test_captured_launch_fidelity.jl`.
     ndrange, workgroupsize, iterspace, _ = KA.launch_config(obj, nd,
                                                             Mantle.callgroup(obj, d.group))
     ctx = KA.mkcontext(obj, ndrange, iterspace)
@@ -738,9 +737,9 @@ One thread, writing the threadgroup counts the command processor reads next.
 The encode path's `metal_write_range!`. `base` is the first WORD of this segment's
 run of triples and `n` how many dispatches it holds; an open gate copies the grids
 as recorded, a closed one writes zeros and each of those dispatches runs no
-threadgroups at all. Measured before it was built: a zero count from memory really
-does run nothing, and a count written by the dispatch before it is visible across an
-encoder barrier.
+threadgroups at all. Both halves are measured: a zero count from memory really
+does run nothing, and a count written by the dispatch before it is visible
+across an encoder barrier.
 """
 function metal_write_grids!(grids, templ, pred, i::Int32, base::Int32, n::Int32)
     @inbounds go = pred[i + Int32(1)].go != UInt32(0)

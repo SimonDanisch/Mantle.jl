@@ -394,10 +394,11 @@ end
 # KA's static NDRange / WG-size type parameters, so two Kernel instances with the
 # same shape share the plan. Built lazily on first launch.
 #
-# The device is not in the key and does not need to be, now that the cache
-# belongs to one. As a process-wide dict it was a wrong-answer path: `block_dims`
-# is `pad_to_3d(vkctx, …)` over the device's `max_wg_dims`, so the first device
-# to launch a given kernel shape decided the block grid for every device after.
+# The device is not in the key and does not need to be, because the cache belongs
+# to one. Process-wide it would be a wrong-answer path: `block_dims` is
+# `pad_to_3d(vkctx, …)` over the device's `max_wg_dims`, so the first device to
+# launch a given kernel shape would decide the block grid for every device
+# after.
 function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroupsize,
                                 vkctx::VkContext)
     # `K` is known at THIS call site — the caller has `ndrange` in hand — so the
@@ -519,11 +520,9 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
             return relaunch_dynamic(obj, args, ndrange)
         end
     end
-    # The capture check was here, deleted 2026-09-15: a launch on a task with a
-    # graph pass open used to be diverted into that pass instead of submitted. A
-    # graph is DECLARED now — `dispatch!(p, kernel, args, ndrange)` — so a launch
-    # reaching this function is an immediate launch and nothing else, which is
-    # what it always looked like.
+    # No capture check: a graph is DECLARED, through
+    # `dispatch!(p, kernel, args, ndrange)`, so a launch reaching this function
+    # is an immediate launch and nothing else.
     bq = obj.backend.dispatch_bq
 
     # Auto-discover HWTLAS for ray-query kernels — extract BEFORE Adapt strips
@@ -597,14 +596,13 @@ holder, e.g. `struct MyOp{KK}; kern::KK; end`.
 struct LavaKernel{K,P,Q}
     inner::K
     plan::P
-    # The queue. `LavaBackend` now stores a concrete `dispatch_bq::SubmitChannel{<:VulkanQueue}`
-    # (it pins its device at construction), so `backend.dispatch_bq` is a plain
-    # field load — no accessor, no abstract union. Typing the plan was worthless
-    # while this stayed dynamic: a dynamic call has to box
-    # its arguments, so a concrete `IterPlan{Ctx}` (a large isbits struct) got
-    # copied into a fresh box on every launch. Measured 144 B/dispatch, i.e.
-    # THREE TIMES the abstract-plan barrier it was meant to beat. Typing the plan
-    # is worthless unless the call it feeds is static.
+    # The queue, concrete. `LavaBackend` stores a
+    # `dispatch_bq::SubmitChannel{<:VulkanQueue}` (it pins its device at
+    # construction), so `backend.dispatch_bq` is a plain field load. Typing the
+    # plan is worthless unless the call it feeds is static: a dynamic call boxes
+    # its arguments, so a concrete `IterPlan{Ctx}` (a large isbits struct) is
+    # copied into a fresh box on every launch, measured at 144 B/dispatch, three
+    # times the abstract-plan barrier it is meant to beat.
     bq::Q
 end
 
@@ -628,13 +626,11 @@ end
     block_dims = plan.block_dims
     ws_3d      = plan.ws_3d
 
-    # The `openrecording()` consult was here, deleted 2026-09-15 with
-    # `batched!`: an open batch on this task was joined instead of opening a
-    # command buffer, which meant where a launch's commands landed depended on
-    # task-global state this function was never told about. Its own comment gave
-    # the answer it was measuring against — a graph gives one submit AND the
-    # barriers, 153 ms against 204 — so a declared graph is the batching, and an
-    # immediate launch is now just an immediate launch.
+    # One command buffer per launch, with nothing consulted about an open batch:
+    # joining one would make where a launch's commands land depend on
+    # task-global state this function is never told about. A declared graph is
+    # the batching, and a better one, at one submit with the barriers derived:
+    # 153 ms against 204.
     oneshot!(bq; tag = :launch) do e
         emitlaunch!(e, obj, args, ka_ctx, block_dims, ws_3d, tlas)
     end
@@ -977,12 +973,10 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
         driver(bq).last_dispatch_info = name
     end
     # The prepare, the barrier that makes its write visible to the command
-    # processor, then the dispatch that reads it. `bq.deferred_indirect` used to
-    # stand here: inside a `concurrent_indirect_group` this pushed onto a list
-    # on the QUEUE and recorded nothing, so the group's flush could fuse every
-    # prepare into one dispatch. A pass knows which of its dispatches are
-    # device-sized without being told — see `emitprepares!` — and this path is
-    # the one nothing declared.
+    # processor, then the dispatch that reads it. Fusing the prepares of several
+    # launches is a pass's business, which knows which of its dispatches are
+    # device-sized without being told (see `emitprepares!`); this path is the
+    # one nothing declared.
     prepare_indirect_dispatch!(e, indirect_view, ndrange_buf, ws_prod)
     indirectbarrier!(e, VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                      VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
