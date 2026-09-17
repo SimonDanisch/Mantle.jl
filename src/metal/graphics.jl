@@ -219,24 +219,18 @@ end
 Metal's format for a Julia element type. The counterpart to `vkformat`, and the
 same table `runtime/format.jl` documents.
 
-Matched on the element TYPE. It used to match on `nameof(T)` and the element's
-name, because three comments concluded that ColorTypes was not a Mantle
-dependency; it is, in `[deps]`, and `runtime/format.jl` documents
-`BGRA{N0f8}` as the portable spelling. The structural version accepted any
-foreign type that happened to be called `RGBA`.
+Matched on the element TYPE, not on `nameof(T)`: ColorTypes is a Mantle
+dependency (`[deps]`), and matching structurally accepts any foreign type that
+happens to be called `RGBA`. `runtime/format.jl` documents `BGRA{N0f8}` as the
+portable spelling.
 """
 function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # Depth, matching `vkformat`'s `D32_SFLOAT` and the table in
-    # `runtime/format.jl`. It said `R32Float` here once, which is a colour
-    # format: the one caller hardcoded `Depth32Float` beside it and so never
-    # saw it, but a depth target reaching this by way of its element type would
-    # have been created as colour and rejected by the render pass.
+    # `runtime/format.jl`. `R32Float` is a colour format, so a depth target
+    # reaching this by way of its element type would be created as colour and
+    # rejected by the render pass.
     T === Float32 && return MTLm.MTLPixelFormatDepth32Float
     T <: Real && error("no Metal pixel format for the scalar $T")
-    # On the TYPES, not on `nameof(T)`. The structural match this replaces
-    # accepted any type named `RGBA` whose element was an 8-bit `Normed`,
-    # from any package, and it was there because three comments said ColorTypes
-    # was not a dependency. It is.
     T === BGRA{N0f8}    && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
                                          MTLm.MTLPixelFormatBGRA8Unorm
     T === RGBA{N0f8}    && return srgb ? MTLm.MTLPixelFormatRGBA8Unorm_sRGB :
@@ -545,9 +539,8 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
                           color_formats::Vector{MTLm.MTLPixelFormat},
                           depth_format::Union{Nothing,MTLm.MTLPixelFormat},
                           vert_bufs::Type, frag_bufs::Type)
-    # Asked through the capability, not asserted here: a caller can now ask
-    # `supports_geometry_stage(backend)` BEFORE building a pipeline, which is
-    # the point of phase 2.7 — the answer used to be reachable only by
+    # Asked through the capability, not asserted here, so a caller can ask
+    # `supports_geometry_stage(backend)` BEFORE building a pipeline instead of
     # compiling one and reading the error.
     #
     # A geometry pipeline does not normally reach this function at all:
@@ -569,9 +562,9 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
               "`supports_tessellation(backend)` before building a pipeline " *
               "with it.")
 
-    # The stages themselves, because each now carries its function, its config
-    # and its interface — three things that used to be keyed separately and
-    # could disagree about which pipeline they belonged to.
+    # The stages themselves, because each carries its function, its config and
+    # its interface, and keying those separately lets them disagree about which
+    # pipeline they belong to.
     key = (p.vertex, p.fragment, p.geometry, vert_bufs, frag_bufs,
            color_formats, depth_format,
            typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth))
@@ -725,16 +718,12 @@ end
 # run in COMMIT order, which is exactly the ordering Mantle's barrier phase
 # established.
 #
-# One buffer per call, because the alternative was an open one. This backend
-# used to keep a command buffer open across consecutive render and copy passes
-# and commit it only where the graph said a dispatch was about to follow
-# (`Mantle.submit!(device)`): that is the open command buffer the Vulkan
-# backend deleted, by the same rule — what is open depends on every call since
-# it was opened, and nothing can be scheduled around it. A submission costs
-# more than the drawing in it (`bench/showcase.jl`'s frame is 5 ms of GPU work
-# and took ten times that when every pass committed), so the per-pass
+# One buffer per call, because the alternative is an open one, and what is open
+# depends on every call since it was opened and cannot be scheduled around. A
+# submission costs more than the drawing in it (`bench/showcase.jl`'s frame is
+# 5 ms of GPU work and ten times that when every pass commits), so the per-pass
 # submissions this costs are the same regression the Vulkan side accepts for
-# its ad hoc launches; batching is the graph's job, later, not the queue's.
+# its ad hoc launches; batching is the graph's job, not the queue's.
 #
 # What stays is the flush of Metal.jl's OWN batched compute before one of our
 # buffers is created: Metal.jl accumulates KA dispatches in a command buffer of
@@ -949,9 +938,8 @@ resident — Metal reads it as zeros rather than faulting. `record_draw!` hands
 each one to `use!`.
 
 Everything is converted once here, because `mtlconvert` on a buffer also makes
-it persistently resident and that is a setup cost. A `Ref` used to be kept as a
-`Ref` and re-read per frame; `refuserefs` refuses one at the declaration now,
-and a value that changes between frames is a `GPURef`.
+it persistently resident and that is a setup cost. `refuserefs` refuses a `Ref`
+at the declaration, and a value that changes between frames is a `GPURef`.
 """
 mutable struct StageArgs
     # What this was baked FROM, for the identity check in `rebake!`. A plan that
@@ -962,9 +950,9 @@ mutable struct StageArgs
     buffers::Vector{MTLm.MTLBuffer}
     # Scratch the argument bytes are staged in on their way to the encoder.
     # `setVertexBytes` takes a POINTER, and the only way to point at a Julia
-    # value is to put it somewhere addressable; that used to be a fresh
-    # `Base.RefValue` per argument per draw per frame — 145 KB and 811
-    # allocations a frame. One buffer per stage, reused, is the same bytes.
+    # value is to put it somewhere addressable. A fresh `Base.RefValue` per
+    # argument per draw per frame is 145 KB and 811 allocations a frame; one
+    # buffer per stage, reused, is the same bytes.
     scratch::Vector{UInt8}
 end
 
@@ -991,12 +979,12 @@ scratchsize(d::Tuple) = isempty(d) ? 0 : maximum(sizeof(typeof(x)) for x in d)
 """
 Re-bake `a` from `args`.
 
-`record_draw!` used to bind what it baked at COMPILE and ignore the arguments it
-was handed, on the reasoning that a plan's arguments never change. They can now
-— a [`Mantle.DrawBinding`](@ref) is a plan's way of saying which of its values
-are re-read each frame — and a backend that ignores them turns a rebind into a
-silent no-op: the plan is correctly reused, the draw correctly recorded, and the
-picture is last frame's. A zoomed axis whose scatter does not move.
+A plan's arguments DO change between frames: a [`Mantle.DrawBinding`](@ref) is
+a plan's way of saying which of its values are re-read each frame. Binding what
+was baked at compile and ignoring the arguments `record_draw!` is handed turns a
+rebind into a silent no-op: the plan is correctly reused, the draw correctly
+recorded, and the picture is last frame's. A zoomed axis whose scatter does not
+move.
 
 UNCONDITIONAL, and that is the point. It was guarded by `===` on the tuple the
 bake came from, which assumed that the same Julia objects mean the same device
@@ -1120,8 +1108,6 @@ ONE dynamic dispatch lands here, on the tuple's concrete type; everything after
 it is static, because `@generated` writes out the indices and each `d[i]` is
 then a typed field read.
 
-The loop this replaces carried a comment saying it was dynamic whatever
-happened. That was true of the loop and not of the problem.
 """
 @generated function bindall!(setbytes!, enc, d::D, scratch) where {D<:Tuple}
     Expr(:block, Expr(:meta, :inline),
@@ -1160,10 +1146,10 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, cou
     MTLm.set_cull_mode!(h.encoder, c.cull)
     # Counter-clockwise is front-facing here, because `flip_clip` mirrors y and
     # a mirror reverses the handedness of every triangle. Without this, back-face
-    # culling keeps exactly the faces it used to drop: the g-buffer shows the far
-    # side of every solid and a shadow map records the depth of the wrong side —
-    # which still LOOKS like a shadow map, and still fills, so the only symptom
-    # was the demo's shadow-bias knob having no effect at all.
+    # culling keeps exactly the faces it should drop: the g-buffer shows the far
+    # side of every solid and a shadow map records the depth of the wrong side,
+    # which still LOOKS like a shadow map and still fills, so the only symptom
+    # is the demo's shadow-bias knob having no effect at all.
     MTLm.set_front_facing_winding!(h.encoder, MTLm.MTLWindingCounterClockwise)
     bind_stage!(h.encoder, d.vert, MTLm.set_vertex_bytes!, MTLm.MTLRenderStageVertex)
     # A depth-only pipeline has no fragment stage, so binding to it is not just
@@ -1271,13 +1257,6 @@ Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
 
 Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
 Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
-# The `OffscreenTarget` and `WindowTarget` methods that used to sit here are
-# core's, in `graphics/resources.jl`, and were byte-identical to them. Two
-# identical definitions of one signature were harmless while this file was an
-# extension — a different module extending the same function — and are a method
-# OVERWRITE now that it is included into Mantle itself, which precompilation
-# refuses outright.
-
 # The ELEMENT type of the attachment, which is what a pipeline is compiled
 # against. `MetalFramebuffer` keeps the MTL format it was created with and not the
 # Julia type behind it, so this is the reverse of `mtlformat` — and only over the
@@ -1298,9 +1277,7 @@ eltypeof(f::MTLm.MTLPixelFormat) =
 End the encoder and commit the pass's command buffer.
 
 One buffer per pass, committed here: nothing stays open across the call
-boundary. It used to stay open for the next render or copy pass to share, and
-the graph's `submit!` hook closed it before a dispatch — the open buffer this
-backend, like the Vulkan one, no longer has.
+boundary.
 """
 function Mantle.end_render_pass!(h::MetalPassHandle)
     MTLm.endEncoding!(h.encoder)
@@ -1322,9 +1299,7 @@ function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
         ibuf === nothing &&
             error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
         # `MTLRenderStageVertex` IS an `MTLRenderStages`; the constructor takes
-        # an `Integer`, so wrapping it was a `MethodError` for every indexed
-        # draw. Never reached until a graph could express one — the geometry
-        # lowering has its own `record_draw!` and goes nowhere near here.
+        # an `Integer`, so wrapping it is a `MethodError`.
         MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageVertex)
         MTLm.draw_indexed_primitives!(enc, c.primitive, n,
                                       MTLm.MTLIndexTypeUInt32, ibuf,

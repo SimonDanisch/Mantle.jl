@@ -130,10 +130,8 @@ Note every device pointer inside a just-packed value of type `T` whose bytes are
 at `at`.
 
 WHICH fields those are is core's answer (`devicepointeroffsets`), not this
-backend's — the packer used to carry that knowledge itself, naming `x.ptr` by
-hand in one method and saying nothing in the next, so a plain struct holding a
-device array was packed and never patched. Asking core instead means the two
-backends cannot drift, and the one that answered nothing at all could not.
+backend's: a plain struct holding a device array has to be patched like any
+other, and one copy of that knowledge per backend drifts.
 
 The COLLECTION stays here: Vulkan notes host pointers into the recording and
 resolves them to `(region, offset)` when it seals (`patchtarget`), which a
@@ -186,12 +184,7 @@ without it must not be pending execution when it is submitted again, and there i
 one recording per plan: nothing stops `run!` being called twice before the device
 has finished the first, so two runs routinely overlap on the queue.
 
-That was not true while a plan had an argument RING. There was a recording per
-slot, and the run that would have reused a slot waited for the token covering the
-run that last used it — so a given command buffer was provably idle before it was
-submitted again, and no flag was correct and cheaper. Deleting the ring (see
-[`GPURef`](@ref)) deleted that guarantee with it, so the flag comes back.
-`ONE_TIME_SUBMIT` was never a candidate: it means "submitted once, then reset or
+`ONE_TIME_SUBMIT` is not a candidate: it means "submitted once, then reset or
 freed".
 """
 function recording!(bq::SubmitChannel{<:VulkanQueue})
@@ -404,12 +397,11 @@ puts the run's host stores and pointer patches in front of the plan's
 recording that way, and `submit!(bq, closed...)` is the only way two closed
 buffers ever share a submission.
 
-Every path that used to reach for the open batch reaches for this. What it
-costs is a `vkBeginCommandBuffer`/`vkEndCommandBuffer` pair and a
-`vkQueueSubmit2` per call where the open buffer amortised them, measured in
-`docs/submission-refactor.md` (step 7) and accepted: how many ad hoc launches
-are batched efficiently is a question for a graph built to hold them, not for
-the queue to answer with a buffer and a threshold.
+What it costs is a `vkBeginCommandBuffer`/`vkEndCommandBuffer` pair and a
+`vkQueueSubmit2` per call, measured in `docs/submission-refactor.md` and
+accepted: how many ad hoc launches are batched efficiently is a question for a
+graph built to hold them, not for the queue to answer with a buffer and a
+threshold.
 """
 function oneshot(f, bq::SubmitChannel{<:VulkanQueue})
     o = openoneshot(bq)
@@ -535,8 +527,8 @@ function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
     Threads.atomic_add!(ctx.diag.flush_counter, 1)
     # Give back what the device has finished — the command buffers this call
     # takes from the free list, and the destroys that were waiting on them.
-    # Once per SUBMISSION: per launch this was a `Dict` lookup for the device
-    # plus a dynamic `passed` on an `Any` token — 171 bytes, measured by
+    # Once per SUBMISSION: per launch it is a `Dict` lookup for the device plus
+    # a dynamic `passed` on an `Any` token, 171 bytes, pinned by
     # `test_dispatch_allocation.jl`.
     drain!(bq)
 
@@ -823,14 +815,14 @@ end
 
 """
 How long `flush!` waits for the queue to drain before it gives up, in
-nanoseconds. `0` restores the old behaviour of waiting forever.
+nanoseconds. `0` waits forever.
 
-`vkWaitSemaphores` took `typemax(UInt64)` here, which is not a timeout — a
-dispatch that never completes turned into a process that could only be killed,
-taking the in-memory dispatch log with it. That is the failure this wait exists
-to survive, so it gets a budget: long enough that no legitimate submission comes
-near it (a whole VAE decode is ~30 s of device work), short enough that a hang
-is a diagnosable error instead of a wedged session.
+`typemax(UInt64)` to `vkWaitSemaphores` is not a timeout: a dispatch that never
+completes gives a process that can only be killed, taking the in-memory dispatch
+log with it. That is the failure this wait exists to survive, so it gets a
+budget: long enough that no legitimate submission comes near it (a whole VAE
+decode is ~30 s of device work), short enough that a hang is a diagnosable error
+instead of a wedged session.
 """
 
 """Poll interval inside that budget, so a TDR is noticed without waiting it out."""
@@ -1170,17 +1162,15 @@ end
 # `::Device`, core's abstract type, and not `LavaDevice`: this file is included
 # before `graph.jl` declares that one. What matters is the ARGUMENT — the
 # portable `flush!(channel, device)` takes the Mantle device, which is what
-# `deviceof` answers and what core's one-argument form fills in. It used to take
-# a raw `VK.Device`, so the portable spelling could not reach it.
+# `deviceof` answers and what core's one-argument form fills in.
 function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     @assert Threads.threadid() == bq.thread  "the submit channel is single-writer; cross-thread flush forbidden"
-    # Was `vk_flush!`'s, which is gone: waiting on a semaphore of a dead device
-    # is the confusing failure this turns into a message that says what to do.
+    # Waiting on a semaphore of a dead device is a confusing failure; this
+    # turns it into a message that says what to do.
     device_lost(ctxof(bq)) && throw(LavaError("command flush", "Vulkan device lost",
         "Call reset_device!() to reinitialize, or restart Julia session."))
-    # One question, one list. This used to seed `target` from `replay_watermark`
-    # and then fold a maximum over `in_flight`, because the two submission paths
-    # kept separate records; a caller that forgot either returned early.
+    # One question, one list: `newest` covers every submission path, so there
+    # is no second record to fold a maximum over.
     target = something(newest(bq), UInt64(0))
     target == UInt64(0) && return
     budget = driver(bq).flush_timeout_ns
@@ -1304,9 +1294,7 @@ it.
 # One `cmd_copy_buffer` into whatever the emitter is writing, with both sides
 # pinned. No barrier of its own: inside a plan the barriers around a copy pass
 # are derived, and a one-shot opens with the global barrier that orders it
-# against everything before it — the shader-write → transfer-read barrier that
-# used to guess here from the batch's dispatch count, and the transfer-write →
-# everything barrier after the copy, were both the open batch's problem.
+# against everything before it.
 
 """
     cmd_copy_buffer!(e, src, dst, nbytes; src_off=0, dst_off=0)

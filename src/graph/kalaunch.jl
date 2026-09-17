@@ -42,14 +42,14 @@ backend that overrides `resolve` is consulted for the elements too. That is the
 only difference between the two; `rawargs`, which has no device, goes through
 `storage`.
 
-Two other walks had to learn the same thing, and only one of them was already
-right. `holdleaves!` does walk tuples to their leaves, so the resources stay
-held for the submission. `devicepointeroffsets` did NOT: it counted the tuple as
-a level of nesting and stopped one short of the device pointers inside it, so a
-tuple of operands got an empty patch table and a `resize!` under a recorded plan
-silently left the old address in place — see `nestinglevels` in
-`graph/packing.jl`. The packer itself needed nothing: its generic branch inlines
-any isbits aggregate and hands `recpatchfields!` the aggregate's TYPE.
+Two other walks have to agree about tuples. `holdleaves!` walks them to their
+leaves, so the resources stay held for the submission. `devicepointeroffsets`
+must not count a tuple as a level of nesting (`nestinglevels` in
+`graph/packing.jl`): stopping one short of the device pointers inside it gives a
+tuple of operands an empty patch table, and a `resize!` under a recorded plan
+then leaves the old address in place. The packer needs nothing: its generic
+branch inlines any isbits aggregate and hands `recpatchfields!` the aggregate's
+TYPE.
 
 A tuple of plain values resolves to itself, since `storage(x) = x`.
 """
@@ -151,9 +151,8 @@ The two cannot be told apart by `isa Function`, because the macro generates a
 function too.
 
 One predicate, in core, because this is a decision about what a dispatch MEANS
-and not about any backend's machinery. It was being made three times: Lava asked
-it in `compile_dispatch`, the ROCm extension asked it as `kifunction`, and
-`bake` below did not ask it at all, so a declared macro-free dispatch was a
+and not about any backend's machinery: Lava's `compile_dispatch`, the ROCm
+extension and `bake` below all ask it here, and a caller that does not ask is a
 `MethodError: no method matching ew2!(::CPU)` on the host. Deletes itself with
 the last `@kernel`.
 """
@@ -300,12 +299,11 @@ bakedrange(::Compile, n) = n
 # to bounds-check itself, repo-wide, and over-dispatching it is defined to be a
 # no-op for the surplus threads.
 #
-# This path did not use that. It built a `DeferredRange`, whose `ndrangeof`
-# calls `awaitwrites` — a full device synchronise, on the host, before EVERY
-# such dispatch. Measured on an M5, killeroo-gold at 684x513/8spp: 320 of them
-# per frame, 0.585 s of a 0.602 s frame. 97 % of the render was the host
-# standing still waiting for a number it then used to launch the next kernel,
-# and hardware traversal made no difference because traversal was not the cost.
+# A `DeferredRange` here instead calls `awaitwrites` from `ndrangeof`: a full
+# device synchronise, on the host, before EVERY such dispatch. Measured on an
+# M5, killeroo-gold at 684x513/8spp, 320 of them per frame cost 0.585 s of a
+# 0.602 s frame, and hardware traversal made no difference because traversal
+# was not the cost.
 #
 # Ordering does not depend on the sync: the producing and consuming dispatches
 # go to the same queue, which runs them in order. The sync existed only so the
@@ -328,8 +326,7 @@ owns (`argcursor`), the indirect-command slot each device-sized dispatch owns
 and what a compiled draw or dispatch IS is the backend's, through
 `compiledraw` and `compile_dispatch`. An interpreted backend answers with a
 callable and an argument size of zero, a recording backend with the pipeline
-and the size of the block it will pack. The Vulkan backend used to run this
-whole phase itself, cursor and all, beside this one.
+and the size of the block it will pack.
 """
 function run!(::Pipelines, c::Compile)
     argcursor = 0        # every draw's and dispatch's argument block, laid out once
@@ -594,10 +591,10 @@ function run!(pl::Plan)
         # A surface that resized moved every attachment that follows it; refit
         # here, AFTER the acquire and before anything is recorded: the acquire
         # is where a resize is noticed last (the presentation engine reports it
-        # there, and the framebuffer size is asked again), and a frame refit
-        # before it was recorded against a swapchain the acquire then rebuilt —
-        # a colour target at the new size beside a depth target at the old one,
-        # which is a lost device on NVIDIA. A frame where nothing moved costs one
+        # there, and the framebuffer size is asked again), and refitting before
+        # it fits against a swapchain the acquire then rebuilds: a colour target
+        # at the new size beside a depth target at the old one, which is a lost
+        # device on NVIDIA. A frame where nothing moved costs one
         # size compare per tracking transient, and `refit!` returns `false` for
         # a plan that follows nothing.
         refit!(pl)
@@ -778,10 +775,8 @@ end
 Walk the plan's passes into `emitter`: the head barrier, then every pass —
 its barriers, its predicate scope and its work — in compile order.
 
-Named for what it walks, beside `emithead!`, `emitpass!` and `emitwork!`. It was
-`emit!`, which is also what a geometry body calls to emit a vertex; two
-unrelated meanings of one name in one module is one too many, and this is the
-half that is internal and has a family to be consistent with.
+Named for what it walks, beside `emithead!`, `emitpass!` and `emitwork!`.
+`emit!` is a geometry body emitting a vertex, which is a different thing.
 """
 function emitplan!(e, pl::Plan)
     emithead!(e, pl)
@@ -827,11 +822,11 @@ function emitpass!(e, pl, pp::PassPlan)
     emitbarriers!(e, pp)
     # The fused prepare comes BEFORE the predicate scope, so it runs whether or
     # not the iteration does: it folds the gate in and writes zero rays or
-    # groups for a discarded one. Inside the scope it was discarded with the
-    # iteration — and a trace-rays command is not subject to conditional
+    # groups for a discarded one. Inside the scope it would be discarded with
+    # the iteration, and a trace-rays command is not subject to conditional
     # rendering (VK_KHR_ray_tracing_pipeline leaves it out), so the trace of a
-    # discarded bounce still ran, with a ray count read from a slot nothing had
-    # written. `test_discarded_iteration_prepare.jl` pins the slot.
+    # discarded bounce would still run, with a ray count read from a slot
+    # nothing had written. `test_discarded_iteration_prepare.jl` pins the slot.
     p.kind === :compute && emitprepares!(e, pl, pp)
     # The predicate scope opens AFTER the barriers and the prepare, and closes
     # before the next pass's, so a discarded iteration still orders the ones
@@ -892,7 +887,7 @@ unchanged; `run!` walks its passes each time instead.
 Not yet for plans with a surface: a swapchain image is a different image every
 frame and a recording names one. Headless plans have no such thing.
 
-It does NOT run the plan. `bake!`, which this replaced, did.
+It does NOT run the plan.
 
 `maxpasses=N` splits the baked commands into submissions of at most N passes,
 preserving the full plan's ordering and barriers, on any backend that records at
@@ -968,10 +963,9 @@ to find out whether this backend records at all.
 
 Nothing here is a driver call, which is why it is core's: the arithmetic that
 picks the chunks is the same everywhere, and a piece is whatever this backend's
-`closerecording!` hands back. It was the Vulkan backend's until 2026-09-14, and
-`HorizonRunner`'s prefill — the only caller that asks for a partition, because a
-512-token prefill is over 20 seconds in one submission — could therefore only be
-recorded on that backend.
+`closerecording!` hands back. `HorizonRunner`'s prefill is the only caller that
+asks for a partition, because a 512-token prefill is over 20 seconds in one
+submission.
 """
 function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
     parts = Any[]
@@ -1044,17 +1038,15 @@ Two reasons they cannot, and both are the same shape — something inside the
 commands differs between runs:
 
   * a plan drawing to a SURFACE names a swapchain image, and that is a different
-    image every frame (step 9 removes this one);
+    image every frame;
   * a plan holding a [`DrawBinding`](@ref) names the bytes it packed, and a cell
     whose whole purpose is to be rewritten between runs cannot be frozen into
     them.
 
-The second one was enforced in the PACKER, which refused a cell whether it was
-packing a recording or a run — so `record!` told a caller to leave the plan
-unrecorded, and `execute!` then refused to run the unrecorded plan. A Makie
-frame, whose every draw is a cell, could neither be recorded nor run. Refusing
-here instead is one answer in one place: this plan cannot be recorded, so it is
-emitted per run, and the packer re-reads every cell on the way.
+Refused here and not in the packer, which cannot tell whether it is packing a
+recording or a run: this plan cannot be recorded, so it is emitted per run, and
+the packer re-reads every cell on the way. A Makie frame, whose every draw is a
+cell, depends on that.
 """
 recordable(pl::Plan) = isempty(pl.graph.surfaces) && !hasrebindable(pl)
 
