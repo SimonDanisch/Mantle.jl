@@ -989,7 +989,7 @@ end
 scratchsize(d::Tuple) = isempty(d) ? 0 : maximum(sizeof(typeof(x)) for x in d)
 
 """
-Re-bake `a` from `args`, unless it already was.
+Re-bake `a` from `args`.
 
 `record_draw!` used to bind what it baked at COMPILE and ignore the arguments it
 was handed, on the reasoning that a plan's arguments never change. They can now
@@ -998,23 +998,50 @@ are re-read each frame — and a backend that ignores them turns a rebind into a
 silent no-op: the plan is correctly reused, the draw correctly recorded, and the
 picture is last frame's. A zoomed axis whose scatter does not move.
 
-Guarded by `===` on the tuple the bake came from, so a draw that does not rebind
-pays one pointer comparison and the per-frame bake this was avoiding stays
-avoided. A rebind assigns a fresh tuple, so it never matches.
+UNCONDITIONAL, and that is the point. It was guarded by `===` on the tuple the
+bake came from, which assumed that the same Julia objects mean the same device
+addresses. They do not: `resize!` on a `MtlVector` keeps the object and
+reallocates the `MTLBuffer` under it, so the guard said "nothing changed" and
+the encoder kept a pointer into freed storage.
+
+It showed up as tick labels that would not update. Every link in the chain was
+correct — the render object, the rebound cell, the count, even the contents of
+the buffer on the GPU — and the draw read the address the buffer used to have.
+A cached device pointer is not a property of an object's identity, so there is
+nothing cheap to compare here and the bake is simply done. It is 32 to 80 bytes
+an argument; the guard was saving that and costing correctness.
 """
-function rebake!(a::StageArgs, args)
-    t = Tuple(args)
-    a.source === t && return a
-    a.source = t
-    a.device = map(bakearg, t)
-    n = scratchsize(a.device)
+rebake!(a::StageArgs, args) = rebake!(a, Tuple(args))
+
+# The bake runs on a CONCRETE tuple and everything derived from it is computed
+# before anything is stored. `StageArgs.device` and `.source` are declared
+# `::Tuple`, so reading either one back mid-bake makes `map`, `maximum` and the
+# buffer scan dynamic — 147 KB a frame against 10, for the same work.
+function rebake!(a::StageArgs, t::T) where {T<:Tuple}
+    d = map(bakearg, t)
+    n = scratchsize(d)
     length(a.scratch) < n && resize!(a.scratch, n)
     empty!(a.buffers)
-    for x in t
-        b = metal_buffer(x)
-        b === nothing || push!(a.buffers, b)
-    end
+    collectbuffers!(a.buffers, t)
+    a.source = t
+    a.device = d
     return a
+end
+
+"""
+Push every argument that HAS a device buffer onto `bufs`, unrolled.
+
+The same trap `bindall!` is unrolled for, one function along: iterating a
+heterogeneous tuple boxes each element, and this loop ran over every argument of
+every stage of every draw — 617 boxes and 117 KB a frame. `@generated` writes
+out the indices, so each `t[i]` is a typed field read and `metal_buffer` is
+resolved statically.
+"""
+@generated function collectbuffers!(bufs, t::T) where {T<:Tuple}
+    Expr(:block, Expr(:meta, :inline),
+         (:(let b = metal_buffer(t[$i]); b === nothing || push!(bufs, b) end)
+          for i in 1:fieldcount(T))...,
+         :(return nothing))
 end
 
 """One draw's compiled pipeline and its baked arguments."""
