@@ -37,7 +37,7 @@ function rawfree end
 The largest single allocation this device will make.
 
 A harder limit than [`capacity`](@ref) and usually a far smaller one — 4 GB
-against 29 GB of budget on the machine this was written on — and the one that
+against 29 GB of budget on this machine — and the one that
 actually bounds a block, because a block is *one* allocation: the offsets a
 placement produces are into a single contiguous range, so it cannot be split
 across two.
@@ -328,9 +328,9 @@ struct Pool
     # Regions handed back from a context that must not touch a free list, and
     # the same regions once stamped with a fence. See `retire!` / `reclaim!`.
     #
-    # PARALLEL vectors, and the fences CONCRETE. This was one
-    # `Vector{Tuple{Region,Any}}` — `Any` because a fence was documented as opaque
-    # — and a tuple with a boxed field makes every element non-isbits, so
+    # PARALLEL vectors, and the fences CONCRETE. One
+    # `Vector{Tuple{Region,Any}}` — `Any` because a fence is documented as
+    # opaque — has a boxed field in every element, so
     # `reclaim!` paid a boxed read and a boxed write for each entry it KEPT. That
     # walk runs on every `run!`, over everything the device has not finished with:
     # measured through RayMakie with four dropped screens' worth in the list, 1200
@@ -916,8 +916,8 @@ Whether more than one live plan is placed in this arena.
 
 Nothing emits on the strength of it any more: a recording opens with a global
 barrier whoever ran last, because a cross-plan hazard cannot be derived and a
-barrier decided at record time from who ran last was wrong the moment two
-plans alternated. The arena's memory of who ran last went with that.
+barrier decided at record time from who ran last is wrong the moment two plans
+alternate, so the arena keeps no memory of who ran last.
 """
 sharing(pool::Pool, kind) =
     (a = get(pool.arenas, kind, nothing); a === nothing ? false : length(tenants!(a)) > 1)

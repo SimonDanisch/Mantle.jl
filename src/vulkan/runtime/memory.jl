@@ -730,8 +730,8 @@ function destroy_buffer!(buf::VkManagedBuffer)
     # the span for one more submission boundary on top of a wait that has
     # already happened.
     #
-    # The thread hazard that used to make this the wrong place is closed at the
-    # allocator now: `release!` takes the block's lock, so a free-list corruption
+    # The thread hazard is closed at the allocator: `release!` takes the
+    # block's lock, so a free-list corruption
     # like the `ConcurrencyViolationError` described in `vk_free!` cannot recur
     # through this path. The off-thread deferral above stays regardless — it is
     # about the DEVICE still reading the bytes, not about the list.
@@ -873,59 +873,35 @@ function scan_slabs_for_unknown_bdas(bq)
     return results
 end
 
-# `lastwritepassed`, `drain_deferred_frees!` and the two lists they swept are
-# gone with phase 2.2. "Has the device finished the last submission that named
-# this buffer" is one question about one stamp, and core asks it once, for
-# buffers and acceleration structures alike — `reclaim!` in `graph/lifetime.jl`.
-# What this file still answers is the destructor itself: `rawfree`.
+# "Has the device finished the last submission that named this buffer" is one
+# question about one stamp, and core asks it once, for buffers and acceleration
+# structures alike — `reclaim!` in `graph/lifetime.jl`. What this file answers is
+# the destructor itself: `rawfree`.
 
 # ── Sub-allocation: one pool, and it is Mantle's ──
 #
-# What was here: 64 MiB blocks carved by a bump pointer, 153 size classes, a free
-# list per class holding recycled `VkManagedBuffer` objects, and a block-reclaim
-# scan. About seven hundred lines, and a complete second allocator sitting beside
-# `Mantle.Pool` with no knowledge of it.
-#
-# Two allocators over one `VkDevice` is not a tidiness problem. Neither could
-# reuse the other's bytes, so an idle 64 MiB arena could not serve an array
-# allocation that was about to grow the pool, and the footprint either reported
-# was about its own bookkeeping rather than about the device. `Mantle.Pool`'s own
+# Array allocations go through `Mantle.Pool`, the same way `Place` does, and this
+# file keeps no allocator of its own. Two allocators over one `VkDevice` cannot
+# reuse each other's bytes, so an idle 64 MiB arena could not serve an array
+# allocation about to grow the pool, and the footprint either one reported would
+# be about its own bookkeeping rather than about the device. `Mantle.Pool`'s own
 # header says this outright: a backend that routes `rawalloc` through its own
 # pool defeats the point.
 #
-# So the size classes are gone and this file allocates the same way `Place` does.
-# What each piece became:
+# Carving is exact (`carve!` splits at the requested length), so there is no
+# rounding waste to account for, and a `VkManagedBuffer` is built per allocation
+# rather than recycled from a free list: one mutable struct and one finalizer,
+# against a suballocator call of roughly 300 ns. That is the price of one
+# allocator instead of two.
 #
-#     pool_alloc                  ->  acquire!
-#     return_to_pool!             ->  release!
-#     alloc_pool_block            ->  Pool's own growth, in acquire!
-#     reclaim_empty_pool_blocks!  ->  trim!
-#     PoolBlock                   ->  Mantle.Block
-#     (pool_offset, pool_block)   ->  Mantle.Region
-#     size_class / POOL_SUBDIV    ->  nothing; carving is exact
-#
-# Two things are lost with the size classes and both were measured, so they are
-# stated rather than discovered later:
-#
-#   * **Rounding waste is gone**, which was the size classes' whole cost. Eight
-#     subclasses per octave bounded it at 1/8 of a request — SAM 2's encoder went
-#     from 59.3% efficient to ~94% when they were introduced. `carve!` splits at
-#     exactly the requested length, so it is 100%, and `pool_accounting` is
-#     deleted because it existed to measure a number that is now always 1.0.
-#   * **Object recycling is gone.** A free list held the `VkManagedBuffer` itself,
-#     so reuse cost a `pop!` and four field writes. A fresh one is now built per
-#     allocation: one mutable struct and one finalizer, against a suballocator
-#     call that costs roughly 300 ns where the size-class `pop!` cost about 50.
-#     That is the price of one allocator instead of two.
-#
-# The LIFETIME layer above this is untouched, and deliberately. `vk_free!` still
-# decides when a buffer's bytes are safe to reuse from that buffer's own
-# `last_write` and its queue's deferred list, which is finer-grained than the
-# device-wide fence `Mantle.retire!`/`reclaim!` use. By the time `destroy_buffer!`
-# reaches a pooled chunk the wait is already done and the thread is the owning
-# one, so it can `release!` outright rather than retiring for another submission
-# boundary. `retire!` remains what the graph arenas use, where no per-resource
-# `last_write` exists to be more precise with.
+# The LIFETIME layer above this is finer-grained than the pool's, and stays that
+# way. `vk_free!` decides when a buffer's bytes are safe to reuse from that
+# buffer's own `last_write` and its queue's deferred list, not from the
+# device-wide fence `Mantle.retire!`/`reclaim!` use. By the time
+# `destroy_buffer!` reaches a pooled chunk the wait is already done and the
+# thread is the owning one, so it can `release!` outright rather than retiring
+# for another submission boundary. `retire!` is what the graph arenas use, where
+# no per-resource `last_write` exists to be more precise with.
 
 """
 How large a block the pool cuts when it has to grow.
@@ -1201,11 +1177,9 @@ end
 Allocate GPU memory on `bq` out of this device's `Mantle.Pool`.
 
 `extra_usage` is passed through as the region's CONSTRAINT rather than used to
-bypass the pool, which is the one behavioural change of the merge. The old
-allocator gave every non-default usage its own `VkBuffer`, because a size class
-carries no notion of what a block may be used for; `compatible` does, so an
-index buffer can now sit in a block whose usage bits already permit it and only
-falls out to a dedicated allocation when none does.
+bypass the pool: `compatible` knows what a block may be used for, so an index
+buffer sits in a block whose usage bits already permit it and falls out to a
+dedicated allocation only when none does.
 """
 function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usage::UInt32=UInt32(0))
     ctx = ctxof(bq)

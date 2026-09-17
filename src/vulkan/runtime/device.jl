@@ -521,18 +521,15 @@ mutable struct VkContext
     # from before a reset can never be handed to after it.
     #
     # An identity — for logging, and for the probe's assertion that two contexts
-    # are distinct — and NOT a cache key. Keying by it is not ownership: the
-    # cached value types are defined in files included after this
-    # one, so a field would have to be `Any` and cost inference on a lookup per
-    # dispatch. The premise was true and the conclusion was wrong: the fix is to
-    # move the nine type definitions ahead of this file (`coretypes.jl`), not to
-    # accept a surrogate key. `caches` below is concrete.
+    # are distinct — and NOT a cache key: keying by it is not ownership. The
+    # cached value types are defined in `coretypes.jl`, ahead of this file, so
+    # `caches` below is concrete rather than an `Any` field costing inference on
+    # a lookup per dispatch.
     id::UInt64
 
-    # Per-device state, owned by the device. See `DeviceCaches` for what was
-    # global before and why keying it by `id` was not the same thing: a field
-    # dies with its context, so nothing outlives the handles it describes and
-    # `reset_device!` has nothing to clear.
+    # Per-device state, owned by the device: a field dies with its context, so
+    # nothing outlives the handles it describes and `reset_device!` has nothing
+    # to clear. See `DeviceCaches`.
     caches::DeviceCaches
 
     # Every debugging and instrumentation toggle, owned by the device it

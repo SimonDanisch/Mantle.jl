@@ -233,8 +233,6 @@ Base.mapreducedim!(f, op::REDUCERS, R::LavaArray{T, N},
 #
 # Raising the *workgroup* instead does nothing (64 and 256 measure the same); the
 # ceiling is the device's `maxComputeWorkGroupInvocations`, see `DeviceCaps`.
-# (The "above 256 is unsafe on this driver" that used to be written here was the
-# pipeline-cache hash collision, not the device — see `workgroup_limit`.)
 @kernel cpu=false function lava_broadcast_flat!(dest, bc, n, ::Val{U}, ::Val{WG}) where {U, WG}
     l = @index(Local, Linear)
     g = @index(Group, Linear)
@@ -252,13 +250,13 @@ end
 
 Launch geometry for a flat broadcast over `n` elements.
 
-`maxunroll` is elements per thread; 1 restores one-element-per-thread. It was a
-module-level `Ref` so it could be flipped **inside one session**, because that is
-the only comparison this project accepts: an isolated benchmark showed 5-11% here
-and a dispatch-timing profile showed the elementwise bucket dropping 18 ms, while
-the free-running encode did not move at all across sessions. An argument does
-that without making the setting process-wide. Each new value recompiles the
-broadcast kernels, so warm up after each flip before timing.
+`maxunroll` is elements per thread; 1 restores one-element-per-thread. An
+argument and not a process-wide setting, so the two sides can be compared
+**inside one session**, which is the only comparison this project accepts: an
+isolated benchmark reads 5-11% here and a dispatch-timing profile reads the
+elementwise bucket dropping 18 ms, while the free-running encode does not move
+at all across sessions. Each new value recompiles the broadcast kernels, so warm
+up after each flip before timing.
 
 `U` is backed off while the grid would be too small to occupy the device — 8
 elements per thread over a 4096-element array is 2 workgroups, and a kernel that
@@ -280,9 +278,9 @@ end
 
 # ── division by a runtime-constant extent, without dividing ──────────────────
 #
-# **The division chain is the cost of these kernels, which this document said it
-# was not.** Isolated, with no memory traffic in the way — one kernel that only
-# writes, one that also runs `cart32` — over 2.36 M elements:
+# **The division chain is the cost of these kernels.** Isolated, with no memory
+# traffic in the way — one kernel that only writes, one that also runs `cart32` —
+# over 2.36 M elements:
 #
 #     rank 2, 1 division      11.7 -> 33.5 us
 #     rank 4, 3 divisions     11.7 -> 59.6 us
@@ -290,9 +288,8 @@ end
 #
 # Linear in the number of divisions, ~15 us each, and at rank 6 that is **74 us
 # against a ~42 us memory floor** for the same array — the arithmetic outweighs
-# the traffic. The earlier note (kept below) concluded the opposite from an
-# end-to-end delta of -0.5 ms; it was measuring a kernel where the access pattern
-# happened to hide it.
+# the traffic. An end-to-end delta reads the opposite, because it measures a
+# kernel whose access pattern hides the divisions.
 #
 # `reference/llama.cpp-vulkan`'s `generic_unary_head.glsl` solves exactly this,
 # and its `copy.comp` is otherwise the same algorithm as ours: it never divides,
@@ -577,8 +574,8 @@ end
 
 # Allocate broadcast output, on the device the inputs live on. The style carries
 # no device, so the first device array in the argument tree decides: a broadcast
-# over arrays on a second device used to allocate its result on the default
-# device and then record the kernel reading the inputs on the result's queue.
+# over arrays on a second device would otherwise allocate its result on the
+# default device and record the kernel reading the inputs on the result's queue.
 firstdevicearray(x::LavaArray) = x
 firstdevicearray(bc::Base.Broadcast.Broadcasted) = firstdevicearray(bc.args)
 firstdevicearray(x::Base.Broadcast.Extruded) = firstdevicearray(x.x)
@@ -618,16 +615,14 @@ end
 
 # ── No staging copy in either direction ──
 #
-# Both of these used to allocate a `Vector{UInt8}` the size of the transfer and
-# `unsafe_copyto!` every byte into it, purely to hand `upload!`/`download!` the
-# `Vector{UInt8}` their signatures ask for. That is a second full copy of every
-# byte that crosses the bus, and on Kokoro it was **3.6 MB of host allocation per
-# utterance** (measured, `--track-allocation`).
+# A staging `Vector{UInt8}` the size of the transfer, allocated only to satisfy
+# `upload!`/`download!`'s signature, is a second full copy of every byte that
+# crosses the bus: **3.6 MB of host allocation per Kokoro utterance** (measured,
+# `--track-allocation`).
 #
 # `copy_buffer!` underneath them takes a raw pointer and a byte count — `upload!`
-# is only a wrapper — and `download_typed!` already called it directly with a
-# user array's pointer. So do these. `GC.@preserve` keeps the host array alive
-# across the call, which is exactly what the wrapper was doing for its temporary.
+# is only a wrapper — so these call it directly, like `download_typed!` does.
+# `GC.@preserve` keeps the host array alive across the call.
 # The device-to-device copy is `Mantle.d2dcopy_kernel!` in `runtime/dispatch.jl`
 # now — every backend needs the same one, and this file had the only copy of it
 # while the ROCm extension had a second. See the recording branch below.
@@ -708,8 +703,8 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     end
     # No wait: this is device→device, so nothing on the host needs the result,
     # and the next closed buffer on this queue opens with the barrier that
-    # orders it behind the copy. The flush that used to be here drained the
-    # whole GPU on every `copy(::LavaArray)`.
+    # orders it behind the copy. A flush here would drain the whole GPU on
+    # every `copy(::LavaArray)`.
     return dest
 end
 
