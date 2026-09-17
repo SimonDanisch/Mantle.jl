@@ -1022,7 +1022,6 @@ end
 # backend's — see the Vulkan and host ones. Only the generic is core's.
 
 
-
 # The body goes in `dispatches` beside the `Dispatch`es rather than in a field of
 # its own: the compile walks that vector and this is one more thing it can find
 # there, so `Pass` does not grow a field only one kind ever sets.
@@ -1086,12 +1085,6 @@ function hostwritten!(g::Graph)
     return Tuple(found)
 end
 
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 """
     copy!(g, name, dst, src) -> Pass
 
@@ -1504,7 +1497,6 @@ end
 # generic: a backend that never creates a `BufferRange` falls through to
 # `a == b`, which is the floor its docstring describes.
 
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 npipelines(pl::Plan) = length(pl.pipelines)
 
 """
@@ -1521,7 +1513,6 @@ averaged in.
 """
 elapsed(lo::UInt64, hi::UInt64, period) = hi < lo ? nothing : Float64(hi - lo) * period
 
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 """Whether this plan's commands have been written — see `record!`."""
 recorded(pl::Plan) = pl.recording !== nothing
 
@@ -1570,18 +1561,8 @@ function droprecording!(pl::Plan)
     return pl
 end
 
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 lp_of(d::CompiledDispatch) = d.launch
 
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
-# ↓ moved to src/vulkan/graph.jl — it names this backend's command queue.
 """
 Give this plan's regions back to the pool — its transients', and the argument
 memory its recording reads. The pipelines are ordinary backend objects and the

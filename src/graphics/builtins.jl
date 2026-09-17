@@ -1,4 +1,3 @@
-# DELETED in phase 1.4: see docs/mantle-owns-it.md
 #
 # This file declared `vertex_index`, `instance_index`, the `frag_coord` family,
 # `SHADER_BUILTINS` and `clip_y`, with a host method per name that errored.

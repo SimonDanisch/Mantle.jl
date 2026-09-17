@@ -1,28 +1,16 @@
 # The graph, plan and pass machinery for the Vulkan backend.
 #
-# This was `ext/MantleLavaExt.jl`, an extension, because Mantle only weak-depended
-# on Lava. The runtime moved into `src/vulkan/` on 2026-08-27 and Lava became a
-# hard dependency, so there is nothing optional left to gate and this is core.
-#
-# Every `Mantle.` qualifier is gone from it for the same reason: it IS Mantle now.
-# What was `Mantle.caps(dev)` is `caps(dev)`, and the two `DeviceCaps` structs it
-# used to copy between — positionally, with a comment in each warning that a field
-# inserted in the middle would misalign silently — are one type in
-# `KernelInterface`.
-#
-# It still reaches into `Lava` by name, and that is the boundary working: what it
-# asks for there is the COMPILER — `lava_compile_gpu_from_job`, `LavaGPUKernel`,
-# the SPIR-V module — and nothing else.
+# It reaches into `Lava` by name, and that is the boundary: what it asks for
+# there is the COMPILER — `lava_compile_gpu_from_job`, `LavaGPUKernel`, the
+# SPIR-V module — and nothing else.
 
 # ── device ────────────────────────────────────────────────────────────────────
 """
 One allocation per arena, shared by every plan on the device.
 
-A plan used to allocate its own arenas, so two plans in one process cost the
-*sum* of their peaks even though only one of them is ever running. The device
-owns the allocation instead and a plan **reserves** in it: the pool is sized to
-the largest tenant, not to their total. On SAM 2's eight graphs that is the
-difference between the largest peak and eight of them.
+The device owns the allocation and a plan **reserves** in it, so the pool is
+sized to the largest tenant rather than to the sum of every plan's peak. On
+SAM 2's eight graphs that is the difference between one peak and eight.
 
 Sound because a transient never crosses a plan boundary — a value that outlives
 a graph is a persistent `Buffer`, not a transient — so the only thing two tenants
@@ -57,9 +45,8 @@ a second `Pool` over one VkDevice — two allocators again, and every workload t
 asked separately would get its own memory instead of sharing. Caching is what
 makes "the device owns the pools" mean anything.
 
-Measured before the cache: `reserved(pool(Device(VulkanAPI())))` came back 0 immediately
-after a 120-frame render that had reserved 64 MiB, because the probe had made a
-different device.
+Without it, `reserved(pool(Device(VulkanAPI())))` answers about a freshly made
+device and reads 0 however much the running one has reserved.
 """
 const DEVICES = IdDict{Any,LavaDevice}()
 
@@ -89,8 +76,8 @@ The missing link for a KA workload that wants the pool: `DNNKernels` holds a
 `LavaBackend`, not a module, and allocating through `KA.allocate` puts its slab
 somewhere Mantle cannot see. This maps the backend it does have onto the cached
 device of its context, same pool, so a model's scratch and an editor's
-transients land in one allocator. It used to ignore the backend and answer the
-process default, which handed Hikari on a second device the first device's pool.
+transients land in one allocator. The BACKEND decides which, not the process
+default: on a second device that would hand out the first device's pool.
 """
 Device(b::LavaBackend) = lavadevice(vk_context(b))
 
@@ -101,8 +88,6 @@ allocate_batch_queue!(d::LavaDevice) = allocate_batch_queue!(d.ctx)
 allocate_batch_queue!(b::LavaBackend) = allocate_batch_queue!(vk_context(b))
 build_accel!(f, d::LavaDevice) = build_accel!(f, d.bq)
 build_accel!(f, b::LavaBackend) = build_accel!(f, b.dispatch_bq)
-
-# ↑ moved to src/graph/build.jl
 
 
 """
@@ -137,14 +122,8 @@ backend(d::LavaDevice) = LavaBackend(d.bq, d.bq)
 """
 What this device can do.
 
-One line, where this was a field-by-field copy between two `DeviceCaps` structs
-that agreed on all ten fields. The copy was POSITIONAL, and both definitions
-carried a comment warning that a field inserted anywhere but the end would
-misalign it silently — a warning is what you write when the design cannot be
-checked.
-
-`DeviceCaps` is `KernelInterface`'s now, and `caps` and `caps` are
-methods of KI's one function, so there is no second type to convert into and no
+`DeviceCaps` is `KernelInterface`'s and `caps` is a method of KI's one
+function, so there is no second type to convert into and no
 `caps(::LavaBackend)` to write: `caps(::LavaBackend)` already IS
 that method.
 """
@@ -156,11 +135,9 @@ caps(dev::LavaDevice) = caps(dev.ctx)
 # docstring here was attached to; the docstring went with the concept to the
 # abstract type, where it already said the same thing about `isopen` and `run!`.
 #
-# Left behind as an orphan, this file did not parse: two docstrings in a row is
-# "cannot document the following expression", because the first one's target is
-# the second STRING. Only a Vulkan build sees it — the backend is chosen at
-# parse time, so a Metal build never includes this file, which is why it could
-# land green.
+# Two docstrings in a row do not parse: "cannot document the following
+# expression", because the first one's target is the second STRING. Only a
+# Vulkan build sees this file, so a Metal build never reports it.
 """
 What is on the window now, as a `(width, height)` matrix of BGRA byte tuples.
 
@@ -178,7 +155,6 @@ screenshot(w::VulkanWindow) = readback_window(w)
 # memory now comes from the same pool as every transient, which is the point:
 # one allocator sees both.
 
-# ↑ moved to src/graph/build.jl
 extrausage(::Type{DrawIndirectCommand}) = UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT)
 # `repeat!`'s per-iteration flags, read by `vkCmdBeginConditionalRenderingEXT`.
 extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT)
@@ -221,33 +197,21 @@ constraintof(::LavaDevice, ::Persistent, ts) = UInt32(0)
 devicename(d::LavaDevice) = d.ctx.device_name
 
 fence(d::LavaDevice) = driver(d.bq).next_timeline
-# One predicate for "has the device finished this", spelled once.
-#
-# It was written out as `query_timeline(bq) >= v` at each of the places that ask,
-# which is how `flush!` came to fold over two lists and the argument ring came
-# to compare against `next_timeline` — a raw counter, in code that had no
-# business knowing there was one. The queue method is the primitive; the device forwards
-# to it, and `Pool` and the plan's argument memory both go through the device.
+# One predicate for "has the device finished this", spelled once. The queue
+# method is the primitive; the device forwards to it, and `Pool` and the plan's
+# argument memory both go through the device rather than comparing raw counters.
 # The portable spelling of "wait for this device to finish everything".
 #
-# `waitidle` had methods for `LavaBackend`, `VkContext` and `VK.Device` here and
-# for `MetalDevice` on the other backend — everything except the one type core
-# names in `graph/queue.jl`, which is the DEVICE. So `waitidle(device)` worked on
-# Metal and was a `MethodError` on Vulkan, and any portable caller had to reach
-# past the device to something backend-shaped.
+# On the DEVICE, which is the type core names in `graph/queue.jl`.
 #
-# Hands the open batch over BEFORE waiting, which is the part `vkDeviceWaitIdle`
-# does not do. The device is idle with respect to what it has been GIVEN, so a
-# caller that had recorded a run into a batch nobody submitted got an immediate
-# return and then read buffers the GPU had never written — and, worse, the "flush
-# so one submission does not grow past the driver's timeout" callers got no
-# flush at all. `waitidle` that ignores the work you are still holding is not a
-# wait, and the caller cannot tell the difference from the outside.
+# Hands the open batch over BEFORE waiting, which is the part
+# `vkDeviceWaitIdle` does not do: the device is idle with respect to what it has
+# been GIVEN, so without the flush a caller that recorded a run nobody submitted
+# returns immediately and then reads buffers the GPU never wrote.
 #
 # `flush!` covers this device's queue; `device_wait_idle` then covers everything
 # else in the context — a split upload queue, async compute. It throws during a
-# capture, which is correct: a capture has nothing to wait FOR, and returning
-# quietly is how that was hidden before.
+# capture, which has nothing to wait FOR.
 waitidle(d::LavaDevice) = (flush!(d.bq); waitidle(d.ctx::VkContext))
 
 passed(bq::SubmitChannel{<:VulkanQueue}, v) = query_timeline(bq) >= v
@@ -304,14 +268,9 @@ devicecopy!(d::LavaDevice, dst::DeviceArray, src::DeviceArray,
 # ── the window ────────────────────────────────────────────────────────────────
 # `WindowSurface` is Mantle's now — see `src/graph/types.jl`.
 
-# ↑ moved to src/graph/build.jl
 
 # A render pass targets either the window or an offscreen framebuffer. These four
 # are the only places that difference shows.
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 
 target_view(fb::VulkanFramebuffer) = fb.color_view
 target_image(fb::VulkanFramebuffer) = fb.color_image
@@ -323,38 +282,27 @@ target_format(fb::VulkanFramebuffer) = fb.color_format
 # window. Both are discarded by a clearing pass, so this only matters when the
 # pass loads. A placed target has no contents at all until something writes it,
 # and after aliasing it is back in that state, so it starts from Undefined.
-# ↑ moved to src/graph/build.jl
 initial_usage(::VulkanFramebuffer) = CopySrc
 
 # What state a resource is in when a replay begins. `nothing` means the first use
 # establishes it and no transition into it is needed, which is the answer for
 # every buffer: buffers have no layout, so there is nothing to transition from.
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 initial_state(fb::VulkanFramebuffer) = initial_usage(fb)
 # Not `nothing`: an image whose first use is a colour attachment still needs the
 # layout transition out of UNDEFINED, and `nothing` would emit none.
 
 # ── graph ─────────────────────────────────────────────────────────────────────
 # `DrawCall` is Mantle's now — see `src/graph/types.jl`.
-# ↑ moved to src/graph/build.jl
 
-# ↑ moved to src/graph/build.jl
 
 """The colour attachment a pass configures itself from: extent and viewport are
 the same for all of them, so the first answers for the set."""
 # The attachment a pass takes its render area from. A depth-only pass — which is
 # what a shadow map is — has no colour target, and then the depth one is it.
-# ↑ moved to src/graph/build.jl
 loadop(::KeepOp) = VK.ATTACHMENT_LOAD_OP_LOAD
 loadop(::DiscardOp) = VK.ATTACHMENT_LOAD_OP_DONT_CARE
 loadop(::Clear) = VK.ATTACHMENT_LOAD_OP_CLEAR
 
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 
 """
 A transient. The compiler owns its interval and its offset; the handle carries no
@@ -370,11 +318,6 @@ graph is built, so liveness is not a separate declaration that could disagree.
 
 # `TransientBuffer` is Mantle's now — see `src/graph/types.jl`.
 
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 
 # `TransientImage` is Mantle's now — see `src/graph/types.jl`. Five of its
 # fields are this backend's objects and are type parameters; this is the
@@ -388,21 +331,12 @@ const VulkanTransientImage{T} = TransientImage{T,VK.Format,VK.ImageUsageFlag,VK.
 alignment(::LavaDevice, ::TransientBuffer) = 256
 
 
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
 # `take!(::Recycler, …)` is gone with renaming — it handed out a fresh region for
 # a whole-buffer store to land in, recycled by byte size because the sizes repeat exactly.
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 # `Graph(dev)` and `Transient.Buffer` are Mantle's — both were generic already.
 
-# ↑ moved to src/graph/build.jl
 imageusage(::LavaDevice, ::Type) = COLOR_USAGE
 # The same three as COLOR_USAGE, with the attachment bit that matches the
 # aspect: a depth target is worth copying out (a test that asserts the depth
@@ -471,51 +405,11 @@ function remakeimage!(dev::LavaDevice, t::VulkanTransientImage)
     t.req = image_requirements(ctx, t.image)
     return t
 end
-# ↑ moved to src/graph/build.jl
 resourcekind(::VulkanFramebuffer) = ImageKind()
 
-# ↑ moved to src/graph/build.jl
 
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 Base.length(a::Attr) = length(a.resource)
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 """
 Bytes into a resource's store: inside the command buffer when
@@ -534,11 +428,6 @@ function storebytes!(e::Emitter, a::DeviceArray, off::Int, p::Ptr{Cvoid}, n::Int
     return nothing
 end
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/types.jl — how deep a plan pipelines is not a driver's.
 
 """
 A plan's argument bytes: a `Unified` region — BAR memory, device-local and
@@ -560,9 +449,7 @@ indirectslot(::LavaDevice, region::Region, off::Int) =
     LavaArray{UInt32,1}(copy((memoryof(region)::BufferBlock).ref), (3,);
                         offset = offset(region) + off)
 
-# ↑ moved to src/graph/backend.jl — how deep a plan pipelines is the graph's policy.
 
-# ↑ moved to src/graph/build.jl
 """
 An image barrier with everything resolved except the image.
 
@@ -634,7 +521,6 @@ end
 
 # `PassPlan` is Mantle's now — see `src/graph/types.jl`.
 
-# ↑ moved to src/graph/build.jl
 
 function Profiler(ctx, passes)
     n = length(passes)
@@ -647,7 +533,6 @@ function Profiler(ctx, passes)
              [Float64[] for _ in 1:n], [Float64[] for _ in 1:n], false)
 end
 
-# ↑ moved to src/graph/build.jl
 
 """The backend object behind a resource: what actually gets bound or copied."""
 # `storage(::Attr)` is Mantle's now — see `src/graph/build.jl`. An attribute
@@ -682,15 +567,7 @@ storage(t::TransientBuffer{T,N}, block::BufferBlock) where {T,N} =
 # is a pure strip, and the pin it used to do is a separate pass now. Lifetime is
 # the plan's: it holds every argument it names for as long as it lives, which is
 # what a per-frame pin would have been bookkeeping for.
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 """
 The barrier a pass needs: one `VkMemoryBarrier2` per distinct hazard, and no
@@ -740,17 +617,6 @@ end
 
 # `Compile` is Mantle's now — see `src/graph/types.jl`.
 
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 """
 An edge from i to j when they share a resource and at least one writes it.
@@ -951,7 +817,6 @@ function mergeconstraints(::LavaDevice, ::Images, a::Integer, b::Integer)
 end
 compatible(::LavaDevice, blk, req) = blk == req
 
-# ↑ moved to src/graph/build.jl
 
 function materialize!(dev::LavaDevice, t::VulkanTransientImage{T}, slab, offset) where {T}
     # A VkImage binds memory exactly once, so re-materialising — the arena moved
@@ -985,11 +850,7 @@ would be to report the larger and pretend the other is free.
 """
 # ── Aliasing ──────────────────────────────────────────────────────────────────
 
-# ↑ moved to src/graph/build.jl
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 syncbackend(::LavaDevice) = VulkanAPI()
 
 # ── Pipelines ─────────────────────────────────────────────────────────────────
@@ -1307,16 +1168,7 @@ emitdispatch!(e::Emitter, t::CompiledTrace, name::AbstractString) =
 
 # An ndrange fixed when the graph was built, or one that is read per frame — the
 # same distinction `drawover` makes for a draw's vertex count.
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 """
 Read back whatever the last profiled frame left, without waiting for it.
@@ -1349,18 +1201,6 @@ function collect!(prof::Profiler, dev::LavaDevice)
     prof
 end
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 """
 Bracket one pass with timestamps and time its recording.
@@ -1408,7 +1248,6 @@ function emithead!(e::Emitter, pl::Plan)
     return nothing
 end
 
-# ↑ moved to src/graph/build.jl
 
 """Mantle's own barriers, derived from the declared usage sequence. Layout
 changes first: a pass may both need an image transitioned and wait on a
@@ -1542,10 +1381,6 @@ end
 # 64-transient plan every RUN; this is noise beside it, and a global is not.
 
 # ── plan ─────────────────────────────────────────────────────────────────────
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
-# ↑ moved to src/graph/build.jl
 
 """
 One dispatch: the same two steps as a draw, into the same memory.
@@ -1572,11 +1407,6 @@ function emitdispatch!(e::Emitter, d::CompiledDispatch{L,K,A,I},
     nothing
 end
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
 
 # `rebind!` is gone.
 #
@@ -1592,18 +1422,8 @@ end
 # verification that proved the write plan's offsets, the ring that made the
 # writes safe, and the wait at the top of every run that the ring needed.
 
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-# ↑ moved to src/graph/build.jl
-
-
 
 # `Device()` with no argument is core's — see `Mantle.jl`.
-
 
 
 # `adaptor` for this backend. It names `LavaAdaptor`, which is exactly the line
@@ -1665,10 +1485,8 @@ batchqueue(d::LavaDevice) = d.bq
 # filled from, recycled by NEGATIVE size so a host and a device region of the
 # same length never shared a free list.
 
-# ↑ moved to src/graph/build.jl — one predicate, `passed`, and it is core's.
 
 # `Graph` is Mantle's now — see `src/graph/types.jl`.
-
 
 
 """

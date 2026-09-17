@@ -426,7 +426,6 @@ fence(d::MetalDevice) = fence(d.queue)
 passed(d::MetalDevice, f) = passed(d.queue, f)
 waitfor(d::MetalDevice, f) = waitfor(d.queue, f)
 
-# DELETED in phase 1.7: the docstring, which said "Read, never forced" of a
 # function whose first line is `q.next += 1`. Whether a fence is a read or an
 # allocation is phase 2.2's question, since it is the same question as what a
 # submission holds.
@@ -1101,7 +1100,6 @@ waitidle(d::MetalDevice) = (Metal.synchronize(); nothing)
 # compute kernels only — no vertex or fragment stage existed for a shader to
 # become. It compiles both now.
 
-# DELETED in phase 1.7: the body of `allocate_batch_queue!` and its message.
 # It told the caller "Metal.jl has no graphics pipeline, check
 # `supports_graphics` and take the compute path" on a backend where
 # `supports_graphics` measurably answers `true`, fifteen lines below a comment

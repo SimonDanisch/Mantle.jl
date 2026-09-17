@@ -383,7 +383,6 @@ end
 # forgotten here is a `MethodError` naming it rather than a shader that reads
 # the wrong thing.
 #
-# DELETED in phase 1.4: see docs/mantle-owns-it.md
 
 # Both stages exist here. Declared in `graphics/commands.jl` with a `false`
 # default, so this is the opt-in and Metal's silence is its answer.

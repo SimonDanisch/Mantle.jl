@@ -1,36 +1,12 @@
-# The submission queue.
+# The submission queue's lifecycle verbs: get a channel, submit on it, flush it,
+# give it back. The state they act on is `SubmitChannel` in `graph/lifetime.jl`
+# — the submission list, the hold lists, the retired list and the recording pool
+# — with the driver arrangement behind one opaque field.
 #
-# It was 41 fields, of which TEN name a driver object and thirty-one did not. The
-# thirty-one were an argument-slab ring allocator, a deferred-free list, barrier
-# elision state, capture/replay watermarks and submission thresholds — machinery
-# every backend needs and none of it Vulkan's. It was `VulkanBatchQueue`, so a
-# Metal backend would have written all of it again. Sixteen of them are gone
-# outright rather than shared: they existed because something recorded GPU work
-# without a plan, and a plan says what they were guessing. The last of those —
-# the open command buffer itself, with its pools of batches and segments, its
-# split and submit thresholds, its dedicated acceleration-structure buffer and
-# fence, and its staging buffer — went with it: nothing is open on a queue
-# between calls, and what a caller closed is submitted when it is closed.
-#
-# What is left of it, after phases 2.2 and 2.3, is `SubmitChannel` in
-# `graph/lifetime.jl`: the submission list, the hold lists, the retired list and
-# the recording pool, with the whole driver arrangement behind one opaque field.
-# This file is now only the VERBS — get a channel, submit on it, flush it, give
-# it back — which are what every backend answers and none of them Vulkan's.
-
-# ── The queue's lifecycle verbs ──────────────────────────────────────────────
-#
-# Four things a caller does to a channel, declared here for the reason
-# `SubmitChannel` itself is shared: getting a channel, submitting on it,
-# flushing it and giving it back are what every backend does, not what Vulkan
-# does. They lived in
-# `src/vulkan/runtime/` and were reached as `Mantle.allocate_batch_queue!` by
-# RayMakie, which meant a name that only resolved when a Vulkan driver was
-# present — the package did not load on a Mac at all.
-#
-# Implemented per backend. Vulkan hands out real `VkQueue`s from the family and
-# falls back to sharing the primary queue when the device runs out; Metal has
-# one `MTLCommandQueue` per device and distinguishes batches rather than queues.
+# Declared here because every backend answers them. Vulkan hands out real
+# `VkQueue`s from the family and falls back to sharing the primary queue when the
+# device runs out; Metal has one `MTLCommandQueue` per device and distinguishes
+# batches rather than queues.
 
 """
     allocate_batch_queue!(device) -> SubmitChannel
@@ -49,7 +25,7 @@ function allocate_batch_queue! end
 
 Can this backend hand out a [`SubmitChannel`](@ref)?
 
-A SEPARATE question from [`supports_graphics`](@ref), and the two now differ.
+A SEPARATE question from [`supports_graphics`](@ref).
 A channel is a command-pool, fence and timeline-semaphore arrangement on
 Vulkan, and a backend can rasterise perfectly well without one: Metal
 compiles vertex and fragment programs and records draws on its own command

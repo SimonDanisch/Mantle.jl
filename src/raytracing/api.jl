@@ -164,7 +164,6 @@ callers that need to ask have one of those to hand and not always the same one.
 supports_rt_pipeline(::Any) = false
 supports_rt_pipeline(a::AdaptedAccel) = supports_rt_pipeline(a.hwtlas)
 
-# DELETED in phase 1.1: see docs/mantle-owns-it.md
 #
 # `pin!`, `blases` and `pintrace!` are gone with the mechanism they served.
 # 35 call sites, all in one backend, all of them "hold this Julia object until

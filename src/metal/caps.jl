@@ -99,7 +99,6 @@ function caps(d::MetalDevice)
     return d.caps
 end
 
-# DELETED in phase 1.6: `_DEVICE` and `_device_for`, a second cache for "one
 # device per process" beside `METAL_DEVICE` in `device.jl`. It built a second
 # `MetalDevice` — a second `Pool`, a second `MTLCommandQueue`, a second
 # `MTLSharedEvent` — from a capability query. `device.jl:65` forbids it and
