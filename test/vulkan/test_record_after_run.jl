@@ -7,21 +7,18 @@ across every run count. That is what this sweeps: `pre` runs, a second
 against the arithmetic. `run!` never records: a plan that was never recorded
 is refused, which the last testset pins.
 
-It exists because of what the argument RING did to this. There was a recording
-per slot, with the slot's base offset folded into every address it held, and
-`run!` looked one up as `pl.recordings[pl.args.slot]` — so the two had to agree
-on what the index meant, and they did not. `bake!` collected them with
-`map(1:ARG_SLOTS)`, letting position stand for slot, which is only true while the
-ring is still at 0 — that is, only for a plan that has never run. A plan that HAS
-run is somewhere else in the ring, so recording 1 named slot 2 and every run
-afterwards read a neighbouring slot's arguments.
+The sweep exists because a recording tied to an argument SLOT fails as a
+function of the run count. With a recording per slot, the slot's base offset
+folded into every address it holds, and the recordings collected by position,
+position stands for slot only while nothing has run: a plan that HAS run is
+elsewhere in the ring, so recording 1 names slot 2 and every run afterwards
+reads a neighbouring slot's arguments.
 
-What that looked like from outside is why the sweep is worth keeping: not a crash
-and not a uniformly wrong answer, but an answer right for some run counts and
-wrong for others — right exactly when the number of runs brought the two indices
-back into phase. Measured on Hikari's `setup` plan at 1200x900: bit identical at
-1, 3 and 6 samples, and wrong at 2, 4, 5, 7 and 8. A test that recorded a fresh
-plan and ran it three times would have passed.
+From outside that is neither a crash nor a uniformly wrong answer, but an answer
+right for some run counts and wrong for others — right exactly when the number
+of runs brings the two indices back into phase. Measured on Hikari's `setup`
+plan at 1200x900: bit identical at 1, 3 and 6 samples, and wrong at 2, 4, 5, 7
+and 8. A test that records a fresh plan and runs it three times passes.
 
 `pre = 0` is the case where the second `record!` follows the first directly.
 """

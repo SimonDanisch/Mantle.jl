@@ -222,9 +222,9 @@ end
     plan = M.Plan(g)
 
     # Every render target needs its offset aligned to what the driver asked for,
-    # and so does the REGION they sit in. It was reserved with `reserve!`'s
-    # default 256 while a Metal texture wants 2048, which put the second target
-    # 128 bytes short of its boundary — and `reserve!`'s fast path handed back a
+    # and so does the REGION they sit in. Reserved with `reserve!`'s default 256
+    # while a Metal texture wants 2048, the second target lands 128 bytes short
+    # of its boundary, and `reserve!`'s fast path hands back a
     # kept region without re-checking either.
     for t in (albedo, matter, normal)
         @test t.image isa Metal.MTL.MTLTexture
@@ -335,13 +335,13 @@ end
 end
 
 @testset "the FIRST run of a plan is already correct" begin
-    # Not a tautology: it was not. The image arena's heap and its textures were
-    # created `Untracked`, on the reasoning that Mantle's graph had emitted the
-    # dependency — and the KernelAbstractions path this backend runs on does not
+    # Not a tautology. With the image arena's heap and its textures created
+    # `Untracked`, on the reasoning that Mantle's graph emitted the dependency,
+    # the KernelAbstractions path this backend runs on does not
     # consume the barrier phase at all. The driver was free to overlap a
-    # readback with the render pass feeding it, and did, exactly once per
-    # process: the first frame came back as the untouched texture, alpha and
-    # all, and every frame after it was right.
+    # readback with the render pass feeding it, and does, exactly once per
+    # process: the first frame comes back as the untouched texture, alpha and
+    # all, and every frame after it is right.
     #
     # Committing to one queue orders when command buffers START. Tracking is
     # what keeps them from overlapping.
@@ -454,8 +454,8 @@ using ColorTypes: BGRA
     g = M.Graph(RG_DEV)
     screen = M.Surface(g, win)
     # A surface answers the same four questions an image does — that is what
-    # lets `runrenderpass!` bind it without knowing which it has. They used to
-    # be answered in CORE by reading `s.win.views[s.win.current_image_idx + 1]`,
+    # lets `runrenderpass!` bind it without knowing which it has. Answered in
+    # CORE by reading `s.win.views[s.win.current_image_idx + 1]`, they would be
     # a Vulkan swapchain's anatomy, which a layer has no counterpart for.
     @test M.target_extent(screen) == (64, 64)
     @test eltype(screen) == BGRA{N0f8}
@@ -587,8 +587,8 @@ end
     @test size(big) == (128, 96)
     @test size(z) == (128, 96)          # the depth buffer came along
     # The same triangle covers the same FRACTION of a bigger frame; the exact
-    # count cannot match, and a depth buffer left at the old size would have
-    # rejected most of it rather than shrinking the fraction slightly.
+    # count cannot match, and a depth buffer left at the previous size would
+    # reject most of it rather than shrinking the fraction slightly.
     frac(img) = count(p -> ColorTypes.green(p) > 0.5, img) / length(img)
     @test isapprox(frac(big), frac(small); atol = 0.02)
 
@@ -607,14 +607,14 @@ end
 end
 
 @testset "a pass leaves nothing open, and the frame is still correct" begin
-    # This used to assert the opposite, and the reversal is the point.
+    # NOT the opposite, and that is the point.
     #
-    # The backend kept ONE command buffer open across consecutive render and
+    # Keeping ONE command buffer open across consecutive render and
     # copy passes and committed it only where the graph said a dispatch was
     # about to follow, because a submission costs more than the drawing in it —
-    # the deferred demo's frame is ~3 ms of GPU work and paid ~20 submissions.
-    # That open buffer is gone by the same rule that removed Vulkan's: what is
-    # open depends on every call since it was opened, so nothing can be
+    # the deferred demo's frame is ~3 ms of GPU work and pays ~20 submissions.
+    # It is still the wrong trade, by the same rule the Vulkan side follows: what
+    # is open depends on every call since it was opened, so nothing can be
     # scheduled around it, and batching is the graph's job rather than the
     # queue's. See the block above `framebuffer!` in `src/metal/graphics.jl`.
     #
@@ -737,9 +737,9 @@ end
     # The other half of the bug a person found by looking at a window: the frame
     # was distorted as well as upside down. A `CAMetalLayer` derives its
     # `drawableSize` from bounds times `contentsScale` unless one is set
-    # EXPLICITLY, and it has no bounds until it is put on a view — so the size
-    # it was constructed with was replaced by the view's, in points times the
-    # Retina factor. `target_extent` kept answering the old one.
+    # EXPLICITLY, and it has no bounds until it is put on a view — so the size it
+    # was constructed with is replaced by the view's, in points times the Retina
+    # factor, while `target_extent` keeps answering the constructed one.
     #
     # Nothing here needs a view: a detached layer already shows the invariant,
     # which is that the extent a window reports is the extent of the texture it

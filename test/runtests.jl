@@ -21,9 +21,9 @@ _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
 
 # BOTH backends are probed here, before anything runs.
 #
-# `_METAL_OK` used to be decided at line 580, three hundred lines below the
-# portable tests — so `Mantle.eachbackend()` was empty when they asked, and
-# `foreachbackend` skipped every one of them with "no usable backend" on a
+# Decided here and not below the portable tests: asked later,
+# `Mantle.eachbackend()` is empty when they run, and `foreachbackend` skips
+# every one of them with "no usable backend" on a
 # machine whose backend was working fine. A probe that runs after the thing it
 # gates is not a gate.
 global _METAL_OK = let
@@ -42,9 +42,8 @@ end
 # ONE outer testset around everything, and the reason is the failure mode the
 # comment below already describes — from the other side.
 #
-# `@testset` only throws at the END of the OUTERMOST one. This file used to have
-# four of those (`Mantle`, `sync`, `Metal backend`, `Vulkan backend`) plus a
-# dozen bare `include`s between them, all at top level, so the first one with a
+# `@testset` only throws at the END of the OUTERMOST one. Several of those at
+# top level, with bare `include`s between them, means the first one with a
 # failure ended the run and everything after it never ran. Measured on
 # 2026-08-30: nine errors in `sync` — one ambiguous name — and the 130 Vulkan
 # backend files below reported nothing at all, which reads as "the suite
@@ -62,12 +61,12 @@ end
 # machine that has only one of them.
 global BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks"))
 
-# The corpus is an EXTERNAL checkout, and its absence used to take the whole
-# suite down with it: the four testsets below erred, the enclosing
-# `@testset "Mantle"` threw at its `end`, and the exception propagated out of
-# this file — so the `sync` testset and all six GPU test files never ran. That
-# reads as "the suite failed", not as "six files were skipped", which is the
-# worse of the two failure modes by a distance.
+# The corpus is an EXTERNAL checkout, and unguarded its absence takes the whole
+# suite down: the four testsets below err, the enclosing `@testset "Mantle"`
+# throws at its `end`, and the exception propagates out of this file, so the
+# `sync` testset and all six GPU test files never run. That reads as "the suite
+# failed", not as "six files were skipped", which is the worse of the two
+# failure modes by a distance.
 #
 # Guarded rather than deleted: with the corpus present these are the only thing
 # pinning how GOOD the packing is, as opposed to merely legal (see
@@ -231,8 +230,8 @@ end
 # ── everything below that needs a Vulkan driver ───────────────────────────────
 #
 # `Vulkan` loads with Mantle but the DRIVER need not be there, so this file is
-# reached on a machine that has no loader at all. See `backend_probe.jl` for why
-# that used to be fatal.
+# reached on a machine that has no loader at all. See `backend_probe.jl` for
+# why that must not be fatal.
 #
 # BOTH, because the backend is the pair: Vulkan is the driver and Lava is the
 # Julia→SPIR-V compiler that feeds it. Asking only about Vulkan let the gate open
@@ -396,9 +395,9 @@ import Vulkan
     @testset "an attribute is pulled, not bound" begin
         # The Vulkan backend's pipelines declare an empty vertex input state and
         # the vertex shader loads its attributes through a buffer device address,
-        # so `Vertices` is a storage read in VERTEX_SHADER. It used to lower to
+        # so `Vertices` is a storage read in VERTEX_SHADER and NOT
         # VERTEX_ATTRIBUTE_INPUT / VERTEX_ATTRIBUTE_READ, which describes a fetch
-        # that never happens: the stage was survivable, because it precedes
+        # that never happens: the stage is survivable, because it precedes
         # VERTEX_SHADER and so the execution dependency still covered the shader,
         # but the access mask was not — it makes a write visible to attribute
         # fetch and says nothing about the storage read that actually occurs.
@@ -534,9 +533,9 @@ end
 # NOT per-backend yet. Two of its assertions are genuinely Vulkan's — a
 # `pool_offset` inside a VkBuffer and `plan.recording isa Mantle.Recording` —
 # and the first belongs in `test/vulkan/` while the second has a portable
-# spelling (`recordsplans(dev)`). The third was `vk_flush!`, which is gone:
-# `flush!(device)` is core's now. Splitting the rest is the remainder of 0.7;
-# gating it is honest in the meantime, and the guard in
+# spelling (`recordsplans(dev)`). Flushing has one too: `flush!(device)` is
+# core's. Splitting the rest is still to do; gating it is honest in the
+# meantime, and the guard in
 # `test_mantle_owns_it.jl` still names the file.
 _VULKAN_OK && include(joinpath(@__DIR__, "test_arena_recording.jl"))
 # What every declaration is derived from. Before the files that build plans,
@@ -559,8 +558,8 @@ foreachbackend(joinpath(@__DIR__, "test_declared_kernel.jl"))
 foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
 # How each argument of a dispatch reaches the kernel: which take a slot, which
 # bind an allocation, which the compiled kernel has no parameter for at all. One
-# rule in core, checked against GPUCompiler's own, because it was two rules in
-# two backends and only ever one of them in a build.
+# rule in core, checked against GPUCompiler's own: two rules in two backends is
+# only ever one of them in a build.
 foreachbackend(joinpath(@__DIR__, "test_argument_packing.jl"))
 # And once on the host, which is where the file's other half runs: the host has
 # no `KI.kernel_function` at all, so what it pins is the named refusal. Driven
@@ -606,8 +605,8 @@ _VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership
 # with everything before it still in the stdout buffer. One child per FILE, so a
 # hang in one does not hide what the other would have said.
 @testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
-    # The big file needs Vulkan until phase 2.8 splits its twenty-six backend sites
-    # out; the portable half runs on every backend.
+    # The big file names twenty-six backend sites, so it needs Vulkan; the
+    # portable half runs on every backend.
     for wf in (_VULKAN_OK ? ("test_window_portable.jl", "test_window.jl") :
                             ("test_window_portable.jl",))
         log = joinpath(mktempdir(), "window.log")
@@ -707,7 +706,7 @@ if _VULKAN_OK
             # move and neither failed at load.
             include(joinpath(VULKAN_TESTS, "test_no_stale_exports.jl"))
             # And how much of the array algorithms is still Vulkan's — a ratchet
-            # on step 5, which asks where they should live.
+            # on where they should live.
             include(joinpath(VULKAN_TESTS, "test_array_algorithm_portability.jl"))
         end
 
@@ -733,9 +732,9 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_tensor_clamp.jl"))
             # And that a shape the device does NOT report is usable at all: every
             # KHR shape here has M == 16, so 64x16 exercises coopmat2's flexible
-            # dimensions. A hard-coded shape list in `KNOWN_INTRINSICS` used to
-            # reject it before the emitter — which handles it correctly — ever saw
-            # it, so this guards a gate, not an instruction.
+            # dimensions. A hard-coded shape list in `KNOWN_INTRINSICS` rejects
+            # it before the emitter, which handles it correctly, ever sees it, so
+            # this guards a gate and not an instruction.
             include(joinpath(VULKAN_TESTS, "test_coopmat_flexible_dims.jl"))
             # The clamp test above covers READS. This is the other half: a clamping
             # layout must bounds-check the STORE too, or a tensor GEMM can consume
@@ -957,10 +956,10 @@ if _VULKAN_OK
         @testset "two devices in one process" begin
             include(joinpath(VULKAN_TESTS, "twodevice_probe.jl"))
             probe()
-            # And that the process can then EXIT. The probe passed for months
-            # while the run it was part of ended in a SIGSEGV, because the crash
-            # is in the shutdown finalizer sweep — after every summary has
-            # printed. Nothing inside this process can observe that, so the check
+            # And that the process can then EXIT. A passing probe is not enough:
+            # the crash is in the shutdown finalizer sweep, after every summary
+            # has printed. Nothing inside this process can observe that, so the
+            # check
             # is a subprocess and an exit code.
             include(joinpath(VULKAN_TESTS, "test_twodevice_shutdown.jl"))
         end
@@ -987,8 +986,8 @@ if _VULKAN_OK
             # the runs that submit it: a collection, ad hoc work on the same
             # queue, and input rewritten in place.
             include(joinpath(VULKAN_TESTS, "test_recording_lifecycle.jl"))
-            # A recording belongs to the argument slot it was written for, and
-            # the ring is not at slot 0 for a plan that has already run.
+            # Recording a plan that has already run: the recording is one
+            # command buffer and belongs to no argument slot.
             include(joinpath(VULKAN_TESTS, "test_record_after_run.jl"))
             # Recording a plan big enough to allocate while it is being written.
             include(joinpath(VULKAN_TESTS, "test_no_pool_trim_while_recorded.jl"))
@@ -1008,7 +1007,7 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
             include(joinpath(VULKAN_TESTS, "test_backend_vocabulary.jl"))
             # No open command buffer on the queue: every call closes and submits
-            # what it wrote, and a run is one submission (step 7).
+            # what it wrote, and a run is one submission.
             include(joinpath(VULKAN_TESTS, "test_closed_command_buffers.jl"))
             include(joinpath(VULKAN_TESTS, "test_sweep_per_queue.jl"))
             include(joinpath(VULKAN_TESTS, "test_discarded_iteration_prepare.jl"))

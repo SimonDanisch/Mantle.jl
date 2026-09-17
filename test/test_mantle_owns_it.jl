@@ -112,13 +112,12 @@ end
 # vendor-prefixed entry in it is a portable hook that only one vendor can mean.
 # `:vkformat` is one; Metal's counterpart is `mtlformat`. CLAUDE.md states the
 # rule for code paths and this is a code path.
-# Cleared by: phase 1.7.
 
 @testset "0.1 the vocabulary names no vendor" begin
     bad = filter(n -> occursin(r"^(vk|mtl|lava|VK_|MTL)"i, String(n)),
                  collect(Mantle.BACKEND_VOCABULARY))
     isempty(bad) || @info "0.1 vendor-named vocabulary entries" bad
-    # PROMOTED after phase 1.7 removed `:vkformat`. A ratchet from here on.
+    # A ratchet: the set is empty and stays empty.
     @test isempty(bad)
 end
 
@@ -130,7 +129,6 @@ end
 #
 # `NOT_PORTABLE` is where a deliberate answer goes, with its reason. It is empty
 # on purpose: filling it is part of the work, not a way to make this pass.
-# Cleared by: phase 2, as each name is either implemented, moved, or listed.
 
 const NOT_PORTABLE = Set{Symbol}()
 
@@ -322,7 +320,6 @@ end
 # a second `Pool`, a second `MTLCommandQueue`, a second `MTLSharedEvent`.
 # `metal/device.jl:65` forbids exactly that, and `metal/graphics.jl` records two
 # Metal queues as the cause of a hang, because they have no order between them.
-# Cleared by: phase 1.6.
 #
 # 0.5 (downstream names no backend) lives in the consumers' own suites; it
 # cannot run from here, because Mantle does not depend on Hikari or RayMakie.
@@ -340,7 +337,7 @@ end
         second === nothing && (second = d)
         same = d === second
         same || @info "0.6 a second device exists" pools_differ = Mantle.pool(d) !== Mantle.pool(second)
-        # PROMOTED after phase 1.6 removed the second cache. A ratchet from here.
+        # A ratchet: one device, one cache.
         @test same
     end
 end
@@ -400,10 +397,9 @@ end
 # ── 0.7b The shared test layer names no backend-only BINDING ─────────────────
 #
 # 0.7 above asks whether a shared test hardcodes an API marker. It never asked
-# what those tests NAME, and for as long as the backend was an extension it did
-# not have to: a reach was spelled `MVE.LavaArray`, the module prefix announced
-# itself, and `grep MVE\.` found all 1,960 of them. The extension is gone and
-# the prefix with it — `Mantle.LavaArray` reads exactly like portable API.
+# what those tests NAME. With the backend in an extension a reach is spelled
+# `MVE.LavaArray` and the module prefix announces itself; compiled in, there is
+# no prefix and `Mantle.LavaArray` reads exactly like portable API.
 #
 # So ask the definition SITE, which is what the rule was always about and needs
 # no vendor name in the pattern: is this a thing only `src/vulkan/` or

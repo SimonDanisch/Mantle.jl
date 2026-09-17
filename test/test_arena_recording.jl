@@ -6,7 +6,7 @@ const M = Mantle
 # The backend this run is for. `runtests.jl` includes this file once per
 # available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
 # gets the default one. Nothing below names a backend, which is the point:
-# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+# these testsets check PORTABLE behaviour, on whichever backend is there.
 # Vulkan-gated until its three backend-specific assertions are split out; see
 # the note beside its include in `runtests.jl`.
 const TESTBACKEND = M.VulkanAPI()
@@ -83,9 +83,9 @@ const E = Mantle
 
     # Interleaved, a hundred times: two plans alternating on one arena, each
     # run's recording opening with the global barrier that orders it behind
-    # whatever ran last. The arena no longer remembers who that was — the
-    # handover used to be decided at record time from its memory of the last
-    # runner, so of two recorded plans alternating the first never got one.
+    # whatever ran last, and no arena memory of who that was: a handover decided
+    # at record time from such a memory gives the first of two alternating
+    # recorded plans no barrier at all.
     for _ in 1:100
         M.run!(small.plan)
         M.run!(big.plan)
@@ -99,7 +99,7 @@ end
 @testset "over budget fails at compile, with numbers" begin
     dev = M.Device(TESTBACKEND)
     # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
-    # this was written against and `typemax(Int)` — "no limit" — on NVIDIA, so a
+    # this runs on and `typemax(Int)` — "no limit" — on NVIDIA, so a
     # test pinned to it passes on one machine and allocates 8 exabytes on the
     # other. `headroom` is the number the compiler actually checks against.
     n = M.headroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32)
@@ -121,15 +121,15 @@ end
 end
 
 @testset "a pass barrier carries mask tuples, not buffers" begin
-    # This used to assert the opposite: that a `renameable` resource was widened
-    # to a global memory barrier while everything else kept a barrier scoped to
-    # its (VkBuffer, offset, size). The `renameable` case was the general one —
+    # NOT the opposite: a barrier scoped to a `(VkBuffer, offset, size)` for
+    # everything except a widened `renameable` resource has the general case the
+    # wrong way round —
     # a recording cannot bake a handle for anything that can move, and baking
     # makes everything movable — so `build_pass_barrier` emits one
     # `VkMemoryBarrier2` per distinct `(waits, to)` tuple and no buffer barriers
-    # at all. `barrierspan`, `barrierbuffer` and the special case are gone.
+    # at all.
     #
-    # `renameable` itself is gone with renaming: `a` and `b` are read by the pass
+    # Nothing renames, either: `a` and `b` are read by the pass
     # below, so `Plan` registers both as `CopyDst` of the update pass and writes
     # them in place, and neither can move its target — the distinction has
     # nothing left to decide. What is worth pinning is the tuples being `unique`
@@ -175,17 +175,16 @@ end
     want = copy(Array(M.storage(s.out)))
 
     # Dispatches the host recorded INTO THE FRAME'S BATCH, counted at submit.
-    # This is the assertion, and it used to be a wall-clock ratio: baked had to
-    # be three times faster than unbaked over thirty runs.
+    # This is the assertion, and NOT a wall-clock ratio asking for recorded to
+    # be three times faster than walked over thirty runs.
     #
     # That measurement stopped meaning what it said the day `run!` started
     # rotating argument slots for a baked plan too: a recorded run submitted
     # every run and waited when the host got `ARG_SLOTS` ahead of the device,
     # which is the same backpressure the interpreted path always had — so both
     # medians were GPU throughput for this graph (0.73 ms against 0.64 ms
-    # measured). Nothing regressed; the clock was simply no longer measuring
-    # host work. (The ring is gone now and so is the wait, but the point about
-    # what a wall-clock ratio measures here stands.)
+    # measured), which is not host work. That is what a wall-clock ratio
+    # measures here.
     #
     # Counting is better than timing anyway: it is exactly the claim in the name
     # of this testset, it is not a ratio anybody has to keep generous, and it does
@@ -234,9 +233,9 @@ end
 
 @testset "growing the arena under a recorded plan patches it" begin
     # The one way M1 and M5 interact. Plans share the device's arena, so a
-    # later, larger plan grows it and remaps every tenant. A recorded tenant
-    # used to make that an error: its command buffer held the addresses the old
-    # allocation had, and re-materialising underneath it gave a run that read
+    # later, larger plan grows it and remaps every tenant. A recorded tenant is
+    # what makes that hard: its command buffer holds the addresses the previous
+    # allocation had, so re-materialising underneath it gives a run that reads
     # freed storage, deterministically and quietly.
     #
     # Those addresses are not IN the command buffer — they are in the plan's
@@ -295,8 +294,8 @@ end
 @testset "two recorded plans alternating on one arena stay bit-exact" begin
     # Both recorded up front, so neither run emits anything: what orders b's
     # writes behind a's reads of the same bytes is the barrier each recording
-    # opens with, and nothing else. The arena's record of who ran last,
-    # consulted at record time, is gone; a run has nothing to claim.
+    # opens with, and nothing else: the arena keeps no record of who ran last,
+    # so a run has nothing to claim.
     dev = M.Device(TESTBACKEND)
     a = Base.invokelatest(chainplan, dev, 50_000, 2)
     b = Base.invokelatest(chainplan, dev, 50_000, 2)
@@ -313,9 +312,9 @@ end
 end
 
 @testset "an N-dimensional buffer reaches the GPU with its shape" begin
-    # The Lava half of `Buffer(dev, T, dims)`: `deviceview` used to hard-code
-    # `LavaArray{T,1}(…, (length(a),))`, so a 2-D region arrived at a kernel
-    # flattened and every index had to be recomputed from a width the kernel had
+    # The Lava half of `Buffer(dev, T, dims)`: `deviceview` hard-coding
+    # `LavaArray{T,1}(…, (length(a),))` delivers a 2-D region to a kernel
+    # flattened, with every index recomputed from a width the kernel has
     # to be told separately.
     dev = M.Device(TESTBACKEND)
     want = reshape(collect(1f0:12f0), 3, 4)

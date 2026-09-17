@@ -14,8 +14,7 @@ A device that allocates nothing and counts what it was asked for.
 `allocs` is the whole point of the fixture — the headline property is "a second
 acquire does not reach the device", and that is only observable by counting.
 """
-# `<: M.Device`, because that is what it stands in for. It was a bare struct
-# while every verb it reached took `dev` untyped; `Buffer` now normalises its
+# `<: M.Device`, because that is what it stands in for: `Buffer` normalises its
 # device argument with `todevice`, which accepts a `Device` and a KA backend and
 # nothing else — deliberately, so a mistake fails where it is made. A test double
 # that plays a device has to be one.
@@ -140,8 +139,8 @@ end
 M.rawalloc(d::FakeDev, ::M.Persistent, bytes, c) = (push!(d.allocs, bytes); zeros(UInt8, bytes))
 M.blocksize(::FakeDev) = 1 << 16
 # A slab is host memory, so the three transfer verbs are core's over one answer.
-# They used to be written out here with `reinterpret`, which is a fourth copy of
-# what the host and Metal backends each had — and the broken spelling of it:
+# Written out here with `reinterpret` they would be a fourth copy of what the
+# host and Metal backends each have, and the broken spelling of it:
 # `reinterpret` refuses any element type with padding, so this fixture could
 # only ever move `Float32`. The testset below is the one that would have caught
 # that, and it is here rather than beside a backend because it needs no device.
@@ -152,7 +151,7 @@ M.download(d::FakeDev, a::M.DeviceArray) = M.hostdownload(d, a)
 M.devicecopy!(d::FakeDev, dst, src, n) = M.hostdevicecopy!(d, dst, src, n)
 M.deviceview(d::FakeDev, a) = a
 
-# One transfer path, and the element type it used to fail on.
+# One transfer path, and the element type a per-backend copy of it fails on.
 #
 # `hostview`, `upload!`, `download` and `devicecopy!` lived three times: in the
 # host backend as `wrapbytes`, in the Metal backend as its own `hostview`, and
@@ -211,7 +210,7 @@ end
     @test length(b) == 6 && Array(b) == Float32[1, 2, 3, 4, 5, 6]
     @test length(d.allocs) == 1
 
-    # past capacity: a fresh region, the contents carried over, the old one back
+    # past capacity: a fresh region, the contents carried over, the previous one back
     before = M.offset(M.region(b.store))
     resize!(b, 32)
     @test M.capacity(b) == 32
@@ -235,8 +234,8 @@ end
 end
 
 @testset "release! catches a double release the free list cannot see" begin
-    # The case the old neighbour check could not reach and the reason the block
-    # keeps a `live` ledger. Release `a`, then release its neighbour `b`: `b`
+    # The case a neighbour check cannot reach, and the reason the block keeps a
+    # `live` ledger. Release `a`, then release its neighbour `b`: `b`
     # coalesces with `a`, so no free span starts where `b` did any more. A second
     # release of `b` finds nothing that looks like itself, and on the free list
     # alone it reads as a fresh region being given back.
@@ -400,7 +399,7 @@ end
     @test hi1 <= lo2 || hi2 <= lo1              # …and genuinely disjoint
 
     # a tenant that refuses to move stops the arena growing, rather than being
-    # re-materialised under a recording that names the old addresses
+    # re-materialised under a recording that names the previous addresses
     struct Nailed end
     M.remappable(::Nailed) = false
     M.tenant!(p, :buf, Nailed())
@@ -421,8 +420,8 @@ M.compatible(::BitDev, blk::UInt32, req::UInt32) = (blk & req) == req
 M.mergeconstraints(::BitDev, kind, a::UInt32, b::UInt32) = a | b
 
 @testset "an arena reconciles what all its tenants need" begin
-    # reserve!'s fast path used to return the existing region on SIZE alone. An
-    # arena outlives the plan that sized it, so a block created for one plan's
+    # `reserve!`'s fast path must not return the existing region on SIZE alone:
+    # an arena outlives the plan that sized it, so a block created for one plan's
     # usage bits may not permit what the next plan does with them — memory that
     # works until the one transient whose bit was missing is used.
     d, p = BitDev(), M.Pool()
@@ -476,9 +475,9 @@ end
 # its regions retired until the device is known to be past them, and on a backend
 # whose timeline only advances on an explicit wait, they stay.
 #
-# It was not free. `retiring` was a `Vector{Tuple{Region,Any}}` — `Any` because
-# what a fence IS belongs to the backend — and a tuple with a boxed field made
-# every element non-isbits, so the loop paid a boxed read and a boxed write for
+# It is not free. A `retiring` of `Vector{Tuple{Region,Any}}` — `Any` because
+# what a fence IS belongs to the backend — has a boxed field in every element,
+# so the loop pays a boxed read and a boxed write for
 # each entry it KEPT. Measured through RayMakie with four dropped screens' worth
 # in the list: 1200 allocations and 48 KB per frame, on a frame whose own cost is
 # 240 bytes. The fix is two parallel vectors; this pins the property.

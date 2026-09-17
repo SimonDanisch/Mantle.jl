@@ -12,9 +12,9 @@ using KernelAbstractions: @kernel, @index, @Const
 
 # The host backend was `ext/MantleHostExt.jl` until the KernelAbstractions
 # weakdep turned out to be unworkable; it lives in `src/host/host.jl` now, so
-# `HostDevice` is a plain `Mantle` name. `get_extension` returned `nothing` here
-# and every use of it threw — unnoticed, because `import Vulkan` in runtests.jl
-# aborted the run before this file was reached on a driverless machine.
+# `HostDevice` is a plain `Mantle` name: fetched through `get_extension` it is
+# `nothing` here and every use of it throws, which a driverless machine reaches
+# only if nothing aborts the run before this file.
 
 @kernel function hostscale!(dst, @Const(src), a::Float32)
     i = @index(Global)
@@ -102,12 +102,10 @@ end
     @test M.peakbytes(M.Plan(g; alias = false)) == 3 * n * sizeof(Float32)
 end
 
-# `custom!` stood here — a pass that declared what it touched and returned a
-# zero-argument callable to do it. It is gone: on a recording backend the body
-# had to be handed the QUEUE, and with it every heuristic reachable from one, to
-# compensate for a declaration that never said what it was doing. This backend's
-# half of it was one line (`bake(::Compile, body) = body`, "a body already IS the
-# callable"), so nothing here is worse off.
+# There is no `custom!` pass — one that declares what it touches and returns a
+# zero-argument callable to do it. On a recording backend such a body has to be
+# handed the QUEUE, and with it every heuristic reachable from one, to
+# compensate for a declaration that never says what it is doing.
 
 @testset "Host: a store lands at the position the graph reserved" begin
     dev = M.Device(M.HostAPI())
@@ -115,9 +113,8 @@ end
     b = M.Buffer(dev, zeros(Float32, 4))
     seen = Float32[]
     # A `compute!` pass whose kernel copies the buffer somewhere the host can
-    # read, which is what `custom!` was doing here — declare a read, observe what
-    # the pass sees. `dispatch!` says the same thing and says it in a form the
-    # graph can model.
+    # read: declare a read, observe what the pass sees, in a form the graph can
+    # model.
     dst = M.Buffer(dev, zeros(Float32, 4))
     M.dispatch!(g, hostcopy!, (dst,
                                    b), 4; name = "read it")
@@ -197,16 +194,15 @@ end
     @test_throws ArgumentError M.dispatch!(g, host_addref!, (out, Ref(Int32(1))), n)
 end
 
-# ── the thing that used to be silently broken ─────────────────────────────────
+# ── two backends, two methods, and not by luck ────────────────────────────────
 #
-# The Vulkan backend used to define `Device(::typeof(Lava))`, selecting on the
-# MODULE — and `typeof(Lava)` is `Module`, so a `Device(::typeof(KernelAbstractions))`
-# here would have been the SAME signature, and whichever extension loaded second
-# would have replaced the other with no warning.
+# `Device(::typeof(SomeModule))` selects on the MODULE, and `typeof(SomeModule)`
+# is `Module` for every module, so two backends written that way define the SAME
+# signature and whichever loads second replaces the other with no warning.
 #
-# Both dispatch on a backend MARKER now — `VulkanAPI()` and `HostAPI()` — so they
-# are different methods by construction rather than by luck. Asserted rather than
-# reasoned about, because the failure mode was silent.
+# Both dispatch on a backend MARKER — `VulkanAPI()` and `HostAPI()` — so they are
+# different methods by construction. Asserted rather than reasoned about, because
+# the failure mode is silent.
 include(joinpath(@__DIR__, "backend_probe.jl"))
 
 @testset "Host and Vulkan devices coexist" begin
@@ -289,12 +285,12 @@ end
 # `DeviceRange(count; max = capacity)` says two things: where the real count
 # lives, and how large it can possibly get. A RECORDING backend uses the first
 # (an indirect dispatch reads it on the device) and compiles against the second.
-# A KernelAbstractions backend has no indirect dispatch, and it used to resolve
-# the range by reading the count ON THE HOST — which means synchronising the
-# device first, before every such dispatch.
+# A KernelAbstractions backend has no indirect dispatch, so resolving the range
+# means reading the count ON THE HOST, which means synchronising the device
+# first, before every such dispatch.
 #
-# That is what `bakedrange` no longer does when a ceiling exists. Measured on an
-# M5, killeroo-gold at 684x513/8spp: 320 of those synchronises per frame,
+# That is what `bakedrange` avoids when a ceiling exists. Measured on an M5,
+# killeroo-gold at 684x513/8spp: 320 of those synchronises per frame,
 # 0.585 s of a 0.602 s frame. Dispatching the ceiling instead is defined to be
 # equivalent, because the same contract the recording path relies on already
 # requires the kernel to bound itself — see `dispatchrange`.
@@ -363,9 +359,9 @@ end
 @testset "Host: a padded struct can be WRITTEN, not only read" begin
     # A `reinterpret(T, ::Vector{UInt8})` refuses `setindex!` for any `T` with
     # padding — "Padding of type … is not compatible with type UInt8" — because
-    # the padding bytes have no defined value to write. Host storage used to be
-    # exactly that, so a buffer of any padded type could be read and never
-    # written: `upload!` threw, and so did every kernel that filled a work
+    # the padding bytes have no defined value to write. Host storage spelled
+    # that way makes a buffer of any padded type readable and never writable:
+    # `upload!` throws, and so does every kernel that fills a work
     # queue. The whole point of this backend is to be the one the others are
     # checked against, and it could not hold most of their data.
     dev = M.Device(M.HostAPI())

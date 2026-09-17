@@ -38,7 +38,7 @@ const M = Mantle
 # The backend this run is for. `runtests.jl` includes this file once per
 # available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
 # gets the default one. Nothing below names a backend, which is the point:
-# these testsets check PORTABLE behaviour and used to check it on Vulkan only.
+# these testsets check PORTABLE behaviour, on whichever backend is there.
 const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
     Main.MANTLE_TEST_BACKEND : M.defaultbackend()
 
@@ -65,11 +65,8 @@ if !(Sys.isapple() || !isempty(get(ENV, "DISPLAY", "")))
 else
     GLFW.Init() || error("GLFW.Init failed")
 
-    # DELETED in phase 1.5: the testsets that reached for the backend module
-    # drove a window without a graph through the backend's own window type.
-    # The portable spelling is `Window(backend, w, h)`,
-    # which is in the vocabulary and which only Lava answers; phase 2.7 makes
-    # Metal answer it, and these testsets then need no extension at all.
+    # Driven through the portable `Window(backend, w, h)` and not a backend's
+    # own window type, so nothing here reaches for a backend module.
     include(joinpath(@__DIR__, "..", "bench", "two_scatters.jl"))
 
     # Reads along rows and writes down columns, which is the shape of anything
@@ -224,9 +221,9 @@ else
 
         # And the first pass of a frame is not free either. A plan is replayed, so
         # "first" is only first *within* a frame: the previous frame's draw read
-        # these positions and this frame's advect overwrites them. This assertion
-        # used to read `isempty(adv.pre)`, which was the old belief that a frame
-        # starts from nothing — true only while every frame was flushed.
+        # these positions and this frame's advect overwrites them.
+        # `isempty(adv.pre)` is the assertion for a frame that starts from
+        # nothing, which holds only while every frame is flushed.
         @test !isempty(adv.pre)
         @test any(t -> Vertices in t.waits, adv.pre)
     end
@@ -244,9 +241,9 @@ else
     @testset "a headless plan runs many times without a submit between" begin
         # A plan with a surface submits every frame inside `present_frame!`. One
         # without submits when something asks it to, so several frames land in
-        # the same batch. That used to be where the argument ring deadlocked:
-        # the frame that first reused a slot waited for a timeline value the
-        # queue had never been given, and `vkWaitSemaphores` is a foreign call,
+        # the same batch. That is where an argument ring deadlocks: the frame
+        # that first reuses a slot waits for a timeline value the queue was
+        # never given, and `vkWaitSemaphores` is a foreign call,
         # so the wait could not be interrupted, profiled or garbage collected —
         # the process was simply gone. Found by running a compute-only graph 30
         # times. There is no ring and no wait now; what this pins is that the
@@ -273,9 +270,9 @@ else
         # `present_frame!`. Compiling breaks that: it shells out to `spirv-opt`,
         # and waiting on a subprocess is a task switch.
         #
-        # It used to compile once per kernel after *any* method definition
-        # anywhere in the session, because the dispatch went through
-        # KernelAbstractions per frame and its launch plan is keyed on
+        # Through KernelAbstractions per frame it compiles once per kernel after
+        # *any* method definition anywhere in the session, because the launch
+        # plan is keyed on
         # `Base.get_world_counter()`. A plan now resolves its dispatches when it
         # is built, the same as its draws.
         #
@@ -352,11 +349,11 @@ else
         # that took over another's bytes, and the handover is appended after the
         # coverage test precisely because nothing can cover it — so it is 48 of
         # 48 whether coalescing runs or not, and the number measures nothing.
-        # This used to be asserted with aliasing on and passed by a margin of one
-        # or two; that margin was the aliasing barrier naming every stage and so
-        # making the next few look covered, not coalescing doing its job. Once
-        # the handover was derived from what the old tenant actually did, the
-        # margin went to zero and the real figure came out: a third.
+        # Asserted with aliasing ON it passes by a margin of one or two, and
+        # that margin is the aliasing barrier naming every stage and so making
+        # the next few look covered, not coalescing doing its job. With the
+        # handover derived from what the vacating tenant did, the margin is zero
+        # and the real figure is a third.
         include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
         dev = M.Device(TESTBACKEND)
         emitted(pl) = count(pp -> !isempty(pp.pre), pl.passes)
@@ -364,8 +361,8 @@ else
         loose = Base.invokelatest(build_interleaved, dev, 1 << 12, 8, 6;
                                   alias = false, coalesce = false)
         @test emitted(loose.plan) == length(loose.plan.passes)   # one per pass
-        # This used to assert that a third of them went away, which was true and
-        # was the bug: a barrier scoped to one buffer orders that buffer and
+        # NOT an assertion that a third of them go away, which is true and is
+        # the bug: a barrier scoped to one buffer orders that buffer and
         # nothing else, so "an earlier barrier already covers this" is only ever
         # sound about the *same* resource — and the per-resource walk emits only
         # where a resource's own state changes, so there is nothing left to cover.
@@ -416,13 +413,12 @@ else
 
     @testset "a windowed frame runs every pass, every frame" begin
         # A windowed plan is emitted per frame into a one-shot the present
-        # submits. It used to be emitted into the open batch, whose command
-        # buffer the recorder split mid-frame every few thousand
-        # dispatches, and `present_frame!` submitted only the last segment: a
-        # frame that did nothing, once every threshold, with no validation
-        # error because nothing about it was invalid. The split and the
-        # threshold are gone with the open batch; what this pins is what it
-        # always pinned — every pass of every frame reaches the device. For
+        # submits. Emitted into an open batch instead, whose command buffer a
+        # recorder splits mid-frame every few thousand dispatches, a present
+        # submits only the last segment: a frame that does nothing, once every
+        # threshold, with no validation error because nothing about it is
+        # invalid. What this pins is that every pass of every frame reaches the
+        # device. For
         # this graph — clear a counter in the first pass, accumulate into it
         # later — a lost clear means the counter never restarts. `tally` is
         # monotonic on purpose, because the counter itself cannot detect a

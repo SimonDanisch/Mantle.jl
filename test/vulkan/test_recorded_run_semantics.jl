@@ -1,13 +1,13 @@
 """
 Recording changes WHEN commands are built. It does not change what a run means.
 
-Three properties, and all three have been false at some point.
+Three properties, and each of them is easy to lose.
 
-**`record!` writes without executing.** `capture` used to fall through into
-`submit!`, so a plan ran as a side effect of being captured. It was never a
-Vulkan constraint — `vkEndCommandBuffer` and `vkQueueSubmit2` are separate calls
-— it was `submit!` doing two jobs, with the collection step capture needed buried
-between them. `test_record_does_not_execute.jl` is that property on its own.
+**`record!` writes without executing.** Nothing about Vulkan forces otherwise —
+`vkEndCommandBuffer` and `vkQueueSubmit2` are separate calls — but a `submit!`
+doing two jobs, with the collection step a recording needs buried between them,
+makes a plan run as a side effect of being recorded.
+`test_record_does_not_execute.jl` is that property on its own.
 
 **A per-run value reaches the run.** This is what a `GPURef` is for. A dispatch
 is packed with the ref's device ADDRESS, once, at `record!`; the value behind it
@@ -16,23 +16,23 @@ recording in the run's own submission. So the same recording reads a different
 number every run, and it does so without the host touching argument memory at
 all.
 
-It was a `Ref` argument, re-read and REPACKED every run, and that cost the
-argument ring: 602 host stores per run on Hikari's fused sample to move 268
-bytes, into memory an in-flight submission could still be reading, so the plan
+A `Ref` argument, re-read and REPACKED every run, is what costs an argument
+ring: 602 host stores per run on Hikari's fused sample to move 268 bytes, into
+memory an in-flight submission could still be reading, so the plan
 needed three copies of its arguments and a wait to rotate between them. One
 indirection deletes all of it.
 
 **And argument memory does NOT move.** The other half of the same statement, and
 the one that has to be pinned or the first is meaningless: the bytes a plan's
 dispatches read their arguments from are written at `record!` and not again. A
-run with stores between leaves them byte-identical, and a `Ref` — which used to
-mean the opposite — is refused at the declaration, however deep in the
-arguments it sits.
+run with stores between leaves them byte-identical, and a `Ref`, which means
+the opposite, is refused at the declaration however deep in the arguments it
+sits.
 
 The assertion for the first is arithmetic: the same graph, run with a sequence of
-values, must accumulate their sum. There is no unbaked half to compare against
-and that is the point — the old test would have passed if both paths were wrong
-the same way.
+values, must accumulate their sum. There is no interpreted half to compare
+against and that is the point: a comparison passes when both paths are wrong the
+same way.
 """
 
 using Test, Mantle, Lava, KernelAbstractions
@@ -103,8 +103,8 @@ argbytes(pl) = copy(unsafe_wrap(Array, pl.args.ptr, length(pl.args.store)))
     # `record!` wrote commands and did not run — and did not land the store.
     @test Array(Mantle.storage(out_b)) == zeros(Int32, n)
     @test Mantle.isdirty(kref_b)
-    # ONE recording. It was one per argument slot, and the slots existed because
-    # a run rewrote argument bytes on the host; nothing does.
+    # ONE recording, and not one per argument slot: nothing rewrites argument
+    # bytes on the host.
     @test pl_b.recording isa Mantle.Recording
 
     for k in steps
@@ -125,15 +125,14 @@ end
 # A run is one submission: the recording, and nothing else when nothing is
 # pending.
 #
-# `replay!` used to reach the queue twice per run: force-close whatever batch was
-# open, submit it, then submit the recording behind a hand-rolled wait on the
-# newest outstanding timeline value. Then a run was appended to an open batch
-# that went when something else asked — a flush, a readback, a threshold — so
-# a run submitted nothing at all and the test here asserted exactly that. There
-# is no open batch now: a run is handed over the moment it is called, as ONE
-# `vkQueueSubmit2` carrying the recording — and, when a store is waiting, the
-# one-shot that lands it in front. Two passes, so the count is not accidentally
-# right because there is only one thing to submit.
+# Two ways to get this wrong, both of them a queue reaching the driver more than
+# once per run: force-closing whatever batch is open, submitting it, then
+# submitting the recording behind a hand-rolled wait on the newest outstanding
+# timeline value; or appending the run to an open batch that goes when something
+# else asks, so the run submits nothing at all. A run is handed over the moment
+# it is called, as ONE `vkQueueSubmit2` carrying the recording, and when a store
+# is waiting, the one-shot that lands it in front. Two passes, so the count is
+# not accidentally right because there is only one thing to submit.
 @testset "a run with nothing pending submits exactly the recording" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
     be = Mantle.defaultbackend()
@@ -230,12 +229,11 @@ end
     Mantle.free!(pl)
 end
 
-# The contract that makes the first testset mean something: a `Ref` used to
-# mean "read this fresh every run", and honouring that is what the write plan,
-# the argument ring and `rebind!` all existed for. Nothing rewrites argument
-# memory now, so a `Ref` would silently freeze at whatever it held when the
-# plan recorded — and it is refused at the declaration instead, wherever it
-# sits in the arguments. Nested is the case that matters: a `Ref` inside a
+# The contract that makes the first testset mean something: a `Ref` means "read
+# this fresh every run", and honouring that is what a write plan, an argument
+# ring and a rebind verb are for. Nothing rewrites argument memory, so a `Ref`
+# would silently freeze at whatever it held when the plan recorded, and it is
+# refused at the declaration instead, wherever it sits in the arguments. Nested is the case that matters: a `Ref` inside a
 # camera struct is what a renderer actually passed.
 struct RefHolder
     r::Base.RefValue{Int32}
