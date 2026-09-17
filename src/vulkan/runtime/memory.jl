@@ -11,7 +11,7 @@
 
 # Per-allocation trace
 
-# When enabled, vk_free! scans every live VulkanBatchQueue's arg/indirect slabs for
+# When enabled, vk_free! scans every live channel's arg/indirect slabs for
 # any UInt64 == buf.address.  Hits are logged + zeroed so the GPU faults on a
 # clean null reference instead of corrupting random memory.  Optionally
 # throws a LavaError instead of just logging (`ctx.diag.destroy_freed_bdas_throws`).
@@ -39,7 +39,7 @@ append a record to `diag.freed_bda_scan_log` and overwrite the slot with 0 so th
 GPU faults cleanly on a null reference instead of touching the freed memory.
 Returns the number of hits found.
 
-Defined AFTER VkManagedBuffer + VulkanBatchQueue (forward-call from vk_free!).
+Defined AFTER VkManagedBuffer + the submit channel (forward-call from vk_free!).
 Cost is ~`(block_bytes / 8)` UInt64 reads per block — for 4 MiB blocks that is
 ~512 K reads, fast enough for debug.
 """
@@ -70,7 +70,7 @@ const BDA_POISON = UInt64(0)
 
 # No reset callback: every counter above is a `MemoryPolicy` field, and the pool
 # is a `VkContext` field, so all of it dies with the context `reset_device!`
-# retires. Staging, indirect and arg slabs are per-`VulkanBatchQueue` and go the same
+# retires. Staging, indirect and arg slabs are per-channel and go the same
 # way. `reset_memory_stats!` is the one piece left, and `reset_device!` calls
 # it directly.
 
@@ -419,7 +419,7 @@ function format_oom_error(ctx::VkContext, fail::AllocFailure)
 end
 
 """
-    vk_alloc(bq::VulkanBatchQueue, nbytes; extra_usage=UInt32(0), unified=false) -> VkManagedBuffer
+    vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes; extra_usage=UInt32(0), unified=false) -> VkManagedBuffer
 
 Allocate a GPU buffer with BDA support.  Takes the queue the allocation is
 recorded against — `drain!` runs only on that queue's timeline, ready for the
@@ -435,7 +435,7 @@ multi-queue refactor.
 AS-scratch alignment is the caller's responsibility — see
 `bda_alignment_for(ctx, scratch::Bool)`, used in `LavaArray(...; scratch=true)`.
 """
-function vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
+function vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                   extra_usage::UInt32=UInt32(0), unified::Bool=false)
     # Refuse allocation on a lost device — Vulkan calls would either error or
     # (worse) succeed against a torn-down driver state and produce garbage BDAs.
@@ -502,7 +502,7 @@ steady state. `pool.reclaiming` guards the re-entry through `flush!`'s own
 allocations.
 """
 
-function quiesce_before_reclaim!(bq::VulkanBatchQueue)
+function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
     # Refuse while any plan on this device holds a recording, and say so, because
     # the caller must not go on to reclaim either.
     #
@@ -559,7 +559,7 @@ function quiesce_before_reclaim!(bq::VulkanBatchQueue)
 end
 
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
-function try_vk_alloc(bq::VulkanBatchQueue, nbytes::Integer;
+function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                       extra_usage::UInt32=UInt32(0), unified::Bool=false)
     ctx = ctxof(bq)
     dev = ctx.device
@@ -808,7 +808,7 @@ It was two slab lists on the queue. The blocks are what backs them now, so the
 scans below read the same bytes through the owner that has them."""
 unifiedblocks(ctx::VkContext) = get(() -> Block[], spans(ctx).blocks, Unified())
 
-# Scanner method — reachable now that VkManagedBuffer + VulkanBatchQueue are defined.
+# Scanner method — reachable now that VkManagedBuffer + the channel are defined.
 function scan_unified_for_bda!(buf::VkManagedBuffer)
     target = buf.address
     target == UInt64(0) && return 0
@@ -1147,7 +1147,7 @@ actually ran, so the caller knows whether retrying is worthwhile.
 buffer freed while the GPU still referenced it went to the deferred list rather
 than back to the pool, and until it is drained the memory is dead to everyone.
 """
-function collect_for_pool!(bq::VulkanBatchQueue)
+function collect_for_pool!(bq::SubmitChannel{<:VulkanQueue})
     p = mempolicy(ctxof(bq))
     now = time()
     # The gap is `gc_mingap`, or what the LAST collection cost divided by the
@@ -1235,7 +1235,7 @@ function clear_alloc_trace!(ctx::VkContext = vk_context())
 end
 
 """
-    pool_alloc(bq::VulkanBatchQueue, nbytes; extra_usage=UInt32(0)) -> VkManagedBuffer
+    pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes; extra_usage=UInt32(0)) -> VkManagedBuffer
 
 Allocate GPU memory on `bq` out of this device's `Mantle.Pool`.
 
@@ -1246,7 +1246,7 @@ carries no notion of what a block may be used for; `compatible` does, so an
 index buffer can now sit in a block whose usage bits already permit it and only
 falls out to a dedicated allocation when none does.
 """
-function pool_alloc(bq::VulkanBatchQueue, nbytes::Integer; extra_usage::UInt32=UInt32(0))
+function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usage::UInt32=UInt32(0))
     ctx = ctxof(bq)
     # Even pure free-span reuse must refuse a dead device — the blocks belong to
     # the old (broken) ctx and would hand back garbage BDAs.
@@ -1303,7 +1303,7 @@ device, a bad usage flag — propagates with its own message intact.
 # `dev` is untyped for the same reason `ctxof(bq)` is: `LavaDevice` is declared in
 # `graph.jl`, which this file is included before. A signature annotation is
 # evaluated at load; the body is not.
-function acquire_or_reclaim!(bq::VulkanBatchQueue, sp::Pool, dev,
+function acquire_or_reclaim!(bq::SubmitChannel{<:VulkanQueue}, sp::Pool, dev,
                              nbytes::Int, extra_usage::UInt32)
     try
         return acquire!(sp, dev, Buffers(), nothing, nbytes;
@@ -1342,7 +1342,7 @@ function acquire_or_reclaim!(bq::VulkanBatchQueue, sp::Pool, dev,
 end
 
 """
-    reclaim_empty_pool_blocks!(bq::VulkanBatchQueue) -> (n_blocks::Int, bytes::Int)
+    reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue}) -> (n_blocks::Int, bytes::Int)
 
 Hand every block with nothing live in it back to the driver, and say how much
 that was.
@@ -1353,7 +1353,7 @@ is empty — so what is left here is measuring, which the caller reports.
 Callers must have run `quiesce_before_reclaim!` first; see there for why. Not
 finalizer-safe, and never was.
 """
-function reclaim_empty_pool_blocks!(bq::VulkanBatchQueue)
+function reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue})
     ctx = ctxof(bq)
     sp = spans(ctx)
     before = reserved(sp)
@@ -1428,8 +1428,8 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
         (managed.ctx::VkContext).default_bq
     else
         wbq = stampof(managed).channel
-        (wbq !== nothing && !queue_released(wbq::VulkanBatchQueue)) ?
-            (wbq::VulkanBatchQueue) : (managed.ctx::VkContext).default_bq
+        (wbq !== nothing && !queue_released(wbq::SubmitChannel{<:VulkanQueue})) ?
+            (wbq::SubmitChannel{<:VulkanQueue}) : (managed.ctx::VkContext).default_bq
     end
     # `Mantle.offset`, qualified: this function's `offset` keyword shadows it.
     if direction === :upload

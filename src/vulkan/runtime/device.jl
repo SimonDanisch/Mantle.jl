@@ -55,7 +55,7 @@ What the commands must OUTLIVE is not here: that is `hold!` on the channel
 (`graph/lifetime.jl`), and the submission's payload carries it. What is here is
 the driver's own bookkeeping for the buffers the commands name — see `sync`.
 
-`bq` is the `VulkanBatchQueue{VkContext}` it was taken from; typed `Any`
+`bq` is core's `SubmitChannel` over a `VulkanQueue` it was taken from; typed `Any`
 because the queue is declared below this, and asserted at every read
 (`queueof`) so the field is a static load and not a boxed one.
 """
@@ -184,7 +184,7 @@ mutable struct VulkanQueue{C}
     timeline_sem::VK.Semaphore
     next_timeline::UInt64
     # The owning VkContext. A type parameter because `VkContext` is declared
-    # after this struct; `VkContext` holds a `VulkanBatchQueue{VkContext}`.
+    # after this struct; `VkContext` holds core's `SubmitChannel` over a `VulkanQueue`.
     ctx::C
     # How long `flush!` waits before it decides a dispatch is not completing.
     flush_timeout_ns::UInt64
@@ -219,20 +219,25 @@ mutable struct VulkanQueue{C}
     raw_submits::Vector{VK.vk.VkSubmitInfo2}               # always length 1
 end
 
-# The channel this backend submits on: core's `SubmitChannel` over the driver
-# bundle above. The recording type it pools is `OneShot`; a plan's `Recording`
-# keeps its own lifetime (`release!`) and is never pooled. The payload of a
-# submission is core's `Submission` over the one-shot it carried — or `nothing`
-# when a run submits its recording alone.
-const VulkanBatchQueue{C} = SubmitChannel{VulkanQueue{C}, OneShot, UInt64,
-                                          Submission{Union{Nothing,OneShot}}}
+# There is NO alias for this backend's channel type, deliberately. It was
+# `VulkanBatchQueue`, a name that read as a queue this backend owns and manages, and
+# queue management is core's: the type is `SubmitChannel` over the driver bundle
+# above, and core holds the outstanding list, the free recordings and the holds.
+# A name saying "BatchQueue" invited exactly the wrong reading of who is
+# responsible -- it was the old 41-field struct's name, kept after the struct
+# became core's. Written out where it is needed instead.
+#
+# The recording type pooled is `OneShot`; a plan's `Recording` keeps its own
+# lifetime (`release!`) and is never pooled. The payload of a submission is
+# core's `Submission` over the one-shot it carried -- or `nothing` when a run
+# submits its recording alone.
 
 """The queue a closed command buffer was taken from, as the concrete type — the
 field is `Any` only because the queue is declared after the closed types."""
-@inline queueof(c::Closed) = c.bq::VulkanBatchQueue{VkContext}
+@inline queueof(c::Closed) = c.bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 
 
-function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
+function SubmitChannel(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ctx;
                     queue_index::Int=-1)
     cmd_pool = VK.CommandPool(device, qf_idx;
         flags=VK.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
@@ -252,25 +257,26 @@ function VulkanBatchQueue(device::VK.Device, queue::VK.Queue, qf_idx::UInt32, ct
                     sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
                     sizehint!(VK.vk.VkSemaphoreSubmitInfo[], 4),
                     Vector{VK.vk.VkSubmitInfo2}(undef, 1))
-    return VulkanBatchQueue{typeof(ctx)}(q)
+    return SubmitChannel{VulkanQueue{typeof(ctx)},OneShot,UInt64,
+                         Submission{Union{Nothing,OneShot}}}(q)
 end
 
 # The driver bundle behind the channel, and its fields. Every site that wrote
 # `ctxof(bq)` or `timelineof(bq)` reads one of these instead: the arrangement is
 # the backend's, the lists around it are core's, and `channelof` is the one
 # field core hands back without looking inside it.
-@inline driver(bq::VulkanBatchQueue{C}) where {C} = bq.channel::VulkanQueue{C}
-@inline ctxof(bq::VulkanBatchQueue{C}) where {C} = driver(bq).ctx::C
-@inline vkdevice(bq::VulkanBatchQueue) = driver(bq).device
-@inline vkqueue(bq::VulkanBatchQueue) = driver(bq).queue
-@inline timelineof(bq::VulkanBatchQueue) = driver(bq).timeline_sem
+@inline driver(bq::SubmitChannel{VulkanQueue{C}}) where {C} = bq.channel::VulkanQueue{C}
+@inline ctxof(bq::SubmitChannel{VulkanQueue{C}}) where {C} = driver(bq).ctx::C
+@inline vkdevice(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).device
+@inline vkqueue(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).queue
+@inline timelineof(bq::SubmitChannel{<:VulkanQueue}) = driver(bq).timeline_sem
 
 # The Mantle device this channel submits to — what core asks `rawfree` and
 # `flush!` of. A verb and not a field: a `LavaDevice` is built AROUND its
 # default channel (it holds the channel and the pool), so a channel that held
 # its device could not be constructed first. `lavadevice` is the cache that
 # makes this one device per context rather than one per call.
-deviceof(bq::VulkanBatchQueue) = lavadevice(ctxof(bq))
+deviceof(bq::SubmitChannel{<:VulkanQueue}) = lavadevice(ctxof(bq))
 
 """
     CoopMat2Caps
@@ -362,7 +368,7 @@ end
     VkContext
 
 Persistent Vulkan context. Batch-based command recording goes through
-`default_bq::VulkanBatchQueue` (the primary queue). Use `VulkanBatchQueue(...)` to
+`default_bq::SubmitChannel{<:VulkanQueue}` (the primary queue). Use `SubmitChannel(device, queue, ...)` to
 create additional independent queues (e.g., for async compute/RT).
 """
 mutable struct VkContext
@@ -372,12 +378,12 @@ mutable struct VkContext
     queue_family_index::UInt32
     device_name::String
     # Primary batch queue — all global API functions delegate here.  Always
-    # non-nothing after the inner constructor returns (VulkanBatchQueue is built
+    # non-nothing after the inner constructor returns (the channel is built
     # using `new()`-based two-phase init to break the chicken-and-egg with
-    # VulkanBatchQueue.ctx).
-    # `VulkanBatchQueue{VkContext}`, not the UnionAll — otherwise `ctx.default_bq` is
+    # the driver bundle's ctx).
+    # the fully concrete `SubmitChannel`, not the UnionAll — otherwise `ctx.default_bq` is
     # abstract and the parameter above buys nothing at this end of the cycle.
-    default_bq::VulkanBatchQueue{VkContext}
+    default_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
     # Secondary compute queue (async RT) — same family, separate queue object
     compute_queue::VK.Queue
     # Ray tracing (nothing if not available)
@@ -402,7 +408,7 @@ mutable struct VkContext
     # driver. Holding the queue here means it outlives every buffer allocated on
     # it, the same argument `caches` makes further down: a field dies with its
     # context, so nothing outlives the handles it describes.
-    extra_queues::Vector{VulkanBatchQueue{VkContext}}
+    extra_queues::Vector{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
     # Hardware queue slots handed back by `release_batch_queue!`, reused before
     # `next_queue_index` advances.
     free_queue_indices::Vector{Int}
@@ -541,7 +547,7 @@ mutable struct VkContext
     diag::Diagnostics
 
     # Inner constructor: two-phase init via `new()` so we can hand a live
-    # `ctx` reference to `VulkanBatchQueue(...)` while finishing the ctx's own
+    # `ctx` reference to `SubmitChannel(...)` while finishing the ctx's own
     # field assignments.  There is no public ctor that can leave `default_bq`
     # unset.  `primary_queue` is the raw `VK.Queue` for the default bq;
     # everything else maps directly to a field.
@@ -593,7 +599,7 @@ mutable struct VkContext
         ctx.validation = validation
         ctx.next_queue_index = next_queue_index
         ctx.max_queue_count = max_queue_count
-        ctx.extra_queues = VulkanBatchQueue{VkContext}[]
+        ctx.extra_queues = SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}[]
         ctx.free_queue_indices = Int[]
         ctx.async_queue_family_index = async_queue_family_index
         ctx.async_queue_count = async_queue_count
@@ -638,9 +644,9 @@ mutable struct VkContext
         ctx.pipeline_cache = create_lava_pipeline_cache(
             device, lava_pipeline_cache_path(device_name, driver_version), physical_device)
         _register_pipeline_cache_atexit!()
-        # Now build the default VulkanBatchQueue with the live ctx.  Sets the
+        # Now build the default submit channel with the live ctx.  Sets the
         # remaining field; no nullable slot, no post-hoc mutation.
-        ctx.default_bq = VulkanBatchQueue(device, primary_queue, queue_family_index, ctx)
+        ctx.default_bq = SubmitChannel(device, primary_queue, queue_family_index, ctx)
         return ctx
     end
 end
@@ -912,7 +918,7 @@ function vk_context()
     # Double-checked under a lock. Unlocked, two threads both saw `nothing` and
     # both ran the constructor, leaving two live VkDevices: the loser's context is
     # still reachable from every buffer it allocated (`buf.last_write` retains
-    # its VulkanBatchQueue), so the next cross-queue wait passed a semaphore from one
+    # its channel), so the next cross-queue wait passed a semaphore from one
     # device to the other and the driver segfaulted with no Julia frame to show.
     lock(VK_CONTEXT_LOCK)
     try
@@ -1732,7 +1738,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
 
     # VkContext's inner constructor builds its own default_bq via `new()`-
     # based two-phase init.  Pass the raw primary queue and all other ctx
-    # fields; the ctor wires VulkanBatchQueue(device, queue, qfi, ctx) internally.
+    # fields; the ctor wires SubmitChannel(device, queue, qfi, ctx) internally.
     # The hardware implements a fixed set of (M, N, K, dtype) tiles; a kernel
     # must choose one of these, it cannot pick an arbitrary tile size.
     CMShape = eltype(fieldtype(VkContext, :coopmat_shapes))
@@ -1801,9 +1807,9 @@ end
 supports_batch_queue(::VulkanAPI) = true
 
 """
-    allocate_batch_queue!(ctx) -> VulkanBatchQueue
+    allocate_batch_queue!(ctx) -> SubmitChannel
 
-Create a new independent VulkanBatchQueue on a separate Vulkan queue (if available).
+Create a new independent submit channel on a separate Vulkan queue (if available).
 Falls back to a separate command pool on the primary queue if all queues are taken.
 Used by Screen for isolated graphics rendering.
 
@@ -1821,13 +1827,13 @@ function allocate_batch_queue!(ctx::VkContext)
         queue = vkqueue(ctx.default_bq)
         idx = -1
     end
-    bq = VulkanBatchQueue(ctx.device, queue, ctx.queue_family_index, ctx; queue_index = idx)
+    bq = SubmitChannel(ctx.device, queue, ctx.queue_family_index, ctx; queue_index = idx)
     push!(ctx.extra_queues, bq)
     return bq
 end
 
 """
-    release_batch_queue!(bq::VulkanBatchQueue)
+    release_batch_queue!(bq::SubmitChannel{<:VulkanQueue})
 
 Give a queue from [`allocate_batch_queue!`](@ref) back: drain it, destroy what it
 still holds, and make its hardware slot available again.
@@ -1841,7 +1847,7 @@ context keeps it alive (see `extra_queues`), so an unreleased queue is a leak of
 a command pool, a semaphore and its argument slabs rather than a dangling
 handle.
 """
-function release_batch_queue!(bq::VulkanBatchQueue)
+function release_batch_queue!(bq::SubmitChannel{<:VulkanQueue})
     ctx = ctxof(bq)
     bq === ctx.default_bq &&
         throw(LavaError("release_batch_queue!", "the context's primary queue cannot be released",
@@ -1862,7 +1868,7 @@ function release_batch_queue!(bq::VulkanBatchQueue)
 end
 
 """
-    queue_released(bq::VulkanBatchQueue) -> Bool
+    queue_released(bq::SubmitChannel{<:VulkanQueue}) -> Bool
 
 Whether `bq` has been handed back by [`release_batch_queue!`](@ref).
 
@@ -1881,7 +1887,7 @@ buffer still naming it can be destroyed immediately instead of waited on.
 Membership in `ctx.extra_queues` is already the liveness record, so this needs no
 flag — `release_batch_queue!` removing the entry IS the transition.
 """
-function queue_released(bq::VulkanBatchQueue)
+function queue_released(bq::SubmitChannel{<:VulkanQueue})
     ctx = ctxof(bq)
     bq === ctx.default_bq && return false      # the primary queue is never released
     return findfirst(q -> q === bq, ctx.extra_queues) === nothing

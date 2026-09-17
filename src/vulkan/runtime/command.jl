@@ -65,7 +65,7 @@ It only runs when dispatch logging is on, so the dynamic call is free.
 """
 @noinline dispatch_log_string(args...) = string(args...)
 
-function log_dispatch!(bq::VulkanBatchQueue, info::String)
+function log_dispatch!(bq::SubmitChannel{<:VulkanQueue}, info::String)
     d = (ctxof(bq)).diag
     d.dispatch_logging || return
     log = d.dispatch_log
@@ -96,7 +96,7 @@ import Vulkan.VkCore: VkMemoryBarrier, VK_STRUCTURE_TYPE_MEMORY_BARRIER,
 # Was `const CMD_PIPELINE_BARRIER_FPTR = Ref{Ptr{Nothing}}(C_NULL)`. A device
 # function pointer is per device, so it lives on `VkContext` now — see the field
 # there for what a global one did the first time two contexts existed.
-@inline barrier_fptr(bq::VulkanBatchQueue) = (ctxof(bq)).cmd_pipeline_barrier_fptr
+@inline barrier_fptr(bq::SubmitChannel{<:VulkanQueue}) = (ctxof(bq)).cmd_pipeline_barrier_fptr
 
 # Despite the `_2_` in its name, VK.jl types PIPELINE_STAGE_2_ALL_COMMANDS_BIT
 # as the *sync1* `PipelineStageFlag`, while `Submission.wait_semaphores` is
@@ -160,7 +160,7 @@ end
 """One primary command buffer from the queue's pool. A recording keeps its for
 as long as it lives; a one-shot's stays with the one-shot, which the queue
 pools for ever."""
-function allocate_cmd(bq::VulkanBatchQueue)
+function allocate_cmd(bq::SubmitChannel{<:VulkanQueue})
     alloc_info = VK.CommandBufferAllocateInfo(driver(bq).cmd_pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)
     return throw_if_error(bq, "vkAllocateCommandBuffers",
         VK.allocate_command_buffers(vkdevice(bq), alloc_info))[1]
@@ -194,7 +194,7 @@ submitted again, and no flag was correct and cheaper. Deleting the ring (see
 `ONE_TIME_SUBMIT` was never a candidate: it means "submitted once, then reset or
 freed".
 """
-function recording!(bq::VulkanBatchQueue)
+function recording!(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
     device_lost(ctxof(bq)) && throw(LavaError(
         "recording!", "Vulkan device is lost — cannot record",
@@ -278,17 +278,17 @@ end
 # called (`graph/lifetime.jl`). What is here is a `VkCommandBuffer` being
 # allocated, reset and freed, and nothing else.
 
-makerecording(bq::VulkanBatchQueue) =
+makerecording(bq::SubmitChannel{<:VulkanQueue}) =
     OneShot(bq, allocate_cmd(bq), Region[], VkManagedBuffer[], false)
 
-function resetrecording!(bq::VulkanBatchQueue, o::OneShot)
+function resetrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot)
     throw_if_error(bq, "vkResetCommandBuffer",
         VK.reset_command_buffer(o.cmd; flags = VK.CommandBufferResetFlag(0)))
     o.open = false
     return o
 end
 
-destroyrecording!(bq::VulkanBatchQueue, o::OneShot) =
+destroyrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot) =
     VK.free_command_buffers(vkdevice(bq), driver(bq).cmd_pool, [o.cmd])
 
 """
@@ -305,7 +305,7 @@ pooled one-shot that holds a buffer alive until it is next used and one that
 holds nothing: the list is a strong reference to every `VkManagedBuffer` the
 commands named.
 """
-function finishrecording!(bq::VulkanBatchQueue, o::OneShot)
+function finishrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot)
     # A build that threw hands back a command buffer that was BEGUN and never
     # ended. `vkResetCommandBuffer` would take it either way, but a pooled
     # one-shot that reads as open is indistinguishable from one that is being
@@ -411,7 +411,7 @@ costs is a `vkBeginCommandBuffer`/`vkEndCommandBuffer` pair and a
 are batched efficiently is a question for a graph built to hold them, not for
 the queue to answer with a buffer and a threshold.
 """
-function oneshot(f, bq::VulkanBatchQueue)
+function oneshot(f, bq::SubmitChannel{<:VulkanQueue})
     o = openoneshot(bq)
     try
         f(Emitter(o, nothing))
@@ -428,7 +428,7 @@ end
 
 """Open a one-shot and hand it back open, for a caller that emits into it over
 several calls — a run's front, a windowed frame — and seals it itself."""
-function openoneshot(bq::VulkanBatchQueue)
+function openoneshot(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
     ctx = ctxof(bq)
     device_lost(ctx) && throw(LavaError(
@@ -452,7 +452,7 @@ function begin!(o::OneShot, info)
 end
 
 # What core's `oneshot!` records through — see `graph/lifetime.jl`.
-recorder(bq::VulkanBatchQueue, o::OneShot) = Emitter(begin!(o, BEGIN_INFO_ONE_TIME), nothing)
+recorder(bq::SubmitChannel{<:VulkanQueue}, o::OneShot) = Emitter(begin!(o, BEGIN_INFO_ONE_TIME), nothing)
 
 """
     hold!(owner::Closed, obj) -> obj
@@ -518,7 +518,7 @@ takeholds!(bq)))` — because only the caller knows whether the recording it
 submitted is a pooled one-shot it is giving away or a plan's, submitted again
 next run. Core's `oneshot!` is the common case written once.
 """
-function submit!(bq::VulkanBatchQueue, closed::Closed...;
+function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
                  waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing)
     ownthread(bq)
     ctx = ctxof(bq)
@@ -691,8 +691,8 @@ driver facts rather than decisions:
   * a RELEASED channel was idle when it went, so its work has landed and its
     semaphore is gone with it. Waiting on it is both unnecessary and unsafe.
 """
-@inline function crosssemaphore(bq::VulkanBatchQueue, other)
-    o = other::VulkanBatchQueue{VkContext}
+@inline function crosssemaphore(bq::SubmitChannel{<:VulkanQueue}, other)
+    o = other::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
     ctxof(o) === ctxof(bq) || throw(LavaError(
         "submit!",
         "a buffer was last used on a channel from a DIFFERENT VkContext",
@@ -877,7 +877,7 @@ past the gate, or a dispatch pays for a name nothing reads. That is 835 bytes pe
 dispatch when the pieces are `" g="` and a tuple — measured, and
 `test_dispatch_allocation.jl` is the test that measures it.
 """
-@inline function dispatchinfo(bq::VulkanBatchQueue, suffix...)
+@inline function dispatchinfo(bq::SubmitChannel{<:VulkanQueue}, suffix...)
     d = (ctxof(bq)).diag
     (d.dispatch_logging || d.dispatch_timing) || return ""
     return Base.invokelatest(dispatch_log_string, driver(bq).last_dispatch_info, suffix...)::String
@@ -915,7 +915,7 @@ end
 # ── Flush ──
 
 """
-    query_timeline(bq::VulkanBatchQueue) -> UInt64
+    query_timeline(bq::SubmitChannel{<:VulkanQueue}) -> UInt64
 
 Return the current counter of `timelineof(bq)`.  Replaces the old
 `try ... catch; typemax(UInt64); end` sentinel:
@@ -935,7 +935,7 @@ case, loud is correct: we want the dispatcher / finalizer log to show it.
 # allocates a result box and a counter cell per call (~80 bytes), and a `run!`
 # allocates nothing. Errors take the cold path — the same query through the
 # checked wrapper, which fails the same way and throws with full context.
-@inline function query_timeline(bq::VulkanBatchQueue)::UInt64
+@inline function query_timeline(bq::SubmitChannel{<:VulkanQueue})::UInt64
     # The shared cell is the owning thread's. A finalizer asks the same question
     # from the GC thread (see `deferred_as_frees`), and two threads writing one
     # RefValue would hand each other torn or wrong counter values — a monotone
@@ -968,7 +968,7 @@ Block until this queue's timeline reaches `val`. The one-semaphore case of
 `SemaphoreWaitInfo` and its two vectors were ~300 bytes of every `waitfor!`.
 Errors fall through to the checked wrapper, which throws with context.
 """
-function wait_timeline!(bq::VulkanBatchQueue, val::UInt64)
+function wait_timeline!(bq::SubmitChannel{<:VulkanQueue}, val::UInt64)
     # Same discipline as `query_timeline`: the slots are the owning thread's.
     if Threads.threadid() != bq.thread
         # Not a path with a fast lane: a caller off the owning thread gets the
@@ -1001,7 +1001,7 @@ of a buffer last written on a second queue, an acceleration-structure build
 on a queue the caller chose. A token is a value of one queue's timeline, and
 this waits on that queue.
 """
-function waitfor!(bq::VulkanBatchQueue, tok::UInt64)
+function waitfor!(bq::SubmitChannel{<:VulkanQueue}, tok::UInt64)
     passed(bq, tok) && return nothing
     wait_timeline!(bq, tok)
     return nothing
@@ -1016,7 +1016,7 @@ end
 # DEVICE_LOST regardless of which low-level call surfaced the error.
 
 """
-    mark_if_lost!(bq::VulkanBatchQueue, result)
+    mark_if_lost!(bq::SubmitChannel{<:VulkanQueue}, result)
     mark_if_lost!(ctx::VkContext, result)
 
 Mark `ctx.device_lost = true` iff `result` is a Vulkan `ERROR_DEVICE_LOST`.
@@ -1030,14 +1030,14 @@ own recovery before throwing (`submit!`, `flush!`).  Otherwise prefer
     e.code == VK.ERROR_DEVICE_LOST && mark_device_lost!(ctx)
     return
 end
-@inline mark_if_lost!(bq::VulkanBatchQueue, result) = mark_if_lost!(ctxof(bq), result)
+@inline mark_if_lost!(bq::SubmitChannel{<:VulkanQueue}, result) = mark_if_lost!(ctxof(bq), result)
 
 device_lost_hint(call) =
     "Vulkan device is lost during $(call). " *
     "Call reset_device!() to reinitialize, or restart Julia."
 
 """
-    throw_if_error(bq::VulkanBatchQueue, result)
+    throw_if_error(bq::SubmitChannel{<:VulkanQueue}, result)
     throw_if_error(ctx::VkContext, result)
     throw_if_error(ctx_or_bq, call::String, result)       # adds a call name
 
@@ -1058,7 +1058,7 @@ to get the device-lost handling for free.  The wrappers below
     throw(LavaVulkanError(call, Int32(e.code), e.msg, suggestion))
 end
 @inline throw_if_error(ctx::VkContext, result) = throw_if_error(ctx, "Vulkan call", result)
-@inline throw_if_error(bq::VulkanBatchQueue, args...) = throw_if_error(ctxof(bq), args...)
+@inline throw_if_error(bq::SubmitChannel{<:VulkanQueue}, args...) = throw_if_error(ctxof(bq), args...)
 
 """
     queue_submit!(bq, submits; fence=VK.Fence(C_NULL))
@@ -1066,7 +1066,7 @@ end
 `vkQueueSubmit` wrapper.  Auto-marks device_lost on failure and throws
 `LavaVulkanError`.
 """
-@inline queue_submit!(bq::VulkanBatchQueue, submits::AbstractVector{VK.SubmitInfo};
+@inline queue_submit!(bq::SubmitChannel{<:VulkanQueue}, submits::AbstractVector{VK.SubmitInfo};
                       fence=VK.Fence(C_NULL)) =
     throw_if_error(bq, "vkQueueSubmit", VK.queue_submit(vkqueue(bq), submits; fence=fence))
 
@@ -1075,7 +1075,7 @@ end
 
 `vkQueueSubmit2` wrapper.  Auto-marks device_lost on failure.
 """
-@inline queue_submit_2!(bq::VulkanBatchQueue, submits::AbstractVector{VK.SubmitInfo2};
+@inline queue_submit_2!(bq::SubmitChannel{<:VulkanQueue}, submits::AbstractVector{VK.SubmitInfo2};
                         fence=VK.Fence(C_NULL)) =
     throw_if_error(bq, "vkQueueSubmit2", VK.queue_submit_2(vkqueue(bq), submits; fence=fence))
 
@@ -1084,7 +1084,7 @@ end
 
 `vkWaitForFences` wrapper.  Auto-marks device_lost on failure.
 """
-@inline wait_for_fences!(bq::VulkanBatchQueue, fences;
+@inline wait_for_fences!(bq::SubmitChannel{<:VulkanQueue}, fences;
                          wait_all::Bool=true, timeout::UInt64=typemax(UInt64)) =
     throw_if_error(bq, "vkWaitForFences", VK.wait_for_fences(vkdevice(bq), fences, wait_all, timeout))
 
@@ -1093,12 +1093,12 @@ end
 
 `vkWaitSemaphores` wrapper.  Auto-marks device_lost on failure.
 """
-@inline wait_semaphores!(bq::VulkanBatchQueue, info::VK.SemaphoreWaitInfo;
+@inline wait_semaphores!(bq::SubmitChannel{<:VulkanQueue}, info::VK.SemaphoreWaitInfo;
                          timeout::UInt64=typemax(UInt64)) =
     throw_if_error(bq, "vkWaitSemaphores", VK.wait_semaphores(vkdevice(bq), info, timeout))
 
 """
-    flush!(bq::VulkanBatchQueue, dev::Device)
+    flush!(bq::SubmitChannel{<:VulkanQueue}, dev::Device)
 
 Block until every submission on `bq` has been signalled on the queue's
 timeline semaphore.  Uses a single `wait_semaphores` call on the HIGHEST
@@ -1127,7 +1127,7 @@ unsubmitted.
 #
 # A comment, not a docstring: `flush!`'s own docstring follows immediately, and
 # two adjacent strings make `@doc` document the second one.
-function flush_stall_report(bq::VulkanBatchQueue, target::UInt64)
+function flush_stall_report(bq::SubmitChannel{<:VulkanQueue}, target::UInt64)
     io = IOBuffer()
     ctx = ctxof(bq)
     # The one place a swallow is right, and it is narrowed to say why: this
@@ -1172,8 +1172,8 @@ end
 # portable `flush!(channel, device)` takes the Mantle device, which is what
 # `deviceof` answers and what core's one-argument form fills in. It used to take
 # a raw `VK.Device`, so the portable spelling could not reach it.
-function flush!(bq::VulkanBatchQueue, ::Device)
-    @assert Threads.threadid() == bq.thread  "VulkanBatchQueue is single-writer; cross-thread flush forbidden"
+function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
+    @assert Threads.threadid() == bq.thread  "the submit channel is single-writer; cross-thread flush forbidden"
     # Was `vk_flush!`'s, which is gone: waiting on a semaphore of a dead device
     # is the confusing failure this turns into a message that says what to do.
     device_lost(ctxof(bq)) && throw(LavaError("command flush", "Vulkan device lost",
@@ -1336,7 +1336,7 @@ end
 
 """Throw a LavaError enriched with recent validation layer messages and dispatch log."""
 function throw_with_validation_context(call_name::String, err_result,
-        bq::Union{Nothing,VulkanBatchQueue}=nothing)
+        bq::Union{Nothing,SubmitChannel{<:VulkanQueue}}=nothing)
     # Re-enable dispatch logging so the next run captures debug info. `bq` when
     # the caller has one — all three currently do — and the current context
     # otherwise, since this is also reachable from a raw `VkResult` check.

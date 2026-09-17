@@ -111,7 +111,7 @@ Example:
     lava_launch!(bq, my_kernel, a, b, Int32(n); ndrange=n, workgroup_size=(256,1,1))
     # kernel signature: my_kernel(a::LavaDeviceArray{Float32,1}, ...)
 """
-function lava_launch!(bq::VulkanBatchQueue, @nospecialize(f), args...;
+function lava_launch!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
                        tlas=nothing)  # Union{Nothing, VulkanTLAS} — declared later in raytracing/hwtlas.jl
@@ -712,7 +712,7 @@ the address. A modelled plan does not come through here at all.
 """
 @inline function scratch!(owner::O, nbytes::Integer) where {O<:Closed}
     bq = queueof(owner)
-    @assert Threads.threadid() == bq.thread  "VulkanBatchQueue is single-writer; cross-thread scratch alloc forbidden"
+    @assert Threads.threadid() == bq.thread  "the submit channel is single-writer; cross-thread scratch alloc forbidden"
     dev = lavadevice(ctxof(bq))
     r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE)

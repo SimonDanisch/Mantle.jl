@@ -53,13 +53,13 @@ backend built before a `reset_device!` is dead after it, like every array it
 allocated, and is rebuilt the same way they are.
 """
 struct LavaBackend <: KA.GPU
-    dispatch_bq::VulkanBatchQueue{VkContext}
-    upload_bq::VulkanBatchQueue{VkContext}
+    dispatch_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
+    upload_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 end
 
 LavaBackend() = LavaBackend(vk_context())
 LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
-LavaBackend(bq::VulkanBatchQueue) = LavaBackend(bq, bq)
+LavaBackend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
 
 # The three Mantle verbs that dispatch on the BACKEND rather than on the context.
 #
@@ -88,10 +88,10 @@ the single-device case; what has to stop is code *depending* on it, because a
 global cannot answer "which device" once there are two.
 
 **No new state.** Both are derived from what these objects already carried:
-`VulkanBatchQueue.ctx` for a backend and `Buffer.ctx` for an array. That is worth
+the channel's `ctx` for a backend and `Buffer.ctx` for an array. That is worth
 saying because it was briefly got wrong in the other direction — a `ctx` field
 was added to `LavaBackend` on the belief that no path existed, which came from
-reading the first half of `VulkanBatchQueue`'s field list, where `ctx::Any` sits
+reading the first half of `VulkanQueue`'s field list, where `ctx::Any` sits
 sixty-odd lines down. A second copy of a fact the queue already holds can only
 ever disagree with it, so this derives instead.
 
@@ -184,7 +184,7 @@ Takes the CHANNEL and not a backend, because its one caller is
 the portable spelling normalises to a device before it dispatches, so the
 backend form had no caller left and the mismatch was a `MethodError` on every
 indexed draw."""
-function alloc_index_buffer(bq::VulkanBatchQueue, data::AbstractVector{UInt32})
+function alloc_index_buffer(bq::SubmitChannel{<:VulkanQueue}, data::AbstractVector{UInt32})
     arr = LavaArray{UInt32,1}(undef, (length(data),); bq,
         extra_usage=UInt32(VK.BUFFER_USAGE_INDEX_BUFFER_BIT))
     upload!(arr, data)
@@ -640,7 +640,7 @@ holder, e.g. `struct MyOp{KK}; kern::KK; end`.
 struct LavaKernel{K,P,Q}
     inner::K
     plan::P
-    # The queue. `LavaBackend` now stores a concrete `dispatch_bq::VulkanBatchQueue`
+    # The queue. `LavaBackend` now stores a concrete `dispatch_bq::SubmitChannel{<:VulkanQueue}`
     # (it pins its device at construction), so `backend.dispatch_bq` is a plain
     # field load — no accessor, no abstract union. Typing the plan was worthless
     # while this stayed dynamic: a dynamic call has to box
@@ -664,7 +664,7 @@ function (lk::LavaKernel)(args...)
     return launch_planned!(lk.bq, lk.inner, args, lk.plan, tlas)
 end
 
-@noinline function launch_planned!(bq::VulkanBatchQueue, obj::KA.Kernel{LavaBackend},
+@noinline function launch_planned!(bq::SubmitChannel{<:VulkanQueue}, obj::KA.Kernel{LavaBackend},
                                    args::Tuple, plan::IterPlan, tlas)
     plan.nblocks == 0 && return nothing
     ka_ctx     = plan.ka_ctx
@@ -790,11 +790,11 @@ Internal launch function for KA kernels. Compiles and dispatches the GPU functio
 
 @inline launch_plan_cache(ctx) = ctx.caches.launchplans
 
-@inline function launch_plan(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
+@inline function launch_plan(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
                              wg::NTuple{3,Int}, ray_query::Bool)
     key = typeof(all_args)
     world = Base.get_world_counter()
-    # `ctxof(bq)`, and the assert is the whole point: `VulkanBatchQueue.ctx` is
+    # `ctxof(bq)`, and the assert is the whole point: the driver bundle's `ctx` is
     # declared `::Any` (it must be — `VkContext` owns the queue, so one direction
     # of the cycle is untyped). Without the assert `ctx.caches.launchplans` infers
     # as `Any`, which makes the `get` below a dynamic dispatch and the loop over
@@ -835,7 +835,7 @@ end
 # This is CUDA.jl's shape (`cudacall` keeps the argument-dependent part to a thin
 # shell over a type-erased worker). The split point is `tt`: everything above it
 # is per-kernel and tiny, everything below is per-kernel-invariant and large.
-@noinline function build_launch_plan!(bq::VulkanBatchQueue, @nospecialize(f), all_args::Tuple,
+@noinline function build_launch_plan!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
                                       wg::NTuple{3,Int}, ray_query::Bool,
                                       key::DataType, world::UInt64)
     # Excludes f — GPUCompiler prepends typeof(f). all_args are already
@@ -869,7 +869,7 @@ The cost is that `f` and `tt` come out as `Any` and every call below here is a
 dynamic dispatch. That is the right trade on this path and only on this path:
 `launch_plan` reaches it solely on a cache miss, i.e. once per kernel per world,
 and what follows is a SPIR-V compile. On the hit path nothing here runs."""
-@noinline function build_launch_plan_tt!(bq::VulkanBatchQueue, fbox::Base.RefValue{Any},
+@noinline function build_launch_plan_tt!(bq::SubmitChannel{<:VulkanQueue}, fbox::Base.RefValue{Any},
                                          ttbox::Base.RefValue{Any},
                                          keybox::Base.RefValue{Any},
                                          wg::NTuple{3,Int}, ray_query::Bool,

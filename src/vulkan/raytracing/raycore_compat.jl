@@ -39,9 +39,9 @@ mutable struct HardwareAccel{TriVec <: AbstractVector}
     rt_pipeline::RayTracingPipeline
     # Optional any-hit pipeline (lazy — created on first use via set_anyhit_pipeline!)
     anyhit_pipeline::Union{Nothing, RayTracingPipeline}
-    # VulkanBatchQueue this accel's RT dispatches run on.  Stored explicitly so
+    # submit channel this accel's RT dispatches run on.  Stored explicitly so
     # callers don't reach for an implicit `vk_context().default_bq`.
-    bq::VulkanBatchQueue
+    bq::SubmitChannel{<:VulkanQueue}
 end
 
 """
@@ -50,13 +50,13 @@ end
 Build a HardwareAccel from a Raycore-compatible HWTLAS.
 The HWTLAS must have `.blas_array` and `.instances` fields.
 
-`bq` defaults to the VulkanBatchQueue whose ctx built the HWTLAS (the CPU-side HWTLAS
+`bq` defaults to the submit channel whose ctx built the HWTLAS (the CPU-side HWTLAS
 object is used to find the ctx via the HW build path), so ray tracing runs
 on the same device the AS was allocated against.
 """
 function HardwareAccel(tlas;
                        ctx::VkContext,
-                       bq::VulkanBatchQueue=ctx.default_bq)
+                       bq::SubmitChannel{<:VulkanQueue}=ctx.default_bq)
     hw_tlas, tri_data, offsets, per_inst_offsets = build_hw_accel_from_tlas(tlas; ctx)
     HardwareAccel(hw_tlas, tri_data, offsets, per_inst_offsets; bq)
 end
@@ -80,7 +80,7 @@ one pipeline per VulkanTLAS, lifetime tied to the VulkanTLAS.
 """
 function HardwareAccel(hw_tlas::LavaTLAS, triangle_data::TriVec, blas_offsets,
                        per_instance_tri_offsets::AbstractVector{UInt32};
-                       bq::VulkanBatchQueue=(hw_tlas.storage.buf[].ctx::VkContext).default_bq
+                       bq::SubmitChannel{<:VulkanQueue}=(hw_tlas.storage.buf[].ctx::VkContext).default_bq
                        ) where {TriVec <: AbstractVector}
     pipeline = RayTracingPipeline(
         raygen=hw_raygen,

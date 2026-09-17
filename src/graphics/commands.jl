@@ -71,14 +71,16 @@ whether re-creating it is the right response.
 function reset_device! end
 
 """
-    present_frame!(submitter, window)
+    present_frame!(device, window)
 
 Show what was drawn, once the work behind it completes.
 
-`submitter` is whatever this backend submits through — a [`SubmitChannel`](@ref) on
-one, the device itself on the other. That is the only part that differs, and it
-differs because the two have genuinely different submission machinery; the verb,
-the ordering and the moment are the same.
+**The device, and never a channel.** This used to read "`submitter` is whatever
+this backend submits through -- a `SubmitChannel` on one, the device itself on
+the other", and one backend then answered only a three-argument form taking its
+channel and the frame's one-shot. A caller outside a backend has neither and
+should not: which channel a frame submits on, and when, is Mantle's to decide.
+A backend answers this from its device and finds its own channel.
 
 Ordered behind the frame rather than issued immediately: presenting an image the
 GPU has not finished writing shows a torn frame, and nothing reports it.

@@ -42,7 +42,7 @@ via the BDA argument buffer (same as compute kernel arguments).
 - `args`: Arguments passed to the raygen function (buffers, scalars, structs)
 - `width`, `height`, `depth`: Dispatch dimensions (number of rays per dimension)
 """
-function trace_rays!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, tlas::LavaTLAS,
+function trace_rays!(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipeline, tlas::LavaTLAS,
                      args...;
                      width::Integer, height::Integer, depth::Integer=1)
     # Before the one-shot below — see `rt_compiled_for` for why.
@@ -94,7 +94,7 @@ would have drifted: a modelled trace resolves the pipeline at COMPILE and record
 later, so a difference in how the key is built would show up as a second pipeline
 for the same work rather than as an error.
 """
-function rt_compiled_for(bq::VulkanBatchQueue, pipeline::RayTracingPipeline, args)
+function rt_compiled_for(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipeline, args)
     ctx = ctxof(bq)
     invalidate_stale_rt_cache!(pipeline)
     tt_key = Tuple{map(arg_sigtype, args)...}
@@ -119,7 +119,7 @@ The unmodelled form: it packs its arguments into scratch its own one-shot owns
 as it records. Use [`trace!`](@ref) inside a graph, whose arguments live in the
 plan — see `Trace`.
 """
-function trace_rays_indirect!(bq::VulkanBatchQueue, pipeline::RayTracingPipeline,
+function trace_rays_indirect!(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipeline,
                               tlas::LavaTLAS, args...;
                               n_rays::LavaArray{Int32})
     vk_pipeline, raygen_compiled, offsets, byval_sizes = rt_compiled_for(bq, pipeline, args)

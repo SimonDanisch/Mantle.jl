@@ -448,9 +448,9 @@ function readback_window(win::VulkanWindow)
     # The present has to be the submit that carries this copy, not one after it:
     # it waits on the acquire semaphore, which is binary, and a wait here would
     # consume that wait first and leave the present waiting on a semaphore
-    # nothing will signal again. So submit through `present_frame!` and wait on
+    # nothing will signal again. So submit through `submit_and_present!` and wait on
     # the token it answers with.
-    tok = present_frame!(bq, win, frame)
+    tok = submit_and_present!(bq, win, frame)
     waitfor!(bq, tok)
 
     pixels = Matrix{T}(undef, w, h)

@@ -174,7 +174,7 @@ end
 Draw using the given graphics pipeline to the render target.
 Device-side type tuples are inferred automatically from args.
 """
-function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::WindowTarget, vertex_count::Integer;
+function draw!(bq::SubmitChannel{<:VulkanQueue}, pipeline::GraphicsPipeline, target::WindowTarget, vertex_count::Integer;
                args=(), frag_args=(), instances::Integer=1,
                clear_color::Union{Nothing, NTuple{4, Float32}}=(0.0f0, 0.0f0, 0.0f0, 1.0f0))
     win = target.window
@@ -202,7 +202,7 @@ function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::WindowT
     return nothing
 end
 
-function draw!(bq::VulkanBatchQueue, pipeline::GraphicsPipeline, target::OffscreenTarget, vertex_count::Integer;
+function draw!(bq::SubmitChannel{<:VulkanQueue}, pipeline::GraphicsPipeline, target::OffscreenTarget, vertex_count::Integer;
                args=(), frag_args=(), instances::Integer=1,
                clear_color::Union{Nothing, NTuple{4, Float32}}=(0.0f0, 0.0f0, 0.0f0, 1.0f0),
                depth_clear::Union{Nothing, Float32}=1.0f0,
@@ -336,9 +336,17 @@ function presentuntouched!(e::Emitter, win::VulkanWindow)
 end
 
 """
-    present_frame!(bq::VulkanBatchQueue, win::VulkanWindow, frame::OneShot) -> token
+    submit_and_present!(bq, win, frame) -> token
 
-Submit the frame's one-shot and present.
+Submit the frame's one-shot and present. INTERNAL: the portable verb is
+`present_frame!(device, window)`, and this is the machinery under it.
+
+It was a third arity of `present_frame!` itself, which made the exported verb
+mean two different things -- `(device, window)` on Metal and on core's
+`closerun!`, `(channel, window, frame)` here -- so Vulkan never answered the
+portable one and `test_window_portable.jl` failed on a vocabulary gap. A caller
+outside this backend has no one-shot to pass and should not: which channel a
+frame submits on is Mantle's to decide, not the caller's.
 
 One submission, through the same `submit!` everything else goes through, with
 the two extra semaphores a swapchain image needs — wait for the image to be
@@ -350,7 +358,8 @@ It used to take the open batch over and submit it by a second route, with its
 own list of sealed segments and its own bookkeeping of which of them a
 recording had lent it. There is one route now.
 """
-function present_frame!(bq::VulkanBatchQueue, win::VulkanWindow, frame::OneShot)
+function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow,
+                             frame::OneShot)
     win.acquired || error("present_frame!: no image acquired (call acquire_next_image! first)")
     fi = win.current_frame
     tok = submit!(bq, frame;

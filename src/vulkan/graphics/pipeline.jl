@@ -726,7 +726,7 @@ Room for `n` draw commands, allocated so a draw may read them.
 gets, and a buffer without it is a validation error at the draw rather than at
 the allocation, which is a long way from the mistake.
 """
-indirect_buffer(bq::VulkanBatchQueue, n::Integer=1) =
+indirect_buffer(bq::SubmitChannel{<:VulkanQueue}, n::Integer=1) =
     LavaArray{DrawIndirectCommand,1}(undef, (Int(n),);
         bq, extra_usage=UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT))
 

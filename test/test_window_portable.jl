@@ -37,8 +37,14 @@ const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
         @test Mantle.target_extent(w) == (320, 200)
         Mantle.beginframe!(w)
         Mantle.acquire_next_image!(w)
+        # The window hands out a target between acquire and present. Its EXTENT
+        # is `target_extent` above and not a field of the thing handed out: a
+        # `MTLTexture` carries its size, a `VK.ImageView` is a handle and the
+        # extent lives on the image. Asserting `t.width` asked the Metal shape
+        # of every backend, and a vendor-conditional test is not the fix --
+        # `target_extent` is the portable question and is already checked.
         t = Mantle.target_view(w)
-        @test (Int(t.width), Int(t.height)) == (320, 200)
+        @test t !== nothing
         Mantle.present_frame!(Mantle.Device(TESTBACKEND), w)
     finally
         close(w)

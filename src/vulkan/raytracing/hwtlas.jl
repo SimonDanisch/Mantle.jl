@@ -109,8 +109,8 @@ the backend-wide queue the Raycore default `wait_for_gpu!` uses).
 mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
     backend::LavaBackend
 
-    # VulkanBatchQueue for all AS builds and RT dispatches on this VulkanTLAS.
-    bq::VulkanBatchQueue
+    # submit channel for all AS builds and RT dispatches on this VulkanTLAS.
+    bq::SubmitChannel{<:VulkanQueue}
 
     # Geometry (accumulated on push!)
     blas_list::Vector{LavaBLAS}
@@ -169,7 +169,7 @@ Construct an empty VulkanTLAS parametrised on triangle type `Tri`.
 # backend answers with its own concrete type.
 HWTLAS{Tri}(backend::LavaBackend; kw...) where {Tri} = VulkanTLAS{Tri}(backend; kw...)
 
-function VulkanTLAS{Tri}(backend::LavaBackend; bq::VulkanBatchQueue=backend.dispatch_bq) where {Tri}
+function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=backend.dispatch_bq) where {Tri}
     VulkanTLAS{Tri}(
         backend, bq,
         LavaBLAS[], Vector{Tri}[], UInt32[],
@@ -189,7 +189,7 @@ end
 
 Default constructor — narrows to `Triangle{UInt32}`.
 """
-VulkanTLAS(backend::LavaBackend; bq::VulkanBatchQueue=backend.dispatch_bq) =
+VulkanTLAS(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=backend.dispatch_bq) =
     VulkanTLAS{Raycore.Triangle{UInt32}}(backend; bq)
 
 # ============================================================================
@@ -207,7 +207,7 @@ end
 # pin_leaves! stops at VulkanTLAS — its LavaArray contents (`tri_gpu` / `off_gpu`)
 # are already directly exposed as fields on AdaptedAccel, so the walker pins
 # them via that path.  Without this stop, the @generated walker recurses into
-# VulkanTLAS → VulkanBatchQueue → ctx → VulkanBatchQueue → … and blows the stack.
+# VulkanTLAS → submit channel → ctx → submit channel → … and blows the stack.
 #
 # `::Closed`, not one concrete owner. It was the batch alone, from when a batch
 # was the only thing that could own a pin — so a `Recording` fell through to

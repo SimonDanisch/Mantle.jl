@@ -43,7 +43,7 @@ error, not a silent pick of a type some image cannot use.
 # dynamic getproperty that boxes the UInt64 it lands on.
 struct LavaDevice <: Device
     ctx::VkContext
-    bq::VulkanBatchQueue{VkContext}
+    bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
     pool::Pool          # the device owns it; nothing about it reaches the caller
 end
 LavaDevice(ctx, bq) = LavaDevice(ctx, bq, Pool())
@@ -250,7 +250,7 @@ fence(d::LavaDevice) = driver(d.bq).next_timeline
 # quietly is how that was hidden before.
 waitidle(d::LavaDevice) = (flush!(d.bq); waitidle(d.ctx::VkContext))
 
-passed(bq::VulkanBatchQueue, v) = query_timeline(bq) >= v
+passed(bq::SubmitChannel{<:VulkanQueue}, v) = query_timeline(bq) >= v
 
 passed(d::LavaDevice, f) = passed(d.bq, f)
 
@@ -1619,7 +1619,7 @@ adaptor(e::Emitter) = LavaAdaptor(e.owner)
 # At COMPILE, where there is nothing to emit into yet and the adaptor is used for
 # its pure half — `adapt_storage` is a strip, and the pinning is a separate walk
 # — so it has no owner.
-adaptor(::VulkanBatchQueue) = LavaAdaptor(nothing)
+adaptor(::SubmitChannel{<:VulkanQueue}) = LavaAdaptor(nothing)
 
 
 # The portable constructors. A caller writes `Framebuffer(backend, w, h)` and
@@ -1830,7 +1830,7 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         win = only(surfaces).win
         presentready!(e, win)
         seal!(e.owner)
-        return present_frame!(bq, win, e.owner)
+        return submit_and_present!(bq, win, e.owner)
     end
     return submitrecording!(bq, pl.recording, e)
 end
@@ -1887,6 +1887,29 @@ function abandonrun!(dev::LavaDevice, e::Emitter)
     return nothing
 end
 
+"""
+    present_frame!(dev::LavaDevice, win::VulkanWindow) -> token
+
+Present the acquired image, on the portable verb every backend answers.
+
+For a frame nothing recorded into. That is what every caller of the two-argument
+form does -- `test_window_portable.jl` acquires, reads `target_view` and
+presents -- and it is why the transition is `presentuntouched!`: the image is in
+`UNDEFINED` after an acquire, and a frame that DREW is in
+`COLOR_ATTACHMENT_OPTIMAL` and goes through this backend's own `closerun!`,
+which transitions it itself. Vulkan cannot ask an image what layout it is in, so
+the two cases cannot share one transition; if a drawn frame ever needs to reach
+this verb, the window has to record that it was drawn and this has to read it.
+
+The channel comes from the device, which is the whole point of the signature.
+"""
+function present_frame!(dev::LavaDevice, win::VulkanWindow)
+    o = oneshot(dev.bq) do e
+        presentuntouched!(e, win)
+    end
+    return submit_and_present!(dev.bq, win, o)
+end
+
 """A frame that failed after its image was acquired: the image goes back to the
 presentation engine untouched, through the same submit-and-present as a drawn
 frame so the slot's fence and semaphores stay paired. Nothing when the frame
@@ -1899,7 +1922,7 @@ function abandonframe!(dev::LavaDevice, pl::Plan)
         o = oneshot(dev.bq) do e
             presentuntouched!(e, win)
         end
-        present_frame!(dev.bq, win, o)
+        submit_and_present!(dev.bq, win, o)
     end
     return nothing
 end

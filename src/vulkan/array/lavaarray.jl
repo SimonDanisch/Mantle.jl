@@ -50,7 +50,7 @@ end
 # the family every array package has); every path inside the backend that holds
 # a device passes its queue, and `test_no_ambient_device.jl` holds it to that.
 function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
-                        bq::VulkanBatchQueue=vk_context().default_bq,
+                        bq::SubmitChannel{<:VulkanQueue}=vk_context().default_bq,
                         extra_usage::UInt32=UInt32(0),
                         scratch::Bool=false,
                         unified::Bool=false) where {T,N}

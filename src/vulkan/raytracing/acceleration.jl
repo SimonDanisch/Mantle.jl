@@ -176,7 +176,7 @@ as a required parameter. Created by `build_accel!()` which manages the lifecycle
 # `AccelBuildContext` is Mantle's — see `graph/queue.jl`'s neighbour in
 # `raytracing/accel.jl`. Both its fields are portable now that `BatchQueue` is
 # shared, so there was nothing backend-specific left in it.
-const VulkanAccelBuildContext = AccelBuildContext{VulkanBatchQueue{VkContext}}
+const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}}
 
 # Derived accessors so call sites stay readable.
 @inline buildcmd(ctx::VulkanAccelBuildContext)   = ctx.into.cmd
@@ -958,7 +958,7 @@ end
 BLAS device addresses are available immediately after `build_blas` returns
 (even before the GPU build executes), so `build_tlas` can reference them.
 """
-function build_accel!(f, bq::VulkanBatchQueue)
+function build_accel!(f, bq::SubmitChannel{<:VulkanQueue})
     # The builds go into a one-shot of their own, on the timeline like every
     # other submission — it used to be a dedicated command buffer and a fence
     # beside the queue, submitted by a second route. The one-shot opens with
@@ -1109,7 +1109,7 @@ provide per-BLAS geometry. Returns one `LavaBLAS` per input.
 """
 function build_blas_pooled(all_vertices::Vector{Vector{NTuple{3,Float32}}},
                            all_indices::Vector{Vector{UInt32}};
-                           bq::VulkanBatchQueue)
+                           bq::SubmitChannel{<:VulkanQueue})
     n_blas = length(all_vertices)
     n_blas == 0 && return LavaBLAS[]
     @assert length(all_indices) == n_blas
@@ -1273,7 +1273,7 @@ Each primitive must have a `.vertices` field with 3 vertex positions
 
 Primitives on GPU (LavaArray, etc.) are downloaded to CPU automatically.
 """
-function build_blas_from_primitives(bq::VulkanBatchQueue, primitives; opaque::Bool=true)
+function build_blas_from_primitives(bq::SubmitChannel{<:VulkanQueue}, primitives; opaque::Bool=true)
     cpu_prims = to_cpu_vector(primitives)
     n_tris = length(cpu_prims)
 
@@ -1327,7 +1327,7 @@ where `instance_custom_index` = BLAS index (0-based) set by this function.
 """
 function build_hw_accel_from_tlas(tlas;
                                   ctx::VkContext,
-                                  bq::VulkanBatchQueue=ctx.default_bq)
+                                  bq::SubmitChannel{<:VulkanQueue}=ctx.default_bq)
     instances = to_cpu_vector(tlas.instances)
     blas_array = to_cpu_vector(tlas.blas_array)
 

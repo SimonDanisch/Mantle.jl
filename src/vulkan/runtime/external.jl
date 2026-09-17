@@ -92,7 +92,7 @@ the image format. Waits for pending Lava kernels writing `a`, then blocks
 until the copy has landed, so the importer may sample immediately.
 
 Runs as a one-shot submission on the context's secondary compute queue —
-it never interleaves with the VulkanBatchQueue's batched submissions.
+it never interleaves with the submit channel's batched submissions.
 """
 function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     nbytes = length(a) * sizeof(eltype(a))
