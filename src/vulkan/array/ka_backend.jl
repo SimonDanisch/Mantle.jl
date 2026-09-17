@@ -44,10 +44,9 @@ Lava's GPU compute backend: a device and the two queues its work goes out on.
     LavaBackend(dispatch_bq, upload_bq)  # split: enables pipelining
 
 Every spelling PINS its queues when it is constructed, `LavaBackend()` included:
-it reads the default device once, at the call, and never again. It used to store
-`nothing` and resolve the default at every property access, so that a
-`const BACKEND = LavaBackend()` survived `reset_device!`; the price was that
-"which device" was answered by a global on every launch, and a backend handed to
+it reads the default device once, at the call, and never again. The alternative
+is resolving the default at every property access, which answers "which device"
+from a global on every launch and means a backend handed to
 code that also held a second device dispatched on whichever one was current. A
 backend built before a `reset_device!` is dead after it, like every array it
 allocated, and is rebuilt the same way they are.
@@ -63,11 +62,11 @@ LavaBackend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
 
 # The three Mantle verbs that dispatch on the BACKEND rather than on the context.
 #
-# Here and not in `runtime/device.jl` beside their `VkContext` methods, which is
-# where they were written: that file is included seven files before this one, so
-# each signature named a type that did not exist yet. A method's argument types
-# are resolved when it is DEFINED — unlike a function body, which is why the
-# `vk_context(b)` call below is fine and the `::LavaBackend` above it was not.
+# Here and not in `runtime/device.jl` beside their `VkContext` methods: that file
+# is included seven files before this one, so a signature there cannot name
+# `LavaBackend` yet. A method's argument types are resolved when it is DEFINED,
+# unlike a function body — which is why the `vk_context(b)` call below is fine
+# where an annotation would not be.
 #
 # `supports_batch_queue` vs `supports_graphics`: having a queue to batch onto is
 # a separate question from being able to rasterise. See `graph/queue.jl` and
@@ -88,12 +87,9 @@ the single-device case; what has to stop is code *depending* on it, because a
 global cannot answer "which device" once there are two.
 
 **No new state.** Both are derived from what these objects already carried:
-the channel's `ctx` for a backend and `Buffer.ctx` for an array. That is worth
-saying because it was briefly got wrong in the other direction — a `ctx` field
-was added to `LavaBackend` on the belief that no path existed, which came from
-reading the first half of `VulkanQueue`'s field list, where `ctx::Any` sits
-sixty-odd lines down. A second copy of a fact the queue already holds can only
-ever disagree with it, so this derives instead.
+the channel's `ctx` for a backend and `Buffer.ctx` for an array. `VulkanQueue`
+already holds it — `ctx::Any`, sixty-odd lines into its field list — and a
+second copy of a fact the queue holds can only ever disagree with it.
 
 """
 vk_context(b::LavaBackend) = (ctxof(b.dispatch_bq))::VkContext
@@ -170,9 +166,9 @@ function KA.copyto!(::LavaBackend, A, B)
 end
 
 # Adapt: convert Array ↔ LavaArray, ON THIS BACKEND'S DEVICE. `Adapt.adapt(backend, x)`
-# is how RayMakie uploads a scene and Hikari its adapted accel; it used to go
-# through the type-based `Adapt.adapt(LavaArray, a)`, which allocates on the
-# process default device whatever backend was asked.
+# is how RayMakie uploads a scene and Hikari its adapted accel. On the BACKEND
+# and not the type: `Adapt.adapt(LavaArray, a)` allocates on the process default
+# device whatever backend was asked.
 Adapt.adapt_storage(b::LavaBackend, a::Array) = LavaArray(a; bq = b.dispatch_bq)
 
 """Allocate a LavaArray with INDEX_BUFFER_BIT for use as a Vulkan index buffer,
@@ -219,42 +215,24 @@ Adapt.adapt_storage(::Type{<:LavaArray}, a::LavaArray) = a
 Largest workgroup Lava will ask the device for — its own
 `maxComputeWorkGroupInvocations`. Requesting more throws.
 
-This was a module-level `Ref(1024)` whose docstring said exactly the sentence
-above while being a hardcoded constant, and before that it sat at **256** on a
-diagnosis that was wrong in an instructive way and is worth keeping written down.
+Read from [`DeviceCaps`](@ref) rather than held as a constant: the limit differs
+between devices, so a process-wide value answers one device's question for all
+of them.
 
-The recorded claim was that "above 256 this driver silently runs fewer
-invocations than the shader declares" — a workgroup of 512 wrote half its output,
-1024 wrote a quarter, no error anywhere. Everything about it pointed at hardware:
-`spirv-val` passed, the SPIR-V declared `LocalSize 512 1 1`, the driver reported
-identical Register Count for a body that failed and one that did not, and it was
-body-dependent (64 simultaneously live values failed, 32 and 128 did not).
+**The pipeline cache key must hash every byte.** `Base.hash` on a large `Vector`
+*samples* elements, and the 256- and 512-wide modules of one kernel differ at
+exactly one byte — the `LocalSize` operand — so they collide: the 512 launch
+looks up the 256 pipeline, dispatches a 256-thread shader over a grid computed
+for 512, and writes `256/wg` of its output, with no error anywhere. Whichever
+size compiled first wins, and whether two modules collide depends on which bytes
+the sampling skipped. [`spirv_content_hash`](@ref) reads all of them.
 
-**None of it was the device.** A kernel reading `lava_local_invocation_index()`
-with an unconditional store reports every lane running and writing at 256, 384,
-512, 768 and 1024. The real cause was one line in `get_compute_pipeline`:
+That generalises past workgroups: any two SPIR-V modules differing only in bytes
+a sampling hash skips would share a pipeline, which is a silent wrong-results
+bug for any pair of instantiations differing in a literal.
+`test/test_workgroup_limit.jl` pins every size on both launch spellings and
+asserts that two one-byte-different modules do not share a cache key.
 
-    cache_key = hash((spirv_bytes, ...))
-
-`Base.hash` on a large `Vector` *samples* elements rather than reading all of
-them. The 256- and 512-wide modules of one kernel differ at **exactly one byte**
-— the `LocalSize` operand — and collide. So the 512 launch looked up the 256
-pipeline, dispatched a 256-thread shader over a grid computed for 512, and wrote
-`256/wg` of its output. Whichever size compiled first won, which is the whole of
-the "order dependence"; whether a given body's two modules happened to collide is
-the whole of the "body dependence"; and adding an unrelated store "fixed" it by
-changing enough bytes to miss the collision.
-
-See [`spirv_content_hash`](@ref), which reads every byte. `test/test_workgroup_limit.jl`
-pins the coverage at every size on both launch spellings, and asserts directly
-that two one-byte-different modules no longer share a cache key.
-
-The lesson generalises past workgroups: **any** two SPIR-V modules differing only
-in bytes the sampling hash skips shared a pipeline. That is a silent
-wrong-results bug for any pair of kernel instantiations that differ in a literal.
-
-See [`DeviceCaps`](@ref), which is where it lives now — the limit differs between
-devices, so a process-wide `Ref` answered one device's question for all of them.
 """
 workgroup_limit(ctx::VkContext) = caps(ctx).workgrouplimit
 

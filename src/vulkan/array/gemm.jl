@@ -52,10 +52,8 @@ const GEMM_MAXBLOCK = 4    # largest register block `@nexprs` is unrolled for
 # Vulkan backend (`ggml-vulkan/vulkan-shaders/mul_mm.comp`, MIT) does exactly
 # that, and so does cuBLAS, which reaches 44.6 TFLOP/s on these shapes.
 #
-# **The first port of it was a wash, and the reason was measurable.** With
-# `VK_KHR_pipeline_executable_properties` the driver reports, per pipeline,
-# registers and workgroup memory — and workgroup memory is where NVIDIA puts a
-# cooperative matrix it cannot keep in registers:
+# NVIDIA puts a cooperative matrix it cannot keep in registers into workgroup
+# memory, and `VK_KHR_pipeline_executable_properties` reports both per pipeline:
 #
 #                       registers   shared/WG   of which ours
 #   direct 4×4 block      255 (cap)     25344         0
@@ -79,9 +77,8 @@ A staged-GEMM tiling: `(STM, STN, WM, WN, BK, PAD)`.
 
 The three levels of `mul_mm.comp`'s block -> warp -> tile, as parameters rather
 than as constants, because which one wins is a property of the device and not of
-the algorithm — and because the previous version hardcoded its `@nexprs` counts
-to the value it shipped with, so the "4 measured worse" recorded beside the
-constant had never actually run a 4×4 warp tile.
+the algorithm. The `@nexprs` counts follow the tile constants rather than being
+written out, so changing one actually changes what runs.
 
   * `WM × WN` subgroups per workgroup, arranged with `WM` down the M axis;
   * each subgroup owns `STM × STN` cooperative-matrix tiles;
@@ -254,22 +251,10 @@ on the shared store are not the explanation either:
     PAD = 16                         38.74    36.21
     PAD = 24                         43.03    40.34
 
-**`PAD` had never been swept, and 24 beats 8 on EVERY shape in the
-microbenchmark — and buys NOTHING in the model.** Per shape, interleaved, cuBLAS
-beside it:
+`PAD = 24` beats 8 on every shape in the microbenchmark by 2-8% and buys
+nothing in the model, which is why 8 is what ships.
 
-    shape                  PAD=8    PAD=24
-    2304 x 4096 x  576     41.53     43.65   +5.1%
-    1728 x 4096 x  576     41.79     43.38   +3.8%
-     576 x 4096 x  576     36.12     39.03   +8.1%
-     288 x 16384 x 1152    39.65     41.10   +3.7%
-    1152 x 16384 x  288    33.21     33.92   +2.1%
-
-Never a regression, on the tiling that serves 56.5% of the encoder's GEMM
-arithmetic — so it was shipped, and SAM 2's encode came back **74.50 ms against
-74.13/74.37 before it**, i.e. nothing, or slightly worse. Reverted.
-
-**That gap is the finding, and it applies to every GEMM number in this file.**
+**That gap applies to every GEMM number in this file.**
 The microbenchmark runs one GEMM eight times over the same operands, so both arms
 work out of a warm L2; the model streams different weights through every one of
 its 195 calls. A change that helps the L2-resident regime need not help the
@@ -867,9 +852,9 @@ const GEMM_STAGED_DB_KERNELS = Dict{GemmTiling,Any}()
 """
 4-wide-staging twins of `GEMM_STAGED_V2N_KERNELS`: 64-bit shared accesses.
 
-The staging width turned out to be the load-bearing thing in this kernel —
-scalar to `vec2` is **+45% to +54%** per shape against cuBLAS measured beside it,
-not the +9% recorded when `vec2` landed. SPIR-V vectors stop at four components,
+The staging width dominates this kernel: scalar to `vec2` is **+45% to +54%**
+per shape against cuBLAS measured beside it. SPIR-V vectors stop at four
+components,
 so this is the last notch available without changing how the tile is addressed.
 
 Generated only for tilings where every width divides exactly (`LDA`, `LDB`, `BM`
@@ -891,8 +876,7 @@ Interleaved, cuBLAS beside it, TFLOP/s:
     1152 x 16384 x  288    34.52    34.26    -0.8%
 
 **`vec2` is the sweet spot.** Scalar to `vec2` is +45% to +54%; `vec2` to `vec4`
-is -4%. Whatever the first step bought, it was not simply "wider is better", or
-the second would have continued it. Shared memory and register counts are
+is -4%, so this is not "wider is better". Shared memory and register counts are
 unchanged between the two, so it is not residency.
 
 Kept, default off, because the Lava-side generalisation it forced is a real fix
