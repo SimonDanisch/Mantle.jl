@@ -89,10 +89,9 @@ the argument regions its dispatches read, the descriptor sets they bind and a
 strong reference to every resource they name stay alive until `release!`,
 because until then the recording may be submitted again.
 
-This replaced `CapturedSequence`, which held a LIST of command buffers because
-the thing that produced it was the open batch's `submit!`: a capture ran the
-ordinary recorder and collected whatever segments the queue's split and submit
-thresholds happened to cut. Measured on Hikari's fused sample:
+One command buffer and not a list: a capture that runs the ordinary recorder
+collects whatever segments the queue's split and submit thresholds happen to
+cut. Measured on Hikari's fused sample:
 five command buffers per recording, decided by a threshold about when to
 submit, applied while nothing was being submitted.
 """
@@ -314,9 +313,9 @@ CoopMat2Caps() = CoopMat2Caps(false, false, false, false, false, false, false, f
 The SM/CU count and warps per SM, or `(0, 0)` where the device will not say.
 
 A grid that does not fill the device is the dominant cost on small shapes — SAM
-2's decode runs one attention at 8 workgroups on 48 SMs — so "how many workgroups
-before the device is busy" is a number kernels need, and before it was queried
-they hardcoded it.
+2's decode runs one attention at 8 workgroups on 48 SMs — so "how many
+workgroups before the device is busy" is a number kernels need queried rather
+than hardcoded.
 
 Vendor coverage follows llama.cpp's `ggml-vulkan.cpp:6138-6146`, which is the
 same question asked by the same kind of code. Neither extension is *enabled* on
@@ -412,7 +411,7 @@ mutable struct VkContext
     # compute+transfer. Used by the explicit-queue refactor for upload_bq.
     async_queue_family_index::Union{Nothing, UInt32}
     async_queue_count::Int
-    # Per-device state (was previously a global Ref).
+    # Per-device state.
     # Set to `true` after vkQueueSubmit returns DEVICE_LOST. Finalizers
     # holding a ref to the context check this to skip Vulkan calls on
     # invalid handles.
@@ -496,9 +495,8 @@ mutable struct VkContext
     # `vkCmdPipelineBarrier`, resolved for THIS device.
     #
     # Device function pointers are per device — `vkGetDeviceProcAddr` returns a
-    # pointer valid only for the device it was asked about. This was a module
-    # global (`CMD_PIPELINE_BARRIER_FPTR`), so creating a second context
-    # overwrote it, and the FIRST device's command buffers were then recorded
+    # pointer valid only for the device it was asked about. As a module global
+    # a second context overwrites it, and the FIRST device's command buffers are then recorded
     # through the SECOND device's driver.
     #
     # That is an immediate segfault rather than a wrong answer, which makes it
@@ -522,10 +520,9 @@ mutable struct VkContext
     # also survives `reset_device!`, which builds a new context, so entries
     # from before a reset can never be handed to after it.
     #
-    # It survives as an identity — for logging, and for the probe's assertion
-    # that two contexts are distinct — but it is no longer a cache key. It was
-    # one, and this comment used to argue that keying was as good as ownership
-    # because the cached value types are defined in files included after this
+    # An identity — for logging, and for the probe's assertion that two contexts
+    # are distinct — and NOT a cache key. Keying by it is not ownership: the
+    # cached value types are defined in files included after this
     # one, so a field would have to be `Any` and cost inference on a lookup per
     # dispatch. The premise was true and the conclusion was wrong: the fix is to
     # move the nine type definitions ahead of this file (`coretypes.jl`), not to
@@ -837,17 +834,16 @@ end
 """
 Bind the process-wide default context.
 
-What the emitter may declare for a device is NOT pushed from here any more: it
-used to be a process global the compiler read, so a kernel compiled for a second
-device was shaped by whichever device was bound. The record travels with the
-context (`ctx.features`) and with every compile job the context runs.
+What the emitter may declare for a device is not pushed from here. As a process
+global the compiler reads, a kernel compiled for a second device is shaped by
+whichever device is bound; the record travels with the context (`ctx.features`)
+and with every compile job the context runs.
 """
 function bind_context!(ctx::Union{Nothing, VkContext})
     VK_CONTEXT_REF[] = ctx
     # The frozen cache's miss logging, for the same reason: the half of that
-    # cache the compiler consults is `compiler/frozen_spirv.jl`, and it was
-    # reading `ctx.diag.frozen_log_misses` through `VK_CONTEXT_REF[]` for a
-    # `println`. It is a boolean, so it is pushed like one.
+    # cache the compiler consults is `compiler/frozen_spirv.jl`, which needs
+    # `ctx.diag.frozen_log_misses` for a `println`. A boolean, pushed as one.
     FROZEN_LOG_MISSES[] = ctx !== nothing && ctx.diag.frozen_log_misses
     return ctx
 end
@@ -976,11 +972,10 @@ function reset_device!(; select = defaultselector(),
     # hold a strong ref to it, and their finalizers gate every Vulkan call on
     # `device_lost` — so marking it here is what makes that gate true.
     #
-    # It used to be assumed rather than set, and the assumption only held on the
-    # path that *caused* it: a reset after `ERROR_DEVICE_LOST` finds the flag
-    # already true, while a voluntary `reset_device!()` left it false. Then
-    # dropping the ref below made the old context garbage — and its buffers
-    # garbage in the SAME collection, where Julia does not order finalizers. Run
+    # Set and not assumed: a reset after `ERROR_DEVICE_LOST` finds the flag
+    # already true, while a voluntary `reset_device!()` does not. Dropping the
+    # ref below then makes the old context garbage — and its buffers garbage in
+    # the SAME collection, where Julia does not order finalizers. Run
     # the context's first and `VK.Device`'s own finalizer destroys the
     # device; the buffer's `vk_free!` then calls `query_timeline` on it and the
     # driver takes a SIGSEGV inside `vkGetSemaphoreCounterValue`.
@@ -1115,7 +1110,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     #   best_practices → API-misuse / perf warnings.
     #   printf         → NonSemantic.DebugPrintf output from `@lava_printf`.
     # All are very slow; use one or a combination as needed for triage. See
-    # `DebugConfig` — it enforces the two rules that used to be warnings here.
+    # `DebugConfig` — it enforces the two rules rather than warning about them.
     #
     # `gpu_assisted` and `sync_val` below record what was ACHIEVED, which is not
     # the same as `debug`, what was asked for: the extension may be missing.
@@ -1779,9 +1774,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # sent the first device's command buffers through the second device's driver.
     ctx.cmd_pipeline_barrier_fptr = cmd_barrier_fptr
     # The pool belongs to this context, so its debug setting is applied here
-    # rather than by the caller. It used to be a separate `mempolicy(ctx).disabled =`
-    # line every caller had to remember after the reset — and forgetting it left
-    # GPU-AV blind to exactly the sub-pool overruns it was turned on to find.
+    # rather than by the caller: a separate `mempolicy(ctx).disabled =` line
+    # after the reset is one a caller can forget, which leaves GPU-AV blind to
+    # exactly the sub-pool overruns it was turned on to find.
     mempolicy(ctx).disabled = debug.pool_disabled
     return ctx
 end
@@ -2172,9 +2167,8 @@ function setup_debug_messenger(instance::VK.Instance, ring::ValidationRing,
     # it's enabled; otherwise stay at WARNING to avoid info-level chatter.
     #
     # Read from the config this device was built with, not from the environment.
-    # As `LAVA_DEBUG_PRINTF` it was the one env read that happened AFTER the
-    # instance existed, so exporting it mid-session moved the severity floor on
-    # a device whose instance had no printf feature — a subscription to messages
+    # An env read happening AFTER the instance exists moves the severity floor
+    # on a device whose instance has no printf feature — a subscription to messages
     # that could never arrive.
     min_sev = debug.printf ?
         VK.DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT :
