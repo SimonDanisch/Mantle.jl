@@ -10,12 +10,12 @@ the four verbs that open and close a recording and a run, and the capability
 table. `src/metal/` fills in the same list, and `graph/backend.jl` is where it
 is declared.
 
-That is a correction and not a description of the first draft, which overrode
-`Mantle.recordplan!` and `Mantle.execute!` — core's orchestration — and carried
-a copy of core's run body plus a `WeakKeyDict` state machine to decide when to
-capture. All of it is gone: the state machine existed to work around a problem
-that disappears once kernels are compiled in [`compile_dispatch`](@ref), which
-is the verb Mantle already has for exactly that.
+Overriding `Mantle.recordplan!` and `Mantle.execute!` — core's orchestration —
+is what this backend does NOT do, and neither does it carry a copy of core's run
+body or a `WeakKeyDict` state machine to decide when to capture: that state
+machine works around a problem that disappears once kernels are compiled in
+[`compile_dispatch`](@ref), which is the verb Mantle already has for exactly
+that.
 
 **Written against the merged `sd/lava-refactor`** (`be9e117`), which matters for
 one method in particular. That commit deleted `resource_moved!`/`arena_moved!`
@@ -541,11 +541,10 @@ Mantle.devicesized(::ROCmCompiledDispatch) = false
 
 # ── a CALL ───────────────────────────────────────────────────────────────────
 #
-# `ROCmCallDispatch` was here and is core's `Mantle.Call` now. It was this with
-# an `ndrange` keyword bolted on, for the old convention where a callable
-# kernel was launched as `body(args...; ndrange)`, and it became unreachable the
-# moment `buildskernel` started routing every non-`@kernel` to the
-# KernelInterface path.
+# A call is core's `Mantle.Call`, and there is no `ROCmCallDispatch`: that would
+# be this with an `ndrange` keyword bolted on, for a convention where a callable
+# kernel is launched as `body(args...; ndrange)`, and it is unreachable with
+# `buildskernel` routing every non-`@kernel` to the KernelInterface path.
 #
 # Nothing about a call is this backend's, which is why the type is not:
 # `compile_dispatch` hands a call to core's `bake` and what comes back runs
@@ -569,9 +568,9 @@ Compile a macro-free kernel through `KernelInterface`.
 `KI.auto_launch_sizes` is the launch configuration. Both happen HERE and neither
 happens per run: a capture cannot contain host work, and a replay has none to do.
 
-**This replaced `hipcompile`, which was 40 lines of this file doing it by hand,
-and the hand version was wrong.** It read whether a workgroup size had been
-requested off the value `KA.launch_config` RETURNED, and that call substitutes a
+**Not 40 lines of this file doing it by hand.** Reading whether a workgroup size
+was requested off the value `KA.launch_config` RETURNED is wrong, because that
+call substitutes a
 default of its own for a `DynamicSize` kernel — so the occupancy autotune never
 ran, and 1,014 of SAM 2.1's broadcast kernels replayed in the wrong group shape
 for 29% of the encoder (647.3 ms recorded against 454.9 eager; 460.8 after).
@@ -851,7 +850,7 @@ Refuse to record a plan whose resources have moved since it was compiled.
 
 `compile_dispatch` resolves each argument ONCE, at `Pipelines` time, and a
 compiled dispatch holds the resulting `ROCArray` — so a `resize!` that relocates
-a persistent buffer leaves it holding the old storage. Core invalidates the
+a persistent buffer leaves it holding the vacated storage. Core invalidates the
 RECORDING on a move (see [`Mantle.patchable`](@ref)) and `run!` records again,
 but re-recording walks the same compiled dispatches and captures the same stale
 address.
@@ -970,12 +969,11 @@ them.
 core throws the recording away on a move instead. It costs one walk at a
 `resize!` or an arena growth and nothing per run.
 
-This replaced a pair of `resource_moved!`/`arena_moved!` methods that walked the
-pool's own listener list and invalidated by hand. Those hooks are gone upstream,
-and the version of this backend that still defined them was not overloading
-anything: it was DEFINING two functions nothing called, so a move left the graph
-reading the old storage with nothing said. Which is the exact bug the hooks were
-removed for, reproduced by keeping them.
+There are no `resource_moved!`/`arena_moved!` methods here walking the pool's
+own listener list and invalidating by hand. Core declares no such hooks, so
+defining them here defines two functions nothing calls, and a move then leaves
+the graph reading freed storage with nothing said: the exact bug the hooks would
+be there to prevent.
 """
 Mantle.patchable(::ROCmDevice) = false
 

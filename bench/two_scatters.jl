@@ -1,15 +1,11 @@
 import Mantle
 using GeometryBasics, LinearAlgebra, KernelAbstractions
 
-# `using Lava` is gone (phase 2.8). This file is a benchmark scene: shaders, a
-# graph and a window, all of it portable — it named a backend only because the
-# shader intrinsics used to come from one, and they come from Mantle now.
-#
-# The note that stood here said Scalar, Buffer and draw! were each exported by
-# more than one of Mantle, Lava and StaticArrays and had to be qualified. With
-# the backend out of the picture that clash is gone too, and the observation it
-# ended on — "a name that cannot be `using`-ed alongside the backend it drives
-# is a poor name" — stopped being a problem rather than being solved.
+# No `using Lava`. This file is a benchmark scene: shaders, a graph and a
+# window, all of it portable, and the shader intrinsics come from Mantle. Naming
+# a backend here would also bring back the clash where `Scalar`, `Buffer` and
+# `draw!` are each exported by more than one of Mantle, Lava and StaticArrays
+# and every use has to be qualified.
 const M = Mantle
 
 const W, H = 1000, 750

@@ -23,8 +23,8 @@ include(joinpath(@__DIR__, "targets.jl"))
 Rebuild the default device with sync validation on. Call it before anything here.
 
 Validation is a property of the `VkInstance`, so it is chosen when the device is
-built and cannot be switched on afterwards — which is also why the seven `LAVA_*`
-environment variables this file used to ask for are gone. **Every `LavaArray`
+built and cannot be switched on afterwards, which is also why there are no
+`LAVA_*` environment variables to ask for. **Every `LavaArray`
 alive becomes invalid**, so this goes first, before any of the builders below.
 """
 syncdevice!() = Mantle.reset_device!(debug = Mantle.DebugConfig(sync_val = true))

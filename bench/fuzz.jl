@@ -100,9 +100,9 @@ function check(dev, seed; n = 4096, passes = 12, policy = M.Overlap())
     reference = once(u)
     got = once(s)
 
-    # What coalescing removed, measured rather than guessed at. `passes - 1` was
-    # the old proxy for "every barrier there could be", and it undercounts: a plan
-    # is replayed, so the first pass needs one against the previous frame too.
+    # What coalescing removed, measured rather than guessed at. `passes - 1` as
+    # a proxy for "every barrier there could be" undercounts: a plan is
+    # replayed, so the first pass needs one against the previous frame too.
     # Comparing against the same graph compiled with `coalesce = false` asks the
     # question the number is for, and does not move when a mask gets wider.
     (seed = seed,

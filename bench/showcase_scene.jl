@@ -179,14 +179,14 @@ end
 end
 
 # One increment per instance and `ndrange` is `NINST`, so `slot` cannot exceed
-# the list — unless a frame's clear never ran, which is what used to happen:
-# `present_frame!` submitted only the last command-buffer segment, so a split
+# the list — unless a frame's clear never ran, which is what a split submission
+# causes: presenting only the last command-buffer segment means a split
 # mid-frame dropped everything recorded before it. The counter then carried over
 # and the write walked off the end into whatever the pool put next, which here is
 # the light buffers: the crystals collapsed to the origin and stopped emitting.
 #
-# `slot` was bounded here for a while. That is gone on purpose. The bound could
-# only ever fire when something upstream was already broken, so keeping it meant
+# `slot` is deliberately NOT bounded here. The bound could only ever fire when
+# something upstream was already broken, so keeping it means
 # a demo that quietly rendered a wrong scene instead of a demo that shows the
 # bug — and surfacing infrastructure bugs is what this file is for.
 @kernel function cull!(visible, counter, @Const(centers), vp::AbstractVector{Mat4f})
@@ -718,8 +718,8 @@ end
 # Where the lights live, drawn HERE with the rest of the scene rather than
 # inside `showcase_plan`.
 #
-# It was inside, so every call to `showcase_plan` drew a fresh set and two plans
-# built in one process were two different scenes — which is not what "build the
+# Inside, every call to `showcase_plan` would draw a fresh set and two plans
+# built in one process would be two different scenes — which is not what "build the
 # same frame for a second target" should mean, and it makes the two drivers
 # impossible to compare. Everything else the scene is made of is already fixed
 # by the `Random.seed!(9)` above; this belongs with it.
@@ -743,8 +743,8 @@ Build every resource, every pass and the compiled plan.
 That is the ONLY thing the two differ by — the twenty passes, the shaders and
 the scene are shared, so a change to any of them lands on both.
 
-`profile` is OFF by default. It used to be on, which was free when the only
-backend answered per-pass timings from timestamp queries — a backend without
+`profile` is OFF by default. On, it is free only where a backend answers
+per-pass timings from timestamp queries — a backend without
 them answers by submitting and waiting at every pass boundary, and that turns
 a pipelined frame into a serial one. `M.timings(S.plan)` needs it; a frame loop
 does not.
