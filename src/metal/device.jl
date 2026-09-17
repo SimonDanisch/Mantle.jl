@@ -63,11 +63,9 @@ reuse costs a device sync — but it is the honest answer to "has the GPU finish
 with these bytes" from a queue this backend cannot observe. An `MTL4Queue` can
 answer it properly, because there Mantle does own the submission.
 
-DELETED with the split: `event::MTLSharedEvent` and `recording::Bool`. Nothing
-read either. The event was kept "for the hardware ray tracing path", which
-builds its own command buffer off `mtl` and waits on it directly; `recording`
-was to have made `fence` conservative while that command buffer was open, and
-never got a reader.
+No `MTLSharedEvent` and no `recording` flag: the hardware ray tracing path
+builds its own command buffer off `mtl` and waits on it directly, and this
+timeline is already conservative.
 """
 mutable struct LegacyQueue
     # THE queue. One per device, Mantle's, and the only one anything on this
@@ -391,7 +389,7 @@ function rawalloc(d::MetalDevice, ::Images, bytes::Int, storage)
     desc.storageMode = storage === Metal.PrivateStorage ? MTL.MTLStorageModePrivate :
                                                           MTL.MTLStorageModeShared
     desc.type = MTL.MTLHeapTypePlacement
-    # DELETED in phase 1.8: the reason given for `Tracked`. See `metal/ka.jl`.
+    # `Tracked`, for the reason `metal/ka.jl` gives.
     desc.hazardTrackingMode = MTL.MTLHazardTrackingModeTracked
     heap = MTL.MTLHeap(d.dev, desc)
     heap === nothing && throw(OutOfMemoryError())
@@ -423,9 +421,8 @@ fence(d::MetalDevice) = fence(d.queue)
 passed(d::MetalDevice, f) = passed(d.queue, f)
 waitfor(d::MetalDevice, f) = waitfor(d.queue, f)
 
-# function whose first line is `q.next += 1`. Whether a fence is a read or an
-# allocation is phase 2.2's question, since it is the same question as what a
-# submission holds.
+# Asking a `LegacyQueue` for a fence ADVANCES it: this counts retirements, so
+# `q.next += 1` is the whole of what a new fence is here.
 function fence(q::LegacyQueue)
     q.next += UInt64(1)
     return q.next

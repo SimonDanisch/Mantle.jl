@@ -639,8 +639,8 @@ this run has to say, close it. A plan with a recording says only its host
 stores and address patches — in a FRONT the backend opens only when there is
 something to put in it, so a run with nothing pending hands over exactly the
 recording — and the recording follows in the same submission. A plan without
-one is walked into the run, pass by pass: an interpreted backend always, a
-windowed plan on any backend until step 9 records those too.
+one is walked into the run, pass by pass: an interpreted backend always, and a
+windowed plan on any backend.
 
 Never records. A recordable plan on a recording backend that was not
 `record!`ed is refused here.
