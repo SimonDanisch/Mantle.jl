@@ -844,9 +844,8 @@ Mantle's portable viewport verb: plain numbers in, viewport AND the scissor it
 implies out.
 
 The five-argument form is the one `graphics/commands.jl` declares, and it exists
-so a caller never has to build a `VK.Viewport`/`VK.Rect2D` — RayMakie used to,
-which made every overlay draw a Vulkan-only line of code in a package that is
-supposed to be portable.
+so a caller never has to build a `VK.Viewport`/`VK.Rect2D`, which would make
+every overlay draw a Vulkan-only line of code in a portable package.
 
 The scissor is derived rather than passed because the clamping below is not a
 choice: Vulkan rejects a negative offset, and a flipped viewport (negative

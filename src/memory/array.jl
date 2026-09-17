@@ -1,11 +1,10 @@
 # A typed handle on a region of a pool block. Backend-independent, on purpose.
 #
-# Mantle used to reach for the backend's array type — `LavaArray` for the buffer
-# arena — and suballocate inside it. That stacked two allocators AND made the
-# ownership question unanswerable from here: whether a `LavaArray` built over an
-# existing buffer frees that buffer on GC is Lava's business, and the answer
-# decided whether Mantle's memory would be handed back to Lava's pool by the
-# finalizer thread.
+# Reaching for a backend's array type and suballocating inside it stacks two
+# allocators AND makes the ownership question unanswerable from here: whether an
+# array built over an existing buffer frees that buffer on GC is the backend's
+# business, and the answer decides whether Mantle's memory is handed back to the
+# backend's pool by the finalizer thread.
 #
 # Owning the type removes the question rather than answering it. Ownership is
 # stated here, once, and it is not negotiable per backend:
@@ -16,9 +15,8 @@
 # finalizer, and cannot race the GC thread — which is the failure mode this
 # codebase has already paid for three times.
 #
-# This is also the direction of travel: Lava's high-level surface moves here over
-# time and Lava becomes the mechanism underneath, so the array type belonging to
-# Mantle is where it was always going to end up.
+# Lava's high-level surface moves here over time and Lava becomes the mechanism
+# underneath, so this is where the array type belongs.
 
 """
     DeviceArray{T,N}(region, dims)
@@ -100,10 +98,9 @@ out of the backend: `gemm.jl`, `fft.jl`, `gemv.jl` and `gemm_cm2.jl` are ~4000
 lines of KernelAbstractions with a single-digit number of Vulkan references each,
 and every one of them is a capability query like this. What is NOT ready is the
 dispatch: they are written on `::LavaArray`, and widening that to
-`::AbstractGPUArray` today would make Mantle pirate `LinearAlgebra.mul!` for
-every GPU array package in the session. That widening wants a second backend to
-be designed against, which is what step 5's "prove a vendor override works" is
-for.
+`::AbstractGPUArray` would make Mantle pirate `LinearAlgebra.mul!` for every GPU
+array package in the session. Widening it wants a second backend to be designed
+against.
 """
 workgrouplimit(x) = caps(KernelAbstractions.get_backend(x)).workgrouplimit
 
@@ -160,8 +157,8 @@ coopmatgemm(x) = caps(KernelAbstractions.get_backend(x)).coopmat
 
 A mutable device array holding a copy of `data`.
 
-The portable spelling of what used to be written `LavaArray(data)` at call
-sites that had no business naming one backend's array type. A backend that has
+The portable spelling, for the call sites that have no business naming one
+backend's array type. A backend that has
 something better than "allocate and copy" — pooled storage, a capacity-aware
 `resize!` — provides its own method; this fallback is correct for any KA
 backend and is what a new one gets before it bothers.

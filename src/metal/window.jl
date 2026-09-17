@@ -168,8 +168,8 @@ are in POINTS and its drawables are in PIXELS, so a layer that is never told
 keeps handing out the size it was made with and the display scales it up.
 
 Only the surface moves here. Every attachment that FOLLOWS the surface moves
-when `refit!` asks it to, and the plan is recompiled because the placement it
-had was for the old size — which is why `run!` refits right after
+when `refit!` asks it to, and the plan is recompiled because its placement was
+made for the previous size, which is why `run!` refits right after
 `beforeframe!` has polled, resized and acquired, and before anything is
 recorded: a half-recorded frame holding the old offsets is what that order
 rules out.

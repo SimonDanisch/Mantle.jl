@@ -85,9 +85,9 @@ Throw if a `Ref` is anywhere in a dispatch's, draw's or trace's arguments —
 nested in a tuple or a struct as much as at the top, because a `Ref` inside a
 camera struct is the case a renderer actually had.
 
-A `Ref` used to mean "read this again every run", and honouring that cost the
-argument ring: 602 host stores per run on Hikari's fused sample to move 268
-bytes, into memory an in-flight submission could still be reading. Nothing
+A `Ref` as "read this again every run" costs an argument ring: 602 host stores
+per run on Hikari's fused sample to move 268 bytes, into memory an in-flight
+submission could still be reading. Nothing
 rewrites argument memory after `record!` now, so there is nothing left for a
 `Ref` to mean: a value that changes between runs is a [`GPURef`](@ref), stored
 with `ref[] = x`, and a value that does not is passed as itself. Refusing it at
@@ -152,31 +152,22 @@ touch!(g, x) = (resourceid(g, x); x)
 
 # ── recording an ordinary kernel launch into a pass ──────────────────────────
 #
-# The capture path was HERE, and is gone: `RECORDING_PASS`, `recordingpass`,
-# `record_into`, `LaunchPasses`, `capture_launch!`, `capture_call!`, `recordarg`,
-# `usagekey`, `useleaves!`, `usefields!` and `Rebound`, deleted 2026-09-15.
+# There is no CAPTURE path: a graph is declared, never collected from a scope
+# around running code. What a scope costs is what declaring avoids:
 #
-# It let a caller that drives an existing kernel library get a graph without
-# writing one: open a scope, and the backend's launch checks it. The reason it
-# goes is that the only caller was code we own. `DNNKernels` has the whole ATen
-# graph — every op, its inputs, its output, their shapes and their live ranges —
-# and was executing it while a scope collected the launches, which cost exactly
-# what it was built to avoid:
-#
-#   * a pass per launch, with `useleaves!` declaring every reachable array
+#   * a pass per launch, with every reachable array declared
 #     `read = true, write = true`, because by interception time the operand and
 #     the destination are indistinguishable. Two passes that only READ the same
-#     weight serialised.
-#   * passes discovered by RUNNING, so placement could not happen before the
-#     ops ran — which is why `DNNKernels` grew its own placer, its own bump
-#     arena for op scratch, and 17 loose `KA.allocate` sites.
-#   * `usagekey` mapping a view back to its storage: recovering the parent a
-#     declared graph states outright.
+#     weight serialise.
+#   * passes discovered by RUNNING, so placement cannot happen before the ops
+#     run, and the caller needs a placer and a scratch arena of its own.
+#   * a view to be mapped back to its storage, which is the parent a declared
+#     graph states outright.
 #
-# Declared, none of that exists. The kernel says which argument is which,
-# `Transient.Buffer` makes the intermediates Mantle's to place and alias, and a
-# library call is a `Dispatch` whose kernel is a callable — which is what a
-# backend's `compile_dispatch` already does with a non-`KA.Kernel`.
+# Declared, the kernel says which argument is which, `Transient.Buffer` makes
+# the intermediates Mantle's to place and alias, and a library call is a
+# `Dispatch` whose kernel is a callable — which is what a backend's
+# `compile_dispatch` already does with a non-`KA.Kernel`.
 
 # ── a fill and a copy, as dispatches ─────────────────────────────────────────
 #
@@ -224,8 +215,8 @@ against everything else.
 two-dimensional. The default partitions an ndrange along its first axis, which
 for anything image-shaped means a workgroup is one long row: a pass that reads a
 row-major g-buffer and writes a column-major target then has one of the two
-uncoalesced, and it costs about nine times the square arrangement — 1.06 ms
-against 0.12 ms at 1280x800 on the machine this was measured on.
+uncoalesced, and it costs about nine times the square arrangement: 1.06 ms
+against 0.12 ms at 1280x800.
 
     dispatch!(p, shade!, args, (w, h); group = (16, 16))
 

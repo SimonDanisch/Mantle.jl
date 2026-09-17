@@ -1,9 +1,8 @@
 # Persistent resources. One implementation, every backend.
 #
-# These used to be a concrete type per backend — `LavaBuffer`, and whatever a
-# second backend would have written next to it — each holding that backend's
-# array type. Nothing in them was backend-specific except where the bytes came
-# from, and once that is the device's `Pool` the difference disappears.
+# One type and not a concrete one per backend holding that backend's array type:
+# nothing in them is backend-specific except where the bytes come from, and once
+# that is the device's `Pool` the difference disappears.
 #
 # The lifetime is what separates these from a transient, not the ownership. A
 # transient's region is scoped to a plan and reclaimed with it; a persistent
@@ -64,9 +63,8 @@ A distinct type rather than a length-1 `Buffer`: "one value shared by every
 element" is a claim about meaning rather than a length that happens to be one,
 and it is what `stride` reads to bind a vertex attribute at stride zero.
 
-This was `Scalar`, and the rename is the content — it was described as an
-attribute binding and used as one, while what it actually is is the storage a
-per-run value lives in.
+Named for what it is, which is the storage a per-run value lives in, and not
+for the attribute binding it can also be used as.
 """
 mutable struct GPURef{T} <: Resource
     store::DeviceArray{T,1}
@@ -207,7 +205,7 @@ consumes.
 
 Element types can demand more than the ordinary bits — a buffer of draw commands
 is read by the command processor, and one without `INDIRECT_BUFFER_BIT` is a
-validation error at the draw rather than where it was allocated. That is a
+validation error at the draw rather than at the allocation. That is a
 backend's vocabulary, so the backend answers.
 """
 function bufferusage end
@@ -493,8 +491,8 @@ Give a persistent resource's region back to the pool.
 **No precondition.** The region is RETIRED, not released: it goes back on a free
 list only once [`passed`](@ref) says the device is finished with it, which
 [`reclaim!`](@ref) checks. So there is no "the GPU must be idle" rule to get
-wrong, and no reason for a caller to reach for a synchronize first — which is
-what every caller used to do, and every one of those was a place to forget.
+wrong, and no reason for a caller to reach for a synchronize first, which is
+one more place to forget.
 
 Still explicit, and still never called for you: skipping it is a leak the pool
 can report. Using the resource afterwards is what it always was — the region may

@@ -24,9 +24,9 @@ end
 # ── what a backend's compilation context has to answer ────────────────────────
 #
 # Five of the seven phases are graph analyses and contain nothing backend-shaped;
-# only Barriers and Pipelines do. They used to live in the Lava extension anyway,
-# which meant a second backend had to copy a scheduler — and two copies of a
-# scheduler drift in exactly the places fuzzing found bugs. They live here now,
+# only Barriers and Pipelines do. In a backend extension they would mean a second
+# backend copying a scheduler, and two copies of a scheduler drift in exactly the
+# places fuzzing finds bugs. They live here,
 # and a backend supplies the five methods below.
 
 """
@@ -351,9 +351,9 @@ that is what gives disjoint slices disjoint ids and the hazard set for free. The
 interval, though, belongs to the PARENT: the bytes the placer hands out are the
 whole transient's, and a pass touching any part of it keeps all of it live.
 
-Without this the parent got no interval at all and `Liveness` threw "never used
-by any pass" for a transient two passes were writing. It was latent because
-`range` had only been used on persistent buffers, which are not placed.
+Without this the parent gets no interval at all and `Liveness` throws "never
+used by any pass" for a transient two passes are writing. Only a placed resource
+can see it, so a `range` over a persistent buffer never does.
 """
 function transientfor(c, byid, id)
     t = get(byid, id, nothing)
@@ -640,8 +640,8 @@ function run!(::Barriers, c)
         #
         # Nothing is left to remove per resource either: `transition!` emits only
         # where a resource's own state actually changes, so the walk is already
-        # minimal and `pre` *is* the local hazard set. Kept as a flag because
-        # `bench/` still compiles both ways to measure what the old strategy did.
+        # minimal and `pre` *is* the local hazard set. Kept as a flag so
+        # `bench/` can compile both ways and measure the difference.
         needed = copy(pre)
 
         # The barrier where bytes change hands, derived like every other one.
@@ -654,9 +654,9 @@ function run!(::Barriers, c)
         # state the walk above is carrying right now. So it waits for exactly
         # those usages, at exactly the new tenant's first one.
         #
-        # It used to name every stage and both access directions instead. That is
-        # correct and says nothing: a barrier that waits for everything cannot be
-        # wrong, and cannot be checked either.
+        # Naming every stage and both access directions instead is correct and
+        # says nothing: a barrier that waits for everything cannot be wrong, and
+        # cannot be checked either.
         handovers = get(analysis(c).alias_begins, i, EMPTY_HANDOVER)
         for newi in unique(first(h) for h in handovers)
             to = usage_of(p, resourceid(g, c.graph.transients[newi]), g)

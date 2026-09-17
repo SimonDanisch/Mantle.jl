@@ -140,9 +140,9 @@ writes(::Type{Depth{DA,SA,D}}) where {DA,SA,D} = writes(DA) || writes(SA)
 """
 Does this usage throw away whatever was there before it?
 
-A discarding destination makes the old layout irrelevant, so the barrier into it
-can come from UNDEFINED whatever the resource was previously in. RPS derives the
-same from `DISCARD_DATA_BEFORE` (`rps_vk_runtime_backend.cpp:143`).
+A discarding destination makes the incoming layout irrelevant, so the barrier
+into it can come from UNDEFINED whatever state the resource is in. RPS derives
+the same from `DISCARD_DATA_BEFORE` (`rps_vk_runtime_backend.cpp:143`).
 """
 discards(::Type{<:Usage}) = false
 discards(::Type{ColorAttachment{D}}) where {D} = D
@@ -176,10 +176,10 @@ The stage is what a barrier is made of, and a pass that traces does its storage
 reads and writes from raygen, hit and miss shaders. Lowered as an ordinary
 `Storage` access, its barriers named the compute/vertex/fragment stages, and on
 a device where ray tracing is its own stage — NVIDIA; AMD runs it as compute —
-that is no dependency at all in either direction: the trace could start before
-the pass that filled its queue had finished, and the pass after it could read
-the queue it was still writing. Bit-identical images almost always, and one
-`VK_ERROR_DEVICE_LOST` on a medium-heavy scene when it was not.
+that is no dependency at all in either direction: the trace can start before
+the pass that filled its queue has finished, and the pass after it can read the
+queue it is still writing. Bit-identical images almost always, and one
+`VK_ERROR_DEVICE_LOST` on a medium-heavy scene when not.
 
 Applied by [`trace!`](@ref) to every shader usage of the pass it makes (see
 [`traced`](@ref)), so no call site names it — a buffer a raygen reads IS a traced

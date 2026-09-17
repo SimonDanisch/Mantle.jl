@@ -13,14 +13,12 @@
 #
 # Five lists of three facts. This file is the three facts, once, in core.
 #
-# ── 2.2, and why it is not `pin!` ────────────────────────────────────────────
+# ── Holding, and why it is not pinning ──────────────────────────────────────
 #
-# `pin!(e, obj)` said "this recording must not let `obj` die". It lived in the
-# backend, which meant the backend decided when a lifetime ended — and a backend
-# deciding lifetimes is the thing this refactor is about. It also could not
-# answer the question it was asked: a pinned object was released by draining a
-# separate deferred list against a separate counter, so "has the submission that
-# pinned this passed" had no single reader.
+# "This recording must not let `obj` die" said from the backend means the backend
+# decides when a lifetime ends, and it cannot answer the question it is asked
+# either: releasing against a deferred list and a counter of its own leaves "has
+# the submission that named this passed" with no single reader.
 #
 # `hold!(ch, obj)` is the same intent with the ownership the other way round: the
 # CHANNEL accumulates what the recording being built must outlive, the submission
@@ -203,7 +201,7 @@ outstanding(ch::SubmitChannel) = ch.outstanding
 # reports — it is a corrupted recording.
 @inline function ownthread(ch::SubmitChannel)
     Threads.threadid() == ch.thread || error(
-        "SubmitChannel is single-writer: it was created on thread $(ch.thread) " *
+        "SubmitChannel is single-writer: it belongs to thread $(ch.thread) " *
         "and this is thread $(Threads.threadid()). Take a channel per thread " *
         "with `allocate_batch_queue!`.")
     return nothing
@@ -436,8 +434,8 @@ any thread, including a finalizer's: it appends and reads nothing, and the
 owning thread decides the rest in [`reclaim!`](@ref).
 
 `retire!(::Pool, ::Region)` is the same word for the same shape one layer down,
-and deliberately so: say what is no longer wanted, from wherever you are, and
-let the thread that may ask the device decide when it is safe.
+and deliberately so: say what is not wanted any more, from wherever you are,
+and let the thread that may ask the device decide when it is safe.
 """
 function retire!(ch::SubmitChannel, obj)
     lock(() -> push!(ch.pending, obj), ch.pendinglock)
@@ -589,9 +587,9 @@ finishrecording!(::SubmitChannel, ::Nothing) = nothing
 
 A recording to build into: one the device has finished with, or a new one.
 
-The reuse discipline is core's, which is the whole of 2.3. It was two `Vector`s
-on the backend's queue — `free_submissions` and `free_oneshots` — swept against a
-counter the backend also owned.
+The reuse discipline is core's: two free lists on a backend's queue, swept
+against a counter that backend also owns, is the same discipline written once
+per backend.
 
 Drains first, so a channel in steady state finds something and allocates nothing,
 and the destroys waiting on the submissions it just gave back run at the same
@@ -656,9 +654,9 @@ Record `f` into a recording of its own and submit it.
         draw!(e, pipeline, args, count)
     end
 
-Core's, and it is the shape every ad hoc piece of work takes: a blit, an upload,
-the overlay compositor's pass. It was the Vulkan backend's, which is why
-RayMakie reached through `Base.get_extension` to call it.
+Core's, and it is the shape every ad hoc piece of work takes: a blit, an
+upload, the overlay compositor's pass. In a backend it would be something a
+portable caller reaches through `Base.get_extension` for.
 
 `f` gets whatever the backend's recording hands to a recorder — the same `e` a
 plan's emitter is. Anything the recording must outlive goes through

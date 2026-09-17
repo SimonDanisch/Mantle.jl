@@ -1,18 +1,16 @@
-# Mantle's Vulkan backend: the runtime that used to be Lava's.
+# Mantle's Vulkan backend.
 #
-# 26,000 lines moved here on 2026-08-27, and the reason is the goal the split was
-# for: **Lava is a Julia→SPIR-V compiler and nothing else.** Memory, queues,
-# state, pipelines and the graph are Mantle's, so a second backend implements one
-# interface instead of copying a runtime.
+# The split it implements: **Lava is a Julia→SPIR-V compiler and nothing else.**
+# Memory, queues, state, pipelines and the graph are Mantle's, so a second
+# backend implements one interface instead of copying a runtime. Lava's half
+# names no Vulkan type at all, which
+# `Lava/test/test_compiler_runtime_split.jl` asserts from the source.
 #
-# The boundary was made real before anything moved. Lava's half names no Vulkan
-# type at all — `Lava/test/test_compiler_runtime_split.jl` asserts it from the
-# source — which is why this is a move rather than a rewrite. Four things had to
-# be untangled first: `DeviceCaps` (written twice and copied positionally, now
-# `KernelInterface`'s), the emitter's `VK_CONTEXT_REF` reads (now
-# `Lava.TargetFeatures`, pushed from here by `bind_context!`),
-# `spirv_content_hash`, and the frozen cache, whose SPIR-V half is the compiler's
-# and whose `VkPipelineCache` half is this one's.
+# The four things that cross the line: `DeviceCaps` is `KernelInterface`'s, the
+# emitter reads `Lava.TargetFeatures` (pushed from here by `bind_context!`)
+# rather than a context ref, `spirv_content_hash` is the compiler's, and the
+# frozen cache is split — the SPIR-V half is the compiler's, the
+# `VkPipelineCache` half is this one's.
 #
 # These files are included INTO `Mantle` rather than a submodule, because the
 # methods in them are methods on Mantle's own functions — `caps`, `upload!`,
@@ -30,8 +28,8 @@
 # loop; those only surfaced when a kernel refused to compile.
 #
 # What is NOT here any more: the shader builtins a body writes. `vertex_index`,
-# the `frag_coord` family and the `rt_*` intrinsics are KernelInterface's names
-# (phase 2.1), which this package reaches through `using KernelInterface` in
+# the `frag_coord` family and the `rt_*` intrinsics are KernelInterface's names,
+# which this package reaches through `using KernelInterface` in
 # `Mantle.jl` — Lava OVERRIDES them for this target rather than defining names
 # of its own. `gfx_input`/`gfx_output`/`set_position!` and the two stage
 # wrappers stay, because they are the lowering the wrappers compile a stage's
@@ -136,10 +134,8 @@ include("graphics/record.jl")
 
 # ── No exports here ───────────────────────────────────────────────────────────
 #
-# This file used to end with 90 `export` lines, restored after the runtime moved
-# from Lava and lost them. They are gone, and not because the problem came back:
-# these files are an EXTENSION now, and an extension cannot export into its
-# parent no matter what it writes.
+# These files are an EXTENSION of `Mantle`, and an extension cannot export into
+# its parent no matter what it writes, so there are no `export` lines here.
 #
 # That is not a loss of surface, it is where the surface belongs. Every name a
 # caller needs — `Texture2D`, `HWTLAS`, `begin_pass!`, `trace_rays!` — is declared
