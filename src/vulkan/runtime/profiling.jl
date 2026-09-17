@@ -16,11 +16,10 @@
 #
 # Designed to stay in the codebase. No `# TODO: remove` markers anywhere.
 
+# `import ... as`, not `const VK = Vulkan`: inside Mantle the bare name `Vulkan`
+# is the backend MARKER, a singleton, so assigning it aliases VK to a DataType
+# and every `VK.CommandBuffer` becomes a field access on it.
 import Vulkan as VK
-# `const VK = Vulkan` used to be here. Inside Mantle the bare name `Vulkan`
-# is the backend MARKER — a singleton — so that line aliased VK to a
-# DataType and every `VK.CommandBuffer` became a field access on it. The
-# import above is the alias.
 
 # ============================================================================
 # 1. SPIR-V instruction-level analysis
@@ -145,10 +144,9 @@ render!(vp, scene, film, camera)
 sort(list_compiled_kernels(); by=k -> -k.spirv.bytes)  # biggest first
 ```
 
-Takes a context, because there is no longer a global registry of them to walk —
-which is the point. This briefly read the OUTER level of a two-level dict and
-handed `kernel_stats` another `Dict`; a cache that belongs to a device cannot be
-iterated at the wrong depth.
+Takes a context, because there is no global registry of them to walk. The
+cache belongs to a device and is one level deep per device: reading the outer
+level of a two-level dict hands `kernel_stats` another `Dict`.
 
 **Both of the context's caches, because the shipped path only populates one.**
 `get_compiled_kernel_and_pipeline` consults the frozen cache first and *returns*
@@ -528,7 +526,7 @@ function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
     # outright `ConstructionBase` error — VK.jl could not even build the
     # result struct, for every driver — and the swallow turned that into
     # `registers = nothing`, which reads as "this driver declines to report
-    # statistics". It was written up as an AMD driver limitation. RADV in fact
+    # statistics", which reads as an AMD driver limitation. RADV in fact
     # returns twenty statistics per pipeline, more than NVIDIA does.
     #
     # A profiler that hides its own failure is worse than one that has none: the

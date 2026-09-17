@@ -6,9 +6,8 @@
 # backend to launch on — come from `workgrouplimit` and
 # `KernelAbstractions.get_backend`. Both take the array, not a `VkContext`.
 #
-# So it moved to core, where a second backend inherits it rather than
-# reimplementing it. That is step 5 of the split, for the part of step 5 that
-# does not need a second backend to exist yet.
+# So it lives in core, where a second backend inherits it rather than
+# reimplementing it.
 #
 # The dispatch widened with it, from `::LavaArray` to `::AbstractGPUArray`, and
 # that is safe **here** in a way it is not everywhere: `gemv`/`gemv!` are
@@ -42,11 +41,10 @@
 #
 # **DNNKernels' graphs produce the second layout, not the first.** `hoistpermutes`
 # materialises every weight as torch `(K, N)` — Julia `(N, K)` — because that is
-# what `coopmat_gemm!` wants. So the ported llama.cpp kernel, on its own, does not
-# apply to the model it was ported for: pointing it at these weights would need a
-# 634 MB transpose per model. That is worth stating plainly, because "we ported
-# the SOTA kernel" and "the SOTA kernel fits our data" are different claims and
-# only the first was true here.
+# what `coopmat_gemm!` wants. So the ported llama.cpp kernel, on its own, does
+# not apply to the model it was ported for: pointing it at these weights would
+# need a 634 MB transpose per model. "The kernel is ported" and "the kernel fits
+# our data" are different claims.
 #
 # ## What this kernel does NOT fix
 #
@@ -513,9 +511,8 @@ themselves rather than restating their answers, so a change to either is followe
 automatically. `(1, 4096)` are the two sides of every branch those functions take.
 
 The limit is a *device* property and there is no device at load time, so the
-plausible values are enumerated instead. A device outside this list still works;
-it merely pays the old cost, which is the same failure mode as before and not a
-worse one.
+plausible values are enumerated instead. A device outside this list still
+works, at the cost of compiling its variant on first use.
 """
 const GEMV_PREGENERATED_LIMITS = (64, 128, 256, 512, 1024)
 
@@ -523,9 +520,8 @@ const GEMV_PREGENERATED_LIMITS = (64, 128, 256, 512, 1024)
 Subgroup widths worth pregenerating for, same reasoning as the limits above: it
 is a device property and there is no device at load time.
 
-Both real values, and BOTH are needed — 32 on NVIDIA, Metal and Intel, 64 on AMD.
-Generating only 32 is what the kernel used to assume outright, and on AMD it
-returned exactly twice the right answer.
+Both real values, and BOTH are needed — 32 on NVIDIA, Metal and Intel, 64 on
+AMD. A kernel that assumes 32 returns exactly twice the right answer on AMD.
 """
 const GEMV_PREGENERATED_SUBGROUPS = (32, 64)
 

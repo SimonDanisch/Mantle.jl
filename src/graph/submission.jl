@@ -1,21 +1,11 @@
-# One model of "work handed to the device", and one way to ask whether it is done.
+# One model of "work handed to the device", and one way to ask whether it is
+# done.
 #
-# There were five, all meaning the same thing, each consulted by different code:
-#
-#   `in_flight` batches + `signal_value`   flush!, sweep_retired_batches!
-#   `replay_watermark`                     flush!, replay!
-#   `am.signal[slot]`                      the argument ring
-#   `buf.last_write_bq`, `buf.last_write_val`  vk_free!, sync_access!
-#   `arg_pool_frontier`                    the slab rewind — the slabs are gone;
-#                                          a region's owner says when it is free
-#
-# Five records of one fact is five chances to read the wrong one, and the
-# comments in tree record two occasions when that happened: `flush!` returning
-# before a replay had run, because a replay puts no batch in `in_flight`; and
-# the argument ring waiting on a timeline value nothing would ever signal,
-# because the frame that reserved it had not been submitted. Both were patched where they
-# surfaced. Neither could be fixed where it was caused, because there was no
-# single place that knew what was outstanding.
+# Several records of that one fact is several chances to read the wrong one: a
+# `flush!` that returns before a replay has run, because the replay put nothing
+# in the list it reads, or a wait on a timeline value nothing will ever signal,
+# because the frame that reserved it was never submitted. Neither can be fixed
+# where it is caused unless one place knows what is outstanding.
 #
 # This is that place. Core keeps the list; the backend answers three questions
 # about a token, which is exactly the contract `Pool` already asks of it —
@@ -41,10 +31,9 @@ submission carried, with their pins and scratch — and the sweep hands it to
 `tag` is for diagnostics only — a name, a frame number, whatever the submitter
 wants in an error message. Nothing dispatches on it.
 
-The payload used to be a second list on the queue (`in_flight`, holding the
-same submissions in the same order), swept by a second function against the
-same counter. Two lists of one fact, each consulted by different code, is what
-this file's opening paragraph is about.
+The payload lives here and not in a second list on the queue holding the same
+submissions in the same order, swept by a second function against the same
+counter. See this file's opening paragraph.
 """
 struct Outstanding{T,P}
     token::T
@@ -59,9 +48,9 @@ Record that `token` covers work now on its way to the device, and that
 `payload` is what to give back once it has passed.
 
 Every path that hands work over calls this and nothing else records it: a
-recorded batch, a run of a recorded plan, a one-off upload. That is the whole
-point — before this, a replay was invisible to `flush!` because it created no
-batch, and the fix was a second field rather than a second caller here.
+recorded batch, a run of a recorded plan, a one-off upload. A path that skips it
+is invisible to `flush!`, and the fix for that is a caller here rather than a
+second field somewhere else.
 """
 function submitted!(q, token, payload; tag = nothing)
     push!(outstanding(q), Outstanding(token, payload, tag))

@@ -150,10 +150,9 @@ using Raycore: Ray
 # as supertypes, so a qualified path has to resolve.
 import Raycore
 
-# No `ScopedValues` import: as of 2026-09-15 Mantle holds no task-local state at
-# all. `record_into` and `OPEN_RECORDING` were the two, and both let a backend
-# decide what to do with a dispatch by reading ambient state instead of being
-# told — see the notes where they were deleted.
+# No `ScopedValues` import: Mantle holds no task-local state at all, because
+# ambient state is a backend deciding what to do with a dispatch by reading it
+# instead of being told.
 
 
 include("memory/interval.jl")
