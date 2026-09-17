@@ -923,13 +923,20 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
     # a rebindable cell's CONTENTS are what the shader is handed, and they are
     # also the resources this draw is recorded touching — rebinding later
     # replaces values of the same types, never a different resource.
-    dev = graphof(p).dev
-    isempty(va) || declare!(p, va, vertextouches(dev, shader, va))
-    isempty(frag_args) || declare!(p, frag_args, fragmenttouches(dev, shader, frag_args))
     # Here rather than at compile: the pipeline has one push constant range, so
     # two DIFFERENT argument lists are a mistake in the call, and by the time a
     # shader is compiled it surfaces as one stage failing to take an argument it
     # never declared.
+    #
+    # And BEFORE the two `declare!`s below, which is the whole point of "here".
+    # Those walk each stage's arguments, and a stage handed an argument that
+    # belongs to the other one is exactly what the walk cannot infer: it refused
+    # `Tuple{VertexWrapper{typeof(fullscreen_vertex), ()}, LavaDeviceArray{…}}`
+    # -- a vertex stage declaring no arguments, handed one -- and that refusal
+    # masked this one. Same mistake, worse diagnosis: the walk says it cannot
+    # say what a signature does, where this says which call is wrong and how to
+    # fix it. Only `va` and `frag_args` are needed to tell, so nothing has to
+    # run first.
     #
     # The SAME list on both stages is not that mistake and is refused nowhere
     # else: one range, two stages declaring the same layout over it. Every Makie
@@ -946,6 +953,9 @@ function draw!(p::PassHandle, shader, args, n; frag_args = (),
         "pipeline has one push constant range. Put them on the stage that reads " *
         "them and pass what the other needs as a varying, or give both stages the " *
         "same list."))
+    dev = graphof(p).dev
+    isempty(va) || declare!(p, va, vertextouches(dev, shader, va))
+    isempty(frag_args) || declare!(p, frag_args, fragmenttouches(dev, shader, frag_args))
     push!(p.pass.draws, DrawCall(shader, args, drawover(p, n), frag_args,
                                  asviewport(viewport), bindings, indices, Int(instances)))
 end

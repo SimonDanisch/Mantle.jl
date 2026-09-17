@@ -331,7 +331,7 @@ else
             M.run!(s.plan)
             Mantle.copy_framebuffer!(M.storage(s.raw), s.fb)
             blit!(dev, WindowTarget(win), M.storage(s.out))
-            present_frame!(dev.bq, win, Mantle.oneshot(dev.bq) do e
+            Mantle.submit_and_present!(dev.bq, win, Mantle.oneshot(dev.bq) do e
                 Mantle.presentready!(e, win)
             end)
         end
@@ -1253,11 +1253,11 @@ else
         # The refused acquires changed nothing, so the frame that owns the image
         # can still finish, and the window is usable afterwards.
         bq = win.ctx.default_bq
-        present_frame!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
+        Mantle.submit_and_present!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
         @test !win.acquired
         @test win.acquirer === nothing
         acquire_next_image!(win)
-        present_frame!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
+        Mantle.submit_and_present!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
         @test !win.acquired
         close(win)
     end
