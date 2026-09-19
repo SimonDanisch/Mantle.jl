@@ -303,6 +303,23 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     # already paid, and `norecordreason` refuses to record the plan.
     d.ndrange isa Mantle.DeviceRange && d.ndrange.max === nothing &&
         return Mantle.bake(c, d)
+    # Two more kinds of dispatch that are not a `@kernel` to record, both of
+    # which core already knows how to run and this backend was walking straight
+    # past into `kernelfor`. What came out was a `MethodError` naming the USER's
+    # function and `::MetalBackend` — `mul!(::MetalBackend)` — which reads as if
+    # Mantle had lost a method rather than as "that is not a kernel".
+    #
+    # A declared CALL: core's `bake` resolves its arguments into a `Call`. See
+    # the three-argument `dispatch!`.
+    Mantle.iscall(d) && return Mantle.bake(c, d)
+    # And a macro-free `KernelInterface` kernel — a plain function rather than a
+    # `@kernel`-generated constructor, so there is no launchable object to build
+    # here at all. Core's interpreted launch compiles it through
+    # `KI.kernel_function`, or refuses it BY NAME where the backend implements
+    # none, which Metal does not. `buildskernel` is core's predicate for the
+    # distinction and is ASKED rather than restated, the same as on the Vulkan
+    # side.
+    Mantle.buildskernel(d.kernel, Mantle.backend(dev)) || return Mantle.bake(c, d)
     obj = Mantle.kernelfor(d.kernel, d.group, Mantle.backend(dev))
     isempty(fieldnames(typeof(obj.f))) ||
         throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
@@ -500,6 +517,12 @@ struct MetalRecording
     # What the replay declares to its encoder, and the pool's block GENERATION it
     # was built at — see `ensureresident!`.
     resources::Vector{MTL.MTLBuffer}
+    # The same list, marshalled. `useResources:` wants an array of object
+    # pointers, and converting `resources` at the call site rebuilds one every
+    # frame — which is exactly the per-frame work the generation check above
+    # exists to avoid. Both are rebuilt together and only together; `resources`
+    # is what keeps the objects alive.
+    residentids::Vector{MTL.ObjectiveC.id{MTL.MTLBuffer}}
     nblocks::Base.RefValue{Int}
 end
 
@@ -1020,7 +1043,8 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
     return MetalRecording(e.icb, e.segments, e.ranges.data[], Int(e.ranges.offset),
                           e.ranges, e.grids.data[], Int(e.grids.offset), e.grids,
                           e.templ, e.aux, am.store, e.writers, e.ncommands,
-                          e.encoded, MTL.MTLBuffer[], Ref(-1))
+                          e.encoded, MTL.MTLBuffer[],
+                          MTL.ObjectiveC.id{MTL.MTLBuffer}[], Ref(-1))
 end
 
 """
@@ -1149,7 +1173,10 @@ the next replay starting before this one's writes land.
 The pool's BLOCKS rather than the plan's resources: every graph resource is a slice
 of one, a pool holds a handful of blocks where a plan holds thousands of resources,
 and a block covers its tenants exactly. Rebuilt only when the pool has grown, so a
-steady frame is one `useResources:` call over a vector that already exists.
+steady frame is one `useResources:` call over an array that already exists — the
+MARSHALLED one, because passing the `MTLBuffer` vector converts it to object
+pointers on every call and that conversion allocates a fresh array each time,
+which is the per-frame work this whole cache exists to avoid.
 """
 function ensureresident!(d::MetalDevice, rec::MetalRecording)
     p = pool(d)
@@ -1158,7 +1185,7 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
     # the list rather than counting one to find out. Counting was the first version
     # and it was the same mistake as the walk in `reclaim!` — scanning per frame for
     # a change that the one place able to cause it can simply announce.
-    p.blockgen[] == rec.nblocks[] && return rec.resources
+    p.blockgen[] == rec.nblocks[] && return rec.residentids
     # The generation is read UNDER the lock, with the copy: read after it, a block
     # added while this rebuilt would be stamped as already covered and the next
     # frame would not notice it.
@@ -1187,8 +1214,13 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
     # `kernelStart -> kernelEnd` fell from 19.4 us to 7.9 us once the per-frame
     # declaration went away.
     foreach(Metal.make_persistently_resident!, rec.resources)
+    # Marshalled here, with the list, so the per-frame call has nothing to do.
+    resize!(rec.residentids, length(rec.resources))
+    @inbounds for i in eachindex(rec.resources)
+        rec.residentids[i] = Base.pointer(rec.resources[i])
+    end
     rec.nblocks[] = n
-    return rec.resources
+    return rec.residentids
 end
 
 """

@@ -2,8 +2,22 @@ using Mantle, Test
 
 include(joinpath(@__DIR__, "backend_probe.jl"))
 
+# Loadable AND registered. Loadability alone stopped being the question when
+# VulkanCore, Vulkan and Lava were made to compile NOTHING on a platform with no
+# loader: before that a Mac could not precompile Vulkan at all, so
+# `backend_loadable` answered `nothing` and this gate held. Now all three import
+# cleanly and register no backend — which is the point of them being cheap
+# dependencies — and this gate went TRUE, running 130 Vulkan files that every
+# one of them errored out of. 5557 errors, on a machine with no Vulkan driver,
+# reported as if Mantle were broken.
+#
+# So ask what `_METAL_OK` asks: is there a usable DEVICE. Mantle's own probe is
+# the answer — the Vulkan backend registers only when one is there — and
+# `invokelatest` for the same reason the Metal gate needs it, the modules above
+# were required in a newer world than this statement.
 _VULKAN_OK = backend_loadable("Vulkan") !== nothing &&
-             backend_loadable("Lava") !== nothing
+             backend_loadable("Lava") !== nothing &&
+             :vulkan in Base.invokelatest(Mantle.availablebackends)
 
 # BOTH backends are probed here, before anything runs.
 #

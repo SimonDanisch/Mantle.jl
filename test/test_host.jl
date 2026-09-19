@@ -215,7 +215,14 @@ include(joinpath(@__DIR__, "backend_probe.jl"))
     # MARKERS give two distinct methods rather than one silently replacing the
     # other — is worth checking on a machine with no Vulkan loader too, so the
     # Host half stays unconditional and the file keeps running there.
-    if backend_loadable("Vulkan") !== nothing
+    #
+    # LOADABLE is not the question, though it used to be the same answer: before
+    # VulkanCore, Vulkan and Lava were made to compile nothing without a loader,
+    # a Mac could not load them at all. Now it can, they register no backend, and
+    # `Device(::VulkanAPI)` is a method Mantle never compiled — so this guard let
+    # the line through and reported a `MethodError` as a Mantle failure. Ask what
+    # REGISTERED, which is the driver question.
+    if :vulkan in Mantle.availablebackends()
         @test M.Device(M.VulkanAPI()) isa Mantle.LavaDevice
     else
         @info "no Vulkan loader; the Vulkan half of the coexistence test is skipped"

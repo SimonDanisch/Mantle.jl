@@ -1071,6 +1071,14 @@ function notify_move!(pool::Pool, old_base::UInt64, new_base::UInt64, nbytes::In
         filter!(wr -> wr.value !== nothing, pool.movelisteners)
         for wr in pool.movelisteners
             pl = wr.value
+            # The `filter!` above is a SNAPSHOT, not a guarantee. A `WeakRef` may
+            # be cleared at any safepoint, and the loop below allocates — the
+            # `moved` comprehension, every `push!` — so a plan that was alive
+            # when the vector was filtered can be `nothing` by the time its turn
+            # comes. That is a `FieldError` on `nothing.graph`, thrown out of
+            # `resize!` on an unrelated buffer, with the collected plan nowhere
+            # in the backtrace. Check what was READ, not what was filtered.
+            pl === nothing && continue
             # A backend whose recording cannot be rewritten gets it thrown away
             # instead. Before this, such a plan fell through the `isempty(tab)`
             # test below — it has no patch table, because there is nowhere for
