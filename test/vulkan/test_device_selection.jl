@@ -22,6 +22,10 @@ using Test, Mantle, Lava
            Mantle.DeviceInfo(3, "llvmpipe", :cpu, "llvmpipe")]
     @test Mantle.selectdevice(nothing, dev) == 1          # discrete, first in order
     @test Mantle.selectdevice("radeon", dev) == 2         # name, case-insensitive
+    @test Mantle.selectdevice("NVIDIA", dev) == 1         # driver, case-insensitive
+    @test Mantle.selectdevice("lavapipe", [
+        Mantle.DeviceInfo(1, "llvmpipe", :cpu, "lavapipe llvmpipe Mesa")
+    ]) == 1
     @test Mantle.selectdevice(3, dev) == 3                # index
     @test Mantle.selectdevice(i -> i.kind == :cpu, dev) == 3
     @test_throws ArgumentError Mantle.selectdevice("nonexistent", dev)

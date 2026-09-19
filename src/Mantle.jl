@@ -387,7 +387,7 @@ export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_ker
 
 export pixelbytes
 export LoadOp, Clear, Keep, Discard
-export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
+export Device, device, Resource, Graph, Plan, Transient, Window, backend, screenshot
 export DeviceInfo, devices, defaultdevice!
 export DeviceCaps, caps
 export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
@@ -541,6 +541,26 @@ wants to say which, and `devices`/`selectdevice`/`defaultdevice!` still choose
 among the GPUs of the one that is here.
 """
 Device() = @static Sys.isapple() ? Device(MetalAPI()) : Device(VulkanAPI())
+
+"""
+    device([select]) -> Device
+
+The process device, or a device selected by a case-insensitive substring of its
+name or driver. Each selected device owns an independent context, so several can
+be used in the same process.
+
+    nvidia = device("nvidia")
+    lavapipe = device("lavapipe")
+
+See [`devices`](@ref) for the values a selector can match.
+"""
+function device(select = nothing)
+    @static if Sys.isapple()
+        return Device(MetalAPI(); select)
+    else
+        return Device(VulkanAPI(); select)
+    end
+end
 
 __init__() = initbackend!()
 

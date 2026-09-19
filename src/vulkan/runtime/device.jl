@@ -1906,8 +1906,9 @@ function deviceinfos(phys_devs)
         # `VK_KHR_driver_properties` is core since 1.2, which every device here is.
         driver = if props.api_version >= v"1.2"
             d = VK.get_physical_device_properties_2(pd, VK.PhysicalDeviceDriverProperties).next
-            strip(String(filter(!=('\0'), collect(d.driver_name))) * " " *
-                  String(filter(!=('\0'), collect(d.driver_info))))
+            description = strip(String(filter(!=('\0'), collect(d.driver_name))) * " " *
+                                String(filter(!=('\0'), collect(d.driver_info))))
+            d.driver_id == VK.DRIVER_ID_MESA_LLVMPIPE ? "lavapipe " * description : description
         else
             "unknown"
         end

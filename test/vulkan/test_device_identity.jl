@@ -29,9 +29,9 @@ end
     if lvp === nothing
         @info "no software rasterizer here; the two-device identity check needs a second driver"
     else
-        gpudev = Mantle.Device(Mantle.VulkanAPI())          # the process default
+        gpudev = Mantle.device()                            # the process default
         gpu = gpudev.ctx
-        cpudev = Mantle.Device(Mantle.VulkanAPI(); select = "llvmpipe")
+        cpudev = Mantle.device("lavapipe")
         cpu = cpudev.ctx
         try
             @test gpu !== cpu

@@ -68,7 +68,9 @@ function defaultdevice! end
 The index in `infos` that `select` names. `nothing` admits every device, a
 string admits those whose name contains it (case-insensitive), an integer
 admits the device at that index, and anything else is called as a predicate over
-`DeviceInfo`. Among the admitted, the ranking is `:discrete` before
+`DeviceInfo`. A string is matched case-insensitively against both the device
+name and its driver, so `"llvmpipe"` and `"lavapipe"` can select the same Mesa
+software device. Among the admitted, the ranking is `:discrete` before
 `:integrated` before `:virtual` before `:cpu` before `:other`, enumeration order
 within a rank, and the first wins; so `"AMD"` on a box with a Radeon and an APU
 is the Radeon, and `nothing` is the best GPU there is. Throws naming every
@@ -84,7 +86,10 @@ function selectdevice(select, infos::AbstractVector{DeviceInfo})
     return first(sort(admitted; by = i -> (rank[i.kind], i.index))).index
 end
 admits(::Nothing, ::DeviceInfo) = true
-admits(s::AbstractString, i::DeviceInfo) = occursin(lowercase(s), lowercase(i.name))
+function admits(s::AbstractString, i::DeviceInfo)
+    needle = lowercase(s)
+    return occursin(needle, lowercase(i.name)) || occursin(needle, lowercase(i.driver))
+end
 admits(n::Integer, i::DeviceInfo) = i.index == n
 admits(f, i::DeviceInfo) = f(i)::Bool
 
