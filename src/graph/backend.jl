@@ -266,14 +266,20 @@ vendor-library call whose submitted kernels become part of the recording.
 librarygemm(::Device, out, A, B, bias, epilogue) = nothing
 
 """
-    native_gemm_dispatch!(device, graph, out, A, B; name) -> Bool
+    native_gemm_dispatch!(device, graph, out, A, B;
+                          bias=nothing, epilogue=identity, name)
 
-Declare a backend's recordable native GEMM kernel into `graph`.  Returns false
-when the backend has no native kernel for these operand types.  Unlike
-`librarygemm`, this path is a device dispatch and can therefore be baked into a
-command-buffer recording.
+Declare a backend's recordable native GEMM kernel into `graph`.  Return `nothing`
+when no native kernel covers the operands, otherwise return
+`(; bias::Bool, epilogue::Bool)` saying which requested post-operations the
+dispatch folded into its store.  DNNKernels uses those two generic facts to
+declare any remaining passes; a backend does not participate in graph planning.
+
+Unlike `librarygemm`, this path is a device dispatch and can therefore be baked
+into a command-buffer recording.
 """
-native_gemm_dispatch!(::Device, graph, out, A, B; name) = false
+native_gemm_dispatch!(::Device, graph, out, A, B;
+                      bias = nothing, epilogue = identity, name) = nothing
 native_gemm_available(::Device, ::Type, ::Type, ::Type) = false
 
 """

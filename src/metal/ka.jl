@@ -127,43 +127,13 @@ Mantle.native_gemm_available(::MetalDevice, ::Type{A}, ::Type{B}, ::Type{C}) whe
     Metal.gemm_simd_eltype(A, B, C)
 
 """Declare Metal.jl's fastest recordable GEMM so a Mantle plan can bake it."""
-function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B; name)
-    Metal.gemm_simd_eltype(eltype(A), eltype(B), eltype(out)) || return false
-    M, N, K = size(out, 1), size(out, 2), size(A, 2)
-    if Metal.tensor_matmul_capable() &&
-       Metal.gemm_tensor_eltype(eltype(A), eltype(B), eltype(out))
-        tm = Metal.gemm_tensor_tile(M, Metal.GEMM_TENSOR_MN_TILES)
-        tn = Metal.gemm_tensor_tile(N, Metal.GEMM_TENSOR_MN_TILES)
-        tk = Metal.gemm_tensor_tile(K, Metal.GEMM_TENSOR_K_TILES)
-        if tm != 0 && tn != 0 && tk != 0
-            nsimd = Metal.GEMM_TENSOR_NSIMD
-            threads = nsimd * 32
-            groups = (M ÷ tm, N ÷ tn)
-            args = (out, A, B, UInt32(M), UInt32(N), UInt32(K),
-                    Val(Int32(tm)), Val(Int32(tn)), Val(Int32(tk)), Val(Int32(nsimd)))
-            dispatch!(g, Metal.gemm_tensor_kernel!, args,
-                      (groups[1] * threads, groups[2]); group = (threads, 1), name)
-            return true
-        end
-    end
-    WM = Metal.GEMM_SIMD_WM
-    WN = Metal.GEMM_SIMD_WN
-    TM = Metal.GEMM_SIMD_TM
-    TN = Metal.GEMM_SIMD_TN
-    KB = Metal.GEMM_SIMD_KB
-    BM, BN = 8 * TM * WM, 8 * TN * WN
-    threads = WM * WN * 32
-    groups = (cld(M, BM), cld(N, BN))
-    edge = !(M % BM == 0 && N % BN == 0)
-    args = (out, A, B, 1.0f0, 0.0f0, M, N, K,
-            Val('N'), Val('N'), Val(WM), Val(WN), Val(TM), Val(TN), Val(KB),
-            Val(edge), Val(true), Val(true))
-    # KI spells launches in workitems rather than workgroups.  The second axis
-    # has one thread per group; the kernel obtains both group coordinates from
-    # Metal's threadgroup-position intrinsic.
-    dispatch!(g, Metal.gemm_simd_kernel!, args,
-              (groups[1] * threads, groups[2]); group = (threads, 1), name)
-    return true
+function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
+                                      bias = nothing, epilogue = identity, name)
+    config = Metal.gemm_kernel_config(out, A, B; bias, epilogue)
+    config === nothing && return nothing
+    dispatch!(g, config.kernel, config.args, config.ndrange;
+              group = config.group, name)
+    return config.fused
 end
 
 Mantle.accesscache(d::MetalDevice) = d.accesses
