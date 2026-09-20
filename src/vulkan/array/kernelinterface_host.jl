@@ -52,6 +52,7 @@ KI.bestshape(b::LavaBackend, ab, acc; scope::MatrixScope = SubgroupScope()) =
 # device side. `KI_SHFL_TYPES` is the one list both read, so KI's own suite
 # cannot end up exercising a type Lava never generated.
 KI.shfl_down_types(::LavaBackend) = collect(KI_SHFL_TYPES)
+KI.shfl_types(::LavaBackend) = collect(KI_SHFL_TYPES)
 
 # …and the same for the reduce-add, off its own list for the reason given beside
 # `KI_REDUCE_ADD_TYPES`: the two families are separate capabilities and only

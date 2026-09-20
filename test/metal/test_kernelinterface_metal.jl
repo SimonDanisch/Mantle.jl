@@ -59,6 +59,7 @@ end
     # Float64 is absent on purpose: Apple GPUs do not have it, which is the
     # divergence the shuffle and reduce type lists were separated for.
     @test !(Float64 in KI.shfl_down_types(b))
+    @test KI.shfl_types(b) == KI.shfl_down_types(b)
     @test !(Float64 in KI.sub_group_reduce_add_types(b))
     @test Float32 in KI.sub_group_reduce_add_types(b)
 end

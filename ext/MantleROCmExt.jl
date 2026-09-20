@@ -53,12 +53,15 @@ a name that does not is a new definition rather than a method.
     this a dense device array" — one of them gating the one-kernel layer norm,
     which cost 854 graph passes against Lava's 96.
 
-    What is LEFT of the gap is a GEMM library not being the whole of what a DNN
-    runtime needs from a vendor stack. `caps().coopmat` is false here, so
-    attention runs the three-pass path against Lava's fused flash kernel (291
-    passes against 81) and convolution falls onto a scalar kernel; and rocBLAS
-    has no way to fuse the bias and activation Lava writes into its store, which
-    is the 486 passes for 195 `addmm`s against Lava's 243.
+    A GEMM library is not the whole of what a DNN runtime needs from a vendor
+    stack. On gfx11 and gfx12, this backend now exposes AMDGPU's native 16x16
+    WMMA lowering through the same backend-independent cooperative-matrix API,
+    so DNNKernels emits its one-pass fused flash-attention kernel instead of the
+    old score/softmax/apply sequence. Dense identity-activation `addmm`s use an
+    optional hipBLASLt bias epilogue when `libhipblaslt` is available; exact
+    GELU remains a separate DNNKernels kernel because the vendor epilogue is not
+    the same function. rocBLAS remains the fallback library GEMM, and convolution
+    still uses DNNKernels where no suitable vendor plan is integrated.
 
     SAM 2 is also the WORST case, and four models is a fairer picture than one.
     Steady state, same GPU, same session, this backend against Lava:
@@ -134,6 +137,7 @@ import KernelAbstractions as KA
 import KernelInterface as KI
 import Mantle
 import LinearAlgebra
+import Libdl
 using Mantle: Pool, Buffers, Images, Persistent, TransientBuffer, DeviceArray,
     DeviceInfo, ROCmAPI, register_backend!, selectdevice
 using KernelInterface: DeviceCaps, MatrixShape
@@ -174,6 +178,10 @@ still reading.
 mutable struct ROCmDevice <: Mantle.Device
     dev::AMDGPU.HIPDevice
     stream::AMDGPU.HIP.HIPStream
+    # hipBLASLt's handle belongs to this concrete device.  It is deliberately
+    # carried by the device and passed into calls, never recovered through an
+    # ambient/global device cache.
+    blaslt::Ptr{Cvoid}
     pool::Pool
     # `next` is the fence a retirement gets; `completed` is the highest value a
     # real synchronise has covered.
@@ -183,6 +191,17 @@ mutable struct ROCmDevice <: Mantle.Device
     # `waitidle`.
     blocking::Bool
     caps::Union{Nothing,DeviceCaps}
+    accesses::Mantle.AccessCache
+end
+
+const HIPBLASLT_LIB = Libdl.find_library(["libhipblaslt.so.1", "libhipblaslt.so"])
+
+function hipblaslt_handle()
+    isempty(HIPBLASLT_LIB) && return C_NULL
+    h = Ref{Ptr{Cvoid}}(C_NULL)
+    status = ccall((:hipblasLtCreate, HIPBLASLT_LIB), Cint,
+                   (Ref{Ptr{Cvoid}},), h)
+    return status == 0 ? h[] : C_NULL
 end
 
 function ROCmDevice(dev::AMDGPU.HIPDevice = AMDGPU.device())
@@ -191,7 +210,11 @@ function ROCmDevice(dev::AMDGPU.HIPDevice = AMDGPU.device())
     # would otherwise get a stream belonging to the first.
     stream = dev == AMDGPU.device() ? AMDGPU.HIPStream() :
              AMDGPU.device!(AMDGPU.HIPStream, dev)
-    return adopt!(ROCmDevice(dev, stream, Pool(), UInt64(0), UInt64(0), true, nothing))
+    d = ROCmDevice(dev, stream, C_NULL, Pool(), UInt64(0), UInt64(0), true, nothing,
+                   Mantle.AccessCache())
+    adopt!(d)
+    d.blaslt = hipblaslt_handle()
+    return d
 end
 
 """Make this device's stream the current task's. Idempotent, and it does not put
@@ -237,6 +260,18 @@ Mantle.backend(::ROCmDevice) = AMDGPU.ROCBackend()
 # `kernel_function`, `argconvert` and `auto_launch_sizes` are defined on. Core
 # asks for the second by name instead of assuming `backend(dev)` answers both.
 Mantle.kibackend(::ROCmDevice) = AMDGPU.ROCInterface.ROCBackend()
+Mantle.accesscache(d::ROCmDevice) = d.accesses
+Mantle.devicebuffertype(::ROCmDevice, ::Type{T}, N::Int) where {T} =
+    AMDGPU.Device.ROCDeviceArray{T,N,1}
+Mantle.argtype(d::ROCmDevice, y) =
+    Core.Typeof(KI.argconvert(Mantle.kibackend(d), y))
+Mantle.isdevicearray(::AMDGPU.Device.ROCDeviceArray) = true
+
+function Mantle.kernelinterpreter(d::ROCmDevice, f, tt)
+    config = AMDGPU.Compiler.compiler_config(d.dev)
+    source = Mantle.GPUCompiler.methodinstance(typeof(f), tt)
+    return Mantle.GPUCompiler.get_interpreter(Mantle.GPUCompiler.CompilerJob(source, config))
+end
 Mantle.devicename(d::ROCmDevice) = AMDGPU.HIP.name(d.dev)
 Mantle.syncbackend(::ROCmDevice) = ROCmAPI()
 
@@ -723,6 +758,92 @@ property of the body rather than of calls, and `closerecording!` reports it.
 """
 Mantle.runscalls(::ROCmDevice) = true
 
+# ── fused library GEMM ──────────────────────────────────────────────────────
+
+"""A hipBLASLt matmul with the bias epilogue, carrying its owning device handle."""
+struct HipBLASLtBias
+    handle::Ptr{Cvoid}
+end
+
+Mantle.argument_usage(::Type{HipBLASLtBias},
+                      ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
+
+@inline function ltcheck(status::Integer, where::AbstractString)
+    status == 0 || throw(ErrorException("hipBLASLt $where failed with status $status"))
+    return nothing
+end
+
+function (call::HipBLASLtBias)(D, A, B, bias)
+    M, K = size(A)
+    Kb, N = size(B)
+    K == Kb && size(D) == (M, N) && length(bias) == M ||
+        throw(DimensionMismatch("hipBLASLt bias GEMM: $(size(A)) * $(size(B)), " *
+                                "bias $(size(bias)), destination $(size(D))"))
+
+    desc = Ref{Ptr{Cvoid}}(C_NULL)
+    ad = Ref{Ptr{Cvoid}}(C_NULL)
+    bd = Ref{Ptr{Cvoid}}(C_NULL)
+    dd = Ref{Ptr{Cvoid}}(C_NULL)
+    try
+        # HIPBLAS_COMPUTE_32F = 2, HIP_R_32F = 0, HIP_R_16F = 2.
+        ltcheck(ccall((:hipblasLtMatmulDescCreate, HIPBLASLT_LIB), Cint,
+                      (Ref{Ptr{Cvoid}}, Cint, Cint), desc, 2, 0), "descriptor creation")
+        epilogue = Ref{UInt32}(4) # HIPBLASLT_EPILOGUE_BIAS
+        ltcheck(ccall((:hipblasLtMatmulDescSetAttribute, HIPBLASLT_LIB), Cint,
+                      (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Csize_t),
+                      desc[], 2, epilogue, sizeof(UInt32)), "bias epilogue")
+        biasptr = Ref{Ptr{Cvoid}}(Ptr{Cvoid}(pointer(bias)))
+        ltcheck(ccall((:hipblasLtMatmulDescSetAttribute, HIPBLASLT_LIB), Cint,
+                      (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Csize_t),
+                      desc[], 3, biasptr, sizeof(Ptr{Cvoid})), "bias pointer")
+        biastype = Ref{Int32}(2)
+        ltcheck(ccall((:hipblasLtMatmulDescSetAttribute, HIPBLASLT_LIB), Cint,
+                      (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Csize_t),
+                      desc[], 4, biastype, sizeof(Int32)), "bias type")
+        for (layout, rows, cols, ld) in
+                ((ad, M, K, M), (bd, K, N, K), (dd, M, N, M))
+            ltcheck(ccall((:hipblasLtMatrixLayoutCreate, HIPBLASLT_LIB), Cint,
+                          (Ref{Ptr{Cvoid}}, Cint, UInt64, UInt64, Int64),
+                          layout, 2, rows, cols, ld), "matrix layout")
+        end
+
+        alpha = Ref{Float32}(1)
+        beta = Ref{Float32}(0)
+        GC.@preserve D A B bias begin
+            ltcheck(ccall((:hipblasLtMatmul, HIPBLASLT_LIB), Cint,
+                          (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid},
+                           Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid},
+                           Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Csize_t,
+                           Ptr{Cvoid}),
+                          call.handle, desc[], alpha, pointer(A), ad[], pointer(B), bd[],
+                          beta, pointer(D), dd[], pointer(D), dd[], C_NULL, C_NULL, 0,
+                          AMDGPU.stream().stream), "matmul")
+        end
+    finally
+        for layout in (ad[], bd[], dd[])
+            layout == C_NULL || ccall((:hipblasLtMatrixLayoutDestroy, HIPBLASLT_LIB),
+                                      Cint, (Ptr{Cvoid},), layout)
+        end
+        desc[] == C_NULL || ccall((:hipblasLtMatmulDescDestroy, HIPBLASLT_LIB),
+                                  Cint, (Ptr{Cvoid},), desc[])
+    end
+    return D
+end
+
+function Mantle.librarygemm(d::ROCmDevice, out, A, B, bias, epilogue)
+    d.blaslt == C_NULL && return nothing
+    epilogue === identity || return nothing
+    bias === nothing && return nothing
+    ndims(out) == ndims(A) == ndims(B) == 2 || return nothing
+    eltype(out) === eltype(A) === eltype(B) === eltype(bias) === Float16 ||
+        return nothing
+    size(A, 2) == size(B, 1) || return nothing
+    size(out) == (size(A, 1), size(B, 2)) || return nothing
+    ndims(bias) == 1 && length(bias) == size(out, 1) || return nothing
+    return HipBLASLtBias(d.blaslt)
+end
+
 """
     openrecording(dev, plan) -> Immediate
 
@@ -773,6 +894,21 @@ function Mantle.openrecording(d::ROCmDevice, pl::Mantle.Plan)
     # graph, so what this costs is one execution and not a wrong answer.
     for pp in pl.passes, cd in pp.dispatches
         cd isa Mantle.Call && cd()
+    end
+    # Resolve AMDGPU's stream ownership before capture as well as its lazy
+    # library state. `hiptypes` converted these arguments while compiling, but
+    # the same array may subsequently be used by another stream (constant
+    # folding does this across several short plans). The next conversion would
+    # then synchronize its previous owner; inside capture HIP rejects that as
+    # `hipErrorStreamCaptureUnsupported`. Conversion here performs any transfer
+    # while it is legal, and the captured launch sees the already-current owner.
+    for pp in pl.passes, cd in pp.dispatches
+        cd isa ROCmCompiledDispatch || continue
+        # The one-argument form is for reflection: its adaptor deliberately
+        # carries `stream = nothing` and therefore does NOT take ownership.
+        # Use the launch stream explicitly; otherwise this loop is a no-op and
+        # the HIPKernel wrapper attempts the transfer after capture has begun.
+        map(arg -> AMDGPU.rocconvert(arg, d.stream), cd.args)
     end
     # Everything already submitted has to land before the capture opens: a
     # capture records the stream, and work in flight on it is work the graph
@@ -1003,21 +1139,21 @@ Mantle.supportspredicate(::ROCmDevice) = false
 What the portable kernels ask about this device. `gemv.jl` sizes its workgroup
 from `workgrouplimit` and `fft.jl` its staging from `sharedbudget`.
 
-**`coopmat` is `false`, and that is a statement about the SOFTWARE.** gfx1151 has
-WMMA instructions; what does not exist is a lowering of KernelInterface's
-`coopmat_load`/`coopmat_muladd` family onto them — those names reach SPIR-V
-through Lava and AIR through Metal.jl, and AMDGPU.jl has no equivalent. A `true`
-here would make every coopmat kernel in the tree compile and fail at the first
-intrinsic instead of taking its scalar path, which is the opposite of what the
-field is for. It is also why a GEMM on this backend should go to rocBLAS rather
-than to `array/gemm.jl`.
+On gfx11 and gfx12, `coopmat` reports AMDGPU's native WMMA lowering of
+KernelInterface's portable matrix operations: one subgroup-scoped 16x16x16
+Float16 product with Float32 accumulation.  No workgroup-scoped shape is
+advertised.  Other architectures stay disabled until their own native fragment
+adapter exists; a HIP device being present is not by itself a matrix-capability
+claim.
 """
 function Mantle.caps(d::ROCmDevice)
     d.caps === nothing || return d.caps
     p = AMDGPU.HIP.properties(d.dev)
+    arch = first(split(AMDGPU.HIP.gcn_arch(d.dev), ':'))
+    coopmat = startswith(arch, "gfx11") || startswith(arch, "gfx12")
     return d.caps = DeviceCaps(
-        false,                              # coopmat: see the docstring
-        0,                                  # tile: none to report while coopmat is off
+        coopmat,
+        coopmat ? 16 : 0,
         Int(p.warpSize),                    # subgroup: 32 on gfx11
         Int(p.warpSize),                    # coopmatsubgroup
         Int(p.sharedMemPerBlock),           # sharedbudget
@@ -1032,9 +1168,15 @@ function Mantle.caps(d::ROCmDevice)
         # this, runs 91.7 ms at 20 and 92.6 ms at 40. Worth knowing if a tiling
         # surprise ever traces back here.
         Int(p.multiProcessorCount),
-        0,                                  # warps: HIP does not report residency
+        # HIP exposes the maximum resident threads per processor directly.
+        # DeviceCaps speaks in subgroups, so convert rather than throwing the
+        # fact away.  Attention's shared-memory-heavy tile uses this to avoid
+        # launching an eight-wave workgroup on a processor that can keep 64
+        # waves resident; on gfx1151 the measured 16-wave form is 32-35% faster.
+        Int(p.maxThreadsPerMultiProcessor) ÷ Int(p.warpSize),
         NTuple{4,Int}[],                    # wggran: no granularity table
-        MatrixShape[],
+        coopmat ? [MatrixShape(Float16, Float32, 16, 16, 16,
+                               KI.SubgroupScope())] : MatrixShape[],
     )
 end
 

@@ -30,6 +30,7 @@ This file is the ratchet: the count may fall and may not rise. A new
 """
 
 using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
 const KA = KernelAbstractions
 
 # ── What moved, and what is blocked on what ───────────────────────────────────
@@ -56,10 +57,12 @@ const KA = KernelAbstractions
 #
 # `CoopMatrix{T,M,N,Use,Scope}` and its `AcceleratedMatrix`/`WorkgroupMatrix`
 # aliases are `KernelInterface`'s now, beside the vocabulary that went ahead of
-# them. The type was always portable — one `Int32` SSA anchor, no element
-# storage — and what stayed in Lava is the 766 lines of `llvmcall` that lower
-# KI's nine `coopmat_*` operations to `OpCooperativeMatrix*`. `Mantle` names the
-# type through `using KernelInterface` and needs Lava for none of it.
+# them. Its backend storage is opaque: Lava carries an `Int32` SSA anchor and
+# AMDGPU carries a native WMMA register fragment, while portable kernels name
+# neither. What stays in Lava is the `llvmcall` implementation that lowers KI's
+# eleven `coopmat_*` operations to `OpCooperativeMatrix*`. `Mantle` names the
+# type and operations through `using KernelInterface` and needs Lava for none of
+# that portable surface.
 #
 # So the prerequisite is met and what remains for GEMM is the OTHER blocker, the
 # one this file already called solvable: `LinearAlgebra.mul!` is Base's, so the
@@ -100,6 +103,18 @@ const VULKAN_BUDGET = Dict(
 
 @testset "the portable array algorithms stay portable" begin
     dir = joinpath(dirname(pathof(Mantle)), "vulkan", "array")
+
+    @testset "Mantle exposes KernelInterface's complete cooperative-matrix surface" begin
+        @test Mantle.CoopMatrix === KI.CoopMatrix
+        @test Mantle.AcceleratedMatrix === KI.AcceleratedMatrix
+        @test Mantle.WorkgroupMatrix === KI.WorkgroupMatrix
+        for name in (:coopmat_load, :coopmat_store, :coopmat_muladd,
+                     :coopmat_mul, :coopmat_add, :coopmat_zero, :coopmat_undef,
+                     :coopmat_convert, :coopmat_length, :coopmat_getcomp,
+                     :coopmat_setcomp)
+            @test getfield(Mantle, name) === getfield(KI, name)
+        end
+    end
 
     @testset "$f" for (f, budget) in sort(collect(VULKAN_BUDGET))
         n = vulkan_lines(joinpath(dir, f))

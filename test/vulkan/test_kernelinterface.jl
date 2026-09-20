@@ -181,6 +181,10 @@ end
         for T in types
             @test hasmethod(KI.shfl_down, Tuple{T, Int})
         end
+        @test KI.shfl_types(backend) == types
+        for T in types
+            @test hasmethod(KI.shfl, Tuple{T, Int})
+        end
     end
 
     @testset "cooperative matrices" begin

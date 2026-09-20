@@ -31,20 +31,14 @@ a two-dimensional ndrange and a one-dimensional one give different
 `CompilerMetadata` parameters, and inferring the kernel at the wrong one infers
 different code.
 """
-function kerneltouches(dev::LavaDevice, kernel, args::Tuple, ndrange, group)
-    argT = map(a -> devicetype(dev, a), args)
-    # The same split `compile_dispatch` makes, and for the same reason: what a
-    # dispatch MEANS is core's question (`buildskernel`), and a macro-free kernel
-    # is compiled at its arguments alone — no constructor, no iteration context.
-    if !buildskernel(kernel, backend(dev))
-        interp = Lava.kernelinterpreter(kernel, Tuple{argT...})
-        return accessof(interp, kernel, argT; cache = accesscache(dev))[2:end]
-    end
+kernelinterpreter(::LavaDevice, kernel, tt) = Lava.kernelinterpreter(kernel, tt)
+
+function kakernelaccesssignature(dev::LavaDevice, kernel, argT::Tuple, ndrange, group)
     obj  = kernelfor(kernel, group, backend(dev))
     iter = get_or_build_iter_plan(obj, dispatchrange(ndrange), callgroup(obj, group), dev.ctx)
     tt   = (typeof(iter.ka_ctx), argT...)
     interp = Lava.kernelinterpreter(obj.f, Tuple{tt...}; workgroup_size = iter.ws_3d)
-    return accessof(interp, obj.f, tt; cache = accesscache(dev))[3:end]
+    return interp, obj.f, tt
 end
 
 isdevicearray(::LavaArray) = true

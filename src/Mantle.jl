@@ -20,11 +20,12 @@ using KernelInterface: MatrixUse, MatrixA, MatrixB, Accumulator,
 # across the subgroup. KI owns the generic and each backend maps it to its own
 # instruction, so core needs no compiler dependency for it.
 using KernelInterface: sub_group_reduce_add
-# The cooperative-matrix type and the nine operations a backend lowers, in KI so
+# The cooperative-matrix type and the eleven operations a backend lowers, in KI so
 # that GEMM's coopmat half names no SPIR-V compiler's type. Pinned by
 # `test/vulkan/test_array_algorithm_portability.jl`.
 using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
     matrixuse, matrixscope, coopmat_load, coopmat_store, coopmat_muladd,
+    coopmat_mul, coopmat_add,
     coopmat_zero, coopmat_undef, coopmat_convert, coopmat_length,
     coopmat_getcomp, coopmat_setcomp
 # Primitive topology: KI's, because a compiler emits execution modes from it and
@@ -376,6 +377,9 @@ export DeviceInfo, devices, defaultdevice!
 export DeviceCaps, caps
 export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
 export CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope
+export coopmat_load, coopmat_store, coopmat_muladd, coopmat_mul, coopmat_add,
+    coopmat_zero, coopmat_undef, coopmat_convert, coopmat_length,
+    coopmat_getcomp, coopmat_setcomp
 export MatrixScope, SubgroupScope, WorkgroupScope, supports, bestshape
 # `copy!` is deliberately not exported: the name exists in Base, and exporting it
 # would make the bare name ambiguous in any module that does `using Mantle`.

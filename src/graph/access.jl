@@ -203,6 +203,29 @@ argument_usage(::Type{typeof(LinearAlgebra.mul!)},
                ::Type{<:Tuple{Any,Any,Any,Number,Number}}) =
     (Touch(true, true, false), READ, READ, NOTOUCH, NOTOUCH)
 
+"""
+Cooperative-matrix memory operations have one backend-independent meaning.
+
+Their implementations necessarily disappear behind backend intrinsics: Lava
+emits named SPIR-V stubs while AMDGPU's native WMMA adapter expands to
+`Core.LLVMPtr` loads/stores, represented by unnamed `llvmcall`s in inferred IR.
+The access belongs to the portable operation, not to either representation, so
+declare it here once. Matrix arithmetic has no pointer argument and remains
+ordinary inferred code.
+"""
+argument_usage(::Type{typeof(coopmat_load)},
+               ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (NOTOUCH, READ, NOTOUCH, NOTOUCH)
+argument_usage(::Type{typeof(coopmat_load)},
+               ::Type{<:Tuple{Any,Any,Any,Any,Any}}) =
+    (NOTOUCH, READ, NOTOUCH, NOTOUCH, NOTOUCH)
+argument_usage(::Type{typeof(coopmat_store)},
+               ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (WRITE, NOTOUCH, NOTOUCH, NOTOUCH)
+argument_usage(::Type{typeof(coopmat_store)},
+               ::Type{<:Tuple{Any,Any,Any,Any,Any}}) =
+    (WRITE, NOTOUCH, NOTOUCH, NOTOUCH, NOTOUCH)
+
 # ── Which values can reach memory ────────────────────────────────────────────
 
 """
@@ -226,11 +249,11 @@ backend that goes through GPUCompiler — Metal's `MtlDeviceArray` is an
 to build.
 """
 carries(@nospecialize(T)) = carries(T, 0)
+rawpointer(@nospecialize(T)) = T <: Ptr || T <: Core.LLVMPtr
 function carries(@nospecialize(T), depth::Int)
     depth > 8 && return true                    # deep enough to be unknowable
     T === Union{} && return false
-    T <: Ptr && return true
-    T <: Core.LLVMPtr && return true
+    rawpointer(T) && return true
     isconcretetype(T) || return true
     isbitstype(T) || return true                # arrays, memory, mutables
     for F in fieldtypes(T)
@@ -659,7 +682,7 @@ destination, and `Place` then saw its output transient with no interval at all.
 is why only the block kernels were affected.
 """
 pointerlike(ir, st::State, rest) =
-    any(a -> operandtype(ir, a) <: Ptr || isaddress(st, a), rest)
+    any(a -> rawpointer(operandtype(ir, a)) || isaddress(st, a), rest)
 
 isaddress(st::State, @nospecialize(x)) = x isa Core.SSAValue && x.id in st.addresses
 
@@ -1025,6 +1048,7 @@ how every backend spells an intrinsic; what that symbol does is
 const RMW_INSTR   = r"(?m)^\s*(%[^=\n]*=\s*)?(atomicrmw|cmpxchg)\s"
 const STORE_INSTR = r"(?m)^\s*store\s"
 const LOAD_INSTR  = r"(?m)^\s*%[^=\n]*=\s*load\s"
+const ADDRESS_INSTR = r"(?m)^\s*%[^=\n]*=\s*(addrspacecast|bitcast|getelementptr)\b"
 
 function llvmcallusage(src)
     src === nothing && return nothing
@@ -1048,6 +1072,21 @@ function llvmcalltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
     src = llvmsource(rest[1], ir)
     tainted = [a for a in rest if !isempty(operandtaint(ir, st, a))]
     isempty(tainted) && return Taint()
+    # LLVM.jl implements `LLVMPtr` casts and arithmetic as tiny `llvmcall`
+    # modules containing `addrspacecast`, `bitcast`, or `getelementptr`. They
+    # neither read nor write; their result is another spelling of the same
+    # address. Preserve provenance so the later load/store is attributed to the
+    # original argument. This is an LLVM fact, not an AMDGPU declaration, and
+    # belongs in the common walk. A module containing any memory instruction
+    # still takes the authoritative paths below.
+    if src !== nothing && occursin(ADDRESS_INSTR, src) &&
+       !occursin(RMW_INSTR, src) && !occursin(STORE_INSTR, src) &&
+       !occursin(LOAD_INSTR, src)
+        push!(st.addresses, i)
+        out = Taint()
+        foreach(a -> union!(out, operandtaint(ir, st, a)), tainted)
+        return out
+    end
     t = llvmcallusage(src)
     if t === nothing
         callee = src === nothing ? "an `llvmcall` whose module could not be read" :
@@ -1102,7 +1141,39 @@ kernel's own leading arguments are (an iteration context, a kernel state). The
 walk itself is `accessof` and is the same for every backend, because "does this
 kernel store through this pointer" is not a property of a driver.
 """
-function kerneltouches end
+function kerneltouches(dev, kernel, args::Tuple, ndrange, group)
+    argT = map(a -> devicetype(dev, a), args)
+    if buildskernel(kernel, backend(dev))
+        interp, body, tt = kakernelaccesssignature(dev, kernel, argT, ndrange, group)
+        return accessof(interp, body, tt; cache = accesscache(dev))[3:end]
+    end
+    interp = kernelinterpreter(dev, kernel, Tuple{argT...})
+    return accessof(interp, kernel, argT; cache = accesscache(dev))[2:end]
+end
+
+"""The interpreter a backend compiles a macro-free kernel through."""
+function kernelinterpreter end
+
+"""
+    kakernelaccesssignature(device, kernel, argtypes, ndrange, group)
+
+Interpreter, body and signature of a retained KernelAbstractions kernel.
+
+The ordinary KA launch shape is backend-independent: construct the retained
+kernel, ask KA for its iteration space, make its context, then ask the device
+for the compiler interpreter. Backends override this only when the signature
+they actually compile differs from KA's ordinary launch (Lava retains an
+`IterPlan`; the host constructs one block's CPU context).
+"""
+function kakernelaccesssignature(dev, kernel, argT::Tuple, ndrange, group)
+    obj = kernelfor(kernel, group, backend(dev))
+    nd = dispatchrange(ndrange)
+    cg = callgroup(obj, group)
+    ndr, _, iterspace, _ = KA.launch_config(obj, nd, cg)
+    ctx = KA.mkcontext(obj, ndr, iterspace)
+    tt = (typeof(ctx), argT...)
+    return kernelinterpreter(dev, obj.f, Tuple{tt...}), obj.f, tt
+end
 
 """
     devicetype(device, x) -> Type

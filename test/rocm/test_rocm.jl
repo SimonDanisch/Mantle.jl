@@ -30,9 +30,10 @@
 # asking for it by name is the whole of it.
 
 using Test, LinearAlgebra
-import Mantle, AMDGPU, KernelAbstractions
+import Mantle, AMDGPU, KernelAbstractions, KernelInterface
 using KernelAbstractions: @kernel, @index, @Const
 const M = Mantle
+const KI = KernelInterface
 
 const RE = Base.get_extension(Mantle, :MantleROCmExt)
 RE === nothing && error("test_rocm.jl: `import AMDGPU` did not load " *
@@ -41,6 +42,33 @@ RE === nothing && error("test_rocm.jl: `import AMDGPU` did not load " *
 @kernel function rocadd!(dst, @Const(src))
     i = @index(Global)
     @inbounds dst[i] = src[i] + 1.0f0
+end
+
+function rocmacrofree!(dst, src)
+    i = Int(KI.get_global_id().x)
+    i <= length(dst) && (@inbounds dst[i] = src[i] + 1.0f0)
+    return
+end
+
+@testset "ROCm: core infers a macro-free kernel through AMDGPU" begin
+    dev = M.Device(M.ROCmAPI())
+    # The algorithm stays in Mantle. ROCm supplies only the compiler
+    # interpreter needed to inspect the IR; neither the top-level routing nor
+    # KA's ordinary signature construction is copied into the extension.
+    @test which(M.kerneltouches,
+                (typeof(dev), typeof(rocmacrofree!), Tuple, Int, Nothing)).module === M
+    @test which(M.kakernelaccesssignature,
+                (typeof(dev), typeof(rocadd!), Tuple, Int, Nothing)).module === M
+    @test which(M.kernelinterpreter,
+                (typeof(dev), typeof(rocmacrofree!), Type{Tuple{}})).module === RE
+    g = M.Graph(dev)
+    src = M.Buffer(dev, fill(1.0f0, 1024))
+    dst = M.Transient.Buffer(g, Float32, 1024)
+    M.dispatch!(g, rocmacrofree!, (dst, src), 1024; name = "macro-free")
+    pl = M.Plan(g)
+    M.record!(pl)
+    M.run!(pl)
+    @test all(==(2.0f0), Array(M.storage(dst)))
 end
 
 "A forced chain: each pass reads what the previous wrote."
@@ -136,6 +164,26 @@ end
     @test all(==(42.0f0), Array(M.storage(dst)))
 end
 
+@testset "ROCm: capture acquires every argument on its own stream" begin
+    dev = M.Device(M.ROCmAPI())
+    n = 4096
+    g = M.Graph(dev)
+    src = M.Buffer(dev, fill(6.0f0, n))
+    dst = M.Transient.Buffer(g, Float32, n)
+    M.dispatch!(g, rocadd!, (dst, src), n; name = "foreign owner")
+    pl = M.Plan(g)
+
+    # Reproduce an argument last owned by another stream. AMDGPU's kernel
+    # wrapper normally synchronises that owner while converting its arguments;
+    # HIP forbids the synchronisation after capture has started. `record!` must
+    # transfer ownership before opening capture, on the exact stream `dev` owns.
+    foreign = AMDGPU.HIPStream()
+    AMDGPU.rocconvert(M.storage(src), foreign)
+    M.record!(pl)
+    M.run!(pl); M.waitidle(dev)
+    @test all(==(7.0f0), Array(M.storage(dst)))
+end
+
 @testset "ROCm: record! writes the plan down and does not run it" begin
     dev = M.Device(M.ROCmAPI())
     # A pass that ACCUMULATES, so a run that happens when it should not is
@@ -176,17 +224,54 @@ end
     @test all(d -> M.argsize(d) == 0 && M.indirectindex(d) == 0, ds)
 end
 
-@testset "ROCm: what this backend declines to do, and says so" begin
+@testset "ROCm: capabilities are the native backend's exact floor" begin
     dev = M.Device(M.ROCmAPI())
     # `repeat!` over fixed-size work needs the host to read a device-written
     # flag between passes; core does that by scalar-indexing the predicate,
     # which AMDGPU refuses. A gated pass is therefore refused at graph build.
     @test !M.supportspredicate(dev)
-    # …and the coopmat vocabulary has no AMDGPU lowering, which `caps` states
-    # rather than advertising tiles that would fail to compile.
-    @test !M.caps(dev).coopmat
-    @test isempty(M.caps(dev).shapes)
+    arch = first(split(AMDGPU.HIP.gcn_arch(dev.dev), ':'))
+    if startswith(arch, "gfx11") || startswith(arch, "gfx12")
+        @test M.caps(dev).coopmat
+        @test M.caps(dev).tile == 16
+        @test M.caps(dev).shapes ==
+              [KI.MatrixShape(Float16, Float32, 16, 16, 16, KI.SubgroupScope())]
+
+        # The advertised floor has to compile through its real consumer, not
+        # merely exist in the capability table.  This takes the vector-packed
+        # local-memory loads and split-K scratch/reduction paths.
+        ah = rand(Float16, 64, 64)
+        bh = rand(Float16, 64, 64)
+        a, b = AMDGPU.ROCArray(ah), AMDGPU.ROCArray(bh)
+        c = AMDGPU.zeros(Float32, 64, 64)
+        M.coopmat_gemm!(c, a, b, 64, 64, 64)
+        AMDGPU.synchronize()
+        @test maximum(abs.(Array(c) .- Float32.(ah) * Float32.(bh))) < 0.01
+
+        # And through the declared path. This exercises Mantle's access walk
+        # over AMDGPU's native LLVMPtr arithmetic and WMMA loads/stores; an
+        # immediate launch alone cannot catch a lost read/write declaration.
+        gg = M.Graph(dev)
+        ga, gb = M.Buffer(dev, ah), M.Buffer(dev, bh)
+        blk_split = M.coopmat_gemm_shape(64, 64, 64)
+        splitk = blk_split[2]
+        gc = M.Transient.Buffer(gg, Float32, 64, 64, max(splitk, 1))
+        M.coopmat_gemm_dispatch!(gg, gc, ga, gb, 64, 64, 64;
+                                 blk_split, partials = gc, reduce = false,
+                                 name = "declared coopmat")
+        gp = M.Plan(gg)
+        M.record!(gp); M.run!(gp); M.waitidle(dev)
+        got = dropdims(sum(Array(M.storage(gc)); dims = 3); dims = 3)
+        @test maximum(abs.(got .- Float32.(ah) * Float32.(bh))) < 0.01
+    else
+        @test !M.caps(dev).coopmat
+        @test isempty(M.caps(dev).shapes)
+    end
+    @test isempty(M.caps(dev).wggran)
     @test M.caps(dev).subgroup == 32
+    props = AMDGPU.HIP.properties(dev.dev)
+    @test M.caps(dev).warps ==
+          Int(props.maxThreadsPerMultiProcessor) ÷ Int(props.warpSize)
 end
 
 
@@ -282,6 +367,38 @@ end
     @test all(==(0), [(@allocated M.run!(pl)) for _ in 1:8])
     M.waitidle(dev)
     @test all(==(Float32(links)), Array(M.storage(t[end])))
+end
+
+@testset "ROCm: hipBLASLt bias epilogue is one recorded call" begin
+    dev = M.Device(M.ROCmAPI())
+    m, k, n = 48, 32, 64
+    ah = randn(Float16, m, k)
+    bh = randn(Float16, k, n)
+    zh = randn(Float16, m)
+    g = M.Graph(dev)
+    a = M.Buffer(dev, ah)
+    b = M.Buffer(dev, bh)
+    z = M.Buffer(dev, zh)
+    d = M.Transient.Buffer(g, Float16, m, n)
+    call = M.librarygemm(dev, d, a, b, z, identity)
+    if call === nothing
+        # hipBLASLt is optional even when the HIP backend itself is present.
+        @test dev.blaslt == C_NULL
+    else
+        M.dispatch!(g, call, (d, a, b, z); name = "gemm+bias")
+        pl = M.Plan(g)
+        # Initialise the library's implicit algorithm selection before stream
+        # capture, just as DNNKernels' immediate first run does.
+        call(M.storage(d), M.storage(a), M.storage(b), M.storage(z))
+        M.waitidle(dev)
+        M.record!(pl)
+        fill!(M.storage(d), Float16(0))
+        M.run!(pl); M.waitidle(dev)
+        got = Float32.(Array(M.storage(d)))
+        want = Float32.(ah) * Float32.(bh) .+ Float32.(zh)
+        @test got ≈ want rtol=2e-3 atol=2e-2
+        @test length(pl.passes) == 2 # updates plus the single fused call
+    end
 end
 
 @testset "ROCm: a partitioned recording is several graphs, in order" begin

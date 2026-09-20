@@ -24,6 +24,8 @@
 # the divergence that made `KI_REDUCE_ADD_TYPES` a separate list from
 # `KI_SHFL_TYPES` in the first place.
 for T in (Float32, Float16, Int32, UInt32)
+    @eval @device_override @inline KI.shfl(val::$T, lane::Integer) =
+        Metal.simd_shuffle(val, lane)
     @eval @device_override @inline KI.shfl_down(val::$T, offset::Integer) =
         Metal.simd_shuffle_down(val, offset)
 end

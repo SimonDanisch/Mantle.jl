@@ -263,14 +263,10 @@ There is no overlay here and no adaptation: a CPU kernel IS the Julia function,
 run on this thread, over the arrays `resolve` produced. `nothing` for the
 interpreter is what says so.
 """
-function Mantle.kerneltouches(d::HostDevice, kernel, args::Tuple, ndrange, group)
+Mantle.kernelinterpreter(::HostDevice, kernel, tt) = nothing
+
+function Mantle.kakernelaccesssignature(d::HostDevice, kernel, argT::Tuple, ndrange, group)
     be = Mantle.backend(d)
-    # A macro-free kernel is the function itself: no constructor to call and no
-    # iteration context to lead its arguments.
-    if !Mantle.buildskernel(kernel, be)
-        argT = map(a -> Mantle.devicetype(d, a), args)
-        return Mantle.accessof(nothing, kernel, argT; cache = d.accesses)[2:end]
-    end
     obj = Mantle.kernelfor(kernel, group, be)
     ndr, _ws, iterspace, dynamic = KA.launch_config(obj, Mantle.dispatchrange(ndrange), nothing)
     # The same five-argument `mkcontext` a CPU launch calls per block — the block
@@ -279,5 +275,5 @@ function Mantle.kerneltouches(d::HostDevice, kernel, args::Tuple, ndrange, group
     block = first(KA.NDIteration.blocks(iterspace))
     ctx = KA.mkcontext(obj, block, ndr, iterspace, dynamic)
     tt  = (typeof(ctx), map(a -> Mantle.devicetype(d, a), args)...)
-    return Mantle.accessof(nothing, obj.f, tt; cache = d.accesses)[3:end]
+    return nothing, obj.f, tt
 end

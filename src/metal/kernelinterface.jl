@@ -73,6 +73,7 @@ const MTL_SHFL_TYPES = (Float32, Float16, Int32, UInt32)
 const MTL_REDUCE_ADD_TYPES = (Float32, Float16, Int32, UInt32)
 
 KI.shfl_down_types(::MB) = collect(MTL_SHFL_TYPES)
+KI.shfl_types(::MB) = collect(MTL_SHFL_TYPES)
 KI.sub_group_reduce_add_types(::MB) = collect(MTL_REDUCE_ADD_TYPES)
 
 # ── Argument conversion ───────────────────────────────────────────────────────

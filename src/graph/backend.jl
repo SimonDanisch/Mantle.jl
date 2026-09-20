@@ -251,6 +251,21 @@ is declared as dispatches there instead.
 runscalls(::Device) = false
 
 """
+    librarygemm(device, out, A, B, bias, epilogue) -> callable or nothing
+
+Return a backend library call that computes `out = epilogue.(A * B .+ bias)`,
+or `nothing` when this device/library cannot implement that exact combination.
+The callable takes `(out, A, B, bias)`; keeping the device-owned library handle
+inside it means callers pass devices explicitly and no ambient or cached device
+identity is involved.
+
+This is a capability query rather than a vendor branch.  A command-buffer
+backend normally answers `nothing`; a stream-capture backend may return a
+vendor-library call whose submitted kernels become part of the recording.
+"""
+librarygemm(::Device, out, A, B, bias, epilogue) = nothing
+
+"""
     patchable(device) -> Bool
 
 Whether a moved address can be written INTO this backend's recording, or whether
@@ -720,7 +735,7 @@ const BACKEND_VOCABULARY = (
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
-    :recordsplans, :runscalls,
+    :recordsplans, :runscalls, :librarygemm,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submitting ONE baked piece, and giving one back that will never be
     # submitted. Core owns the sequence a partition makes of them
@@ -737,9 +752,11 @@ const BACKEND_VOCABULARY = (
     # owns the SIGNATURE it walks — which interpreter compiles this kernel, what
     # the device-side type of an argument is, and what leading arguments a kernel
     # of its own has. `shadertouches` and the two draw stages are declared with no
-    # method at all, so they are not core functions a backend EXTENDS;
-    # `kerneltouches` is, because the host device answers it in `src/host/`.
+    # method at all, so they are not core functions a backend EXTENDS. Access
+    # inference itself is core; backends provide only their array/type facts and
+    # compiler interpreter, with signature overrides where their launch differs.
     :argtype, :devicebuffertype, :isdevicearray, :accesscache, :kerneltouches,
+    :kernelinterpreter, :kakernelaccesssignature,
     # ray tracing
     :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,

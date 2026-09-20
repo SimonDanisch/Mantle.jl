@@ -65,14 +65,15 @@ actually landed, so a result of 28 where K is 32 says *which* is wrong rather
 than merely *that* it is — and an integer count survives fp16 exactly, where a
 relative error on random data can hide four missing terms in the tolerance.
 """
-function stagedcount(backend, cfg, K; blocks = 2)
+function stagedcount(backend, cfg, K; blocks = 2,
+                     kernels = Mantle.GEMM_STAGED_KERNELS)
     M = Mantle.gemm_bm(cfg) * blocks
     N = Mantle.gemm_bn(cfg) * blocks
     A = KA.allocate(backend, Float16, M, K); fill!(A, one(Float16))
     B = KA.allocate(backend, Float16, K, N); fill!(B, one(Float16))
     C = KA.allocate(backend, Float16, M, N); fill!(C, Float16(-1))
     wg = Mantle.gemm_wg(cfg)
-    Mantle.GEMM_STAGED_KERNELS[cfg](backend, wg)(
+    kernels[cfg](backend, wg)(
         C, A, B, nothing, identity, Val(M), Val(N), Val(K);
         ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg)
     KA.synchronize(backend)
@@ -128,6 +129,21 @@ end
             K % Mantle.gemm_bk(cfg) == 0 || continue
             r = stagedcount(backend, cfg, K)
             r.correct || @info "tiling $cfg lost k-terms" K = r.K seen = r.seen
+            @test r.correct
+        end
+    end
+
+    @testset "register-prefetched tilings accumulate every k-term" begin
+        # One block exercises the prologue; two or more exercise the
+        # register->shared handoff.  K=64 is the smallest such case, while the
+        # larger values cover odd/even loop counts and the long SAM2 products.
+        for cfg in Mantle.GEMM_TILINGS,
+            K in (32, 64, 96, 288, 576, 1152, 2304)
+            haskey(Mantle.GEMM_STAGED_PREFETCH_KERNELS, cfg) || continue
+            K % Mantle.gemm_bk(cfg) == 0 || continue
+            r = stagedcount(backend, cfg, K;
+                            kernels = Mantle.GEMM_STAGED_PREFETCH_KERNELS)
+            r.correct || @info "prefetched tiling $cfg lost k-terms" K = r.K seen = r.seen
             @test r.correct
         end
     end

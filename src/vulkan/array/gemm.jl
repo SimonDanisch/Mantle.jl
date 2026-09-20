@@ -174,6 +174,30 @@ const GEMM_TILINGS = GemmTiling[
 ]
 
 """
+## Sixteen subgroups do NOT transfer to this kernel (RDNA 3.5, 2026-09-18)
+
+`attn_flash_cm!` gained 30% on a device whose cooperative-matrix modules run at
+half its wave width by doubling its subgroup count — 8 subgroups of 32 lanes are
+only 4 native wave64 waves there. The same move was tried here, as five tilings
+keeping the block and halving the tiles a subgroup owns, and it is a loss or a
+tie on every one of SAM 2's six shapes. Forced per shape, interleaved, TFLOP/s:
+
+    shape                  96x128/8w   192x128/16w   96x128/16w   64x128/16w
+    2304 x 4096 x  576       21.88        21.80         16.74        14.77
+     576 x 4096 x 2304       16.07          --            --         12.67
+    1728 x 4096 x  576       19.24        19.33         15.65        13.60
+     576 x 4096 x  576       15.92        16.27         15.13        12.73
+     288 x 16384 x 1152      17.57          --          14.25          --
+    1152 x 16384 x  288      17.13        17.45         15.41        13.27
+
+(`--` is a block the shape does not divide.) `192x128/16w` ties the shipped
+tiling within 1% on the four shapes it divides and never wins; every narrower
+16-subgroup block loses by 10-30%. The shipped table stands unchanged, and the
+flash kernel's rule is about ITS shared traffic and register profile rather than
+about the device: this kernel's subgroup owns 6 accumulator tiles against the
+flash kernel's 3, so halving them to buy subgroups gives up the arithmetic
+intensity that the warp tile is there for.
+
 ## The tiling family is EXHAUSTED — four more were built and measured (2026-08-12)
 
 `tools/gemm_tiling_sweep.jl` forces every legal tiling at every one of SAM 2's
@@ -848,6 +872,44 @@ rebuild it.
 const GEMM_STAGED_DB_KERNELS = Dict{GemmTiling,Any}()
 
 """
+Register-prefetched, single-LDS twins of `GEMM_STAGED_V2N_KERNELS`.
+
+The next global tile is loaded into per-invocation registers before cooperative
+matrix arithmetic consumes the current shared tile.  A workgroup barrier then
+retires the current tile, the prefetched values replace it, and a second barrier
+publishes them.  This is ncnn's `gemm_cm.comp` schedule: unlike the double-buffer
+experiment it does not double shared memory or carry dynamic read/write phase
+offsets through the k-loop.
+
+This is expressed entirely in KernelAbstractions, `MVector`, shared memory and
+`AcceleratedMatrix`; no Vulkan instruction or device lookup is embedded in the
+kernel.  Backends decide how those portable operations lower.
+
+Measured with Vulkan timestamps on gfx1151/RADV, alternating both orders, 25
+dispatches per arm (milliseconds, lower is better):
+
+    M x N x K              old vec2n   prefetch   change
+    2304 x 4096 x 576        0.508       0.467     -8.0%
+     576 x 4096 x 2304       0.641       0.557    -13.1%
+    1728 x 4096 x 576        0.423       0.383     -9.4%
+     576 x 4096 x 576        0.155       0.144     -7.2%
+     288 x 16384 x 1152      0.547       0.500     -8.5%
+    1152 x 16384 x 288       0.560       0.503    -10.2%
+
+Weighted by SAM2's call counts that is 68.34 -> 61.45 ms (1.112x).  The same
+schedule written independently in GLSL reaches 58.36 ms, which both confirms
+the mechanism and leaves a concrete compiler-quality differential rather than
+claiming the remaining three milliseconds are algorithmic.
+
+Replacing both `MVector` queues with generated scalar bindings was also tested
+against the complete recorded encoder. It remained bit-exact but was neutral:
+160.44 ms versus 160.16 ms interleaved (40 pairs, +0.28 ms mean and -0.07 ms
+median). Lava already scalar-replaces these queues; spelling that result out by
+hand does not close the GLSL differential.
+"""
+const GEMM_STAGED_PREFETCH_KERNELS = Dict{GemmTiling,Any}()
+
+"""
 4-wide-staging twins of `GEMM_STAGED_V2N_KERNELS`: 64-bit shared accesses.
 
 The staging width dominates this kernel: scalar to `vec2` is **+45% to +54%**
@@ -1159,6 +1221,127 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               M, c_mt_nt, epi)
             end
             GEMM_STAGED_V2N_KERNELS[$cfg] = $kv2n
+        end
+
+        # ── ncnn schedule: register prefetch + one shared tile ─────────────
+        kp = Symbol("coopmat_gemm_staged_kernel_", ci, "_prefetch!")
+        @eval begin
+            @kernel cpu=false unsafe_indices=true function $kp(
+                                              C, @Const(A), @Const(B), bias, epi,
+                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
+                sA = @localmem GemmV2 ($LDA2 * $BK,)
+                sB = @localmem GemmV2 ($LDB2 * $BN,)
+
+                tid = Int32(@index(Local, Linear) - 1)
+                blk = Int32(@index(Group, Linear) - 1)
+                nblk_m = Int32(M ÷ $BM)
+                tm = (blk % nblk_m) * Int32($BM)
+                tn = (blk ÷ nblk_m) * Int32($BN)
+
+                s = tid ÷ Int32(32)
+                sm = (s % Int32($WM)) * Int32($STM)
+                sn = (s ÷ Int32($WM)) * Int32($STN)
+
+                bp = bias === nothing ? bias : pointer(bias)
+                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
+
+                # Function-storage arrays are scalar-replaced by Lava's normal
+                # pipeline. They are the one-tile register queue, not another
+                # workgroup allocation.
+                nextA = MVector{$AREPS2,GemmV2}(undef)
+                nextB = MVector{$BREPS2,GemmV2}(undef)
+
+                # Prologue: fetch block zero to registers, then publish it to
+                # the sole shared-memory tile.
+                @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                    idx = tid + r * Int32($WG)
+                    p, kk = splitidx(idx, Val($BM2))
+                    g = Int32(1) + tm + Int32(2) * Int32(p) + Int32(kk) * Int32(M)
+                    nextA[Int(r) + 1] = (VecElement(A[g]), VecElement(A[g + Int32(1)]))
+                end
+                @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                    idx = tid + r * Int32($WG)
+                    q, j = splitidx(idx, Val($BK2))
+                    g = Int32(1) + Int32(2) * Int32(q) + (tn + Int32(j)) * Int32(K)
+                    nextB[Int(r) + 1] = (VecElement(B[g]), VecElement(B[g + Int32(1)]))
+                end
+                @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                    idx = tid + r * Int32($WG)
+                    p, kk = splitidx(idx, Val($BM2))
+                    sA[1 + Int(p) + Int(kk) * $LDA2] = nextA[Int(r) + 1]
+                end
+                @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                    idx = tid + r * Int32($WG)
+                    q, j = splitidx(idx, Val($BK2))
+                    sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
+                end
+                @synchronize
+
+                nkb = Int32(K ÷ $BK)
+                for kb in Int32(0):(nkb - Int32(1))
+                    # Issue the following tile's global reads before the MMAs.
+                    # Their values remain live while the current shared tile is
+                    # consumed, giving the scheduler independent memory work.
+                    if kb + Int32(1) < nkb
+                        k0 = (kb + Int32(1)) * Int32($BK)
+                        @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                            idx = tid + r * Int32($WG)
+                            p, kk = splitidx(idx, Val($BM2))
+                            g = Int32(1) + tm + Int32(2) * Int32(p) +
+                                (k0 + Int32(kk)) * Int32(M)
+                            nextA[Int(r) + 1] =
+                                (VecElement(A[g]), VecElement(A[g + Int32(1)]))
+                        end
+                        @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                            idx = tid + r * Int32($WG)
+                            q, j = splitidx(idx, Val($BK2))
+                            g = Int32(1) + k0 + Int32(2) * Int32(q) +
+                                (tn + Int32(j)) * Int32(K)
+                            nextB[Int(r) + 1] =
+                                (VecElement(B[g]), VecElement(B[g + Int32(1)]))
+                        end
+                    end
+
+                    Base.Cartesian.@nexprs $NKT u -> begin
+                        kt = (u - 1) * GEMM_TILE
+                        Base.Cartesian.@nexprs $STM mt -> begin
+                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
+                                    sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
+                                        kt * $LDA2, $LDA2)
+                            Base.Cartesian.@nexprs $STN nt -> begin
+                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
+                                        sB, 1 + (kt ÷ 2) +
+                                            (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
+                                c_mt_nt = muladd(a, b, c_mt_nt)
+                            end
+                        end
+                    end
+
+                    # The last product has no successor to publish.
+                    if kb + Int32(1) < nkb
+                        @synchronize
+                        @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                            idx = tid + r * Int32($WG)
+                            p, kk = splitidx(idx, Val($BM2))
+                            sA[1 + Int(p) + Int(kk) * $LDA2] = nextA[Int(r) + 1]
+                        end
+                        @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                            idx = tid + r * Int32($WG)
+                            q, j = splitidx(idx, Val($BK2))
+                            sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
+                        end
+                        @synchronize
+                    end
+                end
+
+                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                    accstore!(C,
+                              1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
+                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                              M, c_mt_nt, epi)
+            end
+            GEMM_STAGED_PREFETCH_KERNELS[$cfg] = $kp
         end
 
         # ── Double-buffered twin of the narrow vec2 kernel ──────────────────
@@ -2024,9 +2207,20 @@ GEMM will run on and only the destination knows which that is — and it is stor
 on that device's `caches`, since a buffer handed to the wrong device is the
 defect the memory pool had.
 """
-function splitscratch(C, M::Int, N::Int, splitk::Int)
+splitscratch(C, M::Int, N::Int, splitk::Int) =
+    splitscratch(KernelAbstractions.get_backend(C), C, M, N, splitk)
+
+# Backends whose allocator tracks submitted array arguments can hand the launch
+# an ordinary temporary.  The launch tuple owns it through submission; the
+# backend owns retirement after that.  Lava needs the cache below because its
+# pool can reclaim a dropped buffer before a queued dispatch has retired.
+function splitscratch(backend, C, M::Int, N::Int, splitk::Int)
+    return KernelAbstractions.allocate(backend, Float32, M, N, splitk)
+end
+
+function splitscratch(backend::LavaBackend, C, M::Int, N::Int, splitk::Int)
     n = M * N * splitk
-    ctx = vk_context(KernelAbstractions.get_backend(C))
+    ctx = vk_context(backend)
     caches = ctx.caches
     buf = caches.gemm_split_scratch
     if buf === nothing || length(buf::LavaArray{Float32,1})::Int < n
@@ -2067,6 +2261,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        staged::Bool = GEMM_STAGED_DEFAULT,
                        vec2::Bool   = true,
                        narrow_ok::Bool = true,
+                       prefetch::Bool = true,
                        doublebuf::Bool = GEMM_DOUBLEBUF_DEFAULT,
                        vec4::Bool = GEMM_VEC4_DEFAULT,
                        tiling = nothing)
@@ -2100,6 +2295,8 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
             get(GEMM_STAGED_DB_KERNELS, c,
                 get(GEMM_STAGED_V2N_KERNELS, c,
                     get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c])))
+        elseif narrow && prefetch && haskey(GEMM_STAGED_PREFETCH_KERNELS, c)
+            GEMM_STAGED_PREFETCH_KERNELS[c]
         elseif narrow
             get(GEMM_STAGED_V2N_KERNELS, c,
                 get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c]))
