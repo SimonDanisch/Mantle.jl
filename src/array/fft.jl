@@ -405,7 +405,7 @@ fft(src::AbstractGPUArray{ComplexF32}; inverse::Bool = false, skew::Bool = FFT_S
 # same bytes. So `rfft!` is one half-length complex FFT plus one cheap pass.
 
 """
-    rfft_post_kernel!(dst, Z, Val(N), Val(SIGN))
+    rfft_post_kernel!(dst, Z, Val(N), Val(SIGN), scale)
 
 Split the half-length spectrum back into the real transform's `N ÷ 2 + 1` bins.
 
@@ -420,7 +420,7 @@ and `k = H` fall out without their own branch: at `k = 0` both reads hit `Z[0]`,
 so `o[0]` is real and `X[0] = e[0] + o[0]` is the DC bin.
 """
 @kernel cpu=false unsafe_indices=true function rfft_post_kernel!(
-        dst, @Const(Z), ::Val{N}, ::Val{SIGN}) where {N,SIGN}
+        dst, @Const(Z), ::Val{N}, ::Val{SIGN}, scale::Float32) where {N,SIGN}
     H = N ÷ 2
     g = @index(Global, Linear) - 1
     k = g % (H + 1)                 # bin
@@ -436,8 +436,8 @@ so `o[0]` is real and `X[0] = e[0] + o[0]` is the DC bin.
         or, oi = di, -dr
         ang = Float32(SIGN) * Float32(pi) * Float32(k) / Float32(H)
         sn, cs = sincos(ang)
-        dst[c * (H + 1) + k + 1] = ComplexF32(er + or * cs - oi * sn,
-                                              ei + or * sn + oi * cs)
+        dst[c * (H + 1) + k + 1] = scale * ComplexF32(er + or * cs - oi * sn,
+                                                      ei + or * sn + oi * cs)
     end
 end
 
@@ -468,7 +468,7 @@ function rfft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Float32}
     # DeepFilterNet3's 960, neither a power of two.
     Z = fftany!(similar(z), z)
     backend = get_backend(src)
-    rfft_post_kernel!(backend)(dst, Z, Val(N), Val(-1);
+    rfft_post_kernel!(backend)(dst, Z, Val(N), Val(-1), 1f0;
                                ndrange = (H + 1) * nbatch)
     return dst
 end
@@ -763,6 +763,123 @@ function fftany!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Comple
         "fftany!: length $N does not factorise over radices (8,5,4,3,2); " *
         "Rader or Bluestein is what VkFFT reaches for here and neither is ported"))
     return fftmixed!(dst, src, RS; inverse)
+end
+
+# ─────────────────────────────────────────────────────── declared graph forms
+
+"""Pack adjacent real samples as the complex input used by the real-FFT split."""
+@kernel cpu=false unsafe_indices=true function rfft_pack_kernel!(dst, @Const(src))
+    i = @index(Global, Linear)
+    @inbounds dst[i] = ComplexF32(src[2i - 1], src[2i])
+end
+
+"""Restore the redundant half of a real signal's Hermitian spectrum."""
+@kernel cpu=false unsafe_indices=true function irfft_extend_kernel!(
+        dst, @Const(src), ::Val{N}, ::Val{NB}) where {N,NB}
+    g = @index(Global, Linear) - 1
+    k = g % N
+    c = g ÷ N
+    @inbounds dst[g + 1] = k < NB ? src[c * NB + k + 1] :
+                                    conj(src[c * NB + (N - k) + 1])
+end
+
+"""Take and scale the real component after an unnormalised inverse FFT."""
+@kernel cpu=false unsafe_indices=true function irfft_real_kernel!(
+        dst, @Const(src), scale::Float32)
+    i = @index(Global, Linear)
+    @inbounds dst[i] = real(src[i]) * scale
+end
+
+
+"""
+    fftany_dispatch!(graph, dst, src; inverse = false, name = "fft") -> dst
+
+Declare a batched complex FFT along the first dimension.  This is the graph
+form of [`fftany!`](@ref): it selects the same tuned power-of-two or generated
+mixed-radix kernel, but records the launch rather than executing it.
+"""
+function fftany_dispatch!(g, dst, src; inverse::Bool = false,
+                          name::AbstractString = "fft")
+    size(dst) == size(src) || throw(DimensionMismatch(
+        "fftany_dispatch!: destination $(size(dst)) does not match source $(size(src))"))
+    N = size(src, 1)
+    nbatch = length(src) ÷ N
+    c = caps(backend(g.dev))
+    if count_ones(N) == 1 && N >= 8
+        T, lead = fftplan(N)
+        T <= c.workgrouplimit || throw(ArgumentError(
+            "fftany_dispatch!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
+        nb = fftgroup(N, T, nbatch, c.workgrouplimit, c.sharedbudget)
+        dispatch!(g, fft_kernel!,
+                  (dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1),
+                   Val(FFT_SKEW), Val(nb)),
+                  T * nb * (nbatch ÷ nb); group = T * nb, name)
+    else
+        RS = fftplan_mixed(N)
+        RS === nothing && throw(ArgumentError(
+            "fftany_dispatch!: length $N does not factorise over radices (8,5,4,3,2)"))
+        T = N ÷ maximum(RS)
+        T <= c.workgrouplimit || throw(ArgumentError(
+            "fftany_dispatch!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
+        dispatch!(g, fftmixed_kernel(RS, inverse ? 1 : -1), (dst, src),
+                  T * nbatch; group = T, name)
+    end
+    return dst
+end
+
+"""
+    rfft_dispatch!(graph, dst, src, packed, spectrum; name = "rfft") -> dst
+
+Declare a real forward FFT. `packed` and `spectrum` are `(N/2, batch...)`
+complex scratch resources supplied by the caller, so their lifetimes remain
+visible to the graph placer.
+"""
+function rfft_dispatch!(g, dst, src, packed, spectrum;
+                        scale::Real = 1f0,
+                        name::AbstractString = "rfft")
+    N = size(src, 1)
+    iseven(N) || throw(ArgumentError("rfft_dispatch!: length $N must be even"))
+    H = N ÷ 2
+    nbatch = length(src) ÷ N
+    size(dst, 1) == H + 1 || throw(DimensionMismatch(
+        "rfft_dispatch!: destination first dimension is $(size(dst, 1)), expected $(H + 1)"))
+    length(packed) == H * nbatch || throw(DimensionMismatch(
+        "rfft_dispatch!: packed scratch has $(length(packed)) elements, expected $(H * nbatch)"))
+    size(spectrum) == size(packed) || throw(DimensionMismatch(
+        "rfft_dispatch!: spectrum scratch $(size(spectrum)) does not match packed $(size(packed))"))
+    dispatch!(g, rfft_pack_kernel!, (packed, src), H * nbatch;
+              name = "$name/pack")
+    fftany_dispatch!(g, spectrum, packed; name = "$name/fft")
+    dispatch!(g, rfft_post_kernel!,
+              (dst, spectrum, Val(N), Val(-1), Float32(scale)),
+              (H + 1) * nbatch; name = "$name/post")
+    return dst
+end
+
+"""
+    irfft_dispatch!(graph, dst, src, full, transformed; scale = 1, name = "irfft")
+
+Declare an inverse real FFT from the non-redundant half spectrum. `full` and
+`transformed` are full-length complex scratch resources. The underlying inverse
+FFT is unnormalised; `scale` is folded into the final real-component store.
+"""
+function irfft_dispatch!(g, dst, src, full, transformed;
+                         scale::Real = 1f0,
+                         name::AbstractString = "irfft")
+    N = size(dst, 1)
+    NB = size(src, 1)
+    NB == N ÷ 2 + 1 || throw(DimensionMismatch(
+        "irfft_dispatch!: half spectrum has $NB bins, expected $(N ÷ 2 + 1) for length $N"))
+    size(full) == size(transformed) || throw(DimensionMismatch(
+        "irfft_dispatch!: scratch shapes $(size(full)) and $(size(transformed)) differ"))
+    length(full) == length(dst) || throw(DimensionMismatch(
+        "irfft_dispatch!: full scratch has $(length(full)) elements, expected $(length(dst))"))
+    dispatch!(g, irfft_extend_kernel!, (full, src, Val(N), Val(NB)), length(full);
+              name = "$name/extend")
+    fftany_dispatch!(g, transformed, full; inverse = true, name = "$name/fft")
+    dispatch!(g, irfft_real_kernel!, (dst, transformed, Float32(scale)), length(dst);
+              name = "$name/real")
+    return dst
 end
 
 """
