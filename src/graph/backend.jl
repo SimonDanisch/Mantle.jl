@@ -280,7 +280,10 @@ into a command-buffer recording.
 """
 native_gemm_dispatch!(::Device, graph, out, A, B;
                       bias = nothing, epilogue = identity, name) = nothing
-native_gemm_available(::Device, ::Type, ::Type, ::Type) = false
+# Immediate execution carries a KernelAbstractions backend while declaration
+# carries a Mantle device.  Backends may answer for either; the default is the
+# same absence of a native path.
+native_gemm_available(::Union{Device,KA.Backend}, ::Type, ::Type, ::Type) = false
 
 """
     patchable(device) -> Bool

@@ -123,7 +123,8 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
 Mantle.isdevicearray(::Metal.MtlArray) = true
 
 """Whether Metal's native SIMD-group GEMM covers these element types."""
-Mantle.native_gemm_available(::MetalDevice, ::Type{A}, ::Type{B}, ::Type{C}) where {A,B,C} =
+Mantle.native_gemm_available(::Union{MetalDevice,Metal.MetalBackend},
+                             ::Type{A}, ::Type{B}, ::Type{C}) where {A,B,C} =
     Metal.gemm_simd_eltype(A, B, C)
 
 """Declare Metal.jl's fastest recordable GEMM so a Mantle plan can bake it."""
