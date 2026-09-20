@@ -286,6 +286,24 @@ native_gemm_dispatch!(::Device, graph, out, A, B;
 native_gemm_available(::Union{Device,KA.Backend}, ::Type, ::Type, ::Type) = false
 
 """
+    native_batched_gemm_dispatch!(device, graph, out, A, B;
+                                  transpose_a=false, transpose_b=false,
+                                  alpha=1, name)
+
+Declare a backend's recordable strided-batched GEMM into `graph`.  The first
+two axes are the matrix axes and all trailing axes form the batch; corresponding
+matrix planes are multiplied without broadcasting.  `transpose_a` and
+`transpose_b` apply within every plane and `alpha` scales the product.
+
+Return `true` when the dispatch was declared and `false` otherwise.  The
+operation and its optional epilogue are backend-independent; a backend only
+decides whether its native recordable kernel covers the given operands.
+"""
+native_batched_gemm_dispatch!(::Device, graph, out, A, B;
+                              transpose_a = false, transpose_b = false,
+                              alpha = 1, name) = false
+
+"""
     patchable(device) -> Bool
 
 Whether a moved address can be written INTO this backend's recording, or whether
@@ -756,7 +774,7 @@ const BACKEND_VOCABULARY = (
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
     :recordsplans, :runscalls, :librarygemm, :native_gemm_available,
-    :native_gemm_dispatch!,
+    :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submitting ONE baked piece, and giving one back that will never be
     # submitted. Core owns the sequence a partition makes of them

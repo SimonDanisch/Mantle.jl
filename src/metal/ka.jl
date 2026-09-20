@@ -137,6 +137,20 @@ function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
     return config.fused
 end
 
+"""Declare Metal's tensor-ops strided-batched GEMM into a Mantle graph."""
+function Mantle.native_batched_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
+                                               transpose_a = false,
+                                               transpose_b = false,
+                                               alpha = 1,
+                                               name)
+    config = Metal.batched_gemm_kernel_config(
+        out, A, B; transpose_a, transpose_b, alpha)
+    config === nothing && return false
+    dispatch!(g, config.kernel, config.args, config.ndrange;
+              group = config.group, name)
+    return true
+end
+
 Mantle.accesscache(d::MetalDevice) = d.accesses
 
 """
