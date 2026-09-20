@@ -17,6 +17,10 @@ const KI = KernelInterface
     @test Mantle.intrinsic_usage(Symbol("air.atomic.global.load.i32")) === Mantle.READ
     @test Mantle.intrinsic_usage(Symbol("air.atomic.local.store.i32")) === Mantle.WRITE
     @test Mantle.intrinsic_usage(Symbol("air.atomic.global.xchg.i32")) === Mantle.ATOMIC
+    @test Mantle.intrinsic_usage(
+        Symbol("air.init_strided_private_tensor.i32.global")) === Mantle.READ
+    @test Mantle.intrinsic_usage(Symbol(
+        "__tensorops_impl_matmul2d_op_run_dv_f16_dv_f16_dv_f16")) === Mantle.ATOMIC
 end
 
 @testset "Metal: DeviceCaps" begin
