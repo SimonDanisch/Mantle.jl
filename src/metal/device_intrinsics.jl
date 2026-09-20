@@ -10,12 +10,25 @@
 
 # ── Lane identity ─────────────────────────────────────────────────────────────
 #
-# KI is 1-BASED, Metal is 0-based. The `+ 1` is not cosmetic: `shfl_down` and
-# the reductions index off these, and Lava's half carries the same correction
-# for the same reason.
+# KI is 1-based, and Metal.jl's argument intrinsics already apply that offset to
+# every ID (including the two SIMD-group IDs).  Forward them unchanged here.
+@device_override @inline KI.get_global_size() = Metal.threads_per_grid()
+@device_override @inline KI.get_global_id() = Metal.thread_position_in_grid()
+@device_override @inline KI.get_local_size() = Metal.threads_per_threadgroup()
+@device_override @inline KI.get_local_id() = Metal.thread_position_in_threadgroup()
+@device_override @inline KI.get_num_groups() = Metal.threadgroups_per_grid()
+@device_override @inline KI.get_group_id() = Metal.threadgroup_position_in_grid()
 @device_override @inline KI.get_sub_group_size() = Int(Metal.threads_per_simdgroup())
+@device_override @inline KI.get_max_sub_group_size() = Int(Metal.threads_per_simdgroup())
+@device_override @inline KI.get_num_sub_groups() = Int(Metal.simdgroups_per_threadgroup())
+@device_override @inline KI.get_sub_group_id() = Int(Metal.simdgroup_index_in_threadgroup())
 @device_override @inline KI.get_sub_group_local_id() =
-    Int(Metal.thread_index_in_simdgroup()) + 1
+    Int(Metal.thread_index_in_simdgroup())
+
+@device_override @inline function KI.localmemory(::Type{T}, ::Val{Dims},
+                                                  ::Val{Id}) where {T,Dims,Id}
+    return Metal.MtlThreadGroupArray(T, Dims, Val(Id))
+end
 
 # ── The shuffle family ────────────────────────────────────────────────────────
 #
@@ -25,7 +38,7 @@
 # `KI_SHFL_TYPES` in the first place.
 for T in (Float32, Float16, Int32, UInt32)
     @eval @device_override @inline KI.shfl(val::$T, lane::Integer) =
-        Metal.simd_shuffle(val, lane)
+        Metal.simd_shuffle(val, lane + 1)
     @eval @device_override @inline KI.shfl_down(val::$T, offset::Integer) =
         Metal.simd_shuffle_down(val, offset)
 end

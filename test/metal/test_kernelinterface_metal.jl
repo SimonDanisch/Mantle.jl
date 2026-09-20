@@ -13,6 +13,12 @@ using Test, Mantle, Metal, KernelAbstractions, KernelInterface
 const KA = KernelAbstractions
 const KI = KernelInterface
 
+@testset "Metal: opaque AIR access declarations" begin
+    @test Mantle.intrinsic_usage(Symbol("air.atomic.global.load.i32")) === Mantle.READ
+    @test Mantle.intrinsic_usage(Symbol("air.atomic.local.store.i32")) === Mantle.WRITE
+    @test Mantle.intrinsic_usage(Symbol("air.atomic.global.xchg.i32")) === Mantle.ATOMIC
+end
+
 @testset "Metal: DeviceCaps" begin
     d = Mantle.Device(Mantle.MetalAPI())
     c = Mantle.caps(d)
@@ -62,6 +68,33 @@ end
     @test KI.shfl_types(b) == KI.shfl_down_types(b)
     @test !(Float64 in KI.sub_group_reduce_add_types(b))
     @test Float32 in KI.sub_group_reduce_add_types(b)
+    @test !KI.supports_float64(b)
+end
+
+function _ki_ids!(out)
+    i = KI.get_global_id().x
+    i <= length(out) && (@inbounds out[i] = i)
+    return
+end
+
+function _ki_shfl!(out, a)
+    i = KI.get_sub_group_local_id()
+    @inbounds out[i] = KI.shfl(a[i], 31)
+    return
+end
+
+@testset "Metal: macro-free KernelInterface launch and absolute shuffle" begin
+    b = Metal.MetalBackend()
+    ids = Metal.zeros(UInt32, 37)
+    KI.@kernel b workgroupsize = 32 ndrange = 37 _ki_ids!(ids)
+    Metal.synchronize()
+    @test Array(ids) == UInt32.(1:37)
+
+    a = MtlArray(Float32.(1:32))
+    out = Metal.zeros(Float32, 32)
+    KI.@kernel b workgroupsize = 32 _ki_shfl!(out, a)
+    Metal.synchronize()
+    @test Array(out) == fill(32.0f0, 32)
 end
 
 @kernel cpu = false unsafe_indices = true function _ki_reduce!(out, @Const(a))

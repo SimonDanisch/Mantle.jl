@@ -71,6 +71,13 @@ Mantle.Device(::Mantle.HostAPI) = HostDevice(KA.CPU())
 Mantle.Device(b::KA.CPU) = HostDevice(b)
 Mantle.backend(d::HostDevice) = d.backend
 
+# The host has no subgroup or cooperative-matrix hardware to advertise.  It
+# still answers the portable capability query so graph clients can make the
+# same feature decisions for every Mantle device.  A one-lane subgroup is the
+# scalar CPU model; zero means that no bounded device-local memory budget or
+# GPU occupancy count is available.
+Mantle.caps(::HostDevice) = Mantle.DeviceCaps(false, 0, 1, 1, 0, 1024, 0, 0)
+
 # Nothing is ever outstanding here: a CPU launch has completed by the time it
 # returns, which is the same fact the header states about a step doing no
 # synchronisation. Present so that `waitidle(device)` is answerable on every
@@ -274,6 +281,6 @@ function Mantle.kakernelaccesssignature(d::HostDevice, kernel, argT::Tuple, ndra
     # the arity does: `Kernel{CPU}` has no three-argument method.
     block = first(KA.NDIteration.blocks(iterspace))
     ctx = KA.mkcontext(obj, block, ndr, iterspace, dynamic)
-    tt  = (typeof(ctx), map(a -> Mantle.devicetype(d, a), args)...)
+    tt  = (typeof(ctx), argT...)
     return nothing, obj.f, tt
 end

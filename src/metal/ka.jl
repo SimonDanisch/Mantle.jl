@@ -50,6 +50,23 @@
 
 syncbackend(::MetalDevice) = MetalAPI()
 
+# Metal's simdgroup matrix load/store are opaque AIR intrinsics after inlining:
+# the IR contains no ordinary LLVM load or store for the access walker to read.
+# Their globally unique symbol names are therefore the authoritative direction.
+function intrinsic_usage(name::Symbol)
+    s = String(name)
+    startswith(s, "air.simdgroup_matrix_8x8_load.") && return READ
+    startswith(s, "air.simdgroup_matrix_8x8_store.") && return WRITE
+    if startswith(s, "air.atomic.global.") || startswith(s, "air.atomic.local.")
+        occursin(".load.", s) && return READ
+        occursin(".store.", s) && return WRITE
+        return ATOMIC
+    end
+    s == "__metal_linked_closest" && return READ
+    s == "__metal_linked_any" && return READ
+    return nothing
+end
+
 # `resolve` is NOT overridden here. Core's default is `storage(x)`, and that is
 # already right: a `Buffer`'s storage is `deviceview(dev, store)` — the borrowed
 # `MtlArray` over its pool region — and a transient's is what `materialize!`
@@ -93,10 +110,38 @@ Mantle.argtype(::MetalDevice, @nospecialize(y)) = Core.Typeof(Metal.mtlconvert(y
 
 # What `Adapt.adapt_storage(::Metal.Adaptor, ::MtlArray)` produces, which is what
 # a kernel handed a materialised transient receives.
-Mantle.devicebuffertype(::MetalDevice, ::Type{T}) where {T} =
-    Metal.MtlDeviceArray{T,1,Metal.AS.Device}
+Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
+    Metal.MtlDeviceArray{T,N,Metal.AS.Device}
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
+
+"""Whether Metal's native SIMD-group GEMM covers these element types."""
+Mantle.native_gemm_available(::MetalDevice, ::Type{A}, ::Type{B}, ::Type{C}) where {A,B,C} =
+    Metal.gemm_simd_eltype(A, B, C)
+
+"""Declare Metal.jl's native SIMD-group GEMM so a Mantle plan can record it."""
+function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B; name)
+    Metal.gemm_simd_eltype(eltype(A), eltype(B), eltype(out)) || return false
+    M, N, K = size(out, 1), size(out, 2), size(A, 2)
+    WM = Metal.GEMM_SIMD_WM
+    WN = Metal.GEMM_SIMD_WN
+    TM = Metal.GEMM_SIMD_TM
+    TN = Metal.GEMM_SIMD_TN
+    KB = Metal.GEMM_SIMD_KB
+    BM, BN = 8 * TM * WM, 8 * TN * WN
+    threads = WM * WN * 32
+    groups = (cld(M, BM), cld(N, BN))
+    edge = !(M % BM == 0 && N % BN == 0)
+    args = (out, A, B, 1.0f0, 0.0f0, M, N, K,
+            Val('N'), Val('N'), Val(WM), Val(WN), Val(TM), Val(TN), Val(KB),
+            Val(edge), Val(true), Val(true))
+    # KI spells launches in workitems rather than workgroups.  The second axis
+    # has one thread per group; the kernel obtains both group coordinates from
+    # Metal's threadgroup-position intrinsic.
+    dispatch!(g, Metal.gemm_simd_kernel!, args,
+              (groups[1] * threads, groups[2]); group = (threads, 1), name)
+    return true
+end
 
 Mantle.accesscache(d::MetalDevice) = d.accesses
 

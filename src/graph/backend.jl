@@ -266,6 +266,17 @@ vendor-library call whose submitted kernels become part of the recording.
 librarygemm(::Device, out, A, B, bias, epilogue) = nothing
 
 """
+    native_gemm_dispatch!(device, graph, out, A, B; name) -> Bool
+
+Declare a backend's recordable native GEMM kernel into `graph`.  Returns false
+when the backend has no native kernel for these operand types.  Unlike
+`librarygemm`, this path is a device dispatch and can therefore be baked into a
+command-buffer recording.
+"""
+native_gemm_dispatch!(::Device, graph, out, A, B; name) = false
+native_gemm_available(::Device, ::Type, ::Type, ::Type) = false
+
+"""
     patchable(device) -> Bool
 
 Whether a moved address can be written INTO this backend's recording, or whether
@@ -732,10 +743,11 @@ const BACKEND_VOCABULARY = (
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitbarriers!, :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
-    :profiled!, :collect!,
+    :profiled!, :collect!, :argument_usage,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
-    :recordsplans, :runscalls, :librarygemm,
+    :recordsplans, :runscalls, :librarygemm, :native_gemm_available,
+    :native_gemm_dispatch!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submitting ONE baked piece, and giving one back that will never be
     # submitted. Core owns the sequence a partition makes of them

@@ -817,10 +817,26 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         end
         return keptaddress!(st, i, ir, fields, tt) ? out : Taint()
     elseif head === :foreigncall
-        # A `ccall` is C, and nothing here reads C. It is also not compilable for
-        # any device this runs on, so refusing costs nothing a kernel could have
-        # wanted. `llvmcall` does NOT come through here -- it is an intrinsic
-        # call, handled in `calltaint!` below.
+        # Linked device functions use `ccall("extern name", llvmcall, ...)`,
+        # which inference retains as a foreigncall even though the GPU compiler
+        # links it into the device pipeline.  Its globally unique symbol can be
+        # declared by the backend just like an inline llvmcall intrinsic.
+        rawname = stmt.args[1]
+        name = rawname isa QuoteNode ? rawname.value : rawname
+        namestr = name isa Symbol ? String(name) :
+                  name isa String ? name : string(name)
+        m = match(r"([A-Za-z_][A-Za-z0-9_.$]*)$", namestr)
+        if m !== nothing
+            usage = intrinsic_usage(Symbol(m.captures[1]))
+            if usage !== nothing
+                for a in stmt.args
+                    record!(touches, am, operandtaint(ir, st, a), usage)
+                end
+                return Taint()
+            end
+        end
+        # An ordinary `ccall` is host C, and nothing here reads C. It is not
+        # compilable for a device, so refusing costs nothing a kernel could use.
         for a in stmt.args
             refuse!(w, am, operandtaint(ir, st, a), "a `ccall`, which is C", stmt)
         end
@@ -1147,6 +1163,11 @@ function kerneltouches(dev, kernel, args::Tuple, ndrange, group)
         interp, body, tt = kakernelaccesssignature(dev, kernel, argT, ndrange, group)
         return accessof(interp, body, tt; cache = accesscache(dev))[3:end]
     end
+    # Refuse an unsupported macro-free kernel at the same boundary as `bake`.
+    # Walking its host fallback first reports whichever device intrinsic throws
+    # during inference, hiding the actionable fact that this device has no KI
+    # compiler at all.
+    kisupported(dev, kernel) || kikernel(kernel, dev, map(a -> resolve(dev, a), args))
     interp = kernelinterpreter(dev, kernel, Tuple{argT...})
     return accessof(interp, kernel, argT; cache = accesscache(dev))[2:end]
 end

@@ -26,6 +26,7 @@ KI.allocate(b::MB, ::Type{T}, dims::Tuple;
 # core to the shading language rather than an extension.
 KI.supports_unified(::MB) = true
 KI.supports_atomics(::MB) = true
+KI.supports_float64(::MB) = false
 
 # ── Device limits, all out of `caps` ──────────────────────────────────────────
 #
@@ -87,3 +88,36 @@ a scalar is a scalar on both sides.
 """
 KI.argconvert(::MB, a::MtlArray) = Metal.mtlconvert(a)
 KI.argconvert(::MB, x) = x
+
+# `Metal.mtlfunction` is the compiler; `KI.Kernel` supplies KI's portable launch
+# vocabulary around the resulting pipeline.  Keep the compiled HostKernel in the
+# wrapper so `kernel_max_work_group_size` can use the pipeline's real limit and an
+# immediate launch does not compile a second time.
+function KI.kernel_function(backend::MB, @nospecialize(f), @nospecialize(tt) = Tuple{};
+                            name = nothing, kwargs...)
+    isempty(kwargs) || throw(ArgumentError(
+        "unsupported Metal KernelInterface compiler keywords: $(keys(kwargs))"))
+    host = Metal.mtlfunction(Metal.mtlconvert(f), tt; name)
+    return KI.Kernel(backend, host)
+end
+
+function KI.kernel_max_work_group_size(k::KI.Kernel{<:MB};
+                                       max_work_items::Int = typemax(Int))::Int
+    return min(k.kern.maxthreads, max_work_items)
+end
+
+function (k::KI.Kernel{<:MB})(args...;
+                              numworkgroups = (), workgroupsize = (), ndrange = (),
+                              max_work_group_size::Int = typemax(Int))
+    KI.check_launch_args(numworkgroups, workgroupsize, ndrange)
+
+    # KI explicitly defines an empty dimension as a no-op.  An explicit zero
+    # workgroup count has the same meaning and Metal must not encode it.
+    (length(ndrange) > 0 && prod(ndrange) == 0) && return nothing
+    (length(numworkgroups) > 0 && prod(numworkgroups) == 0) && return nothing
+
+    groups, threads = KI.auto_launch_sizes(
+        k, numworkgroups, workgroupsize, ndrange, max_work_group_size)
+    k.kern(args...; groups, threads)
+    return nothing
+end

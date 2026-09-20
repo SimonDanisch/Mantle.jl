@@ -192,6 +192,7 @@ include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases
 # `test/vulkan/test_array_algorithm_portability.jl` for what is left to move and
 # what is deliberately staying.
 include("array/launch.jl")   # what a library routine IS, before it is submitted
+include("array/indexing.jl") # portable index decomposition and launch geometry
 include("array/gemv.jl")
 include("array/fft.jl")
 

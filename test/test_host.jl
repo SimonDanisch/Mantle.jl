@@ -207,6 +207,10 @@ include(joinpath(@__DIR__, "backend_probe.jl"))
 
 @testset "Host and Vulkan devices coexist" begin
     @test M.Device(M.HostAPI()) isa M.HostDevice
+    caps = M.caps(M.Device(M.HostAPI()))
+    @test !caps.coopmat
+    @test caps.subgroup == 1
+    @test caps.workgrouplimit == 1024
     # Only this line needs a driver. What is being asserted — that two backend
     # MARKERS give two distinct methods rather than one silently replacing the
     # other — is worth checking on a machine with no Vulkan loader too, so the

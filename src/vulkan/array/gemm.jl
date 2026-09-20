@@ -93,35 +93,6 @@ the accumulators still fit in registers, which is the whole difficulty.
 """
 const GemmTiling = NTuple{6,Int}
 
-"""
-    splitidx(idx, ::Val{N}) -> (idx % N, idx ÷ N)
-
-Decompose a flat staging index, **without ever emitting `OpUDiv`**.
-
-That is a correctness requirement, not a micro-optimisation. A staging loop whose
-shared-store address goes through a real division by a non-power-of-two constant
-*loses stores* on this driver once the loop is unrollable and a cooperative-matrix
-`muladd` is in scope: at `BM = 96`, 2184 of 3072 slots end up holding another
-row's value and 392 are never written at all. The two emitted modules for
-`BM = 112` (lossy) and `BM = 128` (exact) have **identical opcode sequences except
-that one contains `OpUDiv` and the other `OpShiftRightLogical` + `OpBitwiseAnd`**,
-which is what identified the division. Replacing it with the magic-number form
-below makes every geometry exact at every K.
-
-`FastDiv32` is the same `init_fastdiv_values` port the broadcast path uses, so
-this costs nothing: a high multiply and a shift are cheaper than a divide. A
-power-of-two `N` keeps the mask and shift it would have had anyway.
-"""
-@generated function splitidx(idx::Integer, ::Val{N}) where {N}
-    ispow2(N) && return :((Int(idx) & $(N - 1), Int(idx) >> $(trailing_zeros(N))))
-    fd = FastDiv32(N)
-    quote
-        u = UInt32(idx)
-        q = Int((UInt32((UInt64(u) * $(UInt64(fd.mp))) >> 32) + u) >> $(fd.L))
-        (Int(u) - q * $N, q)
-    end
-end
-
 @inline gemm_bm(c::GemmTiling) = GEMM_TILE * c[1] * c[3]
 @inline gemm_bn(c::GemmTiling) = GEMM_TILE * c[2] * c[4]
 @inline gemm_wg(c::GemmTiling) = c[3] * c[4] * COOPMAT_SUBGROUP

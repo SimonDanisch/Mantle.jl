@@ -116,7 +116,7 @@ lays the plan's argument memory out with, and `adapted` is what `pack_recorded!`
 writes into it at `record!` — held rather than re-derived, because deriving it is
 the per-launch `mtlconvert` this whole path exists to delete.
 """
-struct MetalRecordedDispatch{A<:Tuple,R<:Tuple}
+struct MetalRecordedDispatch{A<:Tuple,R<:Tuple,G,T}
     kernel::Metal.HostKernel
     args::Vector{RecordedArg}
     adapted::A
@@ -124,8 +124,8 @@ struct MetalRecordedDispatch{A<:Tuple,R<:Tuple}
     # dispatch — see the call operator below for why that difference matters.
     raw::R
     state::Metal.KernelState
-    groups::Int
-    nthreads::Int
+    groups::G
+    nthreads::T
     name::String
     argoff::Int
     argsize::Int
@@ -327,14 +327,27 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     # A declared CALL: core's `bake` resolves its arguments into a `Call`. See
     # the three-argument `dispatch!`.
     Mantle.iscall(d) && return Mantle.bake(c, d)
-    # And a macro-free `KernelInterface` kernel — a plain function rather than a
-    # `@kernel`-generated constructor, so there is no launchable object to build
-    # here at all. Core's interpreted launch compiles it through
-    # `KI.kernel_function`, or refuses it BY NAME where the backend implements
-    # none, which Metal does not. `buildskernel` is core's predicate for the
-    # distinction and is ASKED rather than restated, the same as on the Vulkan
-    # side.
-    Mantle.buildskernel(d.kernel, Mantle.backend(dev)) || return Mantle.bake(c, d)
+    # A macro-free KernelInterface kernel has no KA iteration context.  Compile
+    # it directly below so its pipeline gets `indirect=true`; the ordinary KI
+    # wrapper deliberately builds a normal immediate-launch pipeline.
+    if !Mantle.buildskernel(d.kernel, Mantle.backend(dev))
+        raw = map(a -> Mantle.resolve(dev, a), d.args)
+        adapted = map(Metal.mtlconvert, raw)
+        tt = Tuple{map(Core.Typeof, adapted)...}
+        entry = icb_name(string(nameof(typeof(d.kernel))), argoff)
+        kernel = Metal.mtlfunction(Metal.mtlconvert(d.kernel), tt;
+                                   name = entry, indirect = true)
+        wrapped = KI.Kernel(Mantle.backend(dev), kernel)
+        nd = recordedrange(d.ndrange)
+        group = d.group === nothing ? () : d.group
+        groups, threads = KI.auto_launch_sizes(wrapped, (), group, nd)
+        kernel.loggingEnabled && throw(ArgumentError(
+            "record!: kernel $(entry) uses device-side logging, which needs a per-launch buffer"))
+        state = recorded_state(dev, kernel)
+        recargs, nbytes = recorded_args((state, d.kernel, adapted...), argoff)
+        return MetalRecordedDispatch(kernel, recargs, adapted, raw, state,
+                                     groups, threads, entry, argoff, nbytes)
+    end
     obj = Mantle.kernelfor(d.kernel, d.group, Mantle.backend(dev))
     isempty(fieldnames(typeof(obj.f))) ||
         throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
@@ -356,7 +369,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     ctx = KA.mkcontext(obj, ndrange, iterspace)
     entry = icb_name(string(nameof(typeof(obj.f))), argoff)
     adapted = (Metal.mtlconvert(ctx), args...)
-    tt = Base.to_tuple_type(map(typeof, adapted))
+    tt = Tuple{map(Core.Typeof, adapted)...}
     kernel = Metal.mtlfunction(obj.f, tt; name = entry, indirect = true)
     # The same autotune `MetalKernels` does per launch, against the pipeline that
     # will actually run: a kernel with a dynamic workgroup size is partitioned by
@@ -366,7 +379,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
         iterspace, _ = KA.partition(obj, ndrange, ws)
         ctx = KA.mkcontext(obj, ndrange, iterspace)
         adapted = (Metal.mtlconvert(ctx), args...)
-        tt2 = Base.to_tuple_type(map(typeof, adapted))
+        tt2 = Tuple{map(Core.Typeof, adapted)...}
         # The repartition changes the iteration space's VALUES, not its type — a
         # static workgroup size is not repartitioned at all. Checked rather than
         # assumed: a pipeline compiled for one context type and encoded with
@@ -960,7 +973,7 @@ function emitrangewriter!(e::MetalRecorder, pred::Tuple{Any,Int})
     adapted = (Metal.mtlconvert(e.ranges),
                Metal.mtlconvert(Mantle.storage(pred[1])),
                Int32(pred[2]), Int32(2 * slot), UInt32(0), UInt32(0))
-    tt = Base.to_tuple_type(map(typeof, adapted))
+    tt = Tuple{map(Core.Typeof, adapted)...}
     kernel = Metal.mtlfunction(metal_write_range!, tt;
                                name = icb_name("write_range", slot), indirect = true)
     state = recorded_state(e.dev, kernel)
@@ -981,7 +994,7 @@ function emitgridwriter!(e::MetalRecorder, pred::Tuple{Any,Int})
     adapted = (Metal.mtlconvert(e.grids), Metal.mtlconvert(e.templ),
                Metal.mtlconvert(Mantle.storage(pred[1])),
                Int32(pred[2]), Int32(0), Int32(0))
-    tt = Base.to_tuple_type(map(typeof, adapted))
+    tt = Tuple{map(Core.Typeof, adapted)...}
     kernel = Metal.mtlfunction(metal_write_grids!, tt;
                                name = icb_name("write_grids", slot), indirect = true)
     state = recorded_state(e.dev, kernel)
@@ -1025,7 +1038,7 @@ function Mantle.emithead!(e::MetalRecorder, pl::Mantle.Plan)
     arr = encodes(e.dev.queue) ? e.grids : e.ranges
     n = encodes(e.dev.queue) ? Int32(length(e.grids)) : Int32(2 * e.nwriters)
     adapted = (Metal.mtlconvert(arr), n)
-    tt = Base.to_tuple_type(map(typeof, adapted))
+    tt = Tuple{map(Core.Typeof, adapted)...}
     kernel = Metal.mtlfunction(metal_reset_ranges!, tt;
                                name = icb_name("reset_ranges", 0), indirect = true)
     state = recorded_state(e.dev, kernel)
