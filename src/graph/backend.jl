@@ -288,12 +288,17 @@ native_gemm_available(::Union{Device,KA.Backend}, ::Type, ::Type, ::Type) = fals
 """
     native_batched_gemm_dispatch!(device, graph, out, A, B;
                                   transpose_a=false, transpose_b=false,
-                                  alpha=1, name)
+                                  alpha=1, coldiv=nothing, name)
 
 Declare a backend's recordable strided-batched GEMM into `graph`.  The first
 two axes are the matrix axes and all trailing axes form the batch; corresponding
 matrix planes are multiplied without broadcasting.  `transpose_a` and
 `transpose_b` apply within every plane and `alpha` scales the product.
+
+`coldiv` divides each output COLUMN by one value, laid out `(N, batch...)` — the
+epilogue an unnormalized softmax leaves for the product that follows it. A
+backend that fuses it into the product's store saves a whole pass over the
+output; one that cannot simply returns `false` and the caller normalizes itself.
 
 Return `true` when the dispatch was declared and `false` otherwise.  The
 operation and its optional epilogue are backend-independent; a backend only
@@ -301,7 +306,7 @@ decides whether its native recordable kernel covers the given operands.
 """
 native_batched_gemm_dispatch!(::Device, graph, out, A, B;
                               transpose_a = false, transpose_b = false,
-                              alpha = 1, name) = false
+                              alpha = 1, coldiv = nothing, name) = false
 
 """
     patchable(device) -> Bool

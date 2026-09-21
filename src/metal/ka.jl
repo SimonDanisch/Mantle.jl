@@ -142,9 +142,10 @@ function Mantle.native_batched_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
                                                transpose_a = false,
                                                transpose_b = false,
                                                alpha = 1,
+                                               coldiv = nothing,
                                                name)
     config = Metal.batched_gemm_kernel_config(
-        out, A, B; transpose_a, transpose_b, alpha)
+        out, A, B; transpose_a, transpose_b, alpha, coldiv)
     config === nothing && return false
     dispatch!(g, config.kernel, config.args, config.ndrange;
               group = config.group, name)
