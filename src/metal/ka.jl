@@ -127,9 +127,26 @@ Mantle.native_gemm_available(::Union{MetalDevice,Metal.MetalBackend},
                              ::Type{A}, ::Type{B}, ::Type{C}) where {A,B,C} =
     Metal.gemm_simd_eltype(A, B, C)
 
-"""Declare Metal.jl's fastest recordable GEMM so a Mantle plan can bake it."""
+"""
+Declare this backend's fastest product for these operands.
+
+Apple's MPSGraph product where it covers the operands and the activation, this
+backend's `matmul2d` kernel otherwise, with the parts the chosen one could not fold
+reported back so the caller declares them as passes.
+
+`librarygemm` is asked first by the declaring caller and answers for exactly the same
+cases, so what reaches HERE is either a product it never asked about — the
+convolution's im2col GEMM — or one the library cannot express. Both routes are tried
+in the same order either way, which is why the library is offered again here rather
+than left to the one call site that happens to ask for it.
+"""
 function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
                                       bias = nothing, epilogue = identity, name)
+    lib = Mantle.librarygemm(dev, out, A, B, bias, epilogue)
+    if lib !== nothing
+        dispatch!(g, lib, (out, A, B, bias); name)
+        return (; bias = bias !== nothing, epilogue = true)
+    end
     config = Metal.gemm_kernel_config(out, A, B; bias, epilogue)
     config === nothing && return nothing
     dispatch!(g, config.kernel, config.args, config.ndrange;
@@ -164,14 +181,22 @@ end
 # the boundary — and core's answer to an undeclared argument is read-AND-write, which
 # would order every product after every other one and serialise the frame.
 
-"""Apple's MPSGraph matrix product, `out = A * B .+ bias`, as a pass member."""
-struct MPSGraphGemm end
+"""
+Apple's MPSGraph matrix product, `out = act.(A * B .+ bias)`, as a pass member.
+
+The activation rides on the callable — a `Symbol` naming which one, from
+`Mantle.activationkind` — rather than being a fourth argument, because it is decided
+at declare time and is not a resource.
+"""
+struct MPSGraphGemm
+    act::Symbol
+end
 
 Mantle.argument_usage(::Type{MPSGraphGemm}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
     (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
 
-(::MPSGraphGemm)(out, A, B, bias) =
-    (Metal.MPSGraphs.gemm_batched!(out, A, B, bias); nothing)
+(c::MPSGraphGemm)(out, A, B, bias) =
+    (Metal.MPSGraphs.gemm_batched!(out, A, B, bias, c.act); nothing)
 
 """
 Apple's fused scaled dot-product attention as a pass member.
@@ -199,18 +224,23 @@ Mantle.argument_usage(::Type{<:MPSGraphAttention}, ::Type{<:Tuple{Any,Any,Any,An
 Apple's own product where it covers the operands, which is measurably faster than
 this backend's best recordable kernel.
 
+The ACTIVATION goes into the graph too, where MPSGraph has a node for it: an
+activation applied to a product already rounded to half loses accuracy twice, so the
+graph widens to Float32 after the product and rounds once, which is what the kernel
+this replaces does with its accumulator. `Mantle.activationkind` is how the
+activation is named without this backend knowing whose function it is.
+
 Measured on an M5 over SAM 2.1's encoder, fp16, the 195 `addmm` products of one
-frame: 213 ms through `gemm_tensor!` against 171 ms through MPSGraph. So the library
-wins where it applies and `native_gemm_dispatch!` — asked next by the caller — keeps
-everything it does not: a non-identity epilogue, which MPSGraph would need a second
-pass for and the tensor kernel folds into its store.
+frame: 213 ms through `gemm_tensor!` against 130 through MPSGraph. What is left for
+`native_gemm_dispatch!` — asked next by the caller — is a product MPSGraph does not
+cover, or one whose activation it has no node for.
 """
 function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
     # The question is about this device's RUN path, and it is core's to answer.
     Mantle.runscalls(d) || return nothing
-    epilogue === identity || return nothing
-    Metal.MPSGraphs.gemm_shape_supported(out, A, B, bias) || return nothing
-    return MPSGraphGemm()
+    act = Mantle.activationkind(epilogue)
+    Metal.MPSGraphs.gemm_shape_supported(out, A, B, bias, act) || return nothing
+    return MPSGraphGemm(act)
 end
 
 """

@@ -266,6 +266,29 @@ vendor-library call whose submitted kernels become part of the recording.
 librarygemm(::Device, out, A, B, bias, epilogue) = nothing
 
 """
+    activationkind(f) -> Symbol
+
+Which NAMED activation `f` is, for a library that has a node of its own for it:
+`:identity`, `:relu`, `:gelu`, `:gelu_tanh`, or `:unknown`.
+
+NOT a backend hook — there is no device parameter, for the reason `argument_usage`
+has none. What `gelu` computes is not a fact about a driver, and a backend able to
+specialise this would be deciding what a function MEANS. It is declared next to the
+function, once, by whoever defines it.
+
+`:unknown` is the default and is not a licence to guess. A backend whose library has
+no node for the activation declines the fused product and reports what it did fold
+(see `native_gemm_dispatch!`), so the caller declares the rest as a pass.
+
+A library's own `gelu` is not bit-identical to a hand-written one — Apple's is a real
+`erf` where DNNKernels' is Abramowitz-Stegun 7.1.26 — so a backend taking this route
+is choosing its library's arithmetic. That is a choice worth measuring against the
+reference the model is checked on rather than against the other route.
+"""
+activationkind(@nospecialize(f)) = :unknown
+activationkind(::typeof(identity)) = :identity
+
+"""
     native_gemm_dispatch!(device, graph, out, A, B;
                           bias=nothing, epilogue=identity, name)
 
@@ -275,8 +298,12 @@ when no native kernel covers the operands, otherwise return
 dispatch folded into its store.  DNNKernels uses those two generic facts to
 declare any remaining passes; a backend does not participate in graph planning.
 
-Unlike `librarygemm`, this path is a device dispatch and can therefore be baked
-into a command-buffer recording.
+Unlike `librarygemm`, which must compute the whole fused expression or decline, this
+path REPORTS what it folded — so a backend whose fastest product cannot carry the
+bias or the activation still gets to use it, and the caller declares the rest. A
+backend normally answers with a recordable device dispatch; one whose run path takes
+calls (`runscalls`) may answer with a library call here too, and the two returned
+flags mean the same thing either way.
 """
 native_gemm_dispatch!(::Device, graph, out, A, B;
                       bias = nothing, epilogue = identity, name) = nothing
