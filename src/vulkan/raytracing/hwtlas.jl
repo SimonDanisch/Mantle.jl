@@ -581,6 +581,63 @@ function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHand
 end
 
 """
+    Raycore.update_instance_transforms!(hwtlas, transforms, n_to_update[, first_idx])
+
+Raycore's FLAT-index form of a transform update, mapped onto this TLAS's batches.
+
+Every mutation above is addressed by `TLASHandle`, because that is how a
+`VulkanTLAS` stores instances: one `InstanceBatch` per push!, each with its own
+GPU buffer. `Raycore.TLAS` instead keeps one flat instance array and lets callers
+address a range of it directly, and RayMakie's mesh path uses exactly that form —
+a plot remembers `instance_idx = n_instances(accel)` from when it was pushed and
+later writes one transform at that index.
+
+Without this method that call fell through to a `MethodError`, and because
+RayMakie catches per-plot render failures and logs them, the result was not a
+crash but a scene that DID NOT MOVE: measured on an animated figure, two opposite
+extremes of a walk cycle rendered 0 differing pixels out of 76800, while the same
+scene on GLMakie differed in 3669. Ten plots, ten swallowed errors, one perfectly
+still picture.
+
+`n_instances` sums the batches in push order, so a flat index maps onto them by
+walking that order. A range that does not line up with exactly one whole batch is
+refused rather than approximated — `pending_updates` holds one transform array
+per handle and has no way to express "part of a batch", and quietly writing the
+wrong instances is the failure this method exists to end.
+"""
+function Raycore.update_instance_transforms!(hwtlas::VulkanTLAS, transforms::AbstractVector,
+                                             n_to_update::Integer, first_idx::Integer)
+    n, i0 = Int(n_to_update), Int(first_idx)
+    n > 0 || return nothing
+    base = 0
+    for batch in hwtlas.instances
+        if i0 <= base + batch.n
+            (i0 == base + 1 && n == batch.n) || error(
+                "update_instance_transforms!: instances $(i0):$(i0 + n - 1) do not " *
+                "cover exactly one batch (batch at $(base + 1):$(base + batch.n)). " *
+                "A VulkanTLAS updates whole batches; address it by handle instead.")
+            return Raycore.update_transforms!(hwtlas, batch.handle, transforms)
+        end
+        base += batch.n
+    end
+    error("update_instance_transforms!: instance index $(i0) past the end " *
+          "($(base) instances in $(length(hwtlas.instances)) batches).")
+end
+
+Raycore.update_instance_transforms!(hwtlas::VulkanTLAS, transforms::AbstractVector,
+                                    n_to_update::Integer) =
+    Raycore.update_instance_transforms!(hwtlas, transforms, n_to_update, 1)
+
+# A GPU-resident `LavaArray{Mat4f}` is what RayMakie hands over (it allocates
+# through KA). `map` over one would run on the device and hand back a device
+# array of a type the handle path does not take, so convert on the host — these
+# are single-instance updates, not a bulk path.
+Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
+                           transforms::LavaArray{Mat4f, 1}) =
+    Raycore.update_transforms!(hwtlas, handle,
+                               map(Raycore.mat4_to_mat3x4, collect(transforms)))
+
+"""
     update_transform!(hwtlas::VulkanTLAS, handle::TLASHandle, transform)
 
 Set every instance in `handle`'s batch to the same transform. Accepts
