@@ -320,6 +320,12 @@ the three-pass form writes, rewrites and rereads them, and at a few thousand tok
 traffic is what the op costs. A backend answers `false` for the shapes its kernel does not
 cover and the caller declares the three passes instead.
 
+Any operand may be given as a STRIDED VIEW rather than as a resource: a named tuple
+`(; res, dims, strides, offset)`, strides and offset in elements. A backend whose kernel
+reads its operands through a leading dimension takes the view where it lies, which saves the
+caller a transpose per operand — q/k/v arrive permuted from a qkv projection. One that cannot
+returns `false`, and the caller materialises and asks again.
+
 Return `true` when the dispatch was declared and `false` otherwise.
 """
 native_attention_dispatch!(::Device, graph, out, q, k, v; scale, name) = false
