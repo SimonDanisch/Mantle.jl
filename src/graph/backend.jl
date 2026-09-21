@@ -309,6 +309,22 @@ native_batched_gemm_dispatch!(::Device, graph, out, A, B;
                               alpha = 1, coldiv = nothing, name) = false
 
 """
+    native_attention_dispatch!(device, graph, out, q, k, v; scale, name)
+
+Declare a backend's recordable FUSED attention into `graph`: `out = softmax(scale·qᵀk)·v`,
+one matrix per trailing-axis batch entry, with `q`/`out` shaped `(E, Lq, batch...)` and
+`k`/`v` shaped `(E, Lk, batch...)`.
+
+Fused means the `Lq x Lk` scores are never a buffer, which is the whole point of asking:
+the three-pass form writes, rewrites and rereads them, and at a few thousand tokens that
+traffic is what the op costs. A backend answers `false` for the shapes its kernel does not
+cover and the caller declares the three passes instead.
+
+Return `true` when the dispatch was declared and `false` otherwise.
+"""
+native_attention_dispatch!(::Device, graph, out, q, k, v; scale, name) = false
+
+"""
     patchable(device) -> Bool
 
 Whether a moved address can be written INTO this backend's recording, or whether
@@ -780,6 +796,7 @@ const BACKEND_VOCABULARY = (
     :storebytes!,
     :recordsplans, :runscalls, :librarygemm, :native_gemm_available,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
+    :native_attention_dispatch!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submitting ONE baked piece, and giving one back that will never be
     # submitted. Core owns the sequence a partition makes of them

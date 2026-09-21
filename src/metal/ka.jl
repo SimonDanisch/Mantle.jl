@@ -152,6 +152,16 @@ function Mantle.native_batched_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
     return true
 end
 
+"""Declare Metal's fused tensor-ops attention into a Mantle graph."""
+function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
+                                          scale, name)
+    config = Metal.attention_kernel_config(out, q, k, v; scale)
+    config === nothing && return false
+    dispatch!(g, config.kernel, config.args, config.ndrange;
+              group = config.group, name)
+    return true
+end
+
 Mantle.accesscache(d::MetalDevice) = d.accesses
 
 """
