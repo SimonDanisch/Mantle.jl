@@ -491,6 +491,10 @@ mutable struct MetalRecorder
     # this recording has no encoded form.
     encoded::Vector{MetalEncodedCommand}
     segments::Vector{MetalSegment}
+    # The plan's calls, each paired with how many segments were closed before it —
+    # so `0` runs before the first segment and `length(segments)` after the last.
+    # Host work the buffer cannot hold; see `emitdispatch!` for a `Mantle.Call`.
+    calls::Vector{Pair{Int,Any}}
     # The segment being built: where it starts, what gates it, and which range slot
     # that gate writes.
     first::Int
@@ -526,6 +530,9 @@ end
 struct MetalRecording
     icb::MTL.MTLIndirectCommandBuffer
     segments::Vector{MetalSegment}
+    # `segment index => call`, in plan order. Empty for all but a plan that declared
+    # a library call; see `replaywithcalls!`.
+    calls::Vector{Pair{Int,Any}}
     rangebuf::MTL.MTLBuffer
     rangeoff::Int
     ranges::Metal.MtlVector{UInt32}
@@ -574,7 +581,8 @@ walkedplan(pl::Mantle.Plan) =
 function norecordreason(pl::Mantle.Plan)
     for pp in pl.passes
         for d in pp.dispatches
-            d isa MetalRecordedDispatch || return "pass \"$(pp.pass.name)\" holds a " *
+            d isa MetalRecordedDispatch || d isa Mantle.Call ||
+                return "pass \"$(pp.pass.name)\" holds a " *
                 "dispatch over a `DeviceRange` with no `max`. Give the range a " *
                 "ceiling — `DeviceRange(count; max = capacity)` — so the command " *
                 "can be recorded against it; without one the count is only on the " *
@@ -584,19 +592,30 @@ function norecordreason(pl::Mantle.Plan)
     return nothing
 end
 
-"""How many commands the plan needs, and how many of them are range writers."""
+"""
+How many commands the plan needs, how many of them are range writers, and how many
+CALLS it holds.
+
+A call is not a command. It is host work the indirect command buffer has no way to
+hold, so it takes no slot and no argument memory — what it costs the recording is a
+SEGMENT boundary, which `emitdispatch!` puts there and which needs no room reserved
+for it.
+"""
 function planshape(pl::Mantle.Plan)
     ndispatch = 0
     nwriters = 0
+    ncalls = 0
     prev = nothing
     for pp in pl.passes
         pp.pass.kind === :update && continue
-        ndispatch += length(pp.dispatches)
+        for d in pp.dispatches
+            d isa Mantle.Call ? (ncalls += 1) : (ndispatch += 1)
+        end
         pred = pp.pass.predicate
         pred === nothing || samepredicate(pred, prev) || (nwriters += 1)
         prev = pred
     end
-    return ndispatch, nwriters
+    return ndispatch, nwriters, ncalls
 end
 
 """
@@ -636,8 +655,9 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
         "record!: this device has no residency sets, and every buffer a recorded " *
         "command reaches is reached by address — without one nothing it reads is " *
         "resident. Run the plan without recording it."))
-    ndispatch, nwriters = planshape(pl)
-    ndispatch > 0 || throw(ArgumentError("record!: the plan has no dispatches to record."))
+    ndispatch, nwriters, ncalls = planshape(pl)
+    ndispatch + ncalls > 0 ||
+        throw(ArgumentError("record!: the plan has no dispatches to record."))
     nslots = maximum(pp -> maximum(d -> maxslot(d), pp.dispatches; init = 0),
                      pl.passes; init = 0)
     # The range writers bind more than most dispatches do, and the descriptor is
@@ -666,7 +686,10 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     # residency or hazard mistake gets reported. On unified memory the mode costs
     # nothing; the buffer is written once at record time and read by the command
     # processor every frame either way.
-    icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, ncommands;
+    # `max(.., 1)`: a plan of nothing but calls needs no command at all, and Metal
+    # has no zero-length indirect command buffer. `ncommands` stays the honest count,
+    # so `encode!`'s bound still refuses a command such a plan cannot have.
+    icb = MTL.MTLIndirectCommandBuffer(d.dev, desc, max(ncommands, 1);
                                        storage = MTL.MTLResourceStorageModeShared)
     # Resident for the life of the recording. The legacy encoder learns about the
     # buffer from `executeCommandsInBuffer:` itself; a submission path with no
@@ -691,7 +714,8 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     templ = Metal.MtlVector{UInt32}(undef, ngrid)
     fill!(grids, UInt32(0))
     fill!(templ, UInt32(0))
-    return MetalRecorder(d, pl, icb, ncommands, 0, false, MetalEncodedCommand[], MetalSegment[], 1, nothing, -1,
+    return MetalRecorder(d, pl, icb, ncommands, 0, false, MetalEncodedCommand[],
+                         MetalSegment[], Pair{Int,Any}[], 1, nothing, -1,
                          aux, convert(Ptr{UInt8}, MTL.contents(aux)), 0,
                          ranges, grids, templ, zeros(UInt32, ngrid), 0, 0,
                          MetalWriter[], nothing, nwriters, false)
@@ -700,6 +724,9 @@ end
 """How many buffer slots a dispatch's arguments take, which is what the descriptor
 has to declare."""
 maxslot(d::MetalRecordedDispatch) = isempty(d.args) ? 0 : maximum(a -> a.index, d.args)
+# A call binds nothing: the library on the other side lays out its own arguments, so
+# it asks the descriptor for no slots at all.
+maxslot(::Mantle.Call) = 0
 
 """Metal's own limit on how many buffers one command may bind."""
 const MAX_KERNEL_BUFFERS = 31
@@ -776,6 +803,37 @@ function Mantle.emitdispatch!(e::MetalRecorder, d::MetalRecordedDispatch,
     pack_recorded!(am.ptr, d.args, (d.state, d.kernel.f, d.adapted...), e.plan, am)
     encode!(e, d.kernel.pipeline, d.args, am.store,
             MTL.MTLSize(d.groups), MTL.MTLSize(d.nthreads))
+    return nothing
+end
+
+"""
+    Mantle.emitdispatch!(recorder, call, name)
+
+Put a HOLE in the recording where a call is, and remember which one.
+
+A call submits its own work — a vendor library's command buffer, or its own encoder
+in ours — so there is no command to write. What the recording needs is for its
+commands to stop here and resume after, which is what closing the segment is:
+`replaywithcalls!` then runs the call between the two `executeCommandsInBuffer:`
+calls and the queue orders all three.
+
+No barrier bit is needed on either side. A segment boundary is already a boundary
+for the command processor, and the call's own encoders are ordered against ours by
+encoder order within the command buffer.
+
+REFUSED inside a gated pass. A gate is decided on the device and the host never
+learns its value, so there is no way to NOT run a host call for a discarded
+iteration — and running it anyway would be wrong rather than slow.
+"""
+function Mantle.emitdispatch!(e::MetalRecorder, c::Mantle.Call,
+                              name::AbstractString)
+    e.pred === nothing || throw(ArgumentError(
+        "record!: pass \"$name\" declares a library call inside a gated pass. " *
+        "Whether a gated pass runs is decided on the device and the host cannot " *
+        "read it, so a host call in one would run for an iteration that does not. " *
+        "Declare the operation as dispatches inside the gate, or move the call out."))
+    closesegment!(e)
+    push!(e.calls, length(e.segments) => c)
     return nothing
 end
 
@@ -1068,7 +1126,8 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
         e.gridcursor == 0 || copyto!(e.templ, e.templhost)
         markgates!(e)
     end
-    return MetalRecording(e.icb, e.segments, e.ranges.data[], Int(e.ranges.offset),
+    return MetalRecording(e.icb, e.segments, e.calls,
+                          e.ranges.data[], Int(e.ranges.offset),
                           e.ranges, e.grids.data[], Int(e.grids.offset), e.grids,
                           e.templ, e.aux, am.store, e.writers, e.ncommands,
                           e.encoded, MTL.MTLBuffer[],
@@ -1270,13 +1329,52 @@ function replay!(d::MetalDevice, rec::MetalRecording)
     # Residency first, and for its EFFECT: everything this replay reaches by
     # address has to be in the queue's set before the submission names the set.
     # Cheap — it returns on a pointer comparison unless a block came or went.
-    sub = opensubmit!(d, ensureresident!(d, rec))
-    if canreplay(d.queue)
+    ids = ensureresident!(d, rec)
+    sub = opensubmit!(d, ids)
+    if !canreplay(d.queue)
+        encodeplan!(sub, rec)
+    elseif isempty(rec.calls)
         for s in rec.segments
             executesegment!(d, sub, rec, s)
         end
     else
-        encodeplan!(sub, rec)
+        sub = replaywithcalls!(d, sub, rec, ids)
     end
     return closesubmit!(d, sub)
+end
+
+"""
+One frame of a recording that holds CALLS: its segments, with the calls run between
+them in the order the plan put them.
+
+A call is host work — a vendor library encoding or submitting its own — so it cannot
+be a command in an indirect buffer, and a recording holding one is a recording with
+HOLES. `emitdispatch!` ended a segment at every call, so replaying the segments in
+order and running the calls registered after each is the whole of the ordering.
+
+The encoder is SUSPENDED around a call and a fresh one opened after it. Not
+committed: the command buffer stays open, so a library that encodes into it lands in
+this same submission and Metal orders the encoders as it orders any other pair. What
+reopening redoes is the `useResource` declaration, which is per encoder and is this
+backend's hazard tracking as much as its residency.
+"""
+function replaywithcalls!(d::MetalDevice, sub, rec::MetalRecording, ids)
+    next = 1
+    ncalls = length(rec.calls)
+    # `0` is before the first segment, which is where a plan that opens with a call
+    # puts it.
+    for i in 0:length(rec.segments)
+        i == 0 || executesegment!(d, sub, rec, rec.segments[i])
+        next <= ncalls && first(rec.calls[next]) == i || continue
+        suspendsubmit!(d, sub)
+        while next <= ncalls && first(rec.calls[next]) == i
+            last(rec.calls[next])()
+            next += 1
+        end
+        sub = opensubmit!(d, ids)
+    end
+    next > ncalls || error(
+        "replay!: $(ncalls - next + 1) of the recording's calls name a segment the " *
+        "replay never reached; the recording and its segment list disagree.")
+    return sub
 end

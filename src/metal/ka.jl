@@ -152,9 +152,78 @@ function Mantle.native_batched_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
     return true
 end
 
-"""Declare Metal's fused tensor-ops attention into a Mantle graph."""
+# ── Apple's libraries, as pass members ───────────────────────────────────────
+#
+# MPSGraph builds a pipeline and encodes it; there is no Julia kernel to record, so
+# these are CALLS (`dispatch!` with no ndrange) and a recording keeps a hole for each.
+# See `runscalls` and `replaywithcalls!` in `device.jl`/`record.jl` for how a hole is
+# replayed, and `Mantle.Call` for why it is core's type rather than one of ours.
+#
+# A type per operation rather than a closure, because `argument_usage` has to be
+# declarable: a call is opaque to the access walk — the body is on the other side of
+# the boundary — and core's answer to an undeclared argument is read-AND-write, which
+# would order every product after every other one and serialise the frame.
+
+"""Apple's MPSGraph matrix product, `out = A * B .+ bias`, as a pass member."""
+struct MPSGraphGemm end
+
+Mantle.argument_usage(::Type{MPSGraphGemm}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
+
+(::MPSGraphGemm)(out, A, B, bias) =
+    (Metal.MPSGraphs.gemm_batched!(out, A, B, bias); nothing)
+
+"""Apple's fused scaled dot-product attention as a pass member."""
+struct MPSGraphAttention
+    scale::Float32
+end
+
+Mantle.argument_usage(::Type{MPSGraphAttention}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
+
+(c::MPSGraphAttention)(out, q, k, v) =
+    (Metal.MPSGraphs.sdpa_batched!(out, q, k, v, c.scale); nothing)
+
+"""
+Apple's own product where it covers the operands, which is measurably faster than
+this backend's best recordable kernel.
+
+Measured on an M5 over SAM 2.1's encoder, fp16, the 195 `addmm` products of one
+frame: 213 ms through `gemm_tensor!` against 171 ms through MPSGraph. So the library
+wins where it applies and `native_gemm_dispatch!` — asked next by the caller — keeps
+everything it does not: a non-identity epilogue, which MPSGraph would need a second
+pass for and the tensor kernel folds into its store.
+"""
+function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
+    # The question is about this device's RUN path, and it is core's to answer.
+    Mantle.runscalls(d) || return nothing
+    epilogue === identity || return nothing
+    Metal.MPSGraphs.gemm_shape_supported(out, A, B, bias) || return nothing
+    return MPSGraphGemm()
+end
+
+"""
+Declare attention: Apple's fused op where it fits, this backend's fused kernel
+otherwise.
+
+Measured on an M5 over the same frame, the 42 attention ops: 78 ms through the
+`matmul2d` kernel against 24 ms through `scaledDotProductAttentionWithQueryTensor`.
+
+A STRIDED operand is declined rather than served. The library reads dense operands
+only, and the caller's protocol is to ask with the operands unmaterialised first and
+retry with them materialised — so declining is how this backend says "materialise and
+I will do better", and the copy it costs is bought back several times over. The
+`matmul2d` kernel still takes the strided form when the library cannot have the dense
+one either, which is what the second `attention_kernel_config` below is for.
+"""
 function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
                                           scale, name)
+    dense = !any(x -> x isa NamedTuple, (out, q, k, v))
+    if Mantle.runscalls(dev) && Metal.MPSGraphs.sdpa_shape_supported(out, q, k, v)
+        dense || return false
+        dispatch!(g, MPSGraphAttention(Float32(scale)), (out, q, k, v); name)
+        return true
+    end
     config = Metal.attention_kernel_config(out, q, k, v; scale)
     config === nothing && return false
     dispatch!(g, config.kernel, config.args, config.ndrange;

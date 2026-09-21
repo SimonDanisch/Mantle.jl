@@ -522,6 +522,25 @@ function executesegment!(::LegacyQueue, s::LegacySubmission, rec, seg)
     return nothing
 end
 
+"""
+    suspendsubmit!(dev, sub)
+
+End the open encoder so a host CALL may encode into the same command buffer, without
+ending the submission.
+
+The third verb, and only for a recording with holes (`replaywithcalls!`). A command
+buffer may have one encoder open at a time and a vendor library makes its own, so
+ours has to close first; `opensubmit!` afterwards opens a fresh one in the same
+buffer. Ending an encoder is not committing the buffer — the whole frame is still one
+submission, which is what `fence` depends on.
+"""
+suspendsubmit!(d::MetalDevice, s) = suspendsubmit!(d.queue, s)
+
+# `end_encoder!` also drops Metal.jl's cached pipeline binding, which is the same
+# thing `closesubmit!` does for the same reason: an indirect execution leaves the
+# encoder's pipeline undefined and a cached `set_pipeline!` would skip restoring it.
+suspendsubmit!(q::LegacyQueue, ::LegacySubmission) = (Metal.end_encoder!(q.bq); nothing)
+
 closesubmit!(d::MetalDevice, s) = closesubmit!(d.queue, s)
 
 function closesubmit!(q::LegacyQueue, s::LegacySubmission)
@@ -996,6 +1015,23 @@ function closeframe!(q::LegacyQueue, ::MTL.MTLDevice)
     Metal.flush!(q.bq)
     return fence(q)
 end
+
+"""
+`true` on a queue that batches, which is the pre-MTL4 one.
+
+A call is host work that submits or encodes work of its own, and the question
+`runscalls` asks is whether this device's RUN path can hold it in order. It can here,
+for a reason that is Metal.jl's batch rather than this backend's: a frame is ONE open
+command buffer, so a library given that buffer encodes into the same submission and
+Metal orders its encoders against the replay's by encoder order. `replaywithcalls!`
+ends and reopens the encoder around each call; `suspendsubmit!` is the verb.
+
+An `MTL4Queue` is not asked and answers core's `false`: Mantle builds and commits
+those command buffers itself, there is no open batch to join, and MPSGraph has no
+MTL4 encode entry point to join it with. A plan declaring a call there is refused at
+`bake` with core's message rather than silently losing the call on every replay.
+"""
+Mantle.runscalls(::MetalDevice{LegacyQueue}) = true
 
 """
     cmdqueue(dev) -> MTLCommandQueue

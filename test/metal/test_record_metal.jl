@@ -19,6 +19,7 @@
 
 using Test, Mantle, Metal
 using KernelAbstractions: @kernel, @index, @Const
+using LinearAlgebra: mul!
 
 const REC_DEV = Mantle.Device(Mantle.MetalAPI())
 
@@ -30,6 +31,19 @@ end
 @kernel function rec_add!(dst, @Const(src))
     i = @index(Global)
     @inbounds dst[i] += src[i]
+end
+
+# The consumer for the call tests: it has to READ what the call wrote, so the
+# ordering is exercised rather than asserted.
+@kernel function rec_trace!(out, @Const(c), n::Int32)
+    i = @index(Global)
+    @inbounds if i == 1
+        t = zero(eltype(c))
+        for kk in Int32(1):n
+            t += c[kk, kk]
+        end
+        out[1] = t
+    end
 end
 
 @kernel function rec_scale_ref!(dst, s)
@@ -299,4 +313,114 @@ end
     b_big = runbytes(big)
     @test b_small < 4096
     @test b_big <= b_small + 64
+end
+
+# ── A library call is a HOLE in the recording ─────────────────────────────────
+#
+# `runscalls` is `true` on this queue, so a plan may hold a `Mantle.Call`: host work
+# that submits or encodes its own — here `mul!`, which reaches MPSGraph. An indirect
+# command buffer cannot hold one, so the recording stops at the call and resumes
+# after it, and a frame is one `executeCommandsInBuffer:` per SEGMENT with the calls
+# run between them.
+#
+# What is silent when it is wrong is the ordering. Metal runs command buffers in
+# COMMIT order and encoders in creation order, so a library that commits a buffer of
+# its own while the frame's is still open runs BEFORE everything already in it. The
+# tests below put a dispatch on each side of a call and read the result, which is the
+# only way that shows up.
+
+@testset "a library call is a hole in the recording" begin
+    n = 32
+    ones_h = ones(Float32, n, n)
+    B = Mantle.Buffer(REC_DEV, ones_h)
+    A = Mantle.Buffer(REC_DEV, zeros(Float32, n, n))
+    C = Mantle.Buffer(REC_DEV, zeros(Float32, n, n))
+    D = Mantle.Buffer(REC_DEV, zeros(Float32, n, n))
+    tr = Mantle.Buffer(REC_DEV, zeros(Float32, 1))
+
+    g = Mantle.Graph(REC_DEV)
+    # Every step reads what the one before it wrote, so nothing here is right by
+    # accident: a dispatch, then two calls, then a dispatch.
+    Mantle.dispatch!(g, rec_fill!, (A, 3.0f0), n * n; name = "pre")
+    Mantle.dispatch!(g, mul!, (C, A, B); name = "gemm1")
+    Mantle.dispatch!(g, mul!, (D, C, B); name = "gemm2")
+    Mantle.dispatch!(g, rec_trace!, (tr, D, Int32(n)), 1; name = "post")
+    plan = Mantle.record!(Mantle.Plan(g))
+
+    # TWO segments and two calls, both in the same hole: the calls are adjacent in
+    # the plan, so there is no command between them to reopen the buffer for.
+    @test length(plan.recording.segments) == 2
+    @test map(first, plan.recording.calls) == [1, 1]
+    # And the calls took no room in the buffer — the two commands are the two
+    # dispatches, one per segment.
+    @test plan.recording.ncommands == 2
+    @test plan.recording.segments[1] == Mantle.MetalSegment(1, 1, -1)
+    @test plan.recording.segments[2] == Mantle.MetalSegment(2, 2, -1)
+
+    want = 3.0f0 * n * n            # A is 3, B is ones: C is 3n, D is 3n*n
+    Mantle.run!(plan)
+    Mantle.waitfor!(plan)
+    @test all(==(3.0f0 * n), Array(Mantle.storage(C)))
+    @test all(==(want), Array(Mantle.storage(D)))
+    @test Array(Mantle.storage(tr))[1] == want * n
+
+    # Again from zeroed outputs. A replay runs the calls again — the recording holds
+    # a hole, not the library's kernels — so the second frame has to reach the same
+    # answer through the same holes.
+    fill!(Mantle.storage(C), 0.0f0)
+    fill!(Mantle.storage(D), 0.0f0)
+    fill!(Mantle.storage(tr), 0.0f0)
+    Mantle.run!(plan)
+    Mantle.waitfor!(plan)
+    @test all(==(want), Array(Mantle.storage(D)))
+    @test Array(Mantle.storage(tr))[1] == want * n
+    Mantle.free!(plan)
+end
+
+@testset "a call before the first command" begin
+    n = 32
+    A = Mantle.Buffer(REC_DEV, fill(2.0f0, n, n))
+    B = Mantle.Buffer(REC_DEV, ones(Float32, n, n))
+    C = Mantle.Buffer(REC_DEV, zeros(Float32, n, n))
+    tr = Mantle.Buffer(REC_DEV, zeros(Float32, 1))
+
+    g = Mantle.Graph(REC_DEV)
+    Mantle.dispatch!(g, mul!, (C, A, B); name = "gemm")
+    Mantle.dispatch!(g, rec_trace!, (tr, C, Int32(n)), 1; name = "post")
+    plan = Mantle.record!(Mantle.Plan(g))
+
+    # Registered at segment ZERO, which is what "before the first segment" is.
+    @test map(first, plan.recording.calls) == [0]
+    @test length(plan.recording.segments) == 1
+
+    Mantle.run!(plan)
+    Mantle.waitfor!(plan)
+    @test all(==(2.0f0 * n), Array(Mantle.storage(C)))
+    @test Array(Mantle.storage(tr))[1] == 2.0f0 * n * n
+    Mantle.free!(plan)
+end
+
+@testset "a call inside a gated pass is refused by name" begin
+    n = 32
+    A = Mantle.Buffer(REC_DEV, fill(2.0f0, n, n))
+    B = Mantle.Buffer(REC_DEV, ones(Float32, n, n))
+    C = Mantle.Buffer(REC_DEV, zeros(Float32, n, n))
+    flag = Mantle.Buffer(REC_DEV, Int32[1])
+
+    g = Mantle.Graph(REC_DEV)
+    Mantle.repeat!(g, 2; while_nonzero = flag) do i
+        Mantle.dispatch!(g, mul!, (C, A, B); name = "gated-gemm")
+    end
+    # Whether a gated pass runs is a value the device writes and the host never
+    # reads, so there is no way to NOT run a host call for a discarded iteration.
+    # Refused at record, naming the pass — not run anyway.
+    err = try
+        Mantle.record!(Mantle.Plan(g))
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("gated pass", err.msg)
+    @test occursin("gated-gemm", err.msg)
 end
