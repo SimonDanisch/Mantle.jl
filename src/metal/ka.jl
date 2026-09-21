@@ -173,16 +173,27 @@ Mantle.argument_usage(::Type{MPSGraphGemm}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
 (::MPSGraphGemm)(out, A, B, bias) =
     (Metal.MPSGraphs.gemm_batched!(out, A, B, bias); nothing)
 
-"""Apple's fused scaled dot-product attention as a pass member."""
-struct MPSGraphAttention
+"""
+Apple's fused scaled dot-product attention as a pass member.
+
+The three layout keys ride on the callable rather than in the argument list. An
+operand is often a strided window on a shared projection buffer — q, k and v are
+three windows on one array — and what a call passes are RESOURCES, so the window is
+described here, once, at declare time. `Metal.MPSGraphs.packoperand` says which
+windows qualify and the graph does the narrowing.
+"""
+struct MPSGraphAttention{Q,K,V}
     scale::Float32
+    q::Q
+    k::K
+    v::V
 end
 
-Mantle.argument_usage(::Type{MPSGraphAttention}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+Mantle.argument_usage(::Type{<:MPSGraphAttention}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
     (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
 
 (c::MPSGraphAttention)(out, q, k, v) =
-    (Metal.MPSGraphs.sdpa_batched!(out, q, k, v, c.scale); nothing)
+    (Metal.MPSGraphs.sdpa_batched!(out, q, k, v, c.q, c.k, c.v, c.scale); nothing)
 
 """
 Apple's own product where it covers the operands, which is measurably faster than
@@ -209,20 +220,22 @@ otherwise.
 Measured on an M5 over the same frame, the 42 attention ops: 78 ms through the
 `matmul2d` kernel against 24 ms through `scaledDotProductAttentionWithQueryTensor`.
 
-A STRIDED operand is declined rather than served. The library reads dense operands
-only, and the caller's protocol is to ask with the operands unmaterialised first and
-retry with them materialised — so declining is how this backend says "materialise and
-I will do better", and the copy it costs is bought back several times over. The
-`matmul2d` kernel still takes the strided form when the library cannot have the dense
-one either, which is what the second `attention_kernel_config` below is for.
+A STRIDED operand needs no copy on either route. SAM 2.1's projection leaves q, k
+and v as three windows on one buffer, and both the library and the kernel read them
+where they lie — the library because `sdpa_operands` hands the dense array to the
+graph and narrows it there, the kernel because a tensor descriptor carries a leading
+dimension. Materialising three operands per attention op would have been most of
+what the library saves.
 """
 function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
                                           scale, name)
-    dense = !any(x -> x isa NamedTuple, (out, q, k, v))
-    if Mantle.runscalls(dev) && Metal.MPSGraphs.sdpa_shape_supported(out, q, k, v)
-        dense || return false
-        dispatch!(g, MPSGraphAttention(Float32(scale)), (out, q, k, v); name)
-        return true
+    if Mantle.runscalls(dev)
+        ops = Metal.MPSGraphs.sdpa_operands(out, q, k, v)
+        if ops !== nothing
+            dispatch!(g, MPSGraphAttention(Float32(scale), ops.keys...),
+                      (out, ops.res...); name)
+            return true
+        end
     end
     config = Metal.attention_kernel_config(out, q, k, v; scale)
     config === nothing && return false
