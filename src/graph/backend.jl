@@ -266,6 +266,29 @@ vendor-library call whose submitted kernels become part of the recording.
 librarygemm(::Device, out, A, B, bias, epilogue) = nothing
 
 """
+    native_conv2d_dispatch!(device, graph, out, x, w;
+                            bias=nothing, stride, pad, dilation, groups,
+                            epilogue=identity, name)
+
+Declare a backend's own 2-D convolution into `graph`. Return `nothing` when nothing
+covers these operands, otherwise `(; bias::Bool, epilogue::Bool)` saying which of the
+two post-operations it folded, exactly as `native_gemm_dispatch!` does — the caller
+declares whatever was not folded.
+
+The layout is the one every declared op here uses, the reverse of torch's: `x` is
+`(W, H, Cin, N)`, `w` is `(KW, KH, Cin ÷ groups, Cout)`, `out` is `(OW, OH, Cout, N)`
+and `bias` is one value per output channel. `stride`, `pad` and `dilation` are
+`(x, y)` pairs and the padding is symmetric in each, which is what ATen gives.
+
+Beside the GEMM hooks because it is the same kind of question and gets the same kind
+of answer, and a backend that has neither says nothing. A backend whose run path takes
+calls (`runscalls`) may answer with a library call; one that records answers with a
+dispatch.
+"""
+native_conv2d_dispatch!(::Device, graph, out, x, w; bias = nothing, stride, pad,
+                        dilation, groups, epilogue = identity, name) = nothing
+
+"""
     activationkind(f) -> Symbol
 
 Which NAMED activation `f` is, for a library that has a node of its own for it:
@@ -828,6 +851,7 @@ const BACKEND_VOCABULARY = (
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
     :recordsplans, :runscalls, :librarygemm, :native_gemm_available,
+    :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :native_attention_dispatch!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,

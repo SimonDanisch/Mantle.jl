@@ -243,6 +243,48 @@ function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
     return MPSGraphGemm(act)
 end
 
+"""Apple's MPSGraph 2-D convolution, `out = act.(conv(x, w) .+ bias)`, as a pass
+member. The geometry rides on the callable, like the activation: it is fixed when the
+op is declared and none of it is a resource."""
+struct MPSGraphConv2D
+    stride::NTuple{2,Int}
+    pad::NTuple{2,Int}
+    dilation::NTuple{2,Int}
+    groups::Int
+    act::Symbol
+end
+
+Mantle.argument_usage(::Type{MPSGraphConv2D}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
+
+(c::MPSGraphConv2D)(out, x, w, bias) =
+    (Metal.MPSGraphs.conv2d_batched!(out, x, w, bias, c.stride, c.pad, c.dilation,
+                                     c.groups, c.act); nothing)
+
+"""
+Apple's direct convolution where it covers the operands.
+
+Nothing recordable on this backend competes with it. The alternative is an im2col
+matrix materialised into a transient and a product over a padded reduction axis —
+20.0 MiB written and read back before SAM 2.1's `7x7x3` stem starts, whose product
+alone was the single dearest pass in the frame at 6.35 ms.
+
+`nothing` when the graph cannot express it, and then the caller's own lowering runs:
+this declines rather than falling back, because a convolution has four of those and
+choosing between them is the caller's arithmetic, not a backend's.
+"""
+function Mantle.native_conv2d_dispatch!(dev::MetalDevice, g, out, x, w;
+                                        bias = nothing, stride, pad, dilation,
+                                        groups, epilogue = identity, name)
+    Mantle.runscalls(dev) || return nothing
+    act = Mantle.activationkind(epilogue)
+    Metal.MPSGraphs.conv2d_shape_supported(out, x, w, bias, act) || return nothing
+    dispatch!(g, MPSGraphConv2D(Tuple(Int.(stride)), Tuple(Int.(pad)),
+                                Tuple(Int.(dilation)), Int(groups), act),
+              (out, x, w, bias); name)
+    return (; bias = bias !== nothing, epilogue = true)
+end
+
 """
 Declare attention: Apple's fused op where it fits, this backend's fused kernel
 otherwise.
