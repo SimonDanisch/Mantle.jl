@@ -1,34 +1,22 @@
 # `KernelInterface`'s device half, for Metal.
 #
-# The counterpart of Lava's `device/kernelinterface.jl`. Each of these is one
-# call site the Metal compiler lowers to a SIMD-group instruction; outside a
-# kernel they mean nothing, exactly as on the Vulkan side.
+# WHAT IS NOT HERE any more: the lane identity queries, `localmemory`,
+# `shfl_down` and the two barriers. Metal.jl implements `KernelInterface`
+# itself now, so keeping a copy here was not redundancy, it was a SHADOW --
+# these are `@device_override`s on the same names, and the zero-arg forms took
+# precedence over Metal's, which meant Metal's implementation never ran and KI
+# 0.2's typed `get_global_id(::Type{T})` never got the chance to convert.
 #
-# Shorter than Lava's because Metal.jl already provides the primitives — there
-# is no SPIR-V to emit, so this file only has to say which Metal spelling
-# answers which portable name.
-
-# ── Lane identity ─────────────────────────────────────────────────────────────
+# The copies were also wrong where they differed. KI declares
+# `get_sub_group_size()::UInt32` and Metal's `threads_per_simdgroup()` answers
+# `UInt32`; this file wrapped it in `Int`. Lava's half does not wrap it either,
+# so removing these is what makes the two backends agree with the contract and
+# with each other.
 #
-# KI is 1-based, and Metal.jl's argument intrinsics already apply that offset to
-# every ID (including the two SIMD-group IDs).  Forward them unchanged here.
-@device_override @inline KI.get_global_size() = Metal.threads_per_grid()
-@device_override @inline KI.get_global_id() = Metal.thread_position_in_grid()
-@device_override @inline KI.get_local_size() = Metal.threads_per_threadgroup()
-@device_override @inline KI.get_local_id() = Metal.thread_position_in_threadgroup()
-@device_override @inline KI.get_num_groups() = Metal.threadgroups_per_grid()
-@device_override @inline KI.get_group_id() = Metal.threadgroup_position_in_grid()
-@device_override @inline KI.get_sub_group_size() = Int(Metal.threads_per_simdgroup())
-@device_override @inline KI.get_max_sub_group_size() = Int(Metal.threads_per_simdgroup())
-@device_override @inline KI.get_num_sub_groups() = Int(Metal.simdgroups_per_threadgroup())
-@device_override @inline KI.get_sub_group_id() = Int(Metal.simdgroup_index_in_threadgroup())
-@device_override @inline KI.get_sub_group_local_id() =
-    Int(Metal.thread_index_in_simdgroup())
-
-@device_override @inline function KI.localmemory(::Type{T}, ::Val{Dims},
-                                                  ::Val{Id}) where {T,Dims,Id}
-    return Metal.MtlThreadGroupArray(T, Dims, Val(Id))
-end
+# What REMAINS is what Metal.jl does not provide: `shfl` and
+# `sub_group_reduce_add`. Both are one Metal instruction and the rule for this
+# backend still holds -- a capability Metal has and Metal.jl does not wrap is a
+# gap to close there, not to work around here.
 
 # ── The shuffle family ────────────────────────────────────────────────────────
 #
@@ -39,8 +27,6 @@ end
 for T in (Float32, Float16, Int32, UInt32)
     @eval @device_override @inline KI.shfl(val::$T, lane::Integer) =
         Metal.simd_shuffle(val, lane + 1)
-    @eval @device_override @inline KI.shfl_down(val::$T, offset::Integer) =
-        Metal.simd_shuffle_down(val, offset)
 end
 
 # ── The reduction ─────────────────────────────────────────────────────────────
@@ -59,11 +45,3 @@ end
 for T in (Float32, Float16, Int32, UInt32)
     @eval @device_override @inline KI.sub_group_reduce_add(val::$T) = Metal.simd_sum(val)
 end
-
-# ── Barriers ──────────────────────────────────────────────────────────────────
-#
-# `@device_override`, not a plain method: KI gives `barrier` a HOST method that
-# errors, so a plain definition would shadow it and a host-side call would reach
-# a device instruction on the CPU. Lava's half carries the identical note.
-@device_override @inline KI.barrier() = KA.@synchronize()
-@device_override @inline KI.sub_group_barrier() = Metal.simdgroup_barrier(Metal.MemoryFlagThreadGroup)

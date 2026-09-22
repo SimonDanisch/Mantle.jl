@@ -15,7 +15,14 @@
 const MB = Metal.MetalBackend
 
 KI.synchronize(b::MB) = KA.synchronize(b)
-KI.get_backend(a::MtlArray) = KA.get_backend(a)
+# `KI.get_backend(::MtlArray)` is NOT here: Metal.jl defines it now, and it is
+# typed on the ARRAY rather than on a backend, so two definitions is a
+# redefinition and Mantle stopped precompiling outright. Metal's answers
+# `MetalInterface.MetalBackend`, its own KernelInterface backend, which is a
+# different type from the `MetalKernels.MetalBackend` every method below is
+# written for. Nothing in this tree calls it, so ceding it costs nothing --
+# but the two backend types are a seam worth knowing about before anything
+# starts routing through `KI.get_backend`.
 
 KI.allocate(b::MB, ::Type{T}, dims::Tuple;
             unified::Union{Nothing,Bool} = nothing) where {T} =
