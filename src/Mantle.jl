@@ -255,6 +255,30 @@ include("graph/build.jl")
 # and Metal backends; Vulkan records commands instead and overrides it.
 include("graph/kalaunch.jl")
 
+"""
+    apair(loader, A, m, k, lda) -> NTuple{2,VecElement{Float16}}
+
+The staged kernels' whole A-operand read: the pair `A[m, k]`, `A[m+1, k]`, with
+`m` zero-based and even and `lda` the leading dimension. `nothing` is a plain
+column-major matrix and is what every GEMM passes.
+
+**The hook exists so a convolution does not have to materialise im2col.** The
+matrix a 3x3 convolution multiplies is nine times its own input, and building it
+costs a write plus a read of that. A loader that reads the image where the kernel
+would have read the matrix removes the buffer, the pass that fills it and that
+traffic, and changes nothing else about the schedule.
+
+Declared HERE rather than beside the GEMM that consumes it, because this is a
+hook other packages add methods to: `DNNKernels`' convolution gathers through it
+unconditionally, and while it lived in `src/vulkan/array/gemm.jl` the name simply
+did not exist on a machine that loads a different backend — `UndefVarError:
+apair not defined in Mantle` at DNNKernels' precompile, on every Mac. What a
+caller may extend belongs above the backend split; only the kernels that read
+through it are Vulkan's.
+"""
+@inline apair(::Nothing, A, m, k, lda) =
+    @inbounds (VecElement(A[1 + m + k * lda]), VecElement(A[2 + m + k * lda]))
+
 # ── backends ──────────────────────────────────────────────────────────────────
 #
 # Everything above this line is what a backend implements against, and it must
