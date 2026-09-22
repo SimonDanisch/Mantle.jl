@@ -257,19 +257,25 @@ end
             c === nothing && continue
             @test ispow2(Mantle.gemm_bm(c))
         end
-        # ...and where it is allowed, the 96-row block is what gets picked, since
-        # it now leads the table.
+        # ...and where the aliasing rule allows a choice at all, the leader is
+        # the 128-row block wherever `M` divides by it and the 96-row one
+        # otherwise. `c96` led this table until llama.cpp's AMD coopmat
+        # `l_warptile` put a 128-row entry in front of it — see `GEMM_TILINGS`
+        # for the measurement. The assertion is the RULE, not the position, so
+        # reordering the table again fails here only if the rule changes.
+        c128 = (4, 2, 2, 4, 32, 8)
+        @test Mantle.gemm_bm(c128) == 128 && ispow2(Mantle.gemm_bm(c128))
         for K in (576, 1152, 1728, 2880), M in (576, 1152, 2304)
-            @test Mantle.gemm_tiling(M, 4096, K) == c96
+            @test Mantle.gemm_tiling(M, 4096, K) == (M % 128 == 0 ? c128 : c96)
         end
 
         # SAM 2's own six, as the encoder runs them.
-        @test Mantle.gemm_tiling(2304, 4096,  576) == c96
+        @test Mantle.gemm_tiling(2304, 4096,  576) == c128   # 2304 = 18 x 128
         @test Mantle.gemm_tiling( 576, 4096, 2304) == (2, 2, 2, 4, 32, 8)   # the bad K
-        @test Mantle.gemm_tiling(1728, 4096,  576) == c96
+        @test Mantle.gemm_tiling(1728, 4096,  576) == c96    # 1728 = 13.5 x 128
         @test Mantle.gemm_tiling( 576, 4096,  576) == c96
         @test Mantle.gemm_tiling( 288, 16384, 1152) == c96
-        @test Mantle.gemm_tiling(1152, 16384,  288) == c96
+        @test Mantle.gemm_tiling(1152, 16384,  288) == c128  # 1152 = 9 x 128
     end
 end
 

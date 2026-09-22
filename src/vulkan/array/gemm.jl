@@ -137,6 +137,27 @@ with everything else fixed, the loss is not a trend but a wall — see
 `gemm_aliasing`. Per-shape, the mean was hiding the opposite conclusion.
 """
 const GEMM_TILINGS = GemmTiling[
+    # llama.cpp's AMD + cooperative-matrix `l_warptile`, which is
+    # `{ 256, 128, 128, 16, ... }` — 256 threads, `BM = BN = 128`, `BK = 16` —
+    # under the comment "This is intentionally using tx_m values, slight
+    # performance increase" (`ggml-vulkan.cpp`, the chip-specific block). This
+    # table had no 128-row entry at all, and `gemm_aliasing` vetoes the 96-row
+    # one whenever `K % 256 == 0`, which is every shape in this tree that
+    # matters — so SAM 2's and Qwen-Image's products were all running the
+    # 64-row block.
+    # Forced per shape, interleaved, TFLOP/s — the BLOCK transfers and their
+    # `BK` does not:
+    #
+    #     shape              128x128x16   128x128x32   64x128x32 (was)
+    #     4096^3                18.26        23.85        20.53
+    #     12288x4224x4096       18.92        19.22        17.35
+    #     24576x4224x4096       18.70        20.02        17.49
+    #
+    # so `BK = 32` leads. The 16 stays because it is the only entry a `K` that
+    # is a multiple of 16 and not of 32 can land on — a convolution's `K` is
+    # `Cin*KH*KW`, and `Cin = 48` gives 432.
+    (4, 2, 2, 4, 32, 8),    # 128 x 128 x 32, 8 warps — the reference block
+    (4, 2, 2, 4, 16, 8),    # 128 x 128 x 16, 8 warps — llama.cpp's own BK
     (3, 2, 2, 4, 32, 8),    #  96 x 128, 8 warps — faster wherever it is allowed
     (2, 2, 2, 4, 32, 8),    #  64 x 128, 8 warps
     (2, 2, 2, 2, 32, 8),    #  64 x  64, 4 warps
