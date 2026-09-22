@@ -150,6 +150,10 @@ end
         @test KI.get_backend(LavaArray(zeros(Float32, 1))) isa LavaBackend
         @test KI.supports_unified(backend)
         @test KI.supports_atomics(backend)
+        # Stated, not inherited: the `= true` default is declared on
+        # `KI.Backend` and `LavaBackend` is a `KA.GPU`, so before Mantle
+        # declared this, asking threw `MethodError` instead of answering.
+        @test KI.supports_float64(backend)
 
         sg = KI.sub_group_size(backend)
         @test sg isa Integer && sg > 0 && ispow2(sg)

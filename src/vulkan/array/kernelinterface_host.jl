@@ -25,6 +25,14 @@ KI.get_backend(a::LavaArray) = KA.get_backend(a)
 
 KI.supports_unified(::LavaBackend) = true
 KI.supports_atomics(::LavaBackend) = true
+# `KernelInterface`'s docstring says a backend implements this only if it does
+# NOT support Float64, and Vulkan's `shaderFloat64` is core. It still has to be
+# stated: the `= true` default is declared on `KI.Backend`, and `LavaBackend` is
+# a `KA.GPU`, so nothing dispatched and a Float64 literal reaching
+# `DNNKernels.kernelnumber` threw `MethodError` rather than being kept. The
+# Metal backend states the other side of the same trait in
+# `src/metal/kernelinterface.jl`.
+KI.supports_float64(::LavaBackend) = true
 
 # ── The KA 0.9 gap ──────────────────────────────────────────────────────────
 #

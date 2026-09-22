@@ -260,6 +260,12 @@ Mantle.backend(::ROCmDevice) = AMDGPU.ROCBackend()
 # `kernel_function`, `argconvert` and `auto_launch_sizes` are defined on. Core
 # asks for the second by name instead of assuming `backend(dev)` answers both.
 Mantle.kibackend(::ROCmDevice) = AMDGPU.ROCInterface.ROCBackend()
+# Stated for BOTH backend objects above, because callers reach this through
+# either one. KernelInterface's `= true` default is declared on `KI.Backend`
+# and neither of these subtypes it, so without these a Float64 literal reaching
+# `DNNKernels.kernelnumber` threw `MethodError` and no graph could be built.
+KI.supports_float64(::AMDGPU.ROCBackend) = true
+KI.supports_float64(::AMDGPU.ROCInterface.ROCBackend) = true
 Mantle.accesscache(d::ROCmDevice) = d.accesses
 Mantle.devicebuffertype(::ROCmDevice, ::Type{T}, N::Int) where {T} =
     AMDGPU.Device.ROCDeviceArray{T,N,1}
