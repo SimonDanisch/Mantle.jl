@@ -142,6 +142,7 @@ than left to the one call site that happens to ask for it.
 """
 function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
                                       bias = nothing, epilogue = identity, name)
+    denseoperands(out, A, B, bias) || return nothing
     lib = Mantle.librarygemm(dev, out, A, B, bias, epilogue)
     if lib !== nothing
         dispatch!(g, lib, (out, A, B, bias); name)
@@ -161,6 +162,7 @@ function Mantle.native_batched_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
                                                alpha = 1,
                                                coldiv = nothing,
                                                name)
+    denseoperands(out, A, B) || return false
     config = Metal.batched_gemm_kernel_config(
         out, A, B; transpose_a, transpose_b, alpha, coldiv)
     config === nothing && return false
@@ -238,9 +240,40 @@ cover, or one whose activation it has no node for.
 function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
     # The question is about this device's RUN path, and it is core's to answer.
     Mantle.runscalls(d) || return nothing
+    denseoperands(out, A, B, bias) || return nothing
     act = Mantle.activationkind(epilogue)
     Metal.MPSGraphs.gemm_shape_supported(out, A, B, bias, act) || return nothing
     return MPSGraphGemm(act)
+end
+
+"""
+    denseoperands(xs...) -> Bool
+
+Whether every operand is one this backend can hand a dense kernel or Apple's
+library: a graph resource it will place, or an array it already holds.
+
+`gemm_shape_supported` and its siblings are deliberately duck-typed — they are asked
+of graph RESOURCES, before anything is placed, so nothing in them is more specific
+than `eltype`, `ndims` and `size`. A caller's own wrapper answers all three like a
+matrix without being one. Qwen-Image 2.1's text encoder projects through a packed
+int8 weight whose `size` and `eltype` are its LOGICAL ones and whose storage is
+`UInt32`; it passed every shape test and then found no `gemm_batched!` method at
+replay, thirteen gigabytes into the run.
+
+Asked by every hook here, not just the library ones: `gemm_tensor_kernel!` is typed
+`MtlDeviceArray` too, so declining to the library and then handing the same operand
+to this backend's own kernel only moves the `MethodError`. A caller that packs its
+own weights has its own product for them, and what it needs from these hooks is a
+`nothing`.
+
+Here rather than in `Metal.MPSGraphs`, because this is the one place that knows both
+vocabularies: what a graph resource is, and what an `MtlArray` is. The library knows
+only the second and the caller only the first.
+"""
+denseoperands(xs...) = all(xs) do x
+    x === nothing && return true
+    x isa Mantle.Buffer || x isa Mantle.TransientBuffer ||
+        x isa Mantle.ResourceView || x isa Metal.MtlArray
 end
 
 """Apple's MPSGraph 2-D convolution, `out = act.(conv(x, w) .+ bias)`, as a pass
@@ -282,6 +315,7 @@ function Mantle.native_conv2d_dispatch!(dev::MetalDevice, g, out, x, w;
                                         groups, epilogue = identity,
                                         transposed = false, name)
     Mantle.runscalls(dev) || return nothing
+    denseoperands(out, x, w, bias) || return nothing
     act = Mantle.activationkind(epilogue)
     ok(b) = Metal.MPSGraphs.conv2d_shape_supported(out, x, w, b, act;
                                                    transposed, groups = Int(groups))
@@ -321,7 +355,7 @@ what the library saves.
 """
 function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
                                           scale, name)
-    if Mantle.runscalls(dev)
+    if Mantle.runscalls(dev) && denseoperands(out, q, k, v)
         ops = Metal.MPSGraphs.sdpa_operands(out, q, k, v)
         if ops !== nothing
             dispatch!(g, MPSGraphAttention(Float32(scale), ops.keys...),

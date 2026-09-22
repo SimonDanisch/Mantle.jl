@@ -593,20 +593,26 @@ function norecordreason(pl::Mantle.Plan)
 end
 
 """
-How many commands the plan needs, how many of them are range writers, and how many
-CALLS it holds.
+How many commands `passes` needs, how many of them are range writers, and how many
+CALLS they hold.
+
+A RANGE, because a recording covers the whole plan only when it is not partitioned:
+`record!(pl; maxpasses = N)` writes the walk into several, and each has to be sized
+for its own piece. Sizing every piece for the plan gave Qwen-Image 2.1's text
+encoder eighteen indirect command buffers of 1116 commands each to hold 25.
 
 A call is not a command. It is host work the indirect command buffer has no way to
 hold, so it takes no slot and no argument memory — what it costs the recording is a
 SEGMENT boundary, which `emitdispatch!` puts there and which needs no room reserved
 for it.
 """
-function planshape(pl::Mantle.Plan)
+function planshape(pl::Mantle.Plan, passes::AbstractUnitRange = eachindex(pl.passes))
     ndispatch = 0
     nwriters = 0
     ncalls = 0
     prev = nothing
-    for pp in pl.passes
+    for i in passes
+        pp = pl.passes[i]
         pp.pass.kind === :update && continue
         for d in pp.dispatches
             d isa Mantle.Call ? (ncalls += 1) : (ndispatch += 1)
@@ -633,7 +639,8 @@ samepredicate(::Nothing, ::Any) = false
 
 The indirect command buffer the plan's commands go into, sized for them.
 """
-function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
+function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
+                              passes::AbstractUnitRange = eachindex(pl.passes))
     walkedplan(pl) && return nothing
     # THIS DEVICE'S QUEUE, before anything below touches the GPU, for the same
     # reason `enterrun!` does it before a frame: recording is not pure host work.
@@ -655,7 +662,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
         "record!: this device has no residency sets, and every buffer a recorded " *
         "command reaches is reached by address — without one nothing it reads is " *
         "resident. Run the plan without recording it."))
-    ndispatch, nwriters, ncalls = planshape(pl)
+    ndispatch, nwriters, ncalls = planshape(pl, passes)
     ndispatch + ncalls > 0 ||
         throw(ArgumentError("record!: the plan has no dispatches to record."))
     nslots = maximum(pp -> maximum(d -> maxslot(d), pp.dispatches; init = 0),
@@ -668,8 +675,24 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan)
     nslots <= MAX_KERNEL_BUFFERS || throw(ArgumentError(
         "record!: a dispatch binds $(nslots) buffers and an indirect command may " *
         "bind $(MAX_KERNEL_BUFFERS). Pass fewer arguments, or group them in a struct."))
-    # …plus the range reset, which every gated plan opens with (`emithead!`).
-    ncommands = ndispatch + nwriters + (nwriters > 0 ? 1 : 0)
+    # …plus the range reset, which every gated plan opens with (`emithead!`) — and
+    # core emits that into the FIRST piece only, so only the first piece reserves it.
+    #
+    # A later piece with range writers is refused rather than recorded. Each piece
+    # owns its `ranges`, and without a head nothing zeroes that array between
+    # replays, so the second `repeat!` of a partitioned gated plan would read the
+    # first one's counts. Nobody asks for this today — a partition is what
+    # HorizonRunner's prefill and Qwen-Image 2.1's text encoder want, and neither
+    # gates — and a clear refusal is worth more than a recording that is wrong on
+    # its second frame.
+    head = first(passes) == 1 && nwriters > 0
+    nwriters == 0 || first(passes) == 1 || throw(ArgumentError(
+        "record!: passes $(passes) hold $(nwriters) gated pass(es) and this is not " *
+        "the first piece of the partition. A piece owns the range array its gates " *
+        "write, and only the first is given the reset that clears it — so a later " *
+        "gated piece would replay stale counts. Record this plan without " *
+        "`maxpasses`, or keep the gated passes in its first $(first(passes) - 1)."))
+    ncommands = ndispatch + nwriters + (head ? 1 : 0)
     # `ray_tracing`, unconditionally: a command whose kernel traces — an inline
     # ray query against a hardware acceleration structure — is refused by a buffer
     # that did not declare it, and the refusal is a MISS rather than an error.
@@ -1232,7 +1255,12 @@ function submitrun!(d::MetalDevice, pl::Mantle.Plan)
     # queue that signals an event per submit knows which value this run will
     # reach, and one that does not falls back to bumping its retirement counter.
     # A walked plan submitted nothing here, so it asks for a bare fence.
-    tok = rec === nothing ? closeframe!(d) : replay!(d, rec::MetalRecording)
+    # Through `submitrecording!` rather than straight to `replay!`: a plan recorded
+    # with `maxpasses` is several pieces, and core owns the sequence over them
+    # (`RecordingParts`). Asserting one `MetalRecording` here is what Qwen-Image
+    # 2.1's text encoder met — it asks for a partition, and until now only Vulkan
+    # had ever been given one.
+    tok = rec === nothing ? closeframe!(d) : Mantle.submitrecording!(d, rec, nothing)
     for s in pl.graph.surfaces
         Mantle.present_frame!(d, s.win)
     end
@@ -1309,6 +1337,14 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
     rec.nblocks[] = n
     return rec.residentids
 end
+
+"""
+One baked piece, replayed. Core's `RecordingParts` method calls this per piece and
+gives this backend the sequence for free; `e` is the run's emitter, which on this
+backend is always `nothing` because a Metal run's host stores ride in its own
+submission (`emitupdates!`) rather than in the recording.
+"""
+Mantle.submitrecording!(d::MetalDevice, rec::MetalRecording, ::Any) = replay!(d, rec)
 
 """
 One frame of a recorded plan: an encoder, one `execute` per segment, and a commit.

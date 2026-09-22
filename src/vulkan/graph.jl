@@ -1472,7 +1472,10 @@ A command buffer of the plan's own, opened for the walk; the plan's argument
 memory is what the pack writes into, which is the whole difference between a
 recording and the unmodelled path — see `packtrace!`.
 """
-openrecording(dev::LavaDevice, pl::Plan) = Emitter(recording!(dev.bq), pl.args)
+# The range is ignored here: a Vulkan command buffer grows, so a partition needs
+# no size up front. Metal's is fixed-length and does.
+openrecording(dev::LavaDevice, pl::Plan, ::AbstractUnitRange) =
+    Emitter(recording!(dev.bq), pl.args)
 
 # `runscalls` is `false` here, which is core's default, so there is no method
 # for it and this comment is the record of WHY.

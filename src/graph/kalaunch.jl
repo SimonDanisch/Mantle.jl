@@ -924,7 +924,13 @@ function record!(pl::Plan; maxpasses::Int = pl.record_maxpasses)
 end
 
 function recordplan!(dev, pl::Plan, maxpasses::Int)
-    e = openrecording(dev, pl)
+    # The range this FIRST recording covers, which is the whole plan unless the
+    # caller asked for a partition. `recordparts!` opens the rest itself and knows
+    # its own chunks; this one is opened here because `recordplan!` has to open one
+    # to find out whether the backend records at all.
+    npass = length(pl.passes)
+    first_range = maxpasses == 0 ? (1:npass) : (1:min(maxpasses, npass))
+    e = openrecording(dev, pl, first_range)
     if e === nothing
         # A backend with no command buffers to build: `run!` walks the plan
         # instead, which is the same walk. Asking for a partition of it is a
@@ -975,9 +981,10 @@ function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
         # `run!` has something to submit and the plan is recorded rather than
         # walked.
         for firstpass in 1:maxpasses:max(length(pl.passes), 1)
-            e === nothing && (e = openrecording(dev, pl))
+            chunk = firstpass:min(firstpass + maxpasses - 1, length(pl.passes))
+            e === nothing && (e = openrecording(dev, pl, chunk))
             firstpass == 1 && emithead!(e, pl)
-            emitpasses!(e, pl, firstpass:min(firstpass + maxpasses - 1, length(pl.passes)))
+            emitpasses!(e, pl, chunk)
             push!(parts, closerecording!(e, pl))
             e = nothing                 # closed, and now `parts`' business
         end

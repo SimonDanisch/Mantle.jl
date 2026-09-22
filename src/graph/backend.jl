@@ -93,13 +93,21 @@ function refit! end
 # defines a method below.
 
 """
-    openrecording(device, plan) -> emitter or nothing
+    openrecording(device, plan, passes) -> emitter or nothing
 
-Open a command buffer for `plan` and hand back what the walk emits into.
+Open a command buffer for `plan`'s `passes` and hand back what the walk emits into.
 `nothing` from a backend that has no command buffers to build: the plan is then
 walked by every `execute!` instead, which is the same walk.
+
+`passes` is the range this recording will cover, which is the WHOLE plan only when
+it is not partitioned. `record!(pl; maxpasses = N)` writes the walk into several
+recordings of at most N passes each, and a backend that has to size its buffer up
+front has to size it for the piece rather than for the plan. A Vulkan command
+buffer grows and ignores this; a Metal indirect command buffer is fixed-length, and
+sizing it from the plan gave `recordparts!` one buffer per part each large enough
+for all of them — Qwen-Image 2.1's text encoder is 1116 commands in 18 parts.
 """
-openrecording(::Device, ::Plan) = nothing
+openrecording(::Device, ::Plan, ::AbstractUnitRange) = nothing
 
 """
     closerecording!(emitter, plan) -> recording
