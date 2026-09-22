@@ -77,3 +77,19 @@ include("record.jl")
 Mantle.initbackend!() = register_backend!(; name = :metal, priority = 90) do
     Metal.functional() ? Metal.MetalBackend() : nothing
 end
+
+# ── What this backend does not have ───────────────────────────────────────────
+#
+# Declared by core in `runtime/backendhooks.jl`, and answered here rather than
+# left undefined: a caller asking either of these is asking whether the feature
+# EXISTS, and a name that is missing cannot say no. See that file.
+#
+# Metal.jl compiles its kernels through its own pipeline and keeps no cache of
+# Mantle's, so there are no frozen entries to read.
+use_frozen_kernels(version) = nothing
+
+# `simdgroup_matrix` is 8x8 and the staged GEMM is emitted at 16 — its `@nexprs`
+# unroll counts are literals derived from that extent, so it is not a parameter
+# this backend could pass a different value for. `nothing` and not `8`: the
+# question is which tile MANTLE has kernels at, and here the answer is none.
+staged_gemm_tile() = nothing

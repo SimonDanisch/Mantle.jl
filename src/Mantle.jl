@@ -167,6 +167,7 @@ include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
 include("sync/backend.jl")
 include("sync/transition.jl")
 include("runtime/backends.jl")
+include("runtime/backendhooks.jl")  # declared here, answered in vulkan/ or metal/
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("memory/array.jl")    # names `Device` and `backend`, both from api.jl
