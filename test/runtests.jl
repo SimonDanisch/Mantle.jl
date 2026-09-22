@@ -1343,6 +1343,11 @@ if _VULKAN_OK
             end
 
 
+            @testset "coopmat through a phi cycle" begin
+                include(joinpath(VULKAN_TESTS, "test_coopmat_phi_cycle.jl"))
+            end
+
+
             @testset "coopmat reductions (NV)" begin
                 include(joinpath(VULKAN_TESTS, "test_coopmat_reduce.jl"))
             end
