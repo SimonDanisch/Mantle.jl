@@ -66,13 +66,7 @@ than merely *that* it is — and an integer count survives fp16 exactly, where a
 relative error on random data can hide four missing terms in the tolerance.
 """
 function stagedcount(backend, cfg, K; blocks = 2,
-                     kernels = Mantle.GEMM_STAGED_KERNELS,
-                     # The prefetch kernel takes an A-loader between the epilogue
-                     # and the shapes; every other staged kernel does not. See
-                     # `Mantle.apair` — `nothing` there IS the plain matrix read,
-                     # so this changes nothing about what is measured.
-                     loader = kernels === Mantle.GEMM_STAGED_PREFETCH_KERNELS ?
-                              (nothing,) : ())
+                     kernels = Mantle.GEMM_STAGED_KERNELS)
     M = Mantle.gemm_bm(cfg) * blocks
     N = Mantle.gemm_bn(cfg) * blocks
     A = KA.allocate(backend, Float16, M, K); fill!(A, one(Float16))
@@ -80,7 +74,7 @@ function stagedcount(backend, cfg, K; blocks = 2,
     C = KA.allocate(backend, Float16, M, N); fill!(C, Float16(-1))
     wg = Mantle.gemm_wg(cfg)
     kernels[cfg](backend, wg)(
-        C, A, B, nothing, identity, loader..., Val(M), Val(N), Val(K);
+        C, A, B, nothing, identity, Val(M), Val(N), Val(K);
         ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg)
     KA.synchronize(backend)
     g = Float32.(Array(C))
