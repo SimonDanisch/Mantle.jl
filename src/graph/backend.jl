@@ -280,13 +280,19 @@ The layout is the one every declared op here uses, the reverse of torch's: `x` i
 and `bias` is one value per output channel. `stride`, `pad` and `dilation` are
 `(x, y)` pairs and the padding is symmetric in each, which is what ATen gives.
 
+`transposed` asks for ATen's `conv_transpose2d` instead, where `w` is
+`(KW, KH, Cout ÷ groups, Cin)` and `stride`/`pad` describe the FORWARD convolution
+that would map `out` back to `x`. `output_padding` has no argument: it extends one
+edge of the result and the caller declines rather than asking when it is non-zero.
+
 Beside the GEMM hooks because it is the same kind of question and gets the same kind
 of answer, and a backend that has neither says nothing. A backend whose run path takes
 calls (`runscalls`) may answer with a library call; one that records answers with a
 dispatch.
 """
 native_conv2d_dispatch!(::Device, graph, out, x, w; bias = nothing, stride, pad,
-                        dilation, groups, epilogue = identity, name) = nothing
+                        dilation, groups, epilogue = identity, transposed = false,
+                        name) = nothing
 
 """
     activationkind(f) -> Symbol

@@ -252,6 +252,10 @@ struct MPSGraphConv2D
     dilation::NTuple{2,Int}
     groups::Int
     act::Symbol
+    # A transposed convolution is the SAME MPSGraph node's data gradient, so it is a
+    # field here rather than a second callable: the operands, the descriptor and the
+    # epilogue are identical and only which node is built differs.
+    transposed::Bool
 end
 
 Mantle.argument_usage(::Type{MPSGraphConv2D}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
@@ -259,7 +263,7 @@ Mantle.argument_usage(::Type{MPSGraphConv2D}, ::Type{<:Tuple{Any,Any,Any,Any}}) 
 
 (c::MPSGraphConv2D)(out, x, w, bias) =
     (Metal.MPSGraphs.conv2d_batched!(out, x, w, bias, c.stride, c.pad, c.dilation,
-                                     c.groups, c.act); nothing)
+                                     c.groups, c.act; c.transposed); nothing)
 
 """
 Apple's direct convolution where it covers the operands.
@@ -275,14 +279,30 @@ choosing between them is the caller's arithmetic, not a backend's.
 """
 function Mantle.native_conv2d_dispatch!(dev::MetalDevice, g, out, x, w;
                                         bias = nothing, stride, pad, dilation,
-                                        groups, epilogue = identity, name)
+                                        groups, epilogue = identity,
+                                        transposed = false, name)
     Mantle.runscalls(dev) || return nothing
     act = Mantle.activationkind(epilogue)
-    Metal.MPSGraphs.conv2d_shape_supported(out, x, w, bias, act) || return nothing
+    ok(b) = Metal.MPSGraphs.conv2d_shape_supported(out, x, w, b, act;
+                                                   transposed, groups = Int(groups))
+    # A bias MPSGraph cannot BIND is not a reason to hand back the whole
+    # convolution. One value per output channel is a single axis, so there is no flat
+    # shape to fall back to and a channel count whose bytes are not a multiple of
+    # sixteen cannot be bound at an offset -- RIFE's decoder has 52 channels, which is
+    # 104 bytes. The `(; bias, epilogue)` answer exists precisely so a caller can be
+    # told which post-operations were folded, and adding a bias afterwards is one
+    # elementwise pass over the result. Refusing instead cost seven transposed
+    # convolutions their library node and 438 ms of a 581 ms frame.
+    fold = bias
+    if !ok(fold)
+        (fold === nothing || !ok(nothing)) && return nothing
+        fold = nothing
+    end
     dispatch!(g, MPSGraphConv2D(Tuple(Int.(stride)), Tuple(Int.(pad)),
-                                Tuple(Int.(dilation)), Int(groups), act),
-              (out, x, w, bias); name)
-    return (; bias = bias !== nothing, epilogue = true)
+                                Tuple(Int.(dilation)), Int(groups), act,
+                                Bool(transposed)),
+              (out, x, w, fold); name)
+    return (; bias = fold !== nothing, epilogue = true)
 end
 
 """
