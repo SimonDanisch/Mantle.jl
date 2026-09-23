@@ -1541,6 +1541,39 @@ end
 lp_of(d::CompiledDispatch) = d.launch
 
 """
+    runonce!(g) -> nothing
+
+Plan, record and run one graph, then free the plan.
+
+The whole verb for work that happens ONCE and is afterwards only read: packing
+a checkpoint's weights, quantising them, growing a cache. Such work is a kernel
+like any other and belongs in a `Graph`, which is the only thing that knows
+where a kernel's intrinsics come from and what its arguments are — there is no
+immediate-launch entry point in this API, by design.
+
+Declaring buys two things a bare launch cannot. `Plan` puts a barrier between a
+pass and the pass that reads what it wrote, inferred from what each kernel
+touches rather than left to the queue's ordering; and the `Graph` already
+carries the device, which is more specific than a backend.
+
+No wait. `free!` retires the plan's regions rather than destroying them, and
+`reclaim!` runs the destroy only once the device has passed the submission —
+see `free!` below. The buffers the graph wrote are NOT freed: they are the
+result, and the plan owns only its recording, argument memory and arenas.
+
+It is not free: `Plan` and `record!` cost roughly a millisecond for a small
+graph, so this is for work done once and not per step. Work that recurs wants
+one plan recorded once and replayed with `run!`.
+"""
+function runonce!(g::Graph)
+    plan = Plan(g)
+    record!(plan)
+    run!(plan)
+    free!(plan)
+    return nothing
+end
+
+"""
 Give this plan's regions back to the pool — its transients', and the argument
 memory its recording reads. The pipelines are ordinary backend objects and the
 GC reclaims those; a region is the thing only an explicit call can return,
