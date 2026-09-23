@@ -183,6 +183,16 @@ function (k::KI.Kernel{LavaBackend})(args...;
     wg, blocks = ki_launch_extents(k.backend, ndrange, workgroupsize, numworkgroups;
                                    max_work_group_size)
 
+    # A `Buffer` or `GPURef` resolves to the array over its region, exactly as
+    # `dispatch!` resolves one when it packs a declared pass. Without this a
+    # resource is a legal argument to the declared path and an
+    # `InvalidIRError` on this one — "passing non-bitstype argument … `.store`
+    # is of type `DeviceArray`" — and the same operand would have to be spelled
+    # two ways depending on how it is run. `storage` is the identity on
+    # anything that is already an array, so nothing else changes. Top level
+    # only: a kernel that genuinely takes a tuple keeps it.
+    args = map(storage, args)
+
     bq = k.backend.dispatch_bq
     # `find_tlas_in_args` BEFORE Adapt, which strips the hwtlas — same ordering
     # the KA entry point depends on.
