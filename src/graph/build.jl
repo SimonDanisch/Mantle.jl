@@ -295,6 +295,64 @@ function repeat!(g::Graph, kernel, args::Tuple, ndrange;
     end
 end
 
+"""
+    when!(f, g::Graph, cond)
+
+Declare the passes `f` creates as conditional on `cond`, which the HOST reads at
+submit time.
+
+`cond` is read as `cond[]` at every submission, so a `Ref{Bool}` is the usual
+one: it is asked once per run, not once per record. A graph is therefore
+declared and recorded ONCE with every branch in it, and each run submits only
+the branches it wants.
+
+    when!(g, needseg) do
+        dispatch!(g, pixel_fusion, …)
+        dispatch!(g, segment, …)
+    end
+
+# Why this and not [`repeat!`](@ref)'s predicate
+
+They answer different questions and cost different amounts. A device predicate
+discards a pass's WORK but the commands are still in the buffer and still
+dispatch — its own docstring prices that: "what a discarded iteration still
+costs is its barriers, its gate dispatch and its predicate test". That is the
+right trade when only the GPU knows the answer.
+
+When the HOST knows it, nothing need be dispatched at all: the recording is
+already a sequence of independently submittable pieces (see [`RecordingParts`](@ref)),
+so the partition a conditional region occupies is simply not submitted. A
+branch that does not run costs one boolean read.
+
+# What it does not do
+
+It does not nest, for the same reason `repeat!` does not: a pass carries one
+condition and nesting would need their conjunction.
+
+The passes a region creates are kept CONTIGUOUS in the recording — the
+partition boundary is drawn where the condition changes — so a region whose
+passes the scheduler would otherwise interleave with unconditional ones is
+still one piece.
+
+Barriers are unaffected, which is what makes a skipped region harmless rather
+than a hole in the ordering: every surviving pass keeps the barriers the graph
+derived for it, and a barrier waiting on a write that did not happen is a wait
+that has already been satisfied.
+"""
+function when!(f, g::Graph, cond)
+    first_new = length(passes(g)) + 1
+    f()
+    for k in first_new:length(passes(g))
+        pp = passes(g)[k]
+        pp.hostcond === nothing || throw(ArgumentError(
+            "when!: pass \"$(pp.name)\" already has a host condition — nested " *
+            "`when!` is not supported, because a pass carries one condition and " *
+            "nesting needs their conjunction."))
+        pp.hostcond = cond
+    end
+    return nothing
+end
+
 function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
                  while_nonzero = nothing)
     maxiters >= 1 || throw(ArgumentError("repeat!: maxiters must be at least 1, got $maxiters"))
@@ -488,7 +546,7 @@ asviewport(v) = NTuple{4,Float32}(v)
 # `Pass` is Mantle's now — see `src/graph/types.jl`.
 
 Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing, nothing,
-                        DrawCall[], Pair{Int,Type}[], Any[], nothing)
+                        DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing)
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 

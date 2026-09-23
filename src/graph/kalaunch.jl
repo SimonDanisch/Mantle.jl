@@ -953,9 +953,12 @@ function recordplan!(dev, pl::Plan, maxpasses::Int)
     # caller asked for a partition. `recordparts!` opens the rest itself and knows
     # its own chunks; this one is opened here because `recordplan!` has to open one
     # to find out whether the backend records at all.
-    npass = length(pl.passes)
-    first_range = maxpasses == 0 ? (1:npass) : (1:min(maxpasses, npass))
-    e = openrecording(dev, pl, first_range)
+    # The pieces this plan records as. With no `when!` condition and no
+    # `maxpasses` this is one range covering everything, and the single-piece
+    # path below is the one taken — unchanged, so a plan that uses neither pays
+    # nothing for their existence.
+    ranges = partitionranges(pl, maxpasses)
+    e = openrecording(dev, pl, first(ranges))
     if e === nothing
         # A backend with no command buffers to build: `run!` walks the plan
         # instead, which is the same walk. Asking for a partition of it is a
@@ -965,6 +968,13 @@ function recordplan!(dev, pl::Plan, maxpasses::Int)
             "record!: maxpasses = $maxpasses, and this backend does not record: " *
             "`openrecording` declined the plan, so there is nothing to partition. " *
             "`run!` walks it per frame."))
+        # Same argument for a `when!` region: skipping one means not submitting
+        # the piece it is in, and a backend with no pieces has nothing to skip.
+        length(ranges) == 1 || throw(ArgumentError(
+            "record!: this plan has a `when!` condition and this backend does " *
+            "not record: a conditional region is a recorded piece that the run " *
+            "may omit, and `openrecording` declined the plan. Branch on the " *
+            "host and declare the graph you want."))
         return pl
     end
     # Where every device address the pack writes lands, keyed by the address —
@@ -972,7 +982,7 @@ function recordplan!(dev, pl::Plan, maxpasses::Int)
     # `notify_move!`, never per run. A partition fills it from every piece.
     empty!(pl.patchtab)
     empty!(pl.pending_patches)
-    if maxpasses == 0
+    if length(ranges) == 1
         emitplan!(e, pl)
         pl.recording = closerecording!(e, pl)
     else
@@ -1000,17 +1010,15 @@ submission.
 """
 function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
     parts = Any[]
+    conds = Any[]
     e = emitter
     try
-        # `max(…, 1)`: a plan with no passes still records one (empty) piece, so
-        # `run!` has something to submit and the plan is recorded rather than
-        # walked.
-        for firstpass in 1:maxpasses:max(length(pl.passes), 1)
-            chunk = firstpass:min(firstpass + maxpasses - 1, length(pl.passes))
+        for chunk in partitionranges(pl, maxpasses)
             e === nothing && (e = openrecording(dev, pl, chunk))
-            firstpass == 1 && emithead!(e, pl)
+            first(chunk) == 1 && emithead!(e, pl)
             emitpasses!(e, pl, chunk)
             push!(parts, closerecording!(e, pl))
+            push!(conds, isempty(chunk) ? nothing : pl.passes[first(chunk)].pass.hostcond)
             e = nothing                 # closed, and now `parts`' business
         end
     catch
@@ -1023,7 +1031,46 @@ function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
     end
     # Narrowed from `Any[]`: the pieces are all one backend type, and
     # `submitrecording!` over them should specialise.
-    return RecordingParts(identity.(parts))
+    return RecordingParts(identity.(parts), conds, any(!isnothing, conds))
+end
+
+"""
+    partitionranges(plan, maxpasses) -> Vector{UnitRange{Int}}
+
+The pass ranges each recorded piece covers.
+
+Two things cut a piece, and they are independent:
+
+  * `maxpasses`, which is a submission-length bound — see [`record!`](@ref);
+  * a change of [`when!`](@ref) condition, because a piece is the unit that can
+    be left unsubmitted, so a conditional region has to be one.
+
+The FIRST range is always unconditional, and that is not a convenience: the head
+(`emithead!`) is baked into piece one and carries the head barrier and the
+profiler's query-pool reset. A piece that might not be submitted cannot hold it,
+so a graph whose very first pass is conditional gets an empty leading piece
+rather than a head that sometimes does not run.
+"""
+function partitionranges(pl::Plan, maxpasses::Int)
+    n = length(pl.passes)
+    out = UnitRange{Int}[]
+    n == 0 && return push!(out, 1:0)
+    cond(i) = pl.passes[i].pass.hostcond
+    # An empty leading piece when the graph opens on a conditional region: the
+    # head has to go somewhere that always runs.
+    cond(1) === nothing || push!(out, 1:0)
+    i = 1
+    while i <= n
+        c = cond(i)
+        j = i
+        # Extend while the condition is the SAME OBJECT and the bound allows.
+        while j < n && cond(j + 1) === c && (maxpasses == 0 || j + 1 - i + 1 <= maxpasses)
+            j += 1
+        end
+        push!(out, i:j)
+        i = j + 1
+    end
+    return out
 end
 
 """
@@ -1041,6 +1088,17 @@ gets the sequence for free.
 """
 struct RecordingParts{R}
     parts::Vector{R}
+    # One per piece: `nothing` for a piece that always runs, or the [`when!`](@ref)
+    # condition the host asks at submit time. Parallel to `parts` rather than a
+    # field on the piece, because a piece is whatever the backend's
+    # `closerecording!` hands back and core does not get to add to it.
+    conds::Vector{Any}
+    # Whether any of them is a condition at all. A plan partitioned only by
+    # `maxpasses` — which is every partitioned plan that predates `when!` — takes
+    # the unconditional submit below, and that loop is over the CONCRETE
+    # `parts`. Asking `conds` per piece instead costs a dynamic call, which is 16
+    # bytes a run on a path whose whole point is that it allocates none.
+    anycond::Bool
 end
 
 release!(rec::RecordingParts) = (foreach(release!, rec.parts); nothing)
@@ -1056,10 +1114,39 @@ with the FIRST piece — it carries this run's host stores and address patches,
 which have to land before any baked command reads them — and the rest go alone.
 """
 function submitrecording!(ctx, rec::RecordingParts, e)
+    rec.anycond && return submitconditional!(ctx, rec, e)
+    # No `when!` anywhere: the loop a plan partitioned by `maxpasses` alone has
+    # always taken, over the concrete `parts`, allocating nothing.
     tok = submitrecording!(ctx, first(rec.parts), e)
     for part in Iterators.drop(rec.parts, 1)
         tok = submitrecording!(ctx, part, nothing)
     end
+    return tok
+end
+
+"""
+Submit only the pieces whose [`when!`](@ref) condition asks for them.
+
+The run's emitter rides with the first piece ACTUALLY SUBMITTED, not with
+`parts[1]`: it carries this run's host stores and address patches, which have to
+land before any baked command reads them, and a conditional piece may not go at
+all. (`partitionranges` keeps piece one unconditional so the recorded head
+always runs — but the run emitter is a separate thing and has to find its own
+way to the front.)
+"""
+function submitconditional!(ctx, rec::RecordingParts, e)
+    tok = nothing
+    pending = e
+    for i in eachindex(rec.parts)
+        c = rec.conds[i]
+        c === nothing || c[] || continue
+        tok = submitrecording!(ctx, rec.parts[i], pending)
+        pending = nothing
+    end
+    # Every piece was conditional and every condition false. The run still has to
+    # land its host stores and patches, and something has to answer for the
+    # submission, so the unconditional head goes on its own.
+    pending === nothing || (tok = submitrecording!(ctx, first(rec.parts), pending))
     return tok
 end
 

@@ -997,6 +997,9 @@ if _VULKAN_OK
             # A recorded plan survives its storage moving: a resized buffer and
             # a grown buffers arena are patched, a grown images arena re-records.
             include(joinpath(VULKAN_TESTS, "test_recorded_move_patch.jl"))
+            # …and survives a branch: `when!` records every branch once and the
+            # run submits only the pieces its conditions ask for.
+            include(joinpath(VULKAN_TESTS, "test_when.jl"))
             # The point of all of the above: `run!` of a recorded plan, with
             # nothing pending, allocates zero bytes.
             include(joinpath(VULKAN_TESTS, "test_run_allocates_nothing.jl"))

@@ -201,6 +201,18 @@ mutable struct Pass
     # would be one more thing every rewrite has to keep consistent. A predicate
     # is a property of a pass, so it travels with it.
     predicate::Any
+    # `nothing`, or something the HOST can ask at submit time whether this pass
+    # should run — see [`when!`](@ref). The difference from `predicate` above is
+    # where the answer lives and what it costs: a device predicate discards the
+    # work but still dispatches it, while a host condition lets the recording
+    # OMIT the partition this pass is in, which costs nothing at all.
+    #
+    # Two mechanisms rather than one because the question is genuinely two
+    # questions. Only the GPU can answer "did the previous pass find anything",
+    # and only the host can answer "is this the first frame of the clip" without
+    # a readback. A condition on the pass, like the predicate, because the graph
+    # still has no nesting.
+    hostcond::Any
 end
 
 abstract type TransientResource <: Resource end
