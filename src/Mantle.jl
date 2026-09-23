@@ -279,6 +279,37 @@ through it are Vulkan's.
 @inline apair(::Nothing, A, m, k, lda) =
     @inbounds (VecElement(A[1 + m + k * lda]), VecElement(A[2 + m + k * lda]))
 
+"""
+The GEMM blocking a plane has to fill before per-plane routing is worth it.
+
+`64, 64, 32` — `BK = 32` with `BK_STEP = 4` is the reference's F32 pair.
+
+Declared HERE rather than beside the kernels that use them, for the same reason
+as [`apair`](@ref): `DNNKernels.planewise_worth` reads `SGEMM_BM`/`SGEMM_BN` as a
+MINIMUM PLANE SIZE when it decides whether to route a batched matmul per plane,
+and it does that on every backend. While they lived in `src/vulkan/array/gemm.jl`
+the names did not exist on a build that compiled in a different one, so
+`batchedmatmul!` was an `UndefVarError` there — a documented entry point that
+could not be called at all, which `test_batchedmatmul.jl` did not catch because
+it named a backend and never ran.
+"""
+const SGEMM_BM, SGEMM_BN, SGEMM_BK = 64, 64, 32
+
+"""
+Tiles a plane must cover before per-plane routing beats one flat launch.
+
+Read by `DNNKernels.planewise_worth` alongside [`SGEMM_BM`](@ref), so it is
+declared here for the same reason.
+"""
+const SGEMM_MINTILES = 16
+
+"""
+How much of a padded tile `planewise_worth` will accept as waste.
+
+Read on every backend alongside [`SGEMM_BM`](@ref) and `SGEMM_MINTILES`.
+"""
+const SGEMM_MAXWASTE = 4
+
 # ── backends ──────────────────────────────────────────────────────────────────
 #
 # Everything above this line is what a backend implements against, and it must

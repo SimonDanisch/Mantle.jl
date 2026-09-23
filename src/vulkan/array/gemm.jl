@@ -1949,7 +1949,9 @@ end
 # `WARP` is a tiling parameter, NOT a subgroup requirement: this branch uses no
 # subgroup operation, only an index decomposition, so the value need not match
 # the device's subgroup width and no capability query gates it.
-const SGEMM_BM, SGEMM_BN, SGEMM_BK = 64, 64, 32   # BK=32/BK_STEP=4 is the reference's F32 pair
+# `SGEMM_BM`/`BN`/`BK` are declared in `Mantle.jl`, above the backend split:
+# `DNNKernels.planewise_worth` reads them as a minimum plane size, so the names
+# have to exist on every backend. See the note there.
 const SGEMM_WM, SGEMM_WN = 32, 32
 # ── the one place this departs from the reference's shipped numbers ──────────
 #
@@ -2547,7 +2549,8 @@ end
 # plane is the single largest operation in Depth Anything's forward pass. Sixteen
 # tiles is where the staged kernel stops losing. `test_gemm_staged_scalar.jl`
 # pins both sides so this cannot drift into "always staged" unmeasured.
-const SGEMM_MINTILES = 16
+# `SGEMM_MINTILES` is declared in `Mantle.jl`, above the backend split, for the
+# same reason as `SGEMM_BM`: `planewise_worth` reads it on every backend.
 
 # How much padded output a staged launch may compute for output it discards. A
 # tile is evaluated whole, so a product much narrower than `BN` (or shorter than
@@ -2578,7 +2581,7 @@ const SGEMM_MINTILES = 16
 # more precision into it than that. Note also that K matters and is not in the
 # rule at all: the 64 x 1370 plane wins 1.63x at K = 1370 and ties at K = 512,
 # because a shorter reduction gives the staging less to amortise against.
-const SGEMM_MAXWASTE = 4
+# `SGEMM_MAXWASTE` is declared in `Mantle.jl`, above the backend split.
 
 """
 Can this product use the staged kernel rather than the per-element one?
