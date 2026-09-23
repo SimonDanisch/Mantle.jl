@@ -174,6 +174,13 @@ Mantle.rawfree(::HostDevice, mem) = nothing
 # purpose — a backend that cannot say where its memory is cannot have a recorded
 # plan patched when it moves, and silence would look like success.
 Mantle.deviceaddress(::HostDevice, mem::Vector{UInt8}) = UInt64(pointer(mem))
+# …and NOT patchable with it. There is no recording here and no argument memory:
+# `bake` resolved every launch into a `Vector` view over the block, and a move
+# leaves those views naming the old bytes. Nothing rewrites them, so the plan is
+# marked in `remap!` and `refit!` recompiles it before the next run. Before this
+# answer, the default `true` said the move had been handled and the editor
+# rendered a whole frame from freed storage without a word.
+Mantle.patchable(::HostDevice) = false
 # Host memory is not VRAM: a 64 MiB block would fault in pages nobody asked for,
 # and an allocation here is cheap enough that a small block is the right trade.
 Mantle.blocksize(::HostDevice) = 1 << 20
@@ -281,6 +288,10 @@ function Mantle.kakernelaccesssignature(d::HostDevice, kernel, argT::Tuple, ndra
     # the arity does: `Kernel{CPU}` has no three-argument method.
     block = first(KA.NDIteration.blocks(iterspace))
     ctx = KA.mkcontext(obj, block, ndr, iterspace, dynamic)
+    # `argT` is already what `kerneltouches` mapped `devicetype` over, as the
+    # Vulkan and generic forms both read it. This said `args`, which is not a
+    # parameter here: every KernelAbstractions kernel dispatched on the host
+    # backend raised `UndefVarError: args` from the access walk.
     tt  = (typeof(ctx), argT...)
     return nothing, obj.f, tt
 end

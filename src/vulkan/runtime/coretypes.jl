@@ -245,6 +245,12 @@ struct VulkanCompiledGraphicsPipeline <: CompiledGraphicsPipeline
     # pipeline is built for a whole set of colour attachment formats.
     color_formats::Vector{VK.Format}
     has_depth::Bool
+    # `:vertex` or `:mesh` — which front end this pipeline was built with, and
+    # therefore which draw command is legal against it. Carried on the pipeline
+    # because that is where the answer is true: a caller holding one has no
+    # other way to ask, and `vkCmdDraw` against a mesh pipeline is undefined
+    # behaviour rather than an error the driver reports.
+    front::Symbol
 end
 
 """

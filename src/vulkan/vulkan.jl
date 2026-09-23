@@ -44,7 +44,7 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             LavaGfxShader, LavaRTShader, LavaSharedArray, MatrixA, MatrixB,
             Op, PushConstantInfo, Scope, SourceMap, TENSOR_CLAMP_CONSTANT,
             TENSOR_CLAMP_UNDEFINED, TargetFeatures, TessConfig,
-            GeometryWrapper, VertexWrapper, WorkgroupMatrix, cache_io_error,
+            GeometryWrapper, MeshWrapper, VertexWrapper, WorkgroupMatrix, cache_io_error,
             coopmat_convert, coopmat_getcomp, coopmat_length, coopmat_load,
             coopmat_muladd, coopmat_setcomp, coopmat_store, coopmat_undef,
             coopmat_zero, disassemble_spirv, dump_spirv_to_disk,
@@ -63,6 +63,11 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_ray_query_get_primitive_index, lava_ray_query_get_t,
             lava_ray_query_get_type, lava_ray_query_init,
             lava_ray_query_proceed,
+            # Procedural geometry: answering an AABB candidate with a solve of
+            # one's own. See `raytracing/accel.jl`.
+            lava_ray_query_generate_intersection,
+            lava_ray_query_get_object_ray_origin,
+            lava_ray_query_get_object_ray_direction,
             # The four RT intrinsics KernelInterface does not declare — the set
             # there is what CALLERS use, and these are called only by this
             # backend's own raygen and closest-hit shaders
@@ -98,6 +103,7 @@ include("array/gpuarrays.jl")
 include("array/gemm.jl")
 include("array/gemm_cm2.jl")
 include("array/mapreduce.jl")
+include("array/accumulate.jl")
 include("runtime/debug.jl")
 include("runtime/diagnostics.jl")   # gpu_memory_usage, dump_state
 include("runtime/external.jl")

@@ -13,6 +13,13 @@ struct VulkanTexture2D{T} <: Texture2D{T}
     ctx::VkContext
 end
 
+# `size` and `eltype` so a caller can ask whether new data FITS an existing
+# texture without naming the backend's fields. `update_texture!` in RayMakie is
+# the caller that matters: uploading into the texture it already has is what
+# keeps a recorded plan's baked descriptor set pointing at the right image.
+Base.size(t::VulkanTexture2D) = (t.width, t.height)
+Base.eltype(::VulkanTexture2D{T}) where {T} = T
+
 """1D texture backed by VkImage."""
 struct VulkanTexture1D{T} <: Texture1D{T}
     image::VK.Image
@@ -69,8 +76,14 @@ end
 
 # ── Texture Construction ──
 
-"""Create a 2D texture from a matrix of data."""
-function VulkanTexture2D(data::Matrix{T}; ctx::VkContext, filter=:linear, wrap=:repeat) where T
+"""Create a 2D texture from a matrix of data.
+
+`AbstractMatrix`, not `Matrix`: the pixels may already be ON the device — a
+decoded video frame, the output of a compute pass — and a texture built from
+those should not go out to the host and back. Which of the two it is, is
+[`upload_texture_data!`](@ref)'s question, answered by dispatch.
+"""
+function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear, wrap=:repeat) where T
     dev = ctx.device
 
     # `data[x, y]`: the FIRST index is the horizontal one, as on the Metal side and
@@ -113,22 +126,22 @@ function VulkanTexture2D(data::Matrix{T}; ctx::VkContext, filter=:linear, wrap=:
     return tex
 end
 
-"""Upload pixel data to a texture via staging buffer."""
-function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
-    ctx = tex.ctx
-    bq = ctx.default_bq
-    dev = ctx.device
+"""
+    copy_into_texture!(srcfor, tex)
 
-    bytes = reinterpret(UInt8, vec(collect(data)))
-    nbytes = length(bytes)
-    # The upload is a one-shot of its own: the bytes go into scratch the
-    # one-shot owns, and the sweep gives them back once the copy has passed.
+Record `tex`'s upload: the two layout transitions and the buffer-to-image copy,
+around whatever buffer `srcfor(e)` answers with.
+
+ONE recording for both sources. `srcfor` returns `(VkBuffer, byte_offset)` and is
+responsible for keeping whatever it named alive for the submission — it runs
+INSIDE the one-shot, which is what lets the host path acquire its staging
+scratch from the emitter that will own it.
+"""
+function copy_into_texture!(srcfor, tex::VulkanTexture2D)
+    bq = tex.ctx.default_bq
     oneshot!(bq; tag = :upload) do e
     cmd = e.cmd
-    r = scratch!(e.owner, nbytes)
-    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
-    staging_buf = mb.buffer
-    GC.@preserve bytes unsafe_copyto!(mb.mapped_ptr + offset(r), pointer(bytes), nbytes)
+    staging_buf, src_offset = srcfor(e)
 
     transition_image!(cmd, tex.image,
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -136,7 +149,7 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
         VK.AccessFlag(0), VK.ACCESS_TRANSFER_WRITE_BIT)
 
     region = VK.BufferImageCopy(
-        UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
+        UInt64(src_offset), UInt32(0), UInt32(0),
         VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
             UInt32(0), UInt32(0), UInt32(1)),
         VK.Offset3D(0, 0, 0),
@@ -150,15 +163,47 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::Matrix{T}) where T
         VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK.ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_SHADER_READ_BIT)
 
-    # The submission names the texture and the staging region; both stay alive
-    # until it has passed.
+    # The submission names the texture; the SOURCE was held by `srcfor`.
     hold!(e, tex)
-    hold!(e, mb)
     end
     # No wait: a draw that samples the texture on this queue is ordered behind
-    # the copy, and the host bytes were copied into the scratch before the
-    # submit, so the caller's array is free the moment this returns.
+    # the copy.
     return nothing
+end
+
+"""Upload pixel data to a texture from the HOST, via staging."""
+function upload_texture_data!(tex::VulkanTexture2D{T}, data::AbstractMatrix{T}) where T
+    bytes = reinterpret(UInt8, vec(collect(data)))
+    nbytes = length(bytes)
+    # The bytes go into scratch the one-shot owns, and the sweep gives them back
+    # once the copy has passed. Copied in before the submit, so the caller's
+    # array is free the moment this returns.
+    copy_into_texture!(tex) do e
+        r = scratch!(e.owner, nbytes)
+        mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
+        GC.@preserve bytes unsafe_copyto!(mb.mapped_ptr + offset(r), pointer(bytes), nbytes)
+        hold!(e, mb)
+        (mb.buffer, pool_offset(mb) + offset(r))
+    end
+end
+
+"""
+Upload pixel data that is ALREADY on the device: no staging, no host round trip.
+
+`vkCmdCopyBufferToImage` reads the array's own buffer, so a frame produced by a
+compute pass or a video decoder becomes a texture without ever being seen by the
+host. A `LavaArray` carries a byte `offset` and no strides, so it is contiguous
+by construction and the whole image is one region.
+
+The ARRAY is held, not its `VkManagedBuffer`: what keeps the memory ours is the
+`DataRef` refcount the array owns, not reachability of the buffer.
+"""
+function upload_texture_data!(tex::VulkanTexture2D{T}, data::LavaArray{T,2}) where T
+    copy_into_texture!(tex) do e
+        mb = data.buf[]::VkManagedBuffer
+        hold!(e, data)
+        (mb.buffer, pool_offset(mb) + data.offset)
+    end
 end
 
 # ── Format Mapping ──

@@ -162,6 +162,11 @@ extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT
 # the extension is optional, and a device without it must refuse the graph rather
 # than record one that runs every iteration unconditionally.
 supportspredicate(d::LavaDevice) = (d.ctx::VkContext).conditional_rendering_available
+
+# The frozen-SPIR-V cache is the COMPILER's, which is where it belongs; this is
+# the runtime forwarding the question so a caller never has to name Lava.
+kernelcompiles(::LavaDevice) = (s = Lava.frozen_stats(); (; hits = s.hits, misses = s.misses))
+resetkernelcompiles!(::LavaDevice) = (Lava.frozen_reset_stats!(); nothing)
 bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
 # Vulkan refuses an index buffer that was not allocated as one, so this backend
@@ -402,6 +407,39 @@ resourcekind(::VulkanFramebuffer) = ImageKind()
 
 Base.length(a::Attr) = length(a.resource)
 
+
+"""
+Bytes into a TRANSIENT's arena slice: `vkCmdUpdateBuffer` while it can carry
+them, and a staged copy recorded into THIS run past that.
+
+Not the `DeviceArray` method below, and the difference is the staged branch. A
+frame is the case this exists for — 1920x1080 RGBA is 8 MB, so every store of
+one takes the staged path — and routing it through `upload!` would stall the
+queue at the update pass, which is the cost the whole arrangement is here to
+avoid: measured on the lego project, a timeline with a scene played at 10.6 fps
+with the upload inside a pass body against 32.4 with it staged here.
+
+So the staging region comes from the run's own `scratch!` and the copy is a
+command in the run's submission, ordered ahead of every reader by the barriers
+`hostwritten!`'s `CopyDst` made the graph derive. Offsets are relative to the
+managed buffer, which is what `cmd_copy_buffer!` and `cmd_update_buffer` both
+take: `pool_offset` puts it in its block, `t.offset` in the arena.
+"""
+function storebytes!(e::Emitter, t::TransientBuffer, off::Int, p::Ptr{Cvoid}, n::Int)
+    dst = (t.block::BufferBlock).ref[]::VkManagedBuffer
+    dst_off = pool_offset(dst) + t.offset + off
+    if n <= 65536 && n % 4 == 0 && dst_off % 4 == 0
+        VK.cmd_update_buffer(e.cmd, dst.buffer, UInt64(dst_off), UInt64(n), p)
+        hold!(e, dst)
+    else
+        r = scratch!(e.owner, n)
+        src = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
+        unsafe_copyto!(src.mapped_ptr + offset(r), Ptr{UInt8}(p), n)
+        cmd_copy_buffer!(e, src, dst, n;
+                         src_off = pool_offset(src) + offset(r), dst_off = dst_off)
+    end
+    return nothing
+end
 
 """
 Bytes into a resource's store: inside the command buffer when
@@ -1315,7 +1353,7 @@ function beginrender!(e::Emitter, ::Plan, pp::PassPlan)
                 depth_clear = p.depth === nothing ? nothing : depthclear(p.depth_load),
                 depth_load_op = p.depth === nothing ? nothing : loadop(p.depth_load),
                 transition = false)
-    # Viewport and scissor are dynamic pipeline state. vk_draw! sets them for
+    # Viewport and scissor are dynamic pipeline state. `begin_pass!` sets them for
     # you; draw_in_pass! only does so when passed, and omitting them
     # rasterizes nothing without raising anything.
     ext = target_extent(first_target(p))
@@ -1754,11 +1792,14 @@ end
 # carries it as a type parameter, so whether a draw is indexed is settled when
 # the plan is recorded and never asked again.
 
+# …except for the front stage, which the PIPELINE answers and the count type
+# cannot: a mesh draw and a classic one are both "a number and no index buffer".
 emit_draw!(e, pipe, n::Integer, addr::UInt64, ::Nothing, inst::Int) =
-    draw_in_pass!(e, pipe, n; push_bda = addr, instances = inst)
+    ismeshpipeline(pipe) ? draw_mesh_in_pass!(e, pipe, n; push_bda = addr) :
+                           draw_in_pass!(e, pipe, n; push_bda = addr, instances = inst)
 
 emit_draw!(e, pipe, x, addr::UInt64, ::Nothing, inst::Int) =
-    draw_in_pass!(e, pipe, count(x); push_bda = addr, instances = inst)
+    emit_draw!(e, pipe, count(x), addr, nothing, inst)
 
 emit_draw!(e, pipe, c::Commands, addr::UInt64, ::Nothing, ::Int) =
     draw_indirect_in_pass!(e, pipe, storage(c.resource);

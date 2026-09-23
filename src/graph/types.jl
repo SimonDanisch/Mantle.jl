@@ -226,7 +226,38 @@ mutable struct TransientBuffer{T,N} <: TransientResource
     # and an address alone cannot name the buffer.
     block::Any            # ::BufferBlock once placed
     offset::Int
+    # Stores made through `setindex!` and not yet landed, exactly as `Buffer`
+    # keeps them — `(range, data)` in the order they were made, and the flag a
+    # run reads before touching the list.
+    #
+    # A transient can be written from the host for the same reason a `Buffer`
+    # can, and the arena is WHY rather than an obstacle: a per-frame plane — a
+    # decoded frame, a matte, a colour table — is a resource of the graph whose
+    # bytes may alias anything already dead, and the alternative is a persistent
+    # buffer living beside the graph and reaching in. `hostwritten!` registers
+    # this as a `CopyDst` of the update pass, so `Liveness` extends the interval
+    # to cover the write and the placer will not alias those bytes against
+    # something still live.
+    pending::Vector{Tuple{UnitRange{Int},Vector{T}}}
+    pendinglock::ReentrantLock
+    @atomic dirty::Bool
+    # DECLARED at construction, not discovered at the first store, and the
+    # difference is 28x on SAM 2's encoder. The registration above is a usage on
+    # the update pass, so it drags the interval of everything it touches back to
+    # pass 1 — and a transient whose interval starts at pass 1 can alias nothing.
+    # Registering every transient because it *could* be written turned 167 MB of
+    # peak live bytes into the full 4.70 GB sum of 701 of them, over the 4 GiB a
+    # single Vulkan allocation may be. Only the ones a caller says it will write
+    # pay that, and `setindex!` refuses the rest by name.
+    hostwritten::Bool
 end
+
+# The 5-argument form every caller writes; the stores start empty.
+TransientBuffer{T,N}(dims::NTuple{N,Int}, first::Int, last::Int, block, offset::Int;
+                     hostwritten::Bool = false) where {T,N} =
+    TransientBuffer{T,N}(dims, first, last, block, offset,
+                         Tuple{UnitRange{Int},Vector{T}}[], ReentrantLock(), false,
+                         hostwritten)
 
 """
 A transient render target.
@@ -662,6 +693,16 @@ mutable struct Plan{D,H<:Tuple}
     # before it submits. Never set for a plan that was not recorded: `run!`
     # refuses those rather than recording on the way past.
     stale::Bool
+    # The arena this plan was placed in MOVED — it grew for another plan and
+    # `remap!` rebound the transients under it. Distinct from `stale`, which
+    # asks only for the recording to be written again: a recording is emitted
+    # FROM `passes`, and `bake` resolved those into concrete device arrays when
+    # the plan was built, so re-recording would faithfully re-emit the old
+    # block. What a move needs is the recompile `refit!` already does, and it
+    # cannot happen inside `remap!` — that runs while the pool is mid-growth.
+    # So it is deferred: `run!` calls `refit!` every frame, and this is what
+    # tells it to.
+    replaced::Bool
 end
 
 """

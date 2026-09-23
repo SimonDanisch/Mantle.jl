@@ -79,7 +79,7 @@ function checkcapacity(p::Problem, pl::Placement, what::AbstractString = "arena"
         $what does not fit: needs $(humanbytes(pl.height)), \
         $(humanbytes(p.capacity)) available.
         Lower bound for these items is $(humanbytes(bound)), so $verdict.
-        Largest items:
+        $(length(p.items)) items totalling $(humanbytes(sum(i -> i.size, p.items))). Largest items:
         $listed"""))
 end
 

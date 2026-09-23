@@ -162,7 +162,16 @@ Accepts a backend, an `HWTLAS`, or an [`AdaptedAccel`](@ref), because the
 callers that need to ask have one of those to hand and not always the same one.
 """
 supports_rt_pipeline(::Any) = false
-supports_rt_pipeline(a::AdaptedAccel) = supports_rt_pipeline(a.hwtlas)
+# PROCEDURAL geometry forces the inline path, whatever the backend says.
+#
+# The two ray paths answer a box by different mechanisms: an inline ray query
+# does it in the traversal loop with `OpRayQueryGenerateIntersectionKHR`, while
+# an RT pipeline needs an INTERSECTION SHADER in a `PROCEDURAL_HIT_GROUP` —
+# a different instruction in a different stage, bound through the shader binding
+# table. Only the first is wired here, so an accel carrying a procedural payload
+# says no and is traced inline. A triangles-only accel is unaffected.
+supports_rt_pipeline(a::AdaptedAccel) =
+    a.procedural === nothing && supports_rt_pipeline(a.hwtlas)
 
 #
 # There is no pinning verb here. "Hold this Julia object until a submission

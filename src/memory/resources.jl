@@ -356,8 +356,8 @@ storage(s::GPURef) = deviceview(s.dev, s.store)
 Base.Array(b::Buffer{T,1}) where {T} = download(b.dev, b.store)[1:b.len]
 Base.Array(b::Buffer) = download(b.dev, b.store)
 
-update!(b::Buffer{T,1}, data::AbstractVector) where {T} = update!(b, 1:length(data), data)
-function update!(b::Buffer{T,1}, r::AbstractUnitRange, data::AbstractVector) where {T}
+update!(b::Buffer{T,N}, data::AbstractVector) where {T,N} = update!(b, 1:length(data), data)
+function update!(b::Buffer{T,N}, r::AbstractUnitRange, data::AbstractVector) where {T,N}
     last(r) <= b.capacity ||
         throw(ArgumentError("update! writes $(last(r)) elements into a capacity of $(b.capacity)"))
     upload!(b.dev, b.store, first(r), data)
@@ -374,8 +374,11 @@ update!(s::GPURef{T}, x) where {T} = (upload!(s.dev, s.store, 1, T[x]); s)
     buf[range] = data
     buf[:] = data
 
-Store a value into a persistent resource, to be landed by the next plan that
-reads it.
+Store a value into a resource, to be landed by the next plan that reads it.
+
+A `Buffer` or a `GPURef`, and a `TransientBuffer` too: a per-frame plane is an
+ordinary resource of the graph, and its bytes land in the arena slice the placer
+gave it.
 
 A store retains what it is given and marks the resource dirty. It copies
 nothing, touches no command buffer and may be made from any thread, which is
@@ -418,7 +421,7 @@ function Base.setindex!(r::GPURef{T}, x) where {T}
     return r
 end
 
-function Base.setindex!(b::Buffer{T,1}, data::AbstractVector, r::AbstractUnitRange) where {T}
+function Base.setindex!(b::Buffer{T,N}, data::AbstractVector, r::AbstractUnitRange) where {T,N}
     rng = UnitRange{Int}(r)
     length(data) == length(rng) || throw(DimensionMismatch(
         "setindex!: $(length(data)) elements were given for a range of $(length(rng))"))
@@ -426,6 +429,9 @@ function Base.setindex!(b::Buffer{T,1}, data::AbstractVector, r::AbstractUnitRan
     last(rng) <= b.capacity || throw(ArgumentError(
         "setindex!: a store to $(last(rng)) elements into a capacity of $(b.capacity)"))
     v = data isa Vector{T} ? data : convert(Vector{T}, data)
+    # Any rank, and the range is LINEAR: a shaped buffer is shaped so a kernel
+    # gets extents, and a store is the run of elements it is. Same as the
+    # transient's, for the same reason.
     lock(b.pendinglock) do
         push!(b.pending, (rng, v))
         @atomic :release b.dirty = true
@@ -433,11 +439,50 @@ function Base.setindex!(b::Buffer{T,1}, data::AbstractVector, r::AbstractUnitRan
     return b
 end
 
-Base.setindex!(b::Buffer{T,1}, data::AbstractVector, ::Colon) where {T} =
+Base.setindex!(b::Buffer{T,N}, data::AbstractVector, ::Colon) where {T,N} =
     setindex!(b, data, 1:length(data))
 
+# The same store, into a transient. Identical because it IS the same protocol —
+# the difference is only where the bytes end up, which `landstores!`' caller
+# decides. Capacity is the shape the transient was declared with; there is no
+# `len` to carry, because a transient holds nothing between runs and every
+# reader of it takes its extents from `size(t)`.
+#
+# ANY RANK, where `Buffer`'s store is rank-1: a transient carries its shape so a
+# kernel gets extents (see the note on the struct), and a 3D colour table or a
+# 2D plane is stored as the linear run of elements it is. The range is linear
+# for the same reason the byte offset below is — `landhost!` and `emitstore!`
+# both address the slice from its start, and a shaped store would need a
+# strided copy neither the arena nor `vkCmdCopyBuffer` has.
+function Base.setindex!(t::TransientBuffer{T,N}, data::AbstractVector, r::AbstractUnitRange) where {T,N}
+    # Declared, not discovered. A store into a transient the graph did not
+    # register is not late — it is unsafe: `hostwritten!` ran at `Plan` time and
+    # these bytes were placed as if nothing wrote them before the first pass
+    # that reads them, so the placer may have given them to something still
+    # live. Refused here, where the caller is, rather than corrupting a frame.
+    t.hostwritten || throw(ArgumentError(
+        "setindex!: this transient was not declared host-written, so the placer " *
+        "may have aliased its bytes against something still live at the update " *
+        "pass. Build it with `Transient.Buffer(g, T, dims...; hostwritten = true)`."))
+    rng = UnitRange{Int}(r)
+    length(data) == length(rng) || throw(DimensionMismatch(
+        "setindex!: $(length(data)) elements were given for a range of $(length(rng))"))
+    first(rng) >= 1 || throw(ArgumentError("setindex!: a range starts at 1 or later, not $(first(rng))"))
+    last(rng) <= prod(t.dims) || throw(ArgumentError(
+        "setindex!: a store to $(last(rng)) elements into a transient of $(prod(t.dims))"))
+    v = data isa Vector{T} ? data : convert(Vector{T}, data)
+    lock(t.pendinglock) do
+        push!(t.pending, (rng, v))
+        @atomic :release t.dirty = true
+    end
+    return t
+end
+
+Base.setindex!(t::TransientBuffer{T,N}, data::AbstractVector, ::Colon) where {T,N} =
+    setindex!(t, data, 1:length(data))
+
 """Whether a resource holds a store not yet landed: one flag read."""
-isdirty(r::Union{Buffer,GPURef}) = @atomic :acquire r.dirty
+isdirty(r::Union{Buffer,GPURef,TransientBuffer}) = @atomic :acquire r.dirty
 
 """Whether any resource in the tuple does — a plan's `hostwritten`. Unrolled at
 compile time (`@generated`), so a heterogeneous tuple costs no `Base.tail` box
@@ -490,6 +535,20 @@ function landstores!(f, b::Buffer{T}) where {T}
         end
         empty!(b.pending)
         @atomic :release b.dirty = false
+    end
+    return nothing
+end
+
+# A transient's, which is `Buffer`'s without the `len`: what a draw covers comes
+# from the declared shape here, not from how much of it was last written.
+function landstores!(f, t::TransientBuffer{T}) where {T}
+    isdirty(t) || return nothing
+    lock(t.pendinglock) do
+        for (rng, data) in t.pending
+            f(t, data, first(rng))
+        end
+        empty!(t.pending)
+        @atomic :release t.dirty = false
     end
     return nothing
 end

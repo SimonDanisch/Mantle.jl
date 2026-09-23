@@ -106,14 +106,19 @@ results; a hand-recorded pass has one target and resolves it here, so the backen
 hook has ONE shape whichever side calls it. That is the whole reason
 `begin_render_pass!` was given resolved attachments rather than a `Pass`.
 """
-function passtargets(t::OffscreenTarget, clear)
+function passtargets(t::OffscreenTarget, clear, depth_clear = 1.0f0)
     load = clear === nothing ? Keep : Clear(clear)
     fb = t.fb
     d = depthimage(fb)
-    return ((colorimage(fb),), (load,), d, d === nothing ? nothing : Clear(1.0f0))
+    # `depth_clear = nothing` is a LOAD, the depth counterpart of `clear =
+    # nothing`: a second draw that tests against the first one's depth needs the
+    # buffer kept, and hardcoding `Clear` here is what made that inexpressible
+    # through a pass and sent callers to a second draw path.
+    return ((colorimage(fb),), (load,), d,
+            d === nothing ? nothing : (depth_clear === nothing ? Keep : Clear(depth_clear)))
 end
 
-function passtargets(t::WindowTarget, clear)
+function passtargets(t::WindowTarget, clear, depth_clear = nothing)
     load = clear === nothing ? Keep : Clear(clear)
     return ((currentimage(t.window),), (load,), nothing, nothing)
 end
@@ -156,9 +161,9 @@ begin/end verb pair leaves to the caller: a shader that fails to compile
 mid-pass then leaves the pass open, and the next frame's `begin_pass!` opens a
 second one on the same buffer.
 """
-function pass!(f, device, target::RenderTarget; clear = nothing)
+function pass!(f, device, target::RenderTarget; clear = nothing, depth_clear = 1.0f0)
     dev = todevice(device)
-    targets, loads, depth, depth_load = passtargets(target, clear)
+    targets, loads, depth, depth_load = passtargets(target, clear, depth_clear)
     h = begin_render_pass!(dev, targets, loads, depth, depth_load)
     p = PassRecorder(h)
     result = try
@@ -268,6 +273,56 @@ function blit!(device, target::RenderTarget, source; clear::Bool = true)
     end
     return nothing
 end
+
+"""
+    draw!(device, pipeline, target::RenderTarget, count; args = (), frag_args = (),
+          instances = 1, clear_color = (0f0,0f0,0f0,1f0), depth_clear = 1f0,
+          indices = nothing, bindings = nothing)
+
+Draw `pipeline` into `target` once, in its own pass.
+
+The immediate-mode counterpart of the graph: a caller with one draw to make and
+no graph to put it in. `count` is a vertex count, an index count with `indices`,
+or a WORKGROUP count for a [`MeshPipeline`](@ref) — whichever the pipeline's kind
+makes legal, which [`record_draw!`](@ref) decides.
+
+**One implementation, in core.** This was two: a 178-line `vk_draw!` on the
+Vulkan side that did its own image transitions, its own `vkCmdBeginRendering`
+and its own bind, and an encoder-building method on the Metal side, neither of
+which went through [`pass!`](@ref) or [`record_draw!`](@ref). They drifted, as a
+second copy does — the Vulkan one never learned mesh pipelines, the two
+disagreed on whether arguments arrive as `args` or as bound buffers, and the
+duplicated barrier logic was wrong in the copy long after `begin_pass!` had it
+right. `blit!` below is the same three lines with the pipeline fixed.
+"""
+function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
+               target::RenderTarget, count::Integer;
+               args = (), frag_args = (), instances::Integer = 1,
+               clear_color::Union{Nothing, NTuple{4, Float32}} = (0f0, 0f0, 0f0, 1f0),
+               depth_clear::Union{Nothing, Float32} = 1f0,
+               indices = nothing, bindings = nothing)
+    dev = todevice(device)
+    compiled = compile_draw(dev, pipeline, (blittarget(target),), depthtarget(target),
+                            args, frag_args; bindings)
+    pass!(dev, target; clear = clear_color, depth_clear) do p
+        bindings === nothing || bindings!(p, compiled, bindings)
+        draw!(p, compiled, args, count; instances, indices)
+    end
+    return nothing
+end
+
+"""
+    depthtarget(target) -> element type or `nothing`
+
+`target`'s depth attachment as [`compile_draw`](@ref) names formats, and
+`nothing` when it has none.
+
+`Float32` and not a backend query because neither backend's [`Framebuffer`](@ref)
+offers a choice: Vulkan allocates `D32_SFLOAT` and Metal `Depth32Float`. The day
+one of them takes a depth format, this becomes the accessor that reads it.
+"""
+depthtarget(t::OffscreenTarget) = depthimage(t.fb) === nothing ? nothing : Float32
+depthtarget(::WindowTarget) = nothing
 
 """
     blittarget(target) -> element type

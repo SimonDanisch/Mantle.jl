@@ -85,8 +85,12 @@ struct VulkanDraw
     shader::LavaGfxShader
 end
 
-function compile_draw(dev::LavaDevice, p::GraphicsPipeline, color_formats,
-                      depth_format, vargs, fargs; bindings = nothing)
+# Both pipeline kinds, one body: the two differ in which stages get compiled and
+# which draw command is legal, and `resolve_shader_pair` /
+# `ensure_compiled_with_shader!` / `ismeshpipeline` are where each of those is
+# answered. Nothing here is different, so there is nothing to write twice.
+function compile_draw(dev::LavaDevice, p::Union{GraphicsPipeline, MeshPipeline},
+                      color_formats, depth_format, vargs, fargs; bindings = nothing)
     ctx = dev.ctx
     ad = adaptor(dev.bq)
     vtt = typeof(convert_args(devargs(ad, rawargs(vargs))))
@@ -169,7 +173,12 @@ function record_draw!(h::VulkanPassHandle, d::VulkanDraw, args, count::Integer;
                       instances::Integer = 1, indices = nothing)
     e = h.e
     addr = pack_gfx_args_bda(e.owner, args, d.shader.push_info)
-    if indices === nothing
+    if ismeshpipeline(d.pipeline)
+        indices === nothing || throw(ArgumentError(
+            "record_draw!: a mesh pipeline takes no index buffer — the mesh stage " *
+            "writes its own primitive indices. `count` is its workgroup count."))
+        draw_mesh_in_pass!(e, d.pipeline, count; push_bda = addr)
+    elseif indices === nothing
         draw_in_pass!(e, d.pipeline, count; push_bda = addr, instances)
     else
         # The device READS the indices, so the submission has to outlive them —

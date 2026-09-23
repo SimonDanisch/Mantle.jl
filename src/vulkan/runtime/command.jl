@@ -1160,7 +1160,7 @@ end
 # portable `flush!(channel, device)` takes the Mantle device, which is what
 # `deviceof` answers and what core's one-argument form fills in.
 function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
-    @assert Threads.threadid() == bq.thread  "the submit channel is single-writer; cross-thread flush forbidden"
+    ownthread(bq)
     # Waiting on a semaphore of a dead device is a confusing failure; this
     # turns it into a message that says what to do.
     device_lost(ctxof(bq)) && throw(LavaError("command flush", "Vulkan device lost",

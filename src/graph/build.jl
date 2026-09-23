@@ -634,7 +634,10 @@ so this is where the size is final. Failing here hands the image back untouched
 frame.
 """
 function refit!(pl::Plan)
-    moved = false
+    # A moved arena is a move like any tracking transient's, and takes the same
+    # recompile — see `remap!`.
+    moved = pl.replaced
+    pl.replaced = false
     # MEASURED 2026-09-14: this loop allocates 96 bytes per transient per frame,
     # and it is the only thing that allocates in a recorded `run!` — a 64-link
     # chain came to 6,144 bytes a run against zero for everything else, on both
@@ -1019,18 +1022,27 @@ end
 # What a host store can be waiting on, and so what `hostwritten!` collects.
 hostwritable(::Buffer) = true
 hostwritable(::GPURef) = true
+# A transient only if it was DECLARED `hostwritten = true`. Registering it is
+# what makes the write SAFE against aliasing rather than merely possible: the
+# `CopyDst` below is a usage, so `Liveness` — which derives every interval from
+# use — starts this transient's interval at the update pass instead of at the
+# first pass that reads it, and the placer will not give those bytes to anything
+# still live at that point. That safety is also the cost, which is why it is
+# declared: see the `hostwritten` field.
+hostwritable(t::TransientBuffer) = t.hostwritten
 hostwritable(::Any) = false
 
 """
     hostwritten!(graph) -> Tuple
 
-Every `Buffer` and `GPURef` a pass of `graph` declares, registered as a
-`CopyDst` of the update pass — once each, however many passes name it — and
+Every `Buffer`, `GPURef` and `TransientBuffer` a pass of `graph` declares,
+registered as a `CopyDst` of the update pass — once each, however many passes name it — and
 returned as a tuple with every element's concrete type in the tuple's type,
 which is what `Plan.hostwritten` holds and `run!` walks.
 
 "Declares" is every usage, followed through `rootresource`: a vertex `Attr`, a
-`BufferRange` slice and a `Commands` buffer all reach the `Buffer` under them.
+`BufferRange` slice and a `Commands` buffer all reach the `Buffer` under them,
+and a transient is its own root.
 A resource handed to a kernel and declared by nothing is not here, which is
 what undeclared means. The "once" is worth having: several passes reading one
 buffer are one hazard against the store, and a usage list that repeats it
@@ -1383,7 +1395,7 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                           alias, coalesce, policy,
                           makeargmemory(g.dev, c.passes), nothing, 0,
                           Dict{UInt64,Vector{Tuple{Any,Int}}}(),
-                          Tuple{Any,Int,UInt64}[], hw, false)
+                          Tuple{Any,Int,UInt64}[], hw, false, false)
             # After construction, because a plan cannot be a tenant before it is a
             # plan — and the arena it was just placed into may grow for the NEXT
             # plan, which is when this registration earns its keep.
@@ -1409,7 +1421,7 @@ Graph(dev::Device) =
                        Dict{Tuple{Int,UnitRange{Int}},Any}())
 
 """
-    Transient.Buffer(graph, T, dims...) -> TransientBuffer
+    Transient.Buffer(graph, T, dims...; hostwritten = false) -> TransientBuffer
 
 A buffer the graph owns: the placer decides where it lives and which other
 transient it may share those bytes with, and it has no storage until `Plan` has
@@ -1420,12 +1432,18 @@ thing — a kernel gets `size(t)` extents and does not have to be told them
 separately. See the note on the struct for why a DECLARED graph needs this:
 `use` interns by object identity, so the shape has to live on the handle rather
 than on a view of it.
+
+`hostwritten = true` says this graph will store into it from the host between
+runs (`t[:] = data`), which buys the aliasing safety for those bytes and costs
+the aliasing everywhere else in its arena — so it is declared here rather than
+assumed of every transient. `setindex!` refuses one that did not ask for it.
 """
-Transient.Buffer(g::Graph, ::Type{T}, n::Integer) where {T} =
-    Transient.Buffer(g, T, (Int(n),))
-Transient.Buffer(g::Graph, ::Type{T}, dims::Integer...) where {T} =
-    Transient.Buffer(g, T, map(Int, dims))
-function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N}) where {T,N}
+Transient.Buffer(g::Graph, ::Type{T}, n::Integer; kw...) where {T} =
+    Transient.Buffer(g, T, (Int(n),); kw...)
+Transient.Buffer(g::Graph, ::Type{T}, dims::Integer...; kw...) where {T} =
+    Transient.Buffer(g, T, map(Int, dims); kw...)
+function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N};
+                          hostwritten::Bool = false) where {T,N}
     # An EMPTY transient has nothing to place and nothing can read it: a kernel
     # over it would have a zero ndrange, which `refuseempty` refuses, so the
     # declaration can only ever be an orphan. `Liveness` does report it, as
@@ -1437,7 +1455,7 @@ function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N}) where {T,N}
     prod(dims) == 0 && throw(ArgumentError(
         "Transient.Buffer: $(dims) has no elements. An empty result needs no " *
         "buffer and no pass -- skip it where the shape is decided."))
-    t = TransientBuffer{T,N}(dims, typemax(Int), 0, nothing, 0)
+    t = TransientBuffer{T,N}(dims, typemax(Int), 0, nothing, 0; hostwritten)
     push!(g.transients, t)
     t
 end
@@ -1465,10 +1483,20 @@ elapsed(lo::UInt64, hi::UInt64, period) = hi < lo ? nothing : Float64(hi - lo) *
 """Whether this plan's commands have been written — see `record!`."""
 recorded(pl::Plan) = pl.recording !== nothing
 
-"""Whether this plan is free of a recording whose baked addresses constrain the
+"""_Whether this plan is free of a recording whose baked addresses constrain the
 pool. `movable` asks it for the block trim: trimming destroys whole blocks, which
 patching cannot follow. Arena GROWTH does not ask — a buffers arena patches
-its recorded tenants (see `notify_move!`), an images arena re-records them."""
+its recorded tenants (see `notify_move!`), an images arena re-records them.
+
+KNOWN GAP (2026-09-21): patching is not enough for a plan whose arena MOVED.
+`bake` resolves every dispatch's arguments into concrete device arrays when the
+plan is BUILT, and `remap!` rebinds the transients without re-resolving those.
+On Vulkan `notify_move!` patches the recorded BDAs and hides it; the HOST
+backend has neither a recording nor BDAs, so a remapped plan keeps writing the
+old block while `storage` reads the new one. Reproduced from the editor: two
+live compositions of different sizes, the smaller one wrong in 100% of pixels
+after the larger was built. Changing this predicate does NOT fix it — the
+buffers path never consults it."""
 remappable(pl::Plan) = pl.recording === nothing
 
 """
@@ -1545,6 +1573,18 @@ function remap!(pl::Plan, kind, region)
         arena(t) == kind || continue
         materialize!(pl.graph.dev, t, memoryof(region), offset(region) + pl.offsets[i])
     end
+    # …and on a backend that cannot patch, the plan is now inconsistent with
+    # itself: `bake` resolved every dispatch's arguments into device arrays over
+    # the OLD region when the plan was built, and nothing above touches those.
+    # Vulkan patches those addresses (`notify_move!`), which is what
+    # [`patchable`](@ref) answers and why it is asked here rather than assumed
+    # either way; the host backend has neither a recording nor addresses to
+    # patch, so it wrote the old block and read the new one — 100% wrong pixels,
+    # silently. A recompile is the only thing that re-resolves them, so the
+    # plan is marked and `refit!` — which `run!` calls before every submit —
+    # does it. NOT done here: this runs while the pool is mid-growth, and a
+    # recompile would re-enter placement.
+    patchable(pl.graph.dev) || (pl.replaced = true)
     return pl
 end
 

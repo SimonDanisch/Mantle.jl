@@ -45,8 +45,13 @@ binaries.
 Layout:
   - Group 0:                raygen (GENERAL)
   - Group 1:                miss (GENERAL)
-  - Group 2 .. 1+N:         closest-hit hit groups (TRIANGLES_HIT_GROUP)
+  - Group 2 .. 1+N:         closest-hit hit groups (TRIANGLES_HIT_GROUP, or
+                            PROCEDURAL_HIT_GROUP when `intersection_spirv` is
+                            given — AABB primitives whose hit is computed by an
+                            intersection shader rather than by the hardware
+                            triangle test)
   - Optional any-hit:       shared across every hit group when supplied
+  - Optional intersection:  ditto; makes the groups procedural
   - Descriptor set 0/0:     AccelerationStructure (HWTLAS)
   - Push constant:          BDA pointer (8 bytes by default)
 """
@@ -64,6 +69,7 @@ function create_rt_pipeline(ctx::VkContext,
                             miss_spirv::Vector{UInt8},
                             chit_spirvs::Vector{Vector{UInt8}};
                             anyhit_spirv::Union{Nothing, Vector{UInt8}}=nothing,
+                            intersection_spirv::Union{Nothing, Vector{UInt8}}=nothing,
                             push_constant_size::Integer=8)
     dev = ctx.device
     rt_props = ctx.rt_pipeline_properties
@@ -89,6 +95,12 @@ function create_rt_pipeline(ctx::VkContext,
     end
 
     has_anyhit = anyhit_spirv !== nothing
+    # An intersection shader turns every hit group PROCEDURAL: the two group
+    # types are alternatives, not options to combine. A procedural group's
+    # primitives are AABBs, and the intersection shader is what decides whether
+    # and where a ray hits inside one — so the hardware triangle test is not
+    # skipped, it is simply not what the BLAS holds.
+    has_isect = intersection_spirv !== nothing
 
     # Shader stages: 0=raygen, 1=miss, 2..1+N=closest-hit per chit_spirvs,
     # then optional anyhit at the next index.
@@ -115,12 +127,25 @@ function create_rt_pipeline(ctx::VkContext,
         anyhit_stage_index = UInt32(length(stages) - 1)
     end
 
+    isect_stage_index = VK_SHADER_UNUSED_KHR
+    if has_isect
+        isect_mod = create_shader_module(dev, intersection_spirv)
+        check_validation_errors!("vkCreateShaderModule (intersection)")
+        push!(stages, VK.PipelineShaderStageCreateInfo(
+            VK.SHADER_STAGE_INTERSECTION_BIT_KHR, isect_mod, "main"))
+        push!(shader_modules, isect_mod)
+        isect_stage_index = UInt32(length(stages) - 1)
+    end
+
     # All stage flags (for descriptor set and push constant visibility)
     all_stage_flags = VK.SHADER_STAGE_RAYGEN_BIT_KHR |
                       VK.SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                       VK.SHADER_STAGE_MISS_BIT_KHR
     if has_anyhit
         all_stage_flags |= VK.SHADER_STAGE_ANY_HIT_BIT_KHR
+    end
+    if has_isect
+        all_stage_flags |= VK.SHADER_STAGE_INTERSECTION_BIT_KHR
     end
 
     # Shader groups: raygen (0), miss (1), then one triangles-hit-group per chit.
@@ -136,13 +161,16 @@ function create_rt_pipeline(ctx::VkContext,
             VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR,
         ),
     ]
+    group_type = has_isect ?
+        VK.RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR :
+        VK.RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR
     for chit_idx in chit_stage_indices
         push!(groups, VK.RayTracingShaderGroupCreateInfoKHR(
-            VK.RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR,
+            group_type,
             VK_SHADER_UNUSED_KHR,
             UInt32(chit_idx),
             anyhit_stage_index,
-            VK_SHADER_UNUSED_KHR,
+            isect_stage_index,
         ))
     end
 

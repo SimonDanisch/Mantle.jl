@@ -193,17 +193,45 @@ the device existed and vice versa. The backend already has the link.
 """
 function deviceof end
 
+# A submit channel names a device too, and it is what a caller holding a queue
+# has: `draw!(bq, …)` should not make them find the device first. Here and not
+# beside the other `todevice` methods in `runtime/api.jl`, because that file is
+# included before `SubmitChannel` exists.
+todevice(ch::SubmitChannel) = todevice(deviceof(ch))
+
 outstanding(ch::SubmitChannel) = ch.outstanding
 
-# The single-writer invariant, asserted where it can be broken rather than
-# documented and hoped for. Recording into one channel from two threads
-# interleaves two command streams into one buffer, which is not a race the driver
-# reports — it is a corrupted recording.
+"""
+    WrongThread(owner, caller)
+
+A submit channel was touched from a thread that does not own it.
+
+Its own type, and the ONLY one this invariant throws, because callers act on it:
+the editor discovers which thread owns the process device by trying and catching
+this, and a message match on an `AssertionError` is not something to build that
+on. Every check goes through [`ownthread`](@ref) so there is one spelling.
+"""
+struct WrongThread <: Exception
+    owner::Int
+    caller::Int
+end
+
+Base.showerror(io::IO, e::WrongThread) = print(io,
+    "SubmitChannel is single-writer: it belongs to thread $(e.owner) and this ",
+    "is thread $(e.caller). Take a channel per thread with `allocate_batch_queue!`.")
+
+"""
+    ownthread(ch) -> nothing
+
+Check the single-writer invariant, at the places it can be broken rather than
+documenting it and hoping. Recording into one channel from two threads
+interleaves two command streams into one buffer, which is not a race the driver
+reports — it is a corrupted recording.
+
+Throws [`WrongThread`](@ref).
+"""
 @inline function ownthread(ch::SubmitChannel)
-    Threads.threadid() == ch.thread || error(
-        "SubmitChannel is single-writer: it belongs to thread $(ch.thread) " *
-        "and this is thread $(Threads.threadid()). Take a channel per thread " *
-        "with `allocate_batch_queue!`.")
+    Threads.threadid() == ch.thread || throw(WrongThread(ch.thread, Threads.threadid()))
     return nothing
 end
 

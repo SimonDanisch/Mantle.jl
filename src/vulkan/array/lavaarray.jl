@@ -295,3 +295,9 @@ Base._parentsmatch(A::LavaArray, B::LavaArray) = A.buf === B.buf && A.offset == 
 function Lava.LavaDeviceArray(a::LavaArray{T,N}) where {T,N}
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 end
+
+
+# The address IS the identity a recorded draw baked — see `argidentity` in
+# `graphics/commands.jl`. It changes exactly when `resize!` had to reallocate,
+# which is the case a cached plan cannot otherwise notice.
+Mantle.argidentity(a::LavaArray) = bda_address(a)
