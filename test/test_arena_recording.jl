@@ -291,6 +291,60 @@ end
     M.free!(profiled)
 end
 
+@testset "a profiled pass reports the time it actually took" begin
+    # `samples >= 1` above says a frame was COLLECTED, not that the number in it
+    # is right, and the difference hid a bug for as long as nothing asked:
+    # `timings` reported **0.0 ms** for a 2048x2048 `mm` that takes 2.3 ms.
+    #
+    # The cause is that `collect!` reads the query pool WITHOUT waiting, on
+    # purpose, and the reset for the next frame sits at the head of its
+    # recording. A slot that has been reset and not yet written back reads as
+    # value 0 with availability 1 — Vulkan says a reset query is unavailable,
+    # RADV reports it available and zero — so `elapsed(0, 0)` became a
+    # plausible 0.0 ms sample. Over 33 samples, 15 were that, and a median over
+    # a set half of which is zero IS zero. The real samples were all there and
+    # all correct.
+    #
+    # So the assertion is against the CLOCK, not against zero: a pass cannot
+    # take less time than the loop that ran it, to within the submission
+    # overhead the wall time also includes.
+    dev = M.Device(TESTBACKEND)
+    n = 1 << 22                                   # 4 Mi elements: milliseconds
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, n))
+    out  = M.Buffer(dev, zeros(Float32, n))
+    M.dispatch!(g, bump!, (out, seed), n; name = "only")
+    profiled = Base.invokelatest(M.Plan, g; profile = true)
+    M.record!(profiled)
+
+    # No synchronise inside the loop: running them back to back is what opens
+    # the reset window this is here for.
+    reps = 30
+    for _ in 1:reps
+        M.run!(profiled)
+    end
+    KernelAbstractions.synchronize(M.backend(dev))
+    wall = @elapsed begin
+        for _ in 1:reps
+            M.run!(profiled)
+        end
+        KernelAbstractions.synchronize(M.backend(dev))
+    end
+    wall_ms = 1000 * wall / reps
+
+    t = M.timings(profiled)
+    only_ = t[findfirst(x -> x.name == "only", t)]
+    @test only_.samples >= 1
+    @test only_.gpu_ms > 0                        # the assertion that was missing
+    # Bracketed by the wall clock from both sides. The pass cannot have taken
+    # longer than the submission that contained it, and a pass that reports a
+    # small fraction of it is reporting a truncated interval rather than a fast
+    # kernel.
+    @test only_.gpu_ms <= wall_ms
+    @test only_.gpu_ms >= 0.2 * wall_ms
+    M.free!(profiled)
+end
+
 @testset "two recorded plans alternating on one arena stay bit-exact" begin
     # Both recorded up front, so neither run emits anything: what orders b's
     # writes behind a's reads of the same bytes is the barrier each recording
