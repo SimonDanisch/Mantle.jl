@@ -35,6 +35,7 @@ end
 
 ArrayLaunch(kern, args, ndrange) = ArrayLaunch(kern, args, ndrange, 0)
 
+
 """
     runlaunches!(backend, launches)
 
@@ -49,10 +50,14 @@ function runlaunches!(backend, launches)
     for l in launches
         # MIGRATION SHIM. A plain function over `KernelInterface`'s intrinsics is
         # launched as `KI.Kernel(backend, f)`; a `@kernel` is its own constructor
-        # and answers `kern(backend)` with the object to call. `applicable` asks
-        # exactly which one this is — a plain kernel function takes its operands,
-        # not a backend — and the branch goes away with the last `@kernel`.
-        if applicable(l.kern, backend)
+        # and answers `kern(backend)` with the object to call. The branch goes
+        # away with the last `@kernel`.
+        #
+        # `buildskernel` and NOT `applicable(l.kern, backend)`: a one-argument
+        # kernel — `rngadvance_kernel!(state)` — is applicable to a backend, so
+        # that test sent it down the constructor path and ran the kernel body on
+        # the host. Core's predicate is the one place that question is answered.
+        if buildskernel(l.kern, backend)
             k = l.group == 0 ? Base.invokelatest(l.kern, backend) :
                                Base.invokelatest(l.kern, backend, l.group)
             Base.invokelatest(k, l.args...; ndrange = l.ndrange)
