@@ -123,8 +123,20 @@ function (k::KI.Kernel{<:MB})(args...;
     (length(ndrange) > 0 && prod(ndrange) == 0) && return nothing
     (length(numworkgroups) > 0 && prod(numworkgroups) == 0) && return nothing
 
+    # A `KI.Kernel` here holds EITHER a compiled `HostKernel` or the plain function
+    # it was built from. `kernel_function` above hands back the first; core builds
+    # the second directly -- `KI.Kernel(backend, f)` in `array/gemv.jl` and
+    # `array/fft.jl`, which is the documented spelling for a macro-free kernel that
+    # is not its own constructor. Both have to launch, and everything below this
+    # point needs the compiled one: `auto_launch_sizes` reads the pipeline's
+    # `maxthreads`, and the call itself takes `groups`/`threads` keywords that a
+    # plain function has no method for.
+    kern = k.kern isa Metal.HostKernel ? k.kern :
+        Metal.mtlfunction(Metal.mtlconvert(k.kern),
+                          Tuple{map(a -> Core.Typeof(KI.argconvert(k.backend, a)), args)...})
     groups, threads = KI.auto_launch_sizes(
-        k, numworkgroups, workgroupsize, ndrange, max_work_group_size)
-    k.kern(args...; groups, threads)
+        KI.Kernel(k.backend, kern), numworkgroups, workgroupsize, ndrange,
+        max_work_group_size)
+    kern(args...; groups, threads)
     return nothing
 end
