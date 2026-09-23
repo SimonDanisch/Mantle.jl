@@ -241,6 +241,25 @@ command buffer for the call's work to be missing from.
 Mantle.runscalls(::HostDevice) = true
 
 """
+Yes — a CPU has `Float64`, and saying so is not redundant.
+
+There are TWO functions spelled `supports_float64` here. `KernelAbstractions` defines
+one over its own `KernelAbstractions.Backend`, and `KernelInterface` defines another
+over `KernelInterface.Backend`; the hierarchies are separate, and `KA.CPU` belongs
+only to the first. Everything in this repo asks the **KernelInterface** one — Mantle
+answers it for the Metal backend, and `DNNKernels`' `narrowfusedconsts` and `emit`
+call it as `KI.supports_float64` — so `KA.CPU` reached it with no method at all and
+`Model(graphs, weights; backend = CPU())` threw a `MethodError` out of a constant
+narrowing pass.
+
+Stated for `CPU` and not for `KA.Backend` at large: KernelInterface's contract is that
+a backend implements this only when the answer is NO, so a blanket `true` over that
+hierarchy would make a GPU that lacks `Float64` and forgot to declare silently claim
+it. A CPU having `Float64` is a fact; the rest is the other backends' to say.
+"""
+Mantle.KI.supports_float64(::KA.CPU) = true
+
+"""
 Yes, trivially: nothing here is recorded. A GPU discards a predicated iteration
 with conditional rendering because its commands are already written; this
 backend interprets the plan on every run, so "discard" is `withpredicate`
