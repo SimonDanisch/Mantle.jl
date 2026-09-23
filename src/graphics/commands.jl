@@ -313,6 +313,26 @@ learns the count.
 # two primitives, and beats a family.
 function record_draw! end
 
+"""
+    argidentity(x)
+
+What a recorded draw BAKED about `x`, or `nothing` if it bakes nothing.
+
+`record_draw!` packs a draw's arguments and bakes the address of the packed
+block into a push constant, so a device array that has been REALLOCATED — which
+is what `resize!` does past its capacity — is invisible to a plan that was
+recorded before. A caller that caches plans needs one value per argument that
+changes exactly then, and this is it.
+
+`nothing` for everything that is not a device array, deliberately: a uniform
+rebinds through the draw's cell, and folding its VALUE in here would rebuild a
+plan for every camera move — which is the cost the cell exists to avoid.
+
+!!! note
+    Backends implement it for their array type; the fallback covers the rest.
+"""
+argidentity(@nospecialize(x)) = nothing
+
 # ── The frame, for a graph that reaches a window ─────────────────────────────
 #
 # Three verbs, called by `run!` around the passes for every surface the graph

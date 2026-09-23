@@ -18,9 +18,10 @@
 Create a graphics pipeline from SPIR-V shader binaries.
 Uses VK_KHR_dynamic_rendering — no VkRenderPass needed.
 """
-function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
+function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
                                     fragment_spirv::Vector{UInt8};
                                     ctx::VkContext,
+                                    mesh_spirv::Union{Nothing, Vector{UInt8}}=nothing,
                                     blend::BlendMode=Opaque(),
                                     cull::CullFace=CullBack(),
                                     topology::Topology=TriangleList(),
@@ -35,14 +36,31 @@ function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
                                     descriptor_set_layout::Union{Nothing, VK.DescriptorSetLayout}=nothing)
     dev = ctx.device
 
+    # A pipeline has EITHER a vertex stage or a mesh stage as its front end —
+    # the mesh stage replaces the whole vertex/geometry/tessellation chain, so
+    # the two are alternatives rather than options to combine.
+    (vertex_spirv === nothing) == (mesh_spirv === nothing) && throw(ArgumentError(
+        "a graphics pipeline needs exactly one front end: pass `vertex_spirv` " *
+        "for the classic chain, or `mesh_spirv` for a mesh pipeline. " *
+        "Got $(vertex_spirv === nothing ? "neither" : "both")."))
+    if mesh_spirv !== nothing
+        ctx.mesh_shader_available || throw(ArgumentError(
+            "this device has no VK_EXT_mesh_shader, so a mesh pipeline cannot " *
+            "be created on it. Ask `supports_mesh_stage(backend)` first — the " *
+            "classic vertex chain is still there on hardware without it."))
+        geometry_spirv === nothing && tess_ctrl_spirv === nothing || throw(ArgumentError(
+            "a mesh pipeline has no geometry or tessellation stage: the mesh " *
+            "stage is what replaces them."))
+    end
+
     # Create shader modules
-    vert_mod = create_gfx_shader_module(dev, vertex_spirv)
     frag_mod = create_gfx_shader_module(dev, fragment_spirv)
-    modules = VK.ShaderModule[vert_mod, frag_mod]
+    front_mod = create_gfx_shader_module(dev, mesh_spirv === nothing ? vertex_spirv : mesh_spirv)
+    front_bit = mesh_spirv === nothing ? VK.SHADER_STAGE_VERTEX_BIT : VK.SHADER_STAGE_MESH_BIT_EXT
+    modules = VK.ShaderModule[front_mod, frag_mod]
 
     stages = VK.PipelineShaderStageCreateInfo[
-        VK.PipelineShaderStageCreateInfo(
-            VK.SHADER_STAGE_VERTEX_BIT, vert_mod, "main"),
+        VK.PipelineShaderStageCreateInfo(front_bit, front_mod, "main"),
         VK.PipelineShaderStageCreateInfo(
             VK.SHADER_STAGE_FRAGMENT_BIT, frag_mod, "main"),
     ]
@@ -66,12 +84,14 @@ function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
             VK.SHADER_STAGE_TESSELLATION_EVALUATION_BIT, te_mod, "main"))
     end
 
-    # Vertex input: EMPTY (BDA vertex pulling)
-    vertex_input = VK.PipelineVertexInputStateCreateInfo([], [])
-
-    # Input assembly
-    vk_topo = vk_topology(topology)
-    input_assembly = VK.PipelineInputAssemblyStateCreateInfo(vk_topo, false)
+    # Vertex input: EMPTY (BDA vertex pulling), and absent entirely for a mesh
+    # pipeline — there is no input assembler in front of a mesh stage, so the
+    # topology comes from the shader's own `OutputTrianglesEXT` rather than from
+    # pipeline state.
+    vertex_input = mesh_spirv === nothing ?
+        VK.PipelineVertexInputStateCreateInfo([], []) : C_NULL
+    input_assembly = mesh_spirv === nothing ?
+        VK.PipelineInputAssemblyStateCreateInfo(vk_topology(topology), false) : C_NULL
 
     # Tessellation state (if applicable)
     tess_state = C_NULL
@@ -146,7 +166,7 @@ function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
     dynamic_state = VK.PipelineDynamicStateCreateInfo(dynamic_states)
 
     # Pipeline layout
-    all_stage_flags = VK.SHADER_STAGE_VERTEX_BIT | VK.SHADER_STAGE_FRAGMENT_BIT
+    all_stage_flags = front_bit | VK.SHADER_STAGE_FRAGMENT_BIT
     if geometry_spirv !== nothing
         all_stage_flags |= VK.SHADER_STAGE_GEOMETRY_BIT
     end
@@ -208,8 +228,17 @@ function create_graphics_pipeline(vertex_spirv::Vector{UInt8},
         descriptor_set_layout,
         all_stage_flags,
         color_formats, has_depth,
+        mesh_spirv === nothing ? :vertex : :mesh,
     )
 end
+
+"""
+    ismeshpipeline(p) -> Bool
+
+Whether `p`'s front end is a mesh stage, so a draw against it counts WORKGROUPS
+and issues `vkCmdDrawMeshTasksEXT`.
+"""
+ismeshpipeline(p::VulkanCompiledGraphicsPipeline) = p.front === :mesh
 
 """
 One colour attachment or several, normalised. A single format is the common case
@@ -305,184 +334,12 @@ end
 
 # ── Draw Recording ──
 
-"""
-    vk_draw!(pipeline::VulkanCompiledGraphicsPipeline, color_view::VK.ImageView,
-             color_image::VK.Image, extent::VK.Extent2D,
-             vertex_count::Integer; push_data=UInt8[], instances=1,
-             depth_view=nothing, clear_color=nothing,
-             indices_buffer=nothing, index_count=0)
-
-Record a draw command using dynamic rendering.
-"""
-function vk_draw!(e::Emitter,
-                   pipeline::VulkanCompiledGraphicsPipeline,
-                   color_view::VK.ImageView,
-                   color_image::VK.Image,
-                   extent::VK.Extent2D,
-                   vertex_count::Integer;
-                   push_data::Vector{UInt8}=UInt8[],
-                   instances::Integer=1,
-                   depth_view::Union{Nothing, VK.ImageView}=nothing,
-                   depth_image::Union{Nothing, VK.Image}=nothing,
-                   depth_clear::Union{Nothing, Float32}=1.0f0,
-                   depth_store_op::VK.AttachmentStoreOp=VK.ATTACHMENT_STORE_OP_STORE,
-                   clear_color::Union{Nothing, NTuple{4, Float32}}=nothing,
-                   indices_buffer::Union{Nothing, VK.Buffer}=nothing,
-                   index_count::Integer=0,
-                   descriptor_set::Union{Nothing, VK.DescriptorSet}=nothing)
-    # Into whatever the emitter is writing — a one-shot the caller opened for
-    # this draw, which begins with the global barrier that orders it behind
-    # every dispatch before it. Image transitions, the dynamic rendering scope,
-    # bind + draw + end_rendering follow.
-    let batch = e.owner, cmd = e.cmd
-
-        # Transition color image to COLOR_ATTACHMENT_OPTIMAL.
-        #
-        # `clear_color = nothing` is a LOAD, so the previous contents have to
-        # survive: the old layout is what the last pass left the image in, and the
-        # destination has to allow the read the load op performs. From UNDEFINED
-        # the driver is free to throw those contents away, which is the whole
-        # point of drawing without a clear. Synchronization validation reports the
-        # missing halves as a WRITE_AFTER_WRITE on the transition and a
-        # READ_AFTER_WRITE at vkCmdBeginRendering; `begin_pass!` has always got
-        # this right and this path did not.
-        loads_color = clear_color === nothing
-        transition_image!(cmd, color_image,
-            loads_color ? VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
-                          VK.IMAGE_LAYOUT_UNDEFINED,
-            VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            # srcStage is COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE. On a swapchain
-            # image the submit waits on the semaphore `vkAcquireNextImageKHR`
-            # signals, at COLOR_ATTACHMENT_OUTPUT — and a barrier whose srcStage is
-            # TOP_OF_PIPE creates NO execution dependency with that wait, so this
-            # transition (and the writes behind it) can run while the presentation
-            # engine still owns the image. Synchronization validation reports it as
-            # "WRITE_AFTER_READ hazard … previously accessed by vkAcquireNextImageKHR";
-            # on screen it is bands of stale pixels that vanish under any full sync.
-            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            loads_color ? VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                          VK.ACCESS_COLOR_ATTACHMENT_READ_BIT :
-                          VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-
-        # Transition depth image to DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
-        #
-        # `depth_clear = nothing` means this draw builds on the depth the last one
-        # left, so the transition comes from DEPTH_STENCIL_ATTACHMENT_OPTIMAL and
-        # waits on that write. From UNDEFINED it would be free to throw the depth
-        # away, which is exactly what a second draw testing against the first needs
-        # to keep.
-        if depth_image !== nothing
-            loads = depth_clear === nothing
-            # The source side names the previous depth write whichever way the load
-            # op goes: a layout transition is itself a write, so discarding one
-            # still has to be ordered after the store op of the pass before it.
-            depth_barrier = VK.ImageMemoryBarrier(
-                VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                loads ? VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL :
-                        VK.IMAGE_LAYOUT_UNDEFINED,
-                VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED,
-                depth_image,
-                VK.ImageSubresourceRange(VK.IMAGE_ASPECT_DEPTH_BIT,
-                    UInt32(0), UInt32(1), UInt32(0), UInt32(1)),
-            )
-            VK.cmd_pipeline_barrier(cmd, [], [], [depth_barrier];
-                src_stage_mask=VK.PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                dst_stage_mask=VK.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT)
-        end
-
-        # Color attachment for dynamic rendering
-        clear_val = if clear_color !== nothing
-            VK.ClearValue(VK.ClearColorValue(clear_color))
-        else
-            VK.ClearValue(VK.ClearColorValue((0.0f0, 0.0f0, 0.0f0, 1.0f0)))
-        end
-
-        load_op = clear_color !== nothing ? VK.ATTACHMENT_LOAD_OP_CLEAR : VK.ATTACHMENT_LOAD_OP_LOAD
-
-        color_attachment = VK.RenderingAttachmentInfo(
-            VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK.IMAGE_LAYOUT_UNDEFINED,  # resolve image layout (unused)
-            load_op,
-            VK.ATTACHMENT_STORE_OP_STORE,
-            clear_val;
-            image_view=color_view,
-            resolve_mode=VK.RESOLVE_MODE_NONE,
-        )
-
-        # Depth attachment (optional)
-        depth_attachment = C_NULL
-        if depth_view !== nothing
-            depth_clear_val = VK.ClearValue(VK.ClearDepthStencilValue(
-                depth_clear === nothing ? 1.0f0 : depth_clear, UInt32(0)))
-            depth_attachment = VK.RenderingAttachmentInfo(
-                VK.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                VK.IMAGE_LAYOUT_UNDEFINED,
-                depth_clear === nothing ? VK.ATTACHMENT_LOAD_OP_LOAD :
-                                          VK.ATTACHMENT_LOAD_OP_CLEAR,
-                depth_store_op,
-                depth_clear_val;
-                image_view=depth_view,
-                resolve_mode=VK.RESOLVE_MODE_NONE,
-            )
-        end
-
-        render_area = VK.Rect2D(VK.Offset2D(0, 0), extent)
-
-        rendering_info = VK.RenderingInfo(
-            render_area,
-            UInt32(1),  # layer count
-            UInt32(0),  # view mask
-            [color_attachment];
-            depth_attachment=depth_attachment,
-        )
-
-        VK.cmd_begin_rendering(cmd, rendering_info)
-
-        # Bind the pipeline, and hold it: these commands name it until the
-        # submission that carries them has passed.
-        VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
-        hold!(batch, pipeline)
-
-        # Bind descriptor set (for textures)
-        if descriptor_set !== nothing
-            VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS,
-                pipeline.pipeline_layout, UInt32(0), [descriptor_set], UInt32[])
-        end
-
-        # Dynamic viewport + scissor
-        viewport = VK.Viewport(0.0f0, 0.0f0,
-            Float32(extent.width), Float32(extent.height),
-            0.0f0, 1.0f0)
-        VK.cmd_set_viewport(cmd, [viewport])
-
-        scissor = VK.Rect2D(VK.Offset2D(0, 0), extent)
-        VK.cmd_set_scissor(cmd, [scissor])
-
-        # Push constants
-        if !isempty(push_data)
-            GC.@preserve push_data begin
-                VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                    pipeline.push_stage_flags, UInt32(0), UInt32(length(push_data)),
-                    Ptr{Nothing}(pointer(push_data)))
-            end
-        end
-
-        # Draw
-        if indices_buffer !== nothing
-            VK.cmd_bind_index_buffer(cmd, indices_buffer, UInt64(0), VK.INDEX_TYPE_UINT32)
-            VK.cmd_draw_indexed(cmd, UInt32(index_count), UInt32(instances),
-                                     UInt32(0), Int32(0), UInt32(0))
-        else
-            VK.cmd_draw(cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
-        end
-
-        VK.cmd_end_rendering(cmd)
-    end
-end
+# `vk_draw!` is GONE. It was 178 lines that opened a render pass, transitioned
+# the attachments, bound and drew — a second implementation of what
+# `begin_pass!` + `record_draw!` already did, sharing none of it. That is why
+# it never learned mesh pipelines and why its barrier logic had to be fixed a
+# second time after `begin_pass!` was right. `Mantle.draw!` in
+# `src/graphics/record.jl` is the one path now, for both backends.
 
 """Transition an image layout using a pipeline barrier."""
 function transition_image!(cmd, image::VK.Image,
@@ -683,6 +540,44 @@ function draw_in_pass!(e::Emitter,
                            instances::Integer=1,
                            viewport::Union{Nothing, VK.Viewport}=nothing,
                            scissor::Union{Nothing, VK.Rect2D}=nothing)
+    bind_for_draw!(e, pipeline; push_data, push_bda, viewport, scissor)
+    VK.cmd_draw(e.cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
+    # Hold the pipeline: the command buffer names it until its submission passes.
+    hold!(e, pipeline)
+end
+
+"""
+    draw_mesh_in_pass!(e, pipeline, groups; push_data, push_bda, viewport, scissor)
+
+Record a MESH draw within an active rendering pass.
+
+`groups` is a workgroup count, not a vertex count: there is no input assembler to
+feed, and the mesh stage's own `set_mesh_outputs!` says how much geometry each
+group produced. Everything before the command — bind, viewport, push constants —
+is what a classic draw does, which is why both spell it once in
+[`bind_for_draw!`](@ref).
+"""
+function draw_mesh_in_pass!(e::Emitter,
+                            pipeline::VulkanCompiledGraphicsPipeline,
+                            groups::Integer;
+                            push_data::Vector{UInt8}=UInt8[],
+                            push_bda::UInt64=UInt64(0),
+                            viewport::Union{Nothing, VK.Viewport}=nothing,
+                            scissor::Union{Nothing, VK.Rect2D}=nothing)
+    bind_for_draw!(e, pipeline; push_data, push_bda, viewport, scissor)
+    VK.cmd_draw_mesh_tasks_ext(e.cmd, UInt32(groups), UInt32(1), UInt32(1))
+    hold!(e, pipeline)
+end
+
+"""
+Bind the pipeline and set everything a draw reads before the draw command:
+viewport, scissor and the push constant block.
+"""
+function bind_for_draw!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline;
+                        push_data::Vector{UInt8}=UInt8[],
+                        push_bda::UInt64=UInt64(0),
+                        viewport::Union{Nothing, VK.Viewport}=nothing,
+                        scissor::Union{Nothing, VK.Rect2D}=nothing)
     cmd = e.cmd
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
@@ -711,10 +606,7 @@ function draw_in_pass!(e::Emitter,
                 Ptr{Nothing}(pointer(push_data)))
         end
     end
-
-    VK.cmd_draw(cmd, UInt32(vertex_count), UInt32(instances), UInt32(0), UInt32(0))
-    # Hold the pipeline: the command buffer names it until its submission passes.
-    hold!(e, pipeline)
+    return nothing
 end
 
 """

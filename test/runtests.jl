@@ -1166,9 +1166,11 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_phase5_copy.jl"))
         end
 
-        @testset "phase 6 — graphics dispatch" begin
-            include(joinpath(VULKAN_TESTS, "test_phase6_graphics.jl"))
-        end
+        # `test_phase6_graphics.jl` was here, and it is deleted with the thing
+        # it tested: a static source check that `vk_draw!` did not hand-roll its
+        # dispatch barrier. `vk_draw!` is gone, and the property it asserted now
+        # holds structurally — every draw goes through `begin_pass!`, which is
+        # where the barrier lives.
 
         # `test_pool_sizeclass.jl` was here, and it is deleted with the thing it
         # tested. It checked that `size_class` was idempotent on its own output —
@@ -1239,6 +1241,15 @@ if _VULKAN_OK
         # ── Tier 3g: Graphics Pipeline ──
         @testset "Tier 3g: Graphics Pipeline" begin
             include(joinpath(VULKAN_TESTS, "test_graphics_pipeline.jl"))
+        end
+
+        # ── Tier 3h: Mesh Pipeline ──
+        # The mesh stage end to end, against a CPU reference that was written
+        # independently of it (`examples/isubd/reference.jl`, vendored from
+        # koehlerson/mantle_mwe). Skips itself on a device without
+        # VK_EXT_mesh_shader.
+        @testset "Tier 3h: Mesh Pipeline" begin
+            include(joinpath(VULKAN_TESTS, "test_isubd_mesh.jl"))
         end
 
             @testset "Tier 4: GPUArrays TestSuite" begin

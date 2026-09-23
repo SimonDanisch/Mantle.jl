@@ -37,10 +37,11 @@ using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
 using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
     frag_coord_y, frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy,
     set_point_size!, sample_texture_2d, emit_vertex!, end_primitive!,
-    primitive_id_in, clip_y
+    primitive_id_in, clip_y, discard
 export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
     frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
-    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y
+    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y,
+    discard
 # The vertex index a body can be HANDED instead of asking for. Exported because a
 # shader declares the parameter, and `graphics/lowering.jl` is what passes one —
 # a mesh stage has no `vertex_index()` to call.
@@ -300,11 +301,14 @@ export RenderTarget
 # backend is loaded — see `graphics/resources.jl` for why each is one or the
 # other, and which three turned out portable outright.
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
+export upload_texture_data!
+export argidentity
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, ExternalImage
 # A submission channel and what a submission holds — 2.2 and 2.3. `hold!` is what
 # `pin!` meant, with the lifetime owned by core instead of by a backend.
 export SubmitChannel, channelof, deviceof, hold!, oneshot!, acquire!, Submission
+export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
@@ -348,6 +352,10 @@ export MeshPipeline, meshconfig, objectconfig
 export supports_mesh_pipeline
 # The shader builtins are KernelInterface's, imported and re-exported above.
 export RayTracingPipeline, AdaptedAccel
+# The procedural-geometry protocol: a scene implements these to put geometry
+# that is not triangles into the traversal. See `raytracing/accel.jl`.
+export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
+export candidate_primitive_index, candidate_object_ray, commit_intersection!
 
 # Hardware ray tracing.
 export build_accel!, refit_tlas!, set_anyhit_pipeline!
@@ -395,6 +403,7 @@ export indexbuffer
 # names the type; `supportspredicate` because a caller may want to pick between
 # `repeat!` and a host loop rather than be thrown at.
 export repeat!, Predicate, supportspredicate
+export kernelcompiles, resetkernelcompiles!
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive

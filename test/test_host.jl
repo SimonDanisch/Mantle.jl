@@ -163,6 +163,38 @@ end
     @test seen[(end - 3):end] == Float32[9, 9, 9, 9]
 end
 
+# ── a transient can be written from the host, if it SAYS so ──────────────────
+
+@testset "Host: only a declared transient is host-written, and aliasing survives" begin
+    dev = M.Device(M.HostAPI())
+    n = 1024
+    g = M.Graph(dev)
+    src = M.Transient.Buffer(g, Float32, n; hostwritten = true)
+    mid = M.Transient.Buffer(g, Float32, n)
+    out = M.Buffer(dev, zeros(Float32, n))
+    M.dispatch!(g, hostscale!, (mid, src, 2.0f0), n; name = "scale")
+    M.dispatch!(g, hostcopy!, (out, mid), n; name = "copy")
+    plan = M.Plan(g)
+
+    # The declared one is what a store can be waiting on; the other is not, so
+    # its interval still starts where it is first written and the placer may
+    # give its bytes away. That is the whole difference: registering every
+    # transient drags each interval back to the update pass, and SAM 2's encoder
+    # went from 167 MB of peak live bytes to the 4.70 GB sum of all 701 of them.
+    @test any(r -> r === src, plan.hostwritten)
+    @test !any(r -> r === mid, plan.hostwritten)
+    @test_throws ArgumentError (mid[:] = zeros(Float32, n))
+
+    # Two runs of ONE plan with different payloads. One run proves nothing: an
+    # unstored transient hands back the previous run's bytes, because the arena
+    # slice still holds them.
+    for payload in (Float32[i for i in 1:n], Float32[-i for i in 1:n])
+        src[:] = payload
+        M.run!(plan)
+        @test Array(out) == 2 .* payload
+    end
+end
+
 # The host twin of `test_recorded_run_semantics.jl`'s first testset: the
 # contract is the same on every backend. A `GPURef` is a one-element buffer the
 # kernel reads through; the value behind it is whatever was last stored before

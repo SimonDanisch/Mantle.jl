@@ -156,6 +156,12 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
     #   (LavaArray{Point3f,1}, LavaArray{Vec4f,1}, Float32, UInt32)   — GPU uniform scale
     #   (LavaArray{Point3f,1}, LavaArray{Vec4f,1}, LavaArray{Vec3f,1}, UInt32) — GPU per-vec scale
     pending_updates::Dict{Raycore.TLASHandle, Any}
+
+    # The scene's procedural geometry, or `nothing`. Lives beside `blas_list`
+    # because that is what it is — geometry — and it reaches the kernel through
+    # `AdaptedAccel`, which is what the traversal loop reads. See
+    # `procedural_candidate` in `raytracing/accel.jl`.
+    procedural::Any
 end
 
 """
@@ -180,6 +186,7 @@ function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=
         true,                     # dirty
         false,                    # transforms_dirty
         Dict{Raycore.TLASHandle, Any}(),  # pending_updates
+        nothing,                  # procedural
     )
 end
 
@@ -199,8 +206,8 @@ VulkanTLAS(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=backend.dispat
 function AdaptedAccel(hwtlas::VulkanTLAS{Tri}) where Tri
     # `nothing` for `scene`: Vulkan binds the TLAS as a descriptor, so the kernel
     # does not carry a handle to it. See `AdaptedAccel` in `raytracing/accel.jl`.
-    AdaptedAccel{VulkanTLAS{Tri}, typeof(hwtlas.tri_gpu), typeof(hwtlas.off_gpu), Tri, Nothing}(
-        hwtlas, hwtlas.tri_gpu, hwtlas.off_gpu, Raycore.empty_triangle(Tri), nothing)
+    AdaptedAccel(hwtlas, hwtlas.tri_gpu, hwtlas.off_gpu, Raycore.empty_triangle(Tri),
+                 nothing, hwtlas.procedural)
 end
 
 # pin_leaves! stops at VulkanTLAS — its LavaArray contents (`tri_gpu` / `off_gpu`)
@@ -252,6 +259,7 @@ function Adapt.adapt_structure(to::LavaAdaptor, accel::AdaptedAccel)
         Adapt.adapt(to, accel.offsets),
         accel.empty,
         accel.scene,
+        Adapt.adapt(to, accel.procedural),
     )
 end
 
@@ -684,12 +692,18 @@ end
 # Try to reuse `prev` as the GPU sink for `data` via capacity-aware resize+copyto.
 # `bq` is the device the fresh allocation lands on when `prev` cannot be reused —
 # the TLAS's own queue, never the process default.
+#
+# Never shorter than one element: a trace BINDS these, and a zero-length buffer
+# has no device address to bind. An empty scene is a legitimate scene — every
+# ray misses it — so the element exists to be addressable and is never read.
 function _reuse_or_alloc(prev, data::AbstractArray{T}, bq) where T
+    n = max(length(data), 1)
     if prev isa LavaArray{T}
-        resize!(prev, length(data))
-        copyto!(prev, data)
+        resize!(prev, n)
+        isempty(data) || copyto!(prev, 1, data, 1, length(data))
         return prev
     end
+    isempty(data) && return LavaArray{T, 1}(undef, n; bq)
     return LavaArray(data; bq)
 end
 
@@ -702,8 +716,10 @@ function _concat_batch_instances!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         total += batch.n
     end
     combined = hwtlas.combined_instance_buf
-    if combined === nothing || length(combined) < total
-        combined = LavaArray{VulkanInstanceRecord, 1}(undef, total;
+    # One record minimum, for the same reason as `_reuse_or_alloc`: the build
+    # reads the buffer's ADDRESS before it reads `total` of them.
+    if combined === nothing || length(combined) < max(total, 1)
+        combined = LavaArray{VulkanInstanceRecord, 1}(undef, max(total, 1);
                                                        bq=hwtlas.bq, extra_usage=AS_INPUT_USAGE)
         hwtlas.combined_instance_buf = combined
     end
@@ -758,10 +774,13 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     # Drop unused BLASes (deleted batches may have left some unreferenced).
     dropped_blases = _compact_blas_list!(hwtlas)
 
-    if isempty(hwtlas.instances)
-        # Caller (sync!) handles the empty path before us; assert defensively.
-        return (nothing, nothing, nothing, nothing, dropped_blases)
-    end
+    # No early return for an empty instance list. A TLAS over ZERO instances is
+    # a valid acceleration structure that every ray misses, and building it is
+    # what lets a scene whose geometry is being drawn by the other renderer keep
+    # its sky: the trace still runs, every ray escapes, and the environment
+    # light paints them. Leaving `hw_tlas = nothing` instead left the ray query
+    # with no acceleration structure bound, which is undefined behaviour and
+    # cost the device.
 
     # Rebuild always starts with a fresh combined buffer: the previous one
     # (if any) is now solely owned by the soon-to-be-freed `hw_tlas.preserves`.
@@ -825,30 +844,12 @@ function Raycore.sync!(hwtlas::VulkanTLAS)
         return hwtlas
     end
 
-    # Empty-topology path: drop the prior AS without rebuilding.
-    if hwtlas.dirty && isempty(hwtlas.instances)
-        # Even with no batches we may still have unreferenced BLASes (e.g.,
-        # the user delete!'d every handle).  Compact + free.
-        dropped_blases = _compact_blas_list!(hwtlas)
-        old_hw_tlas = hwtlas.hw_tlas
-        old_tri_gpu = hwtlas.tri_gpu
-        old_off_gpu = hwtlas.off_gpu
-        hwtlas.hw_tlas    = nothing
-        hwtlas.hw_accel   = nothing
-        hwtlas.tri_gpu    = nothing
-        hwtlas.off_gpu    = nothing
-        hwtlas.dirty            = false
-        hwtlas.transforms_dirty = false
-        empty!(hwtlas.pending_updates)
-        hwtlas.static_tlas = AdaptedAccel(hwtlas)
-        unsafe_free!(old_hw_tlas)
-        unsafe_free!(old_tri_gpu)
-        unsafe_free!(old_off_gpu)
-        for blas in dropped_blases
-            unsafe_free!(blas)
-        end
-        return hwtlas
-    end
+    # An empty instance list takes the REBUILD path like any other topology
+    # change — it builds an acceleration structure over zero instances, which
+    # every ray misses. Dropping the structure instead (the previous behaviour)
+    # left nothing for a ray query to be initialised with, and the device was
+    # lost the first time a scene with an environment light had its last
+    # traced plot handed to the rasteriser.
 
     # Apply any queued transform updates to instance bufs before reading them.
     had_pending = !isempty(hwtlas.pending_updates)
@@ -935,12 +936,53 @@ end
 # (auto-set when a `tlas=` kwarg is passed to `lava_launch!`) so the SPIR-V
 # emitter binds the HWTLAS descriptor at set 0 binding 0.
 
-@inline function _hw_rq_collect(accel::AdaptedAccel)
+# Candidate/committed intersection kinds, from the SPIR-V ray query spec. Named
+# because `== UInt32(1)` means AABB in one of these enumerations and triangle in
+# the other, and the two appear four lines apart.
+const CANDIDATE_TRIANGLE = UInt32(0)
+const CANDIDATE_AABB     = UInt32(1)
+const COMMITTED_NONE      = UInt32(0)
+const COMMITTED_TRIANGLE  = UInt32(1)
+const COMMITTED_GENERATED = UInt32(2)
+
+# The portable candidate accessors, on the inline ray query. See
+# `raytracing/accel.jl` for what they are for.
+@inline candidate_primitive_index() = Int(lava_ray_query_get_primitive_index(false)) + 1
+@inline candidate_object_ray() = (
+    Vec3f(lava_ray_query_get_object_ray_origin(false, 1),
+          lava_ray_query_get_object_ray_origin(false, 2),
+          lava_ray_query_get_object_ray_origin(false, 3)),
+    Vec3f(lava_ray_query_get_object_ray_direction(false, 1),
+          lava_ray_query_get_object_ray_direction(false, 2),
+          lava_ray_query_get_object_ray_direction(false, 3)))
+@inline commit_intersection!(t) = lava_ray_query_generate_intersection(Float32(t))
+
+@inline function rq_collect(accel::AdaptedAccel)
+    # The running best procedural hit, kept by the SHADER. See
+    # `procedural_candidate` for why the query cannot keep it for us.
+    # `nothing` when the scene holds only triangles, and then this whole loop
+    # body folds away to the empty one it used to be.
+    best = procedural_miss(accel.procedural)
     while lava_ray_query_proceed()
-        # Opaque triangles auto-commit; no any-hit decision here.
+        # Opaque triangles auto-commit; no any-hit decision for those. A box is
+        # the traversal ASKING, and it gets answered here.
+        if lava_ray_query_get_type(false) == CANDIDATE_AABB
+            best = procedural_candidate(accel.procedural, best)
+        end
     end
+
     kind = lava_ray_query_get_type(true)  # committed
-    if kind != UInt32(1)  # not RayQueryCommittedIntersectionTriangleKHR
+    if kind == COMMITTED_GENERATED
+        t = lava_ray_query_get_t(true)
+        prim_idx = lava_ray_query_get_primitive_index(true)
+        inst_custom_idx = lava_ray_query_get_instance_custom_index(true)
+        prim = procedural_commit(accel.procedural, best, prim_idx, t, accel.empty)
+        # Same tuple shape, same primitive TYPE, as a triangle hit — see
+        # `procedural_commit`. Nothing downstream needs to know this ray met a
+        # box rather than a triangle.
+        return (true, prim, t, procedural_bary(accel.procedural, best), inst_custom_idx)
+    end
+    if kind != COMMITTED_TRIANGLE
         return (false, accel.empty, 0f0, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
     end
     t = lava_ray_query_get_t(true)
@@ -961,7 +1003,7 @@ end
     lava_ray_query_init(UInt32(0), UInt32(0xFF),
         Float32(o[1]), Float32(o[2]), Float32(o[3]), Float32(ray.t_min),
         Float32(d[1]), Float32(d[2]), Float32(d[3]), Float32(ray.t_max))
-    return _hw_rq_collect(accel)
+    return rq_collect(accel)
 end
 
 @propagate_inbounds function Raycore.any_hit(accel::AdaptedAccel, ray::Raycore.AbstractRay)
@@ -970,7 +1012,7 @@ end
     lava_ray_query_init(UInt32(4), UInt32(0xFF),
         Float32(o[1]), Float32(o[2]), Float32(o[3]), Float32(ray.t_min),
         Float32(d[1]), Float32(d[2]), Float32(d[3]), Float32(ray.t_max))
-    return _hw_rq_collect(accel)
+    return rq_collect(accel)
 end
 
 """

@@ -464,6 +464,10 @@ mutable struct VkContext
     # VK_KHR_shader_subgroup_rotate: OpGroupNonUniformRotateKHR, a shuffle by a
     # subgroup-uniform delta. KHR, promoted to Vulkan 1.4.
     subgroup_rotate_available::Bool
+    # VK_EXT_mesh_shader: the mesh (and task) stage, which replaces the
+    # vertex+geometry front end with a compute-like workgroup that writes
+    # vertices and primitives into output arrays. EXT, and RDNA3 has it.
+    mesh_shader_available::Bool
     # Whether VK_EXT_memory_budget is enabled. When true, OOM error reporting
     # queries the driver's real per-heap budget vs usage via
     # VkPhysicalDeviceMemoryBudgetPropertiesEXT.
@@ -569,6 +573,7 @@ mutable struct VkContext
                        maximal_reconvergence_available::Bool=false,
                        subgroup_uniform_control_flow_available::Bool=false,
                        subgroup_rotate_available::Bool=false,
+                       mesh_shader_available::Bool=false,
                        memory_budget_available::Bool=false,
                        external_memory_available::Bool=false,
                        gpu_assisted::Bool=false,
@@ -609,6 +614,7 @@ mutable struct VkContext
         ctx.maximal_reconvergence_available = maximal_reconvergence_available
         ctx.subgroup_uniform_control_flow_available = subgroup_uniform_control_flow_available
         ctx.subgroup_rotate_available = subgroup_rotate_available
+        ctx.mesh_shader_available = mesh_shader_available
         ctx.memory_budget_available = memory_budget_available
         ctx.external_memory_available = external_memory_available
         ctx.video_decode_available = video_decode_available
@@ -1316,6 +1322,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # OpGroupNonUniformRotateKHR: shuffle by a subgroup-uniform delta, which is
     # the cheap form of a butterfly reduction. KHR, promoted to Vulkan 1.4.
     has_subgroup_rotate = has_extension(phys_dev, "VK_KHR_shader_subgroup_rotate")
+    # VK_EXT_mesh_shader. Probed, not assumed: it is an EXT, and the geometry
+    # front end it replaces is still the only one on hardware without it.
+    has_mesh_shader = has_extension(phys_dev, "VK_EXT_mesh_shader")
 
     # Device extensions
     extensions = String[
@@ -1374,6 +1383,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     end
     if has_subgroup_rotate
         push!(extensions, "VK_KHR_shader_subgroup_rotate")
+    end
+    if has_mesh_shader
+        push!(extensions, "VK_EXT_mesh_shader")
     end
     # External-memory export (opaque fds for GL/other-API interop). Enabling
     # the extension has no effect until an VulkanExternalImage is created.
@@ -1630,6 +1642,21 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         has_subgroup_ucf && (feature_chain =
             VK.PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR(true; next=feature_chain))
     end
+    if has_mesh_shader
+        q = VK.get_physical_device_features_2(phys_dev,
+            VK.PhysicalDeviceMeshShaderFeaturesEXT).next
+        # `mesh_shader` is the one that decides it; the task stage is optional
+        # and a pipeline without one dispatches mesh workgroups directly, which
+        # is what the geometry lowering does.
+        has_mesh_shader = q.mesh_shader
+        has_mesh_shader && (feature_chain = VK.PhysicalDeviceMeshShaderFeaturesEXT(
+            q.task_shader,       # asked for as REPORTED — nothing amplifies yet
+            true,                # mesh_shader
+            false,               # multiview_mesh_shader
+            false,               # primitive_fragment_shading_rate_mesh_shader
+            false;               # mesh_shader_queries
+            next = feature_chain))
+    end
     if has_subgroup_rotate
         q = VK.get_physical_device_features_2(phys_dev,
             VK.PhysicalDeviceShaderSubgroupRotateFeaturesKHR).next
@@ -1759,6 +1786,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         has_max_reconv,
         has_subgroup_ucf,
         has_subgroup_rotate,
+        has_mesh_shader,
         has_memory_budget,
         has_external_memory,
         gpu_assisted,
