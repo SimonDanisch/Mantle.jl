@@ -285,6 +285,21 @@ persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
              align = 256, blocksize = blocksize(dev),
              constraint = bufferusage(dev, T))
 
+"""
+A resource's leaf is its REGION, not the device it was allocated on.
+
+`holdleaves!`'s generic walker is documented as being for "a plain Julia value
+tree", and a `Buffer` is not one: it carries `dev` so it can free itself, and
+walking that reaches the `VkContext` and the `Vulkan.Instance`, whose
+`destructor` captures the `Instance` back. `DeviceArray`'s own method stops the
+other route into the driver; this one stops this route.
+
+Holding the store is also the right answer on the merits. What a launch must
+keep alive is the memory its commands name, and that is the region; the device
+outlives every resource on it by construction.
+"""
+@inline holdleaves!(holder, r::Union{Buffer,GPURef}) = holdleaves!(holder, r.store)
+
 Base.length(b::Buffer) = b.len
 Base.size(b::Buffer) = size(b.store)
 # The per-dimension form, which `Base` gives an `AbstractArray` for free and a

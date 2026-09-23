@@ -262,6 +262,35 @@ end
     M.free!(big.plan)
 end
 
+@testset "the lifetime walk stops at a device region" begin
+    # `holdleaves!` is documented as walking "a plain Julia value tree" that
+    # "names no driver". Two of Mantle's own types are not plain value trees and
+    # had no method saying where to stop:
+    #
+    #   * `DeviceArray` is NOT an `AbstractArray` — it is a region and a shape —
+    #     so the array method did not cover it and the generic walker descended
+    #     `region` -> `block` -> `memory` -> `buffer` -> `Vulkan.Device` ->
+    #     `PhysicalDevice` -> `Instance`.
+    #   * `Buffer` carries `dev` so it can free itself, which reaches the same
+    #     place by the other road.
+    #
+    # `Vulkan.Instance`'s `destructor` is a closure that captures the
+    # `Instance`, so that is a value CYCLE and the walk never returned: a
+    # `StackOverflowError` 53320 frames deep, from a `KI.Kernel` launch handed a
+    # `Mantle.Buffer` as an argument. The assertion is simply that it returns.
+    dev = M.Device(TESTBACKEND)
+    b = M.Buffer(dev, Float32, (64,))
+    q = M.backend(dev).dispatch_bq
+    walked = Ref(false)
+    M.oneshot!(q; tag = :holdleaves_test) do e
+        # Both spellings, and a couple of leaves that must not confuse it.
+        M.holdleaves!(e.owner, (b, M.storage(b), 1, nothing))
+        walked[] = true
+    end
+    @test walked[]
+    M.free!(b)
+end
+
 @testset "a profiled plan reports both halves of a recorded run" begin
     dev = M.Device(TESTBACKEND)
     # `bake!` REFUSED a profiled plan, because `timings` measures host recording
