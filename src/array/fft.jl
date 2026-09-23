@@ -15,7 +15,7 @@
 # Batched 1D FFT, ported from VkFFT (`dev/VkFFT`, MIT, Dmitrii Tolmachev).
 #
 # What was taken from it is the ARRANGEMENT, which is not the obvious one. The
-# obvious design keeps the whole transform in `@localmem` and butterflies it in
+# obvious design keeps the whole transform in workgroup memory and butterflies it in
 # place. VkFFT does not: its working set lives in **registers**
 # (`logicalStoragePerThread` — `vkFFT_RegisterBoost.h`), `fftDim /
 # logicalStoragePerThread` threads cooperate on one transform, and shared memory
@@ -72,7 +72,7 @@
 # ## Real and imaginary in separate arrays
 #
 # Not a `Complex` array. Each is then a stride-1 access per lane where an
-# interleaved layout strides by 2, and it keeps `Complex` out of `@localmem`
+# interleaved layout strides by 2, and it keeps `Complex` out of workgroup memory
 # entirely — see `lava-localmem-silent-miscompile` for how quietly that class of
 # thing fails here.
 
@@ -156,10 +156,10 @@ goes **first** because at `Ns = 1` every twiddle is exactly 1 — the angle is
 `idx/(Ns*R)` and `idx = tid % 1 = 0`. Putting it last would cost a full twiddle
 pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
 """
-@kernel cpu=false unsafe_indices=true function fft_kernel!(
-        dst, @Const(src), ::Val{N}, ::Val{LEAD}, ::Val{SIGN}, ::Val{SKEW},
+function fft_kernel!(
+        dst, src, ::Val{N}, ::Val{LEAD}, ::Val{SIGN}, ::Val{SKEW},
         ::Val{NB}) where {N,LEAD,SIGN,SKEW,NB}
-    # `Val` parameters, not locals: a `@localmem` whose size comes from a local
+    # `Val` parameters, not locals: a workgroup buffer whose size comes from a local
     # variable compiles, runs, and writes NOTHING on this backend.
     # `SKEW` pads the shared arrays so that a stride-8 write does not serialise.
     # The Stockham store address is `(tid ÷ Ns) * (Ns * 8) + idx`; at `Ns = 1`
@@ -170,12 +170,12 @@ pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
     # four would idle — measured 30.2% of copy against 59.8% at N = 256. Packing
     # several transforms into the workgroup fixes the shape of the launch
     # without touching the algorithm.
-    sre = @localmem Float32 (NB * (SKEW ? N + N ÷ 32 : N),)
-    sim = @localmem Float32 (NB * (SKEW ? N + N ÷ 32 : N),)
+    sre = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(1))
+    sim = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(2))
     @inline sx(i) = SKEW ? i + i ÷ 32 : i
 
-    lid = @index(Local, Linear) - 1          # 0 .. NB*T-1
-    blk = @index(Group, Linear) - 1
+    lid = KI.get_local_id().x - 1          # 0 .. NB*T-1
+    blk = KI.get_group_id().x - 1
     T = N ÷ 8
     sub = lid ÷ T                            # which transform inside the group
     tid = lid % T                            # 0 .. T-1 within that transform
@@ -195,7 +195,7 @@ pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
         # Ns == 1: every twiddle is 1, so this is butterflies and nothing else.
         # `M` butterflies in the stage, `8 ÷ LEAD` of them per thread.
         M = N ÷ LEAD
-        @synchronize
+        KI.barrier()
         gr = ntuple(Val(8)) do e
             q, m = (e - 1) ÷ LEAD, (e - 1) % LEAD
             sre[soff + sx(tid + q * T + m * M) + 1]
@@ -204,7 +204,7 @@ pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
             q, m = (e - 1) ÷ LEAD, (e - 1) % LEAD
             sim[soff + sx(tid + q * T + m * M) + 1]
         end
-        @synchronize
+        KI.barrier()
         # `ntuple(Val(...))` rather than `for q in 0:...`: the body indexes the
         # register tuples `gr`/`gi`, and a tuple indexed by a RUNTIME value is a
         # stack slot on this backend — the whole working set would spill to
@@ -226,7 +226,7 @@ pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
     end
 
     @inbounds while Ns < N
-        @synchronize
+        KI.barrier()
         xr = ntuple(k -> sre[soff + sx(tid + (k - 1) * T) + 1], Val(8))
         xi = ntuple(k -> sim[soff + sx(tid + (k - 1) * T) + 1], Val(8))
 
@@ -250,7 +250,7 @@ pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
         yr, yi = fftbutterfly(Val(8), tr, ti, Val(SIGN))
 
         # ── the barrier that lets one buffer do the work of two.
-        @synchronize
+        KI.barrier()
         out0 = (tid ÷ Ns) * (Ns * 8) + idx
         for k in 1:8
             sre[soff + sx(out0 + (k - 1) * Ns) + 1] = yr[k]
@@ -259,11 +259,12 @@ pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
         Ns *= 8
     end
 
-    @synchronize
+    KI.barrier()
     @inbounds for k in 0:7
         i = tid + k * T
         dst[base + i + 1] = ComplexF32(sre[soff + sx(i) + 1], sim[soff + sx(i) + 1])
     end
+    return nothing
 end
 
 """
@@ -378,7 +379,7 @@ function fft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF3
         "A larger radix, or a multi-pass decomposition, is what VkFFT reaches " *
         "for here (`numAxisUploads > 1`); neither is implemented yet."))
     nb = group === nothing ? fftgroup(N, T, nbatch, lim, sharedbudget(src)) : group
-    kern = fft_kernel!(backend)
+    kern = KI.Kernel(backend, fft_kernel!)
     kern(dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1), Val(skew), Val(nb);
          ndrange = T * nb * (nbatch ÷ nb), workgroupsize = T * nb)
     return dst
@@ -419,10 +420,10 @@ and `X[k] = e[k] + W_N^k o[k]`. The `mod` on both indices is what makes `k = 0`
 and `k = H` fall out without their own branch: at `k = 0` both reads hit `Z[0]`,
 so `o[0]` is real and `X[0] = e[0] + o[0]` is the DC bin.
 """
-@kernel cpu=false unsafe_indices=true function rfft_post_kernel!(
-        dst, @Const(Z), ::Val{N}, ::Val{SIGN}, scale::Float32) where {N,SIGN}
+function rfft_post_kernel!(
+        dst, Z, ::Val{N}, ::Val{SIGN}, scale::Float32) where {N,SIGN}
     H = N ÷ 2
-    g = @index(Global, Linear) - 1
+    g = KI.get_global_id().x - 1
     k = g % (H + 1)                 # bin
     c = g ÷ (H + 1)                 # which transform
     @inbounds begin
@@ -439,6 +440,7 @@ so `o[0]` is real and `X[0] = e[0] + o[0]` is the DC bin.
         dst[c * (H + 1) + k + 1] = scale * ComplexF32(er + or * cs - oi * sn,
                                                       ei + or * sn + oi * cs)
     end
+    return nothing
 end
 
 """
@@ -468,7 +470,7 @@ function rfft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Float32}
     # DeepFilterNet3's 960, neither a power of two.
     Z = fftany!(similar(z), z)
     backend = get_backend(src)
-    rfft_post_kernel!(backend)(dst, Z, Val(N), Val(-1), 1f0;
+    KI.Kernel(backend, rfft_post_kernel!)(dst, Z, Val(N), Val(-1), 1f0;
                                ndrange = (H + 1) * nbatch)
     return dst
 end
@@ -655,10 +657,10 @@ function fftmixed_kernel(RS::Tuple, sign::Int)
                 end)
             end
             body = Expr[Expr(:block, gathers...),
-                        :(@synchronize),          # UNIFORM, between all reads and all writes
+                        :(KI.barrier()),          # UNIFORM, between all reads and all writes
                         Expr(:block, scatters...)]
             push!(stages, quote
-                @synchronize
+                KI.barrier()
                 $(body...)
             end)
             Ns *= r
@@ -689,18 +691,19 @@ function fftmixed_kernel(RS::Tuple, sign::Int)
         # load. That is precisely the cost the Runner packages exist to remove.
         kname = Symbol("fftmixed_", join(RS, "_"), sign > 0 ? "_inv" : "_fwd")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kname(dst, @Const(src))
-                sre = @localmem Float32 ($N,)
-                sim = @localmem Float32 ($N,)
-                tid = @index(Local, Linear) - 1
-                blk = @index(Group, Linear) - 1
+            function $kname(dst, src)
+                sre = KI.localmemory(Float32, Val(($N,)), Val(1))
+                sim = KI.localmemory(Float32, Val(($N,)), Val(2))
+                tid = KI.get_local_id().x - 1
+                blk = KI.get_group_id().x - 1
                 base = blk * $N
                 @inbounds begin
                     $(load...)
                     $(stages...)
-                    @synchronize
+                    KI.barrier()
                     $(store...)
                 end
+                return nothing
             end
             $kname
         end
@@ -732,15 +735,14 @@ function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Comp
     lim = workgrouplimit(src)
     T <= lim || throw(ArgumentError(
         "fftmixed!: N=$N needs $T threads, above this device's limit of $lim"))
-    # BOTH calls need `invokelatest`, not just the launch. `fftmixed_kernel`
-    # `@eval`s the kernel, so the method `@kernel` defines for it is newer than
-    # this function's world — and `kern(backend)`, which CONSTRUCTS the
-    # `KA.Kernel`, is one of those methods. Wrapping only the launch gets a
-    # `MethodError: method too new to be called from this world context`, which
-    # names the right problem in an easy place to misread.
+    # `invokelatest` on the launch: `fftmixed_kernel` `@eval`s the kernel, so it
+    # is newer than this function's world. There is only one call to wrap now —
+    # the kernel is a plain function and `KI.Kernel` merely carries it beside the
+    # backend, where a `@kernel` answered `kern(backend)` with a method that was
+    # itself too new to call from here.
     kern = fftmixed_kernel(RS, inverse ? 1 : -1)
-    k = Base.invokelatest(kern, backend)
-    Base.invokelatest(k, dst, src; ndrange = T * nbatch, workgroupsize = T)
+    Base.invokelatest(KI.Kernel(backend, kern), dst, src;
+                      ndrange = T * nbatch, workgroupsize = T)
     return dst
 end
 
@@ -768,26 +770,29 @@ end
 # ─────────────────────────────────────────────────────── declared graph forms
 
 """Pack adjacent real samples as the complex input used by the real-FFT split."""
-@kernel cpu=false unsafe_indices=true function rfft_pack_kernel!(dst, @Const(src))
-    i = @index(Global, Linear)
+function rfft_pack_kernel!(dst, src)
+    i = KI.get_global_id().x
     @inbounds dst[i] = ComplexF32(src[2i - 1], src[2i])
+    return nothing
 end
 
 """Restore the redundant half of a real signal's Hermitian spectrum."""
-@kernel cpu=false unsafe_indices=true function irfft_extend_kernel!(
-        dst, @Const(src), ::Val{N}, ::Val{NB}) where {N,NB}
-    g = @index(Global, Linear) - 1
+function irfft_extend_kernel!(
+        dst, src, ::Val{N}, ::Val{NB}) where {N,NB}
+    g = KI.get_global_id().x - 1
     k = g % N
     c = g ÷ N
     @inbounds dst[g + 1] = k < NB ? src[c * NB + k + 1] :
                                     conj(src[c * NB + (N - k) + 1])
+    return nothing
 end
 
 """Take and scale the real component after an unnormalised inverse FFT."""
-@kernel cpu=false unsafe_indices=true function irfft_real_kernel!(
-        dst, @Const(src), scale::Float32)
-    i = @index(Global, Linear)
+function irfft_real_kernel!(
+        dst, src, scale::Float32)
+    i = KI.get_global_id().x
     @inbounds dst[i] = real(src[i]) * scale
+    return nothing
 end
 
 
@@ -941,10 +946,10 @@ computed per sample rather than materialised, so no padded copy of the input
 exists — which matters because the padded signal is the largest array in a mel
 front end and it would be read exactly once.
 """
-@kernel cpu=false unsafe_indices=true function stft_frames_kernel!(
-        frames, @Const(x), @Const(window), ::Val{NFFT}, hop::Int, len::Int,
+function stft_frames_kernel!(
+        frames, x, window, ::Val{NFFT}, hop::Int, len::Int,
         ::Val{CENTER}) where {NFFT,CENTER}
-    g = @index(Global, Linear) - 1
+    g = KI.get_global_id().x - 1
     i = g % NFFT                 # position within the frame
     t = g ÷ NFFT                 # which frame
     @inbounds begin
@@ -960,6 +965,7 @@ front end and it would be read exactly once.
         v = (p >= 0 && p < len) ? x[p + 1] : 0.0f0
         frames[g + 1] = v * window[i + 1]
     end
+    return nothing
 end
 
 """
@@ -989,7 +995,7 @@ function stft(x::AbstractGPUArray{Float32}, nfft::Int, hop::Int,
     nframes > 0 || throw(ArgumentError("stft: signal of $len samples is shorter than nfft = $nfft"))
     backend = get_backend(x)
     frames = similar(x, Float32, nfft, nframes)
-    stft_frames_kernel!(backend)(frames, x, window, Val(nfft), hop, len, Val(center);
+    KI.Kernel(backend, stft_frames_kernel!)(frames, x, window, Val(nfft), hop, len, Val(center);
                                  ndrange = nfft * nframes)
     return rfft(frames)
 end

@@ -17,8 +17,8 @@ using Atomix
 
 # ── Vulkan-native single-dispatch sum ──
 
-@kernel cpu=false function _vk_reduce_fadd_kernel!(out, @Const(src), total_threads::Int32)
-    gi = _KA_reduce.@index(Global, Linear)
+function _vk_reduce_fadd_kernel!(out, src, total_threads::Int32)
+    gi = KI.get_global_id().x
     n = length(src)
     # Strided: each thread walks the array in steps of `total_threads`. Cuts
     # atomic pressure by `n / total_threads` vs "1 thread per element" — at
@@ -91,7 +91,8 @@ function vk_reduce_sum(A::LavaArray{Float32})
     nblocks = min(cld(n, wgsize), 2048)
     total_threads = Int32(nblocks * wgsize)
     ndr = Int(total_threads)
-    _vk_reduce_fadd_kernel!(KA.get_backend(A), wgsize)(out, A, total_threads; ndrange=ndr)
+    KI.Kernel(KA.get_backend(A), _vk_reduce_fadd_kernel!)(
+        out, A, total_threads; ndrange=ndr, workgroupsize=wgsize)
     bq = ctx.default_bq
     flush!(bq)
     # out is mapped — read directly.

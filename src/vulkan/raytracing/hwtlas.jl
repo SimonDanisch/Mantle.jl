@@ -542,16 +542,17 @@ end
 #
 # Each workitem reads and writes only element `i`, so the read-before-write is
 # not a hazard.
-KA.@kernel cpu=false function update_instance_records_kernel!(
+function update_instance_records_kernel!(
         records,
-        @Const(transforms),
+        transforms,
         blas_address::UInt64)
-    i = @index(Global, Linear)
+    i = KI.get_global_id().x
     @inbounds old = records[i]
     @inbounds records[i] = VulkanInstanceRecord(transforms[i],
                                                 old.custom_index_and_mask,
                                                 old.sbt_offset_and_flags,
                                                 blas_address)
+    return nothing
 end
 
 """
@@ -668,7 +669,7 @@ function _apply_pending_update!(batch::InstanceBatch, transforms::LavaArray{Mat3
     # No `cim`/`sof`: the kernel keeps each record's own. The BLAS address is
     # still passed, because a rebuilt BLAS is a new address and the record has
     # to follow it.
-    update_instance_records_kernel!(backend)(
+    KI.Kernel(backend, update_instance_records_kernel!)(
         batch.instance_buf, transforms, batch.blas.address;
         ndrange = batch.n)
 end

@@ -396,7 +396,7 @@ end
 
 # ── Lava disk cache ──
 # GPUCompiler's disk cache only works for precompiled package code (needs build_id).
-# KA @kernel macros generate functions at expansion time without build_id, so we
+# A generated kernel function carries no build_id at expansion time, so we
 # implement our own disk cache keyed by (specTypes hash, workgroup_size).
 # The specTypes hash is stable across sessions for the same kernel+argtypes.
 

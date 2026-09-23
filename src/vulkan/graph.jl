@@ -1204,6 +1204,18 @@ function collect!(prof::Profiler, dev::LavaDevice)
         lo, hi = 2 * (2i - 2) + 1, 2 * (2i - 1) + 1     # value words of the pair
         raw[lo + 1] == 0 && continue                     # start not available
         raw[hi + 1] == 0 && continue                     # end not available
+        # A slot that has been RESET but not yet written back reads as value 0
+        # with availability 1 — this is read without waiting, and the reset for
+        # the next frame is at the head of its recording, so that window is hit
+        # routinely. Vulkan says a reset query is unavailable; RADV reports it
+        # available and zero, and `elapsed(0, 0)` is a perfectly plausible
+        # 0.0 ms that then outvotes the real samples in the median. Measured:
+        # a 2048x2048 `mm.default` taking 2.3 ms recorded 37 samples, more than
+        # half of them zero, and `timings` reported **0.0 ms** for it.
+        #
+        # A GPU timestamp is a free-running counter and is never 0, so this
+        # tells the two apart without a wait.
+        (raw[lo] == 0 || raw[hi] == 0) && continue
         ns = elapsed(raw[lo], raw[hi], prof.period_ns)
         ns === nothing || sample!(prof.gpu_ns[i], ns)
     end

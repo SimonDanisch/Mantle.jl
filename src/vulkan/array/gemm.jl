@@ -61,7 +61,7 @@ const GEMM_MAXBLOCK = 4    # largest register block `@nexprs` is unrolled for
 #   staged 4×4            255 (cap)     48896     17664
 #
 # The direct kernel spills its entire 4×4 accumulator block — it declares no
-# `@localmem` at all and the driver still gives it 25 KB — and the staged 4×4,
+# workgroup memory at all and the driver still gives it 25 KB — and the staged 4×4,
 # which is exactly `mul_mm.comp`'s shipped configuration, spills 31 KB on top of
 # its blocks and lands at 4.6 TFLOP/s. Neither is a tiling problem. Both are one
 # structural difference from the reference: the first port held `ST` A-fragments
@@ -107,7 +107,7 @@ The tilings a kernel is generated for, **fastest first** — `gemm_tiling` takes
 the first whose block divides the shape, so the order is the preference and the
 last entries exist for coverage rather than for speed.
 
-One compiled `@kernel` per entry, so the list is short on purpose. Measured on an
+One compiled kernel per entry, so the list is short on purpose. Measured on an
 RTX 4000 Ada over SAM 2's six `addmm` shapes, weighted by their share of the
 encoder's GEMM arithmetic, against the register-blocked kernel's 20.5:
 
@@ -591,10 +591,10 @@ const GEMM_BLOCK_KERNELS = Dict{Int,Any}()
 for BLK in (1, 2, 4)
     kname = Symbol("coopmat_gemm_kernel_", BLK, "!")
     @eval begin
-        @kernel cpu=false function $kname(C, @Const(A), @Const(B), bias, epi,
+        function $kname(C, A, B, bias, epi,
                                 ::Val{M}, ::Val{N}, ::Val{K},
                                 ::Val{KPER}) where {M,N,K,KPER}
-            lane = @index(Global, Linear) - 1
+            lane = KI.get_global_id().x - 1
             g = lane ÷ 32
             tiles_m = M ÷ (GEMM_TILE * $BLK)
             ntiles = tiles_m * (N ÷ (GEMM_TILE * $BLK))
@@ -667,6 +667,7 @@ for BLK in (1, 2, 4)
                 accstore!(C, 1 + coff + tm + (i - 1) * GEMM_TILE +
                              (tn + (j - 1) * GEMM_TILE) * M + sk * M * N,
                           M, c_i_j, epi)
+            return nothing
         end
         GEMM_BLOCK_KERNELS[$BLK] = $kname
     end
@@ -716,7 +717,7 @@ end
 #   4-wide   0.69 - 0.81x
 #
 # The global side is not the problem — it is coalesced either way. The shared
-# side is: `@localmem` here is `Float16`, so a lane that loaded `V` elements
+# side is: the workgroup buffer here is `Float16`, so a lane that loaded `V` elements
 # writes them with `V` scalar stores whose addresses stride by `V` across the
 # warp. At V=2 that is a 2-way bank conflict on every store and at V=4 a 4-way,
 # against none at all for the stride-1 scalar loop. The monotonic 1 > 2 > 4
@@ -729,7 +730,7 @@ end
 # pieces were missing and both are in, with a device test in
 # `test_coopmat_shared.jl`:
 #
-#   * `@localmem NTuple{2,VecElement{Float16}}` — `Op.OpCompositeInsert` was used
+#   * a workgroup buffer of `NTuple{2,VecElement{Float16}}` — `Op.OpCompositeInsert` was used
 #     by the emitter and never declared, so building a vector value element by
 #     element died with `UndefVarError` rather than compiling;
 #   * `loadw2`, a cooperative-matrix load whose access chain addresses the vector
@@ -847,7 +848,7 @@ const GEMM_STAGED_V2N_KERNELS = Dict{GemmTiling,Any}()
 """
 Double-buffered twins of `GEMM_STAGED_V2N_KERNELS`, keyed the same way.
 
-Two alternating staging buffers, so the second `@synchronize` per k-block — the
+Two alternating staging buffers, so the second `KI.barrier()` per k-block — the
 one that exists only to stop the next block's staging from overwriting a tile
 still being read — is not needed, and the staging of block `k+1` overlaps the
 arithmetic of block `k`. Costs 2x the shared memory (33792 B at 96x128, against a
@@ -1033,14 +1034,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         # `muladd` under an `OpSelectionMerge`, which cost **3x** (8.8 against 26.1
         # TFLOP/s weighted). The guard is why the two loop forms structurize
         # differently at all.
-        @kernel cpu=false unsafe_indices=true function $kname(
-                                          C, @Const(A), @Const(B), bias, epi,
+        function $kname(
+                                          C, A, B, bias, epi,
                                           ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-            sA = @localmem Float16 ($LDA * $BK,)
-            sB = @localmem Float16 ($LDB * $BN,)
+            sA = KI.localmemory(Float16, Val(($LDA * $BK,)), Val(1))
+            sB = KI.localmemory(Float16, Val(($LDB * $BN,)), Val(2))
 
-            tid = @index(Local, Linear) - 1
-            blk = @index(Group, Linear) - 1
+            tid = KI.get_local_id().x - 1
+            blk = KI.get_group_id().x - 1
             nblk_m = M ÷ $BM
             tm = (blk % nblk_m) * $BM
             tn = (blk ÷ nblk_m) * $BN
@@ -1075,7 +1076,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                     kk, j = splitidx(idx, Val($BK))
                     sB[1 + kk + j * $LDB] = B[1 + (k0 + kk) + (tn + j) * K]
                 end
-                @synchronize
+                KI.barrier()
 
                 # One A fragment and one B fragment live, both reassigned — the
                 # reference's ordering. See the note above on why reloading beats
@@ -1092,7 +1093,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                         end
                     end
                 end
-                @synchronize   # nothing may refill shared until every subgroup is done
+                KI.barrier()   # nothing may refill shared until every subgroup is done
             end
 
             Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
@@ -1100,6 +1101,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                           1 + (tm + (sm + mt - 1) * GEMM_TILE) +
                               (tn + (sn + nt - 1) * GEMM_TILE) * M,
                           M, c_mt_nt, epi)
+            return nothing
         end
         GEMM_STAGED_KERNELS[$cfg] = $kname
     end
@@ -1119,14 +1121,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         BM2, BK2 = BM ÷ 2, BK ÷ 2
         kv2 = Symbol("coopmat_gemm_staged_kernel_", ci, "_v2!")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kv2(
-                                              C, @Const(A), @Const(B), bias, epi,
+            function $kv2(
+                                              C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = @localmem GemmV2 ($LDA2 * $BK,)
-                sB = @localmem GemmV2 ($LDB2 * $BN,)
+                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-                tid = @index(Local, Linear) - 1
-                blk = @index(Group, Linear) - 1
+                tid = KI.get_local_id().x - 1
+                blk = KI.get_group_id().x - 1
                 nblk_m = M ÷ $BM
                 tm = (blk % nblk_m) * $BM
                 tn = (blk ÷ nblk_m) * $BN
@@ -1156,7 +1158,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                         g = 1 + (k0 + 2q) + (tn + j) * K
                         sB[1 + q + j * $LDB2] = (VecElement(B[g]), VecElement(B[g + 1]))
                     end
-                    @synchronize
+                    KI.barrier()
 
                     Base.Cartesian.@nexprs $NKT u -> begin
                         kt = (u - 1) * GEMM_TILE
@@ -1172,7 +1174,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             end
                         end
                     end
-                    @synchronize
+                    KI.barrier()
                 end
 
                 Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
@@ -1180,20 +1182,21 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               1 + (tm + (sm + mt - 1) * GEMM_TILE) +
                                   (tn + (sn + nt - 1) * GEMM_TILE) * M,
                               M, c_mt_nt, epi)
+                return nothing
             end
             GEMM_STAGED_V2_KERNELS[$cfg] = $kv2
         end
 
         kv2n = Symbol("coopmat_gemm_staged_kernel_", ci, "_v2n!")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kv2n(
-                                              C, @Const(A), @Const(B), bias, epi,
+            function $kv2n(
+                                              C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = @localmem GemmV2 ($LDA2 * $BK,)
-                sB = @localmem GemmV2 ($LDB2 * $BN,)
+                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-                tid = Int32(@index(Local, Linear) - 1)
-                blk = Int32(@index(Group, Linear) - 1)
+                tid = Int32(KI.get_local_id().x - 1)
+                blk = Int32(KI.get_group_id().x - 1)
                 nblk_m = Int32(M ÷ $BM)
                 tm = (blk % nblk_m) * Int32($BM)
                 tn = (blk ÷ nblk_m) * Int32($BN)
@@ -1227,7 +1230,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                         sB[1 + Int(q) + Int(j) * $LDB2] =
                             (VecElement(B[g]), VecElement(B[g + Int32(1)]))
                     end
-                    @synchronize
+                    KI.barrier()
 
                     Base.Cartesian.@nexprs $NKT u -> begin
                         kt = (u - 1) * GEMM_TILE
@@ -1243,7 +1246,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             end
                         end
                     end
-                    @synchronize
+                    KI.barrier()
                 end
 
                 Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
@@ -1251,6 +1254,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
                                   (tn + (sn + nt - 1) * GEMM_TILE) * M,
                               M, c_mt_nt, epi)
+                return nothing
             end
             GEMM_STAGED_V2N_KERNELS[$cfg] = $kv2n
         end
@@ -1258,14 +1262,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         # ── ncnn schedule: register prefetch + one shared tile ─────────────
         kp = Symbol("coopmat_gemm_staged_kernel_", ci, "_prefetch!")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kp(
-                                              C, @Const(A), @Const(B), bias, epi,
+            function $kp(
+                                              C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = @localmem GemmV2 ($LDA2 * $BK,)
-                sB = @localmem GemmV2 ($LDB2 * $BN,)
+                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-                tid = Int32(@index(Local, Linear) - 1)
-                blk = Int32(@index(Group, Linear) - 1)
+                tid = Int32(KI.get_local_id().x - 1)
+                blk = Int32(KI.get_group_id().x - 1)
                 nblk_m = Int32(M ÷ $BM)
                 tm = (blk % nblk_m) * Int32($BM)
                 tn = (blk ÷ nblk_m) * Int32($BN)
@@ -1308,7 +1312,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                     q, j = splitidx(idx, Val($BK2))
                     sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
                 end
-                @synchronize
+                KI.barrier()
 
                 nkb = Int32(K ÷ $BK)
                 for kb in Int32(0):(nkb - Int32(1))
@@ -1352,7 +1356,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
 
                     # The last product has no successor to publish.
                     if kb + Int32(1) < nkb
-                        @synchronize
+                        KI.barrier()
                         @inbounds for r in Int32(0):Int32($AREPS2 - 1)
                             idx = tid + r * Int32($WG)
                             p, kk = splitidx(idx, Val($BM2))
@@ -1363,7 +1367,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             q, j = splitidx(idx, Val($BK2))
                             sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
                         end
-                        @synchronize
+                        KI.barrier()
                     end
                 end
 
@@ -1372,6 +1376,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
                                   (tn + (sn + nt - 1) * GEMM_TILE) * M,
                               M, c_mt_nt, epi)
+                return nothing
             end
             GEMM_STAGED_PREFETCH_KERNELS[$cfg] = $kp
         end
@@ -1405,14 +1410,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         # a plain A read gets nothing back for the registers.
         kg = Symbol("coopmat_gemm_staged_kernel_", ci, "_gather!")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kg(
-                                              C, @Const(A), @Const(B), bias, epi, ald,
+            function $kg(
+                                              C, A, B, bias, epi, ald,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = @localmem GemmV2 ($LDA2 * $BK,)
-                sB = @localmem GemmV2 ($LDB2 * $BN,)
+                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-                tid = Int32(@index(Local, Linear) - 1)
-                blk = Int32(@index(Group, Linear) - 1)
+                tid = Int32(KI.get_local_id().x - 1)
+                blk = Int32(KI.get_group_id().x - 1)
                 nblk_m = Int32(M ÷ $BM)
                 tm = (blk % nblk_m) * Int32($BM)
                 tn = (blk ÷ nblk_m) * Int32($BN)
@@ -1444,7 +1449,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                 @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
                     sB[1 + Int(qj_r[1]) + Int(qj_r[2]) * $LDB2] = nextB_r
                 end
-                @synchronize
+                KI.barrier()
 
                 nkb = Int32(K ÷ $BK)
                 for kb in Int32(0):(nkb - Int32(1))
@@ -1479,14 +1484,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
 
                     # The last product has no successor to publish.
                     if kb + Int32(1) < nkb
-                        @synchronize
+                        KI.barrier()
                         @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
                             sA[1 + Int(pkk_r[1]) + Int(pkk_r[2]) * $LDA2] = nextA_r
                         end
                         @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
                             sB[1 + Int(qj_r[1]) + Int(qj_r[2]) * $LDB2] = nextB_r
                         end
-                        @synchronize
+                        KI.barrier()
                     end
                 end
 
@@ -1495,6 +1500,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
                                   (tn + (sn + nt - 1) * GEMM_TILE) * M,
                               M, c_mt_nt, epi)
+                return nothing
             end
             GEMM_STAGED_GATHER_KERNELS[$cfg] = $kg
         end
@@ -1514,14 +1520,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         # already binds at two workgroups per SM.
         kdb = Symbol("coopmat_gemm_staged_kernel_", ci, "_db!")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kdb(
-                                              C, @Const(A), @Const(B), bias, epi,
+            function $kdb(
+                                              C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = @localmem GemmV2 (2 * $LDA2 * $BK,)
-                sB = @localmem GemmV2 (2 * $LDB2 * $BN,)
+                sA = KI.localmemory(GemmV2, Val((2 * $LDA2 * $BK,)), Val(1))
+                sB = KI.localmemory(GemmV2, Val((2 * $LDB2 * $BN,)), Val(2))
 
-                tid = Int32(@index(Local, Linear) - 1)
-                blk = Int32(@index(Group, Linear) - 1)
+                tid = Int32(KI.get_local_id().x - 1)
+                blk = Int32(KI.get_group_id().x - 1)
                 nblk_m = Int32(M ÷ $BM)
                 tm = (blk % nblk_m) * Int32($BM)
                 tn = (blk ÷ nblk_m) * Int32($BN)
@@ -1552,7 +1558,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                     sB[1 + Int(q) + Int(j) * $LDB2] =
                         (VecElement(B[g]), VecElement(B[g + Int32(1)]))
                 end
-                @synchronize
+                KI.barrier()
 
                 for kb in Int32(0):(nkb - Int32(1))
                     rda = (kb & Int32(1)) * Int32($LDA2 * $BK)
@@ -1599,7 +1605,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                     end
                     # ONE barrier: it both publishes the tile just staged and
                     # retires the reads of the tile just consumed.
-                    @synchronize
+                    KI.barrier()
                 end
 
                 Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
@@ -1607,6 +1613,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
                                   (tn + (sn + nt - 1) * GEMM_TILE) * M,
                               M, c_mt_nt, epi)
+                return nothing
             end
             GEMM_STAGED_DB_KERNELS[$cfg] = $kdb
         end
@@ -1625,14 +1632,14 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         BM4, BK4 = BM ÷ 4, BK ÷ 4
         kv4 = Symbol("coopmat_gemm_staged_kernel_", ci, "_v4!")
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kv4(
-                                              C, @Const(A), @Const(B), bias, epi,
+            function $kv4(
+                                              C, A, B, bias, epi,
                                               ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = @localmem GemmV4 ($LDA4 * $BK,)
-                sB = @localmem GemmV4 ($LDB4 * $BN,)
+                sA = KI.localmemory(GemmV4, Val(($LDA4 * $BK,)), Val(1))
+                sB = KI.localmemory(GemmV4, Val(($LDB4 * $BN,)), Val(2))
 
-                tid = Int32(@index(Local, Linear) - 1)
-                blk = Int32(@index(Group, Linear) - 1)
+                tid = Int32(KI.get_local_id().x - 1)
+                blk = Int32(KI.get_group_id().x - 1)
                 nblk_m = Int32(M ÷ $BM)
                 tm = (blk % nblk_m) * Int32($BM)
                 tn = (blk ÷ nblk_m) * Int32($BN)
@@ -1668,7 +1675,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             (VecElement(B[g]), VecElement(B[g + Int32(1)]),
                              VecElement(B[g + Int32(2)]), VecElement(B[g + Int32(3)]))
                     end
-                    @synchronize
+                    KI.barrier()
 
                     Base.Cartesian.@nexprs $NKT u -> begin
                         kt = (u - 1) * GEMM_TILE
@@ -1684,7 +1691,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             end
                         end
                     end
-                    @synchronize
+                    KI.barrier()
                 end
 
                 Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
@@ -1692,6 +1699,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                               1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
                                   (tn + (sn + nt - 1) * GEMM_TILE) * M,
                               M, c_mt_nt, epi)
+                return nothing
             end
             GEMM_STAGED_V4_KERNELS[$cfg] = $kv4
         end
@@ -1714,15 +1722,15 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
     # the ablation report its own artifact.
     kabl = Symbol("coopmat_gemm_staged_kernel_", ci, "_abl!")
     @eval begin
-        @kernel cpu=false unsafe_indices=true function $kabl(
-                                          C, @Const(A), @Const(B), bias, epi,
+        function $kabl(
+                                          C, A, B, bias, epi,
                                           ::Val{M}, ::Val{N}, ::Val{K},
                                           ::Val{ABL}) where {M,N,K,ABL}
-            sA = @localmem GemmV2 ($LDA2 * $BK,)
-            sB = @localmem GemmV2 ($LDB2 * $BN,)
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-            tid = Int32(@index(Local, Linear) - 1)
-            blk = Int32(@index(Group, Linear) - 1)
+            tid = Int32(KI.get_local_id().x - 1)
+            blk = Int32(KI.get_group_id().x - 1)
             nblk_m = Int32(M ÷ $BM)
             tm = (blk % nblk_m) * Int32($BM)
             tn = (blk ÷ nblk_m) * Int32($BN)
@@ -1755,7 +1763,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             (VecElement(B[g]), VecElement(B[g + Int32(1)]))
                     end
                 end
-                @synchronize
+                KI.barrier()
 
                 Base.Cartesian.@nexprs $NKT u -> begin
                     kt = (u - 1) * GEMM_TILE
@@ -1771,7 +1779,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                         end
                     end
                 end
-                @synchronize
+                KI.barrier()
             end
 
             Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
@@ -1779,6 +1787,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                           1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
                               (tn + (sn + nt - 1) * GEMM_TILE) * M,
                           M, c_mt_nt, epi)
+            return nothing
         end
         GEMM_STAGED_ABL_KERNELS[$cfg] = $kabl
     end
@@ -1820,7 +1829,8 @@ copy costs more than the tensor cores return. Hence widening here instead.
 # It takes each operand as a *dense base array plus strides* rather than as the
 # wrapper the caller had. A transposed operand is then just a pair of swapped
 # strides — no copy, no second kernel, and no wrapper type inside the kernel at
-# all. That last part matters: `@Const` runs `Adapt.adapt_structure` on the
+# all. That last part mattered while these were `@kernel`s: `@Const` ran
+# `Adapt.adapt_structure` on the
 # device, and rebuilding a wrapper there drags its constructor's error paths in
 # with it (see the PermutedDimsArray quirk). The staged kernel takes its operands
 # the same way for the same reason.
@@ -1839,14 +1849,14 @@ copy costs more than the tensor cores return. Hence widening here instead.
 # is the path `verifygraph` runs and not the one inference does.
 
 
-@kernel cpu=false function strided_gemm_kernel!(C, @Const(A), @Const(B), ::Val{K},
+function strided_gemm_kernel!(C, A, B, ::Val{K},
                                       co, cr, cc, ao, ar, ac, bo, br, bc,
                                       α, β, M, ntot) where {K}
     # Flat launch: an N-D `ndrange` is partitioned into N-D workgroups, so
     # consecutive lanes stop walking consecutive memory. Worth 2.3 ms of a
     # 31.7 ms inference step when applied to the convolution's im2col and
     # epilogue.
-    lin = @index(Global, Linear)
+    lin = KI.get_global_id().x
     if lin <= ntot
     i = (Int32(lin) - Int32(1)) % Int32(M) + Int32(1)
     j = (Int32(lin) - Int32(1)) ÷ Int32(M) + Int32(1)
@@ -1932,11 +1942,12 @@ copy costs more than the tensor cores return. Hence widening here instead.
                           muladd(acc, T(α), T(C[ci]) * T(β)))
     end
     end
+    return nothing
 end
 
 # ── the staged scalar GEMM ───────────────────────────────────────────────────
 #
-# `strided_gemm_kernel!` above declares no `@localmem` at all: one invocation per
+# `strided_gemm_kernel!` above declares no workgroup memory at all: one invocation per
 # output element, K walked in global memory, two global loads per `muladd`. At
 # 2048^3 on a Radeon 8060S that is **0.448 TFLOP/s** against 14.6 for the fp16
 # cooperative-matrix path, and it gets *worse* with size (0.531 at 1024^3), which
@@ -2058,14 +2069,14 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
     # against 4.895 for the same kernel with none of it, so this branch is
     # roughly the difference between a 6.8x and an 11x win over the kernel it
     # replaces.
-    @kernel cpu=false unsafe_indices=true function scalar_gemm_staged_kernel!(
-            C, @Const(A), @Const(B), ::Val{M}, ::Val{N}, ::Val{K}, ::Val{FAST},
+    function scalar_gemm_staged_kernel!(
+            C, A, B, ::Val{M}, ::Val{N}, ::Val{K}, ::Val{FAST},
             co, cr, cc_, ao, ar, ac, bo, br, bc, α, β, nblk_m) where {M,N,K,FAST}
-        bufa = @localmem Float32 ($SGEMM_BM * $SGEMM_SHF,)
-        bufb = @localmem Float32 ($SGEMM_BN * $SGEMM_SHF,)
+        bufa = KI.localmemory(Float32, Val(($SGEMM_BM * $SGEMM_SHF,)), Val(1))
+        bufb = KI.localmemory(Float32, Val(($SGEMM_BN * $SGEMM_SHF,)), Val(2))
 
-        tid = @index(Local, Linear) - 1
-        blk = @index(Group, Linear) - 1
+        tid = KI.get_local_id().x - 1
+        blk = KI.get_group_id().x - 1
         ir = (blk % nblk_m) * $SGEMM_BM        # this workgroup's first row of C
         ic = (blk ÷ nblk_m) * $SGEMM_BN        # ...and its first column
 
@@ -2105,7 +2116,7 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
                     (k < K) & (j < N) ? Float32(B[bo + k * br + j * bc]) : 0.0f0
                 end
             end
-            @synchronize
+            KI.barrier()
 
             @inbounds Base.Cartesian.@nexprs $SGEMM_NKSTEP ii -> begin
                 kof = (ii - 1) * $SGEMM_BKSTEP
@@ -2139,7 +2150,7 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
                                     muladd(a_wsir_jj_3, b3, s_wsic_cn_wsir_jj))))
                     end
             end
-            @synchronize   # nothing may refill shared until every warp is done
+            KI.barrier()   # nothing may refill shared until every warp is done
         end
 
         @inbounds Base.Cartesian.@nexprs $SGEMM_WNITER wsic ->
@@ -2159,6 +2170,7 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
                         end
                     end
             end
+        return nothing
     end
 end
 
@@ -2333,8 +2345,8 @@ Sum the `SPLITK` partial planes `Cp[:, :, s]` into `C`.
 `S * n` — indexing with `i + s * n` alone would read batch 0's later splits for
 every batch and silently return the wrong sum for all but the first.
 """
-@kernel cpu=false function splitk_reduce_kernel!(C, @Const(Cp), ::Val{S}, n) where {S}
-    i = @index(Global, Linear)
+function splitk_reduce_kernel!(C, Cp, ::Val{S}, n) where {S}
+    i = KI.get_global_id().x
     @inbounds begin
         b = (i - 1) ÷ n                 # 0 for an unbatched call
         j = (i - 1) % n + 1 + b * S * n
@@ -2344,6 +2356,7 @@ every batch and silently return the wrong sum for all but the first.
         end
         C[i] = acc
     end
+    return nothing
 end
 
 """
@@ -2719,10 +2732,10 @@ has enough rows to fill the device, which is the case from `GEMV_NOSPLIT_ROWS`.
     S
 end
 
-@kernel cpu=false function gemv_splitk_kernel!(P, @Const(A), @Const(B),
+function gemv_splitk_kernel!(P, A, B,
                                                ao, ar, ac, bo, br,
                                                M::Int32, K::Int32, KC::Int32, ntot::Int32)
-    lin = @index(Global, Linear)
+    lin = KI.get_global_id().x
     if lin <= ntot
         l = Int32(lin) - Int32(1)
         i = l % M + Int32(1)        # row; consecutive lanes -> consecutive rows
@@ -2753,11 +2766,12 @@ end
             P[lin] = (a0 + a1) + (a2 + a3)
         end
     end
+    return nothing
 end
 
-@kernel cpu=false function gemv_reduce_kernel!(C, @Const(P), co, cr,
+function gemv_reduce_kernel!(C, P, co, cr,
                                                M::Int32, S::Int32, α, β)
-    i = @index(Global, Linear)
+    i = KI.get_global_id().x
     if i <= M
         @inbounds begin
             acc = P[i]
@@ -2769,6 +2783,7 @@ end
                               muladd(acc, Float32(α), Float32(C[ci]) * Float32(β)))
         end
     end
+    return nothing
 end
 
 """
@@ -2823,10 +2838,17 @@ function scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing)
                      eltype(C)(α), eltype(C)(β), nblk_m),
                     nblk_m * nblk_n * SGEMM_WG, SGEMM_WG)]
     end
+    # 256 EXPLICITLY, not `0` for "the backend picks". The two backends pick
+    # differently: KernelAbstractions gave this 256, and `KernelInterface`'s
+    # `ki_launch_extents` asks `threads_to_workgroupsize` for the device limit,
+    # which is 1024 here. One thread per output at 1024 wide is two workgroups
+    # for a 1x1280 product on 48 compute units — measured at 0.269 ms against
+    # 0.120 for the same kernel at 256, a 2.2x regression that is entirely the
+    # launch shape.
     return [ArrayLaunch(strided_gemm_kernel!,
                 (c[1], a[1], b[1], Val(K), c[2], c[3], c[4],
                  a[2], a[3], a[4], b[2], b[3], b[4], α, β, M, M * N),
-                M * N, 0)]
+                M * N, 256)]
 end
 
 """

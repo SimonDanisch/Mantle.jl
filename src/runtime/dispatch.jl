@@ -55,8 +55,8 @@ real: the kernel was compiled against `max` precisely so its bounds check would
 not clamp to a size known at compile time, which means nothing else clamps
 either. Take the count as an argument and return early:
 
-    @kernel function compact!(dst, @Const(src), n)
-        i = @index(Global)
+    function compact!(dst, src, n)
+        i = KI.get_global_id().x
         @inbounds if i <= n[1]
             ...
         end
@@ -190,19 +190,21 @@ touch!(g, x) = (resourceid(g, x); x)
 `n` elements from `src` at `soff` into `dst` at `doff`, as a dispatch. Offsets
 are ZERO-based, so a caller passes `first - 1`.
 """
-@kernel function d2dcopy_kernel!(dst, @Const(src), doff::Int64, soff::Int64, n::Int64)
-    i = @index(Global, Linear)
+function d2dcopy_kernel!(dst, src, doff::Int64, soff::Int64, n::Int64)
+    i = KI.get_global_id().x
     if i <= n
         @inbounds dst[doff + i] = src[soff + i]
     end
+    return nothing
 end
 
 """    fill_kernel!(a, v)
 
 `v` into every element of `a`, as a dispatch."""
-@kernel function fill_kernel!(a, v)
-    i = @index(Global, Linear)
+function fill_kernel!(a, v)
+    i = KI.get_global_id().x
     @inbounds a[i] = v
+    return nothing
 end
 
 """

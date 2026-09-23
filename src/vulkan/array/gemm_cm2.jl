@@ -131,14 +131,14 @@ One workgroup owns a `BM x BN` tile of `C` and walks `K` in steps of `BK`. There
 is no shared memory, no staging loop and no barrier: each step is two tensor
 loads and one `coopmat_muladd` over matrices that span all `NT` invocations.
 """
-@kernel cpu=false unsafe_indices=true function gemm_cm2!(
-        C, @Const(A), @Const(B), M::Int32, N::Int32, K::Int32,
+function gemm_cm2!(
+        C, A, B, M::Int32, N::Int32, K::Int32,
         ::Val{BM}, ::Val{BN}, ::Val{BK}, ::Val{UNROLL} = Val(false),
         ::Val{CM} = Val(TENSOR_CLAMP_CONSTANT)) where {BM,BN,BK,UNROLL,CM}
     WM = WorkgroupMatrix
-    grp = @index(Group, NTuple)
-    m0 = Int32((grp[1] - 1) * BM)
-    n0 = Int32((grp[2] - 1) * BN)
+    grp = KI.get_group_id()
+    m0 = Int32((grp.x - 1) * BM)
+    n0 = Int32((grp.y - 1) * BN)
 
     # A 2-D layout over a column-major Julia `(r, c)` array, whose tensor is
     # `(c, r)` with strides `(r, 1)`.
@@ -218,6 +218,7 @@ loads and one `coopmat_muladd` over matrices that span all `NT` invocations.
     else
         tensor_store(acc, UInt64(pointer(C)), olay)
     end
+    return nothing
 end
 
 """
@@ -238,7 +239,7 @@ Each subgroup owns a `4x4` block of `16x16` accumulators — 128 fp32 a lane, th
 same as the staged kernel — and loads four A-fragments and four B-fragments per
 k-step to feed sixteen products. That ratio is the whole point of register
 blocking, and it is unchanged; what changes is that the fragments come from
-global memory through a tensor layout instead of from `@localmem` after a staging
+global memory through a tensor layout instead of from workgroup memory after a staging
 pass and two barriers.
 
 **What it gives up** is the sharing that shared memory buys: with `NW` subgroups
@@ -248,19 +249,19 @@ The bet is that L2 covers it, which is exactly the bet a measurement settles.
 Clamped, unconditionally, because that is the fast path on this driver — see
 the ablation above, where the unclamped layout cost 2.8x.
 """
-@kernel cpu=false unsafe_indices=true function gemm_cm2_sg!(
-        C, @Const(A), @Const(B), M::Int32, N::Int32, K::Int32,
+function gemm_cm2_sg!(
+        C, A, B, M::Int32, N::Int32, K::Int32,
         ::Val{NW}) where {NW}
     T = GEMM_TILE                       # 16
     RB = 4                              # register block, a literal for `@nexprs`
     AM = AcceleratedMatrix
-    tid = @index(Local, Linear) - 1
+    tid = KI.get_local_id().x - 1
     w = Int32(tid ÷ 32)                 # this invocation's subgroup
-    grp = @index(Group, NTuple)
+    grp = KI.get_group_id()
     # The workgroup covers `RB*T` of M and `NW*RB*T` of N; subgroup `w` takes the
     # w-th slice of the N axis.
-    m0 = Int32((grp[1] - 1) * (RB * T))
-    n0 = Int32((grp[2] - 1) * (NW * RB * T)) + w * Int32(RB * T)
+    m0 = Int32((grp.x - 1) * (RB * T))
+    n0 = Int32((grp.y - 1) * (NW * RB * T)) + w * Int32(RB * T)
 
     lay(r, c, o0, o1, n0, n1) =
         tensor_slice(
@@ -296,6 +297,7 @@ the ablation above, where the unclamped layout cost 2.8x.
             tensor_store(acc_i_j, UInt64(pointer(C)), olay)
         end
     end
+    return nothing
 end
 
 """

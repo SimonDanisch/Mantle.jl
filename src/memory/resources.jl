@@ -285,6 +285,21 @@ persistentarray(dev, ::Type{T}, dims::Dims) where {T} =
              align = 256, blocksize = blocksize(dev),
              constraint = bufferusage(dev, T))
 
+"""
+A resource's leaf is its REGION, not the device it was allocated on.
+
+`holdleaves!`'s generic walker is documented as being for "a plain Julia value
+tree", and a `Buffer` is not one: it carries `dev` so it can free itself, and
+walking that reaches the `VkContext` and the `Vulkan.Instance`, whose
+`destructor` captures the `Instance` back. `DeviceArray`'s own method stops the
+other route into the driver; this one stops this route.
+
+Holding the store is also the right answer on the merits. What a launch must
+keep alive is the memory its commands name, and that is the region; the device
+outlives every resource on it by construction.
+"""
+@inline holdleaves!(holder, r::Union{Buffer,GPURef}) = holdleaves!(holder, r.store)
+
 Base.length(b::Buffer) = b.len
 Base.size(b::Buffer) = size(b.store)
 # The per-dimension form, which `Base` gives an `AbstractArray` for free and a
@@ -292,6 +307,35 @@ Base.size(b::Buffer) = size(b.store)
 # indexes a fixed number of axes works on a resource of any rank.
 Base.size(b::Buffer, d::Integer) = d <= ndims(b) ? size(b)[d] : 1
 Base.ndims(::Buffer{T,N}) where {T,N} = N
+# Element-wise verbs forward to the region. A `Buffer` is a container of `len`
+# elements of `T` — it answers `size`, `length` and `eltype` — so a caller that
+# has one should not have to reach for `storage` to write to it.
+Base.fill!(b::Buffer, v) = (fill!(storage(b), v); b)
+# `similar` answers a BUFFER, not a bare array: the allocation verb on a
+# resource should give back the same kind of thing, owned by the same `free!`.
+Base.similar(b::Buffer{T,N}) where {T,N} = Buffer(b.dev, T, size(b))
+Base.similar(b::Buffer, ::Type{T}) where {T} = Buffer(b.dev, T, size(b))
+Base.similar(b::Buffer{T}, dims::Dims) where {T} = Buffer(b.dev, T, dims)
+Base.similar(b::Buffer, ::Type{T}, dims::Dims) where {T} = Buffer(b.dev, T, dims)
+# The varargs spellings too, which is how most callers write it.
+Base.similar(b::Buffer{T}, dims::Integer...) where {T} = Buffer(b.dev, T, Dims(dims))
+Base.similar(b::Buffer, ::Type{T}, dims::Integer...) where {T} = Buffer(b.dev, T, Dims(dims))
+# `reshape` and `view` answer an ARRAY while `similar` answers a `Buffer`, and
+# the difference is the point: both of the first two are a second reading of the
+# SAME bytes and own nothing, while `similar` allocates and must be freed.
+#
+# `view` here is `Base.view` and has nothing to do with Mantle's `ResourceView`,
+# which is a descriptor a PASS binds — a different function with a different
+# name, reached only through `viewfor`.
+Base.reshape(b::Buffer, dims::Dims) = reshape(storage(b), dims)
+Base.reshape(b::Buffer, dims::Integer...) = reshape(storage(b), dims)
+Base.view(b::Buffer, I...) = view(storage(b), I...)
+# `Base.strides`, which is NOT Mantle's own `stride` below — that one answers
+# "elements to advance per index" for a binding and is a different question
+# with a confusingly similar name. A dense region's strides are its shape's.
+Base.strides(b::Buffer) = strides(storage(b))
+Base.copyto!(dst::Buffer, src) = (copyto!(storage(dst), src); dst)
+Base.copyto!(dst::AbstractArray, src::Buffer) = copyto!(dst, storage(src))
 Base.length(::GPURef) = 1
 # `stride` zero means "one value shared by every element", so a `GPURef` and a
 # per-element `Buffer` take the same shader path and the same pipeline — see

@@ -97,9 +97,10 @@ end
 A draw the GPU wrote, laid out as `VkDrawIndirectCommand`: same four `UInt32`
 fields in the same order, so a buffer of these is one.
 
-    @kernel function finish!(cmds, counter)
+    function finish!(cmds, counter)
         @inbounds cmds[1] = DrawIndirectCommand(counter[1] * UInt32(36),
                                                 UInt32(1), UInt32(0), UInt32(0))
+        return nothing
     end
 
 `firstinstance` other than zero needs the `drawIndirectFirstInstance` feature; it

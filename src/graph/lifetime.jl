@@ -286,6 +286,18 @@ function holdleaves! end
 
 @inline holdleaves!(holder, a::AbstractArray) = (hold!(holder, a); nothing)
 
+# `DeviceArray` is NOT an `AbstractArray` — it is a region and a shape — so the
+# method above does not cover it, and without this one the generic walker below
+# treats it as an ordinary struct and descends: `region` -> `block` -> `memory`
+# -> `buffer` -> `Vulkan.Device` -> `PhysicalDevice` -> `Instance`, whose
+# `destructor` field is a closure that captures the `Instance`. That is a value
+# CYCLE and the walk does not terminate; it surfaced as a `StackOverflowError`
+# 53320 frames deep from a `KI.Kernel` launch handed a `Mantle.Buffer`.
+#
+# It is also the leaf by the docstring's own rule: this walk "names no driver",
+# and a device array is precisely where the driver starts.
+@inline holdleaves!(holder, a::DeviceArray) = (hold!(holder, a); nothing)
+
 @generated function holdleaves!(holder, x::Tuple)
     Expr(:block, Expr[:(holdleaves!(holder, x[$i])) for i in 1:fieldcount(x)]..., :(nothing))
 end

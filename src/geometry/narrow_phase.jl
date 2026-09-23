@@ -55,7 +55,7 @@ const NO_CONTACT = EPAResult(Vec3f(0f0, 0f0, 0f0), 0f0, Vec3f(0f0, 0f0, 0f0), 0,
 """
     narrow_phase_kernel(transforms, pairs, shape, results)
 
-`KernelAbstractions.@kernel`: one thread per pair index `k`.  Reads
+a plain kernel over `KernelInterface`'s intrinsics: one thread per pair index `k`.  Reads
 `pairs[k] = (i, j)` (1-based indices into `transforms`), looks up the row-
 major 3x4 transforms `T_A = transforms[i]` and `T_B = transforms[j]`, runs
 `gjk(shape, shape, T_A, T_B)`.  If GJK reports overlap, runs `epa(...)` and
@@ -84,12 +84,12 @@ Element types:
 """
 # Keeps its CPU variant: `test_narrow_phase_kernel.jl` is a GPU-vs-CPU parity
 # test and `cpu=false` deletes the side it compares against.
-@kernel function narrow_phase_kernel(
-        @Const(transforms),
-        @Const(pairs),
+function narrow_phase_kernel(
+        transforms,
+        pairs,
         shape,
         results)
-    k = @index(Global)
+    k = KI.get_global_id().x
     @inbounds pair = pairs[k]
     i = pair[1]
     j = pair[2]
@@ -101,6 +101,7 @@ Element types:
     else
         @inbounds results[k] = NO_CONTACT
     end
+    return nothing
 end
 
 """
@@ -141,14 +142,14 @@ Element types:
 - `max_contacts`: `Int32`.
 """
 # Same as `narrow_phase_kernel`: `test_narrow_phase_contacts.jl` runs it on CPU.
-@kernel function narrow_phase_contacts_kernel(
-        @Const(transforms),
-        @Const(pairs),
+function narrow_phase_contacts_kernel(
+        transforms,
+        pairs,
         shape,
         counters,
         contacts,
         max_contacts::Int32)
-    k = @index(Global)
+    k = KI.get_global_id().x
     @inbounds pair = pairs[k]
     i = pair[1]
     j = pair[2]
@@ -176,4 +177,5 @@ Element types:
             end
         end
     end
+    return nothing
 end

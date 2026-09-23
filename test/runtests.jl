@@ -1328,6 +1328,12 @@ if _VULKAN_OK
                 include(joinpath(VULKAN_TESTS, "test_gemv.jl"))
             end
 
+            # Two kernels that differ in nothing an argument type can see. The
+            # `gemv` family above is what found this; see the file.
+            @testset "a launch plan is keyed on its kernel" begin
+                include(joinpath(VULKAN_TESTS, "test_launch_plan_key.jl"))
+            end
+
 
             @testset "coopmat shape query" begin
                 include(joinpath(VULKAN_TESTS, "test_coopmat_shape.jl"))

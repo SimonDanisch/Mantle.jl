@@ -146,17 +146,26 @@ Does `f` BUILD a kernel for `backend`, or is it one already?
 
 `@kernel` generates a constructor: `f(backend)` returns the launchable object,
 which is what `kernelfor` calls. A macro-free kernel is the function itself and
-has no such method, so the question is exactly `hasmethod(f, Tuple{backend})`.
-The two cannot be told apart by `isa Function`, because the macro generates a
-function too.
+has no such method. The two cannot be told apart by `isa Function`, because the
+macro generates a function too.
+
+**`hasmethod(f, Tuple{typeof(backend)})` is NOT the question, though it was.** A
+macro-free kernel that takes exactly one argument — `rngadvance_kernel!(state)`
+— answers that yes, and the access walk then tried to construct it, reaching
+`MethodError: no method matching rngadvance_kernel!(::LavaBackend, ::Int64)`
+from inside `kernelfor`. What actually distinguishes them is WHERE the methods
+come from: `@kernel` generates its constructors in KernelAbstractions' own
+`macros.jl`, and nothing else in either package does.
 
 One predicate, in core, because this is a decision about what a dispatch MEANS
 and not about any backend's machinery: Lava's `compile_dispatch`, the ROCm
-extension and `bake` below all ask it here, and a caller that does not ask is a
-`MethodError: no method matching ew2!(::CPU)` on the host. Deletes itself with
-the last `@kernel`.
+extension, `bake` below and `runlaunches!` all ask it here, and a caller that
+does not ask is a `MethodError: no method matching ew2!(::CPU)` on the host.
+Deletes itself with the last `@kernel`.
 """
-buildskernel(f, backend) = hasmethod(f, Tuple{typeof(backend)})
+buildskernel(f, backend) =
+    hasmethod(f, Tuple{typeof(backend)}) &&
+    any(m -> occursin("KernelAbstractions", String(m.file)), methods(f))
 
 """
     kibackend(dev) -> backend
