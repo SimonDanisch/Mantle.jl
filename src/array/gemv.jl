@@ -125,6 +125,17 @@
 "Generated K-contiguous GEMV kernels, keyed by (NROWS, BLOCK, SUB). Compiled once each."
 const GEMV_KERNELS = Dict{Tuple{Int,Int,Int},Any}()
 
+# Lava names a workgroup buffer `lava_shared_$Id` and that name is the whole of
+# its identity, so an id is unique to a BUFFER, not to a buffer within a kernel.
+# Every generated kernel here asked for `Val(1)`: the `nrows = 4` kernel wants 8
+# floats and the `nrows = 8` kernel 16, and once both had been compiled the
+# wider one was silently handed the narrower one's global — half its partials
+# landed nowhere and half the outputs came back at whatever `fill!` left. It
+# reproduced only when both kernels had run, which is what made it look like a
+# launch bug for an afternoon.
+const SHARED_ID = Ref(0)
+nextsharedid!() = (SHARED_ID[] += 1)
+
 """
     gemv_kcontig_kernel(NROWS, BLOCK, SUB) -> kernel
 
@@ -146,14 +157,14 @@ function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
         # whatever it was.
         nsub = cld(BLOCK, SUB)
         kname = Symbol("gemvk_", NROWS, "_", BLOCK, "_", SUB)
+        shid = nextsharedid!()
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kname(
-                    C, @Const(A), @Const(B), K::Int, N::Int)
+            function $kname(C, A, B, K::Int, N::Int)
                 # one partial per (subgroup, output column)
-                parts = @localmem Float32 ($(NROWS * nsub),)
+                parts = KI.localmemory(Float32, Val(($(NROWS * nsub),)), Val($shid))
 
-                tid = @index(Local, Linear) - 1
-                grp = @index(Group, Linear) - 1
+                tid = KI.get_local_id().x - 1
+                grp = KI.get_group_id().x - 1
                 n0 = grp * $NROWS
                 # The HARDWARE's subgroup width, not 32. `sub_group_reduce_add`
                 # below reduces over whatever the device actually uses, so
@@ -198,7 +209,7 @@ function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
                         parts[sub * $NROWS + r] = red_r
                     end
                 end
-                @synchronize
+                KI.barrier()
                 @inbounds if tid < $NROWS
                     n = n0 + tid + 1
                     if n <= N
@@ -209,6 +220,7 @@ function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
                         C[n] = t
                     end
                 end
+                return nothing
             end
             $kname
         end
@@ -261,13 +273,14 @@ function gemv_ncontig_kernel(TM::Int, BLOCK::Int, UNROLL::Int)
         ispow2(ng) || throw(ArgumentError(
             "gemv: BLOCK/TM = $ng must be a power of two for the reduction tree"))
         kname = Symbol("gemvn_", TM, "_", BLOCK, "_", UNROLL)
+        shid = nextsharedid!()
         # Built rather than written: `@nexprs` gives the accumulators, and their
         # final sum has to name all `UNROLL` of them in one expression.
         accsum = Expr(:call, :+, (Symbol("acc_", u) for u in 1:UNROLL)...)
         # …and the tree is unrolled here rather than written as a loop, so that
-        # every `@synchronize` sits at the kernel's top level. A `@synchronize`
-        # inside a loop is uniform here and would probably be fine; "probably
-        # fine" is not what barriers are for.
+        # every `KI.barrier()` sits at the kernel's top level. A barrier inside a
+        # loop is uniform here and would probably be fine; "probably fine" is not
+        # what barriers are for.
         tree = Expr(:block)
         let s = ng ÷ 2
             while s > 0
@@ -276,18 +289,17 @@ function gemv_ncontig_kernel(TM::Int, BLOCK::Int, UNROLL::Int)
                         @inbounds parts[kg * $TM + tm + 1] +=
                             parts[(kg + $s) * $TM + tm + 1]
                     end
-                    @synchronize
+                    KI.barrier()
                 end)
                 s ÷= 2
             end
         end
         @eval begin
-            @kernel cpu=false unsafe_indices=true function $kname(
-                    C, @Const(W), @Const(x), @Const(bias), epi, M::Int, K::Int)
-                parts = @localmem Float32 ($BLOCK,)
+            function $kname(C, W, x, bias, epi, M::Int, K::Int)
+                parts = KI.localmemory(Float32, Val(($BLOCK,)), Val($shid))
 
-                tid = @index(Local, Linear) - 1
-                grp = @index(Group, Linear) - 1
+                tid = KI.get_local_id().x - 1
+                grp = KI.get_group_id().x - 1
                 tm = tid % $TM
                 kg = tid ÷ $TM
                 m = grp * $TM + tm + 1
@@ -308,13 +320,14 @@ function gemv_ncontig_kernel(TM::Int, BLOCK::Int, UNROLL::Int)
                     end
                 end
                 @inbounds parts[kg * $TM + tm + 1] = $accsum
-                @synchronize
+                KI.barrier()
                 $tree
                 @inbounds if kg == 0 && m <= M
                     t = parts[tm + 1]
                     bias === nothing || (t += Float32(bias[m]))
                     C[m] = epi(t)
                 end
+                return nothing
             end
             $kname
         end
@@ -398,8 +411,11 @@ function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::Ab
     nr = nrows === nothing ? pn : nrows
     bl = block === nothing ? pb : block
     kern = gemv_kcontig_kernel(nr, bl, subgroupwidth(B))
-    k = Base.invokelatest(kern, backend)     # `@eval`ed: world age, both halves
-    Base.invokelatest(k, C, A, B, K, N;
+    # `KI.Kernel(backend, f)` and not `f(backend)`: the kernel is a plain
+    # function now, so there is no constructor to call and the backend is
+    # carried beside it. `invokelatest` for the same reason as before — the
+    # function is `@eval`ed on demand, so it can be newer than this method.
+    Base.invokelatest(KI.Kernel(backend, kern), C, A, B, K, N;
                       ndrange = cld(N, nr) * bl, workgroupsize = bl)
     return C
 end

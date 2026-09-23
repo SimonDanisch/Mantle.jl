@@ -17,9 +17,14 @@
 """
 One kernel launch, chosen but not yet submitted.
 
-`group` is the workgroup size, or `0` for a kernel that carries its own in its
-type (KernelAbstractions' `@kernel` with a static size). `ndrange` is whatever
-the launching side accepts: a count, a tuple of them, or a `DeviceRange`.
+`group` is the workgroup size, or `0` to let the backend pick one from the
+`ndrange`. `ndrange` is whatever the launching side accepts: a count, a tuple of
+them, or a `DeviceRange`.
+
+A kernel here is a plain function over `KernelInterface`'s intrinsics, so it is
+launched as `KI.Kernel(backend, kern)` and declared by handing the same function
+to `dispatch!`. There is no kernel object carrying a workgroup size in its type,
+which is why `group` is the only place one can come from.
 """
 struct ArrayLaunch{K,A}
     kern::K
@@ -42,9 +47,24 @@ runs for tens of microseconds.
 """
 function runlaunches!(backend, launches)
     for l in launches
-        k = l.group == 0 ? Base.invokelatest(l.kern, backend) :
-                           Base.invokelatest(l.kern, backend, l.group)
-        Base.invokelatest(k, l.args...; ndrange = l.ndrange)
+        # MIGRATION SHIM. A plain function over `KernelInterface`'s intrinsics is
+        # launched as `KI.Kernel(backend, f)`; a `@kernel` is its own constructor
+        # and answers `kern(backend)` with the object to call. `applicable` asks
+        # exactly which one this is — a plain kernel function takes its operands,
+        # not a backend — and the branch goes away with the last `@kernel`.
+        if applicable(l.kern, backend)
+            k = l.group == 0 ? Base.invokelatest(l.kern, backend) :
+                               Base.invokelatest(l.kern, backend, l.group)
+            Base.invokelatest(k, l.args...; ndrange = l.ndrange)
+        else
+            k = KI.Kernel(backend, l.kern)
+            if l.group == 0
+                Base.invokelatest(k, l.args...; ndrange = l.ndrange)
+            else
+                Base.invokelatest(k, l.args...; ndrange = l.ndrange,
+                                  workgroupsize = l.group)
+            end
+        end
     end
     return nothing
 end
