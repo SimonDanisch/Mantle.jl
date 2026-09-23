@@ -60,8 +60,16 @@ end
     # a third of the time. That is inherent to the failure, not a weakness of
     # the check — and it is why the bug survived so long in renders. Eight
     # independent rounds bring the miss probability under a thousandth.
+    # `src` is dead the moment its address is baked — nothing below mentions it, and
+    # a raw address is not a reference the collector can see. Without this the
+    # `GC.gc(true)` two lines down frees the very buffer `table` points at, and all
+    # eight rounds read zeros: the test was measuring use-after-free and any pass was
+    # luck. Residency does not root anything, and is not meant to — Metal.jl drops a
+    # freed allocation back out of the set (`drop_from_residency!`), and a caller that
+    # bakes an address is required to keep the array alive. Raycore's `store_texture`
+    # does exactly that with its texture table.
     ok = trues(8)
-    for round in 1:8
+    GC.@preserve src for round in 1:8
         for _ in 1:16
             junk = Metal.zeros(Float32, 4 * 1024 * 1024)
             junk .= 1f0
