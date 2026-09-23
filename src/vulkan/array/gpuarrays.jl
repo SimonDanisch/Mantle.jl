@@ -233,9 +233,9 @@ Base.mapreducedim!(f, op::REDUCERS, R::LavaArray{T, N},
 #
 # Raising the *workgroup* instead does nothing (64 and 256 measure the same); the
 # ceiling is the device's `maxComputeWorkGroupInvocations`, see `DeviceCaps`.
-@kernel cpu=false function lava_broadcast_flat!(dest, bc, n, ::Val{U}, ::Val{WG}) where {U, WG}
-    l = @index(Local, Linear)
-    g = @index(Group, Linear)
+function lava_broadcast_flat!(dest, bc, n, ::Val{U}, ::Val{WG}) where {U, WG}
+    l = KI.get_local_id().x
+    g = KI.get_group_id().x
     base = (g - 1) * (WG * U) + l
     @inbounds for u in 0:(U - 1)
         I = base + u * WG
@@ -243,6 +243,7 @@ Base.mapreducedim!(f, op::REDUCERS, R::LavaArray{T, N},
             dest[I] = bc[I]
         end
     end
+    return nothing
 end
 
 """
@@ -276,10 +277,10 @@ access with `n` themselves, so the tail threads simply do nothing.
     return wg, Val(u), wg * cld(n, wg * u)
 end
 
-@kernel cpu=false function lava_broadcast_flat_cartesian!(dest, bc, sz, n,
+function lava_broadcast_flat_cartesian!(dest, bc, sz, n,
                                                           ::Val{U}, ::Val{WG}) where {U, WG}
-    l = @index(Local, Linear)
-    g = @index(Group, Linear)
+    l = KI.get_local_id().x
+    g = KI.get_group_id().x
     base = (g - 1) * (WG * U) + l
     @inbounds for u in 0:(U - 1)
         I = base + u * WG
@@ -288,13 +289,14 @@ end
             dest[J] = bc[J]
         end
     end
+    return nothing
 end
 
 """Destination dense, source not: index `dest` linearly and only `bc` by index."""
-@kernel cpu=false function lava_broadcast_flat_mixed!(dest, bc, sz, n,
+function lava_broadcast_flat_mixed!(dest, bc, sz, n,
                                                       ::Val{U}, ::Val{WG}) where {U, WG}
-    l = @index(Local, Linear)
-    g = @index(Group, Linear)
+    l = KI.get_local_id().x
+    g = KI.get_group_id().x
     base = (g - 1) * (WG * U) + l
     @inbounds for u in 0:(U - 1)
         I = base + u * WG
@@ -302,6 +304,7 @@ end
             dest[I] = bc[CartesianIndex(cart32(UInt32(I) - UInt32(1), sz))]
         end
     end
+    return nothing
 end
 
 # ── the permuted-copy path is bandwidth-bound, not index-bound ───────────────
@@ -413,7 +416,7 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
         probe_broadcast!(:flat, dest, bc)
         flat = Broadcast.instantiate(flat1(bc))
         d1 = reshape(dest, n)
-        lava_broadcast_flat!(backend)(d1, Broadcast.preprocess(d1, flat), n, u, Val(wg);
+        KI.Kernel(backend, lava_broadcast_flat!)(d1, Broadcast.preprocess(d1, flat), n, u, Val(wg);
                                       ndrange = nd, workgroupsize = wg)
         return dest
     end
@@ -425,15 +428,15 @@ function GPUArrays._copyto!(dest::AnyLavaArray, bc::Broadcast.Broadcasted;
     sz = broadcastextents(size(dest); fastdiv)
     if linear
         probe_broadcast!(:linear1d, dest, bc)
-        lava_broadcast_flat!(backend)(dest, bc, n, u, Val(wg);
+        KI.Kernel(backend, lava_broadcast_flat!)(dest, bc, n, u, Val(wg);
                                       ndrange = nd, workgroupsize = wg)
     elseif IndexStyle(dest) === IndexLinear()
         probe_broadcast!(:mixed, dest, bc)
-        lava_broadcast_flat_mixed!(backend)(dest, bc, sz, n, u, Val(wg);
+        KI.Kernel(backend, lava_broadcast_flat_mixed!)(dest, bc, sz, n, u, Val(wg);
                                             ndrange = nd, workgroupsize = wg)
     else
         probe_broadcast!(:cartesian, dest, bc)
-        lava_broadcast_flat_cartesian!(backend)(dest, bc, sz, n, u, Val(wg);
+        KI.Kernel(backend, lava_broadcast_flat_cartesian!)(dest, bc, sz, n, u, Val(wg);
                                                 ndrange = nd, workgroupsize = wg)
     end
     return dest
@@ -608,7 +611,7 @@ function Base.fill!(a::LavaArray{T}, val) where T
     # landed on the wrong queue, the array read back as zeros, and Lava's own
     # cross-context guard caught it later as "a buffer was last used on a channel
     # from a DIFFERENT VkContext" — a long way from the cause.
-    k = fill_kernel!(KernelAbstractions.get_backend(a))
+    k = KI.Kernel(KernelAbstractions.get_backend(a), fill_kernel!)
     k(a, v; ndrange=length(a))
     return a
 end
