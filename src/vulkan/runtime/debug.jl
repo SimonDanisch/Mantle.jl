@@ -54,6 +54,16 @@ worker task and the main task polls `ctx.validation.messages` until either the
 expected message appears or the timeout expires. On success, the function
 calls `reset_device!` to clear the half-flushed batch state.
 """
+# Top level: a kernel is compiled by its function, so this cannot be a closure
+# minted inside the probe below.
+function _lava_gpuav_check_kernel!(out, bad_idx::Int)
+    i = KI.get_global_id().x
+    if i == 1
+        @inbounds out[bad_idx] = Int32(0xBAD)
+    end
+    return nothing
+end
+
 function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     if !ctx.gpu_assisted
         throw(LavaError("verify_gpu_av",
@@ -65,12 +75,6 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     dev = ctx.device
     clear_validation_messages!()
     arr = LavaArray{Int32,1}(undef, (16,); bq)
-    @kernel inbounds = true function _lava_gpuav_check_kernel!(out, bad_idx::Int)
-        i = @index(Global)
-        if i == 1
-            out[bad_idx] = Int32(0xBAD)
-        end
-    end
     # Write FAR past the (pool-disabled) dedicated 64-byte buffer — 400 KB out,
     # so the faulting address lies outside EVERY tracked VkBuffer range.  GPU-AV's
     # BufferDeviceAddressPass flags a store only when its address is within *no*
@@ -79,8 +83,8 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     # 4 KB probe gave a false negative on the RTX 4000 Ada for exactly this
     # reason.)
     bad_idx = 100_000
-    k = _lava_gpuav_check_kernel!(LavaBackend(), 1)
-    Base.invokelatest(k, arr, bad_idx; ndrange=4)
+    Base.invokelatest(KI.Kernel(LavaBackend(), _lava_gpuav_check_kernel!),
+                      arr, bad_idx; ndrange=4, workgroupsize=1)
     # GPU-AV surfaces the violation only after the host waits for the dispatch
     # to complete (the layer reads back the instrumented error log in its
     # post-wait hook, then invokes our debug callback).  Drive that readback

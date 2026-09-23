@@ -23,6 +23,7 @@ suite made of the shapes a GEMM is fast at is a suite that cannot find this.
 
 using Test, Lava, DNNKernels, KernelAbstractions
 const KA = KernelAbstractions
+import KernelInterface
 
 "Relative error of `matmul!` against a Float32 CPU reference, over a slice."
 function gemmerr(backend, ws, M, N, K; staged::Bool, withbias::Bool, gemmkw...)
@@ -73,9 +74,12 @@ function stagedcount(backend, cfg, K; blocks = 2,
     B = KA.allocate(backend, Float16, K, N); fill!(B, one(Float16))
     C = KA.allocate(backend, Float16, M, N); fill!(C, Float16(-1))
     wg = Mantle.gemm_wg(cfg)
-    kernels[cfg](backend, wg)(
+    # `KI.Kernel(backend, f)`: these kernels are plain functions over
+    # `KernelInterface`'s intrinsics, so there is no constructor to call.
+    KernelInterface.Kernel(backend, kernels[cfg])(
         C, A, B, nothing, identity, Val(M), Val(N), Val(K);
-        ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg)
+        ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg,
+        workgroupsize = wg)
     KA.synchronize(backend)
     g = Float32.(Array(C))
     (correct = all(==(Float32(K)), g), K = K, seen = sort(unique(g)))

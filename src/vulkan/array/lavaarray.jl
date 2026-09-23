@@ -112,24 +112,29 @@ LavaArray{T,N}(data::AbstractArray{S,N}; kw...) where {T,S,N} =
 
 # UniformScaling constructor (resolve ambiguity with GPUArrays inner constructor)
 import LinearAlgebra: UniformScaling
+
+# Top level, not inside the constructor below: a kernel is compiled by its
+# function, and a closure minted per call is a new function every time.
+function identity_kernel!(res, stride, val)
+    i = KI.get_global_id().x
+    ilin = (stride * (i - 1)) + i
+    if ilin <= length(res)
+        @inbounds res[ilin] = val
+    end
+    return nothing
+end
+
 function (::Type{LavaArray{T,N}})(s::UniformScaling, dims::Tuple{Int,Int}) where {T,N}
     res = similar(LavaArray{T,N}, dims)
     fill!(res, zero(T))
     isempty(res) && return res
-    @kernel cpu=false function identity_kernel!(res, stride, val)
-        i = @index(Global, Linear)
-        ilin = (stride * (i - 1)) + i
-        if ilin <= length(res)
-            @inbounds res[ilin] = val
-        end
-    end
     # `KA.get_backend(res)`, NOT `LavaBackend()`. An unpinned backend resolves
     # its queue through `vk_context()`, so on a second device this dispatches on
     # whichever context happens to be global — the work lands on the wrong GPU
     # and the buffer's own device never sees it. `get_backend` derives the
     # context from the array's buffer, which has always carried it.
-    kernel = identity_kernel!(KernelAbstractions.get_backend(res))
-    kernel(res, size(res, 1), T(s.λ); ndrange=minimum(dims))
+    KI.Kernel(KernelAbstractions.get_backend(res), identity_kernel!)(
+        res, size(res, 1), T(s.λ); ndrange=minimum(dims))
     return res
 end
 (::Type{LavaArray{T}})(s::UniformScaling, dims::Tuple{Int,Int}) where {T} =
