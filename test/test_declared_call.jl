@@ -141,3 +141,83 @@ end
 
     M.free!(pl)
 end
+
+# The call's DESTINATION in the arena, and an arena that moves underneath it.
+#
+# `bake` resolved a call's arguments once and froze them in an immutable `Call`.
+# That is fine until a second, larger plan is placed in the same arena: `reserve!`
+# acquires a fresh region, `remap!` re-materialises every transient into it and
+# `notify_move!` shifts every baked device address. A LAUNCH follows, because its
+# addresses live in argument memory the patch table covers. A call has no argument
+# memory, so the operands it held stayed pointed at the region the arena used to
+# have -- the call kept writing the old bytes while the dispatch reading its result
+# had moved to the new ones, and the reader saw whatever the second plan left there.
+#
+# Silent by construction: it needs two plans, in size order, in one process, with a
+# library call writing a transient. The existing growth test above it is exactly
+# this shape without the call, which is why it passed throughout.
+#
+# Found via Kokoro, whose text graph and vocoder share an arena: after the vocoder
+# ran once, the text graph returned 816 NaNs out of 30720 for the rest of the
+# process, and a held output stayed clean because outputs are owned rather than
+# placed.
+KernelAbstractions.@kernel function stepone!(dst, @Const(src))
+    i = @index(Global, Linear)
+    @inbounds dst[i] = src[i] + 1f0
+end
+
+@testset "a call's operands follow the arena — $(nameof(typeof(BE)))" begin
+    dev = M.Device(BE)
+    # A capability, not a backend: a device whose `run!` submits a command buffer
+    # it built cannot run a host call at all, and refuses at compile (above).
+    M.runscalls(dev) || return
+
+    n = 8
+    ah = Float32[i + j for i in 1:n, j in 1:n]
+    bh = Float32[i - 2j for i in 1:n, j in 1:n]
+    want = sum((ah * bh)[k, k] for k in 1:n)
+
+    A = M.Buffer(dev, ah)
+    B = M.Buffer(dev, bh)
+    tr = M.Buffer(dev, zeros(Float32, 1))
+
+    g = M.Graph(dev)
+    # The product is a TRANSIENT, so it is placed in the arena and moves with it.
+    prod = M.Transient.Buffer(g, Float32, n, n)
+    M.dispatch!(g, mul!, (prod, A, B); name = "gemm")
+    M.dispatch!(g, tracesum!, (tr, prod, n), 1; name = "trace")
+    small = M.record!(M.Plan(g))
+    M.run!(small)
+    M.waitidle(dev)
+    @test Array(M.storage(tr))[1] ≈ want
+
+    # Big enough that the region `small` sized cannot hold it.
+    before = M.pool(dev).arenas[M.Buffers()].bytes
+    g2 = M.Graph(dev)
+    seed = M.Buffer(dev, zeros(Float32, 1 << 18))
+    u1 = M.Transient.Buffer(g2, Float32, 1 << 18)
+    u2 = M.Transient.Buffer(g2, Float32, 1 << 18)
+    M.dispatch!(g2, stepone!, (u1, seed), 1 << 18; name = "x")
+    M.dispatch!(g2, stepone!, (u2, u1), 1 << 18; name = "y")
+    big = M.record!(M.Plan(g2))
+    # The premise of the rest of this testset: if the arena did not grow, nothing
+    # moved and a pass here would mean nothing.
+    @test M.pool(dev).arenas[M.Buffers()].bytes > before
+
+    M.run!(big)
+    M.waitidle(dev)
+
+    fill!(M.storage(tr), 0f0)
+    M.run!(small)
+    M.waitidle(dev)
+    @test Array(M.storage(tr))[1] ≈ want
+
+    # And it survives the two alternating, which is what a model that chains
+    # graphs through one arena actually does.
+    for _ in 1:5
+        M.run!(big)
+        M.run!(small)
+    end
+    M.waitidle(dev)
+    @test Array(M.storage(tr))[1] ≈ want
+end

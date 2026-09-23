@@ -252,12 +252,27 @@ callable-kernel convention, and it became unreachable the moment
 [`buildskernel`](@ref) started routing every non-`@kernel` to the
 KernelInterface path.
 """
-struct Call{F,A<:Tuple}
+struct Call{F,A<:Tuple,D}
     f::F
+    # The DECLARED arguments, not resolved ones. A plan bakes its launches once,
+    # but an arena is allowed to MOVE afterwards: a later, larger plan placed in
+    # the same arena grows it, `remap!` re-materialises every transient into the
+    # new region and `notify_move!` shifts every baked device address. A launch
+    # follows because its addresses live in argument memory the patch table
+    # covers; a call has no argument memory, so a resolved operand held here
+    # would be a device array over the region the arena USED to have. `record!`
+    # already refuses a kernel that closes over a device array, for this reason
+    # and in those words — freezing the operands here was the same mistake one
+    # level down.
+    #
+    # Nothing is lost by deferring it. `resolve` is `storage`, a field read, and
+    # the library on the other side of a call costs orders more than reading a
+    # pointer out of each operand.
     args::A
+    dev::D
 end
 
-(c::Call)() = (c.f(c.args...); nothing)
+(c::Call)() = (c.f(resolve(c.dev, c.args)...); nothing)
 argsize(::Call) = 0
 indirectindex(::Call) = 0
 devicesized(::Call) = false
@@ -276,7 +291,7 @@ function bake(c::Compile, d::Dispatch)
             "built as a command buffer, and a host call cannot be written into " *
             "one. Declare the operation as dispatches instead — on this backend " *
             "a GEMM is `coopmat_gemm!`, which records like any other dispatch."))
-        return Call(d.kernel, args)
+        return Call(d.kernel, d.args, dev)
     end
     # A `KI.Kernel` is callable with the same `ndrange`/`workgroupsize` keywords
     # a `KA.Kernel` is (KI's `Kernel` docstring states that contract), so the
