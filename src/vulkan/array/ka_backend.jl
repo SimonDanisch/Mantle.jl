@@ -745,7 +745,16 @@ Internal launch function for KA kernels. Compiles and dispatches the GPU functio
 
 @inline function launch_plan(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), all_args::Tuple,
                              wg::NTuple{3,Int}, ray_query::Bool)
-    key = typeof(all_args)
+    # The KERNEL is part of the key, not only its arguments. `typeof(all_args)`
+    # alone was enough while every kernel came from `@kernel`, whose launch puts
+    # a `CompilerMetadata` in `all_args[1]`. A macro-free `KernelInterface`
+    # kernel is a plain function and that slot is `nothing`, so two kernels with
+    # the same signature share one entry and the second is handed the first's
+    # pipeline. Mantle's own `gemv` generates exactly that: `gemvk_4_128_64` and
+    # `gemvk_8_128_64` take `(C, A, B, K::Int, N::Int)` at workgroup 128, and the
+    # 8-row launch ran the 4-row pipeline — half its outputs were never written
+    # and came back at whatever the caller had left in them.
+    key = Tuple{typeof(f), typeof(all_args)}
     world = Base.get_world_counter()
     # `ctxof(bq)`, and the assert is the whole point: the driver bundle's `ctx` is
     # declared `::Any` (it must be — `VkContext` owns the queue, so one direction
