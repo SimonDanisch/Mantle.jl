@@ -76,7 +76,12 @@ end
     Raycore.sync!(tlas)
 
     @test tlas.tri_gpu !== nothing
-    @test length(tlas.tri_gpu) == 0   # empty -- no triangles were passed
+    # Allocated, and holding no triangles — but ONE element long rather than
+    # zero. A trace binds this buffer whatever the scene holds, and a
+    # zero-length allocation has no device address to bind; see
+    # `_reuse_or_alloc`. The statement this case is making is that no triangles
+    # were PASSED, which is `isempty(tlas.instances[1].triangles)` above.
+    @test length(tlas.tri_gpu) <= 1
 
     @test tlas.off_gpu !== nothing
     @test length(tlas.off_gpu) == n   # still N entries, all zero

@@ -710,7 +710,7 @@ holding the address. A modelled plan does not come through here at all.
 """
 @inline function scratch!(owner::O, nbytes::Integer) where {O<:Closed}
     bq = queueof(owner)
-    @assert Threads.threadid() == bq.thread  "the submit channel is single-writer; cross-thread scratch alloc forbidden"
+    ownthread(bq)
     dev = lavadevice(ctxof(bq))
     r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE)

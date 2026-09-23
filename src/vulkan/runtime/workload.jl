@@ -85,15 +85,9 @@ function with_frozen_recording(f, version)
     end
 end
 
-"""
-    use_frozen_kernels(version)
-
-Read frozen entries written under `version`, without recording new ones.
-
-What a *using* package calls at load time — `__init__` is the natural place. The
-version has to match the one the workload froze under, which is why it belongs
-in a `const` both refer to.
-"""
+# This backend's answer to `Mantle.use_frozen_kernels`, declared in
+# `runtime/backendhooks.jl`: point the SPIR-V cache at `version` and read only.
+# The docstring is there, where every build can see it.
 function use_frozen_kernels(version)
     FROZEN_VERSION[] = string(version)
     FROZEN_RECORDING[] = false

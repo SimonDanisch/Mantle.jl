@@ -263,6 +263,7 @@ function Adapt.adapt_structure(to::Metal.Adaptor, accel::AdaptedAccel)
         Adapt.adapt(to, accel.offsets),
         accel.empty,
         Adapt.adapt(to, accel.scene),
+        Adapt.adapt(to, accel.procedural),
     )
 end
 

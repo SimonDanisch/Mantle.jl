@@ -96,6 +96,25 @@ Bind `textures` as one indexable table for a pipeline to sample from.
 """
 function bind_textures end
 
+"""
+    upload_texture_data!(texture, data)
+
+Write new pixels into an EXISTING texture.
+
+The portable verb for animating a texture, and the reason it exists rather than
+making a new one: a recorded draw bakes the descriptor set that names the image,
+so replacing the texture leaves the recording pointing at the old one. Writing
+into the image the set already names is what a frame actually sees.
+
+`data` must match the texture's `size` and `eltype` — ask with those before
+calling; a mismatch is a new texture, not an upload.
+
+!!! note
+    Backend implementations **must** implement it for their texture type, along
+    with `Base.size` and `Base.eltype`.
+"""
+function upload_texture_data! end
+
 # ── Render targets ────────────────────────────────────────────────────────────
 
 """

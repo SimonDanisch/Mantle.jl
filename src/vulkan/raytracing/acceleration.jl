@@ -184,24 +184,53 @@ const VulkanAccelBuildContext = AccelBuildContext{SubmitChannel{VulkanQueue{VkCo
 @inline as_vkctx(ctx::VulkanAccelBuildContext)   = ctxof(ctx.bq)
 
 """
-    build_blas(ctx::VulkanAccelBuildContext, vertices, indices; opaque=true) -> LavaBLAS
+    build_blas(ctx::VulkanAccelBuildContext, vertices, indices; opaque, allow_update) -> LavaBLAS
 
-Build a bottom-level acceleration structure. Records into `ctx`'s command buffer.
-Must be called inside `build_accel!()`.
+Build a bottom-level acceleration structure. Records into `ctx`'s command
+buffer, so it must be called inside `build_accel!()`.
+
+Given `LavaArray`s this builds from buffers that are ALREADY on the device.
+
+The `Vector` method below uploads its arguments and then uses nothing but their
+addresses — which is all an acceleration-structure build ever reads. So geometry
+a kernel just wrote goes straight in: no readback, no re-upload, and the
+triangles never exist on the host at all. That is what lets one device function
+feed both a mesh shader and a BLAS.
+
+Both buffers must carry `AS_INPUT_USAGE`, or the driver refuses to read them as
+build input.
 """
+function build_blas(ctx::VulkanAccelBuildContext,
+                    vertices::LavaArray{NTuple{3,Float32},1},
+                    indices::LavaArray{UInt32,1};
+                    opaque::Bool=true, allow_update::Bool=false)
+    return build_blas_from_addresses(ctx, vertices, indices,
+                                     bda_address(vertices), bda_address(indices),
+                                     length(vertices), length(indices);
+                                     opaque, allow_update)
+end
+
 function build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Float32}}, indices::Vector{UInt32};
                     opaque::Bool=true, allow_update::Bool=false)
     bq = ctx.bq
-    dev = as_device(ctx)
-
-    # Upload vertex/index data to device-local buffers (LavaArrays).
+    # Upload vertex/index data to device-local buffers (LavaArrays), then hand
+    # the shared implementation their addresses — which is all it needs.
     vertex_arr = LavaArray(collect(reinterpret(UInt8, vertices)); bq, extra_usage=AS_INPUT_USAGE)
     index_arr  = LavaArray(collect(reinterpret(UInt8, indices));  bq, extra_usage=AS_INPUT_USAGE)
-    vertex_addr = vertex_arr.buf[].address
-    index_addr  = index_arr.buf[].address
+    return build_blas_from_addresses(ctx, vertex_arr, index_arr,
+                                     vertex_arr.buf[].address, index_arr.buf[].address,
+                                     length(vertices), length(indices);
+                                     opaque, allow_update)
+end
 
-    n_triangles = UInt32(length(indices) ÷ 3)
-    max_vertex = UInt32(length(vertices) - 1)
+function build_blas_from_addresses(ctx::VulkanAccelBuildContext, vertex_arr, index_arr,
+                                   vertex_addr::UInt64, index_addr::UInt64,
+                                   nvertices::Integer, nindices::Integer;
+                                   opaque::Bool=true, allow_update::Bool=false)
+    bq = ctx.bq
+    dev = as_device(ctx)
+    n_triangles = UInt32(nindices ÷ 3)
+    max_vertex = UInt32(nvertices - 1)
 
     vfmt = UInt32(VK.FORMAT_R32G32B32_SFLOAT)
     vstride = UInt64(sizeof(NTuple{3,Float32}))

@@ -24,6 +24,8 @@ won, and the second draw silently rendered with the wrong state.
 pipeline_state_key(p::GraphicsPipeline) =
     (typeof(p), p.vertex, p.fragment, p.geometry, p.tess_control)
 
+pipeline_state_key(p::MeshPipeline) = (typeof(p), p.mesh, p.fragment, p.object)
+
 """Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
                               vert_fn, frag_fn, tt_vertex, tt_fragment;
@@ -102,6 +104,56 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     return compiled
 end
 
+"""
+The mesh-pipeline half of [`ensure_compiled_with_shader!`](@ref).
+
+Returns the MESH stage's shader as the first element, for the same reason the
+classic one returns the vertex stage's: it is the stage the argument block is
+laid out to unless the fragment stage takes arguments of its own.
+"""
+function ensure_compiled_with_shader!(pipeline::MeshPipeline,
+                              mesh_fn, frag_fn, tt_mesh, tt_fragment;
+                              ctx::VkContext,
+                              color_format=VK.FORMAT_B8G8R8A8_SRGB,
+                              depth_format=VK.FORMAT_UNDEFINED,
+                              descriptor_set_layout=nothing)
+    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline), ctx)
+    compiled = ensure_compiled!(pipeline, mesh_fn, frag_fn, tt_mesh, tt_fragment;
+        ctx, color_format, depth_format, descriptor_set_layout)
+    return mesh, compiled
+end
+
+function ensure_compiled!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_fragment;
+                              color_format=VK.FORMAT_B8G8R8A8_SRGB,
+                              depth_format=VK.FORMAT_UNDEFINED,
+                              descriptor_set_layout=nothing,
+                              ctx::VkContext)
+    pipeline.object === nothing || throw(ArgumentError(
+        "ensure_compiled!: this pipeline has an object stage, and the Vulkan " *
+        "backend dispatches its mesh threadgroups from the host. The task stage " *
+        "is what an object stage lowers onto here, and nothing emits one yet."))
+    cache_key = hash((mesh_fn, frag_fn, tt_mesh, tt_fragment, color_format, depth_format,
+                       pipeline_state_key(pipeline), descriptor_set_layout !== nothing))
+    cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
+    cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
+
+    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline), ctx)
+    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment; ctx)
+
+    # No `topology`: a mesh stage has no input stream to assemble, and what it
+    # EMITS is an execution mode of its own entry point rather than pipeline
+    # state — `MeshConfig` carries it and the compile above reads it there.
+    compiled = create_graphics_pipeline(nothing, frag.spirv_bytes;
+        ctx, mesh_spirv=mesh.spirv_bytes,
+        blend=pipeline.blend, cull=pipeline.cull, depth=pipeline.depth,
+        color_format=color_format, depth_format=depth_format,
+        push_constant_size=max(mesh.push_info.push_size, frag.push_info.push_size),
+        descriptor_set_layout=descriptor_set_layout)
+
+    ctx.caches.gfx_pipelines[cache_key] = compiled
+    return compiled
+end
+
 function get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol;
                             config=nothing, ctx::VkContext)
     key = hash((f, tt, stage, config))
@@ -148,6 +200,24 @@ function resolve_shader_pair(pipeline, vert_tt::Type, frag_tt::Type)
 end
 
 """
+The mesh and fragment callables of a [`MeshPipeline`](@ref), and their type
+tuples.
+
+Same shape as the classic pair so every caller — `compile_draw`, the graph's
+`compiledraw`, `vertextouches` — stays one function. The mesh stage needs no
+output type parameter: it writes its varyings by name and the numbering follows
+declaration order, so only the CONSUMER has to be told what it is reading, and
+`stageoutputs(p.mesh)` is what tells it.
+"""
+function resolve_shader_pair(pipeline::MeshPipeline, mesh_tt::Type, frag_tt::Type)
+    vout = Mantle.outputtype(pipeline.mesh)
+    flats = Mantle.flatoutputs(pipeline.mesh)
+    wrapped_mesh = MeshWrapper{typeof(Mantle.stagefunction(pipeline.mesh))}()
+    wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout, flats}()
+    return wrapped_mesh, mesh_tt, wrapped_frag, frag_tt
+end
+
+"""
 The geometry stage, wrapped: the vertex stage's outputs are what the primitive
 arrays, the geometry stage's own outputs are what an emit writes, and the input
 topology says how many vertices a primitive has.
@@ -165,76 +235,11 @@ function geometrystage(pipeline::GraphicsPipeline, cfg)
                            Mantle.primitivevertices(cfg.input_topology)}()
 end
 
-"""
-    draw!(pipeline::GraphicsPipeline, target::RenderTarget, vertex_count;
-          args=(), frag_args=(), instances=1,
-          clear_color=(0f0, 0f0, 0f0, 1f0))
-
-Draw using the given graphics pipeline to the render target.
-Device-side type tuples are inferred automatically from args.
-"""
-function draw!(bq::SubmitChannel{<:VulkanQueue}, pipeline::GraphicsPipeline, target::WindowTarget, vertex_count::Integer;
-               args=(), frag_args=(), instances::Integer=1,
-               clear_color::Union{Nothing, NTuple{4, Float32}}=(0.0f0, 0.0f0, 0.0f0, 1.0f0))
-    win = target.window
-
-    converted_vert = convert_args(args)
-    converted_frag = convert_args(frag_args)
-    vert_tt = typeof(converted_vert)
-    frag_tt = typeof(converted_frag)
-
-    vert_fn, vert_tt, frag_fn, frag_tt = resolve_shader_pair(pipeline, vert_tt, frag_tt)
-
-    # A window target has no depth attachment, so the pipeline must not declare one.
-    vert_shader, compiled = ensure_compiled_with_shader!(pipeline,
-        vert_fn, frag_fn, vert_tt, frag_tt;
-        ctx = win.ctx, color_format=win.format, depth_format=VK.FORMAT_UNDEFINED)
-
-    view = win.views[win.current_image_idx + 1]
-    image = win.images[win.current_image_idx + 1]
-
-    oneshot!(bq; tag = :draw) do e
-        push_data = isempty(args) ? UInt8[] : pack_gfx_args(e.owner, args, vert_shader.push_info)
-        vk_draw!(e, compiled, view, image, win.extent, vertex_count;
-            push_data, instances, clear_color)
-    end
-    return nothing
-end
-
-function draw!(bq::SubmitChannel{<:VulkanQueue}, pipeline::GraphicsPipeline, target::OffscreenTarget, vertex_count::Integer;
-               args=(), frag_args=(), instances::Integer=1,
-               clear_color::Union{Nothing, NTuple{4, Float32}}=(0.0f0, 0.0f0, 0.0f0, 1.0f0),
-               depth_clear::Union{Nothing, Float32}=1.0f0,
-               descriptor_set_layout=nothing,
-               descriptor_set=nothing)
-    fb = target.fb
-
-    converted_vert = convert_args(args)
-    converted_frag = convert_args(frag_args)
-    vert_tt = typeof(converted_vert)
-    frag_tt = typeof(converted_frag)
-
-    vert_fn, vert_tt, frag_fn, frag_tt = resolve_shader_pair(pipeline, vert_tt, frag_tt)
-
-    vert_shader, compiled = ensure_compiled_with_shader!(pipeline,
-        vert_fn, frag_fn, vert_tt, frag_tt;
-        ctx = fb.ctx, color_format=fb.color_format,
-        depth_format=fb.depth_view === nothing ? VK.FORMAT_UNDEFINED : fb.depth_format,
-        descriptor_set_layout)
-
-    oneshot!(bq; tag = :draw) do e
-        push_data = isempty(args) ? UInt8[] : pack_gfx_args(e.owner, args, vert_shader.push_info)
-        vk_draw!(e, compiled, fb.color_view, fb.color_image,
-            VK.Extent2D(UInt32(fb.width), UInt32(fb.height)),
-            vertex_count;
-            push_data, instances,
-            depth_view=fb.depth_view,
-            depth_image=fb.depth_image,
-            depth_clear,
-            clear_color, descriptor_set)
-    end
-    return nothing
-end
+# `draw!(device, pipeline, target, count)` is CORE's — `src/graphics/record.jl`.
+# Two methods stood here and did their own image transitions, their own
+# `vkCmdBeginRendering` and their own bind through `vk_draw!`, sharing nothing
+# with `begin_pass!`/`record_draw!`. That is why they never learned mesh
+# pipelines and why their barrier logic had to be fixed a second time.
 
 """
     pack_gfx_args_bda(owner, args, push_info) -> UInt64
@@ -387,3 +392,9 @@ end
 # default, so this is the opt-in and Metal's silence is its answer.
 Mantle.supports_geometry_stage(::LavaBackend) = true
 Mantle.supports_tessellation(::LavaBackend) = true
+
+# Unlike the two above, this one is a property of the DEVICE rather than of the
+# backend: `VK_EXT_mesh_shader` is an extension, and the geometry chain is still
+# the only front end on hardware without it. Answered from the live context's
+# probe, the way `supportspredicate` answers for conditional rendering.
+Mantle.supports_mesh_pipeline(::LavaBackend) = vk_context().mesh_shader_available

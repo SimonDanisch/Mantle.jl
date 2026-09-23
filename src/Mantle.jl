@@ -37,10 +37,11 @@ using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
 using KernelInterface: vertex_index, instance_index, frag_coord, frag_coord_x,
     frag_coord_y, frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy,
     set_point_size!, sample_texture_2d, emit_vertex!, end_primitive!,
-    primitive_id_in, clip_y
+    primitive_id_in, clip_y, discard
 export vertex_index, instance_index, frag_coord, frag_coord_x, frag_coord_y,
     frag_coord_z, frag_coord_w, frag_coord_xy, dFdx, dFdy, set_point_size!,
-    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y
+    sample_texture_2d, emit_vertex!, end_primitive!, primitive_id_in, clip_y,
+    discard
 # The vertex index a body can be HANDED instead of asking for. Exported because a
 # shader declares the parameter, and `graphics/lowering.jl` is what passes one —
 # a mesh stage has no `vertex_index()` to call.
@@ -167,6 +168,7 @@ include("sync/usage.jl")      # ResourceKind, which backend.jl dispatches on
 include("sync/backend.jl")
 include("sync/transition.jl")
 include("runtime/backends.jl")
+include("runtime/backendhooks.jl")  # declared here, answered in vulkan/ or metal/
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("memory/array.jl")    # names `Device` and `backend`, both from api.jl
@@ -255,29 +257,9 @@ include("graph/build.jl")
 # and Metal backends; Vulkan records commands instead and overrides it.
 include("graph/kalaunch.jl")
 
-"""
-    apair(loader, A, m, k, lda) -> NTuple{2,VecElement{Float16}}
-
-The staged kernels' whole A-operand read: the pair `A[m, k]`, `A[m+1, k]`, with
-`m` zero-based and even and `lda` the leading dimension. `nothing` is a plain
-column-major matrix and is what every GEMM passes.
-
-**The hook exists so a convolution does not have to materialise im2col.** The
-matrix a 3x3 convolution multiplies is nine times its own input, and building it
-costs a write plus a read of that. A loader that reads the image where the kernel
-would have read the matrix removes the buffer, the pass that fills it and that
-traffic, and changes nothing else about the schedule.
-
-Declared HERE rather than beside the GEMM that consumes it, because this is a
-hook other packages add methods to: `DNNKernels`' convolution gathers through it
-unconditionally, and while it lived in `src/vulkan/array/gemm.jl` the name simply
-did not exist on a machine that loads a different backend — `UndefVarError:
-apair not defined in Mantle` at DNNKernels' precompile, on every Mac. What a
-caller may extend belongs above the backend split; only the kernels that read
-through it are Vulkan's.
-"""
-@inline apair(::Nothing, A, m, k, lda) =
-    @inbounds (VecElement(A[1 + m + k * lda]), VecElement(A[2 + m + k * lda]))
+# `apair` is declared in `src/array/indexing.jl`, with the other portable array
+# helpers. It is a hook callers extend, so it has to exist above the backend
+# split; the constants below are here for the same reason.
 
 """
 The GEMM blocking a plane has to fill before per-plane routing is worth it.
@@ -354,11 +336,14 @@ export RenderTarget
 # backend is loaded — see `graphics/resources.jl` for why each is one or the
 # other, and which three turned out portable outright.
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
+export upload_texture_data!
+export argidentity
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, ExternalImage
 # A submission channel and what a submission holds — 2.2 and 2.3. `hold!` is what
 # `pin!` meant, with the lifetime owned by core instead of by a backend.
 export SubmitChannel, channelof, deviceof, hold!, oneshot!, acquire!, Submission
+export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
@@ -402,6 +387,10 @@ export MeshPipeline, meshconfig, objectconfig
 export supports_mesh_pipeline
 # The shader builtins are KernelInterface's, imported and re-exported above.
 export RayTracingPipeline, AdaptedAccel
+# The procedural-geometry protocol: a scene implements these to put geometry
+# that is not triangles into the traversal. See `raytracing/accel.jl`.
+export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
+export candidate_primitive_index, candidate_object_ray, commit_intersection!
 
 # Hardware ray tracing.
 export build_accel!, refit_tlas!, set_anyhit_pipeline!
@@ -449,6 +438,7 @@ export indexbuffer
 # names the type; `supportspredicate` because a caller may want to pick between
 # `repeat!` and a host loop rather than be thrown at.
 export repeat!, Predicate, supportspredicate
+export kernelcompiles, resetkernelcompiles!
 export Dispatch, DeviceRange, countresource, indirectcount!, passof, graphof, touch!
 export newpass, handle, dispatches
 export IdTable, resourceid, byid, checklive

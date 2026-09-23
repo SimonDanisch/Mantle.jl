@@ -259,6 +259,25 @@ is declared as dispatches there instead.
 runscalls(::Device) = false
 
 """
+    kernelcompiles(device) -> (; hits, misses)
+    resetkernelcompiles!(device)
+
+How many kernel launches this device served from its compiled-kernel cache, and
+how many had to compile.
+
+A portable question with a per-backend answer: every backend compiles something
+— SPIR-V here, MSL on Metal — and "did this frame compile a kernel" is what a
+startup-latency test asks. It lives here so a caller asks the RUNTIME rather
+than reaching past it into whichever compiler that backend happens to use; the
+editor's precompile test is the caller that used to.
+
+Zero misses on a warm path is the property worth testing. A backend with no such
+cache reports zeros, which reads as "nothing compiled" and is true.
+"""
+kernelcompiles(::Device) = (; hits = 0, misses = 0)
+resetkernelcompiles!(::Device) = nothing
+
+"""
     librarygemm(device, out, A, B, bias, epilogue) -> callable or nothing
 
 Return a backend library call that computes `out = epilogue.(A * B .+ bias)`,
@@ -397,20 +416,22 @@ native_attention_dispatch!(::Device, graph, out, q, k, v; scale, name) = false
 """
     patchable(device) -> Bool
 
-Whether a moved address can be written INTO this backend's recording, or whether
-the recording has to be thrown away and made again.
+Whether a moved address can be written INTO this backend's already-baked work,
+or whether that work has to be thrown away and made again.
 
 `true` by default, which is the Vulkan answer and the one the pool's move path
 assumed outright: a recorded command holds a device address as eight bytes in
-the plan's argument memory, so `notify_move!` queues a patch and the recording
-survives. `false` is a backend whose recording is opaque — a captured HIP graph
-holds its kernel arguments where only `hipGraphExecKernelNodeSetParams` could
-reach them, and capture does not hand back the node handles that would need.
-Such a plan is [`invalidate!`](@ref)d instead, and the next `run!` records it
-again before it submits.
+the plan's argument memory, so `notify_move!` queues a patch and both the
+recording and the launches that read it survive. `false` is a backend whose
+baked work names the old storage in a form nothing can reach: a captured HIP
+graph holds its kernel arguments where only `hipGraphExecKernelNodeSetParams`
+could, and capture does not hand back the node handles that would need — and
+the host backend, whose `bake` resolved each launch into a `Vector` view over
+the block that moved. Such a plan is [`invalidate!`](@ref)d and marked for the
+recompile `refit!` does before the next `run!` submits.
 
 Asked rather than assumed for the reason [`deviceaddress`](@ref) replaced
-`resource_moved!`: a backend that cannot patch and is never asked is a recording
+`resource_moved!`: a backend that cannot patch and is never asked is a plan
 that quietly keeps reading the old storage. The images-arena path invalidates
 rather than patches, and this is the same fact as a property of the BACKEND
 rather than of one arena kind.
@@ -791,6 +812,11 @@ const BACKEND_VOCABULARY = (
     :initbackend!,
     # for humans: which GPU this is
     :devicename,
+    # What core asks a backend OUTSIDE the graph — `runtime/backendhooks.jl`,
+    # which says why they are declarations rather than names a caller sniffs for
+    # with `isdefined`. Listed here because this is the enumerated surface a
+    # backend may add a method to, and they are two more of it.
+    :use_frozen_kernels, :staged_gemm_tile,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
     :bestshape,
@@ -840,6 +866,11 @@ const BACKEND_VOCABULARY = (
     # A declaration and not a hook with a default answer: `nothing` means
     # undeclared, which the walk refuses rather than guesses about.
     :intrinsic_usage,
+    # Its sibling for a CALLABLE with no body on this side — a library handle a
+    # backend hands to a fused op (hipBLASLt's bias epilogue). Same rule: the
+    # accesses walk refuses what nothing declares, so the backend that owns the
+    # handle type is the one that says what it does.
+    :argument_usage,
     # What core asks a backend's OWN compiled dispatch — the type
     # `compile_dispatch` returned. Core answers it for its own
     # `CompiledDispatch`, `Launch` and `Call`, so a backend that reuses those
@@ -861,13 +892,18 @@ const BACKEND_VOCABULARY = (
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitbarriers!, :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
-    :profiled!, :collect!, :argument_usage,
+    # `argument_usage` is NOT repeated here: it is listed once above, with the
+    # reason it is a declaration rather than a hook. A second entry changed no
+    # behaviour but counted twice in `test_mantle_owns_it.jl`'s 0.8 ratchet, which
+    # walks this list and pushes one name per entry.
+    :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
     :recordsplans, :runscalls, :librarygemm, :native_gemm_available,
     :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :native_attention_dispatch!,
+    :kernelcompiles, :resetkernelcompiles!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submitting ONE baked piece, and giving one back that will never be
     # submitted. Core owns the sequence a partition makes of them

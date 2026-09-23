@@ -165,6 +165,12 @@ const GEMM_TILINGS = GemmTiling[
     (1, 1, 2, 4, 32, 8),    #  32 x  64, 8 warps — one tile per warp, widest reach
 ]
 
+# This backend's answer to `Mantle.staged_gemm_tile`, declared in
+# `runtime/backendhooks.jl`. Beside the table it is a claim about, so a build
+# that loses the table loses the claim with it, rather than beside the
+# `@static include` that decides whether either exists.
+staged_gemm_tile() = GEMM_TILE
+
 """
 ## Sixteen subgroups do NOT transfer to this kernel (RDNA 3.5, 2026-09-18)
 
@@ -355,6 +361,30 @@ const GEMM_DOUBLEBUF_DEFAULT = false
 """Whether 4-wide (64-bit) staging is the default. **Off until measured** — same
 rule as `GEMM_DOUBLEBUF_DEFAULT`, and the same reason."""
 const GEMM_VEC4_DEFAULT = false
+
+"""Whether the narrow-index (`Int32` staging address) kernels may be selected.
+
+**On, and they are the CORRECT ones.** Measured 2026-09-22 on RADV NAVI31
+against `ones * ones = K`, which is exact in fp16 at these K and needs no host
+reference to argue with:
+
+    shape                narrow / prefetch      wide (`GEMM_STAGED_V2_KERNELS`)
+     576 x 4096 x 576    0 wrong of 2.36M       2.36M wrong of 2.36M
+    2304 x 4096 x 576    0 wrong of 9.44M       9.44M wrong of 9.44M
+    1024 x 1152 x 288    0 wrong of 1.18M       1.18M wrong of 1.18M
+
+So `test_gemm_staged.jl`'s "the narrow-index kernel agrees with the wide one"
+is a real disagreement reported against the wrong side, and the GPUVM fault it
+takes the device down with belongs to the wide kernel writing outside its
+allocation — it surfaces on whatever submits next, which is the narrow call
+after it.
+
+The wide vec2 kernel had no other caller: `vec2 = false` selects the scalar
+staged family and `vec2 = true` selects a narrow one whenever `gemm_fits32`
+holds, which is every shape in this repo. That is how it stayed broken — its
+only exercise was a test that compared it to something and blamed the
+something."""
+const GEMM_NARROW_DEFAULT = true
 
 @inline function gemm_tiling(M::Int, N::Int, K::Int; forced = nothing)
     # A forced tiling still has to divide the shape. Skipping that check makes a
@@ -2387,7 +2417,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        # process.
                        staged::Bool = GEMM_STAGED_DEFAULT,
                        vec2::Bool   = true,
-                       narrow_ok::Bool = true,
+                       narrow_ok::Bool = GEMM_NARROW_DEFAULT,
                        prefetch::Bool = true,
                        doublebuf::Bool = GEMM_DOUBLEBUF_DEFAULT,
                        vec4::Bool = GEMM_VEC4_DEFAULT,
@@ -2424,6 +2454,12 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
         # for B, `M*N` for the store. Far outside anything this repo runs — the
         # largest is 18.9M against a 2.1e9 limit — but it is a silent wrong
         # answer rather than an error if it is ever not, so it is checked.
+        #
+        # The FALLBACK below it — the wide vec2 kernel a shape too large for
+        # `gemm_fits32` lands on — is itself wrong; see `GEMM_NARROW_DEFAULT`.
+        # Nothing in this repo reaches it (the largest index formed here is
+        # 18.9M against a 2.1e9 limit), which is why it is a bug and not an
+        # outage, but a shape that did would get garbage.
         narrow = narrow_ok && gemm_fits32(M, N, K)
         if aload !== nothing
             narrow || throw(ArgumentError("coopmat_gemm!: a loader needs 32-bit \

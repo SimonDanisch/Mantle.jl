@@ -575,6 +575,11 @@ attachment_format(t) = eltype(t)
 landhost!(r::GPURef{T}, ptr::Ptr{T}) where {T} = (update!(r, unsafe_load(ptr)); nothing)
 landhost!(b::Buffer, data::AbstractVector, from::Integer) =
     (update!(b, from:(from + length(data) - 1), data); nothing)
+# A transient's storage is the arena slice the placer gave it, which on a
+# KernelAbstractions backend is an array over the slab — so the write is the
+# copy, in place, with no staging to route it through.
+landhost!(t::TransientBuffer, data::AbstractVector, from::Integer) =
+    (copyto!(view(storage(t), from:(from + length(data) - 1)), data); nothing)
 
 """
     run!(plan)
@@ -734,7 +739,8 @@ struct StoreEmitter{E}
     e::E
 end
 (s::StoreEmitter)(r::GPURef{T}, ptr::Ptr{T}) where {T} = emitstore!(s.e, r, ptr)
-(s::StoreEmitter)(b::Buffer, data::AbstractVector, from::Integer) = emitstore!(s.e, b, data, from)
+(s::StoreEmitter)(b::Union{Buffer,TransientBuffer}, data::AbstractVector, from::Integer) =
+    emitstore!(s.e, b, data, from)
 
 """
     emitstore!(emitter, ref, ptr)
@@ -748,9 +754,19 @@ element offset, which is all a backend is asked to carry: `storebytes!`.
 """
 emitstore!(e, r::GPURef{T}, ptr::Ptr{T}) where {T} =
     storebytes!(e, r.store, 0, Ptr{Cvoid}(ptr), sizeof(T))
-function emitstore!(e, b::Buffer{T}, data::AbstractVector{T}, from::Integer) where {T}
+emitstore!(e, b::Buffer{T}, data::AbstractVector{T}, from::Integer) where {T} =
+    storefrom!(e, b.store, data, from)
+# A transient names ITSELF as the target and not `storage(t)`: the backend needs
+# the block to name the buffer a copy writes into, and an array view over it has
+# dropped that (see the note on the struct's `block`).
+emitstore!(e, t::TransientBuffer{T}, data::AbstractVector{T}, from::Integer) where {T} =
+    storefrom!(e, t, data, from)
+
+"""The bytes of one store, at an element offset into whatever the backend was
+handed. Shared by both `emitstore!` methods, which differ only in the target."""
+function storefrom!(e, target, data::AbstractVector{T}, from::Integer) where {T}
     src = data isa Vector{T} ? data : collect(data)
-    GC.@preserve src storebytes!(e, b.store, (Int(from) - 1) * sizeof(T),
+    GC.@preserve src storebytes!(e, target, (Int(from) - 1) * sizeof(T),
                                  Ptr{Cvoid}(pointer(src)), length(src) * sizeof(T))
     return nothing
 end

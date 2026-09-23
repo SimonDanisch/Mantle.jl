@@ -105,3 +105,37 @@ function staticgroup(sz::Dims{N}, target::Int = 256) where {N}
     end
     return ntuple(d -> w[d], Val(N))
 end
+
+"""
+    apair(loader, A, m, k, lda) -> GemmV2
+
+The staged kernels' whole A-operand read: the pair `A[m, k]`, `A[m+1, k]`, with
+`m` zero-based and even and `lda` the leading dimension. `nothing` is a plain
+column-major matrix and is what every GEMM passes.
+
+**The hook exists so a convolution does not have to materialise im2col.** The
+matrix a 3x3 convolution multiplies is nine times its own input, and building it
+costs a write plus a read of that: for the Qwen-Image VAE's `288 -> 288` over
+1024x1024 the operand is 5.4 GB against a 0.6 GB image, and measured against the
+GEMM's own rate on the same shape it is 85 ms of a 168 ms convolution. A loader
+that reads the image where the kernel would have read the matrix removes the
+buffer, the pass that fills it and that traffic, and changes nothing else about
+the schedule. This is llama.cpp's `conv2d_mm.comp`, which gathers its B operand
+out of the image inside the k-loop for the same reason.
+
+The pair is along `m`, which for a convolution is the pixel axis, so the two
+elements are adjacent output pixels and normally adjacent input pixels too.
+
+Only `GEMM_STAGED_GATHER_KERNELS` takes a loader today; see the note there.
+
+**Declared here, in portable code, and not beside the kernel that calls it.**
+`src/vulkan/` is `@static include`d — on a Mac `src/metal/` is loaded instead
+and nothing in `src/vulkan/` exists. A loader is written by the CALLER, and a
+caller extends `Mantle.apair` at top level, so defining it beside the Vulkan
+kernel made `DNNKernels` fail to PRECOMPILE on any platform without Vulkan
+rather than simply decline the path at runtime. Every other Vulkan-only name
+that caller uses sits inside a function body and resolves lazily; this one did
+not.
+"""
+@inline apair(::Nothing, A, m, k, lda) =
+    @inbounds (VecElement(A[1 + m + k * lda]), VecElement(A[2 + m + k * lda]))
