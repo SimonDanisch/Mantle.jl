@@ -371,16 +371,18 @@ struct Predicate
 end
 
 """The gate for `repeat!(…, count)`: this iteration runs while `i <= count[]`."""
-@kernel function gate_count!(pred, count, i::Int32)
+function gate_count!(pred, count, i::Int32)
     @inbounds pred[1] = Predicate(i <= Int32(count[1]) ? UInt32(1) : UInt32(0))
+    return nothing
 end
 
 """The gate for `repeat!(…; while_nonzero)`: this iteration runs while it is set.
 
 Re-read every iteration, so a body that empties the thing it is draining stops
 the loop, and one that refills it carries on."""
-@kernel function gate_nonzero!(pred, flag)
+function gate_nonzero!(pred, flag)
     @inbounds pred[1] = Predicate(flag[1] != 0 ? UInt32(1) : UInt32(0))
+    return nothing
 end
 
 """

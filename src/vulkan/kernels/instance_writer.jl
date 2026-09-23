@@ -26,14 +26,14 @@ One thread per grain. Reads `positions[i]` and `quats[i]`, writes two
 Both records share the same transform: rotation from `quats[i]`, uniform
 scale `radius`, translation `positions[i]`. Custom index = `i - 1`.
 """
-@kernel cpu=false function write_grain_instances_kernel(
-        @Const(positions),
-        @Const(quats),
+function write_grain_instances_kernel(
+        positions,
+        quats,
         radius::Float32,
         aabb_blas_addr::UInt64,
         tri_blas_addr::UInt64,
         instances)
-    i = @index(Global)
+    i = KI.get_global_id().x
     @inbounds p = positions[i]
     @inbounds q = quats[i]
     rot9 = quat_to_rot3x3(q)
@@ -45,4 +45,5 @@ scale `radius`, translation `positions[i]`. Custom index = `i - 1`.
     sof = UInt32(0)  # sbt_offset = 0, flags = 0
     @inbounds instances[2i - 1] = VulkanInstanceRecord(T, cim_phys, sof, aabb_blas_addr)
     @inbounds instances[2i]     = VulkanInstanceRecord(T, cim_rend, sof, tri_blas_addr)
+    return nothing
 end
