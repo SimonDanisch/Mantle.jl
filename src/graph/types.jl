@@ -715,6 +715,10 @@ mutable struct Plan{D,H<:Tuple}
     # So it is deferred: `run!` calls `refit!` every frame, and this is what
     # tells it to.
     replaced::Bool
+    # Whether the plan has been torn down, so an explicit `free!` and the
+    # finalizer that `Plan` attaches cannot both do it. Last, because the
+    # constructor is positional and everything above it is passed by `Plan`.
+    @atomic freed::Bool
 end
 
 """

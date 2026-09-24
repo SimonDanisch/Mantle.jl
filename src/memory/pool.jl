@@ -361,10 +361,27 @@ struct Pool
     # codebase does not do. Nothing else about the pool changes it — a region
     # acquired or released inside an existing block does not move any block.
     blockgen::Base.RefValue{Int}
+    # Plans dropped without a `free!`, waiting for a thread that may tear one
+    # down. A plan's teardown is NOT finalizer-safe — it unlistens from
+    # `movelisteners` and destroys a command buffer — so its finalizer appends
+    # here, which is the same trade `pending` makes for regions: the GC thread
+    # says what is no longer wanted and the owning thread decides when.
+    #
+    # `Any` rather than `Vector{Plan}`: `Plan` is declared in `graph/types.jl`,
+    # which this file precedes.
+    pendingplans::Vector{Any}
     lock::ReentrantLock
 end
 Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
-              Region[], Region[], UInt64[], WeakRef[], Ref(0), ReentrantLock())
+              Region[], Region[], UInt64[], WeakRef[], Ref(0), Any[], ReentrantLock())
+
+"""
+    retireplan!(pool, pl)
+
+Take a dropped plan, from a finalizer. Appends under the lock and does nothing
+else; [`reclaim!`](@ref) tears it down on the owning thread.
+"""
+retireplan!(p::Pool, pl) = (lock(() -> push!(p.pendingplans, pl), p.lock); nothing)
 
 arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 
@@ -701,6 +718,17 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
     # bytes per call, and this runs in `run!` — which allocates nothing.
     lock(p.lock)
     try
+        # Plans first: tearing one down retires ITS regions, so doing it here
+        # means they join this same pass rather than waiting for the next one.
+        # `free!` is idempotent, so a plan that was explicitly freed and then
+        # collected costs a flag read.
+        if !isempty(p.pendingplans)
+            plans = copy(p.pendingplans)
+            empty!(p.pendingplans)
+            for pl in plans
+                free!(pl)
+            end
+        end
         if !isempty(p.pending)
             f = fence(dev)
             for r in p.pending

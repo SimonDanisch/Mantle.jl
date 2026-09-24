@@ -1000,6 +1000,10 @@ if _VULKAN_OK
             # …and survives a branch: `when!` records every branch once and the
             # run submits only the pieces its conditions ask for.
             include(joinpath(VULKAN_TESTS, "test_when.jl"))
+            # Forgetting `free!` is not a leak: every persistent resource and
+            # every plan carries a finalizer, and the release happens on the
+            # owning thread at the next `reclaim!`.
+            include(joinpath(VULKAN_TESTS, "test_dropped_resources.jl"))
             # The point of all of the above: `run!` of a recorded plan, with
             # nothing pending, allocates zero bytes.
             include(joinpath(VULKAN_TESTS, "test_run_allocates_nothing.jl"))

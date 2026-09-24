@@ -1453,13 +1453,20 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
                           alias, coalesce, policy,
                           makeargmemory(g.dev, c.passes), nothing, 0,
                           Dict{UInt64,Vector{Tuple{Any,Int}}}(),
-                          Tuple{Any,Int,UInt64}[], hw, false, false)
+                          Tuple{Any,Int,UInt64}[], hw, false, false, false)
             # After construction, because a plan cannot be a tenant before it is a
             # plan — and the arena it was just placed into may grow for the NEXT
             # plan, which is when this registration earns its keep.
             for ar in a.arenas
                 tenant!(pool(g.dev), ar, pl)
             end
+            # A plan dropped without a `free!` gives its arenas, its argument
+            # memory and its recording back on its own. Tearing one down is not
+            # finalizer-safe — it unlistens from the pool's move listeners and
+            # destroys a command buffer — so this hands it to the pool and
+            # `reclaim!` does the work on the owning thread, which `run!` calls
+            # every submission.
+            finalizer(p -> retireplan!(pool(p.graph.dev), p), pl)
             pl
         end
     end
@@ -1641,6 +1648,11 @@ No precondition: the regions are retired, so a plan freed immediately after its
 last `run!` — the ordinary case, with its recording still in flight — is fine.
 """
 function free!(pl::Plan)
+    # At most once: a plan that is explicitly freed and then collected must not
+    # give the same regions back twice, and the CAS is what makes `free!`
+    # optional rather than required.
+    _, won = @atomicreplace pl.freed false => true
+    won || return pl
     # The recording too, and before the regions: it holds a command buffer, a
     # descriptor set per acceleration structure it binds, and a reference to
     # every resource its commands name. Dropping the plan alone would leave all

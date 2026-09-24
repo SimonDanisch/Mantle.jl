@@ -37,11 +37,17 @@ mutable struct Buffer{T,N} <: Resource
     pending::Vector{Tuple{UnitRange{Int},Vector{T}}}
     pendinglock::ReentrantLock
     @atomic dirty::Bool
+    # Whether the region has been handed back, so the finalizer and an explicit
+    # `free!` cannot both do it. See [`retireonce!`](@ref).
+    @atomic retired::Bool
 end
 
-Buffer{T,N}(store, len::Int, capacity::Int, dev) where {T,N} =
-    Buffer{T,N}(store, len, capacity, dev, Tuple{UnitRange{Int},Vector{T}}[],
-                ReentrantLock(), false)
+function Buffer{T,N}(store, len::Int, capacity::Int, dev) where {T,N}
+    b = Buffer{T,N}(store, len, capacity, dev, Tuple{UnitRange{Int},Vector{T}}[],
+                    ReentrantLock(), false, false)
+    finalizer(retireonce!, b)
+    return b
+end
 
 """
     GPURef(dev, x) -> GPURef{T}
@@ -74,10 +80,14 @@ mutable struct GPURef{T} <: Resource
     pending::Base.RefValue{T}
     @atomic seq::UInt64
     @atomic dirty::Bool
+    @atomic retired::Bool
 end
 
-GPURef{T}(store, dev) where {T} =
-    GPURef{T}(store, dev, Base.RefValue{T}(), UInt64(0), false)
+function GPURef{T}(store, dev) where {T}
+    r = GPURef{T}(store, dev, Base.RefValue{T}(), UInt64(0), false, false)
+    finalizer(retireonce!, r)
+    return r
+end
 
 """
     upload!(dev, dst::DeviceArray, first, data)
@@ -587,24 +597,50 @@ function Base.resize!(b::Buffer{T,1}, n::Integer) where {T}
 end
 
 """
+    retireonce!(r::Buffer) / retireonce!(r::GPURef)
+
+Hand the region back, at most once, from anywhere — including a finalizer.
+
+The CAS is the whole of it: a resource that is dropped AND explicitly freed
+retires once, and the second caller is a no-op. Without it the same region could
+be pushed onto `pending` twice and handed to two owners, which is worse than
+leaking it.
+
+`retire!` is the only thing this calls, and it appends under a lock and does
+nothing else — no free list, no driver, nothing a GC thread may not touch. The
+release itself is [`reclaim!`](@ref), on the owning thread.
+"""
+function retireonce!(r::Union{Buffer,GPURef})
+    _, won = @atomicreplace r.retired false => true
+    won || return nothing
+    retire!(pool(r.dev), r.dev, region(r.store))
+    return nothing
+end
+
+"""
     free!(r::Buffer) / free!(r::GPURef)
 
-Give a persistent resource's region back to the pool.
+Give a persistent resource's region back to the pool, now rather than whenever
+the GC gets to it.
 
-**No precondition.** The region is RETIRED, not released: it goes back on a free
-list only once [`passed`](@ref) says the device is finished with it, which
-[`reclaim!`](@ref) checks. So there is no "the GPU must be idle" rule to get
-wrong, and no reason for a caller to reach for a synchronize first, which is
-one more place to forget.
+**Optional.** Every `Buffer` and `GPURef` carries a finalizer that does exactly
+this, so a resource that is simply dropped comes back on its own and forgetting
+`free!` is not a leak. What calling it buys is timing: the region is retired at
+a point you chose, which matters when the next allocation is large and you would
+rather not wait for a GC to notice.
 
-Still explicit, and still never called for you: skipping it is a leak the pool
-can report. Using the resource afterwards is what it always was — the region may
-already belong to somebody else.
+**No precondition either way.** The region is RETIRED, not released: it goes back
+on a free list only once [`passed`](@ref) says the device is finished with it,
+which [`reclaim!`](@ref) checks. So there is no "the GPU must be idle" rule to
+get wrong, and no reason to reach for a synchronize first.
+
+Using the resource afterwards is what it always was — the region may already
+belong to somebody else.
 
 One method for both because they are one thing, a region and a length, and a
 caller that owns a mix should not have to remember which is which.
 """
-free!(r::Union{Buffer,GPURef}) = (retire!(pool(r.dev), r.dev, region(r.store)); nothing)
+free!(r::Union{Buffer,GPURef}) = retireonce!(r)
 
 """
     devicecopy!(dev, dst::DeviceArray, src::DeviceArray, n)
