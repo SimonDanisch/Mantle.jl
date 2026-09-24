@@ -1321,12 +1321,19 @@ for f in METAL_BUILTINS
 end
 Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 
+# Screen-space derivatives. `air.dfdx.f32`/`air.dfdy.f32` -- see
+# `Metal/src/device/intrinsics/graphics.jl` for where those names come from.
+Metal.@device_override KI.dFdx(v::Float32) = Metal.dfdx(v)
+Metal.@device_override KI.dFdy(v::Float32) = Metal.dfdy(v)
+
+# Throwing a fragment away. `air.discard_fragment` -- same file, same provenance
+# as the derivatives. Returns nothing and does not terminate the shader, which
+# is what `KI.discard`'s contract promises and what MSL does.
+Metal.@device_override KI.discard() = Metal.discard_fragment()
+
 # What Metal does NOT have, and says so rather than leaving a MethodError for a
 # shader compile to find:
 #
-#   `dFdx`/`dFdy`          Metal.jl exposes no derivative intrinsic yet; MSL
-#                          has `dfdx`/`dfdy`, so this is a gap in the binding
-#                          rather than in the hardware.
 #   `set_point_size!`      needs `[[point_size]]` on the stage output struct,
 #                          which the AIR writer does not emit yet.
 #   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
@@ -1335,7 +1342,7 @@ Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 #                          `Mantle.lower_geometry_to_mesh`, so these three are
 #                          the leaf of a lowering nothing here reaches.
 #
-# The first two are unimplemented; the last three are absent from the hardware.
+# The first is unimplemented; the last three are absent from the hardware.
 # `caps` is where a caller asks which — see `supports_geometry`.
 
 # Sampling a bound texture. The binding is a SLOT and AIR has no global textures,
