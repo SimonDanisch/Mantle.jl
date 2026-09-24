@@ -190,7 +190,11 @@ simulate = false                                            # freeze, so the nex
 
 update!(cpu; positions = cloud(n))                          # a new host cloud
 
-update!(gpu; positions = M.storage(M.Buffer(dev, cloud(n))))  # a new device cloud
+# The buffer is BOUND, not a temporary: it finalizes, and a device address is
+# not a reference the collector can see, so passing only its storage leaves the
+# region free to be retired under the update.
+newcloud = M.Buffer(dev, cloud(n))
+update!(gpu; positions = M.storage(newcloud))               # a new device cloud
 
 dt[] = 1.0f0 / 240; dtref[] = dt[]           # dtref is what the in-graph sim reads
 
