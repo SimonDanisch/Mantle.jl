@@ -63,15 +63,69 @@ end
     # nothing in the pipeline would say so.
     push!(calls, :(Metal.set_position_mesh(out, slot,
                        flip_clip(_mesh_vec4(Base.getfield(v, :position))))))
+    # A `Flat` output arrives HERE, in the vertex tuple, and is written to the
+    # per-PRIMITIVE plane. Those are two different statements and both are
+    # forced:
+    #
+    #   * The portable contract is Vulkan's, where flatness "says where a value
+    #     is delivered, never what it is" (`vulkan/graphics/api.jl`) -- every
+    #     declared output is written by `set_mesh_vertex!` and `Flat` only
+    #     decorates the varying. A portable shader therefore writes its flat
+    #     fields per vertex, and this backend does not get to ask for them
+    #     somewhere else.
+    #   * AIR has no flat qualifier on mesh vertex data; a mesh stage's flat
+    #     varying IS per-primitive data (`air.mesh_primitive_data`), which is
+    #     why `mesh_object_of` splits the declaration into two planes.
+    #
+    # Before this, the split was visible to the shader: `cell` was declared
+    # `Flat`, so it was in `P` and not in `V`, and `mesh_field_index` raised
+    # "`cell` is not a field of ..." from inside a `@generated` body. That does
+    # not surface as the error it is -- the generator's throw becomes a runtime
+    # call, so the stage failed to compile with `unsupported dynamic function
+    # invocation` and a dozen `julia.gpu.state_getter` reports from the boxing
+    # around it, naming neither `cell` nor `Flat`.
+    flat = Symbol[]
     for n in fieldnames(v)
         n === :position && continue
-        # FIELD before SLOT: that is AIR's order for the two data intrinsics and
-        # not for `set_position_mesh` above. See `Metal/src/compiler/mesh.jl` —
-        # the two orders agree for the first vertex and nowhere else, so getting
-        # it wrong leaves a shader whose varyings are right at one corner.
-        push!(calls, :(Metal.set_vertex_data_mesh(
-            out, $(mesh_field_index(V, n)), slot,
-            _mesh_component(Base.getfield(v, $(QuoteNode(n)))))))
+        if hasfield(V, n)
+            # FIELD before SLOT: that is AIR's order for the two data intrinsics
+            # and not for `set_position_mesh` above. See
+            # `Metal/src/compiler/mesh.jl` -- the two orders agree for the first
+            # vertex and nowhere else, so getting it wrong leaves a shader whose
+            # varyings are right at one corner.
+            push!(calls, :(Metal.set_vertex_data_mesh(
+                out, $(mesh_field_index(V, n)), slot,
+                _mesh_component(Base.getfield(v, $(QuoteNode(n)))))))
+        elseif hasfield(P, n)
+            push!(flat, n)
+        else
+            error("`$n` is not an output of this mesh stage: it declares " *
+                  "$(Base.tail(fieldnames(V))) smooth and $(fieldnames(P)) flat")
+        end
+    end
+    if !isempty(flat)
+        # The PROVOKING vertex, which is Vulkan's rule for which vertex a flat
+        # varying takes its value from: the primitive's first. `slot` is 0-based
+        # here, so primitive `slot ÷ vpp` is provoked by `slot % vpp == 0`.
+        #
+        # This reads the primitive off the vertex slot rather than off the index
+        # list, so it is exact when a primitive owns its vertices -- which is
+        # what a mesh stage that COMPUTES its geometry does, and what
+        # `set_mesh_triangle!(out, t, 3t-2, 3t-1, 3t)` lays out. A stage that
+        # shares one vertex between primitives has no single primitive to
+        # attribute it to, and should write those outputs with the portable
+        # `set_mesh_primitive_data!`, which names the primitive explicitly.
+        vpp = mesh_verts_per_primitive(T)
+        writes = [:(Metal.set_primitive_data_mesh(
+                        out, $(mesh_field_index(P, n)), prim,
+                        _mesh_component(Base.getfield(v, $(QuoteNode(n))))))
+                  for n in flat]
+        push!(calls, quote
+            if slot % $vpp == Int32(0)
+                prim = slot ÷ $vpp
+                $(writes...)
+            end
+        end)
     end
     return Expr(:block, Expr(:meta, :inline), calls..., :(return nothing))
 end
@@ -93,7 +147,13 @@ end
 @inline _mesh_component(x::Union{Float32,NTuple{2,Float32},NTuple{3,Float32},
                                  NTuple{4,Float32}}) = x
 @inline _mesh_component(x::Real) = Float32(x)
-@inline _mesh_component(x) = Tuple(Float32(c) for c in x)
+# `ntuple(..., Val(N))`, not `Tuple(f(c) for c in x)`. A generator is not statically
+# unrolled, so the tuple it builds reaches the shader with an iteration protocol
+# behind it — and the error path of that protocol asks for `kernel_state`, which a
+# MESH stage does not have: `unsupported call to julia.gpu.state_getter`, at shader
+# compile, naming none of this. `Val` makes every index a literal and the whole thing
+# becomes N field reads. Same reason `Hikari.eval_poly` builds its monomials that way.
+@inline _mesh_component(x) = ntuple(i -> Float32(@inbounds x[i]), Val(length(x)))
 
 # No `@inline` in front of `@device_override`: the macro wraps a method
 # DEFINITION, and a macrocall in that position registers an ordinary method
@@ -223,6 +283,34 @@ mesh_topology_symbol(::Union{Mantle.TriangleList,Mantle.TriangleStrip}) = :trian
 mesh_topology_symbol(::Union{Mantle.LineList,Mantle.LineStrip})         = :line
 mesh_topology_symbol(::Mantle.PointList)                                = :point
 
+"""
+    mesh_verts_per_primitive(kind::Symbol) -> Int32
+
+How many vertices one primitive of AIR's `kind` has.
+
+On the SYMBOL and not on a `Mantle` topology, because its caller is
+`_write_mesh_vertex!`, which has only the `MeshObject`'s last type parameter to
+go on -- by then the strip/list distinction is gone and only the kind is left.
+"""
+mesh_verts_per_primitive(kind::Symbol) =
+    kind === :triangle ? Int32(3) :
+    kind === :line     ? Int32(2) :
+    kind === :point    ? Int32(1) :
+    error("unknown mesh primitive kind `$kind`")
+
+"""
+    mesh_stage_lead(p::MeshPipeline) -> Tuple
+
+What the mesh body is handed before any caller argument: the object it writes
+its vertices and primitives through.
+
+One function because two places need it and must agree: `compile_pipeline`
+compiles the body at `(lead..., buffers...)`, and `vertextouches` walks it at the
+same signature to learn what the draw's arguments are used for. A walk at any
+other signature describes a function nobody compiles.
+"""
+mesh_stage_lead(p::Mantle.MeshPipeline) = (Core.LLVMPtr{mesh_object_of(p), 7},)
+
 """One compiled mesh pipeline: the state, its depth state, and what it needs at draw."""
 struct MetalCompiledMeshPipeline
     state::MTLm.MTLRenderPipelineState
@@ -271,7 +359,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     # because the portable spelling returns a NamedTuple and AIR wants a pointer
     # store; a mesh stage already writes through the object it is handed, which
     # is the AIR shape, so there is nothing to translate.
-    mesh_tt = Tuple{Core.LLVMPtr{Obj, 7}, mesh_bufs.parameters...}
+    mesh_tt = Tuple{mesh_stage_lead(p)..., mesh_bufs.parameters...}
     mfun, mlib = compile_stage_function(Mantle.stagefunction(p.mesh), mesh_tt, :mesh,
                                         string(nameof(Mantle.stagefunction(p.mesh))) * "_ms")
 
@@ -279,7 +367,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
         error("a mesh pipeline needs a colour attachment: Metal has no " *
               "depth-only mesh pipeline, and a nil fragment function is refused " *
               "for one.")
-    VIn  = Mantle.fragmentinputtype(p)
+    VIn  = varying_type(p)
     FOut = NamedTuple{ntuple(i -> Symbol(:color, i), length(color_formats)),
                       NTuple{length(color_formats), NTuple{4,Float32}}}
     ntex = Mantle.ntextures(p.fragment)
@@ -320,75 +408,14 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     return compiled
 end
 
-"""
-    draw!(backend, p::MeshPipeline, target::OffscreenTarget, groups; …)
+# `draw!` is CORE's, in `src/graphics/record.jl`. This backend used to shadow it
+# with a method of its own taking `buffers=`/`frag_buffers=` and explicit
+# `vert_tt`/`frag_tt`, which meant the "portable entry point" its docstring
+# claimed to be was portable in name only -- a caller spelled the same draw two
+# ways depending on the backend. Core builds on `compile_draw`, `pass!` and
+# `record_draw!`, all of which this backend already answers, and infers the
+# shader argument types from the arrays it is handed rather than being told.
 
-Run `groups` mesh threadgroups into `target`.
-
-`groups` and not a vertex count: a mesh pipeline has no vertices to count on the
-host, and how many primitives come out is the mesh stage's to declare through
-[`set_mesh_outputs!`](@ref). The threadgroup WIDTH is the pipeline's, from its
-`MeshConfig`, so a caller cannot dispatch a width the shader was not compiled for.
-
-`buffers` are the mesh stage's, bound from slot 1 — Julia's counting. They start
-at Metal slot 0 like any other stage's: the object is a parameter, not a binding.
-"""
-function Mantle.draw!(be::Metal.MetalBackend, p::Mantle.MeshPipeline,
-                      target::Mantle.OffscreenTarget, groups::Integer;
-                      buffers = (), frag_buffers = (),
-                      clear_color::Union{Nothing,NTuple{4,Float32}} = (0f0, 0f0, 0f0, 1f0),
-                      depth_clear::Union{Nothing,Float32} = 1f0,
-                      mesh_tt::Type = Tuple{}, frag_tt::Type = Tuple{})
-    fb = target.fb
-    fb isa MetalFramebuffer ||
-        error("this backend draws into a MetalFramebuffer, got $(typeof(fb))")
-
-    compiled = compile_pipeline(p, MTLm.MTLPixelFormat[fb.color_format],
-                                fb.depth === nothing ? nothing : fb.depth_format,
-                                mesh_tt, frag_tt)
-
-    dev = Metal.device()
-    rp = MTLm.MTLRenderPassDescriptor()
-    ca = rp.colorAttachments[1]
-    ca.texture     = fb.color
-    ca.loadAction  = clear_color === nothing ? MTLm.MTLLoadActionLoad :
-                                               MTLm.MTLLoadActionClear
-    ca.storeAction = MTLm.MTLStoreActionStore
-    clear_color === nothing ||
-        (ca.clearColor = MTLm.MTLClearColor(clear_color[1], clear_color[2],
-                                            clear_color[3], clear_color[4]))
-    if fb.depth !== nothing
-        da = rp.depthAttachment
-        da.texture     = fb.depth
-        da.loadAction  = depth_clear === nothing ? MTLm.MTLLoadActionLoad :
-                                                   MTLm.MTLLoadActionClear
-        da.storeAction = MTLm.MTLStoreActionStore
-        depth_clear === nothing || (da.clearDepth = Float64(depth_clear))
-    end
-
-    cb = framebuffer!(dev)
-    enc = MTLm.MTLRenderCommandEncoder(cb, rp)
-    MTLm.set_pipeline!(enc, compiled.state)
-    compiled.depth_state === nothing ||
-        MTLm.set_depth_stencil_state!(enc, compiled.depth_state)
-    MTLm.set_cull_mode!(enc, compiled.cull)
-    # `MTLWindingCounterClockwise` for the same reason the vertex path sets it:
-    # `flip_clip` mirrors y, which reverses the handedness of every primitive, so
-    # what the caller wound as front-facing arrives wound the other way.
-    MTLm.set_front_facing_winding!(enc, MTLm.MTLWindingCounterClockwise)
-    for (i, b) in enumerate(buffers)
-        MTLm.set_mesh_buffer!(enc, b, 0, i)
-    end
-    for (i, b) in enumerate(frag_buffers)
-        MTLm.set_fragment_buffer!(enc, b, 0, i)
-    end
-    MTLm.draw_mesh_threadgroups!(enc, MTLm.MTLSize(groups, 1, 1),
-                                      MTLm.MTLSize(1, 1, 1),
-                                      MTLm.MTLSize(compiled.threads, 1, 1))
-    MTLm.endEncoding!(enc)
-    submitwait!(cb)
-    return nothing
-end
 
 # Metal.jl emits `air.mesh` and the vocabulary above lowers onto it, so the
 # capability answers `true` — and it answers for the BACKEND and the device
@@ -439,6 +466,70 @@ function loweredmesh(d::MetalCompiledGeometryDraw, indexed::Bool)
     d.lowered_plain === nothing &&
         (d.lowered_plain = Mantle.lower_geometry_to_mesh(d.pipeline; indexed = false))
     return d.lowered_plain
+end
+
+"""What `compile_draw` hands back for a `MeshPipeline`, and `record_draw!` binds.
+
+The mesh counterpart to [`MetalCompiledDraw`](@ref). It exists for the same reason
+that one does: core's `draw!` compiles once and records per frame, so the pipeline
+and the two stages' baked arguments have to outlive the pass.
+
+A `MeshPipeline` has no vertex stage and no index buffer -- the mesh stage writes
+its own primitive indices -- so `count` is a THREADGROUP count, not a vertex count,
+and there is nothing here for `indices` to mean.
+"""
+struct MetalCompiledMeshDraw
+    pipeline::MetalCompiledMeshPipeline
+    mesh::StageArgs
+    frag::StageArgs
+end
+
+function Mantle.compile_draw(d::MetalDevice, p::Mantle.MeshPipeline,
+                             color_formats, depth_format, mesh_args, frag_args;
+                             bindings = nothing)
+    mesh = StageArgs(mesh_args)
+    frag = StageArgs(frag_args)
+    cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
+    dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
+    pipeline = compile_pipeline(p, cfmts, dfmt, buffer_types(mesh), buffer_types(frag))
+    return MetalCompiledMeshDraw(pipeline, mesh, frag)
+end
+
+"""
+    record_draw!(h, d::MetalCompiledMeshDraw, args, groups; instances, indices)
+
+Record one mesh draw: `groups` threadgroups of the width the pipeline was compiled
+at.
+
+`indices` is refused rather than ignored. A mesh stage emits its own primitive
+indices through `set_mesh_outputs!`, so an index buffer here is a caller who
+believes something about this draw that is not true, and silently dropping it
+would draw the right picture for the wrong reason until the day it did not.
+"""
+function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledMeshDraw, args, groups;
+                             instances::Integer = 1, indices = nothing)
+    indices === nothing || throw(ArgumentError(
+        "record_draw!: a mesh pipeline takes no index buffer — the mesh stage writes " *
+        "its own primitive indices. `count` is its threadgroup count."))
+    instances == 1 || throw(ArgumentError(
+        "record_draw!: this backend dispatches mesh threadgroups directly, so there " *
+        "is no instance count to multiply them by; got instances = $(instances)."))
+    isempty(d.mesh.device) || rebake!(d.mesh, args)
+    isempty(d.frag.device) || rebake!(d.frag, args)
+    c = d.pipeline
+    MTLm.set_pipeline!(h.encoder, c.state)
+    c.depth_state === nothing ||
+        MTLm.set_depth_stencil_state!(h.encoder, c.depth_state)
+    MTLm.set_cull_mode!(h.encoder, c.cull)
+    # Counter-clockwise, for the reason the vertex path sets it: `flip_clip` mirrors
+    # y and a mirror reverses the handedness of every primitive.
+    MTLm.set_front_facing_winding!(h.encoder, MTLm.MTLWindingCounterClockwise)
+    bind_stage!(h.encoder, d.mesh, MTLm.set_mesh_bytes!, MTLm.MTLRenderStageMesh)
+    bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
+    MTLm.draw_mesh_threadgroups!(h.encoder, MTLm.MTLSize(groups, 1, 1),
+                                            MTLm.MTLSize(1, 1, 1),
+                                            MTLm.MTLSize(c.threads, 1, 1))
+    return nothing
 end
 
 """

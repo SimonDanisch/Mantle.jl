@@ -71,6 +71,25 @@ function intrinsic_usage(name::Symbol)
     end
     s == "__metal_linked_closest" && return READ
     s == "__metal_linked_any" && return READ
+    # The procedural pair reads the same things the triangle pair does — the
+    # acceleration structure, and through the argument buffer the candidate's
+    # table and the payload — and writes nothing. Without these the access walk
+    # stops at the `ccall` and refuses the whole kernel, which reads as a
+    # Hikari problem and is this list being one entry short.
+    s == "__metal_linked_closest_proc" && return READ
+    s == "__metal_linked_any_proc" && return READ
+    # The candidate itself, when a kernel happens to name it.
+    s == "__metal_linked_procedural_candidate" && return READ
+    # A mesh stage's outputs (`Metal/src/compiler/mesh.jl`). All five write
+    # through the mesh object, the stage's own output in address space 7, and
+    # read nothing. The object is the stage's lead argument, so its entry is
+    # dropped before anyone sees it; what these declare is only that the walk
+    # may go on past them. Without them a `MeshPipeline` drawn through the graph
+    # was refused at its first `set_primitive_count_mesh`.
+    (s == "air.set_position_mesh" || s == "air.set_index_mesh" ||
+     s == "air.set_primitive_count_mesh" ||
+     startswith(s, "air.set_vertex_data_mesh.") ||
+     startswith(s, "air.set_primitive_data_mesh.")) && return WRITE
     return nothing
 end
 
@@ -453,6 +472,15 @@ function Mantle.vertextouches(dev::MetalDevice, shader, args::Tuple)
     lead = KI.wantsvertexindex(f, argT) ? (KI.VertexIndex,) : ()
     return stagetouches(dev, f, args; lead)
 end
+
+# A mesh pipeline has no vertex stage: the draw's first argument list belongs
+# to the MESH stage, which is what `compile_draw` hands it to. Walked at the
+# signature `compile_pipeline` compiles it at, object pointer first. The graph
+# asked `shader.vertex` of a `MeshPipeline` until this existed, so any FEM or
+# meshlet draw recorded through `draw!` failed before it could be compiled.
+Mantle.vertextouches(dev::MetalDevice, shader::Mantle.MeshPipeline, args::Tuple) =
+    stagetouches(dev, Mantle.stagefunction(shader.mesh), args;
+                 lead = mesh_stage_lead(shader))
 
 """
 What a fragment stage does to each of its arguments.

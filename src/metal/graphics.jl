@@ -481,8 +481,11 @@ depends on which stages the pipeline HAS — the geometry stage when there is on
 the vertex stage otherwise. An empty tuple is a real answer, not a missing one:
 a vertex stage that outputs only its clip position is a real pipeline and a
 shadow pass is exactly that.
+
+A `MeshPipeline` too: its fragment stage is compiled with the same wrapper and
+the same leading varyings, fed by the mesh stage instead.
 """
-varying_type(p::Mantle.GraphicsPipeline) = Mantle.fragmentinputtype(p)
+varying_type(p::Union{Mantle.GraphicsPipeline,Mantle.MeshPipeline}) = Mantle.fragmentinputtype(p)
 
 """
     stage_signatures(p, ncolor, vert_bufs, frag_bufs) -> (vfn, ffn, vert_tt, frag_tt)
@@ -628,76 +631,14 @@ end
 
 # ── drawing ──────────────────────────────────────────────────────────────────
 
-"""
-    draw!(backend, pipeline, target::OffscreenTarget, vertex_count; …)
+# `draw!` is CORE's, in `src/graphics/record.jl`. This backend used to shadow it
+# with a method of its own taking `buffers=`/`frag_buffers=` and explicit
+# `vert_tt`/`frag_tt`, which meant the "portable entry point" its docstring
+# claimed to be was portable in name only -- a caller spelled the same draw two
+# ways depending on the backend. Core builds on `compile_draw`, `pass!` and
+# `record_draw!`, all of which this backend already answers, and infers the
+# shader argument types from the arrays it is handed rather than being told.
 
-Record one draw into `target`.
-
-The portable entry point, the same one the Vulkan backend implements. Mantle
-decides what is drawn; this only records it.
-
-`buffers` is what the shaders read, bound in order from slot 1 — Julia's
-counting, converted at the encoder boundary. Metal binds by slot rather than
-through a descriptor set, so there is nothing between the caller's list and the
-stage's arguments.
-
-`vert_tt`/`frag_tt` are the Tuple types of those buffer arguments as the SHADER
-sees them, which a raw `MTLBuffer` cannot tell you — it is bytes, and the
-element type is the caller's to name. The graph path does not need them: it
-resolves real arrays and reads the types off those.
-"""
-function Mantle.draw!(be::Metal.MetalBackend, p::Mantle.GraphicsPipeline,
-                      target::Mantle.OffscreenTarget, vertex_count::Integer;
-                      buffers = (), frag_buffers = (), instances::Integer = 1,
-                      clear_color::Union{Nothing,NTuple{4,Float32}} = (0f0, 0f0, 0f0, 1f0),
-                      depth_clear::Union{Nothing,Float32} = 1f0,
-                      vert_tt::Type = Tuple{}, frag_tt::Type = Tuple{})
-    fb = target.fb
-    fb isa MetalFramebuffer ||
-        error("this backend draws into a MetalFramebuffer, got $(typeof(fb))")
-
-    compiled = compile_pipeline(p, MTLm.MTLPixelFormat[fb.color_format],
-                                fb.depth === nothing ? nothing : fb.depth_format,
-                                vert_tt, frag_tt)
-
-    dev = Metal.device()
-    rp = MTLm.MTLRenderPassDescriptor()
-    ca = rp.colorAttachments[1]
-    ca.texture     = fb.color
-    ca.loadAction  = clear_color === nothing ? MTLm.MTLLoadActionLoad :
-                                               MTLm.MTLLoadActionClear
-    ca.storeAction = MTLm.MTLStoreActionStore
-    clear_color === nothing ||
-        (ca.clearColor = MTLm.MTLClearColor(clear_color[1], clear_color[2],
-                                            clear_color[3], clear_color[4]))
-    if fb.depth !== nothing
-        da = rp.depthAttachment
-        da.texture     = fb.depth
-        da.loadAction  = depth_clear === nothing ? MTLm.MTLLoadActionLoad :
-                                                   MTLm.MTLLoadActionClear
-        da.storeAction = MTLm.MTLStoreActionStore
-        depth_clear === nothing || (da.clearDepth = Float64(depth_clear))
-    end
-
-    # The immediate path draws and waits: its own command buffer, committed and
-    # waited for at the end.
-    cb = framebuffer!(dev)
-    enc = MTLm.MTLRenderCommandEncoder(cb, rp)
-    MTLm.set_pipeline!(enc, compiled.state)
-    compiled.depth_state === nothing ||
-        MTLm.set_depth_stencil_state!(enc, compiled.depth_state)
-    MTLm.set_cull_mode!(enc, compiled.cull)
-    for (i, b) in enumerate(buffers)
-        MTLm.set_vertex_buffer!(enc, b, 0, i)
-    end
-    for (i, b) in enumerate(frag_buffers)
-        MTLm.set_fragment_buffer!(enc, b, 0, i)
-    end
-    MTLm.draw_primitives!(enc, compiled.primitive, 0, vertex_count, instances)
-    MTLm.endEncoding!(enc)
-    submitwait!(cb)
-    return nothing
-end
 
 # ── How this backend submits ─────────────────────────────────────────────────
 #
@@ -842,25 +783,16 @@ function Mantle.gpupasstime!(d::MetalDevice)
 end
 
 """
-    readback_eltype(format) -> Type
+    readback_framebuffer(fb) -> Matrix{<:Colorant}
 
-The STORAGE type of one channel: `UInt8` for the 8-bit formats, `Float16`/
-`Float32` for the float ones.
+The colour attachment on the host: `width` x `height`, one COLORANT per pixel --
+`eltypeof(fb.color_format)`, the same element type the Vulkan side returns, so
+`p.r` and `p.b` name the channels on either backend.
 
-Not `eltype(eltypeof(format))`, which answers `N0f8` for a `BGRA{N0f8}` — a
-normalised type whose value is already in 0..1. A caller that then divides by 255
-gets a number 255 times too small, which is what turned a rendered frame into a
-nearly-black one with everything still in the right place.
-"""
-readback_eltype(f::MTLm.MTLPixelFormat) = storagetype(eltype(eltypeof(f)))
-storagetype(::Type{T}) where {T <: FixedPoint} = FixedPointNumbers.rawtype(T)
-storagetype(::Type{T}) where {T} = T
-
-"""
-    readback_framebuffer(fb) -> Matrix{NTuple{4,T}}
-
-The colour attachment on the host: `width` x `height`, one 4-component tuple per
-pixel, in the attachment's own channel order.
+The colorant is also what carries the channel ORDER: a `BGRA{N0f8}` attachment
+comes back as `BGRA{N0f8}`, and `p.r` picks the third slot because the type says
+so. Returning a bare `NTuple{4,T}` made that the caller's problem and silently
+the wrong way round for half the formats.
 
 Through `getBytes!` rather than shared memory: a render target cannot be a
 buffer-backed linear texture on an Apple GPU.
@@ -886,8 +818,11 @@ function Mantle.readback_framebuffer(fb::MetalFramebuffer)
     # narrow. `blit!` followed immediately by a readback loses it every time, and
     # the whole composited image came back transparent black.
     Metal.synchronize()
-    T = readback_eltype(fb.color_format)
-    px = Matrix{NTuple{4,T}}(undef, fb.width, fb.height)
+    # Allocated as the COLORANT and read into directly: a `RGBA{Float32}` is
+    # four `Float32`s and a `BGRA{N0f8}` four bytes, laid out exactly as the
+    # texture has them, so there is nothing to convert -- and nothing left for a
+    # caller to get wrong.
+    px = Matrix{eltypeof(fb.color_format)}(undef, fb.width, fb.height)
     GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
                                    MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0),
                                                   MTLm.MTLSize(fb.width, fb.height, 1)))

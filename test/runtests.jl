@@ -476,6 +476,12 @@ include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 # `KernelInterface.HostMeshOutput` runs what a mesh stage runs and shows the
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
+
+# A MeshPipeline drawn through the GRAPH, and `discard()` declared where both
+# backends can reach it. Unguarded for the same reason as the file above: each
+# gates itself on the capability, so the same assertions run on every backend
+# that has it. Both were found by RayMakie's RASTER mode on a Mac.
+include(joinpath(@__DIR__, "test_mesh_pipeline_graph.jl"))
 # Under `test/vulkan/` and guarded, because it is that backend's: it builds a
 # `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
 # default and no other backend's answer. It sat in the section above, whose
