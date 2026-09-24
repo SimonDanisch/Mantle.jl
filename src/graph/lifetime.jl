@@ -255,8 +255,9 @@ Returns `obj`, so a call reads as an annotation on the value being used:
 function hold!(ch::SubmitChannel, obj)
     ownthread(ch)
     isempty(ch.holds) && throw(ArgumentError(
-        "hold!: no recording is open on this channel, so there is no submission " *
-        "for `obj` to outlive. Hold it from inside the recording that names it."))
+        "hold!: no recording is open on this channel (ch=$(objectid(ch)), " *
+        "thread=$(ch.thread)), so there is no submission for `obj` to outlive. " *
+        "Hold it from inside the recording that names it."))
     push!(last(ch.holds), obj)
     claim!(obj)
     return obj
@@ -738,7 +739,23 @@ next run and stays the plan's, or both at once. `submit!` hands command buffers
 to the driver; this says what becomes of them.
 """
 handover!(ch::SubmitChannel, token, recording; tag = nothing) =
-    submitted!(ch, token, payloadtype(ch)(recording, takeholds!(ch)); tag)
+    submitted!(ch, token, payloadtype(ch)(recording, submissionholds!(ch, recording)); tag)
+
+"""
+    submissionholds!(ch, recording) -> holds or `nothing`
+
+The hold frame this SUBMISSION owns, popped from `ch` if it is its to pop.
+
+A one-shot is submitted once, so the frame `acquire!` pushed belongs to that
+submission and this takes it. A recording is submitted every run and must
+outlive all of them, so it takes its own frame when it is SEALED and keeps it
+until `release!` — and a backend says so by overriding this to `nothing`.
+
+This was an unconditional `takeholds!`, which for a recording is a SECOND pop:
+`sealed!` already took its frame, so handing it over took whichever frame was
+still open — an interleaved one-shot's.
+"""
+submissionholds!(ch::SubmitChannel, recording) = takeholds!(ch)
 
 """
     recorder(ch, r) -> emitter

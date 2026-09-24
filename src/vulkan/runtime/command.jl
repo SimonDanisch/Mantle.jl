@@ -223,6 +223,10 @@ end
 sealed!(::OneShot) = nothing
 sealed!(rec::Recording) = (rec.holds = takeholds!(queueof(rec)); nothing)
 
+# …and the other half of the same rule: a recording took its frame at seal, so
+# handing it over must NOT pop a second one. See `submissionholds!`.
+submissionholds!(::SubmitChannel, ::Recording) = nothing
+
 """
     release!(rec::Recording)
 

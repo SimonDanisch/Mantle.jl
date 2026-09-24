@@ -535,7 +535,8 @@ does not produce a device allocation each. `blocksize` is a kwarg rather than a
 constant because the right value is a device property, not a Mantle opinion.
 """
 function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
-                  align::Int = 256, blocksize::Int = 64 << 20, constraint = nothing)
+                  align::Int = 256, blocksize::Int = 64 << 20, constraint = nothing,
+                  maywait::Bool = true)
     bytes = max(bytes, 1)
     # `constraint` given means the caller knows more than these transients do —
     # an arena reconciling what its other tenants also need. Deriving it here
@@ -565,7 +566,16 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
             r = carveany!(pool, dev, kind, bytes, align, want)
             r === nothing || return r
         end
-        if reclaim!(pool, dev; wait = true) > 0
+        # `maywait = false` skips the WAITING reclaim, and the caller that asks
+        # for it is `scratch!` — argument bytes for a recording that is OPEN.
+        # Waiting sweeps completed submissions, and a sweep RELEASES recordings,
+        # and releasing pops the channel's top hold frame — which is the open
+        # recording's, because the frame stack is positional. The caller's next
+        # `hold!` then finds an empty stack and throws `no recording is open on
+        # this channel`, from inside a frame, having allocated successfully.
+        # Growing instead is what the branch below does anyway, and it is what
+        # this would have fallen through to had the wait found nothing.
+        if maywait && reclaim!(pool, dev; wait = true) > 0
             r = carveany!(pool, dev, kind, bytes, align, want)
             r === nothing || return r
         end

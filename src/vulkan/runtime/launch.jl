@@ -712,8 +712,11 @@ holding the address. A modelled plan does not come through here at all.
     bq = queueof(owner)
     ownthread(bq)
     dev = lavadevice(ctxof(bq))
+    # `maywait = false`: see the pool's `acquire!`. This runs INSIDE an open
+    # recording, and a waiting reclaim would sweep the channel and take that
+    # recording's hold frame out from under it.
     r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
-                 align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE)
+                 align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE, maywait = false)
     push!(owner.regions, r)
     return r
 end
