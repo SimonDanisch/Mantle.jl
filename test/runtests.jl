@@ -477,6 +477,11 @@ include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 # vertices, indices and per-primitive values a frame can only imply.
 include(joinpath(@__DIR__, "test_lowering.jl"))
 
+# The isubd example's pass A (adaptive refinement) against a CPU reference written
+# independently of it (`examples/isubd/reference.jl`, vendored from
+# koehlerson/mantle_mwe), key sets compared as EXACT integers. Unguarded and not
+# under `vulkan/`: it asks `Mantle.defaultbackend()`, so it runs everywhere.
+include(joinpath(@__DIR__, "test_isubd_mesh.jl"))
 # A MeshPipeline drawn through the GRAPH, and `discard()` declared where both
 # backends can reach it. Unguarded for the same reason as the file above: each
 # gates itself on the capability, so the same assertions run on every backend
@@ -1253,14 +1258,6 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_graphics_pipeline.jl"))
         end
 
-        # ── Tier 3h: Mesh Pipeline ──
-        # The mesh stage end to end, against a CPU reference that was written
-        # independently of it (`examples/isubd/reference.jl`, vendored from
-        # koehlerson/mantle_mwe). Skips itself on a device without
-        # VK_EXT_mesh_shader.
-        @testset "Tier 3h: Mesh Pipeline" begin
-            include(joinpath(VULKAN_TESTS, "test_isubd_mesh.jl"))
-        end
 
             @testset "Tier 4: GPUArrays TestSuite" begin
                 include(joinpath(VULKAN_TESTS, "test_gpuarrays.jl"))
