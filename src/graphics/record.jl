@@ -302,6 +302,15 @@ function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
                depth_clear::Union{Nothing, Float32} = 1f0,
                indices = nothing, bindings = nothing)
     dev = todevice(device)
+    # RESOLVED here, once, as `blitpass!` below already does for its own source. A
+    # caller spells an operand the portable way -- a `Buffer`, a `Transient` -- and
+    # the graph path resolves those during `Place` before a backend ever sees them.
+    # The immediate path has no place phase, so this is where it happens; without it
+    # a backend is handed a `Buffer` where its shader expects a device pointer, and
+    # on Metal that is a "passing non-bitstype argument" at GPU compile time.
+    # A plain value resolves to itself, so `Int32` and friends pass through.
+    args = map(a -> resolve(dev, a), args)
+    frag_args = map(a -> resolve(dev, a), frag_args)
     compiled = compile_draw(dev, pipeline, (blittarget(target),), depthtarget(target),
                             args, frag_args; bindings)
     pass!(dev, target; clear = clear_color, depth_clear) do p

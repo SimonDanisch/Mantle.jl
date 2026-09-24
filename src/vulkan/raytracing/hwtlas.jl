@@ -1071,3 +1071,8 @@ end
 # `supports_rt_pipeline` in `raytracing/api.jl`.
 supports_rt_pipeline(::LavaBackend) = true
 supports_rt_pipeline(::VulkanTLAS) = true
+
+# …and the inline ray query answers a BOX as well as a triangle: the three
+# candidate verbs just above are what `procedural_candidate` is written against.
+supports_procedural_traversal(::LavaBackend) = true
+supports_procedural_traversal(::VulkanTLAS) = true

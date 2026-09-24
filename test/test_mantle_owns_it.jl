@@ -91,7 +91,7 @@ Files rather than method tables, which is the correction: this question is about
 the REPO, and a method table only shows the backends this process loaded. Metal
 never loads on the machines the Vulkan backend is tested on and the ROCm
 extension loads on neither, so a method-table answer changes per machine and
-`KNOWN_LONELY` could not be a ratchet against it. It also read a method in
+`UNIMPLEMENTED_BACKEND_FUNCS` could not be a ratchet against it. It also read a method in
 `ext/` as core's answer for everyone, which is how `caps`, `closerecording!`,
 `defaultdevice!`, `devicename` and `devices` came to look portable.
 """
@@ -127,10 +127,32 @@ end
 # backend) or not implemented (it belongs on a list). Both are decisions; being
 # in the vocabulary with one implementation is the absence of one.
 #
-# `NOT_PORTABLE` is where a deliberate answer goes, with its reason. It is empty
-# on purpose: filling it is part of the work, not a way to make this pass.
-
-const NOT_PORTABLE = Set{Symbol}()
+# `BACKEND_SPECIFIC_FUNCS` is where a deliberate answer goes, with its reason. Not
+# an escape hatch: a name belongs here only when "every backend answers it" is the
+# WRONG requirement, not when it is merely unmet. An unmet one is
+# `UNIMPLEMENTED_BACKEND_FUNCS` below.
+#
+# Both entries are BUILD-GLOBAL hooks, and that is the distinction. They take no
+# device or backend argument -- `staged_gemm_tile()` takes nothing,
+# `use_frozen_kernels(version)` takes a version -- so they are answered once per
+# build, not once per device. `src/vulkan/` and `src/metal/` are `@static include`d
+# on `Sys.isapple()` and are therefore mutually exclusive, which is the mechanism
+# that makes a no-argument hook well defined. `src/host/` is ALWAYS included
+# alongside whichever of those is compiled in, so a host definition is not a second
+# method, it is the SAME signature: defining it there is `ERROR: Method overwriting
+# is not permitted during Module precompilation`, and Mantle stops precompiling.
+#
+# So "every backend answers it" cannot be satisfied here, and is not the right ask.
+#
+# `staged_gemm_tile` could in principle dispatch on a backend. It must not: its
+# consumers are `DNNKernels`' plan functions, which take a `DeviceCaps` and no
+# backend precisely so they can be asked about hardware this machine is not -- the
+# suite builds synthetic ones and asks the planner about them. Those vary the
+# DEVICE; the BUILD is fixed, and which tile Mantle emits kernels at is a property
+# of the build.
+const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
+    :staged_gemm_tile, :use_frozen_kernels
+])
 
 # The 53 that are lonely TODAY, so the guard can fail on a 54th.
 #
@@ -152,7 +174,7 @@ const NOT_PORTABLE = Set{Symbol}()
 # So: a name here is a known hole, and the test fails on anything NOT here —
 # and also on anything here that has been fixed without being removed, so the
 # list can only shrink.
-const KNOWN_LONELY = Set{Symbol}([
+const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
     :blittarget, :build_accel!, :colorimage, :compile_draw, :currentimage,
@@ -182,7 +204,7 @@ const KNOWN_LONELY = Set{Symbol}([
     # "Does every backend answer this name" is about the REPO, so it reads
     # files: Metal does not load on the machines the Vulkan backend is tested
     # on, and a method-table answer would therefore call every graphics verb
-    # unanswered on Linux and answered on a Mac. `KNOWN_LONELY` cannot ratchet
+    # unanswered on Linux and answered on a Mac. `UNIMPLEMENTED_BACKEND_FUNCS` cannot ratchet
     # against a number that moves per machine.
     #
     # "Is there a default for everyone" is NOT only about this repo: `caps`,
@@ -201,17 +223,20 @@ const KNOWN_LONELY = Set{Symbol}([
 
     lonely = Symbol[]
     for n in Mantle.BACKEND_VOCABULARY
-        n in NOT_PORTABLE && continue
+        n in BACKEND_SPECIFIC_FUNCS && continue
         hasdefault(n) && continue
         all(d -> n in d, values(defs)) || push!(lonely, n)
     end
     backends = sort(collect(keys(defs)))
-    new = sort(collect(setdiff(Set(lonely), KNOWN_LONELY)); by = string)
-    fixed = sort(collect(setdiff(KNOWN_LONELY, Set(lonely))); by = string)
+    new = sort(collect(setdiff(Set(lonely), UNIMPLEMENTED_BACKEND_FUNCS)); by = string)
+    fixed = sort(collect(setdiff(UNIMPLEMENTED_BACKEND_FUNCS, Set(lonely))); by = string)
     isempty(new) || @info "0.2 NEW vocabulary names with no default and not every \
-        backend — implement them, or add them to KNOWN_LONELY with the \
-        reason" backends new
-    isempty(fixed) || @info "0.2 names in KNOWN_LONELY that are now answered \
+        backend. Three places this can go: implement it on the backends that \
+        lack it; or `UNIMPLEMENTED_BACKEND_FUNCS` if it SHOULD be answered \
+        everywhere and is not yet; or `BACKEND_SPECIFIC_FUNCS`, with the reason, \
+        if asking every backend is the wrong requirement — a build-global hook \
+        taking no device cannot be answered by the always-loaded host backend" backends new
+    isempty(fixed) || @info "0.2 names in UNIMPLEMENTED_BACKEND_FUNCS that are now answered \
         everywhere — delete them from the list" backends fixed
     @test isempty(new)
     @test isempty(fixed)
@@ -485,8 +510,21 @@ end
 
     # `unwrap_unionall`: a parametric method's `sig` IS a `UnionAll` and has no
     # `.parameters` at all.
+    # The catch-alls, ENUMERATED. `t isa UnionAll` was the test here and it is a
+    # false positive on every bare parametric type: `::Launch`, `::Call`,
+    # `::CompiledDispatch` and `::CompiledDraw` are all `UnionAll`s, so twelve
+    # perfectly specific dispatches counted as permissive defaults —
+    # `argsize`, `argument_usage`, `callgroup`, `collect!`, `devicesized`,
+    # `extrausage`, `finishrecording!`, `hold!`, `holdleaves!`, `indirectindex`,
+    # `initial_usage`, `workgroupsize`. That is also why this number drifted from
+    # 26 without anyone being able to act on it: core grew parametric types, and
+    # each one inflated the count without adding any silent-default risk.
+    #
+    # `Type` stays, and is why this is a list rather than `t === Any`: it is a
+    # `UnionAll` AND a genuine catch-all — `argument_usage(F::Type, A::Type) =
+    # nothing` answers for every function there is.
     permissive(m) = corefile(m.file) &&
-        all(t -> t === Any || t isa UnionAll || t === Mantle.Device,
+        all(t -> t === Any || t === Mantle.Device || t === Type,
             collect(Base.unwrap_unionall(m.sig).parameters)[2:end])
 
     # Read the backend TREES, not the loaded methods. Only one backend is compiled

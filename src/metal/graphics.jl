@@ -112,10 +112,13 @@ Vulkan side here, both hand a column-major matrix to the driver as tightly packe
 rows, which makes a Julia column one row of the image — and it is what makes
 Makie's glyph atlas sample as itself rather than as its transpose.
 
-`storageMode` is Shared and the upload goes through `replace_region!` rather than
-a buffer-backed texture: a linear texture cannot be sampled on an Apple GPU, and
-the same storage cannot be both a render target and a sampled source. This is
-the same reason `MetalFramebuffer` reads back through `getBytes!`.
+`storageMode` is Shared rather than a buffer-backed texture: a linear texture
+cannot be sampled on an Apple GPU, and the same storage cannot be both a render
+target and a sampled source. This is the same reason `MetalFramebuffer` reads
+back through `getBytes!`.
+
+`data` may be on the host or already on the device; see
+[`upload_texture_data!`](@ref) for both.
 """
 function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {T}
     dev = Metal.device()
@@ -123,19 +126,81 @@ function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {
     desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, false)
     desc.usage = MTLm.MTLTextureUsageShaderRead
     desc.storageMode = MTLm.MTLStorageModeShared
-    tex = MTLm.MTLTexture(dev, desc)
-    # A Julia matrix is COLUMN-major, so its columns are already the contiguous
-    # runs `bytesPerRow` describes — one column IS one row of the image, which is
-    # the same reading the Vulkan upload takes of the same bytes. Transposing here
-    # instead was the bug: the atlas came out mirrored about its diagonal, and text
-    # rendered as pieces of the wrong glyphs.
-    #
-    # `collect` for anything without a pointer to hand — a view or a lazy adjoint.
-    rows = data isa DenseMatrix{T} ? data : collect(data)
-    GC.@preserve rows MTLm.replace_region!(
-        tex, MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1)), 0,
-        convert(Ptr{Cvoid}, pointer(rows)), w * sizeof(T))
-    return MetalTexture2D{T}(tex, w, h)
+    t = MetalTexture2D{T}(MTLm.MTLTexture(dev, desc), w, h)
+    Mantle.upload_texture_data!(t, data)
+    return t
+end
+
+"""
+    upload_texture_data!(tex::MetalTexture2D, data)
+
+New texels for an existing texture, from the host or from the device.
+
+Both go through a blit on Mantle's queue, not `replace_region!`. A CPU write lands
+the moment it is made, while a frame that samples this texture may still be
+running; a blit is a command like the frame's own and waits its turn. That is
+also how Vulkan's upload works (`vkCmdCopyBufferToImage`), and it is why the two
+methods here mirror the two there.
+
+The texels are the matrix's column-major bytes as they stand: a Julia column is
+the contiguous run `bytesPerRow` describes, so one column is one ROW of the
+image, the same reading the Vulkan upload takes. Transposing instead mirrored
+the glyph atlas about its diagonal.
+"""
+function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where {T}
+    size(data) == size(t) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+    # Staged through a shared buffer. `collect` for anything without a dense
+    # HOST pointer to hand: a view, a lazy adjoint.
+    rows = data isa Matrix{T} ? data : collect(data)
+    nbytes = length(rows) * sizeof(T)
+    staging = GC.@preserve rows MTLm.MTLBuffer(Metal.device(), nbytes, pointer(rows);
+                                               storage = Metal.SharedStorage)
+    blit_into_texture!(t, staging, 0)
+    return t
+end
+
+# Already on the device: the array's own buffer is the source, no host round trip.
+#
+# Its own method, and not the one above, because an `MtlArray` IS a
+# `DenseMatrix` (`AbstractGPUArray <: DenseArray`) with a `pointer` — to DEVICE
+# memory. The constructor used to test `DenseMatrix` and hand that pointer to
+# the CPU-side `replace_region!`, which read texels from a device address: the
+# texture came out zero, an `image!` of a device array drew nothing at all,
+# and the image shader's `discard` of a zero alpha hid even that.
+function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) where {T}
+    size(data) == size(t) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+    # The array was most likely just WRITTEN by a kernel — RayMakie's
+    # `texeldata` is a broadcast — and that kernel may sit on a queue this blit
+    # is not ordered against: the running task's own Metal.jl queue, if this
+    # task never adopted the device's (`adoptqueue!`). `framebuffer!` below
+    # only orders after the device's batch. Unordered, the blit read the buffer
+    # before the broadcast had filled it and the texture came out zero.
+    Metal.synchronize()
+    p = pointer(data)
+    blit_into_texture!(t, p.buffer, p.offset)
+    return t
+end
+
+"""Copy a whole texture's worth of texels from `src` at byte `soff`, on the queue."""
+function blit_into_texture!(t::MetalTexture2D{T}, src::MTLm.MTLBuffer, soff::Integer) where {T}
+    w, h = size(t)
+    # Behind whatever the device's batch holds and has not committed — a frame
+    # still sampling this texture, a kernel that produced `src` — because commit
+    # order is execution order, and a buffer opened beside an open batch runs
+    # ahead of it.
+    cb = framebuffer!(Device(MetalAPI()))
+    MTLm.MTLBlitCommandEncoder(cb) do enc
+        MTLm.append_copy!(enc, t.tex, MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1),
+                          src, soff, w * sizeof(T), 0)
+    end
+    # Waited for, so the caller's array is free the moment this returns — the
+    # contract the Vulkan side keeps by copying into its own scratch first.
+    submitwait!(cb)
+    cb.status == MTLm.MTLCommandBufferStatusCompleted ||
+        error("Metal texture upload failed: $(cb.status)")
+    return nothing
 end
 
 """
@@ -481,8 +546,11 @@ depends on which stages the pipeline HAS — the geometry stage when there is on
 the vertex stage otherwise. An empty tuple is a real answer, not a missing one:
 a vertex stage that outputs only its clip position is a real pipeline and a
 shadow pass is exactly that.
+
+A `MeshPipeline` too: its fragment stage is compiled with the same wrapper and
+the same leading varyings, fed by the mesh stage instead.
 """
-varying_type(p::Mantle.GraphicsPipeline) = Mantle.fragmentinputtype(p)
+varying_type(p::Union{Mantle.GraphicsPipeline,Mantle.MeshPipeline}) = Mantle.fragmentinputtype(p)
 
 """
     stage_signatures(p, ncolor, vert_bufs, frag_bufs) -> (vfn, ffn, vert_tt, frag_tt)
@@ -628,76 +696,14 @@ end
 
 # ── drawing ──────────────────────────────────────────────────────────────────
 
-"""
-    draw!(backend, pipeline, target::OffscreenTarget, vertex_count; …)
+# `draw!` is CORE's, in `src/graphics/record.jl`. This backend used to shadow it
+# with a method of its own taking `buffers=`/`frag_buffers=` and explicit
+# `vert_tt`/`frag_tt`, which meant the "portable entry point" its docstring
+# claimed to be was portable in name only -- a caller spelled the same draw two
+# ways depending on the backend. Core builds on `compile_draw`, `pass!` and
+# `record_draw!`, all of which this backend already answers, and infers the
+# shader argument types from the arrays it is handed rather than being told.
 
-Record one draw into `target`.
-
-The portable entry point, the same one the Vulkan backend implements. Mantle
-decides what is drawn; this only records it.
-
-`buffers` is what the shaders read, bound in order from slot 1 — Julia's
-counting, converted at the encoder boundary. Metal binds by slot rather than
-through a descriptor set, so there is nothing between the caller's list and the
-stage's arguments.
-
-`vert_tt`/`frag_tt` are the Tuple types of those buffer arguments as the SHADER
-sees them, which a raw `MTLBuffer` cannot tell you — it is bytes, and the
-element type is the caller's to name. The graph path does not need them: it
-resolves real arrays and reads the types off those.
-"""
-function Mantle.draw!(be::Metal.MetalBackend, p::Mantle.GraphicsPipeline,
-                      target::Mantle.OffscreenTarget, vertex_count::Integer;
-                      buffers = (), frag_buffers = (), instances::Integer = 1,
-                      clear_color::Union{Nothing,NTuple{4,Float32}} = (0f0, 0f0, 0f0, 1f0),
-                      depth_clear::Union{Nothing,Float32} = 1f0,
-                      vert_tt::Type = Tuple{}, frag_tt::Type = Tuple{})
-    fb = target.fb
-    fb isa MetalFramebuffer ||
-        error("this backend draws into a MetalFramebuffer, got $(typeof(fb))")
-
-    compiled = compile_pipeline(p, MTLm.MTLPixelFormat[fb.color_format],
-                                fb.depth === nothing ? nothing : fb.depth_format,
-                                vert_tt, frag_tt)
-
-    dev = Metal.device()
-    rp = MTLm.MTLRenderPassDescriptor()
-    ca = rp.colorAttachments[1]
-    ca.texture     = fb.color
-    ca.loadAction  = clear_color === nothing ? MTLm.MTLLoadActionLoad :
-                                               MTLm.MTLLoadActionClear
-    ca.storeAction = MTLm.MTLStoreActionStore
-    clear_color === nothing ||
-        (ca.clearColor = MTLm.MTLClearColor(clear_color[1], clear_color[2],
-                                            clear_color[3], clear_color[4]))
-    if fb.depth !== nothing
-        da = rp.depthAttachment
-        da.texture     = fb.depth
-        da.loadAction  = depth_clear === nothing ? MTLm.MTLLoadActionLoad :
-                                                   MTLm.MTLLoadActionClear
-        da.storeAction = MTLm.MTLStoreActionStore
-        depth_clear === nothing || (da.clearDepth = Float64(depth_clear))
-    end
-
-    # The immediate path draws and waits: its own command buffer, committed and
-    # waited for at the end.
-    cb = framebuffer!(dev)
-    enc = MTLm.MTLRenderCommandEncoder(cb, rp)
-    MTLm.set_pipeline!(enc, compiled.state)
-    compiled.depth_state === nothing ||
-        MTLm.set_depth_stencil_state!(enc, compiled.depth_state)
-    MTLm.set_cull_mode!(enc, compiled.cull)
-    for (i, b) in enumerate(buffers)
-        MTLm.set_vertex_buffer!(enc, b, 0, i)
-    end
-    for (i, b) in enumerate(frag_buffers)
-        MTLm.set_fragment_buffer!(enc, b, 0, i)
-    end
-    MTLm.draw_primitives!(enc, compiled.primitive, 0, vertex_count, instances)
-    MTLm.endEncoding!(enc)
-    submitwait!(cb)
-    return nothing
-end
 
 # ── How this backend submits ─────────────────────────────────────────────────
 #
@@ -842,25 +848,16 @@ function Mantle.gpupasstime!(d::MetalDevice)
 end
 
 """
-    readback_eltype(format) -> Type
+    readback_framebuffer(fb) -> Matrix{<:Colorant}
 
-The STORAGE type of one channel: `UInt8` for the 8-bit formats, `Float16`/
-`Float32` for the float ones.
+The colour attachment on the host: `width` x `height`, one COLORANT per pixel --
+`eltypeof(fb.color_format)`, the same element type the Vulkan side returns, so
+`p.r` and `p.b` name the channels on either backend.
 
-Not `eltype(eltypeof(format))`, which answers `N0f8` for a `BGRA{N0f8}` — a
-normalised type whose value is already in 0..1. A caller that then divides by 255
-gets a number 255 times too small, which is what turned a rendered frame into a
-nearly-black one with everything still in the right place.
-"""
-readback_eltype(f::MTLm.MTLPixelFormat) = storagetype(eltype(eltypeof(f)))
-storagetype(::Type{T}) where {T <: FixedPoint} = FixedPointNumbers.rawtype(T)
-storagetype(::Type{T}) where {T} = T
-
-"""
-    readback_framebuffer(fb) -> Matrix{NTuple{4,T}}
-
-The colour attachment on the host: `width` x `height`, one 4-component tuple per
-pixel, in the attachment's own channel order.
+The colorant is also what carries the channel ORDER: a `BGRA{N0f8}` attachment
+comes back as `BGRA{N0f8}`, and `p.r` picks the third slot because the type says
+so. Returning a bare `NTuple{4,T}` made that the caller's problem and silently
+the wrong way round for half the formats.
 
 Through `getBytes!` rather than shared memory: a render target cannot be a
 buffer-backed linear texture on an Apple GPU.
@@ -886,8 +883,11 @@ function Mantle.readback_framebuffer(fb::MetalFramebuffer)
     # narrow. `blit!` followed immediately by a readback loses it every time, and
     # the whole composited image came back transparent black.
     Metal.synchronize()
-    T = readback_eltype(fb.color_format)
-    px = Matrix{NTuple{4,T}}(undef, fb.width, fb.height)
+    # Allocated as the COLORANT and read into directly: a `RGBA{Float32}` is
+    # four `Float32`s and a `BGRA{N0f8}` four bytes, laid out exactly as the
+    # texture has them, so there is nothing to convert -- and nothing left for a
+    # caller to get wrong.
+    px = Matrix{eltypeof(fb.color_format)}(undef, fb.width, fb.height)
     GC.@preserve px MTLm.getBytes!(pointer(px), fb.color, fb.width * sizeof(eltype(px)),
                                    MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0),
                                                   MTLm.MTLSize(fb.width, fb.height, 1)))
@@ -1386,12 +1386,19 @@ for f in METAL_BUILTINS
 end
 Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 
+# Screen-space derivatives. `air.dfdx.f32`/`air.dfdy.f32` -- see
+# `Metal/src/device/intrinsics/graphics.jl` for where those names come from.
+Metal.@device_override KI.dFdx(v::Float32) = Metal.dfdx(v)
+Metal.@device_override KI.dFdy(v::Float32) = Metal.dfdy(v)
+
+# Throwing a fragment away. `air.discard_fragment` -- same file, same provenance
+# as the derivatives. Returns nothing and does not terminate the shader, which
+# is what `KI.discard`'s contract promises and what MSL does.
+Metal.@device_override KI.discard() = Metal.discard_fragment()
+
 # What Metal does NOT have, and says so rather than leaving a MethodError for a
 # shader compile to find:
 #
-#   `dFdx`/`dFdy`          Metal.jl exposes no derivative intrinsic yet; MSL
-#                          has `dfdx`/`dfdy`, so this is a gap in the binding
-#                          rather than in the hardware.
 #   `set_point_size!`      needs `[[point_size]]` on the stage output struct,
 #                          which the AIR writer does not emit yet.
 #   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
@@ -1400,7 +1407,7 @@ Metal.@device_override KI.frag_coord(dim::Integer = 1) = Metal.frag_coord(dim)
 #                          `Mantle.lower_geometry_to_mesh`, so these three are
 #                          the leaf of a lowering nothing here reaches.
 #
-# The first two are unimplemented; the last three are absent from the hardware.
+# The first is unimplemented; the last three are absent from the hardware.
 # `caps` is where a caller asks which — see `supports_geometry`.
 
 # Sampling a bound texture. The binding is a SLOT and AIR has no global textures,

@@ -257,6 +257,41 @@ include("graph/build.jl")
 # and Metal backends; Vulkan records commands instead and overrides it.
 include("graph/kalaunch.jl")
 
+# `apair` is declared in `src/array/indexing.jl`, with the other portable array
+# helpers. It is a hook callers extend, so it has to exist above the backend
+# split; the constants below are here for the same reason.
+
+"""
+The GEMM blocking a plane has to fill before per-plane routing is worth it.
+
+`64, 64, 32` — `BK = 32` with `BK_STEP = 4` is the reference's F32 pair.
+
+Declared HERE rather than beside the kernels that use them, for the same reason
+as [`apair`](@ref): `DNNKernels.planewise_worth` reads `SGEMM_BM`/`SGEMM_BN` as a
+MINIMUM PLANE SIZE when it decides whether to route a batched matmul per plane,
+and it does that on every backend. While they lived in `src/vulkan/array/gemm.jl`
+the names did not exist on a build that compiled in a different one, so
+`batchedmatmul!` was an `UndefVarError` there — a documented entry point that
+could not be called at all, which `test_batchedmatmul.jl` did not catch because
+it named a backend and never ran.
+"""
+const SGEMM_BM, SGEMM_BN, SGEMM_BK = 64, 64, 32
+
+"""
+Tiles a plane must cover before per-plane routing beats one flat launch.
+
+Read by `DNNKernels.planewise_worth` alongside [`SGEMM_BM`](@ref), so it is
+declared here for the same reason.
+"""
+const SGEMM_MINTILES = 16
+
+"""
+How much of a padded tile `planewise_worth` will accept as waste.
+
+Read on every backend alongside [`SGEMM_BM`](@ref) and `SGEMM_MINTILES`.
+"""
+const SGEMM_MAXWASTE = 4
+
 # ── backends ──────────────────────────────────────────────────────────────────
 #
 # Everything above this line is what a backend implements against, and it must
@@ -312,6 +347,7 @@ export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
+export supports_procedural_traversal
 export batchqueue
 export defaultbackend, availablebackends, eachbackend, register_backend!, register_kernel_recorder!
 export devicearray
@@ -358,7 +394,7 @@ export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
 export candidate_primitive_index, candidate_object_ray, commit_intersection!
 
 # Hardware ray tracing.
-export build_accel!, refit_tlas!, set_anyhit_pipeline!
+export build_accel!, build_blas_aabb, refit_tlas!, set_anyhit_pipeline!
 export trace_rays!, trace_rays_indirect!
 # The DECLARATION verb, beside `dispatch!` rather than beside the recording ones
 # above: `trace!` says a pass traces, the others record a trace that was already

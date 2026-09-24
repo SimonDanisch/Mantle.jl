@@ -18,6 +18,15 @@ using Mantle: Vec2f, Vec3f, Vec4f
 # The composite format's colorant, for the readback assertions.
 using ColorTypes: RGBA, BGRA
 using ColorTypes.FixedPointNumbers: N0f8
+
+# `readback_framebuffer` answers the attachment's COLORANT -- `BGRA{N0f8}` for a
+# framebuffer here, `RGBA{N0f8}` for the raw-texture helper below -- so a channel
+# is named (`q.g`) rather than indexed, and reads the same whichever the order.
+# That is the point of the element type: the two formats differ by where green
+# sits, and `q[2]` was right for one of them by accident.
+#
+# `n8` keeps these thresholds the exact byte values they have always been.
+n8(b::UInt8) = reinterpret(N0f8, b)
 const MTLg = Metal.MTL
 
 # The PORTABLE spelling, the one `bench/showcase.jl` uses: a vertex stage
@@ -26,8 +35,13 @@ const MTLg = Metal.MTL
 # a stage writes through a trailing pointer and reads each varying as its own
 # tagged parameter — and `MetalVertexStage`/`MetalFragmentStage` are that
 # translation, the counterpart to Lava's `VertexWrapper`/`FragmentWrapper`.
-mantle_gfx_vertex(verts::Core.LLVMPtr{NTuple{4,Float32},1}) =
-    (position = unsafe_load(verts, Int(vertex_index())), tint = (0f0, 1f0, 0f0, 1f0))
+# Indexed, not `unsafe_load`ed through a `Core.LLVMPtr`. The pointer spelling was
+# only reachable while this backend had a `draw!` of its own taking an explicit
+# `vert_tt`: a raw handle cannot say what it points at, so the caller had to. Core
+# reads the shader argument types off the arrays it is handed, so the portable
+# spelling is to take the array -- which is what `lg_vertex` below already did.
+mantle_gfx_vertex(verts) =
+    (position = verts[Int(vertex_index())], tint = (0f0, 1f0, 0f0, 1f0))
 # The fragment reads the varying rather than repeating the constant, so a
 # vertex-to-fragment link that silently failed would show as a black triangle.
 mantle_gfx_fragment(inputs) = inputs.tint
@@ -56,33 +70,35 @@ end
 
     verts = NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0), (0.9f0, -0.9f0, 0f0, 1f0),
                               (0f0, 0.9f0, 0f0, 1f0)]
-    vbuf = MTLg.MTLBuffer(Metal.device(), sizeof(verts), pointer(verts);
-                          storage = Metal.SharedStorage)
+    # A portable `Buffer` and not a hand-built `MTLBuffer`: core's `draw!` reads the
+    # shader argument types off the arrays it is given, which is why it needs no
+    # `vert_tt`. A raw driver handle is bytes and cannot say what it holds.
+    vbuf = Mantle.Buffer(be, verts)
 
-    Mantle.draw!(be, pipe, Mantle.OffscreenTarget(fb), 3; buffers = (vbuf,),
-                 vert_tt = Tuple{Core.LLVMPtr{NTuple{4,Float32},1}})
+    Mantle.draw!(be, pipe, Mantle.OffscreenTarget(fb), 3; args = (vbuf,))
 
-    # `width` x `height`, one 4-tuple per pixel, which is the SHAPE
-    # `readback_framebuffer` promises and what the Vulkan side answers. It used
-    # to be a `4 x width x height` byte array here and only here, so the one
-    # portable caller — RayMakie's compositor — worked on Vulkan and hit a
-    # `BoundsError` on Metal.
+    # `width` x `height`, one COLORANT per pixel, which is the shape AND the
+    # element type `readback_framebuffer` promises and what the Vulkan side
+    # answers. Both halves were wrong here once and only here: it returned a
+    # `4 x width x height` byte array, so the one portable caller — RayMakie's
+    # compositor — worked on Vulkan and hit a `BoundsError` on Metal; and then a
+    # `Matrix{NTuple{4,UInt8}}`, which has the right shape and still makes the
+    # caller guess where red is.
     px = Mantle.readback_framebuffer(fb)
-    @test px isa Matrix{NTuple{4,UInt8}}
+    @test px isa Matrix{BGRA{N0f8}}
     @test size(px) == (64, 64)
-    green = count(q -> q[2] > 0x80, px)
+    green = count(q -> q.g > n8(0x80), px)
     # About 40 % of the frame, which is this triangle's area in NDC. A blank or
     # a fully-covered target both fail here.
     @test 1000 < green < 3000
     # …and the pixels outside it kept the clear colour, so the draw was bounded
     # by the geometry rather than covering everything.
-    @test count(q -> q[2] <= 0x80, px) > 1000
+    @test count(q -> q.g <= n8(0x80), px) > 1000
 
     # Compiling the same pipeline again must hit the cache: a pipeline rebuilt
     # per draw is the difference between a frame and a stall.
     second = Mantle.Framebuffer(be, 64, 64; depth = false)
-    Mantle.draw!(be, pipe, Mantle.OffscreenTarget(second), 3; buffers = (vbuf,),
-                 vert_tt = Tuple{Core.LLVMPtr{NTuple{4,Float32},1}})
+    Mantle.draw!(be, pipe, Mantle.OffscreenTarget(second), 3; args = (vbuf,))
     @test Mantle.readback_framebuffer(second) == px
 end
 
@@ -218,7 +234,7 @@ function ki_draw_mesh(meshfn, fragfn; groups::Int = 1, threads::Int = 1)
     MTL.commit!(cb)
     MTL.wait_completed(cb)
 
-    px = Matrix{NTuple{4,UInt8}}(undef, W, H)
+    px = Matrix{RGBA{N0f8}}(undef, W, H)
     GC.@preserve px MTL.getBytes!(pointer(px), tex, W * 4,
                                   MTL.MTLRegion(MTL.MTLOrigin(0,0,0), MTL.MTLSize(W,H,1)))
     return px
@@ -246,7 +262,7 @@ end
     # A fullscreen triangle, and every pixel carries the per-primitive colour
     # the body declared — (0, 1, 0, 1) — which is what says the numbered field
     # slot and the one-based conversions are both right.
-    @test all(==((0x00, 0xff, 0x00, 0xff)), px)
+    @test all(==(RGBA{N0f8}(0, 1, 0, 1)), px)
 end
 
 @testset "mesh_thread_index and mesh_group_index count from one" begin
@@ -255,7 +271,7 @@ end
                                  Metal.Varying{:colour, NTuple{4,Float32}},
                                  Core.LLVMPtr{KIFragOut,1}}, :fragment, "ki_frag")
 
-    lit(px) = count(q -> q[2] > 0x80, px)
+    lit(px) = count(q -> q.g > n8(0x80), px)
     # Group 1 scales by 1/1 and covers the frame. If `mesh_group_index` were
     # zero-based this would divide by zero and cover nothing.
     @test lit(ki_draw_mesh(ms, fs; groups = 1)) == 32 * 32
@@ -271,8 +287,8 @@ end
 # ── the two paths agree about clip space ─────────────────────────────────────
 
 """Position straight out of a buffer, so the vertex path adds no arithmetic."""
-function ki_ref_vertex(verts::Core.LLVMPtr{NTuple{4,Float32},1})
-    return (position = unsafe_load(verts, Int(Mantle.vertex_index())),)
+function ki_ref_vertex(verts)
+    return (position = verts[Int(Mantle.vertex_index())],)
 end
 ki_solid_fragment(_) = (colour = (0f0, 1f0, 0f0, 1f0),)
 
@@ -327,16 +343,14 @@ end
     be = Metal.MetalBackend()
     verts = NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0), (0.9f0, -0.9f0, 0f0, 1f0),
                               (0f0, 0.1f0, 0f0, 1f0)]
-    vbuf = Metal.MTL.MTLBuffer(Metal.device(), sizeof(verts), pointer(verts);
-                               storage = Metal.SharedStorage)
+    vbuf = Mantle.Buffer(be, verts)
 
     vfb = Mantle.Framebuffer(be, 32, 32; depth = false)
     Mantle.draw!(be, Mantle.GraphicsPipeline(;
                      vertex = Mantle.VertexShader(ki_ref_vertex),
                      fragment = Mantle.FragmentShader(ki_solid_fragment),
                      cull = Mantle.NoCull()),
-                 Mantle.OffscreenTarget(vfb), 3; buffers = (vbuf,),
-                 vert_tt = Tuple{Core.LLVMPtr{NTuple{4,Float32},1}})
+                 Mantle.OffscreenTarget(vfb), 3; args = (vbuf,))
     vpx = Mantle.readback_framebuffer(vfb)
 
     mfb = Mantle.Framebuffer(be, 32, 32; depth = false)
@@ -348,8 +362,8 @@ end
 
     # The triangle is off centre, so the two halves differ and the comparison
     # has something to catch.
-    top = count(q -> q[2] > 0x80, @view vpx[:, 1:16])
-    bot = count(q -> q[2] > 0x80, @view vpx[:, 17:32])
+    top = count(q -> q.g > n8(0x80), @view vpx[:, 1:16])
+    bot = count(q -> q.g > n8(0x80), @view vpx[:, 17:32])
     @test top != bot
     @test 100 < top + bot < 32 * 32
     # …and the mesh stage put it in the same place, pixel for pixel.
@@ -390,6 +404,20 @@ function mp_mesh_lower(out)
     return nothing
 end
 
+# The SAME pipeline as `mp_mesh`, with `colour` written in the VERTEX tuple
+# instead of through `set_mesh_primitive_data!`. Both are legal and both must
+# draw the same frame -- see the testset below for why that is not a stylistic
+# choice.
+function mp_mesh_flat_via_vertex(out)
+    green = (0f0, 1f0, 0f0, 1f0)
+    KIm.set_mesh_vertex!(out, 1, (position = (-1f0, -1f0, 0f0, 1f0), uv = (0f0, 0f0), colour = green))
+    KIm.set_mesh_vertex!(out, 2, (position = ( 3f0, -1f0, 0f0, 1f0), uv = (2f0, 0f0), colour = green))
+    KIm.set_mesh_vertex!(out, 3, (position = (-1f0,  3f0, 0f0, 1f0), uv = (0f0, 2f0), colour = green))
+    KIm.set_mesh_triangle!(out, 1, 1, 2, 3)
+    KIm.set_mesh_outputs!(out, 3, 1)
+    return nothing
+end
+
 mp_pipeline(f) = Mantle.MeshPipeline(;
     mesh = Mantle.MeshShader(f;
         outputs = (uv = NTuple{2,Float32}, colour = Mantle.Flat{NTuple{4,Float32}}),
@@ -420,12 +448,43 @@ mp_pipeline(f) = Mantle.MeshPipeline(;
     px = Mantle.readback_framebuffer(fb)
     # Every pixel carries the per-primitive colour the body declared, so both
     # the coverage and the flat plane are asserted at once.
-    @test all(==((0x00, 0xff, 0x00, 0xff)), px)
+    @test all(==(BGRA{N0f8}(0, 1, 0, 1)), px)
 
     # Compiling the same pipeline again hits the cache rather than rebuilding.
     fb2 = Mantle.Framebuffer(be, 32, 32; depth = false)
     Mantle.draw!(be, p, Mantle.OffscreenTarget(fb2), 1)
     @test Mantle.readback_framebuffer(fb2) == px
+end
+
+@testset "a Flat output may be written per vertex" begin
+    # Mantle's contract is Vulkan's: EVERY declared output is written by
+    # `set_mesh_vertex!` and `Flat` only says how the varying is interpolated --
+    # "flatness says WHERE a value is delivered, never what it is"
+    # (`src/vulkan/graphics/api.jl`). So a portable mesh shader puts its flat
+    # fields in the vertex tuple, and `set_mesh_primitive_data!` is the other,
+    # equally legal spelling for a stage that would rather name the primitive.
+    #
+    # AIR has no flat qualifier on mesh vertex data -- a mesh stage's flat
+    # varying IS per-primitive data -- so `mesh_object_of` splits the
+    # declaration into two planes and this backend has to bridge the two
+    # spellings. It did not: `colour` was in `P` and not in `V`, so the
+    # `@generated` writer raised "`colour` is not a field of ..." from inside
+    # its generator. That does not surface as the error it is. The generator's
+    # throw becomes a RUNTIME call, so the stage failed to compile with
+    # `unsupported dynamic function invocation` and a dozen
+    # `julia.gpu.state_getter` reports from the boxing around it, naming neither
+    # `colour` nor `Flat` -- which is why this went unnoticed until a real
+    # shader (`examples/isubd`) tried it.
+    be = Metal.MetalBackend()
+    fb = Mantle.Framebuffer(be, 32, 32; depth = false)
+    Mantle.draw!(be, mp_pipeline(mp_mesh_flat_via_vertex),
+                 Mantle.OffscreenTarget(fb), 1)
+    px = Mantle.readback_framebuffer(fb)
+
+    # The SAME frame the `set_mesh_primitive_data!` spelling draws, which is the
+    # whole claim: one green triangle covering everything, its flat colour
+    # arriving in the fragment stage unchanged.
+    @test all(==(BGRA{N0f8}(0, 1, 0, 1)), px)
 end
 
 @testset "a MeshPipeline uses Mantle's clip space" begin
@@ -437,7 +496,7 @@ end
     fb = Mantle.Framebuffer(be, 32, 32; depth = false)
     Mantle.draw!(be, mp_pipeline(mp_mesh_lower), Mantle.OffscreenTarget(fb), 1)
     px = Mantle.readback_framebuffer(fb)
-    lit(v) = count(q -> q[2] > 0x80, v)
+    lit(v) = count(q -> q.g > n8(0x80), v)
     top, bot = lit(@view px[:, 1:16]), lit(@view px[:, 17:32])
     @test top + bot > 200          # it drew something
     @test top + bot < 32 * 32      # …and not everything
@@ -476,8 +535,11 @@ end
     orange = Metal.MtlVector{RGBA{Float32}}(fill(RGBA{Float32}(1f0, 0.5f0, 0f0, 1f0), 64))
     Mantle.blit!(be, Mantle.OffscreenTarget(fb), orange; clear = true)
     px = Mantle.readback_framebuffer(fb)
-    # BGRA on the wire, so the blue channel is first and the red last.
-    @test all(==((0x00, 0x80, 0xff, 0xff)), px)
+    # Orange, named by channel. This asserted the raw wire bytes
+    # `(0x00, 0x80, 0xff, 0xff)` with a comment explaining that blue comes first
+    # in a `BGRA` attachment -- which is exactly the knowledge the colorant now
+    # carries, so the test states the COLOUR and the type places it.
+    @test all(==(BGRA{N0f8}(1, n8(0x80), 0, 1)), px)
 end
 
 # ── a geometry pipeline, lowered onto the mesh stage ─────────────────────────
@@ -581,11 +643,15 @@ end
 
 """The pixels that are not the clear colour, and the block they occupy."""
 function lg_covered(px)
-    idx = findall(q -> q != (0x00, 0x00, 0x00, 0xff), px)
+    idx = findall(q -> q != BGRA{N0f8}(0, 0, 0, 1), px)
     isempty(idx) && return (n = 0, rows = (0, 0), cols = (0, 0), colours = eltype(px)[])
     r = extrema(getindex.(idx, 1))
     c = extrema(getindex.(idx, 2))
-    return (n = length(idx), rows = r, cols = c, colours = sort(unique(px[idx])))
+    # `by`, because a colorant has no `isless` -- and should not: there is no
+    # meaningful order on colours, only on their channels. Sorting by the tuple
+    # makes the order explicit and keeps these assertions stable.
+    return (n = length(idx), rows = r, cols = c,
+            colours = sort(unique(px[idx]); by = q -> (q.r, q.g, q.b, q.alpha)))
 end
 
 @testset "a geometry pipeline draws on a backend with no geometry stage" begin
@@ -609,17 +675,17 @@ end
     # per SLOT buys — with the two AIR operands the other way round only the first
     # vertex's `uv` landed and the interpolation collapsed to a corner ramp.
     sub = px[cov.rows[1]:cov.rows[2], cov.cols[1]:cov.cols[2]]
-    ch2 = map(q -> q[2], sub)
-    ch3 = map(q -> q[3], sub)
-    @test maximum(ch2) > 0xd0 && maximum(ch3) > 0xd0
-    @test minimum(ch2) < 0x20 && minimum(ch3) < 0x20
+    ch2 = map(q -> q.g, sub)
+    ch3 = map(q -> q.r, sub)
+    @test maximum(ch2) > n8(0xd0) && maximum(ch3) > n8(0xd0)
+    @test minimum(ch2) < n8(0x20) && minimum(ch3) < n8(0x20)
     # Symmetric about the centre in both directions, which a one-corner ramp is
     # not: the first row equals the last, and the first column the last.
     @test ch2[1, :] == ch2[end, :]
     @test ch3[:, 1] == ch3[:, end]
     # The blue channel is the fragment's own constant, so every covered pixel has
     # it — a check that the frame is the shader's and not something left over.
-    @test all(q -> q[1] == 0x80, sub)
+    @test all(q -> q.b == n8(0x80), sub)
 end
 
 @testset "a lowered draw runs one threadgroup per input primitive" begin
@@ -631,10 +697,11 @@ end
     px = lg_draw(lg_pipeline(lg_frag_tint), (pts,), 3)
     cov = lg_covered(px)
     @test cov.n == 3 * 16 * 16
-    # `tint = vertex index / 4`, so 0.25, 0.5 and 0.75 — and BGRA on the wire puts
-    # the red channel third.
-    @test cov.colours == [(0x00, 0x00, 0x40, 0xff), (0x00, 0x00, 0x80, 0xff),
-                          (0x00, 0x00, 0xbf, 0xff)]
+    # `tint = vertex index / 4`, so 0.25, 0.5 and 0.75 — as RED, which is what
+    # the shader wrote. Where red SITS in the attachment is the colorant's
+    # business, not this assertion's.
+    @test cov.colours == [BGRA{N0f8}(n8(0x40), 0, 0, 1), BGRA{N0f8}(n8(0x80), 0, 0, 1),
+                          BGRA{N0f8}(n8(0xbf), 0, 0, 1)]
 end
 
 @testset "an indexed lowered draw fetches its own vertex indices" begin
@@ -654,8 +721,8 @@ end
     @test 3 * 30 < cov.n < 3 * 50
     # One colour per segment, and they are the OUTER two vertices of each window:
     # (1+3)/16, (1+4)/16, (2+4)/16 one-based.
-    @test cov.colours == [(0x00, 0x00, 0x40, 0xff), (0x00, 0x00, 0x50, 0xff),
-                          (0x00, 0x00, 0x60, 0xff)]
+    @test cov.colours == [BGRA{N0f8}(n8(0x40), 0, 0, 1), BGRA{N0f8}(n8(0x50), 0, 0, 1),
+                          BGRA{N0f8}(n8(0x60), 0, 0, 1)]
     # …and the three sit along the diagonal, at the midpoints of the segments.
     centres = [(sum(getindex.(findall(==(c), px), 1)) / count(==(c), px),
                 sum(getindex.(findall(==(c), px), 2)) / count(==(c), px))
@@ -699,7 +766,7 @@ end
     # refuses a zero grid, so the count has to be checked rather than passed on.
     ib = Mantle.indexbuffer(dev, UInt32[0, 0, 1])
     blank = lg_draw(lg_seg_pipeline(), (pts,), 3; indices = ib)
-    @test all(==((0x00, 0x00, 0x00, 0xff)), blank)
+    @test all(==(BGRA{N0f8}(0, 0, 0, 1)), blank)
 end
 
 # ── Sampling a bound texture, and the layout it is bound in ─────────────────
@@ -744,9 +811,13 @@ function tex_draw(data; n = 4, filter = :nearest)
         Mantle.draw!(pr, compiled, (), 3)
     end
     px = Mantle.readback_framebuffer(fb)
-    # The red channel carries component 0; the readback is BGRA, and its second
-    # index counts from the top while `uv.y = 0` is the bottom of the target.
-    return [px[x, n + 1 - y][3] / 255 for x in 1:n, y in 1:n]
+    # The red channel carries component 0. Its second index counts from the top
+    # while `uv.y = 0` is the bottom of the target, so the row is flipped.
+    #
+    # `.r`, and no division: this read `[3] / 255` -- the third slot because the
+    # attachment is BGRA, over 255 because the slot was a raw byte. Both facts
+    # now live in the element type, and `Float32(::N0f8)` is already 0..1.
+    return [Float32(px[x, n + 1 - y].r) for x in 1:n, y in 1:n]
 end
 
 @testset "a texture is bound as data[x, y]" begin

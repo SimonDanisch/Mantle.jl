@@ -1017,6 +1017,23 @@ function closeframe!(q::LegacyQueue, ::MTL.MTLDevice)
 end
 
 """
+Wait until this device has finished everything it has been given.
+
+Core's `flush!(d::Device)` forwards to `flush!(batchqueue(d))` and needs no
+backend method on Vulkan, where "a queue holds no open batch, so this is
+`waitfor!` on the newest submission and nothing else". Here a queue holds
+exactly that: work sits in an open command buffer until something commits it.
+Waiting without committing first waits for the SUBMISSIONS BEFORE it and
+returns, which does not look like a hang -- it looks like a correct frame that
+reads back as whatever the target held previously.
+
+So: commit the open batch, then wait for it. `closeframe!` is already the verb
+for the first half and hands back a fence covering it, and it dispatches on the
+queue, so both queue generations are served without naming either here.
+"""
+flush!(d::MetalDevice) = (waitfor(d, closeframe!(d)); nothing)
+
+"""
 `true` on a queue that batches, which is the pre-MTL4 one.
 
 A call is host work that submits or encodes work of its own, and the question

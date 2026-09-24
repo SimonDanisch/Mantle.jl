@@ -159,6 +159,39 @@ end
     end
 end
 
+@testset "an unrolled loop compiles its kernel once, and a rebuild links nothing" begin
+    # `repeat!` declares its body once per iteration. Each recorded dispatch used
+    # to be named by its argument offset, and the name is part of the compile
+    # key: four copies were four compile jobs, four metallibs and four native
+    # links. And an indirect pipeline was never cached, so a REBUILT plan linked
+    # every dispatch again. Hikari's bounce loop is such a body, and a RayMakie
+    # material switch rebuilds its plans: 124 links and 138 s before the first
+    # GOLD frame of the isubd demo, 9 links and 21 s after.
+    recorded(plan) = [d for pp in plan.passes for d in pp.dispatches
+                      if d isa Mantle.MetalRecordedDispatch && occursin("rec_bump", d.name)]
+    function bumps()
+        g = Mantle.Graph(REC_DEV)
+        counter = Mantle.Buffer(REC_DEV, Float32[0])
+        flag = Mantle.Buffer(REC_DEV, Int32[4])
+        Mantle.repeat!(g, 4; while_nonzero = flag) do i
+            Mantle.dispatch!(g, rec_bump!, (counter, flag), 1; name = "bump-$i")
+        end
+        return Mantle.record!(Mantle.Plan(g)), counter
+    end
+    plan, counter = bumps()
+    ds = recorded(plan)
+    @test length(ds) == 4
+    @test length(unique(d.name for d in ds)) == 1        # one compile key
+    @test all(d -> d.kernel.pipeline === ds[1].kernel.pipeline, ds)
+    # And it still runs: a shared pipeline is named by four commands.
+    Mantle.run!(plan)
+    Mantle.waitfor!(plan)
+    @test Array(Mantle.storage(counter))[1] == 4f0
+
+    rebuilt, _ = bumps()
+    @test all(d -> d.kernel.pipeline === ds[1].kernel.pipeline, recorded(rebuilt))
+end
+
 @testset "a DeviceRange records at its ceiling" begin
     cap = 256
     g = Mantle.Graph(REC_DEV)

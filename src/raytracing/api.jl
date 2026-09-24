@@ -22,6 +22,32 @@ sequence of builds does not allocate one each.
 function build_accel! end
 
 """
+    build_blas_aabb(ctx, aabbs; opaque = true) -> BLAS
+
+A bottom-level structure over PROCEDURAL geometry: axis-aligned boxes standing in
+for primitives the traversal cannot intersect itself.
+
+What is inside a box is not the traversal's business. A ray that enters one is
+handed back to the caller — through the `procedural_candidate` / `procedural_commit`
+protocol in `raytracing/accel.jl` — which answers whether and where it really hit.
+That is what lets `Hikari`'s `FEMMaterial` put one box around each curved element and
+Newton-solve the isoparametric map inside it, giving an exact silhouette with no
+triangles at all.
+
+Declared HERE and not beside either backend's builder. A caller spells this the same
+way on both — `Hikari`'s `fem.jl` does — and while it lived only in
+`src/vulkan/raytracing/acceleration.jl` the name did not exist on a build that
+compiled in a different backend, so a scene holding procedural geometry was an
+`UndefVarError` at construction rather than a decline. The same rule as
+[`build_accel!`](@ref) above, and the same one `apair` needed.
+
+`aabbs` is a `Vector{`[`AABB`](@ref)`}`. `opaque` is a hint a backend may ignore: a
+box is never opaque the way a triangle is, because there is nothing to intersect
+until the protocol says so.
+"""
+function build_blas_aabb end
+
+"""
     refit_tlas!(tlas)
 
 Update `tlas` in place for instance transforms that have changed.
@@ -172,6 +198,42 @@ supports_rt_pipeline(::Any) = false
 # says no and is traced inline. A triangles-only accel is unaffected.
 supports_rt_pipeline(a::AdaptedAccel) =
     a.procedural === nothing && supports_rt_pipeline(a.hwtlas)
+
+"""
+    supports_procedural_traversal(x) -> Bool
+
+Whether this backend can TRACE procedural (AABB) geometry — not merely build a
+bottom-level structure over the boxes, which is a separate and much smaller
+question.
+
+`false` by default, so a backend opts in by implementing the three candidate
+verbs `procedural_candidate` needs: [`candidate_primitive_index`](@ref),
+[`candidate_object_ray`](@ref) and [`commit_intersection!`](@ref).
+
+The two halves really do come apart, and Metal is why this predicate exists.
+It builds an AABB BLAS and registers it in a TLAS perfectly well, so a scene
+holding `Hikari.FEMMaterial` CONSTRUCTS; tracing it is what cannot happen yet.
+Metal's traversal is `metal::raytracing::intersector<>`, a C++ class template
+the Metal frontend instantiates and inlines, so it is MSL source with no AIR
+symbol (see `src/metal/trace.jl`) — while the body that has to run for a box is
+Hikari's Newton solve, which is Julia. Vulkan inlines those Julia functions into
+its ray-query shader; on Metal there is no Julia shader to inline them into.
+Closing it means compiling the candidate to a `[[visible]]` AIR function and
+registering it in an `MTLIntersectionFunctionTable`.
+
+Asked rather than discovered: without this, pushing procedural geometry on a
+backend that cannot trace it fails as a `MethodError` on `candidate_object_ray`
+in the middle of a shader compile, which names neither the geometry nor the
+backend nor the reason.
+"""
+supports_procedural_traversal(::Any) = false
+
+# An `AdaptedAccel` too, for the same reason `supports_rt_pipeline` takes one: a
+# caller that has to ask usually holds the adapted accel rather than the backend.
+# Without this it would fall to the `::Any` default and answer `false` on a
+# backend that traces boxes perfectly well — a wrong answer, not a missing one,
+# which is the worse of the two.
+supports_procedural_traversal(a::AdaptedAccel) = supports_procedural_traversal(a.hwtlas)
 
 #
 # There is no pinning verb here. "Hold this Julia object until a submission

@@ -79,7 +79,13 @@ function jacobian(e::Element, ξ)
                 Vec3f(poly(e.x, b), poly(e.y, b), poly(e.u, b)))
 end
 
-normal(e::Element, ξ) = (J = jacobian(e, ξ); normalize(J[:, 1] × J[:, 2]))
+# `LinearAlgebra.normalize`, QUALIFIED. This file is `include`d into `Main`
+# alongside others, and once some earlier one has touched an undefined
+# `Main.normalize` the binding is resolved and a later `using LinearAlgebra`
+# cannot introduce it — an `UndefVarError` whose cause is the ORDER of the
+# includes, not this file. Same reason `test/metal/test_hwtlas_metal.jl`
+# qualifies it.
+normal(e::Element, ξ) = (J = jacobian(e, ξ); LinearAlgebra.normalize(J[:, 1] × J[:, 2]))
 
 toclip(x, mvp::Mat4f) = mvp * Vec4f(x[1], x[2], x[3], 1)
 
@@ -89,8 +95,13 @@ toclip(x, mvp::Mat4f) = mvp * Vec4f(x[1], x[2], x[3], 1)
 # the chord is compared against the surface. The demo measures the GEOMETRY and
 # the FIELD separately, against their own tolerances; one 3D distance covers
 # both here because `surfacepoint` already carries u(ξ) out of plane.
-const SAMPLES = ((0.5, 0.0, 0.5), (0.5, 0.5, 0.0), (0.0, 0.5, 0.5),
-                 (1/3, 1/3, 1/3))
+# `f0`-suffixed, not bare. A bare `0.5` is a `Float64` literal, and these reach a
+# GPU kernel through `chorderror` — on a device with no double precision that is
+# "unsupported use of double value" at compile time, not a slow path. The values
+# are exact in single either way; `1/3` is the only one that rounds, and it is a
+# sample position, not a tolerance.
+const SAMPLES = ((0.5f0, 0f0, 0.5f0), (0.5f0, 0.5f0, 0f0), (0f0, 0.5f0, 0.5f0),
+                 (1f0/3f0, 1f0/3f0, 1f0/3f0))
 
 function chorderror(e::Element, ξ::NTuple{3, Vec2f})
     x = map(ξi -> surfacepoint(e, ξi), ξ)
@@ -117,11 +128,11 @@ children(k::Key)  = (child(k, 0), child(k, 1))
 firstborn(k::Key) = iseven(k % UInt32)
 
 """The ξ a key stands for: one barycentric bisection folded per path bit."""
-function corners(k::Key, c1 = (-1.0, -1.0), c2 = (1.0, -1.0), c3 = (1.0, 1.0))
-    w1 = (1.0, 0.0, 0.0); w2 = (0.0, 1.0, 0.0); w3 = (0.0, 0.0, 1.0)
+function corners(k::Key, c1 = (-1f0, -1f0), c2 = (1f0, -1f0), c3 = (1f0, 1f0))
+    w1 = (1f0, 0f0, 0f0); w2 = (0f0, 1f0, 0f0); w3 = (0f0, 0f0, 1f0)
     leb = k % UInt32
     for i in (depth(k) - 1):-1:0
-        m = (w1 .+ w3) ./ 2                       # the LONGEST edge, (v1, v3)
+        m = (w1 .+ w3) ./ 2f0                      # the LONGEST edge, (v1, v3)
         w1, w2, w3 = ((leb >> i) & 1) == 0 ? (w1, m, w2) : (w2, m, w3)
     end
     mix(w) = Vec2f(w[1]*c1[1] + w[2]*c2[1] + w[3]*c3[1],

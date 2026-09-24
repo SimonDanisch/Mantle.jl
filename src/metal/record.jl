@@ -165,14 +165,25 @@ Mantle.devicesized(::MetalRecordedDispatch) = false
 
 """
 An entry-point name Metal will take: the kernel's own name with everything that is
-not an identifier character replaced, and the argument offset behind it to keep two
-dispatches of one kernel apart. `repeat!/gate-1` is a pass name, and a metallib
+not an identifier character replaced. `repeat!/gate-1` is a pass name, and a metallib
 function called that does not link.
+
+A recorded DISPATCH is named by its kernel alone. It used to carry its argument
+offset too, "to keep two dispatches of one kernel apart", but nothing tells
+dispatches apart by name, and the name is part of the compile key: every copy of a
+kernel became its own compile job, its own metallib and its own native link.
+`repeat!` unrolls its body once per iteration, so Hikari's bounce kernels were
+compiled eight times over (80 links for ~10 kernels on the isubd demo). Two
+dispatches of one kernel at the same types are one kernel.
+
+The slotted form stays for the recorder's own helpers, whose slot IS part of what
+they are.
 """
-function icb_name(name::AbstractString, i::Int)
+function icb_name(name::AbstractString)
     cleaned = map(c -> (isletter(c) || isdigit(c) || c == '_') ? c : '_', String(name))
-    return "mantle_" * cleaned * "_" * string(i)
+    return "mantle_" * cleaned
 end
+icb_name(name::AbstractString, i::Int) = icb_name(name) * "_" * string(i)
 
 # The two arguments on this backend whose slot binds an allocation rather than a
 # copy of the value's bytes. There is no `setBytes:` for an indirect command, so
@@ -334,7 +345,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
         raw = map(a -> Mantle.resolve(dev, a), d.args)
         adapted = map(Metal.mtlconvert, raw)
         tt = Tuple{map(Core.Typeof, adapted)...}
-        entry = icb_name(string(nameof(typeof(d.kernel))), argoff)
+        entry = icb_name(string(nameof(typeof(d.kernel))))
         kernel = Metal.mtlfunction(Metal.mtlconvert(d.kernel), tt;
                                    name = entry, indirect = true)
         wrapped = KI.Kernel(Mantle.backend(dev), kernel)
@@ -367,7 +378,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     ndrange, workgroupsize, iterspace, _ = KA.launch_config(obj, nd,
                                                             Mantle.callgroup(obj, d.group))
     ctx = KA.mkcontext(obj, ndrange, iterspace)
-    entry = icb_name(string(nameof(typeof(obj.f))), argoff)
+    entry = icb_name(string(nameof(typeof(obj.f))))
     adapted = (Metal.mtlconvert(ctx), args...)
     tt = Tuple{map(Core.Typeof, adapted)...}
     kernel = Metal.mtlfunction(obj.f, tt; name = entry, indirect = true)

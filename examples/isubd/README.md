@@ -21,12 +21,16 @@ Two renderers for the same two quadratic elements, behind one button:
 
 Both call the same `eval_poly`, and the CPU reference the tests compare against
 calls it too. The sky is a Hosek-Wilkie atmosphere computed from
-`SUN_DIRECTION`, baked once and handed to each renderer in its own convention.
+`sundirection()`, baked once and handed to each renderer in its own convention.
 
-```
-julia> include("isubd_gui.jl");  isubd_gui(backend, cx, cy, cf)   # the window
-julia> include("record_demo.jl")                                  # the video
-```
+Open `run.jl` in VS Code and evaluate it block by block. The first block
+activates and instantiates the `Project.toml` beside it, which names every
+branch the demo needs, so a clone of Mantle is all it takes. `warmup!`
+compiles every material and the raster path before you touch the controls
+(about a minute in a fresh session); after that, every switch takes a second or
+two. `record_demo.jl` makes the video, but it reaches for
+`Makie/docs/fake_interaction.jl` beside this checkout, so it needs the full
+development tree.
 
 ## The demo
 
@@ -55,8 +59,10 @@ that changes is the geometry.
 |---|---|
 | `reference.jl` | the CPU reference, **vendored unedited** from [koehlerson/mantle_mwe](https://github.com/koehlerson/mantle_mwe) @ `d32c990` |
 | `REFERENCE_README.md` | its own README — read this for the FEM side |
-| `mantle_isubd.jl` | the port: passes A (compute + scan), B (mesh shader), C (fragment), D (ray traced) |
-| `isubd_gui.jl` | the Makie GUI, on RayMakie |
+| `mantle_isubd.jl` | pass A (classify, scan, scatter), the key math, the mesh and the sky |
+| `isubd_overlay.jl` | passes B and C: the mesh and fragment stages RayMakie draws in RASTER mode |
+| `isubd_gui.jl` | the Makie GUI, on RayMakie; the traced half is Hikari's `FEMMaterial` |
+| `run.jl` | opens the window, block by block |
 | `record_demo.jl` | drives the GUI with a visible cursor and records it |
 
 The reference is not edited, deliberately: a reference that drifts toward the
@@ -65,9 +71,9 @@ by catching a swapped pair of base corners — eight plausible triangles, the
 split edge on a fan diagonal instead of an element edge, and a triangle *count*
 would never have shown it.
 
-Tested by `Mantle/test/vulkan/test_isubd_mesh.jl` (Tier 3h): key sets compared
-exactly, images compared per pixel, and refinement AND coarsening driven through
-all their intermediate states.
+Pass A is tested by `Mantle/test/test_isubd_mesh.jl`: key sets compared exactly
+against the reference, refinement AND coarsening driven through all their
+intermediate states. `test_gui.jl` drives the window's two controls.
 
 ## Things that will bite the next person
 

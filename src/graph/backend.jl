@@ -844,7 +844,7 @@ const BACKEND_VOCABULARY = (
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
-    :supports_rt_pipeline,
+    :supports_rt_pipeline, :supports_procedural_traversal,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
     :devices, :defaultdevice!,
@@ -892,7 +892,11 @@ const BACKEND_VOCABULARY = (
     # the walk's primitives
     :openrecording, :closerecording!, :emithead!, :emitbarriers!, :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
-    :profiled!, :collect!, :argument_usage,
+    # `argument_usage` is NOT repeated here: it is listed once above, with the
+    # reason it is a declaration rather than a hook. A second entry changed no
+    # behaviour but counted twice in `test_mantle_owns_it.jl`'s 0.8 ratchet, which
+    # walks this list and pushes one name per entry.
+    :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
     :recordsplans, :runscalls, :librarygemm, :native_gemm_available,

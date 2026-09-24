@@ -71,6 +71,25 @@ function intrinsic_usage(name::Symbol)
     end
     s == "__metal_linked_closest" && return READ
     s == "__metal_linked_any" && return READ
+    # The procedural pair reads the same things the triangle pair does — the
+    # acceleration structure, and through the argument buffer the candidate's
+    # table and the payload — and writes nothing. Without these the access walk
+    # stops at the `ccall` and refuses the whole kernel, which reads as a
+    # Hikari problem and is this list being one entry short.
+    s == "__metal_linked_closest_proc" && return READ
+    s == "__metal_linked_any_proc" && return READ
+    # The candidate itself, when a kernel happens to name it.
+    s == "__metal_linked_procedural_candidate" && return READ
+    # A mesh stage's outputs (`Metal/src/compiler/mesh.jl`). All five write
+    # through the mesh object, the stage's own output in address space 7, and
+    # read nothing. The object is the stage's lead argument, so its entry is
+    # dropped before anyone sees it; what these declare is only that the walk
+    # may go on past them. Without them a `MeshPipeline` drawn through the graph
+    # was refused at its first `set_primitive_count_mesh`.
+    (s == "air.set_position_mesh" || s == "air.set_index_mesh" ||
+     s == "air.set_primitive_count_mesh" ||
+     startswith(s, "air.set_vertex_data_mesh.") ||
+     startswith(s, "air.set_primitive_data_mesh.")) && return WRITE
     return nothing
 end
 
@@ -346,12 +365,13 @@ otherwise.
 Measured on an M5 over the same frame, the 42 attention ops: 78 ms through the
 `matmul2d` kernel against 24 ms through `scaledDotProductAttentionWithQueryTensor`.
 
-A STRIDED operand needs no copy on either route. SAM 2.1's projection leaves q, k
+A WINDOWED operand needs no copy on either route. SAM 2.1's projection leaves q, k
 and v as three windows on one buffer, and both the library and the kernel read them
 where they lie — the library because `sdpa_operands` hands the dense array to the
 graph and narrows it there, the kernel because a tensor descriptor carries a leading
-dimension. Materialising three operands per attention op would have been most of
-what the library saves.
+dimension. Materialising those would have been most of what the library saves.
+
+A PERMUTED operand is the other case and wants the opposite answer; see below.
 """
 function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
                                           scale, name)
@@ -363,6 +383,25 @@ function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
             return true
         end
     end
+    # A PERMUTED operand arrives as a strides-and-offset descriptor, which the library
+    # cannot bind at all — so the branch above was never even asked, and taking the
+    # operand here with this backend's kernel is choosing the slower of two routes
+    # without comparing them. Decline instead: the caller materialises on a decline and
+    # asks again, and that second ask reaches Apple's op. Its own comment is the
+    # contract — "Refusing the VIEW is not refusing the operation ... Materialised, it
+    # is asked again, so the copies are paid only where they buy the fused kernel."
+    #
+    # Measured on Hunyuan3D's geometry decoder (16 heads, 8000 queries, 4096 keys,
+    # E=64, fp16): 45.1 ms through `attn_flash_tensor_kernel!` against 11.3 through
+    # `scaledDotProductAttentionWithQueryTensor`, against ~0.4 ms for the three
+    # transposes that buy it. The tiling is not what is costing it — a sweep of every
+    # (BQ, BK, nsimd) that divides these lengths and fits threadgroup memory puts the
+    # chosen 16/128/4 first.
+    #
+    # A WINDOW is not a permute and is not affected: SAM 2.1's projection leaves q, k
+    # and v as three windows on one buffer, `packoperand` narrows those in the graph,
+    # and they take the branch above on the first ask with no copy at all.
+    Mantle.runscalls(dev) && any(x -> x isa NamedTuple, (q, k, v)) && return false
     config = Metal.attention_kernel_config(out, q, k, v; scale)
     config === nothing && return false
     dispatch!(g, config.kernel, config.args, config.ndrange;
@@ -433,6 +472,15 @@ function Mantle.vertextouches(dev::MetalDevice, shader, args::Tuple)
     lead = KI.wantsvertexindex(f, argT) ? (KI.VertexIndex,) : ()
     return stagetouches(dev, f, args; lead)
 end
+
+# A mesh pipeline has no vertex stage: the draw's first argument list belongs
+# to the MESH stage, which is what `compile_draw` hands it to. Walked at the
+# signature `compile_pipeline` compiles it at, object pointer first. The graph
+# asked `shader.vertex` of a `MeshPipeline` until this existed, so any FEM or
+# meshlet draw recorded through `draw!` failed before it could be compiled.
+Mantle.vertextouches(dev::MetalDevice, shader::Mantle.MeshPipeline, args::Tuple) =
+    stagetouches(dev, Mantle.stagefunction(shader.mesh), args;
+                 lead = mesh_stage_lead(shader))
 
 """
 What a fragment stage does to each of its arguments.
