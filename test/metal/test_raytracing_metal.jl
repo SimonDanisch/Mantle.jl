@@ -81,7 +81,10 @@ end
     # translation back out of the descriptor Metal will consume.
     moved = Mantle.Mat3x4f(1, 0, 0, 5,  0, 1, 0, 0,  0, 0, 1, 3)
     Mantle.refit_tlas!(d, tlas, [I, moved])
-    ptr = convert(Ptr{MTL.MTLAccelerationStructureInstanceDescriptor},
+    # The USER-ID descriptor is what `build_accel!` writes (68 bytes, the plain
+    # one plus `userID`); read at the plain 64-byte stride, the second record
+    # comes back four bytes out of step.
+    ptr = convert(Ptr{MTL.MTLAccelerationStructureUserIDInstanceDescriptor},
                   MTL.contents(tlas.instances))
     second = unsafe_load(ptr, 2)
     @test reinterpret(Float32, [second.transformationMatrix])[10] == 5.0f0

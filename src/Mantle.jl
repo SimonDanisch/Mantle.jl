@@ -347,6 +347,7 @@ export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
+export supports_procedural_traversal
 export batchqueue
 export defaultbackend, availablebackends, eachbackend, register_backend!, register_kernel_recorder!
 export devicearray
@@ -393,7 +394,7 @@ export procedural_miss, procedural_candidate, procedural_commit, procedural_bary
 export candidate_primitive_index, candidate_object_ray, commit_intersection!
 
 # Hardware ray tracing.
-export build_accel!, refit_tlas!, set_anyhit_pipeline!
+export build_accel!, build_blas_aabb, refit_tlas!, set_anyhit_pipeline!
 export trace_rays!, trace_rays_indirect!
 # The DECLARATION verb, beside `dispatch!` rather than beside the recording ones
 # above: `trace!` says a pass traces, the others record a trace that was already

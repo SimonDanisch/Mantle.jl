@@ -53,6 +53,8 @@ include("raytracing.jl")
 include("trace.jl")
 # The incremental acceleration structure + device-side traversal.
 include("hwtlas.jl")
+# Tracing AABB geometry: the query loop is MSL, the candidate is Julia.
+include("procedural.jl")
 
 include("graphics.jl")
 
