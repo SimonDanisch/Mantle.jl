@@ -111,9 +111,16 @@ calling; a mismatch is a new texture, not an upload.
 
 !!! note
     Backend implementations **must** implement it for their texture type, along
-    with `Base.size` and `Base.eltype`.
+    with `Base.size`. `Base.eltype` is answered here, from the type parameter.
 """
 function upload_texture_data! end
+
+# The element type IS the abstract type's parameter, so core answers it for every
+# backend. Left to each backend, Metal never did: `eltype` fell back to `Any`,
+# nothing ever "fit", and every animated texture on Metal was rebuilt from
+# scratch each update — new texture, new bindings, new frame plan — which is
+# exactly what `upload_texture_data!` exists to avoid.
+Base.eltype(::Texture{T}) where {T} = T
 
 # ── Render targets ────────────────────────────────────────────────────────────
 

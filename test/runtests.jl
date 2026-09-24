@@ -483,6 +483,9 @@ include(joinpath(@__DIR__, "test_lowering.jl"))
 # that has it. Both were found by RayMakie's RASTER mode on a Mac.
 include(joinpath(@__DIR__, "test_mesh_pipeline_graph.jl"))
 include(joinpath(@__DIR__, "test_discard.jl"))
+# A texture from device data, and one updated in place. Found by RayMakie's
+# `test_device_arrays.jl`: an `image!` of a device array drew nothing on Metal.
+include(joinpath(@__DIR__, "test_texture_upload.jl"))
 # Under `test/vulkan/` and guarded, because it is that backend's: it builds a
 # `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
 # default and no other backend's answer. It sat in the section above, whose

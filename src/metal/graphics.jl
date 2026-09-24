@@ -112,10 +112,13 @@ Vulkan side here, both hand a column-major matrix to the driver as tightly packe
 rows, which makes a Julia column one row of the image — and it is what makes
 Makie's glyph atlas sample as itself rather than as its transpose.
 
-`storageMode` is Shared and the upload goes through `replace_region!` rather than
-a buffer-backed texture: a linear texture cannot be sampled on an Apple GPU, and
-the same storage cannot be both a render target and a sampled source. This is
-the same reason `MetalFramebuffer` reads back through `getBytes!`.
+`storageMode` is Shared rather than a buffer-backed texture: a linear texture
+cannot be sampled on an Apple GPU, and the same storage cannot be both a render
+target and a sampled source. This is the same reason `MetalFramebuffer` reads
+back through `getBytes!`.
+
+`data` may be on the host or already on the device; see
+[`upload_texture_data!`](@ref) for both.
 """
 function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {T}
     dev = Metal.device()
@@ -123,19 +126,81 @@ function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {
     desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, false)
     desc.usage = MTLm.MTLTextureUsageShaderRead
     desc.storageMode = MTLm.MTLStorageModeShared
-    tex = MTLm.MTLTexture(dev, desc)
-    # A Julia matrix is COLUMN-major, so its columns are already the contiguous
-    # runs `bytesPerRow` describes — one column IS one row of the image, which is
-    # the same reading the Vulkan upload takes of the same bytes. Transposing here
-    # instead was the bug: the atlas came out mirrored about its diagonal, and text
-    # rendered as pieces of the wrong glyphs.
-    #
-    # `collect` for anything without a pointer to hand — a view or a lazy adjoint.
-    rows = data isa DenseMatrix{T} ? data : collect(data)
-    GC.@preserve rows MTLm.replace_region!(
-        tex, MTLm.MTLRegion(MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1)), 0,
-        convert(Ptr{Cvoid}, pointer(rows)), w * sizeof(T))
-    return MetalTexture2D{T}(tex, w, h)
+    t = MetalTexture2D{T}(MTLm.MTLTexture(dev, desc), w, h)
+    Mantle.upload_texture_data!(t, data)
+    return t
+end
+
+"""
+    upload_texture_data!(tex::MetalTexture2D, data)
+
+New texels for an existing texture, from the host or from the device.
+
+Both go through a blit on Mantle's queue, not `replace_region!`. A CPU write lands
+the moment it is made, while a frame that samples this texture may still be
+running; a blit is a command like the frame's own and waits its turn. That is
+also how Vulkan's upload works (`vkCmdCopyBufferToImage`), and it is why the two
+methods here mirror the two there.
+
+The texels are the matrix's column-major bytes as they stand: a Julia column is
+the contiguous run `bytesPerRow` describes, so one column is one ROW of the
+image, the same reading the Vulkan upload takes. Transposing instead mirrored
+the glyph atlas about its diagonal.
+"""
+function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where {T}
+    size(data) == size(t) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+    # Staged through a shared buffer. `collect` for anything without a dense
+    # HOST pointer to hand: a view, a lazy adjoint.
+    rows = data isa Matrix{T} ? data : collect(data)
+    nbytes = length(rows) * sizeof(T)
+    staging = GC.@preserve rows MTLm.MTLBuffer(Metal.device(), nbytes, pointer(rows);
+                                               storage = Metal.SharedStorage)
+    blit_into_texture!(t, staging, 0)
+    return t
+end
+
+# Already on the device: the array's own buffer is the source, no host round trip.
+#
+# Its own method, and not the one above, because an `MtlArray` IS a
+# `DenseMatrix` (`AbstractGPUArray <: DenseArray`) with a `pointer` — to DEVICE
+# memory. The constructor used to test `DenseMatrix` and hand that pointer to
+# the CPU-side `replace_region!`, which read texels from a device address: the
+# texture came out zero, an `image!` of a device array drew nothing at all,
+# and the image shader's `discard` of a zero alpha hid even that.
+function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) where {T}
+    size(data) == size(t) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+    # The array was most likely just WRITTEN by a kernel — RayMakie's
+    # `texeldata` is a broadcast — and that kernel may sit on a queue this blit
+    # is not ordered against: the running task's own Metal.jl queue, if this
+    # task never adopted the device's (`adoptqueue!`). `framebuffer!` below
+    # only orders after the device's batch. Unordered, the blit read the buffer
+    # before the broadcast had filled it and the texture came out zero.
+    Metal.synchronize()
+    p = pointer(data)
+    blit_into_texture!(t, p.buffer, p.offset)
+    return t
+end
+
+"""Copy a whole texture's worth of texels from `src` at byte `soff`, on the queue."""
+function blit_into_texture!(t::MetalTexture2D{T}, src::MTLm.MTLBuffer, soff::Integer) where {T}
+    w, h = size(t)
+    # Behind whatever the device's batch holds and has not committed — a frame
+    # still sampling this texture, a kernel that produced `src` — because commit
+    # order is execution order, and a buffer opened beside an open batch runs
+    # ahead of it.
+    cb = framebuffer!(Device(MetalAPI()))
+    MTLm.MTLBlitCommandEncoder(cb) do enc
+        MTLm.append_copy!(enc, t.tex, MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1),
+                          src, soff, w * sizeof(T), 0)
+    end
+    # Waited for, so the caller's array is free the moment this returns — the
+    # contract the Vulkan side keeps by copying into its own scratch first.
+    submitwait!(cb)
+    cb.status == MTLm.MTLCommandBufferStatusCompleted ||
+        error("Metal texture upload failed: $(cb.status)")
+    return nothing
 end
 
 """
