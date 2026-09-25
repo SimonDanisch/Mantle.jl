@@ -524,3 +524,30 @@ M.passed(d::TimelineDev, f) = (d.asked += 1; UInt64(f) <= d.completed)
     @test isempty(p.retiring)
     @test isempty(p.retiring_at)
 end
+
+# ── A finalizer hands a region back without taking the lock ─────────────────
+#
+# `retire!` and `retireplan!` run from finalizers, and they appended under the
+# pool's lock. When another task held it — `reclaim!(; wait = true)` holds it
+# while it waits for the device, which yields — the finalizer had to wait too,
+# which is a task switch: "task switch not allowed from inside gc finalizer", and
+# the region was never retired. Three of those, three leaks, in one run of the
+# isubd demo's GUI test.
+retire_from_finalizer!(p, d, r) = (finalizer(_ -> M.retire!(p, d, r), Ref(0)); nothing)
+
+@testset "Pool: a finalizer retires while another task holds the lock" begin
+    d, p = TimelineDev(0, 0), M.Pool()
+    r = M.acquire!(p, d, :buf, nothing, 256; blocksize = 1 << 20)
+    holding, done = Base.Event(), Base.Event()
+    holder = @async lock(p.lock) do
+        notify(holding)
+        wait(done)
+    end
+    wait(holding)
+    retire_from_finalizer!(p, d, r)
+    GC.gc(true); GC.gc(true)
+    notify(done)
+    wait(holder)
+    @test M.reclaim!(p, d) == 0          # it arrived, and was stamped
+    @test p.retiring == [r]
+end

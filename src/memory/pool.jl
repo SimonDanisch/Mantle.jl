@@ -312,6 +312,37 @@ every live tenant, not of the one growing: it is the INCUMBENT that cannot move.
 """
 remappable(x) = true
 
+# What a finalizer hands the pool: a lock-free stack, pushed with one CAS.
+#
+# A finalizer may not wait, and `lock` on a contended `ReentrantLock` waits by
+# switching tasks, which Julia refuses inside one ("task switch not allowed from
+# inside gc finalizer"): the push was dropped and the region or plan leaked. The
+# lock is contended whenever a finalizer runs on one task while another holds it
+# across a yield, which `reclaim!(; wait = true)` does while it waits for the
+# device. `reclaim!` takes the whole stack at once, on the owning thread.
+mutable struct InboxNode
+    item::Any
+    next::Union{Nothing,InboxNode}
+end
+
+mutable struct Inbox
+    @atomic head::Union{Nothing,InboxNode}
+end
+Inbox() = Inbox(nothing)
+
+function Base.push!(ib::Inbox, item)
+    node = InboxNode(item, nothing)
+    old = @atomic ib.head
+    while true
+        node.next = old
+        old, ok = @atomicreplace ib.head old => node
+        ok && return ib
+    end
+end
+
+# Everything pushed so far, newest first, leaving the inbox empty.
+takeall!(ib::Inbox) = @atomicswap ib.head = nothing
+
 """
 Blocks per arena kind, and the shared arena each kind is placed into.
 
@@ -344,7 +375,7 @@ struct Pool
     # it: a fence IS a monotone `UInt64`. Both real backends already mint one (a
     # timeline-semaphore value on Vulkan, a retirement counter on Metal), and a
     # backend with nothing to count says so with zero.
-    pending::Vector{Region}
+    pending::Inbox
     retiring::Vector{Region}
     retiring_at::Vector{UInt64}
     # The plans whose recordings hold device addresses, so a resource that
@@ -363,25 +394,22 @@ struct Pool
     blockgen::Base.RefValue{Int}
     # Plans dropped without a `free!`, waiting for a thread that may tear one
     # down. A plan's teardown is NOT finalizer-safe — it unlistens from
-    # `movelisteners` and destroys a command buffer — so its finalizer appends
+    # `movelisteners` and destroys a command buffer — so its finalizer pushes
     # here, which is the same trade `pending` makes for regions: the GC thread
     # says what is no longer wanted and the owning thread decides when.
-    #
-    # `Any` rather than `Vector{Plan}`: `Plan` is declared in `graph/types.jl`,
-    # which this file precedes.
-    pendingplans::Vector{Any}
+    pendingplans::Inbox
     lock::ReentrantLock
 end
 Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
-              Region[], Region[], UInt64[], WeakRef[], Ref(0), Any[], ReentrantLock())
+              Inbox(), Region[], UInt64[], WeakRef[], Ref(0), Inbox(), ReentrantLock())
 
 """
     retireplan!(pool, pl)
 
-Take a dropped plan, from a finalizer. Appends under the lock and does nothing
-else; [`reclaim!`](@ref) tears it down on the owning thread.
+Take a dropped plan, from a finalizer. Pushes onto a lock-free stack and does
+nothing else; [`reclaim!`](@ref) tears it down on the owning thread.
 """
-retireplan!(p::Pool, pl) = (lock(() -> push!(p.pendingplans, pl), p.lock); nothing)
+retireplan!(p::Pool, pl) = (push!(p.pendingplans, pl); nothing)
 
 arenaof(p::Pool, kind) = get!(Arena, p.arenas, kind)
 
@@ -685,7 +713,8 @@ second device the destroy was ordered against the wrong queue's completion and
 the bytes came back while a reader still named them. That is the failure
 `vulkan/runtime/coretypes.jl` records having already paid for once.
 
-Appends under a lock and does nothing else. [`release!`](@ref) inserts into a
+Pushes onto a lock-free stack and does nothing else: a finalizer may not take a
+lock (see `Inbox`). [`release!`](@ref) inserts into a
 block's free list and coalesces its neighbours; a GC thread doing that while
 another `acquire!`s is the bug [`trim!`](@ref) describes below, which Lava has
 already paid for once with a `ConcurrencyViolationError` and then a SIGSEGV.
@@ -694,7 +723,7 @@ The release itself is [`reclaim!`](@ref), from the owning thread. So this is not
 "free from a finalizer" — the finalizer never frees, it only says what is no
 longer wanted, and something on the owning thread decides when that is safe.
 """
-retire!(p::Pool, dev, r::Region) = (lock(() -> push!(p.pending, r), p.lock); nothing)
+retire!(p::Pool, dev, r::Region) = (push!(p.pending, r); nothing)
 
 """
     reclaim!(pool, dev) -> Int
@@ -732,20 +761,19 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
         # means they join this same pass rather than waiting for the next one.
         # `free!` is idempotent, so a plan that was explicitly freed and then
         # collected costs a flag read.
-        if !isempty(p.pendingplans)
-            plans = copy(p.pendingplans)
-            empty!(p.pendingplans)
-            for pl in plans
-                free!(pl)
-            end
+        node = takeall!(p.pendingplans)
+        while node !== nothing
+            free!(node.item)
+            node = node.next
         end
-        if !isempty(p.pending)
+        node = takeall!(p.pending)
+        if node !== nothing
             f = fence(dev)
-            for r in p.pending
-                push!(p.retiring, r)
+            while node !== nothing
+                push!(p.retiring, node.item::Region)
                 push!(p.retiring_at, f)
+                node = node.next
             end
-            empty!(p.pending)
         end
         # A PREFIX, and the loop stops at the first entry that has not passed.
         #
