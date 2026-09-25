@@ -315,7 +315,7 @@ per-kernel report after `f` completes (waiting for all submitted work).
 
 ```julia
 report = with_dispatch_timing() do
-    Makie.colorbuffer(scene; backend=RayMakie, integrator=vp)
+    Makie.colorbuffer(scene; backend=RayMakie, samples=4)
 end
 for r in report
     println(r)
