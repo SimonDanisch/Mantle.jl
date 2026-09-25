@@ -24,8 +24,8 @@ using Test
 using Mantle, Makie, RayMakie, GeometryBasics, Hikari, Colors
 
 backend = Mantle.defaultbackend()
-RayMakie.activate!(device = backend, accumulate = false, samples = 2,
-                   integrator = Hikari.VolPath(max_depth = 8, hw_accel = true))
+RayMakie.activate!(device = backend, accumulate = false, samples = 2, max_depth = 8,
+                   hw_accel = true)
 
 module IsubdGuiTest
 include(joinpath(@__DIR__, "mantle_isubd.jl"))

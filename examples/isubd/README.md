@@ -21,7 +21,8 @@ Two renderers for the same two quadratic elements, behind one button:
 
 Both call the same `eval_poly`, and the CPU reference the tests compare against
 calls it too. The sky is a Hosek-Wilkie atmosphere computed from
-`sundirection()`, baked once and handed to each renderer in its own convention.
+`sundirection()`, baked once into the scene's `EnvironmentLight`, which both
+renderers read.
 
 Open `run.jl` in VS Code and evaluate it block by block. The first block
 activates and instantiates the `Project.toml` beside it, which names every
@@ -94,10 +95,6 @@ intermediate states. `test_gui.jl` drives the window's two controls.
   what makes that local best the one traversal commits.
 * **Setup does not belong in the per-frame path.** Building the pipeline and the
   acceleration structure per frame cost 1061 ms; the work itself is 0.1 ms.
-* **The environment was the picture.** At 1024×512 a 46° field of view covers
-  131 source pixels stretched over 560 on screen, and the frame read as mush no
-  matter what the material did. It is a 1:1 copy of the 4096×2048 file now —
-  100 MB on the device, and the single largest change to how this looks.
 * **The background went through four versions**, and each failure looked like a
   different problem. A measured outdoor HDRI is sharp and photographic and takes
   the eye to the gravel. A sky dome is calm and has NOTHING below the horizon,
@@ -109,10 +106,7 @@ intermediate states. `test_gui.jl` drives the window's two controls.
   Read one as the other and you get a plausible sky that is wrong in every
   direction — the ground ends up overhead. `equirect_to_equalarea` and its
   inverse convert at the boundary.
-* **A specular lobe has to START above where the surface sits.** At 0.65 the
-  highlight was measurably present — 4% of the visible surface inside the lobe —
-  and invisible: a 65% boost on a floor near 1.0, which `x/(1+x)` flattens to
-  about 10% on screen. 3.5 reads.
-* **One ray per pixel is a binary hit test**, and a curved surface against a sky
-  is all silhouette. `SS = 2` in the GUI renders BOTH paths at 2× and box-filters
-  down — per-path supersampling would flatter whichever one got it.
+* **RASTER shades like GLMakie.** The overlay's mesh stage emits the triangles and
+  shades them through RayMakie's port of GLMakie's mesh shader: the scene's
+  lights, the environment's diffuse irradiance, the film's tone curve, and the
+  plot's own `strokewidth`/`strokecolor` for the subdivision edges.

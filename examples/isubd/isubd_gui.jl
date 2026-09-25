@@ -1,4 +1,4 @@
-using Makie, RayMakie, Mantle, GeometryBasics, Colors, Printf, FileIO
+using Makie, RayMakie, Mantle, GeometryBasics, Colors
 using Makie: cam3d!, update_cam!, Consume
 import Hikari
 
@@ -36,7 +36,8 @@ function isubd_gui(cx0, cy0, cf0; width = 760, height = 760, surface = 1, warp =
     cursurface = Base.RefValue(surface)
     curtol = Base.RefValue(2.0f-2)
     coarse = GeometryBasics.normal_mesh(Rect3f(Point3f(-1.3, -1.3, -0.1), Vec3f(2.6, 2.6, 0.9)))
-    femplot = Base.RefValue{Any}(mesh!(ls, coarse; material = femmat_for(surface, curtol[])))
+    femmesh!(material) = mesh!(ls, coarse; material, strokewidth = 1.1, strokecolor = RGBf(0.06, 0.07, 0.10))
+    femplot = Base.RefValue{Any}(femmesh!(femmat_for(surface, curtol[])))
 
     panel = GridLayout(fig[1, 2]; tellheight = false)
     Label(panel[1, 1], "renderer"; fontsize = 14, halign = :left, color = RGBf(0.35, 0.35, 0.4))
@@ -48,13 +49,13 @@ function isubd_gui(cx0, cy0, cf0; width = 760, height = 760, surface = 1, warp =
     Label(panel[5, 1], "tessellation tolerance"; fontsize = 15, halign = :left)
     tolsl = Makie.Slider(panel[6, 1]; range = range(log10(6e-2), log10(2e-3); length = 220),
                          startvalue = log10(2e-2), width = 260)
-    Label(panel[7, 1], "drag to orbit, scroll to zoom —\nin EITHER renderer";
+    Label(panel[7, 1], "drag to orbit, scroll to zoom,\nin EITHER renderer";
           fontsize = 13, halign = :left, justification = :left,
           color = RGBf(0.35, 0.35, 0.4), tellwidth = false)
     Label(panel[8, 1],
           "One `mesh!`, one camera, one set of\nlights. `material = FEMMaterial` puts the\n" *
           "$(size(cf, 2)) elements in as ONE BOX EACH for\nthe tracer and as subdivision keys for\n" *
-          "the rasteriser — the material decides,\non both paths.";
+          "the rasteriser. The material decides,\non both paths.";
           fontsize = 13, halign = :left, justification = :left,
           color = RGBf(0.3, 0.3, 0.35), tellwidth = false)
     colsize!(fig.layout, 2, Fixed(290))
@@ -73,7 +74,7 @@ function isubd_gui(cx0, cy0, cf0; width = 760, height = 760, surface = 1, warp =
         cursurface[] = i
         # A new plot, not `material[] = …`: the attribute is typed by the first material.
         delete!(ls.scene, femplot[])
-        femplot[] = mesh!(ls, coarse; material = femmat_for(i, curtol[]))
+        femplot[] = femmesh!(femmat_for(i, curtol[]))
         return nothing
     end
     on(tolsl.value) do lv

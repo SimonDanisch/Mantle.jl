@@ -1,6 +1,5 @@
 # Needs `Makie/docs/fake_interaction.jl` next to this checkout.
-using Mantle, Makie, RayMakie, GeometryBasics, Printf
-import Hikari
+using Mantle, Makie, RayMakie, GeometryBasics
 
 include(joinpath(@__DIR__, "mantle_isubd.jl"))
 include(joinpath(@__DIR__, "isubd_gui.jl"))
@@ -8,8 +7,7 @@ include(joinpath(@__DIR__, "..", "..", "..", "Makie", "docs", "fake_interaction.
 using .FakeInteraction: Wait, MouseTo, LeftClick, LeftDown, LeftUp, Lazy, Scroll, relative_pos
 
 backend = Mantle.defaultbackend()
-RayMakie.activate!(device = backend, accumulate = true, samples = 12,
-                   integrator = Hikari.VolPath(max_depth = 16, hw_accel = true))
+RayMakie.activate!(device = backend, accumulate = true, samples = 12, max_depth = 16)
 
 cx, cy, cf = annulus()
 fig, ctrl = isubd_gui(cx, cy, cf; width = 700, height = 700, surface = 1)

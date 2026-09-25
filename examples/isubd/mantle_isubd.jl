@@ -1,7 +1,7 @@
 # Adaptive tessellation of curved FEM cells: the port of `reference.jl` onto Mantle.
 # Every literal is Float32 (`1f0`), because Apple GPUs have no Float64 at all.
 
-using Mantle, GeometryBasics, LinearAlgebra, FileIO, Colors
+using Mantle, GeometryBasics, LinearAlgebra
 import Hikari
 using KernelAbstractions: @kernel, @index, get_backend
 using Hikari: monomials, eval_poly, surfacepoint, surfacenormal
@@ -190,17 +190,11 @@ end
 
 rootkeys(nbase::Integer = 8) = UInt64[root_key(b) for b in 1:nbase]
 
-# Plain functions, not globals: these are read inside GPU stages.
+# A function, not a global: GPU stages read it.
 @inline meshthreads() = 32
-@inline strokecolor() = (0.06f0, 0.07f0, 0.10f0)
-@inline envwidth() = 4096
-@inline envheight() = 2048
-
-strokehalfpx() = 0.55f0
 
 sundirection(; azimuth = deg2rad(140.0), elevation = deg2rad(38.0)) =
     Vec3f(cos(elevation) * cos(azimuth), cos(elevation) * sin(azimuth), sin(elevation))
-lightdirection() = normalize(sundirection())
 
 function demoenv(; sun = sundirection(), intensity = 1.0f0, turbidity = 2.2f0,
                  groundtile = 0.34f0, sunangle = 2.5f0, sunradiance = 830.0f0)
@@ -247,86 +241,4 @@ function demoenv(; sun = sundirection(), intensity = 1.0f0, turbidity = 2.2f0,
                                       sq[j, i].c[3] + w * 0.86f0)
     end
     return sq
-end
-
-function demosky()
-    sq = demoenv()
-    eq = Hikari.equalarea_to_equirect(sq)
-    return map(c -> Colors.RGB{Float32}(c.c[1], c.c[2], c.c[3]), eq)
-end
-
-function skyenv(; w = envwidth(), h = envheight(), gain = 1.0f0)
-    img = demosky()
-    H, W = size(img)
-    out = Array{Float32}(undef, 3 * w * h)
-    for j in 1:h, i in 1:w
-        si = clamp(round(Int, (i - 0.5) / w * W + 0.5), 1, W)
-        sj = clamp(round(Int, (j - 0.5) / h * H + 0.5), 1, H)
-        c = img[sj, si]
-        f(x) = (v = Float32(x); isfinite(v) ? gain * max(v, 0f0) : 0f0)
-        k = 3 * ((j - 1) * w + (i - 1))
-        out[k+1] = f(Colors.red(c)); out[k+2] = f(Colors.green(c)); out[k+3] = f(Colors.blue(c))
-    end
-    return out
-end
-
-@inline function sampleenv(env, dx::Float32, dy::Float32, dz::Float32)
-    l = sqrt(dx*dx + dy*dy + dz*dz) + 1f-8
-    x = dx / l; y = dy / l; z = dz / l
-    u = 0.5f0 + atan(y, x) * 0.15915494f0        # 1/(2pi)
-    v = acos(clamp(z, -1f0, 1f0)) * 0.31830987f0 # 1/pi, 0 at the zenith
-    fx = clamp(u, 0f0, 1f0) * (envwidth() - 1) + 1f0
-    fy = clamp(v, 0f0, 1f0) * (envheight() - 1) + 1f0
-    i0 = clamp(unsafe_trunc(Int32, fx), Int32(1), Int32(envwidth() - 1))
-    j0 = clamp(unsafe_trunc(Int32, fy), Int32(1), Int32(envheight() - 1))
-    tx = fx - Float32(i0); ty = fy - Float32(j0)
-    @inline function at(i, j)
-        k = 3 * ((Int(j) - 1) * envwidth() + (Int(i) - 1))
-        return (env[k+1], env[k+2], env[k+3])
-    end
-    a = at(i0, j0); b = at(i0 + Int32(1), j0)
-    c = at(i0, j0 + Int32(1)); d = at(i0 + Int32(1), j0 + Int32(1))
-    w00 = (1f0-tx)*(1f0-ty); w10 = tx*(1f0-ty); w01 = (1f0-tx)*ty; w11 = tx*ty
-    return (a[1]*w00 + b[1]*w10 + c[1]*w01 + d[1]*w11,
-            a[2]*w00 + b[2]*w10 + c[2]*w01 + d[2]*w11,
-            a[3]*w00 + b[3]*w10 + c[3]*w01 + d[3]*w11)
-end
-
-@inline tonemap(x::Float32) = clamp((x / (1f0 + x))^(1f0/2.2f0), 0f0, 1f0)
-
-@inline function toclip(x, y, z, mvp::Mat4f)
-    p = mvp * Vec4f(Float32(x), Float32(y), Float32(z), 1.0f0)
-    return p
-end
-
-@inline function shade(env, r::Float32, g::Float32, b::Float32,
-                       n::Vec3f, viewdir::Vec3f, lightdir::Vec3f, exposure::Float32)
-    sun_diffuse = 0.45f0
-    sun_specular = 2.0f0
-    sun_tint = (1.0f0, 0.965f0, 0.90f0)
-    sky_ambient = 0.95f0
-    ndl = max(n[1]*lightdir[1] + n[2]*lightdir[2] + n[3]*lightdir[3], 0f0)
-    ndv = clamp(-(n[1]*viewdir[1] + n[2]*viewdir[2] + n[3]*viewdir[3]), 0f0, 1f0)
-
-    sr, sg, sb = sampleenv(env, n[1], n[2], n[3])
-
-    d = viewdir[1]*n[1] + viewdir[2]*n[2] + viewdir[3]*n[3]
-    rx = viewdir[1] - 2f0*d*n[1]; ry = viewdir[2] - 2f0*d*n[2]; rz = viewdir[3] - 2f0*d*n[3]
-    er, eg, eb = sampleenv(env, rx, ry, rz)
-    fres = 0.03f0 + 0.42f0 * (1f0 - ndv)^5
-
-    hx = lightdir[1] - viewdir[1]
-    hy = lightdir[2] - viewdir[2]
-    hz = lightdir[3] - viewdir[3]
-    hl = sqrt(hx*hx + hy*hy + hz*hz) + 1f-8
-    ndh = max((n[1]*hx + n[2]*hy + n[3]*hz) / hl, 0f0)
-    ndh2 = ndh * ndh; ndh4 = ndh2 * ndh2; ndh8 = ndh4 * ndh4
-    ndh16 = ndh8 * ndh8; ndh32 = ndh16 * ndh16
-    spec = sun_specular * ndh32 * ndh32 * (ndl > 0f0 ? 1f0 : 0f0)
-
-    sun = sun_diffuse * ndl
-    lr = exposure * (r * (sun * sun_tint[1] + sky_ambient * sr) + fres * er + spec * sun_tint[1])
-    lg = exposure * (g * (sun * sun_tint[2] + sky_ambient * sg) + fres * eg + spec * sun_tint[2])
-    lb = exposure * (b * (sun * sun_tint[3] + sky_ambient * sb) + fres * eb + spec * sun_tint[3])
-    return (tonemap(lr), tonemap(lg), tonemap(lb))
 end

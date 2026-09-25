@@ -1,8 +1,24 @@
 import KernelInterface as KI
 
+fem_arg_names() = (:keys, :basecorners, :basecell, :cx, :cy, :cf, :ramp,
+                   :light_types, :light_colors, :light_parameters,
+                   :nkeys, :model, :view, :projection, :world_normalmatrix, :params,
+                   :eyeposition, :shading_mode, :ambient, :light_color, :light_direction,
+                   :N_lights, :has_env, :env_sh, :diffuse, :specular, :shininess, :backlight,
+                   :exposure, :tonemap, :white_point, :inv_gamma, :apply_gamma,
+                   :strokewidth, :strokecolor, :resolution, :px_per_unit)
+
 function fem_overlay_mesh(out, keys, basecorners, basecell, cx, cy, cf, ramp,
-                          nkeys::Int32, mvp::Mat4f, params::Vec4f, stroke::Float32,
-                          eye::Vec3f, lightdir::Vec3f, env)
+                          light_types, light_colors, light_parameters,
+                          nkeys::Int32, model::Mat4f, view::Mat4f, projection::Mat4f,
+                          world_normalmatrix::Mat3f, params::Vec4f,
+                          eyeposition::Vec3f, shading_mode::Int32, ambient::Vec3f,
+                          light_color::Vec3f, light_direction::Vec3f, N_lights::Int32,
+                          has_env::Int32, env_sh::Mat{3,9,Float32}, diffuse::Vec3f, specular::Vec3f,
+                          shininess::Float32, backlight::Float32, exposure::Float32, tonemap::Int32,
+                          white_point::Float32, inv_gamma::Float32, apply_gamma::Int32,
+                          strokewidth::Float32, strokecolor::Vec4f, resolution::Vec2f,
+                          px_per_unit::Float32)
     g = KI.mesh_group_index()
     t = KI.mesh_thread_index()
     warp = Float32(params[1])  # Apple GPUs have no Float64
@@ -17,29 +33,29 @@ function fem_overlay_mesh(out, keys, basecorners, basecell, cx, cy, cf, ramp,
         c1, c2, c3 = key_corners(k, basecorners)
         v0 = (t - Int32(1)) * Int32(3)
         cellf = Float32(cell)
+        pvm = projection * view * model
 
-        p1 = surfacepoint(cx, cy, cf, cell, c1[1], c1[2], warp)
-        p2 = surfacepoint(cx, cy, cf, cell, c2[1], c2[2], warp)
-        p3 = surfacepoint(cx, cy, cf, cell, c3[1], c3[2], warp)
-        n1 = surfacenormal(cx, cy, cf, cell, c1[1], c1[2], warp)
-        n2 = surfacenormal(cx, cy, cf, cell, c2[1], c2[2], warp)
-        n3 = surfacenormal(cx, cy, cf, cell, c3[1], c3[2], warp)
+        p1 = Vec3f(surfacepoint(cx, cy, cf, cell, c1[1], c1[2], warp)...)
+        p2 = Vec3f(surfacepoint(cx, cy, cf, cell, c2[1], c2[2], warp)...)
+        p3 = Vec3f(surfacepoint(cx, cy, cf, cell, c3[1], c3[2], warp)...)
+        n1 = Vec3f(world_normalmatrix * surfacenormal(cx, cy, cf, cell, c1[1], c1[2], warp))
+        n2 = Vec3f(world_normalmatrix * surfacenormal(cx, cy, cf, cell, c2[1], c2[2], warp))
+        n3 = Vec3f(world_normalmatrix * surfacenormal(cx, cy, cf, cell, c3[1], c3[2], warp))
 
-        KI.set_mesh_vertex!(out, v0 + Int32(1),
-            (position = toclip(p1[1], p1[2], p1[3], mvp), xi = Vec2f(c1[1], c1[2]),
-             cell = cellf, bary = Vec2f(1, 0), nrm = n1,
-             wpos = Vec3f(Float32(p1[1]), Float32(p1[2]), Float32(p1[3]))))
-        KI.set_mesh_vertex!(out, v0 + Int32(2),
-            (position = toclip(p2[1], p2[2], p2[3], mvp), xi = Vec2f(c2[1], c2[2]),
-             cell = cellf, bary = Vec2f(0, 1), nrm = n2,
-             wpos = Vec3f(Float32(p2[1]), Float32(p2[2]), Float32(p2[3]))))
-        KI.set_mesh_vertex!(out, v0 + Int32(3),
-            (position = toclip(p3[1], p3[2], p3[3], mvp), xi = Vec2f(c3[1], c3[2]),
-             cell = cellf, bary = Vec2f(0, 0), nrm = n3,
-             wpos = Vec3f(Float32(p3[1]), Float32(p3[2]), Float32(p3[3]))))
+        KI.set_mesh_vertex!(out, v0 + Int32(1), fem_vertex(p1, n1, c1, cellf, p1, p2, p3, model, pvm))
+        KI.set_mesh_vertex!(out, v0 + Int32(2), fem_vertex(p2, n2, c2, cellf, p1, p2, p3, model, pvm))
+        KI.set_mesh_vertex!(out, v0 + Int32(3), fem_vertex(p3, n3, c3, cellf, p1, p2, p3, model, pvm))
         KI.set_mesh_triangle!(out, t, v0 + Int32(1), v0 + Int32(2), v0 + Int32(3))
     end
     return nothing
+end
+
+@inline function fem_vertex(p::Vec3f, n::Vec3f, xi, cellf::Float32, a::Vec3f, b::Vec3f, c::Vec3f,
+                            model::Mat4f, pvm::Mat4f)
+    clip = Vec4f(pvm * Vec4f(p[1], p[2], p[3], 1f0))
+    w = model * Vec4f(p[1], p[2], p[3], 1f0)
+    return (position = RayMakie.gl_to_clip_depth(clip), xi = Vec2f(xi[1], xi[2]), cell = cellf,
+            nrm = n, wpos = Vec3f(w[1], w[2], w[3]) / w[4], clip = clip, c1 = a, c2 = b, c3 = c)
 end
 
 @inline function ramplookup(ramp, s::Float32)
@@ -48,58 +64,63 @@ end
     w = f - Float32(i0)
     @inbounds a = ramp[i0 + Int32(1)]
     @inbounds b = ramp[i0 + Int32(2)]
-    return ((1f0 - w) * a[1] + w * b[1],
-            (1f0 - w) * a[2] + w * b[2],
-            (1f0 - w) * a[3] + w * b[3])
+    return a * (1f0 - w) + b * w
+end
+
+# Every subdivision edge, half the width from each of its two triangles.
+@inline function fem_stroke(color::Vec4f, inputs, pvm::Mat4f, resolution::Vec2f,
+                            px_per_unit::Float32, strokewidth::Float32, strokecolor::Vec4f)
+    strokewidth <= 0f0 && return color
+    clip = inputs.clip
+    scale = px_per_unit * resolution
+    frag = Vec2f((0.5f0 * clip[1] / clip[4] + 0.5f0) * scale[1], (0.5f0 * clip[2] / clip[4] + 0.5f0) * scale[2])
+    a = RayMakie.stroke_screen_space(inputs.c1, pvm, scale)
+    b = RayMakie.stroke_screen_space(inputs.c2, pvm, scale)
+    c = RayMakie.stroke_screen_space(inputs.c3, pvm, scale)
+    edge(p, q) = RayMakie.edge_face_factor(frag, Vec2f(p[1], p[2]), Vec2f(q[1], q[2]), 0.5f0,
+                                           strokewidth, px_per_unit)
+    ff = min(edge(a, b), min(edge(b, c), edge(c, a)))
+    return strokecolor * (1f0 - ff) + color * ff
 end
 
 function fem_overlay_frag(inputs, keys, basecorners, basecell, cx, cy, cf, ramp,
-                          nkeys::Int32, mvp::Mat4f, params::Vec4f, stroke::Float32,
-                          eye::Vec3f, lightdir::Vec3f, env)
+                          light_types, light_colors, light_parameters,
+                          nkeys::Int32, model::Mat4f, view::Mat4f, projection::Mat4f,
+                          world_normalmatrix::Mat3f, params::Vec4f,
+                          eyeposition::Vec3f, shading_mode::Int32, ambient::Vec3f,
+                          light_color::Vec3f, light_direction::Vec3f, N_lights::Int32,
+                          has_env::Int32, env_sh::Mat{3,9,Float32}, diffuse::Vec3f, specular::Vec3f,
+                          shininess::Float32, backlight::Float32, exposure::Float32, tonemap::Int32,
+                          white_point::Float32, inv_gamma::Float32, apply_gamma::Int32,
+                          strokewidth::Float32, strokecolor::Vec4f, resolution::Vec2f,
+                          px_per_unit::Float32)
     # Not `Int(round(x))`: its InexactError cannot be built in a fragment stage.
     cell = Int(unsafe_trunc(Int32, inputs.cell + 0.5f0))
-    n = inputs.nrm
-    nl = sqrt(n[1]*n[1] + n[2]*n[2] + n[3]*n[3]) + 1f-8
-    nn = Vec3f(n[1]/nl, n[2]/nl, n[3]/nl)
-
-    d = inputs.wpos - eye
-    dl = sqrt(d[1]*d[1] + d[2]*d[2] + d[3]*d[3]) + 1f-8
-    viewdir = Vec3f(d[1]/dl, d[2]/dl, d[3]/dl)
-
-    if nn[1]*viewdir[1] + nn[2]*viewdir[2] + nn[3]*viewdir[3] > 0f0
-        nn = Vec3f(-nn[1], -nn[2], -nn[3])
-    end
-
     val = Float32(eval_poly(cf, cell, inputs.xi[1], inputs.xi[2]))
-    vmin = params[2]; vmax = params[3]
-    t = clamp((val - vmin) / max(vmax - vmin, 1f-8), 0f0, 1f0)
+    rgb = ramplookup(ramp, (val - params[2]) / max(params[3] - params[2], 1f-8))
 
-    cr, cg, cb = ramplookup(ramp, t)
-    r, g, b = shade(env, cr, cg, cb, nn, viewdir, lightdir, params[4])
-
-    if stroke > 0f0
-        u1 = inputs.bary[1]
-        u2 = inputs.bary[2]
-        u3 = 1f0 - u1 - u2
-        # Each edge's pixel distance on its own, then the min; the other order blobs the vertices.
-        d1 = u1 / max(sqrt(KI.dFdx(u1)^2 + KI.dFdy(u1)^2), 1f-8)
-        d2 = u2 / max(sqrt(KI.dFdx(u2)^2 + KI.dFdy(u2)^2), 1f-8)
-        d3 = u3 / max(sqrt(KI.dFdx(u3)^2 + KI.dFdy(u3)^2), 1f-8)
-        d = min(d1, min(d2, d3))
-        cov = clamp(stroke - d + 0.5f0, 0f0, 1f0)
-        r = r + (strokecolor()[1] - r) * cov
-        g = g + (strokecolor()[2] - g) * cov
-        b = b + (strokecolor()[3] - b) * cov
+    if shading_mode != RayMakie.SHADING_NONE
+        camdir = RayMakie._unit(inputs.wpos - eyeposition)
+        n = RayMakie._unit(inputs.nrm)
+        n = dot(n, camdir) > 0f0 ? -n : n  # two-sided: an element is a sheet
+        lit = RayMakie.illuminate(inputs.wpos, camdir, n, rgb, shading_mode, ambient, light_color,
+                                  light_direction, N_lights, light_types, light_colors,
+                                  light_parameters, has_env, env_sh, diffuse, specular,
+                                  shininess, backlight)
+        rgb = RayMakie.film_mapping(lit, exposure, tonemap, white_point, inv_gamma, apply_gamma)
     end
-    return Vec4f(r, g, b, 1f0)
+    color = fem_stroke(Vec4f(rgb[1], rgb[2], rgb[3], 1f0), inputs, projection * view * model,
+                       resolution, px_per_unit, strokewidth, strokecolor)
+    return color
 end
 
 function fem_overlay_pipeline!(screen)
     get!(screen.gfx_pipelines, :fem_elements) do
         Mantle.MeshPipeline(
             mesh = Mantle.MeshShader(fem_overlay_mesh;
-                     outputs = (xi = Vec2f, cell = Mantle.Flat{Float32},
-                                bary = Vec2f, nrm = Vec3f, wpos = Vec3f),
+                     outputs = (xi = Vec2f, cell = Mantle.Flat{Float32}, nrm = Vec3f, wpos = Vec3f,
+                                clip = Vec4f, c1 = Mantle.Flat{Vec3f}, c2 = Mantle.Flat{Vec3f},
+                                c3 = Mantle.Flat{Vec3f}),
                      max_vertices = 3 * meshthreads(),
                      max_primitives = meshthreads(),
                      topology = Mantle.TriangleList(),
@@ -107,13 +128,6 @@ function fem_overlay_pipeline!(screen)
             fragment = Mantle.FragmentShader(fem_overlay_frag),
             cull = Mantle.NoCull(), depth = Mantle.DepthLessEq())
     end
-end
-
-overlay_env = Ref{Any}(nothing)
-
-function fem_overlay_env(backend)
-    overlay_env[] === nothing && (overlay_env[] = Mantle.devicearray(backend, skyenv()))
-    return overlay_env[]
 end
 
 overlay_cache = IdDict{Any, Any}()
@@ -142,58 +156,43 @@ function fem_overlay_data(backend, elements, tolerance)
 end
 
 function RayMakie.mesh_overlay_dispatch!(material::Hikari.FEMMaterial, screen, scene,
-                                         plot, args, last_robj)
+                                         plot, args, changed, last_robj)
     backend = screen.config.device
     e = material.elements
     data = fem_overlay_data(backend, e, Float64(material.tolerance))
     keys = data.keys[]
-    nkeys = length(keys)
-
-    mvp = RayMakie.plot_clip_matrix(plot) * Mat4f(args.model_f32c)
-    eye = Vec3f(scene.camera.eyeposition[])
-    exposure = 3.5f0
-    params = Vec4f(e.warp, material.field.vmin, material.field.vmax, exposure)
-    strokewidth = Float32(strokehalfpx() * screen.px_per_unit)
-    env = fem_overlay_env(backend)
-
-    groups = cld(nkeys, meshthreads())
+    shading, lights = RayMakie.raster_shading(screen, plot, args)
+    uniforms = merge((nkeys = Int32(length(keys)), model = Mat4f(args.model_f32c),
+                      view = Mat4f(args.view), projection = Mat4f(args.projection),
+                      world_normalmatrix = Mat3f(args.world_normalmatrix),
+                      params = Vec4f(e.warp, material.field.vmin, material.field.vmax, 0f0)), shading)
+    ramp = [Vec3f(c.c[1], c.c[2], c.c[3]) for c in material.field.ramp]
+    groups = cld(length(keys), meshthreads())
 
     if last_robj isa RayMakie.RenderObject
         RayMakie.update_buffer!(last_robj, :keys, keys)
-        last_robj.uniforms[:nkeys] = Int32(nkeys)
-        last_robj.uniforms[:mvp] = mvp
-        last_robj.uniforms[:params] = params
-        last_robj.uniforms[:stroke] = strokewidth
-        last_robj.uniforms[:eye] = eye
-        RayMakie.update_buffer!(last_robj, :ramp,
-            [Vec3f(c.c[1], c.c[2], c.c[3]) for c in material.field.ramp])
+        RayMakie.update_buffer!(last_robj, :ramp, ramp)
+        for (name, value) in pairs(lights)
+            RayMakie.update_buffer!(last_robj, name, value)
+        end
+        for (name, value) in pairs(uniforms)
+            last_robj.uniforms[name] = value
+        end
         last_robj.vertex_count = groups
         last_robj.visible = true
         return last_robj
     end
 
+    buffers = Dict{Symbol, Any}(
+        :keys => Mantle.devicearray(backend, Array(keys)),  # not the cache's: updates copy from it
+        :basecorners => data.basecorners, :basecell => data.basecell,
+        :cx => data.cx, :cy => data.cy, :cf => data.cf,
+        :ramp => Mantle.devicearray(backend, ramp))
+    for (name, value) in pairs(lights)
+        buffers[name] = Mantle.devicearray(backend, value)
+    end
     return RayMakie.RenderObject(fem_overlay_pipeline!(screen);
-        backend,
-        arg_names = (:keys, :basecorners, :basecell, :cx, :cy, :cf, :ramp,
-                     :nkeys, :mvp, :params, :stroke, :eye, :lightdir, :env),
-        buffers = Dict{Symbol, Any}(
-            :keys => Mantle.devicearray(backend, Array(keys)),  # not the cache's: updates copy from it
-            :basecorners => data.basecorners,
-            :basecell => data.basecell,
-            :cx => data.cx, :cy => data.cy, :cf => data.cf,
-            :ramp => Mantle.devicearray(backend,
-                         [Vec3f(c.c[1], c.c[2], c.c[3]) for c in material.field.ramp]),
-            :env => env,
-        ),
-        uniforms = Dict{Symbol, Any}(
-            :nkeys => Int32(nkeys),
-            :mvp => mvp,
-            :params => params,
-            :stroke => strokewidth,
-            :eye => eye,
-            :lightdir => lightdirection(),
-        ),
-        vertex_count = groups,
-        instances = 1,
-    )
+        backend, arg_names = fem_arg_names(), buffers,
+        uniforms = Dict{Symbol, Any}(pairs(uniforms)),
+        vertex_count = groups, instances = 1)
 end
