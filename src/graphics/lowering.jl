@@ -100,6 +100,27 @@ GeometryAsMesh{IT,OT,NP,FN,IX}(vertex::VF, geometry::GF) where {IT,OT,NP,FN,IX,V
 # lowerings produced the program in a shader dump or a compiler error.
 Base.nameof(m::GeometryAsMesh) = Symbol(nameof(m.geometry), :_as_mesh)
 
+"""
+    splatcall(f, lead::Tuple, args::Tuple)
+
+`f(lead..., args...)` with every element written out, and the call inlined.
+
+Inference resolves a splat of at most 32 elements, and a stage can take more
+arguments than that: RayMakie's mesh shader takes 51. Past the bound `args...` is
+a dynamic `_apply_iterate`, which no GPU compiler accepts, so the lowering
+carries the stage's arguments as ONE tuple and expands them here, at the body.
+Inlined because the geometry body is handed the mutable `MeshEmitter`; see
+`emitprimitive`.
+"""
+@generated function splatcall(f, lead::Tuple, args::Tuple)
+    call = Expr(:call, :f, (:(lead[$i]) for i in 1:fieldcount(lead))...,
+                (:(args[$i]) for i in 1:fieldcount(args))...)
+    return quote
+        Base.@_inline_meta
+        @inline $call
+    end
+end
+
 # Which input primitive this threadgroup is for is the ONLY thing the mesh stage
 # reads from a builtin, so it is the only thing that stops the whole lowering from
 # running on the host. `runprimitive` takes it as an argument for exactly that
@@ -107,7 +128,7 @@ Base.nameof(m::GeometryAsMesh) = Symbol(nameof(m.geometry), :_as_mesh)
 # per-primitive values can be read back and diffed against what the GPU produced,
 # which is what makes this worth more than a per-backend rewrite.
 function (m::GeometryAsMesh)(out, args::Vararg{Any,N}) where {N}
-    return runprimitive(m, out, mesh_group_index(), args...)
+    return primitivewith(m, out, mesh_group_index(), args)
 end
 
 """
@@ -118,13 +139,17 @@ Run one input primitive of a lowered geometry stage into the output object `out`
 `primitive` counts from one. On a mesh stage it is `mesh_group_index()`; on the
 host it is whichever primitive is being checked.
 """
-function runprimitive(m::GeometryAsMesh{IT,OT,NP,FN,false}, out, primitive::Integer,
-                      args::Vararg{Any,N}) where {IT,OT,NP,FN,N}
+runprimitive(m::GeometryAsMesh, out, primitive::Integer, args::Vararg{Any,N}) where {N} =
+    primitivewith(m, out, primitive, args)
+
+# `args` as one tuple from here to the bodies; see `splatcall`.
+function primitivewith(m::GeometryAsMesh{IT,OT,NP,FN,false}, out, primitive::Integer,
+                       args::Tuple) where {IT,OT,NP,FN}
     # A NON-INDEXED draw: the vertex index IS the position in the stream.
     base = firstinputvertex(IT(), Int32(primitive))
-    vs = ntuple(k -> m.vertex(VertexIndex(base + Int32(k) - Int32(1)), args...),
+    vs = ntuple(k -> splatcall(m.vertex, (VertexIndex(base + Int32(k) - Int32(1)),), args),
                 Val(inputvertices(IT())))
-    return emitprimitive(m, out, vs, args...)
+    return emitprimitive(m, out, vs, args)
 end
 
 # An INDEXED draw. `vertex_index()` on a real vertex stage is the value FETCHED
@@ -135,36 +160,40 @@ end
 # The buffer holds what a driver's index buffer holds, counting vertices from
 # ZERO, and `VertexIndex` carries what `vertex_index()` would answer, counting
 # from one. The `+ 1` is that conversion and nothing else.
-function runprimitive(m::GeometryAsMesh{IT,OT,NP,FN,true}, out, primitive::Integer,
-                      args::Vararg{Any,N}) where {IT,OT,NP,FN,N}
+#
+# `ntuple` rather than `Base.front` for everything before the index buffer:
+# `front` recurses by splatting, which is the bound `splatcall` exists for.
+function primitivewith(m::GeometryAsMesh{IT,OT,NP,FN,true}, out, primitive::Integer,
+                       args::NTuple{N,Any}) where {IT,OT,NP,FN,N}
     indices = args[N]
-    rest = Base.front(args)
+    rest = ntuple(i -> args[i], Val(N - 1))
     base = firstinputvertex(IT(), Int32(primitive))
     vs = ntuple(Val(inputvertices(IT()))) do k
         i = Int32(indices[base + Int32(k) - Int32(1)]) + Int32(1)
-        return m.vertex(VertexIndex(i), rest...)
+        return splatcall(m.vertex, (VertexIndex(i),), rest)
     end
-    return emitprimitive(m, out, vs, rest...)
+    return emitprimitive(m, out, vs, rest)
 end
 
 """
-    emitprimitive(m::GeometryAsMesh, out, vs::Tuple, args...)
+    emitprimitive(m::GeometryAsMesh, out, vs::Tuple, args::Tuple)
 
 Run the geometry body over the gathered vertices and declare what it wrote.
 
-Separate from the two call methods above because it is everything they share: the
-only difference between an indexed draw and a direct one is where the vertex
-index comes from.
+Separate from the two `primitivewith` methods because it is everything they
+share: the only difference between an indexed draw and a direct one is where the
+vertex index comes from.
 """
 @inline function emitprimitive(m::GeometryAsMesh{IT,OT,NP,FN}, out, vs::Tuple,
-                               args::Vararg{Any,N}) where {IT,OT,NP,FN,N}
+                               args::Tuple) where {IT,OT,NP,FN}
     e = MeshEmitter{OT,FN}(out, 1, 1, NP)
-    # `@inline` at the CALL, and it is load-bearing. `MeshEmitter` is mutable —
+    # Inlined at the CALL, and it is load-bearing. `MeshEmitter` is mutable —
     # `emit!` advances its cursors — so an emitter handed to a function that is
     # not inlined ESCAPES, and an escaping mutable is a heap allocation, which no
     # GPU has: the shader fails to compile with `gc_pool_alloc` in the trace and
     # nothing pointing at the emitter. Inlined, it is a handful of registers.
-    @inline m.geometry(e, transposeprimitive(vs), args...)
+    # `splatcall` inlines both itself and the body.
+    splatcall(m.geometry, (e, transposeprimitive(vs)), args)
     # Once, and with the emitter's own counts: one invocation per threadgroup
     # means its count is the threadgroup's, so there is nothing to pad and
     # nothing to reduce over. Zero primitives is a real answer — the body culled

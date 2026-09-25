@@ -429,6 +429,51 @@ for every attachment count.
 end
 
 """
+A stage's baked arguments, ALL of them, bound as one block.
+
+One `air.buffer` per argument capped a stage at 31, the size of Metal's buffer
+table, and a stage with more failed at pipeline creation ("indirect argument
+buffer resources exceeded"): RayMakie's mesh shader has 51. Vulkan never had the
+limit, because Lava packs every argument into one block. This is the same
+shape: every baked argument is plain bytes (a device array is its address and
+dimensions), so the whole tuple is one `setBytes`, and the stage wrappers splat
+it back into the body's arguments.
+"""
+struct PackedArgs{T<:Tuple}
+    args::T
+end
+
+# `setBytes` takes at most 4 KB; past that the block would need a buffer of its own.
+function packargs(d::Tuple)
+    isempty(d) && return ()
+    p = PackedArgs(d)
+    sizeof(p) <= 4096 || throw(ArgumentError(
+        "a stage's arguments are $(sizeof(p)) bytes, and Metal binds at most 4096 " *
+        "bytes inline; pass the larger values in a buffer"))
+    return (p,)
+end
+
+# Defined before the wrappers that call it: a generator runs in the world its
+# method was defined in, so a later `unpacked` does not exist for it.
+"""The body's arguments, expressions for a `@generated` wrapper: a `PackedArgs` splatted in place."""
+function unpacked(argtypes, idxs)
+    exprs = Any[]
+    for i in idxs
+        T = argtypes[i]
+        if T <: PackedArgs
+            append!(exprs, (:(args[$i].args[$j]) for j in 1:fieldcount(fieldtype(T, 1))))
+        else
+            push!(exprs, :(args[$i]))
+        end
+    end
+    return exprs
+end
+
+"""The types the body is called with: `bufs` with a `PackedArgs` splatted in place, as `unpacked` does to the values."""
+bodytypes(bufs::Type{<:Tuple}) =
+    Tuple{(U for T in fieldtypes(bufs) for U in (T <: PackedArgs ? fieldtypes(fieldtype(T, 1)) : (T,)))...}
+
+"""
 A vertex shader that returns `(position = …, varyings…)`.
 
 `VID` is whether the body takes its vertex index as a leading
@@ -444,7 +489,7 @@ struct MetalVertexStage{F, Out, VID} end
 MetalVertexStage{F,Out}() where {F,Out} = MetalVertexStage{F,Out,false}()
 
 @generated function (::MetalVertexStage{F,Out,VID})(args::Vararg{Any,N}) where {F,Out,VID,N}
-    bufs = (:(args[$i]) for i in 1:(N - 1))
+    bufs = unpacked(args, 1:(N - 1))
     call = VID ? Expr(:call, :(F.instance), :(KI.VertexIndex(KI.vertex_index())), bufs...) :
                  Expr(:call, :(F.instance), bufs...)
     # By NAME, not by position: the shader is free to list its varyings in
@@ -492,7 +537,7 @@ MetalFragmentStage{F,VIn,Out}() where {F,VIn,Out} = MetalFragmentStage{F,VIn,Out
     nbuf >= 0 || error("a fragment stage with $nv varyings and $NT textures needs " *
                        "at least $(nv + ntex + 1) parameters, got $N")
     ins = Expr(:tuple, (:(args[$(nbuf + i)].value) for i in 1:nv)...)
-    call = Expr(:call, :(F.instance), :(VIn($ins)), (:(args[$i]) for i in 1:nbuf)...)
+    call = Expr(:call, :(F.instance), :(VIn($ins)), unpacked(args, 1:nbuf)...)
     quote
         Base.@_inline_meta
         r = $call
@@ -572,7 +617,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     # two spellings are the same number — see `KernelInterface.VertexIndex` — and
     # a shader that has both runs natively through this and lowers onto a mesh
     # stage through `lower_geometry_to_mesh`.
-    vid = KI.wantsvertexindex(vf, Tuple(vert_bufs.parameters))
+    vid = KI.wantsvertexindex(vf, fieldtypes(bodytypes(vert_bufs)))
     vfn = MetalVertexStage{typeof(vf), VOut, vid}()
     vert_tt = Tuple{vert_bufs.parameters..., Core.LLVMPtr{VOut,1}}
     # No colour attachment means no fragment stage at all — a shadow pass writes
@@ -965,7 +1010,7 @@ function StageArgs(args)
         b = metal_buffer(a)
         b === nothing || push!(bufs, b)
     end
-    d = map(bakearg, t)
+    d = packargs(map(bakearg, t))
     return StageArgs(t, d, bufs, Vector{UInt8}(undef, scratchsize(d)))
 end
 
@@ -1003,7 +1048,7 @@ rebake!(a::StageArgs, args) = rebake!(a, Tuple(args))
 # `::Tuple`, so reading either one back mid-bake makes `map`, `maximum` and the
 # buffer scan dynamic — 147 KB a frame against 10, for the same work.
 function rebake!(a::StageArgs, t::T) where {T<:Tuple}
-    d = map(bakearg, t)
+    d = packargs(map(bakearg, t))
     n = scratchsize(d)
     length(a.scratch) < n && resize!(a.scratch, n)
     empty!(a.buffers)

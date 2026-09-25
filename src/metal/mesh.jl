@@ -323,6 +323,18 @@ end
 const MESH_CACHE = Dict{Any,Any}()
 const MESH_CACHE_LOCK = ReentrantLock()
 
+"""The mesh stage body, handed its arguments with `PackedArgs` splatted back out."""
+struct MetalMeshStage{F} end
+
+@generated function (::MetalMeshStage{F})(args::Vararg{Any,N}) where {F,N}
+    call = Expr(:call, :(F.instance), unpacked(args, 1:N)...)
+    quote
+        Base.@_inline_meta
+        $call
+        return nothing
+    end
+end
+
 """
     compile_pipeline(p::MeshPipeline, color_formats, depth_format, mesh_bufs, frag_bufs)
 
@@ -355,12 +367,12 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     cfg = Mantle.meshconfig(p)
     Obj = mesh_object_of(p)
 
-    # The body is compiled AS WRITTEN — no wrapper. A vertex stage needs one
-    # because the portable spelling returns a NamedTuple and AIR wants a pointer
-    # store; a mesh stage already writes through the object it is handed, which
-    # is the AIR shape, so there is nothing to translate.
+    # A wrapper only to splat the packed arguments (see `PackedArgs`): a mesh
+    # stage already writes through the object it is handed, which is the AIR
+    # shape, so there is nothing else to translate.
     mesh_tt = Tuple{mesh_stage_lead(p)..., mesh_bufs.parameters...}
-    mfun, mlib = compile_stage_function(Mantle.stagefunction(p.mesh), mesh_tt, :mesh,
+    mfn = MetalMeshStage{typeof(Mantle.stagefunction(p.mesh))}()
+    mfun, mlib = compile_stage_function(mfn, mesh_tt, :mesh,
                                         string(nameof(Mantle.stagefunction(p.mesh))) * "_ms")
 
     isempty(color_formats) &&
@@ -554,7 +566,7 @@ function Mantle.compile_draw(d::MetalDevice,
                              bindings = nothing)
     mesh = StageArgs(vert_args)
     frag = StageArgs(frag_args)
-    Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), buffer_types(mesh))
+    Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), bodytypes(buffer_types(mesh)))
     cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
     dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
     return MetalCompiledGeometryDraw(p, cfmts, dfmt, mesh, frag)
