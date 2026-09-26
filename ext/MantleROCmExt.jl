@@ -851,10 +851,18 @@ function Mantle.librarygemm(d::ROCmDevice, out, A, B, bias, epilogue)
 end
 
 """
-    openrecording(dev, plan) -> Immediate
+    openrecording(dev, plan, passes) -> Immediate
 
-Put this device's stream into capture mode, so the plan's walk is written into a
-graph instead of executed.
+Put this device's stream into capture mode, so the walk of `passes` is written
+into a graph instead of executed. `passes` is the whole plan unless `record!` was
+asked for a partition, in which case this is called once per piece and each
+piece becomes its own graph.
+
+This took `(dev, plan)` until 2026-09-26, after core's signature had gained
+`passes` on 2026-09-22 (`2dc58eb`). The two-argument method was then a new
+function nothing called: core's default answered "declined", every ROCm plan was
+walked kernel by kernel instead of replayed as a graph, and asking for a
+partition threw. `test/rocm/test_rocm.jl` pins the signature.
 
 **A library a recorded plan will call has to be initialised before this.**
 rocBLAS creates its handle on first use, and creating one while the stream is
@@ -870,9 +878,10 @@ be had, and saying so is better than handing back a plan that looks recorded.
 Such a plan needs `emitkernel!`, which this backend does not implement; see
 `supportspredicate` for the other half of the same gap.
 """
-function Mantle.openrecording(d::ROCmDevice, pl::Mantle.Plan)
+function Mantle.openrecording(d::ROCmDevice, pl::Mantle.Plan, passes::AbstractUnitRange)
     checkresolved(d, pl)
-    any(pp -> any(x -> x isa Mantle.Launch, pp.dispatches), pl.passes) && throw(ArgumentError(
+    piece = view(pl.passes, passes)
+    any(pp -> any(x -> x isa Mantle.Launch, pp.dispatches), piece) && throw(ArgumentError(
         "record!: this plan dispatches over a `DeviceRange` with no ceiling, whose " *
         "count is read on the host. A capture is invalidated by a host read, so " *
         "there is no graph to record — give the range a `max`, or run the plan " *
@@ -898,7 +907,10 @@ function Mantle.openrecording(d::ROCmDevice, pl::Mantle.Plan)
     # the library is ready. A GATED pass's call runs here too, which is work the
     # gate might have skipped; the gate is still evaluated per run inside the
     # graph, so what this costs is one execution and not a wrong answer.
-    for pp in pl.passes, cd in pp.dispatches
+    # Only this piece's passes: a partitioned record opens one capture per
+    # piece, and warming the whole plan each time would run every call once
+    # per piece.
+    for pp in piece, cd in pp.dispatches
         cd isa Mantle.Call && cd()
     end
     # Resolve AMDGPU's stream ownership before capture as well as its lazy
@@ -908,7 +920,7 @@ function Mantle.openrecording(d::ROCmDevice, pl::Mantle.Plan)
     # then synchronize its previous owner; inside capture HIP rejects that as
     # `hipErrorStreamCaptureUnsupported`. Conversion here performs any transfer
     # while it is legal, and the captured launch sees the already-current owner.
-    for pp in pl.passes, cd in pp.dispatches
+    for pp in piece, cd in pp.dispatches
         cd isa ROCmCompiledDispatch || continue
         # The one-argument form is for reflection: its adaptor deliberately
         # carries `stream = nothing` and therefore does NOT take ownership.
