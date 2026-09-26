@@ -6,7 +6,7 @@ fem_arg_names() = (:keys, :basecorners, :basecell, :cx, :cy, :cf, :ramp,
                    :eyeposition, :shading_mode, :ambient, :light_color, :light_direction,
                    :N_lights, :has_env, :env_sh, :diffuse, :specular, :shininess, :backlight,
                    :exposure, :tonemap, :white_point, :inv_gamma, :apply_gamma,
-                   :strokewidth, :strokecolor, :resolution, :px_per_unit)
+                   :strokewidth, :strokecolor, :resolution, :px_per_unit, :fxaa)
 
 function fem_overlay_mesh(out, keys, basecorners, basecell, cx, cy, cf, ramp,
                           light_types, light_colors, light_parameters,
@@ -18,7 +18,7 @@ function fem_overlay_mesh(out, keys, basecorners, basecell, cx, cy, cf, ramp,
                           shininess::Float32, backlight::Float32, exposure::Float32, tonemap::Int32,
                           white_point::Float32, inv_gamma::Float32, apply_gamma::Int32,
                           strokewidth::Float32, strokecolor::Vec4f, resolution::Vec2f,
-                          px_per_unit::Float32)
+                          px_per_unit::Float32, fxaa::Int32)
     g = KI.mesh_group_index()
     t = KI.mesh_thread_index()
     warp = Float32(params[1])  # Apple GPUs have no Float64
@@ -93,7 +93,7 @@ function fem_overlay_frag(inputs, keys, basecorners, basecell, cx, cy, cf, ramp,
                           shininess::Float32, backlight::Float32, exposure::Float32, tonemap::Int32,
                           white_point::Float32, inv_gamma::Float32, apply_gamma::Int32,
                           strokewidth::Float32, strokecolor::Vec4f, resolution::Vec2f,
-                          px_per_unit::Float32)
+                          px_per_unit::Float32, fxaa::Int32)
     # Not `Int(round(x))`: its InexactError cannot be built in a fragment stage.
     cell = Int(unsafe_trunc(Int32, inputs.cell + 0.5f0))
     val = Float32(eval_poly(cf, cell, inputs.xi[1], inputs.xi[2]))
@@ -111,7 +111,7 @@ function fem_overlay_frag(inputs, keys, basecorners, basecell, cx, cy, cf, ramp,
     end
     color = fem_stroke(Vec4f(rgb[1], rgb[2], rgb[3], 1f0), inputs, projection * view * model,
                        resolution, px_per_unit, strokewidth, strokecolor)
-    return color
+    return RayMakie.raster_output(color, fxaa)
 end
 
 function fem_overlay_pipeline!(screen)
@@ -192,7 +192,7 @@ function RayMakie.mesh_overlay_dispatch!(material::Hikari.FEMMaterial, screen, s
         buffers[name] = Mantle.devicearray(backend, value)
     end
     return RayMakie.RenderObject(fem_overlay_pipeline!(screen);
-        backend, arg_names = fem_arg_names(), buffers,
+        backend, fxaa = RayMakie.plot_fxaa(plot), arg_names = fem_arg_names(), buffers,
         uniforms = Dict{Symbol, Any}(pairs(uniforms)),
         vertex_count = groups, instances = 1)
 end

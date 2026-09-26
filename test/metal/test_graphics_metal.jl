@@ -938,3 +938,22 @@ end
     @test down.cols[2] < n ÷ 2          # …and up when the height is negative
     @test up.rows == down.rows          # x is untouched either way
 end
+
+# ── Closing a window takes the platform window down ─────────────────────────
+#
+# `close` only marked a MetalWindow closed, so the OS window stayed on screen,
+# frozen on its last frame, after the render loop drawing into it had ended:
+# every RayMakie window survived its close button. The Vulkan window has always
+# destroyed its GLFW window here; `test_window.jl` pins that side.
+@testset "closing a window destroys the platform window" begin
+    w = Mantle.Window(MetalBackend(), 64, 64; title = "close test")
+    @test isopen(w)
+    # The close button. `isopen` says so before anything is torn down, which is
+    # what a render loop polls.
+    Mantle.GLFW.SetWindowShouldClose(w.handle, true)
+    @test !isopen(w)
+    close(w)
+    @test w.handle === nothing
+    close(w)                                        # idempotent
+    @test !isopen(w)
+end

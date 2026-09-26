@@ -148,11 +148,24 @@ Base.eltype(::MetalWindow{T}) where {T} = T
 
 Base.size(w::MetalWindow) = (w.width, w.height)
 
-Base.isopen(w::MetalWindow) = w.open
+# Closed by us, or by the user through the platform window's close button, as
+# the Vulkan window answers it.
+Base.isopen(w::MetalWindow) =
+    w.open && (w.handle === nothing || !GLFW.WindowShouldClose(w.handle))
 
 function Base.close(w::MetalWindow)
     w.open = false
     w.drawable = nothing
+    # The platform window too. Only marking this one closed left the OS window up,
+    # frozen on its last frame, after the render loop drawing into it had ended:
+    # four plots gave four windows that the close button could not get rid of.
+    h = w.handle
+    if h !== nothing
+        w.handle = nothing
+        GLFW.DestroyWindow(h)
+        # macOS takes the window off the screen when the event queue next runs.
+        GLFW.PollEvents()
+    end
     return nothing
 end
 
