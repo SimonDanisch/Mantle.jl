@@ -62,14 +62,26 @@ function runlaunches!(backend, launches)
                                Base.invokelatest(l.kern, backend, l.group)
             Base.invokelatest(k, l.args...; ndrange = l.ndrange)
         else
-            k = KI.Kernel(backend, l.kern)
-            if l.group == 0
-                Base.invokelatest(k, l.args...; ndrange = l.ndrange)
-            else
-                Base.invokelatest(k, l.args...; ndrange = l.ndrange,
-                                  workgroupsize = l.group)
-            end
+            Base.invokelatest(launchki!, kibackend(todevice(backend)), l)
         end
+    end
+    return nothing
+end
+
+# KernelInterface's launch protocol, as `KI.@kernel` spells it: convert the
+# arguments, compile for their types, call what `kernel_function` returns. The
+# backend is the device's `kibackend`, which is not always the KernelAbstractions
+# backend the arrays report: on ROCm they are two types, and only the second has
+# a call method. This built `KI.Kernel(backend, f)` around the raw function
+# instead, which worked only where the backend compiles on call (Lava) and was a
+# `MethodError` on ROCm.
+function launchki!(kb, l)
+    tt = Tuple{map(a -> Core.Typeof(KI.argconvert(kb, a)), l.args)...}
+    k = KI.kernel_function(kb, KI.argconvert(kb, l.kern), tt)
+    if l.group == 0
+        k(l.args...; ndrange = l.ndrange)
+    else
+        k(l.args...; ndrange = l.ndrange, workgroupsize = l.group)
     end
     return nothing
 end

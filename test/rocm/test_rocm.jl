@@ -213,22 +213,11 @@ end
 
 # `openrecording` here took `(dev, plan)` after core's grew a `passes` range on
 # 2026-09-22, so it was a new function nothing called. Core's default declined,
-# every ROCm plan ran unrecorded, the `isa ROCmRecording` checks above failed, and
-# `record!(pl; maxpasses)` threw — which is how Qwen-Image's VAE found it.
-@testset "ROCm: a partitioned record! captures one graph per piece" begin
+# every ROCm plan ran unrecorded, and the `isa ROCmRecording` checks in this file
+# failed along with the partition test below — which nobody ran; Qwen-Image's VAE
+# found it by asking for `maxpasses`. Pinned by the method core actually calls.
+@testset "ROCm: openrecording is the method core calls" begin
     @test which(M.openrecording, (RE.ROCmDevice, M.Plan, UnitRange{Int})).module === RE
-    dev = M.Device(M.ROCmAPI())
-    n, links = 1 << 16, 7
-    _, t, pl = chain(dev, n, links)
-    M.record!(pl; maxpasses = 2)
-    @test pl.recording isa M.RecordingParts
-    @test length(pl.recording.parts) == cld(links, 2)
-    @test all(p -> p isa RE.ROCmRecording, pl.recording.parts)
-    M.run!(pl)
-    @test all(==(Float32(links)), Array(M.storage(t[end])))
-    # Replayed, not re-walked: a second run through the same pieces.
-    M.run!(pl)
-    @test all(==(Float32(links)), Array(M.storage(t[end])))
 end
 
 @testset "ROCm: a dispatch is compiled once, at Pipelines time" begin
