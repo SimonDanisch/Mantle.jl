@@ -37,19 +37,6 @@ function chainplan(dev, n, nstage)
     (; g, out, seed, plan = M.record!(M.Plan(g)), keep = (seed, t))
 end
 
-"""Two transients whose lifetimes overlap, so they cannot share bytes. The
-persistent buffer stays tiny on purpose: it is the *placement* that has to exceed
-the device, not an allocation on the way to it."""
-function fatplan(dev, n)
-    g = M.Graph(dev)
-    seed = M.Buffer(dev, zeros(Float32, 16))
-    t1 = M.Transient.Buffer(g, Float32, n)
-    t2 = M.Transient.Buffer(g, Float32, n)
-    M.dispatch!(g, bump!, (t1, seed), 16; name = "a")
-    M.dispatch!(g, bump!, (t2, t1), 16; name = "b")
-    (; plan = M.record!(M.Plan(g)), keep = (seed, t1, t2))
-end
-
 @kernel function add2!(d, @Const(x), @Const(y))
     i = @index(Global)
     @inbounds d[i] = x[i] + y[i]
@@ -96,15 +83,25 @@ const E = Mantle
     @test !hasfield(M.Arena, :lastrun)
 end
 
-@testset "over budget fails at compile, with numbers" begin
+@testset "a transient larger than one allocation fails at compile, with numbers" begin
     dev = M.Device(TESTBACKEND)
     # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
     # this runs on and `typemax(Int)` — "no limit" — on NVIDIA, so a
     # test pinned to it passes on one machine and allocates 8 exabytes on the
     # other. `headroom` is the number the compiler actually checks against.
-    n = M.headroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32)
+    #
+    # ONE transient past it, not two of it: a placement too tall for one
+    # allocation now spills into another (the testset below), so what still
+    # cannot run is an item no single allocation holds.
+    n = M.headroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32) + 1024
     err = try
-        Base.invokelatest(fatplan, dev, n)
+        g = M.Graph(dev)
+        seed = M.Buffer(dev, zeros(Float32, 16))
+        t = M.Transient.Buffer(g, Float32, n)
+        out = M.Buffer(dev, zeros(Float32, 16))
+        M.dispatch!(g, bump!, (t, seed), 16; name = "a")
+        M.dispatch!(g, bump!, (out, t), 16; name = "b")
+        Base.invokelatest(M.Plan, g)
         nothing
     catch e
         e
@@ -118,6 +115,49 @@ end
     # placement, before `reserve!`.
     @test !haskey(M.pool(dev).arenas, E.Buffers()) ||
           M.pool(dev).arenas[E.Buffers()].bytes < n * sizeof(Float32)
+end
+
+# A plan whose transients need more at once than one allocation holds, each of
+# them fitting: two live together at 0.6 of `maxalloc` apiece. It did not compile
+# at all before `ArenaPart` — "arena Buffers() does not fit" — which is what the
+# Qwen-Image VAE hit decoding 1664x928: 5.8 GB of buffers at its peak against
+# RADV's 4 GB `maxalloc`, the largest piece 1.66 GB. Only meaningful where the
+# device's budget holds more than one allocation's worth, which is what it asks.
+@testset "a placement larger than one allocation spills into parts" begin
+    dev = M.Device(TESTBACKEND)
+    cap = M.maxalloc(dev)
+    if 2 * cap < M.capacity(dev)
+        n = (6 * cap ÷ 10) ÷ sizeof(Float32)
+        g = M.Graph(dev)
+        seed = M.Buffer(dev, zeros(Float32, 16))
+        t1 = M.Transient.Buffer(g, Float32, n)
+        t2 = M.Transient.Buffer(g, Float32, n)
+        out = M.Buffer(dev, zeros(Float32, 16))
+        M.dispatch!(g, bump!, (t1, seed), 16; name = "a")
+        M.dispatch!(g, bump!, (t2, t1), 16; name = "b")
+        # `t1` is read again after `t2` is written, so the two are live together.
+        M.dispatch!(g, add2!, (out, t1, t2), 16; name = "c")
+        plan = Base.invokelatest(M.Plan, g)
+        @test length(plan.arenas) == 2
+        @test Set(plan.arenas) == Set([E.Buffers(), E.ArenaPart(E.Buffers(), 2)])
+        @test plan.parts[1] != plan.parts[2]
+        @test all(r -> length(r) <= cap, plan.slabs)
+        M.record!(plan)
+        M.run!(plan)
+        KernelAbstractions.synchronize(M.backend(dev))
+        @test all(==(3f0), Array(M.storage(out)))        # (0 + 1) + (0 + 1 + 1)
+        M.free!(plan)
+        # The part is an arena of its own in the pool, and giving the plan up
+        # empties it like the first.
+        @test M.pool(dev).arenas[E.ArenaPart(E.Buffers(), 2)].region === nothing
+        # Nearly 5 GB of blocks, handed back rather than left to the testsets
+        # after this one.
+        GC.gc(true)
+        while M.reclaim!(M.pool(dev), dev; wait = true) > 0 end
+        M.trim!(M.pool(dev), dev)
+    else
+        @test_skip 2 * cap < M.capacity(dev)
+    end
 end
 
 @testset "a pass barrier carries mask tuples, not buffers" begin
@@ -512,10 +552,19 @@ end
     dev = M.Device(TESTBACKEND)
     pool = M.pool(dev)
     b = M.Buffer(dev, fill(1f0, 4096))
-    reserved = M.reserved(pool)
     # Anything this file retired earlier goes back first, so the counts below
-    # are about `b` and `b3` rather than about the order of the testsets.
+    # are about `b` and `b3` rather than about the order of the testsets. A full
+    # collection FIRST: a buffer an earlier testset dropped retires from its
+    # finalizer, so without it the drain below finds nothing and a collection
+    # between here and the count pushes them — 9 of them once the spill testset
+    # above left its seed and output buffers behind. `reserved` is read after
+    # the drain, which gives those blocks back.
+    GC.gc(true)
     while M.reclaim!(pool, dev; wait = true) > 0 end
+    # …and the blocks those regions came from, which a drain empties but does not
+    # hand back: the count of RESERVED bytes below is about `b`'s block alone.
+    M.trim!(pool, dev)
+    reserved = M.reserved(pool)
 
     # Retire with a submission IN FLIGHT, which is the case that must wait: a
     # command the device is still running can name these bytes. A slow kernel

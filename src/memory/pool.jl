@@ -569,7 +569,7 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
     # `constraint` given means the caller knows more than these transients do —
     # an arena reconciling what its other tenants also need. Deriving it here
     # would size the block for this plan alone.
-    want = constraint === nothing ? constraintof(dev, kind, transients) : constraint
+    want = constraint === nothing ? constraintof(dev, basekind(kind), transients) : constraint
     # Three attempts before the device is asked for anything, and the last two
     # are why `free!` can be deferred without a rebuild doubling peak memory.
     # Bytes a caller just gave back are RETIRED, not free: they are waiting on
@@ -609,7 +609,7 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
         end
         blks = blocksof(pool, kind)
         n = max(bytes, blocksize)
-        blk = Block(rawalloc(dev, kind, n, want), n, kind, want)
+        blk = Block(rawalloc(dev, basekind(kind), n, want), n, kind, want)
         push!(blks, blk)
         pool.blockgen[] += 1
         r = carve!(blk, bytes, align)
@@ -874,10 +874,10 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     lock(pool.lock) do
     a = arenaof(pool, kind)
     bytes = max(bytes, 1)
-    req = constraintof(dev, kind, transients)
+    req = constraintof(dev, basekind(kind), transients)
     # The REGION's absence is what says nothing has been placed here yet — not the
     # constraint's value, which a backend may legitimately leave as `nothing`.
-    want = a.region === nothing ? req : mergeconstraints(dev, kind, a.constraint, req)
+    want = a.region === nothing ? req : mergeconstraints(dev, basekind(kind), a.constraint, req)
     # The fast path has to ask about the CONSTRAINT as well as the size: an
     # arena outlives the plan that sized it, and a block created for one plan's
     # usage bits may not permit what the next plan does with them. Skipping this
@@ -904,7 +904,7 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
         t = wr.value
         (t === nothing || remappable(t)) && continue
         if t isa Plan
-            kind isa Images && invalidate!(t)
+            basekind(kind) isa Images && invalidate!(t)
         else
             throw(ArgumentError(
                 "a tenant of arena $kind cannot be moved — it has been recorded, " *
@@ -927,7 +927,7 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     # packed out of the old region shifts by the same delta. Images have no
     # addresses to patch — their recordings were dropped above. A backend
     # without BDA patching answers `nothing` here.
-    old === nothing || kind isa Images ||
+    old === nothing || basekind(kind) isa Images ||
         notify_move!(pool, deviceaddress(dev, old), deviceaddress(dev, fresh), length(old))
     return fresh
     end

@@ -322,6 +322,34 @@ struct Buffers end
 struct Images end
 
 """
+    ArenaPart(kind, index)
+
+The `index`th allocation of an arena whose placement does not fit in one.
+
+An arena is ONE allocation — its offsets are into a single contiguous range — and
+a device caps that: `maxalloc` is 4 GB on RADV. A plan whose transients need more
+at their peak did not run at all, however much memory the device had: the
+Qwen-Image VAE decoding 1664x928 needs 5.8 GB of buffers at once, in pieces of at
+most 1.66 GB. So `Place` spills what does not fit into further parts, each its own
+allocation and its own arena in the pool, shared across plans like the first.
+Part one is the arena's own kind, which is why a plan that fits is untouched.
+
+The backend never sees one of these: the pool hands its hooks [`basekind`](@ref),
+because what memory a part needs is exactly what its kind needs.
+"""
+struct ArenaPart{K}
+    kind::K
+    index::Int
+end
+
+"""The kind a backend allocates for: an [`ArenaPart`](@ref)'s own, anything else itself."""
+basekind(kind) = kind
+basekind(p::ArenaPart) = p.kind
+
+"""The arena key of part `index` of `kind`: the kind itself for the first."""
+arenapart(kind, index::Int) = index == 1 ? kind : ArenaPart(kind, index)
+
+"""
 Bytes a RECORDING reads while it runs: host-writable, device-addressable, and
 never moved while a recording that names them exists.
 
@@ -648,6 +676,7 @@ mutable struct Plan{D,H<:Tuple}
     slabs::Vector{Any}                  # the SHARED region of each arena, not owned
     arenas::Vector{Any}                 # …and which arena each one is, for remap!/free!
     offsets::Vector{Int}                # per transient, relative to its region
+    parts::Vector{Any}                  # per transient, the arena key it was placed in
     peak::Int
     naive::Int
     profiler::Union{Nothing,Profiler}

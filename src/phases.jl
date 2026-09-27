@@ -53,9 +53,12 @@ mutable struct Analysis
     # what actually gives the bytes back.
     regions::Vector{Any}
     arenas::Vector{Any}
+    # Place: per transient, the arena key it went into — its kind, or an
+    # `ArenaPart` of it when the kind's placement needed more than one allocation.
+    parts::Vector{Any}
 end
 Analysis() = Analysis(Vector{Int}[], Int[], Item[], 0, 0, Int[],
-                      Dict{Int,Vector{Tuple{Int,Int}}}(), Any[], Any[])
+                      Dict{Int,Vector{Tuple{Int,Int}}}(), Any[], Any[], Any[])
 
 """
     Compilation
@@ -420,45 +423,68 @@ function run!(::Place, c)
     isempty(a.items) && return c
     ts = transients(c)
     a.offsets = zeros(Int, length(ts))
+    a.parts = Vector{Any}(undef, length(ts))
     a.peak = 0
     a.naive = sum(nbytes, ts)
     for ar in unique(map(arena, ts))
-        idx = findall(t -> arena(t) == ar, ts)
-        # Bounded by what the device can actually give (see `headroom`), and
-        # checked here rather than at `rawalloc`: this is the only point that
-        # still knows the ITEMS, and "over budget by 40 MB" is answerable by
-        # dropping one buffer and unanswerable without knowing which. Finding out
-        # at allocation time instead attributes the failure to whatever allocated
-        # next.
-        prob = Problem(a.items[idx], headroom(pool(c), device(c), ar))
-        pl = checkcapacity(prob, place(prob), "arena $ar")
-        # `reserve!`, not `acquire!`: every plan placed in an arena gets the SAME
-        # region, so the arena costs the largest of them instead of their total.
-        # A private slice per plan cannot share bytes however well either one is
-        # placed, which is the property a device-owned arena exists to have.
-        # The REGION has to be at least as aligned as anything placed in it. The
-        # placer aligns each tenant WITHIN the region, so a region that starts
-        # at a weaker boundary shifts every one of those offsets off theirs —
-        # and the sum is what the backend is handed.
-        #
-        # It defaulted to `reserve!`'s 256, which held only because nothing had
-        # ever asked for more. A Metal render target wants 2048, and the second
-        # one in an arena landed 128 bytes short of its boundary: the driver
-        # refuses to place a texture there, which is at least loud. The Vulkan
-        # side would have bound the image to a misaligned offset.
-        want_align = maximum(it -> it.alignment, a.items[idx]; init = REGION_ALIGN)
-        want_align = max(want_align, REGION_ALIGN)
-        reg = reserve!(pool(c), device(c), ar, ts[idx], pl.height;
-                       align = want_align, blocksize = blocksize(device(c)))
-        push!(a.regions, reg)
-        push!(a.arenas, ar)
-        a.peak += pl.height
-        for i in idx
-            a.offsets[i] = pl.offsets[string(i)]
-            # The transient's offset is relative to the REGION; the region's is
-            # relative to the block. Adding them is where a suballocated plan
-            # differs from one that owns its allocation outright.
-            materialize!(device(c), ts[i], memoryof(reg), offset(reg) + a.offsets[i])
+        # One allocation per part, as many parts as it takes. The first placement
+        # is the whole kind; what it put entirely inside the room stays there, at
+        # the offsets it was given — a subset of a valid placement is one — and
+        # the rest is placed again as the next part. Each part asks `headroom`
+        # anew AFTER the previous one reserved, so the parts together are still
+        # bounded by the device's budget, not only each by `maxalloc`. A plan that
+        # fits in one allocation is one part, placed exactly as before.
+        rest = findall(t -> arena(t) == ar, ts)
+        part = 0
+        while !isempty(rest)
+            part += 1
+            key = arenapart(ar, part)
+            # Bounded by what the device can actually give (see `headroom`), and
+            # checked here rather than at `rawalloc`: this is the only point that
+            # still knows the ITEMS, and "over budget by 40 MB" is answerable by
+            # dropping one buffer and unanswerable without knowing which. Finding
+            # out at allocation time instead attributes the failure to whatever
+            # allocated next.
+            prob = Problem(a.items[rest], headroom(pool(c), device(c), key))
+            pl = place(prob)
+            ends(i) = pl.offsets[string(i)] + a.items[i].size
+            idx = pl.height <= prob.capacity ? rest : filter(i -> ends(i) <= prob.capacity, rest)
+            # Nothing ended inside the room: an item is larger than one
+            # allocation, or the budget is spent. No further part can help, and
+            # this throws with the items that say which.
+            isempty(idx) && checkcapacity(prob, pl, "arena $key")
+            height = maximum(ends, idx)
+            # `reserve!`, not `acquire!`: every plan placed in an arena gets the
+            # SAME region, so the arena costs the largest of them instead of their
+            # total. A private slice per plan cannot share bytes however well
+            # either one is placed, which is the property a device-owned arena
+            # exists to have. The same holds part by part.
+            # The REGION has to be at least as aligned as anything placed in it.
+            # The placer aligns each tenant WITHIN the region, so a region that
+            # starts at a weaker boundary shifts every one of those offsets off
+            # theirs — and the sum is what the backend is handed.
+            #
+            # It defaulted to `reserve!`'s 256, which held only because nothing
+            # had ever asked for more. A Metal render target wants 2048, and the
+            # second one in an arena landed 128 bytes short of its boundary: the
+            # driver refuses to place a texture there, which is at least loud. The
+            # Vulkan side would have bound the image to a misaligned offset.
+            want_align = maximum(i -> a.items[i].alignment, idx; init = REGION_ALIGN)
+            want_align = max(want_align, REGION_ALIGN)
+            reg = reserve!(pool(c), device(c), key, ts[idx], height;
+                           align = want_align, blocksize = blocksize(device(c)))
+            push!(a.regions, reg)
+            push!(a.arenas, key)
+            a.peak += height
+            for i in idx
+                a.offsets[i] = pl.offsets[string(i)]
+                a.parts[i] = key
+                # The transient's offset is relative to the REGION; the region's
+                # is relative to the block. Adding them is where a suballocated
+                # plan differs from one that owns its allocation outright.
+                materialize!(device(c), ts[i], memoryof(reg), offset(reg) + a.offsets[i])
+            end
+            rest = setdiff(rest, idx)
         end
     end
     return c
@@ -514,7 +540,7 @@ function run!(::Aliasing, c)
     ts = transients(c)
     for (i, y) in enumerate(ts), (j, x) in enumerate(ts)
         i == j && continue
-        arena(x) == arena(y) || continue   # offsets in different allocations never overlap
+        a.parts[i] == a.parts[j] || continue   # offsets in different allocations never overlap
         x.last < y.first || continue
         a.offsets[i] < a.offsets[j] + nbytes(x) &&
             a.offsets[j] < a.offsets[i] + nbytes(y) || continue

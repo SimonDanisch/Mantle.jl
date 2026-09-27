@@ -739,7 +739,7 @@ function refit!(pl::Plan)
     c = compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
     let a = analysis(c)
-        pl.slabs, pl.arenas, pl.offsets = a.regions, a.arenas, a.offsets
+        pl.slabs, pl.arenas, pl.offsets, pl.parts = a.regions, a.arenas, a.offsets, a.parts
         pl.peak, pl.naive = a.peak, a.naive
         # Re-registered: the recompile may have been placed into a different set
         # of arenas, and `tenant!` is idempotent for the ones it was already in.
@@ -1465,7 +1465,7 @@ Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
     let hw = hostwritten!(g), c = compile!(Compile(g; alias, coalesce, policy))
         let a = analysis(c)
             pl = Plan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
-                          a.offsets, a.peak, a.naive,
+                          a.offsets, a.parts, a.peak, a.naive,
                           makeprofiler(g.dev, c.passes, profile),
                           alias, coalesce, policy,
                           makeargmemory(g.dev, c.passes), nothing, 0,
@@ -1690,7 +1690,9 @@ Its own offsets are unaffected by the arena moving; only the base changed."""
 function remap!(pl::Plan, kind, region)
     ts = pl.graph.transients
     for (i, t) in enumerate(ts)
-        arena(t) == kind || continue
+        # The key it was PLACED in, which is `arena(t)` unless its kind needed
+        # more than one allocation; see `ArenaPart`.
+        pl.parts[i] == kind || continue
         materialize!(pl.graph.dev, t, memoryof(region), offset(region) + pl.offsets[i])
     end
     # …and on a backend that cannot patch, the plan is now inconsistent with
