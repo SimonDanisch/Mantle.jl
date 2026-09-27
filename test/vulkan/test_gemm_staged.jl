@@ -67,7 +67,7 @@ than merely *that* it is — and an integer count survives fp16 exactly, where a
 relative error on random data can hide four missing terms in the tolerance.
 """
 function stagedcount(backend, cfg, K; blocks = 2,
-                     kernels = Mantle.GEMM_STAGED_KERNELS)
+                     kernels = Mantle.GEMM_STAGED_KERNELS, gather::Bool = false)
     M = Mantle.gemm_bm(cfg) * blocks
     N = Mantle.gemm_bn(cfg) * blocks
     A = KA.allocate(backend, Float16, M, K); fill!(A, one(Float16))
@@ -76,8 +76,12 @@ function stagedcount(backend, cfg, K; blocks = 2,
     wg = Mantle.gemm_wg(cfg)
     # `KI.Kernel(backend, f)`: these kernels are plain functions over
     # `KernelInterface`'s intrinsics, so there is no constructor to call.
+    # A gathering kernel takes its loader after the epilogue; `nothing` is the
+    # plain matrix read, see `Mantle.apair`.
+    args = gather ? (C, A, B, nothing, identity, nothing, Val(M), Val(N), Val(K)) :
+                    (C, A, B, nothing, identity, Val(M), Val(N), Val(K))
     KernelInterface.Kernel(backend, kernels[cfg])(
-        C, A, B, nothing, identity, Val(M), Val(N), Val(K);
+        args...;
         ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg,
         workgroupsize = wg)
     KA.synchronize(backend)
@@ -149,6 +153,33 @@ end
                             kernels = Mantle.GEMM_STAGED_PREFETCH_KERNELS)
             r.correct || @info "prefetched tiling $cfg lost k-terms" K = r.K seen = r.seen
             @test r.correct
+        end
+    end
+
+    @testset "every gathering tiling accumulates every k-term" begin
+        # With the `nothing` loader a gathering kernel reads A as the matrix, so
+        # it takes the same count. `CONV_GATHER_TILINGS` are compiled ONLY as
+        # gathering kernels, so this is where Mantle runs them at all;
+        # DNNKernels' `test_conv_coopmat_chunk.jl` runs them as convolutions.
+        @test all(c -> haskey(Mantle.GEMM_STAGED_GATHER_KERNELS, c), Mantle.CONV_GATHER_TILINGS)
+        for cfg in keys(Mantle.GEMM_STAGED_GATHER_KERNELS),
+            K in (32, 64, 96, 288, 576, 1152, 2304)
+            K % Mantle.gemm_bk(cfg) == 0 || continue
+            r = stagedcount(backend, cfg, K; kernels = Mantle.GEMM_STAGED_GATHER_KERNELS,
+                            gather = true)
+            r.correct || @info "gathering tiling $cfg lost k-terms" K = r.K seen = r.seen
+            @test r.correct
+        end
+    end
+
+    @testset "a convolution-only tiling is reachable with a loader and only then" begin
+        for c in Mantle.CONV_GATHER_TILINGS
+            M, N, K = 2 * Mantle.gemm_bm(c), Mantle.gemm_bn(c), 4 * Mantle.gemm_bk(c)
+            @test Mantle.gather_gemm_tiling(M, N, K, 1, 1; tiling = c) == c
+            @test Mantle.staged_gemm_tiling(M, N, K, 1, 1; tiling = c) === nothing
+            @test Mantle.gather_gemm_tiling(M, N, K, 1, 2; tiling = c) === nothing  # split
+            @test Mantle.gather_gemm_tiling(M + 16, N, K, 1, 1; tiling = c) === nothing
+            @test Mantle.gemm_tiling(M, N, K) != c        # the product never picks one
         end
     end
 

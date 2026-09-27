@@ -399,6 +399,21 @@ const GEMM_NARROW_DEFAULT = true
     return nothing
 end
 
+"""
+Which gathering kernel a call with a loader may use, or `nothing`.
+
+The same conditions as [`staged_gemm_tiling`](@ref), asked of
+`GEMM_STAGED_GATHER_KERNELS`, which also holds `CONV_GATHER_TILINGS`: a tiling
+compiled only as a gathering kernel is a legal answer here and never there.
+"""
+@inline function gather_gemm_tiling(M::Int, N::Int, K::Int, nbatch::Int, splitk::Int;
+                                    staged::Bool = GEMM_STAGED_DEFAULT, tiling = nothing)
+    tiling === nothing && return staged_gemm_tiling(M, N, K, nbatch, splitk; staged)
+    staged && nbatch == 1 && splitk == 1 || return nothing
+    gemm_divides(tiling, M, N, K) && haskey(GEMM_STAGED_GATHER_KERNELS, tiling) || return nothing
+    return tiling
+end
+
 """Which tiling this call may use, or `nothing` for the register-blocked kernel."""
 @inline function staged_gemm_tiling(M::Int, N::Int, K::Int, nbatch::Int, splitk::Int;
                                     staged::Bool = GEMM_STAGED_DEFAULT, tiling = nothing)
@@ -1381,130 +1396,6 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
             GEMM_STAGED_PREFETCH_KERNELS[$cfg] = $kp
         end
 
-        # ── the same schedule with a GATHERED A operand ───────────────────
-        #
-        # A twin of the prefetch kernel above rather than a flag on it, because
-        # the two want opposite things from the register queue. The `MVector`
-        # above is Function storage that Lava scalar-replaces only when the
-        # staging loop UNROLLS; a gathering `apair` in that loop keeps the trip
-        # count and the queue becomes a packed `[N x i64]` reached by a dynamic
-        # sub-element index, which is a register queue in name only. Generating
-        # the bindings makes the unroll explicit instead of hoped for.
-        #
-        # **Doing that to the shared kernel regressed the plain path**, which is
-        # the reason there are two of them. Interleaved in one process against
-        # the untouched `v2n` kernel, which this schedule is meant to BEAT by
-        # 7-13%, one kernel serving both measured:
-        #
-        #     M x N x K            one kernel   two kernels
-        #     4096 x 4096 x 4096       1.377x        0.900x
-        #     2304 x 4096 x  576       1.093         0.948
-        #      576 x 4096 x 2304       0.885         0.865
-        #     1152 x 16384 x  288      1.143         0.913
-        #
-        # Lower is better and under 1.0 is the point of this kernel existing.
-        #
-        # The queue is live across the whole k-loop, so spelling it as SSA values
-        # adds `AREPS2 + BREPS2` of them to a kernel already at 256 VGPRs. The
-        # gather needs the unroll and pays for it with traffic it no longer does;
-        # a plain A read gets nothing back for the registers.
-        kg = Symbol("coopmat_gemm_staged_kernel_", ci, "_gather!")
-        @eval begin
-            function $kg(
-                                              C, A, B, bias, epi, ald,
-                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
-
-                tid = Int32(KI.get_local_id().x - 1)
-                blk = Int32(KI.get_group_id().x - 1)
-                nblk_m = Int32(M ÷ $BM)
-                tm = (blk % nblk_m) * Int32($BM)
-                tn = (blk ÷ nblk_m) * Int32($BN)
-
-                s = tid ÷ Int32(32)
-                sm = (s % Int32($WM)) * Int32($STM)
-                sn = (s ÷ Int32($WM)) * Int32($STN)
-
-                bp = bias === nothing ? bias : pointer(bias)
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-                # Prologue: fetch block zero to registers, then publish it to
-                # the sole shared-memory tile.
-                @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
-                    pkk_r = splitidx(tid + Int32(r - 1) * Int32($WG), Val($BM2))
-                    nextA_r = apair(ald, A, tm + Int32(2) * Int32(pkk_r[1]),
-                                    Int32(pkk_r[2]), Int32(M))
-                end
-                @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
-                    qj_r = splitidx(tid + Int32(r - 1) * Int32($WG), Val($BK2))
-                    g_r = Int32(1) + Int32(2) * Int32(qj_r[1]) +
-                          (tn + Int32(qj_r[2])) * Int32(K)
-                    nextB_r = (VecElement(B[g_r]), VecElement(B[g_r + Int32(1)]))
-                end
-                @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
-                    sA[1 + Int(pkk_r[1]) + Int(pkk_r[2]) * $LDA2] = nextA_r
-                end
-                @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
-                    sB[1 + Int(qj_r[1]) + Int(qj_r[2]) * $LDB2] = nextB_r
-                end
-                KI.barrier()
-
-                nkb = Int32(K ÷ $BK)
-                for kb in Int32(0):(nkb - Int32(1))
-                    # Issue the following tile's global reads before the MMAs.
-                    if kb + Int32(1) < nkb
-                        k0 = (kb + Int32(1)) * Int32($BK)
-                        @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
-                            nextA_r = apair(ald, A, tm + Int32(2) * Int32(pkk_r[1]),
-                                            k0 + Int32(pkk_r[2]), Int32(M))
-                        end
-                        @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
-                            gk_r = Int32(1) + k0 + Int32(2) * Int32(qj_r[1]) +
-                                   (tn + Int32(qj_r[2])) * Int32(K)
-                            nextB_r = (VecElement(B[gk_r]), VecElement(B[gk_r + Int32(1)]))
-                        end
-                    end
-
-                    Base.Cartesian.@nexprs $NKT u -> begin
-                        kt = (u - 1) * GEMM_TILE
-                        Base.Cartesian.@nexprs $STM mt -> begin
-                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                    sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                        kt * $LDA2, $LDA2)
-                            Base.Cartesian.@nexprs $STN nt -> begin
-                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                        sB, 1 + (kt ÷ 2) +
-                                            (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                                c_mt_nt = muladd(a, b, c_mt_nt)
-                            end
-                        end
-                    end
-
-                    # The last product has no successor to publish.
-                    if kb + Int32(1) < nkb
-                        KI.barrier()
-                        @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
-                            sA[1 + Int(pkk_r[1]) + Int(pkk_r[2]) * $LDA2] = nextA_r
-                        end
-                        @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
-                            sB[1 + Int(qj_r[1]) + Int(qj_r[2]) * $LDB2] = nextB_r
-                        end
-                        KI.barrier()
-                    end
-                end
-
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    accstore!(C,
-                              1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
-                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                              M, c_mt_nt, epi)
-                return nothing
-            end
-            GEMM_STAGED_GATHER_KERNELS[$cfg] = $kg
-        end
-
         # ── Double-buffered twin of the narrow vec2 kernel ──────────────────
         #
         # The single-buffer loop issues TWO barriers per k-block: one so the
@@ -1790,6 +1681,188 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
             return nothing
         end
         GEMM_STAGED_ABL_KERNELS[$cfg] = $kabl
+    end
+end
+
+"""
+    CONV_GATHER_TILINGS
+
+Tilings compiled ONLY as gathering kernels, for a convolution whose output
+channels are a multiple of 144: a 192 x 144 and a 96 x 288 block, twelve
+subgroups each owning 3 x 3 tiles. `GEMM_TILINGS` stays the plain product's
+table, so nothing a matrix product chooses changes.
+
+A gather re-does the im2col addressing once per column block, which is why the
+128-wide `GEMM_TILINGS` gather only ever won at one block
+(`DNNKernels.convgather_worth`). A block as wide as `Cout` gathers each element
+once and multiplies no padded column: `Cout = 144` pads to 256 and `288` to 384
+for the 128-wide product. Measured on RDNA 3.5 (8060S), 2026-09-27, one
+convolution, fp16 operands, fp32 result, bias, whole path (im2col, GEMM and
+epilogue against gather and epilogue), min of seven, outputs bit-identical:
+
+    conv                 im2col+GEMM   gather    block
+    144 -> 144  @1024²      81.1 ms     36.1    192 x 144
+    288 -> 144  @1024²     134.4        65.6    192 x 144
+    288 -> 288  @1024²     172.2       101.5     96 x 288
+    288 -> 288  @ 512²      53.1        25.0     96 x 288
+    576 -> 288  @ 512²      91.2        46.8     96 x 288
+    576 -> 576  @ 512²     122.3        91.1     96 x 288, 2 blocks
+    576 -> 576  @ 256²      40.3        22.7     96 x 288, 2 blocks
+    1152 -> 576 @ 256²      67.7        48.3     96 x 288, 2 blocks
+    1152 ->1152 @ 256²     102.1        89.0     96 x 288, 4 blocks
+    1152 ->1152 @ 128²      34.2        22.2     96 x 288, 4 blocks
+    1152 ->1152 @  64²       5.6         6.2     96 x 288, 4 blocks: too few workgroups
+
+Against the alternatives measured at the same time: `BK = 16` ties at 576 and
+1152 and loses 16% at `288 @ 512²`; 96 x 144 loses 28% at `144 @ 1024²`; 48 x 288
+(six subgroups) and a 96 x 288 of six subgroups owning 3 x 6 tiles lose 30-40%.
+"""
+const CONV_GATHER_TILINGS = GemmTiling[
+    (3, 3, 4, 3, 32, 8),    # 192 x 144, 12 subgroups
+    (3, 3, 2, 6, 32, 8),    #  96 x 288, 12 subgroups
+]
+
+# The gathering kernels, for the product's tilings and for the convolution-only
+# ones above. Numbered through both lists so the product's keep their names.
+for (ci, cfg) in enumerate(vcat(GEMM_TILINGS, CONV_GATHER_TILINGS))
+    STM, STN, WM, WN, BK, PAD = cfg
+    BM, BN = GEMM_TILE * STM * WM, GEMM_TILE * STN * WN
+    WG = WM * WN * COOPMAT_SUBGROUP
+    LDA, LDB = BM + PAD, BK + PAD
+    NKT = BK ÷ GEMM_TILE
+    vec2 = iseven(BM) && iseven(BK) && iseven(LDA) && iseven(LDB) &&
+           ((BM * BK) ÷ 2) % WG == 0 && ((BK * BN) ÷ 2) % WG == 0
+    if !vec2
+        ci > length(GEMM_TILINGS) &&
+            error("CONV_GATHER_TILINGS entry $cfg does not stage in vec2 pairs")
+        continue
+    end
+    LDA2, LDB2 = LDA ÷ 2, LDB ÷ 2
+    AREPS2, BREPS2 = (BM * BK) ÷ 2 ÷ WG, (BK * BN) ÷ 2 ÷ WG
+    BM2, BK2 = BM ÷ 2, BK ÷ 2
+
+    # ── the same schedule with a GATHERED A operand ───────────────────
+    #
+    # A twin of the prefetch kernel (`coopmat_gemm_staged_kernel_*_prefetch!`)
+    # rather than a flag on it, because the two want opposite things from the
+    # register queue. The prefetch kernel's `MVector` is Function storage that Lava scalar-replaces only when the
+    # staging loop UNROLLS; a gathering `apair` in that loop keeps the trip
+    # count and the queue becomes a packed `[N x i64]` reached by a dynamic
+    # sub-element index, which is a register queue in name only. Generating
+    # the bindings makes the unroll explicit instead of hoped for.
+    #
+    # **Doing that to the shared kernel regressed the plain path**, which is
+    # the reason there are two of them. Interleaved in one process against
+    # the untouched `v2n` kernel, which this schedule is meant to BEAT by
+    # 7-13%, one kernel serving both measured:
+    #
+    #     M x N x K            one kernel   two kernels
+    #     4096 x 4096 x 4096       1.377x        0.900x
+    #     2304 x 4096 x  576       1.093         0.948
+    #      576 x 4096 x 2304       0.885         0.865
+    #     1152 x 16384 x  288      1.143         0.913
+    #
+    # Lower is better and under 1.0 is the point of this kernel existing.
+    #
+    # The queue is live across the whole k-loop, so spelling it as SSA values
+    # adds `AREPS2 + BREPS2` of them to a kernel already at 256 VGPRs. The
+    # gather needs the unroll and pays for it with traffic it no longer does;
+    # a plain A read gets nothing back for the registers.
+    kg = Symbol("coopmat_gemm_staged_kernel_", ci, "_gather!")
+    @eval begin
+        function $kg(
+                                          C, A, B, bias, epi, ald,
+                                          ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
+
+            tid = Int32(KI.get_local_id().x - 1)
+            blk = Int32(KI.get_group_id().x - 1)
+            nblk_m = Int32(M ÷ $BM)
+            tm = (blk % nblk_m) * Int32($BM)
+            tn = (blk ÷ nblk_m) * Int32($BN)
+
+            s = tid ÷ Int32(32)
+            sm = (s % Int32($WM)) * Int32($STM)
+            sn = (s ÷ Int32($WM)) * Int32($STN)
+
+            bp = bias === nothing ? bias : pointer(bias)
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
+
+            # Prologue: fetch block zero to registers, then publish it to
+            # the sole shared-memory tile.
+            @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
+                pkk_r = splitidx(tid + Int32(r - 1) * Int32($WG), Val($BM2))
+                nextA_r = apair(ald, A, tm + Int32(2) * Int32(pkk_r[1]),
+                                Int32(pkk_r[2]), Int32(M))
+            end
+            @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
+                qj_r = splitidx(tid + Int32(r - 1) * Int32($WG), Val($BK2))
+                g_r = Int32(1) + Int32(2) * Int32(qj_r[1]) +
+                      (tn + Int32(qj_r[2])) * Int32(K)
+                nextB_r = (VecElement(B[g_r]), VecElement(B[g_r + Int32(1)]))
+            end
+            @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
+                sA[1 + Int(pkk_r[1]) + Int(pkk_r[2]) * $LDA2] = nextA_r
+            end
+            @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
+                sB[1 + Int(qj_r[1]) + Int(qj_r[2]) * $LDB2] = nextB_r
+            end
+            KI.barrier()
+
+            nkb = Int32(K ÷ $BK)
+            for kb in Int32(0):(nkb - Int32(1))
+                # Issue the following tile's global reads before the MMAs.
+                if kb + Int32(1) < nkb
+                    k0 = (kb + Int32(1)) * Int32($BK)
+                    @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
+                        nextA_r = apair(ald, A, tm + Int32(2) * Int32(pkk_r[1]),
+                                        k0 + Int32(pkk_r[2]), Int32(M))
+                    end
+                    @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
+                        gk_r = Int32(1) + k0 + Int32(2) * Int32(qj_r[1]) +
+                               (tn + Int32(qj_r[2])) * Int32(K)
+                        nextB_r = (VecElement(B[gk_r]), VecElement(B[gk_r + Int32(1)]))
+                    end
+                end
+
+                Base.Cartesian.@nexprs $NKT u -> begin
+                    kt = (u - 1) * GEMM_TILE
+                    Base.Cartesian.@nexprs $STM mt -> begin
+                        a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
+                                sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
+                                    kt * $LDA2, $LDA2)
+                        Base.Cartesian.@nexprs $STN nt -> begin
+                            b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
+                                    sB, 1 + (kt ÷ 2) +
+                                        (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
+                            c_mt_nt = muladd(a, b, c_mt_nt)
+                        end
+                    end
+                end
+
+                # The last product has no successor to publish.
+                if kb + Int32(1) < nkb
+                    KI.barrier()
+                    @inbounds Base.Cartesian.@nexprs $AREPS2 r -> begin
+                        sA[1 + Int(pkk_r[1]) + Int(pkk_r[2]) * $LDA2] = nextA_r
+                    end
+                    @inbounds Base.Cartesian.@nexprs $BREPS2 r -> begin
+                        sB[1 + Int(qj_r[1]) + Int(qj_r[2]) * $LDB2] = nextB_r
+                    end
+                    KI.barrier()
+                end
+            end
+
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                accstore!(C,
+                          1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
+                              (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                          M, c_mt_nt, epi)
+            return nothing
+        end
+        GEMM_STAGED_GATHER_KERNELS[$cfg] = $kg
     end
 end
 
@@ -2452,7 +2525,8 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
     # shapes it divides exactly and only where the plan wants a single plane —
     # which includes all four of SAM 2's dominant `addmm` shapes, i.e. 72.7% of
     # the encoder's arithmetic.
-    c = staged_gemm_tiling(M, N, K, nbatch, splitk; staged, tiling)
+    c = aload === nothing ? staged_gemm_tiling(M, N, K, nbatch, splitk; staged, tiling) :
+                            gather_gemm_tiling(M, N, K, nbatch, splitk; staged, tiling)
     # A loader is only understood by the gathering kernel. Every other path reads
     # A as a plain matrix, so falling through with one would return a wrong
     # answer with no complaint. It is a shape question, not a flag: the staged
@@ -2476,8 +2550,13 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
         # outage, but a shape that did would get garbage.
         narrow = narrow_ok && gemm_fits32(M, N, K)
         if aload !== nothing
-            narrow || throw(ArgumentError("coopmat_gemm!: a loader needs 32-bit \
-                                           indexing, got M=$M N=$N K=$K"))
+            # `B` and `C` are the only matrices a gathering call has; `A` is the
+            # loader's own addressing of whatever it reads. `M*K` is the size of
+            # an im2col matrix that is never formed, and at `288 -> 288` over
+            # 1024x1024 it is 2.7e9, which the plain check refused.
+            (narrow_ok && widemul(K, N) < typemax(Int32) && widemul(M, N) < typemax(Int32)) ||
+                throw(ArgumentError("coopmat_gemm!: a loader needs 32-bit indexing \
+                                     of B and C, got M=$M N=$N K=$K"))
             haskey(GEMM_STAGED_GATHER_KERNELS, c) ||
                 throw(ArgumentError("coopmat_gemm!: no gathering kernel for tiling $c"))
             wgg = gemm_wg(c)
