@@ -54,7 +54,7 @@ function tu_draw(dev, be, tex)
     end
     out = Mantle.Transient.Buffer(g, BGRA{N0f8}, TU_N * TU_N)
     Mantle.copy!(g, "read", out, img)
-    Mantle.run!(Mantle.Plan(g))
+    Mantle.run!(Mantle.record!(Mantle.Plan(g)))
     return reshape(Array(Mantle.storage(out)), TU_N, TU_N)
 end
 
@@ -104,6 +104,11 @@ end
     Mantle.upload_texture_data!(t, dc)
     @test tu_draw(dev, be, t) == ref_c
 
-    # A size mismatch is a new texture, not an upload.
+    # A size mismatch is a new texture, not an upload — from the host and from
+    # the device alike. The copy covers the texture's extent, so an unchecked
+    # smaller source is read past its end; Vulkan checked neither until
+    # 2026-09-26.
     @test_throws DimensionMismatch Mantle.upload_texture_data!(t, tu_texels(0f0)[1:8, :])
+    @test_throws DimensionMismatch Mantle.upload_texture_data!(
+        t, Mantle.devicearray(be, tu_texels(0f0)[1:8, :]))
 end

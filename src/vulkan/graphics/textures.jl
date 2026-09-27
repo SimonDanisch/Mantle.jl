@@ -173,6 +173,10 @@ end
 
 """Upload pixel data to a texture from the HOST, via staging."""
 function upload_texture_data!(tex::VulkanTexture2D{T}, data::AbstractMatrix{T}) where T
+    # The copy covers the TEXTURE's extent, so smaller data would be read past its
+    # end. Metal's methods always checked; these did not until 2026-09-26.
+    size(data) == size(tex) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(tex)) texture"))
     bytes = reinterpret(UInt8, vec(collect(data)))
     nbytes = length(bytes)
     # The bytes go into scratch the one-shot owns, and the sweep gives them back
@@ -199,6 +203,9 @@ The ARRAY is held, not its `VkManagedBuffer`: what keeps the memory ours is the
 `DataRef` refcount the array owns, not reachability of the buffer.
 """
 function upload_texture_data!(tex::VulkanTexture2D{T}, data::LavaArray{T,2}) where T
+    # A GPU read past the array's end, otherwise: see the host method above.
+    size(data) == size(tex) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(tex)) texture"))
     copy_into_texture!(tex) do e
         mb = data.buf[]::VkManagedBuffer
         hold!(e, data)
