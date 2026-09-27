@@ -1095,6 +1095,11 @@ if _VULKAN_OK
         @testset "frozen kernels are visible to the profiler" begin
             include(joinpath(VULKAN_TESTS, "test_frozen_kernels_visible.jl"))
         end
+        # And what the driver says about a pipeline is asked of the context that
+        # made it, not of a global flag that only describes the next one.
+        @testset "pipeline executable properties per context" begin
+            include(joinpath(VULKAN_TESTS, "test_pipeline_exec_ir.jl"))
+        end
 
 
         # `vk_context` had methods for three of AnyLavaArray's six wrappers.

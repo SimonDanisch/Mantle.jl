@@ -472,6 +472,12 @@ mutable struct VkContext
     # queries the driver's real per-heap budget vs usage via
     # VkPhysicalDeviceMemoryBudgetPropertiesEXT.
     memory_budget_available::Bool
+    # Whether VK_KHR_pipeline_executable_properties is enabled on THIS device:
+    # the extension was requested (`enable_pipeline_executable_properties!`)
+    # before it was created AND the device offers it. The request is global and
+    # says nothing about a context made before it or on a device without the
+    # extension, so pipeline creation and the queries ask this instead.
+    pipeline_exec_props_available::Bool
     # Whether VK_KHR_external_memory(_fd) is enabled. When true,
     # `VulkanExternalImage` can export allocations as opaque fds for zero-copy
     # sharing with other APIs (OpenGL via GL_EXT_memory_object_fd).
@@ -581,7 +587,8 @@ mutable struct VkContext
                        driver_version::AbstractString="unknown",
                        video_decode_available::Bool=false,
                        video_decode_queue::Union{Nothing, VK.Queue}=nothing,
-                       video_decode_queue_family_index::Union{Nothing, UInt32}=nothing)
+                       video_decode_queue_family_index::Union{Nothing, UInt32}=nothing,
+                       pipeline_exec_props_available::Bool=false)
         ctx = new()
         ctx.instance = instance
         ctx.physical_device = physical_device
@@ -616,6 +623,7 @@ mutable struct VkContext
         ctx.subgroup_rotate_available = subgroup_rotate_available
         ctx.mesh_shader_available = mesh_shader_available
         ctx.memory_budget_available = memory_budget_available
+        ctx.pipeline_exec_props_available = pipeline_exec_props_available
         ctx.external_memory_available = external_memory_available
         ctx.video_decode_available = video_decode_available
         ctx.video_decode_queue = video_decode_queue
@@ -1354,7 +1362,8 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # extension changes pipeline-creation behavior on some drivers; user opts
     # in via `enable_pipeline_executable_properties!()` BEFORE first
     # device creation.
-    if has_pipeline_exec_props && PIPELINE_EXEC_PROPERTIES_REQUESTED[]
+    exec_props = has_pipeline_exec_props && PIPELINE_EXEC_PROPERTIES_REQUESTED[]
+    if exec_props
         push!(extensions, "VK_KHR_pipeline_executable_properties")
     end
     if has_memory_budget
@@ -1501,7 +1510,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     end
 
     # Chain pipeline-executable-properties features (opt-in profiling).
-    if has_pipeline_exec_props && PIPELINE_EXEC_PROPERTIES_REQUESTED[]
+    if exec_props
         exec_props_features = VK.PhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
             true;  # pipeline_executable_info
             next=feature_chain
@@ -1793,6 +1802,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         debug,
         string(phys_props.driver_version),
         has_video_decode, video_decode_queue, video_qf_idx,
+        exec_props,
     )
     # After construction, because it is resolved from THIS device and the inner
     # constructor has no access to the local. Per device — a module-global one

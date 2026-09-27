@@ -516,7 +516,7 @@ pipeline_exec_stats(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_st
 # `LaunchPlan.pipeline` and drops the `LavaLinkedKernel`, so the linked-kernel
 # method was unreachable from the only place that launches anything.
 function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
-    PIPELINE_EXEC_PROPERTIES_REQUESTED[] || return nothing
+    ctx.pipeline_exec_props_available || return nothing
     pipe = pipeline.pipeline
     # Discover the pipeline's executables.
     # NO try/catch around either query, and that is the point.
@@ -530,10 +530,11 @@ function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
     # returns twenty statistics per pipeline, more than NVIDIA does.
     #
     # A profiler that hides its own failure is worse than one that has none: the
-    # absent numbers look like a fact about the hardware. `PIPELINE_EXEC_PROPERTIES_REQUESTED[]`
-    # above already covers "the caller did not ask for this", and the extension is
-    # only enabled when the device advertises it, so anything reaching here and
-    # failing is a bug that must be seen.
+    # absent numbers look like a fact about the hardware. The
+    # `pipeline_exec_props_available` check above already covers "this device was
+    # not created with the extension", whether because nobody asked for it or
+    # because the device lacks it, so anything reaching here and failing is a bug
+    # that must be seen.
     exec_info = VK.PipelineInfoKHR(pipe)
     execs = VK.unwrap(VK.get_pipeline_executable_properties_khr(ctx.device, exec_info))
     isempty(execs) && return nothing
@@ -602,4 +603,56 @@ function pipeline_exec_stats(ctx::VkContext, pipeline::LavaComputePipeline)
         end
     end
     return (; registers, scratch_bytes=scratch, raw_stats=raw)
+end
+
+"""
+    pipeline_exec_ir(ctx, pipeline::LavaComputePipeline) -> Vector{NamedTuple} or Nothing
+
+The driver's internal representations of a compute pipeline, as
+`(name, description, text)`: on RADV the NIR, the ACO IR and the final GPU
+assembly. The assembly is what to set against another compiler's output for the
+same kernel (`AMDGPU.code_gcn` on ROCm).
+
+Needs `enable_pipeline_executable_properties!()` before the device is created,
+like `pipeline_exec_stats`; `nothing` otherwise. Only text representations are
+returned, and a pipeline created before that flag carries none.
+"""
+pipeline_exec_ir(ctx::VkContext, linked::LavaLinkedKernel) = pipeline_exec_ir(ctx, linked.pipeline)
+
+# Raw, because Vulkan.jl's wrapper does only half of the two-call idiom: it asks
+# for the count and returns the structs with `pData = NULL`, so every
+# representation comes back with its size and none of its text. The second call,
+# with a buffer per representation, is the one that fills them.
+function pipeline_exec_ir(ctx::VkContext, pipeline::LavaComputePipeline)
+    ctx.pipeline_exec_props_available || return nothing
+    C = VK.VkCore
+    fptr = VK.function_pointer(ctx.device, "vkGetPipelineExecutableInternalRepresentationsKHR")
+    info = Ref(C.VkPipelineExecutableInfoKHR(C.VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR,
+                                             C_NULL, pipeline.pipeline.vks, UInt32(0)))
+    count = Ref{UInt32}(0)
+    getreps(reps) = GC.@preserve info count reps begin
+        r = ccall(fptr, VK.VkCore.VkResult,
+                  (VK.VkCore.VkDevice, Ptr{VK.VkCore.VkPipelineExecutableInfoKHR}, Ptr{UInt32},
+                   Ptr{VK.VkCore.VkPipelineExecutableInternalRepresentationKHR}),
+                  ctx.device.vks, info, count,
+                  reps === nothing ? C_NULL : pointer(reps))
+        r == C.VK_SUCCESS ||
+            error("vkGetPipelineExecutableInternalRepresentationsKHR returned $r")
+    end
+    empty = C.VkPipelineExecutableInternalRepresentationKHR(
+        C.VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INTERNAL_REPRESENTATION_KHR, C_NULL,
+        ntuple(_ -> Cchar(0), 256), ntuple(_ -> Cchar(0), 256), C.VkBool32(0), Csize_t(0), C_NULL)
+    getreps(nothing)
+    reps = fill(empty, count[])
+    getreps(reps)                                   # sizes
+    bufs = [Vector{UInt8}(undef, r.dataSize) for r in reps]
+    for (i, r) in enumerate(reps)
+        reps[i] = C.VkPipelineExecutableInternalRepresentationKHR(
+            r.sType, C_NULL, r.name, r.description, r.isText, r.dataSize, pointer(bufs[i]))
+    end
+    GC.@preserve bufs getreps(reps)                 # text
+    cstr(t) = String(UInt8.(collect(Iterators.takewhile(!iszero, t))))
+    return [(; name = cstr(r.name), description = cstr(r.description),
+               text = String(bufs[i][1:something(findfirst(iszero, bufs[i]), length(bufs[i]) + 1) - 1]))
+            for (i, r) in enumerate(reps) if r.isText != 0]
 end

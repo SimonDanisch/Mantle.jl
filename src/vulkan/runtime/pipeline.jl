@@ -425,11 +425,13 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
         entry_name;
         next = stage_next
     )
-    # Optional CAPTURE_STATISTICS bit so VK_KHR_pipeline_executable_properties
-    # has a populated stats table to query later via pipeline_exec_stats.
+    # Optional CAPTURE_STATISTICS and CAPTURE_INTERNAL_REPRESENTATIONS bits so
+    # VK_KHR_pipeline_executable_properties has a populated stats table and the
+    # driver's ISA to query later via pipeline_exec_stats / pipeline_exec_ir.
     pipeline_flags = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_DISPATCH_BASE_BIT)
-    if PIPELINE_EXEC_PROPERTIES_REQUESTED[]
-        pipeline_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR)
+    if ctx.pipeline_exec_props_available
+        pipeline_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) |
+                          VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR)
     end
     if PIPELINE_NO_COMPILE[]
         # EARLY_RETURN_ON_FAILURE alongside, as the spec pairs them: bail at the
