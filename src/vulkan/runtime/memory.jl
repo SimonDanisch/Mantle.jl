@@ -1020,7 +1020,11 @@ function destroy_pool!(ctx::VkContext)
     end
     empty!(p.blocks)
     empty!(p.arenas)
-    empty!(p.pending)
+    # Taken and dropped: what finalizers handed over was waiting for THIS device
+    # to finish with it, and the device is gone. `takeall!` because both are the
+    # lock-free `Inbox`, which has no `empty!`.
+    takeall!(p.pending)
+    takeall!(p.pendingplans)
     empty!(p.retiring)
     empty!(p.retiring_at)
     delete!(DEVICES, ctx)
