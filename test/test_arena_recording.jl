@@ -374,6 +374,46 @@ end
     M.free!(profiled)
 end
 
+# A pass is timed from when everything before it has FINISHED. The start
+# timestamp was at `TOP_OF_PIPE`, which the command processor writes as soon as it
+# reaches it — while the previous pass is still running — so every pass reported
+# its predecessor's time as well as its own: on the Qwen-Image 2.1 VAE a 2.95 ms
+# norm reported the 1105 ms convolution in front of it. A heavy pass followed by
+# a trivial one is that, reduced.
+@kernel function spin!(dst, @Const(src))
+    i = @index(Global)
+    x = @inbounds src[i]
+    for _ in 1:4096
+        x = muladd(x, 0.999f0, 1f-3)
+    end
+    @inbounds dst[i] = x
+end
+
+@testset "a pass is not billed the pass before it" begin
+    dev = M.Device(TESTBACKEND)
+    n = 1 << 20
+    g = M.Graph(dev)
+    seed = M.Buffer(dev, rand(Float32, n))
+    mid  = M.Buffer(dev, zeros(Float32, n))
+    tiny = M.Buffer(dev, zeros(Float32, 64))
+    M.dispatch!(g, spin!, (mid, seed), n; name = "heavy")
+    M.dispatch!(g, bump!, (tiny, mid), 64; name = "light")
+    profiled = Base.invokelatest(M.Plan, g; profile = true)
+    M.record!(profiled)
+    for _ in 1:10
+        M.run!(profiled)
+    end
+    KernelAbstractions.synchronize(M.backend(dev))
+    t = M.timings(profiled)
+    heavy = t[findfirst(x -> x.name == "heavy", t)].gpu_ms
+    light = t[findfirst(x -> x.name == "light", t)].gpu_ms
+    @test heavy > 0
+    # 64 elements against a million doing 4096 multiply-adds each. Billed the
+    # heavy pass, `light` came out equal to it.
+    @test light < 0.1 * heavy
+    M.free!(profiled)
+end
+
 @testset "two recorded plans alternating on one arena stay bit-exact" begin
     # Both recorded up front, so neither run emits anything: what orders b's
     # writes behind a's reads of the same bytes is the barrier each recording

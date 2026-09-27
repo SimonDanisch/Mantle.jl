@@ -1231,15 +1231,22 @@ reset is a command like any other, so it goes at the head of the frame's
 recording rather than at the end of the last one — a frame that was never
 recorded has nothing to reset.
 
-The start timestamp is at `TOP_OF_PIPE` and the end at `BOTTOM_OF_PIPE`, which
-brackets everything the pass does. Two adjacent passes therefore overlap in what
-they report, because the GPU is free to overlap them; a sum of pass times is not
-the frame time and is not meant to be.
+Both timestamps are at `BOTTOM_OF_PIPE`: the start one is written when everything
+recorded before the pass has finished, the end one when the pass has, so the
+interval is the pass's own barrier and work.
+
+The start was at `TOP_OF_PIPE` until 2026-09-26, which is written as soon as the
+command processor reaches it — before this pass's barrier, while the previous
+pass is still running. Every pass was billed its predecessor's time: on the
+Qwen-Image 2.1 VAE a channel norm measuring 2.95 ms on its own reported 1105 ms,
+the convolution in front of it, and the passes summed to 35 s of an 18.4 s
+decode. That sent the investigation after memory-bound passes while 95% of the
+time was convolutions.
 """
 function profiled!(f, pl::Plan, e::Emitter, i::Integer)
     prof = pl.profiler
     prof === nothing && return f()
-    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    VK.cmd_write_timestamp(e.cmd, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                     prof.pool, UInt32(2i - 2))
     t0 = time_ns()
     r = f()
