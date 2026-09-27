@@ -228,7 +228,11 @@ end
         # each operand is another, so a plan that noted only what it could reach
         # at the top level of an argument would have exactly one entry — which is
         # what a tuple counting as a level of nesting produced.
-        if M.recordsplans(dev)
+        #
+        # Only a backend that patches a recording keeps the table, so this asks
+        # `patchable`. It asked `recordsplans`, which ROCm answers `true` while
+        # holding its arguments in a HIP graph that nothing rewrites.
+        if M.patchable(dev)
             @test length(pl3.patchtab) == 1 + length(ops)
         end
         M.free!(pl3)

@@ -4,8 +4,12 @@ using Test, Lava, Mantle
 @testset "legacy transfer symbols are gone" begin
     @test !isdefined(Lava, :one_shot_copy)
     @test !isdefined(Lava, :append_copy_and_flush!)
-    @test !hasfield(Mantle.VulkanBatchQueue, :xfer_cmd_buf)
-    @test !hasfield(Mantle.VulkanBatchQueue, :xfer_fence)
+    # `VulkanBatchQueue` itself is gone (e54b15e): the driver half is
+    # `VulkanQueue`, behind core's `SubmitChannel`, and neither carries them.
+    for T in (Mantle.VulkanQueue, Mantle.SubmitChannel)
+        @test !hasfield(T, :xfer_cmd_buf)
+        @test !hasfield(T, :xfer_fence)
+    end
 end
 
 @testset "cmd_copy_buffer! is the single entry point" begin

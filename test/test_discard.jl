@@ -74,7 +74,7 @@ const DC_PIPE = Mantle.Rasterizer(; vertex = Mantle.VertexShader(dc_vertex),
     end
     out = Mantle.Transient.Buffer(g, BGRA{N0f8}, W * H)
     Mantle.copy!(g, "read", out, img)
-    Mantle.run!(Mantle.Plan(g))
+    Mantle.run!(Mantle.record!(Mantle.Plan(g)))
     px = reshape(Array(Mantle.storage(out)), W, H)
 
     red, green = BGRA{N0f8}(1, 0, 0, 1), BGRA{N0f8}(0, 1, 0, 1)

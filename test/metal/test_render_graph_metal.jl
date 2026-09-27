@@ -329,7 +329,7 @@ end
         M.render!(g2, "tri", color2 => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
             M.draw!(p, RG_PIPE, (RG_TRI,), cmd2)
         end
-        M.run!(M.Plan(g2))
+        M.run!(M.record!(M.Plan(g2)))
         @test count(p -> ColorTypes.green(p) > 0.5, M.readback_target(color2)) == 1682
     end
 end

@@ -31,10 +31,14 @@ end
             end
         end
         wait(task)
-        # An `ErrorException` and not an `AssertionError`: recording into one
+        # A `WrongThread` and not an `AssertionError`: recording into one
         # channel from two threads interleaves two command streams into one
-        # buffer, which is not something to compile out.
-        @test result[] isa ErrorException
+        # buffer, which is not something to compile out. It was an
+        # `ErrorException` until the channel got an exception type of its own,
+        # which also names both threads.
+        @test result[] isa Mantle.WrongThread
+        @test result[].owner == bq.thread
+        @test result[].caller != bq.thread
     else
         @info "Skipping cross-thread test; run with `julia -t 2+` to exercise"
     end
@@ -52,10 +56,11 @@ end
     # `<:`, not `===`. The assertion is that the field admits no `nothing` — it
     # was written as identity against the bare `VulkanBatchQueue`, which also pinned
     # the field to the UnionAll and broke when `VulkanBatchQueue` gained its `{C}`
-    # parameter. `VulkanBatchQueue{VkContext}` satisfies the intent MORE strongly (it
-    # is concrete), so test the property, not one spelling of it.
+    # parameter. Test the property, not one spelling of it: the spelling changed
+    # again when the alias went (e54b15e), to core's channel over this backend's
+    # queue.
     T = fieldtype(Mantle.VkContext, :default_bq)
-    @test T <: Mantle.VulkanBatchQueue
+    @test T <: Mantle.SubmitChannel{<:Mantle.VulkanQueue}
     @test !(Nothing <: T)
 end
 

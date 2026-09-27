@@ -494,6 +494,9 @@ include(joinpath(@__DIR__, "test_texture_upload.jl"))
 # More stage arguments than Metal's 31-entry buffer table; RayMakie's mesh
 # shader has 51.
 include(joinpath(@__DIR__, "test_many_stage_args.jl"))
+# A varying spelled `NTuple{N,Float32}`, which Metal takes and Lava had no
+# method for.
+include(joinpath(@__DIR__, "test_tuple_varyings.jl"))
 # Under `test/vulkan/` and guarded, because it is that backend's: it builds a
 # `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
 # default and no other backend's answer. It sat in the section above, whose
@@ -571,6 +574,9 @@ foreachbackend(joinpath(@__DIR__, "test_run_ordering.jl"))
 # whether it is that or a `@kernel` constructor. Per-backend because the decision
 # was being made three times and the three did not agree.
 foreachbackend(joinpath(@__DIR__, "test_declared_kernel.jl"))
+# A plain kernel guards its own tail; eight lost the guard with `@kernel` and
+# wrote past their outputs. Every backend's launch pads to whole workgroups.
+foreachbackend(joinpath(@__DIR__, "test_kernel_tails.jl"))
 # And a library call declared as a pass member: `mul!` with no ndrange. The two
 # GPU backends answer `runscalls` differently and the file asserts both sides.
 foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
@@ -1153,6 +1159,14 @@ if _VULKAN_OK
 
         @testset "hwtlas refit" begin
             include(joinpath(VULKAN_TESTS, "test_hwtlas_refit.jl"))
+        end
+
+        @testset "this backend's plain kernels guard their tails" begin
+            include(joinpath(VULKAN_TESTS, "test_backend_kernel_tails.jl"))
+        end
+
+        @testset "grain instance writer" begin
+            include(joinpath(VULKAN_TESTS, "test_instance_writer_kernel.jl"))
         end
 
         @testset "hwtlas sync batch" begin

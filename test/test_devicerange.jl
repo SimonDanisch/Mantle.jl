@@ -123,22 +123,26 @@ end
                                       src, 0.5f0), 1; name = "count")
     M.dispatch!(g, dr_mark_unguarded!, (dst,),
                     M.DeviceRange(n; max = cap); group = group, name = "mark")
-    M.run!(M.record!(M.Plan(g)))
+    pl = M.record!(M.Plan(g))
+    M.run!(pl)
     # How many invocations ran, observed through a kernel that does NOT bound
     # itself — which is the only way to see it, and why this kernel is named
     # unguarded.
     #
-    # The answer is a backend property and both answers are correct. A recording
-    # backend reads the count on the device and launches whole workgroups over
-    # it. A KernelAbstractions backend has no indirect dispatch and launches the
-    # CEILING, deliberately: resolving the range by reading the count on the
+    # The answer is a property of the compiled dispatch and both answers are
+    # correct. One sized on the device reads the count there and launches whole
+    # workgroups over it (Vulkan's indirect dispatch). One that is not launches
+    # the CEILING, deliberately: resolving the range by reading the count on the
     # host means synchronising before every such dispatch, which measured 320
     # synchronises and 0.585 s of a 0.602 s frame on an M5. `test_host.jl`
     # states that contract and the equivalence it rests on — the kernel must
     # bound itself either way.
     #
-    # Asked through `recordsplans`, which is the same distinction under the name
-    # the vocabulary already has, rather than by naming a backend.
-    launched = M.recordsplans(dev) ? cld(want, group) * group : cap
+    # Asked of the dispatch, `devicesized`, which each backend declares. It was
+    # asked through `recordsplans` until 2026-09-26, which is a different
+    # property: ROCm records a plan (as a HIP graph) and has no indirect dispatch,
+    # so it launched the ceiling where the test expected whole workgroups.
+    mark = only(only(pp.dispatches) for pp in pl.passes if pp.pass.name == "mark")
+    launched = M.devicesized(mark) ? cld(want, group) * group : cap
     @test count(==(1.0f0), Array(M.storage(dst))) == launched
 end
