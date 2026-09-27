@@ -1,27 +1,32 @@
-using Test, Lava, KernelAbstractions
+using Test, Mantle
 using Mantle: UnitCube, ContactRecord, narrow_phase_contacts_kernel
 using GeometryBasics: Vec3f
-using KernelAbstractions: CPU
 
 # Shared narrow-phase helpers — see test/narrow_phase_helpers.jl.
 isdefined(@__MODULE__, :tx) ||
     include(joinpath(@__DIR__, "narrow_phase_helpers.jl"))
 
-# Run the fused kernel on the KA.CPU backend.  `n_grains` is the number of
-# grains; the contact buffer is sized `n_grains * max_contacts`.  Returns
+# Run the fused kernel through a graph on the device, the one way this API runs
+# a kernel; it was `KA.CPU` until the kernel became a plain `KernelInterface`
+# function, which that backend cannot compile. `n_grains` is the number of
+# grains; the contact buffer is sized `n_grains * max_contacts`. Returns
 # (counters, contacts).
-function run_cpu_compact(transforms, pairs, shape, n_grains, max_contacts)
-    counters = zeros(UInt32, n_grains)
+function run_compact(transforms, pairs, shape, n_grains, max_contacts)
+    dev = Mantle.todevice(Mantle.defaultbackend())
     sentinel = ContactRecord(typemax(UInt32), typemax(UInt32),
                              Vec3f(0f0, 0f0, 0f0),
                              Vec3f(0f0, 0f0, 0f0),
                              0f0)
-    contacts = fill(sentinel, n_grains * max_contacts)
-    narrow_phase_contacts_kernel(CPU())(transforms, pairs, shape,
-                                        counters, contacts,
-                                        Int32(max_contacts);
-                                        ndrange = length(pairs))
-    KernelAbstractions.synchronize(CPU())
+    t = Mantle.Buffer(dev, transforms)
+    p = Mantle.Buffer(dev, pairs)
+    c = Mantle.Buffer(dev, zeros(UInt32, n_grains))
+    r = Mantle.Buffer(dev, fill(sentinel, n_grains * max_contacts))
+    g = Mantle.Graph(dev)
+    Mantle.dispatch!(g, narrow_phase_contacts_kernel,
+                     (t, p, shape, c, r, Int32(max_contacts)), length(pairs))
+    Mantle.runonce!(g)
+    counters, contacts = Array(Mantle.storage(c)), Array(Mantle.storage(r))
+    foreach(Mantle.free!, (t, p, c, r))
     return counters, contacts
 end
 
@@ -33,7 +38,7 @@ function records_for(g::Integer, counters, contacts, max_contacts)
     return contacts[(base + 1):(base + n)]
 end
 
-@testset "narrow_phase_contacts_kernel — KA.CPU" begin
+@testset "narrow_phase_contacts_kernel" begin
 
     @testset "single overlapping pair lands in BOTH grain slot lists" begin
         # Two unit cubes overlapping by 0.1 along +X.
@@ -42,7 +47,7 @@ end
         max_contacts = 4
         n_grains     = 2
 
-        counters, contacts = run_cpu_compact(transforms, pairs, UnitCube(),
+        counters, contacts = run_compact(transforms, pairs, UnitCube(),
                                              n_grains, max_contacts)
 
         # Each grain gets exactly one contact.
@@ -72,7 +77,7 @@ end
         max_contacts = 4
         n_grains     = 2
 
-        counters, contacts = run_cpu_compact(transforms, pairs, UnitCube(),
+        counters, contacts = run_compact(transforms, pairs, UnitCube(),
                                              n_grains, max_contacts)
 
         @test counters == UInt32[0, 0]
@@ -95,7 +100,7 @@ end
         max_contacts = 8
         n_grains     = 4
 
-        counters, contacts = run_cpu_compact(transforms, pairs, UnitCube(),
+        counters, contacts = run_compact(transforms, pairs, UnitCube(),
                                              n_grains, max_contacts)
 
         # Each grain participates in exactly 3 pairs.
@@ -133,7 +138,7 @@ end
         max_contacts = 3
         n_grains     = 6
 
-        counters, contacts = run_cpu_compact(transforms, pairs, UnitCube(),
+        counters, contacts = run_compact(transforms, pairs, UnitCube(),
                                              n_grains, max_contacts)
 
         # All 5 pair threads atomically incremented counter[1] once each.
@@ -156,56 +161,3 @@ end
         end
     end
 end
-
-# ---------------------------------------------------------------------------
-# GPU smoke test on the Lava backend.
-#
-# Per the project "never crash-loop GPU tests" rule, this is a single
-# minimal run (one overlapping pair) and any failure is investigated, not
-# retried.  Mirrors the CPU "single overlapping pair lands in BOTH grain
-# slot lists" testset to confirm GPU compaction matches CPU.
-# ---------------------------------------------------------------------------
-@testset "narrow_phase_contacts_kernel — Lava backend (GPU smoke)" begin
-    using Mantle: ContactRecord, narrow_phase_contacts_kernel
-    using Mantle: LavaArray, LavaBackend
-    using GeometryBasics: Vec3f
-    max_contacts = Int32(4)
-    n_grains     = 2
-    transforms = LavaArray([tx(0,0,0), tx(1.9, 0, 0)])
-    pairs      = LavaArray([(Int32(1), Int32(2))])
-    counters   = LavaArray(zeros(UInt32, n_grains))
-    sentinel   = ContactRecord(typemax(UInt32), typemax(UInt32),
-                               Vec3f(0f0, 0f0, 0f0),
-                               Vec3f(0f0, 0f0, 0f0),
-                               0f0)
-    contacts   = LavaArray(fill(sentinel, n_grains * Int(max_contacts)))
-
-    narrow_phase_contacts_kernel(LavaBackend())(
-        transforms, pairs, Mantle.UnitCube(),
-        counters, contacts, max_contacts;
-        ndrange = 1)
-    Mantle.flush!(Mantle.Device())
-
-    cs = Array(counters)
-    rs = Array(contacts)
-
-    @test cs[1] == UInt32(1)
-    @test cs[2] == UInt32(1)
-
-    # Slot 1 of each grain holds the contact record; both copies carry
-    # the same (i, j) pair indices.
-    for r in (rs[1], rs[max_contacts + 1])
-        @test r.i == UInt32(1)
-        @test r.j == UInt32(2)
-        @test r.depth ≈ 0.1f0 atol=1f-3
-        @test r.n_hat[1] ≈ 1f0 atol=1f-3
-        @test abs(r.n_hat[2]) < 1f-3
-        @test abs(r.n_hat[3]) < 1f-3
-    end
-
-    # Untouched slots still hold the sentinel.
-    for k in (2, 3, 4, max_contacts + 2, max_contacts + 3, max_contacts + 4)
-        @test rs[k].i == typemax(UInt32)
-    end
-end
-

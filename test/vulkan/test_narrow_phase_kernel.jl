@@ -1,26 +1,37 @@
-using Test, Lava, KernelAbstractions
+using Test, Mantle
 using Mantle: UnitCube, EPAResult, narrow_phase_kernel, NO_CONTACT, gjk, epa
 using GeometryBasics: Vec3f
-using KernelAbstractions: CPU
 
 # Shared narrow-phase helpers — see test/narrow_phase_helpers.jl.  Provides
 # `tx` (alias for `translation_transform`) and the other transform builders.
 isdefined(@__MODULE__, :tx) ||
     include(joinpath(@__DIR__, "narrow_phase_helpers.jl"))
 
-# Run the kernel on the given inputs on the KA.CPU backend and synchronize.
-function run_cpu_narrow_phase(transforms, pairs, shape)
-    results = Vector{EPAResult}(undef, length(pairs))
-    narrow_phase_kernel(CPU())(transforms, pairs, shape, results;
-                                ndrange = length(pairs))
-    KernelAbstractions.synchronize(CPU())
+# What `results` holds before the kernel runs: every field off what the kernel
+# writes, so a slot it skipped cannot pass for one it wrote.
+narrow_sentinel() = EPAResult(Vec3f(99, 99, 99), 99f0, Vec3f(88, 88, 88), 77, false)
+
+# Through a graph on the device, the one way this API runs a kernel. This ran on
+# `KA.CPU` until the kernel became a plain `KernelInterface` function, which
+# that backend cannot compile; the host reference the kernel is held to is
+# `gjk`/`epa` called directly, in the last testset below.
+function run_narrow_phase(transforms, pairs, shape)
+    dev = Mantle.todevice(Mantle.defaultbackend())
+    t = Mantle.Buffer(dev, transforms)
+    p = Mantle.Buffer(dev, pairs)
+    r = Mantle.Buffer(dev, fill(narrow_sentinel(), length(pairs)))
+    g = Mantle.Graph(dev)
+    Mantle.dispatch!(g, narrow_phase_kernel, (t, p, shape, r), length(pairs))
+    Mantle.runonce!(g)
+    results = Array(Mantle.storage(r))
+    foreach(Mantle.free!, (t, p, r))
     return results
 end
 
 # Local helper, avoids depending on a particular norm overload.
 norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
 
-@testset "narrow_phase_kernel — KA.CPU" begin
+@testset "narrow_phase_kernel" begin
 
     @testset "EPAResult is bitstype (precondition for GPU dispatch)" begin
         @test isbitstype(EPAResult)
@@ -36,9 +47,10 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
         transforms = [tx(0,0,0), tx(1.9, 0, 0)]
         pairs      = [(Int32(1), Int32(2))]
 
-        results = run_cpu_narrow_phase(transforms, pairs, UnitCube())
+        results = run_narrow_phase(transforms, pairs, UnitCube())
 
         r = results[1]
+        @test r.converged
         @test r.depth ≈ 0.1f0 atol=1f-3
         @test r.normal[1] ≈ 1f0 atol=1f-3
         @test abs(r.normal[2]) < 1f-3
@@ -51,7 +63,7 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
         transforms = [tx(0,0,0), tx(5, 0, 0)]
         pairs      = [(Int32(1), Int32(2))]
 
-        results = run_cpu_narrow_phase(transforms, pairs, UnitCube())
+        results = run_narrow_phase(transforms, pairs, UnitCube())
 
         r = results[1]
         @test r.depth == 0f0
@@ -75,7 +87,7 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
             (Int32(2), Int32(3)),  # mirror diagonal
         ]
 
-        results = run_cpu_narrow_phase(transforms, pairs, UnitCube())
+        results = run_narrow_phase(transforms, pairs, UnitCube())
 
         # Every pair overlaps; depth on each is ~0.1.
         for (k, r) in enumerate(results)
@@ -92,7 +104,7 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
         transforms = [tx(5*(i-1), 0, 0) for i in 1:n]
         pairs = [(Int32(i), Int32(i+1)) for i in 1:(n-1)]
 
-        results = run_cpu_narrow_phase(transforms, pairs, UnitCube())
+        results = run_narrow_phase(transforms, pairs, UnitCube())
 
         @test all(r -> r.depth == 0f0,                   results)
         @test all(r -> r.normal  == Vec3f(0f0,0f0,0f0),  results)
@@ -108,7 +120,7 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
             (Int32(3), Int32(4)),  # overlap depth ~0.1
         ]
 
-        results = run_cpu_narrow_phase(transforms, pairs, UnitCube())
+        results = run_narrow_phase(transforms, pairs, UnitCube())
 
         @test results[1].depth ≈ 0.1f0 atol=2f-2
         @test results[2].depth == 0f0
@@ -123,7 +135,7 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
         transforms = [tx(0,0,0), tx(1.95, 0.5, 0), tx(8, 0, 0)]
         pairs      = [(Int32(1), Int32(2)), (Int32(1), Int32(3))]
 
-        results = run_cpu_narrow_phase(transforms, pairs, UnitCube())
+        results = run_narrow_phase(transforms, pairs, UnitCube())
 
         # Pair 1: overlap -> compare against direct epa.
         T1, T2 = transforms[1], transforms[2]
@@ -138,46 +150,3 @@ norm_squared(v::Vec3f) = v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
         @test results[2].depth == 0f0
     end
 end
-
-# ---------------------------------------------------------------------------
-# Layer 2: Lava (GPU) smoke test.
-#
-# Single small batch confirming the kernel compiles and dispatches on the
-# Vulkan backend, with outputs matching the CPU path.  Per the "never
-# crash-loop GPU tests" project rule, we do not retry on failure.
-#
-# STATUS: STILL GATED, but for a different reason than before.
-#
-# GPU smoke test: dispatch narrow_phase_kernel on the Lava backend with a
-# single overlapping pair and assert the result matches the CPU baseline.
-# Was @test_skip'd while the SPIR-V emit had several type-pun bugs around
-# byte-packed MVector allocas; the unified retype_uniform_typed_allocas! pass
-# now retypes the allocas to match their access pattern, and wider accesses
-# get decomposed to T-sized chunks rather than relying on (invalid under
-# logical addressing) Function-pointer OpBitcasts.
-# ---------------------------------------------------------------------------
-@testset "narrow_phase_kernel — Lava backend (GPU smoke)" begin
-    using Mantle: EPAResult
-    using Mantle: LavaArray, LavaBackend
-    using GeometryBasics: Vec3f
-    tx_(x, y, z) = (1f0, 0f0, 0f0, Float32(x),
-                    0f0, 1f0, 0f0, Float32(y),
-                    0f0, 0f0, 1f0, Float32(z))
-    transforms = LavaArray([tx_(0, 0, 0), tx_(1.9, 0, 0)])
-    pairs      = LavaArray([(Int32(1), Int32(2))])
-    sentinel   = EPAResult(Vec3f(99, 99, 99), 99f0, Vec3f(88, 88, 88), 77, false)
-    results    = LavaArray([sentinel])
-    Mantle.narrow_phase_kernel(LavaBackend())(transforms, pairs, Mantle.UnitCube(), results;
-                                            ndrange=1)
-    Mantle.flush!(Mantle.Device())
-    r = Array(results)[1]
-    # Two unit cubes overlapping by 0.1 along +X: depth 0.1, normal (1,0,0),
-    # contact on the +X face of cube A at (1, 1, 1) corner-ish.
-    @test r.converged == true
-    @test isapprox(r.normal[1], 1f0;  atol=1f-3)
-    @test isapprox(r.normal[2], 0f0;  atol=1f-3)
-    @test isapprox(r.normal[3], 0f0;  atol=1f-3)
-    @test isapprox(r.depth,     0.1f0; atol=1f-3)
-    @test isapprox(r.contact[1], 1f0;  atol=1f-2)
-end
-

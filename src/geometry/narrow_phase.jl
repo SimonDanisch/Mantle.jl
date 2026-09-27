@@ -82,14 +82,15 @@ Element types:
 - `shape`:       `ConvexShape` subtype, e.g. `UnitCube()`.
 - `results`:     `AbstractVector{EPAResult}` of length `== length(pairs)`.
 """
-# Keeps its CPU variant: `test_narrow_phase_kernel.jl` is a GPU-vs-CPU parity
-# test and `cpu=false` deletes the side it compares against.
 function narrow_phase_kernel(
         transforms,
         pairs,
         shape,
         results)
     k = KI.get_global_id().x
+    # The launch covers whole workgroups; `@kernel` guarded the tail, a plain
+    # kernel guards its own.
+    k <= length(pairs) || return nothing
     @inbounds pair = pairs[k]
     i = pair[1]
     j = pair[2]
@@ -141,7 +142,6 @@ Element types:
                  `length(counters) * max_contacts`.
 - `max_contacts`: `Int32`.
 """
-# Same as `narrow_phase_kernel`: `test_narrow_phase_contacts.jl` runs it on CPU.
 function narrow_phase_contacts_kernel(
         transforms,
         pairs,
@@ -150,6 +150,9 @@ function narrow_phase_contacts_kernel(
         contacts,
         max_contacts::Int32)
     k = KI.get_global_id().x
+    # A lane past the last pair would read a garbage pair and bump two garbage
+    # counters. See `narrow_phase_kernel`.
+    k <= length(pairs) || return nothing
     @inbounds pair = pairs[k]
     i = pair[1]
     j = pair[2]

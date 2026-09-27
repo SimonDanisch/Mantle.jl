@@ -5,11 +5,12 @@
 # kernel and its `_pervec` variant on purpose, replacing them with
 # `Raycore.update_transforms!` / `_apply_pending_update!`. The test kept importing
 # the deleted symbol and failed 8 assertions for three months without anyone
-# noticing, because this file is not registered in runtests.jl.
+# noticing, because this file was not registered in runtests.jl. It is now.
 #
 # `write_grain_instances_kernel` is still the live API and is what remains here.
 
 using Test, Lava, Mantle
+import KernelInterface as KI
 using Mantle: build_accel!
 using Mantle: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
@@ -30,8 +31,9 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
 
     radius = 0.5f0
 
-    # Launch via KA backend pattern: kernel(LavaBackend())(args...; ndrange=n)
-    k = write_grain_instances_kernel(Mantle.defaultbackend())
+    # A plain KernelInterface kernel since Mantle stopped defining `@kernel`s,
+    # so it is launched the way `src/` launches its sibling, `KI.Kernel`.
+    k = KI.Kernel(Mantle.defaultbackend(), write_grain_instances_kernel)
     k(positions_gpu, quats_gpu, radius,
       aabb_blas.address, tri_blas.address,
       instances_gpu;

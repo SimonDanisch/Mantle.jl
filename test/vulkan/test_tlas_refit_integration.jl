@@ -1,4 +1,5 @@
 using Test, Lava, Mantle
+import KernelInterface as KI
 using Mantle: refit_tlas!, build_accel!
 using Mantle: VulkanInstanceRecord, write_grain_instances_kernel, build_blas_aabb, build_tlas, AS_INPUT_USAGE
 using GeometryBasics: Point3f, Vec3f, Vec4f
@@ -23,7 +24,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     # Frame 0: grains at x = 0, 5, 10, 15 (separated so each has its own AABB).
     pos_a = [Point3f(Float32(5*(i-1)), 0f0, 0f0) for i in 1:n]
     positions_gpu = Mantle.LavaArray(pos_a)
-    write_grain_instances_kernel(backend)(positions_gpu, quats_gpu, radius,
+    KI.Kernel(backend, write_grain_instances_kernel)(positions_gpu, quats_gpu, radius,
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)
@@ -39,7 +40,7 @@ using GeometryBasics: Point3f, Vec3f, Vec4f
     # Frame 1: shift all grains by +100 in x.
     pos_b = [Point3f(Float32(5*(i-1) + 100f0), 0f0, 0f0) for i in 1:n]
     Mantle.copyto!(positions_gpu, pos_b)
-    write_grain_instances_kernel(backend)(positions_gpu, quats_gpu, radius,
+    KI.Kernel(backend, write_grain_instances_kernel)(positions_gpu, quats_gpu, radius,
                                            aabb_blas.address, tri_blas.address,
                                            instances_gpu;
                                            ndrange = n)

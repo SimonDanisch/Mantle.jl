@@ -1,4 +1,5 @@
 using Test, Lava, Raycore, Printf
+import KernelInterface as KI
 using Mantle: build_accel!
 using Mantle: VulkanInstanceRecord, build_blas_aabb, AS_INPUT_USAGE, write_grain_instances_kernel
 using GeometryBasics: Point3f, Vec3f, Vec4f
@@ -35,7 +36,7 @@ end
     bq      = Mantle.batchqueue(Mantle.Device())
 
     # Initial instance record write.
-    write_grain_instances_kernel(backend)(
+    KI.Kernel(backend, write_grain_instances_kernel)(
         positions, quats, radius, blas.address, blas.address, instance_buf;
         ndrange = N)
     Mantle.flush!(bq)
@@ -57,7 +58,7 @@ end
         shift_kernel(positions, 0.001f0; ndrange = N)
         Mantle.flush!(bq)
 
-        write_grain_instances_kernel(backend)(
+        KI.Kernel(backend, write_grain_instances_kernel)(
             positions, quats, radius, blas.address, blas.address, instance_buf;
             ndrange = N)
         Mantle.flush!(bq)

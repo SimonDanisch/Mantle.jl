@@ -547,6 +547,7 @@ function update_instance_records_kernel!(
         transforms,
         blas_address::UInt64)
     i = KI.get_global_id().x
+    i <= length(records) || return nothing   # the launch is whole workgroups
     @inbounds old = records[i]
     @inbounds records[i] = VulkanInstanceRecord(transforms[i],
                                                 old.custom_index_and_mask,

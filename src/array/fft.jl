@@ -379,9 +379,8 @@ function fft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF3
         "A larger radix, or a multi-pass decomposition, is what VkFFT reaches " *
         "for here (`numAxisUploads > 1`); neither is implemented yet."))
     nb = group === nothing ? fftgroup(N, T, nbatch, lim, sharedbudget(src)) : group
-    kern = KI.Kernel(backend, fft_kernel!)
-    kern(dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1), Val(skew), Val(nb);
-         ndrange = T * nb * (nbatch ÷ nb), workgroupsize = T * nb)
+    kilaunch!(backend, fft_kernel!, dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1),
+              Val(skew), Val(nb); ndrange = T * nb * (nbatch ÷ nb), workgroupsize = T * nb)
     return dst
 end
 
@@ -424,6 +423,7 @@ function rfft_post_kernel!(
         dst, Z, ::Val{N}, ::Val{SIGN}, scale::Float32) where {N,SIGN}
     H = N ÷ 2
     g = KI.get_global_id().x - 1
+    g < length(dst) || return nothing   # the launch is whole workgroups
     k = g % (H + 1)                 # bin
     c = g ÷ (H + 1)                 # which transform
     @inbounds begin
@@ -470,8 +470,8 @@ function rfft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Float32}
     # DeepFilterNet3's 960, neither a power of two.
     Z = fftany!(similar(z), z)
     backend = get_backend(src)
-    KI.Kernel(backend, rfft_post_kernel!)(dst, Z, Val(N), Val(-1), 1f0;
-                               ndrange = (H + 1) * nbatch)
+    kilaunch!(backend, rfft_post_kernel!, dst, Z, Val(N), Val(-1), 1f0;
+              ndrange = (H + 1) * nbatch)
     return dst
 end
 
@@ -737,11 +737,10 @@ function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Comp
         "fftmixed!: N=$N needs $T threads, above this device's limit of $lim"))
     # `invokelatest` on the launch: `fftmixed_kernel` `@eval`s the kernel, so it
     # is newer than this function's world. There is only one call to wrap now —
-    # the kernel is a plain function and `KI.Kernel` merely carries it beside the
-    # backend, where a `@kernel` answered `kern(backend)` with a method that was
-    # itself too new to call from here.
+    # the kernel is a plain function, where a `@kernel` answered `kern(backend)`
+    # with a method that was itself too new to call from here.
     kern = fftmixed_kernel(RS, inverse ? 1 : -1)
-    Base.invokelatest(KI.Kernel(backend, kern), dst, src;
+    Base.invokelatest(kilaunch!, backend, kern, dst, src;
                       ndrange = T * nbatch, workgroupsize = T)
     return dst
 end
@@ -772,6 +771,7 @@ end
 """Pack adjacent real samples as the complex input used by the real-FFT split."""
 function rfft_pack_kernel!(dst, src)
     i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = ComplexF32(src[2i - 1], src[2i])
     return nothing
 end
@@ -780,6 +780,7 @@ end
 function irfft_extend_kernel!(
         dst, src, ::Val{N}, ::Val{NB}) where {N,NB}
     g = KI.get_global_id().x - 1
+    g < length(dst) || return nothing
     k = g % N
     c = g ÷ N
     @inbounds dst[g + 1] = k < NB ? src[c * NB + k + 1] :
@@ -791,6 +792,7 @@ end
 function irfft_real_kernel!(
         dst, src, scale::Float32)
     i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = real(src[i]) * scale
     return nothing
 end
@@ -950,6 +952,7 @@ function stft_frames_kernel!(
         frames, x, window, ::Val{NFFT}, hop::Int, len::Int,
         ::Val{CENTER}) where {NFFT,CENTER}
     g = KI.get_global_id().x - 1
+    g < length(frames) || return nothing
     i = g % NFFT                 # position within the frame
     t = g ÷ NFFT                 # which frame
     @inbounds begin
@@ -995,8 +998,8 @@ function stft(x::AbstractGPUArray{Float32}, nfft::Int, hop::Int,
     nframes > 0 || throw(ArgumentError("stft: signal of $len samples is shorter than nfft = $nfft"))
     backend = get_backend(x)
     frames = similar(x, Float32, nfft, nframes)
-    KI.Kernel(backend, stft_frames_kernel!)(frames, x, window, Val(nfft), hop, len, Val(center);
-                                 ndrange = nfft * nframes)
+    kilaunch!(backend, stft_frames_kernel!, frames, x, window, Val(nfft), hop, len,
+              Val(center); ndrange = nfft * nframes)
     return rfft(frames)
 end
 

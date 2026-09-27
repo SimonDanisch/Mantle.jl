@@ -203,6 +203,9 @@ end
 `v` into every element of `a`, as a dispatch."""
 function fill_kernel!(a, v)
     i = KI.get_global_id().x
+    # The launch is whole workgroups: unguarded, `fill!` of 1500 elements wrote
+    # 548 more into whatever the pool placed next.
+    i <= length(a) || return nothing
     @inbounds a[i] = v
     return nothing
 end

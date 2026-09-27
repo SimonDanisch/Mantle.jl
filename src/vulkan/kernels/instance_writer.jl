@@ -34,6 +34,7 @@ function write_grain_instances_kernel(
         tri_blas_addr::UInt64,
         instances)
     i = KI.get_global_id().x
+    i <= length(positions) || return nothing   # the launch is whole workgroups
     @inbounds p = positions[i]
     @inbounds q = quats[i]
     rot9 = quat_to_rot3x3(q)
