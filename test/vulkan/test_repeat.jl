@@ -220,6 +220,26 @@ end
     Mantle.free!(pl)
 end
 
+# The other gate on the host. Both gates are plain functions since Mantle stopped
+# defining `@kernel`s, and the host device compiles none, so both were refused
+# there ("`gate_count!`, which is a macro-free kernel") until they became calls
+# on a device without a KernelInterface compiler.
+@testset "repeat!(; while_nonzero) on the host stops when the body empties it" begin
+    host = Mantle.Device(Mantle.HostAPI())
+    n, maxiters = 8, 6
+    x = Mantle.Buffer(host, zeros(Int32, n))
+    budget = Mantle.Buffer(host, Int32[3])
+    g = Mantle.Graph(host)
+    Mantle.repeat!(g, maxiters; while_nonzero = budget) do i
+        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
+    end
+    pl = Mantle.Plan(g)
+    Mantle.run!(pl)
+    @test all(==(Int32(3)), Array(Mantle.storage(x)))
+    @test Array(Mantle.storage(budget))[1] == 0
+    Mantle.free!(pl)
+end
+
 @testset "repeat! wants exactly one gate and at least one iteration" begin
     # Neither both gates nor neither.
     dev0 = Mantle.Device(Mantle.VulkanAPI())

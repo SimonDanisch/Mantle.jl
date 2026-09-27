@@ -375,9 +375,9 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
     out = Pass[]
     for i in 1:n
         if count === nothing
-            dispatch!(g, gate_nonzero!, (pred, src), 1; name = "repeat!/gate-$i")
+            gate!(g, gate_nonzero!, (pred, src), "repeat!/gate-$i")
         else
-            dispatch!(g, gate_count!, (pred, src, Int32(i)), 1; name = "repeat!/gate-$i")
+            gate!(g, gate_count!, (pred, src, Int32(i)), "repeat!/gate-$i")
         end
         first_new = length(passes(g)) + 1
         f(i)
@@ -442,6 +442,23 @@ function gate_nonzero!(pred, flag)
     @inbounds pred[1] = Predicate(flag[1] != 0 ? UInt32(1) : UInt32(0))
     return nothing
 end
+
+# One gate, dispatched as a kernel where the device compiles one and as a CALL
+# where it cannot. The host device runs `@kernel`s through KernelAbstractions and
+# has no KernelInterface compiler, so since the gates stopped being `@kernel`s
+# every `repeat!` there was refused, naming a kernel the caller never wrote. It
+# walks its plan on this thread, though, and a call there is the function run on
+# the host arrays -- which IS the gate, because both gates index `pred[1]` and
+# their source and call no device intrinsic. A device that can do neither is
+# refused by the call form, saying so.
+gate!(g::Graph, f, args::Tuple, name) =
+    kisupported(g.dev, f) ? dispatch!(g, f, args, 1; name) : dispatch!(g, f, args; name)
+
+# Declared for the call form, which has no body the walk may read; the kernel
+# form would infer the same.
+argument_usage(::Type{typeof(gate_count!)}, ::Type{<:Tuple{Any,Any,Int32}}) =
+    (WRITE, READ, NOTOUCH)
+argument_usage(::Type{typeof(gate_nonzero!)}, ::Type{<:Tuple{Any,Any}}) = (WRITE, READ)
 
 """
     supportspredicate(device) -> Bool
