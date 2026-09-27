@@ -430,11 +430,15 @@ function rocview(mg::Managed, ::Type{T}, dims::Dims{N}, byteoffset::Int) where {
     byteoffset + need <= bytes || throw(ArgumentError(
         "$(join(dims, "x")) $T at offset $byteoffset needs $need bytes, block has $bytes"))
     # Not a driver requirement but an arithmetic one: a `T` load from an address
-    # that does not divide `sizeof(T)` is misaligned. `alignment` below and
-    # `persistentarray`'s 256 both guarantee it, so this is a claim about the
-    # allocator rather than a recoverable case.
-    byteoffset % sizeof(T) == 0 || throw(ArgumentError(
-        "offset $byteoffset does not divide sizeof($T) = $(sizeof(T))"))
+    # that is not a multiple of `T`'s ALIGNMENT is misaligned. `alignment` below
+    # and `persistentarray`'s 256 both guarantee it, so this is a claim about the
+    # allocator rather than a recoverable case. Its alignment and not its size:
+    # this asked for `sizeof(T)`, and a 256-byte placement is a multiple of a
+    # 48-byte struct's size one time in three, so a `Buffer` of `EPAResult` was
+    # refused or not depending on where the pool happened to put it.
+    byteoffset % Base.datatype_alignment(T) == 0 || throw(ArgumentError(
+        "offset $byteoffset is not a multiple of $T's alignment, " *
+        "$(Base.datatype_alignment(T))"))
     ref = GPUArrays.DataRef(_ -> nothing, mg)
     a = AMDGPU.ROCArray{T,N}(ref, dims; offset = byteoffset)
     want = convert(Ptr{T}, mg.mem) + byteoffset
@@ -949,7 +953,35 @@ function Mantle.closerecording!(::Mantle.Immediate, pl::Mantle.Plan{ROCmDevice})
         "record!: the capture was invalidated, so there is no graph. Something " *
         "in the walk reached the host — a synchronise, an allocation on the " *
         "capturing stream, or a kernel that still had to be compiled."))
+    mem = memorynodes(graph)
+    mem == 0 || throw(ErrorException(
+        "record!: the capture holds $mem allocation or free node(s). A plan owns " *
+        "its memory, so its walk allocates and frees nothing: either a call in the " *
+        "plan allocates per invocation, or something outside the walk allocated " *
+        "or freed on this device's stream while it was capturing. A graph that " *
+        "frees memory it did not allocate segfaults in `hipGraphLaunch`, so the " *
+        "recording is refused."))
     return ROCmRecording(AMDGPU.HIP.instantiate(graph), graph)
+end
+
+# How many of the graph's nodes allocate or free. Zero for every plan, which is
+# why it is checked: until 2026-09-26 an array the GC finalised during a capture
+# freed itself on the capturing stream, the free became a node of a graph that
+# never allocated the memory, and the first launch segfaulted in `hipGraphLaunch`
+# after `hsa_amd_vmem_unmap failed`. AMDGPU holds such frees back now
+# (`HIP.outsidecapture`); this turns anything else that gets in into an error at
+# `record!` rather than a crash at the first run.
+function memorynodes(graph::AMDGPU.HIP.HIPGraph)
+    HIP = AMDGPU.HIP
+    n = Ref{Csize_t}(0)
+    HIP.hipGraphGetNodes(graph, C_NULL, n)
+    nodes = Vector{HIP.hipGraphNode_t}(undef, n[])
+    HIP.hipGraphGetNodes(graph, nodes, n)
+    t = Ref{HIP.hipGraphNodeType}()
+    return count(nodes) do node
+        HIP.hipGraphNodeGetType(node, t)
+        t[] == HIP.hipGraphNodeTypeMemAlloc || t[] == HIP.hipGraphNodeTypeMemFree
+    end
 end
 
 """

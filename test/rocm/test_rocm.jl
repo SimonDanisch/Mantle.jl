@@ -121,6 +121,55 @@ end
     @test M.storage(t[1]).offset == M.storage(t[3]).offset
 end
 
+# `rocview` asked for an offset that divides `sizeof(T)` where a load needs `T`'s
+# alignment. The pool places at multiples of 256, which is a multiple of a 48-byte
+# element's size one time in three, so `Buffer(dev, ::Vector{EPAResult})` was
+# refused or not depending on where it landed. Found by `test_kernel_tails.jl`
+# on this backend.
+@testset "ROCm: a view of a non-power-of-two element at any aligned offset" begin
+    T = NTuple{12,Float32}
+    val = ntuple(Float32, 12)
+    raw = AMDGPU.ROCArray{UInt8}(undef, 4096)
+    GC.@preserve raw begin
+        mg = raw.buf[]
+        v = RE.rocview(mg, T, (10,), 256)           # 256 is not a multiple of 48
+        @test pointer(v) == convert(Ptr{T}, mg.mem) + 256
+        copyto!(v, fill(val, 10))
+        @test Array(v) == fill(val, 10)
+        # Alignment is still required: 258 is not a multiple of 4.
+        @test_throws ArgumentError RE.rocview(mg, T, (10,), 258)
+    end
+    # And through the pool, wherever it puts them.
+    dev = M.Device(M.ROCmAPI())
+    bs = [M.Buffer(dev, fill(val, k)) for k in 1:8]
+    @test all(k -> Array(M.storage(bs[k])) == fill(val, k), 1:8)
+    foreach(M.free!, bs)
+end
+
+# An integer `group` against a 3-D ndrange. `KI.auto_launch_sizes` broadcast the
+# one-axis group over every axis, so `(96, 4, 5)` in groups of 32 launched
+# `(3, 1, 1)` workgroups and the other two axes never ran past their first slice.
+# That is how every Qwen-Image denoiser step decoded to all-NaN on this backend:
+# the flash attention launches `(Tr*NT, H, B)` with `group = NT`, so only head 1
+# of batch 1 was ever computed.
+function rocgridmark!(out)
+    g = KI.get_group_id()
+    KI.get_local_id().x == 1 && (@inbounds out[g.x, g.y, g.z] = Int32(1))
+    return nothing
+end
+
+@testset "ROCm: an integer group launches every axis of the ndrange" begin
+    dev = M.Device(M.ROCmAPI())
+    for group in (32, (32,), (32, 1, 1))
+        out = M.Buffer(dev, zeros(Int32, 3, 4, 5))
+        g = M.Graph(dev)
+        M.dispatch!(g, rocgridmark!, (out,), (3 * 32, 4, 5); group, name = "mark")
+        pl = M.Plan(g); M.record!(pl); M.run!(pl); M.waitidle(dev)
+        @test all(==(1), Array(M.storage(out)))
+        M.free!(pl); M.free!(out)
+    end
+end
+
 @testset "ROCm: the waits cover the stream the work is on" begin
     dev = M.Device(M.ROCmAPI())
     # 16 MiB a link and eight links is 268 MB of traffic, which cannot happen
@@ -209,6 +258,70 @@ end
         M.run!(pl); M.waitidle(dev)
         @test all(==(Float32(k)), M.download(dev, acc.store))
     end
+end
+
+# A capture records whatever reaches its stream, from any thread, and an array the
+# GC finalises while one is open frees itself on the stream it last ran on — this
+# device's, for every array allocated through it. Recorded, that free was a node of
+# a graph that never allocated the memory, and the first `run!` segfaulted in
+# `hipGraphLaunch` after `hsa_amd_vmem_unmap failed`: intermittently, whenever a
+# collection landed inside a `record!`, which is how Qwen-Image's VAE found it.
+# AMDGPU now holds such a free back until the capture closes. A call that
+# finalises an array is that collection on demand.
+struct FinaliseOne
+    victims::Vector{Any}
+end
+(f::FinaliseOne)(_) = (finalize(pop!(f.victims)); nothing)
+# Written, so the passes around it stay ordered against it.
+M.argument_usage(::Type{FinaliseOne}, ::Type{<:Tuple{Any}}) = (M.Touch(true, true, false),)
+
+@testset "ROCm: an array finalised during a recording is not recorded" begin
+    dev = M.Device(M.ROCmAPI())
+    n = 1024
+    g = M.Graph(dev)
+    acc = M.Buffer(dev, zeros(Float32, n))
+    # Two, because `openrecording` runs every call once before the capture opens.
+    victims = Any[AMDGPU.zeros(Float32, 1 << 20) for _ in 1:2]
+    M.dispatch!(g, rocadd!, (acc, acc), n; name = "before")
+    M.dispatch!(g, FinaliseOne(victims), (acc,); name = "finalise")
+    M.dispatch!(g, rocadd!, (acc, acc), n; name = "after")
+    pl = M.Plan(g)
+    M.record!(pl)
+    @test isempty(victims)
+    @test RE.memorynodes(pl.recording.graph) == 0
+    for k in 1:3
+        M.run!(pl); M.waitidle(dev)
+        @test all(==(Float32(2k)), M.download(dev, acc.store))
+    end
+end
+
+# The check behind it: whatever else frees on the stream during a capture is
+# refused at `record!` instead of crashing the first run. A raw `hipFreeAsync`
+# does what the finaliser did before AMDGPU held such frees back.
+struct RawFreeOne
+    ptrs::Vector{Ptr{Cvoid}}
+    stream::AMDGPU.HIPStream
+end
+(f::RawFreeOne)(_) = (AMDGPU.HIP.hipFreeAsync(pop!(f.ptrs), f.stream); nothing)
+M.argument_usage(::Type{RawFreeOne}, ::Type{<:Tuple{Any}}) = (M.Touch(true, true, false),)
+
+@testset "ROCm: a recording that frees memory is refused" begin
+    dev = M.Device(M.ROCmAPI())
+    g = M.Graph(dev)
+    acc = M.Buffer(dev, zeros(Float32, 16))
+    ptrs = map(1:2) do _
+        p = Ref{Ptr{Cvoid}}()
+        AMDGPU.HIP.hipMallocAsync(p, 1 << 20, dev.stream)
+        p[]
+    end
+    captured = first(ptrs)          # the warm-up pops, and frees, the other
+    M.waitidle(dev)
+    M.dispatch!(g, rocadd!, (acc, acc), 16; name = "before")
+    M.dispatch!(g, RawFreeOne(ptrs, dev.stream), (acc,); name = "free")
+    pl = M.Plan(g)
+    @test_throws r"allocation or free node" M.record!(pl)
+    @test !AMDGPU.HIP.is_capturing(dev.stream)
+    AMDGPU.HIP.hipFree(captured)    # recorded, so never freed
 end
 
 # `openrecording` here took `(dev, plan)` after core's grew a `passes` range on
@@ -496,4 +609,48 @@ end
     M.record!(pl)
     M.run!(pl)
     @test all(==(2.0f0), Array(M.storage(dst)))
+end
+
+# Mantle's portable array routines launched their plain kernels as
+# `KI.Kernel(backend, f)(args...)`, which only a backend that compiles on call
+# answers (Lava). On ROCm the object has no call method, so `gemv!`, `fft!`,
+# `rfft`, the mixed-radix FFT and `stft` were each a `MethodError` there —
+# found through Whisper's log-mel on 2026-09-26. They launch through
+# `Mantle.kilaunch!` now; this runs every one of them on ROCm against the
+# definition.
+naivedft(x) = [sum(x[n + 1] * cispi(-2k * n / length(x)) for n in 0:length(x)-1) for k in 0:length(x)-1]
+
+@testset "ROCm: the portable array routines launch here" begin
+    dev = M.Device(M.ROCmAPI())
+    roc(a) = AMDGPU.ROCArray(a)
+    K, N = 96, 80
+    a = rand(Float32, K); B = rand(Float32, K, N)
+    C = AMDGPU.zeros(Float32, N)
+    M.gemv!(C, roc(a), roc(B))
+    @test Array(C) ≈ vec(a' * B) rtol = 1e-5
+    W = rand(Float32, N, K)
+    Ct = AMDGPU.zeros(Float32, N)
+    M.gemv!(Ct, roc(a), transpose(roc(W)))
+    @test Array(Ct) ≈ W * a rtol = 1e-5
+
+    for n in (64, 60)            # a power of two, and one only the mixed radix takes
+        z = rand(ComplexF32, n, 3)
+        out = M.fftany!(AMDGPU.zeros(ComplexF32, n, 3), roc(z))
+        want = reduce(hcat, [naivedft(ComplexF64.(z[:, j])) for j in 1:3])
+        @test maximum(abs.(ComplexF64.(Array(out)) .- want)) < 1e-3 * maximum(abs, want)
+    end
+
+    x = rand(Float32, 400)
+    r = Array(M.rfft(roc(x)))
+    want = naivedft(Float64.(x))[1:201]
+    @test maximum(abs.(ComplexF64.(vec(r)) .- want)) < 1e-3 * maximum(abs, want)
+
+    sig = rand(Float32, 2000)
+    win = M.hannwindow(M.backend(dev), 400)
+    S = Array(M.stft(roc(sig), 400, 160, win))
+    @test size(S) == (201, 2000 ÷ 160 + 1)
+    # Frame 5, centred, spans samples 600..999: interior, so the padding at the
+    # edges does not enter it.
+    want = naivedft(Float64.(sig[601:1000] .* Array(win)))[1:201]
+    @test maximum(abs.(ComplexF64.(S[:, 6]) .- want)) < 1e-3 * maximum(abs, want)
 end
