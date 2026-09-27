@@ -340,6 +340,23 @@ end
 `TM = 32` is the warp width and is not a free parameter: it is what makes one
 warp read one contiguous 128-byte line.
 
+**`(32, 512, 8)`, measured 2026-09-26 on RADV (Radeon 8060S, 40 CUs)**, clock
+spun up first, µs per call:
+
+    shape            (32,256,4)   (32,512,8)   (32,1024,8)
+    (1280, 1280)     26.5         18.5         18.0
+    (5120, 1280)     41.0         37.1         39.0
+    (1280, 5120)     78.5         45.1         42.2
+    (51866, 1280)    1238.5       1246.8       1218.4
+
+Twice the K-groups per row block and twice the accumulators: at small `M` the
+grid is one workgroup per core, and more threads and more loads in flight per
+thread is what fills it. `(1280, 1280)` went from 47% to about two thirds of a
+`copyto!` of the same cache-resident matrix, and `test_gemv.jl`'s "it beats mul!
+at one column", which had fallen to 1.3x as `mul!`'s scalar GEMM got faster,
+measures 1.96x. Large `M` does not care. The table below is the earlier sweep, on a
+48-core card, where `(32, 256, 4)` was the choice:
+
 **`BLOCK` and `UNROLL` barely matter, measured.** Swept over `TM ∈ {16, 32}`,
 `BLOCK ∈ {128 … 1024}`, `UNROLL ∈ {2, 4, 8}` on the four shapes Whisper's decoder
 runs, `(32, 256, 4)` is within 8% of the best configuration on every one of them:
@@ -362,9 +379,9 @@ dispatch**, which a 16 KiB GEMV pays in full — see the header.
 """
 function gemv_ncontig_config(M::Int, K::Int, limit::Int)
     tm = 32
-    block = min(limit, 256)
+    block = min(limit, 512)
     block = max(block - block % tm, tm)
-    return (tm, block, 4)
+    return (tm, block, 8)
 end
 
 """
@@ -411,11 +428,10 @@ function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::Ab
     nr = nrows === nothing ? pn : nrows
     bl = block === nothing ? pb : block
     kern = gemv_kcontig_kernel(nr, bl, subgroupwidth(B))
-    # `KI.Kernel(backend, f)` and not `f(backend)`: the kernel is a plain
-    # function now, so there is no constructor to call and the backend is
-    # carried beside it. `invokelatest` for the same reason as before — the
-    # function is `@eval`ed on demand, so it can be newer than this method.
-    Base.invokelatest(KI.Kernel(backend, kern), C, A, B, K, N;
+    # `kilaunch!`, which is KernelInterface's launch on every backend.
+    # `invokelatest` because the function is `@eval`ed on demand, so it can be
+    # newer than this method.
+    Base.invokelatest(kilaunch!, backend, kern, C, A, B, K, N;
                       ndrange = cld(N, nr) * bl, workgroupsize = bl)
     return C
 end

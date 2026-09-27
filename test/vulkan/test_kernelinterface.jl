@@ -180,14 +180,19 @@ end
         # KI asks the backend which element types its shuffle covers, and the
         # answer drives KI's own suite — so the list must be the one Lava
         # actually generates methods for, not a hopeful superset.
+        # Asked of Lava's method table: the methods are overlays, which the
+        # global `hasmethod` does not see (see "device-side coverage").
+        inlava(f, T) = !isempty(Base._methods_by_ftype(Tuple{typeof(f), T, Int},
+                                                         Lava.lava_method_table, -1,
+                                                         Base.get_world_counter()))
         types = KI.shfl_down_types(backend)
         @test Set(types) == Set(Lava.KI_SHFL_TYPES)
         for T in types
-            @test hasmethod(KI.shfl_down, Tuple{T, Int})
+            @test inlava(KI.shfl_down, T)
         end
         @test KI.shfl_types(backend) == types
         for T in types
-            @test hasmethod(KI.shfl, Tuple{T, Int})
+            @test inlava(KI.shfl, T)
         end
     end
 
@@ -223,29 +228,35 @@ end
     #   * `sub_group_barrier` is `OpControlBarrier Subgroup Subgroup`; Lava's
     #     only barrier is workgroup-scoped, and aliasing them would synchronise
     #     the wrong set of invocations while appearing to work.
-    # Which of KI's device functions Lava implements, and by which of the two
-    # mechanisms — because "implemented" is not one question here.
+    # Which of KI's device functions Lava implements. Every one of them is a
+    # `@lava_device_override`, living in `Lava.lava_method_table`, which
+    # GPUCompiler consults when compiling for Lava and nothing else sees.
     #
-    # A KI function with no host method (a bare `function f end`) is implemented
-    # with a PLAIN method: there is nothing to shadow. One that KI gives a host
-    # method — `barrier` errors, `_print` prints with `Base.print`, `localmemory`
-    # errors — has to be a `@lava_device_override`, or the host behaviour KI
-    # promises is replaced by an `llvmcall` of a SPIR-V intrinsic on the CPU.
+    # The ones KI gives no host method used to be PLAIN methods, on the argument
+    # that there was nothing to shadow. There was: a plain method on KI's
+    # function is the method every OTHER backend's compiler finds wherever it has
+    # no override of its own. ROCm compiled `Mantle.gemv!`'s
+    # `sub_group_reduce_add` to `_lava_subgroup_reduce_add_f32`, an unknown
+    # function in a GCN module, and AMDGPU had added an override of `shfl` only
+    # to keep `_lava_subgroup_shuffle_f32` out. KI's contract is
+    # `@device_override`, and this testset now pins that none of them is global.
     #
-    # So `methods()` answers for the first group and says nothing about the
-    # second: an overlay method lives in `Lava.lava_method_table`, which
-    # GPUCompiler consults during compilation and `methods()` never sees.
+    # One that KI gives a host method — `barrier` errors, `_print` prints with
+    # `Base.print`, `localmemory` errors — would additionally have its host
+    # behaviour replaced by an `llvmcall` of a SPIR-V intrinsic on the CPU.
     @testset "device-side coverage" begin
         overridden(f) = any(Base.MethodList(Lava.lava_method_table)) do m
             Base.unwrap_unionall(m.sig).parameters[1] === typeof(f)
         end
 
-        @testset "plain methods, no host fallback to shadow" begin
+        @testset "in Lava's table, and not one of them global" begin
             for f in (KI.get_global_id, KI.get_local_id, KI.get_group_id,
                       KI.get_num_groups, KI.get_sub_group_size,
                       KI.get_num_sub_groups, KI.get_sub_group_id,
-                      KI.get_sub_group_local_id, KI.shfl_down)
-                @test any(m -> m.module === Lava, methods(f))
+                      KI.get_sub_group_local_id, KI.shfl_down, KI.shfl,
+                      KI.sub_group_reduce_add)
+                @test overridden(f)
+                @test !any(m -> m.module === Lava, methods(f))
             end
         end
 
@@ -279,7 +290,10 @@ end
         # it moved out of this testset and into the one below.
         @testset "gaps stay gaps" begin
             for f in (KI.get_local_size, KI.get_global_size, KI.get_max_sub_group_size)
-                @test isempty(methods(f))        # KI declares these with no body
+                # KI's own methods only: since 0.2 it owns the zero-argument
+                # forms of the 3-D queries as `f() = f(Int)`, forwarding to the
+                # typed query a backend implements. Lava implements none.
+                @test all(m -> m.module === KI, methods(f))
                 @test !overridden(f)
             end
             for f in (KI.sub_group_barrier,)

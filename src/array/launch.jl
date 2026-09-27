@@ -22,8 +22,8 @@ One kernel launch, chosen but not yet submitted.
 them, or a `DeviceRange`.
 
 A kernel here is a plain function over `KernelInterface`'s intrinsics, so it is
-launched as `KI.Kernel(backend, kern)` and declared by handing the same function
-to `dispatch!`. There is no kernel object carrying a workgroup size in its type,
+launched through [`kilaunch!`](@ref) and declared by handing the same function to
+`dispatch!`. There is no kernel object carrying a workgroup size in its type,
 which is why `group` is the only place one can come from.
 """
 struct ArrayLaunch{K,A}
@@ -49,7 +49,7 @@ runs for tens of microseconds.
 function runlaunches!(backend, launches)
     for l in launches
         # MIGRATION SHIM. A plain function over `KernelInterface`'s intrinsics is
-        # launched as `KI.Kernel(backend, f)`; a `@kernel` is its own constructor
+        # launched through `kilaunch!`; a `@kernel` is its own constructor
         # and answers `kern(backend)` with the object to call. The branch goes
         # away with the last `@kernel`.
         #
@@ -62,26 +62,37 @@ function runlaunches!(backend, launches)
                                Base.invokelatest(l.kern, backend, l.group)
             Base.invokelatest(k, l.args...; ndrange = l.ndrange)
         else
-            Base.invokelatest(launchki!, kibackend(todevice(backend)), l)
+            Base.invokelatest(kilaunch!, backend, l.kern, l.args...; ndrange = l.ndrange,
+                              workgroupsize = l.group == 0 ? nothing : l.group)
         end
     end
     return nothing
 end
 
-# KernelInterface's launch protocol, as `KI.@kernel` spells it: convert the
-# arguments, compile for their types, call what `kernel_function` returns. The
-# backend is the device's `kibackend`, which is not always the KernelAbstractions
-# backend the arrays report: on ROCm they are two types, and only the second has
-# a call method. This built `KI.Kernel(backend, f)` around the raw function
-# instead, which worked only where the backend compiles on call (Lava) and was a
-# `MethodError` on ROCm.
-function launchki!(kb, l)
-    tt = Tuple{map(a -> Core.Typeof(KI.argconvert(kb, a)), l.args)...}
-    k = KI.kernel_function(kb, KI.argconvert(kb, l.kern), tt)
-    if l.group == 0
-        k(l.args...; ndrange = l.ndrange)
+"""
+    kilaunch!(backend, f, args...; ndrange, workgroupsize = nothing)
+
+Launch the plain `KernelInterface` function `f` now, on the device behind the
+KernelAbstractions `backend` the arrays report.
+
+KernelInterface's launch protocol, as `KI.@kernel` spells it: convert the
+arguments, compile for their types, call what `kernel_function` returns. The
+backend it compiles for is the device's `kibackend`, which is not always the one
+the arrays report: on ROCm they are two types, and only the second has a call
+method. `KI.Kernel(backend, f)(args...)` works only where the backend compiles on
+call (Lava) and is a `MethodError` on ROCm; `runlaunches!` did that until
+2026-09-26, and `gemv!`, `fft!`, `rfft`, the mixed-radix FFT and `stft` did it
+after, which is how Whisper's log-mel failed on ROCm. Anything portable in this
+directory launches through here.
+"""
+function kilaunch!(backend, f, args...; ndrange, workgroupsize = nothing)
+    kb = kibackend(todevice(backend))
+    tt = Tuple{map(a -> Core.Typeof(KI.argconvert(kb, a)), args)...}
+    k = KI.kernel_function(kb, KI.argconvert(kb, f), tt)
+    if workgroupsize === nothing
+        k(args...; ndrange)
     else
-        k(l.args...; ndrange = l.ndrange, workgroupsize = l.group)
+        k(args...; ndrange, workgroupsize)
     end
     return nothing
 end

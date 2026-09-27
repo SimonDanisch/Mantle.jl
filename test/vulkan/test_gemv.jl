@@ -127,7 +127,7 @@ relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
 
         @testset "every (tm, block, unroll) agrees with every other" begin
             for (M, K) in ((1280, 1280), (1279, 129))
-                for tm in (32,), block in (32, 64, 128, 256), unroll in (1, 2, 4)
+                for tm in (32,), block in (32, 64, 128, 256, 512), unroll in (1, 2, 4, 8)
                     @test checkn(M, K; tm, block, unroll) < 1.0f-5
                 end
             end
