@@ -1,4 +1,4 @@
-# Diagonal * matrix must not be ambiguous with the dense GEMM.
+# A Diagonal operand must not be ambiguous with the dense GEMM.
 #
 # `LinearAlgebra.mul!(C::LavaArray{T,2}, ::AbstractVecOrMat, ::AbstractVecOrMat, α, β)` in
 # gemm.jl and GPUArrays' `LinearAlgebra.mul!(::AbstractGPUVecOrMat,
@@ -64,4 +64,18 @@ using Test, Lava, LinearAlgebra
     C5 = Mantle.LavaArray(zeros(ComplexF32, m, n))
     LinearAlgebra.mul!(C5, Ec, Dc, one(ComplexF32), zero(ComplexF32))
     @test Array(C5) ≈ hEc * Diagonal(hdc)
+
+    # And Diagonal * Diagonal, which neither method above takes and which was
+    # ambiguous the same way. A NaN-filled `C` with β = 0 is the case that shows
+    # whether the off-diagonal is written or merely scaled.
+    for T in (Float32, ComplexF32)
+        ha, hb, hC6 = rand(T, n), rand(T, n), rand(T, n, n)
+        Da, Db = Diagonal(Mantle.LavaArray(copy(ha))), Diagonal(Mantle.LavaArray(copy(hb)))
+        C6 = Mantle.LavaArray(copy(hC6))
+        LinearAlgebra.mul!(C6, Da, Db, T(2), T(3))
+        @test Array(C6) ≈ 2 .* Diagonal(ha) * Diagonal(hb) .+ 3 .* hC6
+        C7 = Mantle.LavaArray(fill(T(NaN), n, n))
+        LinearAlgebra.mul!(C7, Da, Db, one(T), zero(T))
+        @test Array(C7) ≈ Diagonal(ha) * Diagonal(hb)
+    end
 end

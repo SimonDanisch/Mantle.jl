@@ -2347,6 +2347,7 @@ every batch and silently return the wrong sum for all but the first.
 """
 function splitk_reduce_kernel!(C, Cp, ::Val{S}, n) where {S}
     i = KI.get_global_id().x
+    i <= length(C) || return nothing   # the launch is whole workgroups
     @inbounds begin
         b = (i - 1) ÷ n                 # 0 for an unbatched call
         j = (i - 1) % n + 1 + b * S * n
@@ -2732,6 +2733,21 @@ has enough rows to fill the device, which is the case from `GEMV_NOSPLIT_ROWS`.
     S
 end
 
+"""
+    gemv_split(C, A, B, M, K) -> S
+
+The split for THIS product: `gemv_split(M, K)` when the split-K kernels can
+compute it, and 1 when they cannot. They read every operand as `Float32` and
+accumulate in it, which is exact for `Float32` and `Float16` and nothing else:
+a `ComplexF32` has no `Float32`, so the conversion's throw path ran instead and
+every complex matrix-vector product with a long enough reduction came back
+wrong, and a `Float64` would lose half its mantissa without a word. Anything
+else takes the per-element kernel, which accumulates in the destination type.
+"""
+gemv_split(C, A, B, M::Int, K::Int) =
+    all(T -> T === Float32 || T === Float16, (eltype(C), eltype(A), eltype(B))) ?
+        gemv_split(M, K) : 1
+
 function gemv_splitk_kernel!(P, A, B,
                                                ao, ar, ac, bo, br,
                                                M::Int32, K::Int32, KC::Int32, ntot::Int32)
@@ -2813,7 +2829,7 @@ function scalar_gemm_launches(C, A, B, M, N, K, α, β; partials = nothing)
     # Before `staged_gemm_ok`, which declines `N == 1` anyway — this is the
     # decode path and it wants a kernel of its own.
     if N == 1
-        S = gemv_split(M, K)
+        S = gemv_split(C, A, B, M, K)
         if S > 1
             KC = cld(K, S)
             P = partials === nothing ? splitscratch(C, M, 1, S) : partials
@@ -2941,4 +2957,25 @@ function LinearAlgebra.mul!(C::LavaArray{T,2},
     ddT = transpose(dd)
     @. C = α * A * ddT + β * C
     C
+end
+
+# Disambiguation: Diagonal * Diagonal, the third of the set. Both operands are
+# Diagonals, which neither method above takes, and GPUArrays'
+# `mul!(::AbstractGPUArray, ::Diagonal, ::Diagonal, α, β)` is as ambiguous
+# against the dense GEMM as the other two were. Its body, for the same reason
+# theirs is mirrored: a product of two diagonals touches only the diagonal.
+function LinearAlgebra.mul!(C::LavaArray{T,2},
+                            A::Diagonal{<:Any, <:AbstractGPUArray},
+                            B::Diagonal{<:Any, <:AbstractGPUArray},
+                            α::Number, β::Number) where {T<:Number}
+    dc = view(C, LinearAlgebra.diagind(C))
+    da, db = A.diag, B.diag
+    d = length(dc)
+    length(da) == d || throw(DimensionMismatch("right hand side has $(length(da)) rows but output is $d by $d"))
+    length(db) == d || throw(DimensionMismatch("left hand side has $(length(db)) rows but output is $d by $d"))
+    # `C` may be uninitialised, so a zero `β` fills rather than scales: `0 * NaN`
+    # is `NaN`.
+    iszero(β) ? fill!(C, zero(T)) : rmul!(C, β)
+    @. dc += α * da * db
+    return C
 end

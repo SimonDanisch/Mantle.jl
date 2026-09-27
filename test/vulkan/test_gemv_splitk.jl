@@ -40,6 +40,30 @@ const KA = KernelAbstractions
         @test Mantle.gemv_split(5120, 26624) > 1
         # Never below a chunk worth a thread — a short K cannot be split far.
         @test Mantle.gemv_split(64, 128) * 64 <= 128
+        # Only for what the split kernels can compute: they read every operand
+        # as `Float32`, so a complex or `Float64` product is never split.
+        for T in (ComplexF32, Float64)
+            A, x, y = zeros(T, 1, 1), zeros(T, 1), zeros(T, 1)
+            @test Mantle.gemv_split(y, A, x, 1024, 5120) == 1
+        end
+        @test Mantle.gemv_split(zeros(Float32, 1), zeros(Float16, 1, 1), zeros(Float16, 1),
+                                1024, 5120) == Mantle.gemv_split(1024, 5120)
+    end
+
+    # A `ComplexF32` has no `Float32`, so through the split kernels every complex
+    # matrix-vector product with a long enough reduction came back wrong: all
+    # zeros, or real parts with no imaginary ones. A `Float64` one kept only a
+    # `Float32`'s precision. Found through GPUArrays' triangular multiply tests,
+    # which this backend's `mul!` routes through here.
+    @testset "a $T product is not split" for T in (ComplexF32, Float64)
+        M, K = 64, 3000
+        Ah, xh = rand(T, M, K), rand(T, K)
+        A = KA.allocate(back, T, M, K); copyto!(A, Ah)
+        x = KA.allocate(back, T, K); copyto!(x, xh)
+        y = KA.allocate(back, T, M); fill!(y, T(NaN))
+        mul!(y, A, x); KA.synchronize(back)
+        want = Ah * xh
+        @test maximum(abs, Array(y) .- want) / maximum(abs, want) < 10 * eps(real(T)) * sqrt(K)
     end
 
     # Shapes on both sides of the rule, plus a ragged one that divides evenly
