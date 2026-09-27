@@ -835,11 +835,18 @@ const BACKEND_VOCABULARY = (
     # what a claim means on its own closed command buffer — a reference AND the
     # driver fact "these commands name this buffer".
     :stampof, :deviceof, :hold!, :holdleaves!,
+    # Whether handing a recording over pops the channel's hold frame: a one-shot
+    # is submitted once and does, a recording that is submitted every run took
+    # its frame when it was sealed and must not pop a second one.
+    :submissionholds!,
     # The hand-recorded pass — see `graphics/record.jl`. The first four are what
     # `pass!`/`draw!` lower to, and `beginrender!(::Immediate, …)` forwards to
     # the same four, so a backend writes one pass implementation and both the
     # graph's walk and a hand-recorded pass reach it.
     :compile_draw, :begin_render_pass!, :record_draw!, :end_render_pass!,
+    # What `record_draw!` baked about an argument — a backend's device array
+    # answers with its address, so a cached plan sees a reallocation.
+    :argidentity,
     :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,                             # Vulkan needs a usage bit at allocation, Metal does not
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
@@ -848,6 +855,9 @@ const BACKEND_VOCABULARY = (
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
     :devices, :defaultdevice!,
+    # Core's channel over a backend's queue: the backend constructs it around
+    # the driver half it owns, and core never looks inside that.
+    :SubmitChannel,
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
     :waitfor, :waitfor!, :passed, :fence, :reset_device!, :awaitwrites,
     # sync lowering
@@ -919,12 +929,16 @@ const BACKEND_VOCABULARY = (
     # What a pass touches, read off its kernels. Core owns the walk; a backend
     # owns the SIGNATURE it walks — which interpreter compiles this kernel, what
     # the device-side type of an argument is, and what leading arguments a kernel
-    # of its own has. `shadertouches` and the two draw stages are declared with no
-    # method at all, so they are not core functions a backend EXTENDS. Access
-    # inference itself is core; backends provide only their array/type facts and
-    # compiler interpreter, with signature overrides where their launch differs.
+    # of its own has. Access inference itself is core; backends provide only
+    # their array/type facts and compiler interpreter, with signature overrides
+    # where their launch differs. `shadertouches` and the two draw stages are
+    # declared in core with no method, like `initbackend!`: core calls them and
+    # only a backend can answer, because the signature walked is the backend's
+    # stage WRAPPER. Left off this list, a shared test asking them looked like it
+    # reached into a backend (`test_mantle_owns_it.jl` 0.7b).
     :argtype, :devicebuffertype, :isdevicearray, :accesscache, :kerneltouches,
     :kernelinterpreter, :kakernelaccesssignature,
+    :vertextouches, :fragmenttouches, :shadertouches,
     # ray tracing
     :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,

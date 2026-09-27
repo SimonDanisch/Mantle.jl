@@ -154,7 +154,7 @@ const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
     :staged_gemm_tile, :use_frozen_kernels
 ])
 
-# The 53 that are lonely TODAY, so the guard can fail on a 54th.
+# The 56 that are lonely TODAY, so the guard can fail on a 57th.
 #
 # Five names left this list when the guard started reading FILES: `caps`,
 # `closerecording!`, `defaultdevice!`, `devicename` and `devices` are answered
@@ -174,6 +174,13 @@ const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
 # So: a name here is a known hole, and the test fails on anything NOT here —
 # and also on anything here that has been fixed without being removed, so the
 # list can only shrink.
+#
+# Three joined on 2026-09-26 without a new hole behind them: `vertextouches`,
+# `fragmenttouches` and `shadertouches` were core declarations missing from the
+# vocabulary, so this guard never asked about them. The ROCm extension has no
+# graphics pipeline to answer the first two, and neither it nor Metal has a
+# ray-tracing pipeline for the third, exactly like `compile_draw` and
+# `trace_rays!` above.
 const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
@@ -188,7 +195,8 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :stages, :storebytes!, :submit!, :trace_closest_hits!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
     :trace_closest_hits_indirect!, :trace_rays!, :trace_rays_indirect!,
-    :transition_image!, :use_bindings!
+    :transition_image!, :use_bindings!,
+    :vertextouches, :fragmenttouches, :shadertouches,
 ])
 
 @testset "0.2 a vocabulary name has a core default or every backend" begin
@@ -615,6 +623,12 @@ end
     # never a missing one. Metal's intrinsics are `@device_override`s on real
     # instructions rather than external symbols, so it may never need a method;
     # if it does, the shape is Lava's in `src/vulkan/access.jl`.
+    #
+    # 22 on 2026-09-26, and `argidentity` is in it because it was declared that
+    # day, not because anything changed. Looked at: nothing in this tree or in
+    # RayMakie calls it, and on Metal it would be right anyway, since Metal does
+    # not record plans (`recordsplans`) and packs a draw's arguments again on
+    # every run, so no address is baked for a reallocation to leave stale.
     @test length(lonely) <= 31
 end
 

@@ -298,6 +298,11 @@ end
     # shadowed by accident: `src/metal/` says `Metal.flush!` and
     # `Metal.device()` qualified wherever it wants Metal's, and neither
     # `maybe_collect` nor `gemv!` is named there at all.
+    #
+    # `kernelinterpreter` against Lava, reviewed 2026-09-26: the same question
+    # on purpose. Core's is the hook "which interpreter compiles this kernel"
+    # (`graph/access.jl`), and the Vulkan backend's answer IS Lava's function,
+    # named qualified at every call in `src/vulkan/access.jl`.
     known = [(:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Mat4f, :GeometryBasics), (:Pass, :LLVM), (:Window, :GLFW),
              (:alignment, :LLVM), (:allocate, :KernelAbstractions),
@@ -305,6 +310,7 @@ end
              (:device, :KernelAbstractions), (:device, :Metal),
              (:fence, :UnsafeAtomics), (:flush!, :Metal), (:free!, :LLVM),
              (:gemv!, :LinearAlgebra), (:gemv!, :Metal),
+             (:kernelinterpreter, :Lava),
              (:maybe_collect, :Metal), (:offset, :LLVM),
              (:overlaps, :GeometryBasics), (:register!, :LLVM), (:run!, :LLVM),
              (:storage, :GPUArrays), (:workgroupsize, :KernelAbstractions)]
