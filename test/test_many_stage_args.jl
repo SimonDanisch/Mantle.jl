@@ -110,7 +110,7 @@ function ms_draw(dev, pipe, args, count)
     end
     out = Mantle.Transient.Buffer(g, BGRA{N0f8}, W * H)
     Mantle.copy!(g, "read", out, img)
-    Mantle.run!(Mantle.Plan(g))
+    Mantle.run!(Mantle.record!(Mantle.Plan(g)))
     return Array(Mantle.storage(out))
 end
 

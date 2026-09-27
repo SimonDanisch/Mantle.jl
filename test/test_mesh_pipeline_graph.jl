@@ -76,7 +76,7 @@ const GM_PIPE = Mantle.MeshPipeline(;
     end
     out = Mantle.Transient.Buffer(g, BGRA{N0f8}, W * H)
     Mantle.copy!(g, "read", out, img)
-    plan = Mantle.Plan(g)
+    plan = Mantle.record!(Mantle.Plan(g))
     Mantle.run!(plan)
     px = Array(Mantle.storage(out))
 
