@@ -513,8 +513,20 @@ takeholds!(bq)))` — because only the caller knows whether the recording it
 submitted is a pooled one-shot it is giving away or a plan's, submitted again
 next run. Core's `oneshot!` is the common case written once.
 """
-function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
-                 waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing)
+submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
+        waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing) =
+    submitlist!(bq, nothing, closed; waits, signals, fence)
+
+"""
+    submitlist!(bq, front, closed; waits, signals, fence) -> token
+
+[`submit!`](@ref) of `front` (a one-shot, or `nothing`) followed by every element of
+`closed`, which may be a tuple or a vector and may name one recording several times
+— a loop body's pieces, once per iteration, in one submission. A vector the caller
+keeps is what lets a run submit several pieces without allocating.
+"""
+function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Closed}, closed;
+                     waits = (), signals = (), fence::Union{Nothing,VK.Fence} = nothing)
     ownthread(bq)
     ctx = ctxof(bq)
     q = driver(bq)
@@ -524,6 +536,7 @@ function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
     # Sealing here rather than refusing an open buffer: submitting IS the moment
     # nothing more can be added, and `seal!` is idempotent, so the caller that
     # closed its own buffer (`oneshot`, a frame) pays nothing.
+    front === nothing || seal!(front)
     for c in closed
         seal!(c)
     end
@@ -535,11 +548,14 @@ function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
     # `test_dispatch_allocation.jl`.
     drain!(bq)
 
-    ncb = length(closed)
+    nf = front === nothing ? 0 : 1
+    ncb = nf + length(closed)
     raw_cbs = q.raw_cb_infos
     length(raw_cbs) == ncb || resize!(raw_cbs, ncb)
+    front === nothing || (raw_cbs[1] = VK.vk.VkCommandBufferSubmitInfo(
+        VK.vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, C_NULL, front.cmd.vks, UInt32(0)))
     for (i, c) in enumerate(closed)
-        raw_cbs[i] = VK.vk.VkCommandBufferSubmitInfo(
+        raw_cbs[nf + i] = VK.vk.VkCommandBufferSubmitInfo(
             VK.vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, C_NULL, c.cmd.vks, UInt32(0))
     end
 
@@ -549,6 +565,7 @@ function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
     # token) pair to a timeline semaphore and a value.
     cross = q.waits
     empty!(cross)
+    front === nothing || crosswaits!(bq, front.sync, cross)
     for c in closed
         crosswaits!(bq, c.sync, cross)
     end
@@ -649,6 +666,7 @@ function submit!(bq::SubmitChannel{<:VulkanQueue}, closed::Closed...;
     # It ran, so it is now the work that last named these buffers: core writes
     # the stamp the next `crosswaits!`, the next explicit destroy and every
     # host readback read.
+    front === nothing || stamp!(bq, token, front.sync)
     for c in closed
         stamp!(bq, token, c.sync)
     end

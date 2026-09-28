@@ -53,7 +53,8 @@ const WHEN_N = 64
     M.when!(g, flag) do
         M.dispatch!(g, when_addone!, (buf, Int32(WHEN_N)), WHEN_N; group = 64, name = "maybe")
     end
-    plan = M.Plan(g)
+    # `budget = Inf`: only the conditions cut, which is what is under test.
+    plan = M.Plan(g; budget = Inf)
     M.record!(plan)
 
     # Two pieces: the unconditional head and the region. The condition is
@@ -99,7 +100,8 @@ end
         M.dispatch!(g, when_addone!, (a, Int32(WHEN_N)), WHEN_N; group = 64, name = "write-again")
     end
     M.dispatch!(g, when_copy!, (out, a, Int32(WHEN_N)), WHEN_N; group = 64, name = "read")
-    plan = M.Plan(g)
+    # `budget = Inf`: only the conditions cut, which is what is under test.
+    plan = M.Plan(g; budget = Inf)
     M.record!(plan)
     # Three pieces: the region splits the unconditional work either side of it.
     @test length(plan.recording.parts) == 3
@@ -131,7 +133,8 @@ end
                     group = 64, name = "fill-tmp")
         M.dispatch!(g, when_copy!, (out, tmp, Int32(WHEN_N)), WHEN_N; group = 64, name = "tmp-out")
     end
-    plan = M.Plan(g)
+    # `budget = Inf`: only the conditions cut, which is what is under test.
+    plan = M.Plan(g; budget = Inf)
     M.record!(plan)
     # The graph opens on a conditional region, so the head gets an empty piece of
     # its own — `emithead!` carries the head barrier and the profiler's pool
@@ -152,18 +155,18 @@ end
 
 @testset "a plan with no condition records exactly as it did" begin
     # The property that keeps `when!` free for everyone not using it: with no
-    # condition and no `maxpasses`, the plan takes the single-recording path and
-    # is not a `RecordingParts` at all.
+    # condition, a measured plan that fits its budget takes the single-recording
+    # path and is not a `RecordingParts` at all.
     dev = M.Device(TESTBACKEND)
     buf = M.Buffer(dev, zeros(Float32, WHEN_N))
     g = M.Graph(dev)
     M.dispatch!(g, when_addone!, (buf, Int32(WHEN_N)), WHEN_N; group = 64, name = "plain")
     plan = M.Plan(g)
     M.record!(plan)
+    M.run!(plan); M.waitidle(dev)        # the measuring run
+    M.run!(plan); M.waitidle(dev)        # re-recorded from what it measured
     @test !(plan.recording isa M.RecordingParts)
-
-    M.run!(plan); M.waitidle(dev)
-    @test all(==(1.0f0), Array(M.storage(buf)))
+    @test all(==(2.0f0), Array(M.storage(buf)))
     M.free!(plan); M.free!(buf)
 end
 

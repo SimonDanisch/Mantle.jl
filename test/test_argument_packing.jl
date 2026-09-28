@@ -173,7 +173,7 @@ end
     n = 32
     want = [Float32(0.25f0 * i) for i in 1:n]
     if !M.kisupported(dev, scaletyped!)
-        # The host has no `KI.kernel_function` at all; stated rather than
+        # A backend with no `KI.kernel_function` at all; stated rather than
         # skipped, as in `test_declared_kernel.jl`.
         @test !M.kisupported(dev, scaletyped!)
         return

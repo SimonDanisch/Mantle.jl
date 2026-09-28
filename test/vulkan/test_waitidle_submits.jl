@@ -37,7 +37,9 @@ end
 function _waitplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, waitidle_bump!, (out, kref), n; name = "bump")
-    Mantle.record!(Mantle.Plan(g))
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    Mantle.record!(Mantle.Plan(g; budget = Inf))
 end
 
 """What the plan's last run signals — 0 before it has run."""

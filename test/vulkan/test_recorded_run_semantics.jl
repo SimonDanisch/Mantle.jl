@@ -55,7 +55,9 @@ end
 function _refplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, baked_addref!, (out, kref), n; name = "add")
-    Mantle.Plan(g)
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    Mantle.Plan(g; budget = Inf)
 end
 
 # Graph builders go through `invokelatest`, as they do everywhere in this suite.
@@ -69,14 +71,14 @@ function _twopassplan(dev, out, kref, n)
     for name in ("a", "b")
         Mantle.dispatch!(g, baked_addref!, (out, kref), n; name = name)
     end
-    Mantle.Plan(g)
+    Mantle.Plan(g; budget = Inf)
 end
 
 """The same graph with a constant where the `GPURef` was: nothing can move."""
 function _constplan(dev, out, n)
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, baked_addk!, (out, Int32(5)), n; name = "add")
-    Mantle.Plan(g)
+    Mantle.Plan(g; budget = Inf)
 end
 
 """The plan's argument memory, byte for byte."""

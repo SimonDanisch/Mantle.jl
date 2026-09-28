@@ -112,6 +112,16 @@ memory, so a backend with no slices still has to answer `a == b`.
 """
 function overlapping end
 
+"""
+    overlapgroup(ctx, id::Int) -> Int
+
+A key shared by every id that can overlap `id`: two ids in different groups never
+name the same bytes, and [`overlapping`](@ref) decides within a group. For a slice
+it is its parent's id. What lets the `Dag` phase compare a pass only with the
+passes that touched the same memory, instead of with every pass before it.
+"""
+function overlapgroup end
+
 """The scheduling [`Policy`](@ref) a context was built with."""
 function policy end
 policy(c::Compilation) = c.policy
@@ -202,15 +212,32 @@ function run!(::Dag, c)
     ps = passes(c)
     a = analysis(c)
     a.deps = [Int[] for _ in ps]
-    for j in eachindex(ps), i in 1:(j - 1)
-        shared = false
-        for (idj, Uj) in usages(ps[j]), (idi, Ui) in usages(ps[i])
-            overlapping(c, idi, idj) || continue
-            (writes(Ui) || writes(Uj)) || continue
-            shared = true
-            break
+    # The earlier passes by what they touched, keyed by `overlapgroup`: every pass
+    # that touched a group, and the ones that wrote it. A read depends on the
+    # earlier writers and a write on every earlier pass, of an overlapping id —
+    # the same relation as comparing every pair of passes, found without
+    # comparing the ones that share nothing. 5944 passes took 2.2 s that way.
+    touched = Dict{Int,Vector{Tuple{Int,Int}}}()
+    written = Dict{Int,Vector{Tuple{Int,Int}}}()
+    # `stamp[i] == j` once pass `i` is among `j`'s dependencies.
+    stamp = zeros(Int, length(ps))
+    none = Tuple{Int,Int}[]
+    for j in eachindex(ps)
+        deps = a.deps[j]
+        for (idj, Uj) in usages(ps[j])
+            for (i, idi) in get(writes(Uj) ? touched : written, overlapgroup(c, idj), none)
+                stamp[i] == j && continue
+                overlapping(c, idi, idj) || continue
+                stamp[i] = j
+                push!(deps, i)
+            end
         end
-        shared && push!(a.deps[j], i)
+        sort!(deps)
+        for (idj, Uj) in usages(ps[j])
+            k = overlapgroup(c, idj)
+            push!(get!(Vector{Tuple{Int,Int}}, touched, k), (j, idj))
+            writes(Uj) && push!(get!(Vector{Tuple{Int,Int}}, written, k), (j, idj))
+        end
     end
     return c
 end
@@ -261,7 +288,7 @@ function run!(::Schedule, c)
     n = length(ps)
     n == 0 && return c
 
-    deps = analysis(c).deps
+    deps = loopdeps(ps, analysis(c).deps)
     remaining = [length(d) for d in deps]
     dependents = [Int[] for _ in 1:n]
     for j in 1:n, i in deps[j]
@@ -290,11 +317,20 @@ function run!(::Schedule, c)
     oshift = order_shift(policy(c))
     order = Int[]
     ready = [i for i in 1:n if remaining[i] == 0]
+    # A loop's body is scheduled as one run of passes: once its first pass is
+    # taken, only its own passes are candidates until the last one is. `left`
+    # counts what is still to come of each loop.
+    left = IdDict{Any,Int}()
+    for p in ps
+        p.loop === nothing || (left[p.loop] = get(left, p.loop, 0) + 1)
+    end
+    inloop = nothing
 
     while !isempty(ready)
         best, bestscore = 0, -1
         for k in eachindex(ready)
             i = ready[k]
+            inloop === nothing || ps[i].loop === inloop || continue
             alloc = 0
             freed = 0
             for id in ids(ps[i])
@@ -323,9 +359,16 @@ function run!(::Schedule, c)
                 best, bestscore = k, score
             end
         end
+        best == 0 && error("scheduling: a loop body was entered and none of its " *
+                           "remaining passes is ready, which `loopdeps` rules out")
         i = ready[best]
         deleteat!(ready, best)
         push!(order, i)
+        if ps[i].loop !== nothing
+            l = ps[i].loop
+            left[l] -= 1
+            inloop = left[l] == 0 ? nothing : l
+        end
         for id in ids(ps[i])
             seen[id] = get(seen, id, 0) + 1
         end
@@ -339,6 +382,59 @@ function run!(::Schedule, c)
         error("scheduling left $(n - length(order)) passes unreachable: cycle in the DAG")
     analysis(c).order = order
     return c
+end
+
+"""
+    loopdeps(passes, deps) -> deps
+
+The Dag with every [`repeat!`](@ref) body made enterable only as a whole: each pass
+of a body depends on everything outside the loop that ANY pass of the body depends
+on. The scheduler keeps a body contiguous once it enters it, and this is what
+guarantees that, once in, every pass of the body can be reached without leaving it.
+"""
+function loopdeps(ps, deps)
+    any(p -> p.loop !== nothing, ps) || return deps
+    deps = [copy(d) for d in deps]
+    members = IdDict{Any,Vector{Int}}()
+    for (i, p) in enumerate(ps)
+        p.loop === nothing || push!(get!(members, p.loop, Int[]), i)
+    end
+    for (_, ms) in members
+        inside = Set(ms)
+        ext = unique!([d for m in ms for d in deps[m] if !(d in inside)])
+        for m in ms
+            for d in ext
+                d in deps[m] || push!(deps[m], d)
+            end
+        end
+    end
+    return deps
+end
+
+"""
+    loopspans(passes) -> Vector{Tuple{UnitRange{Int},Loop}}
+
+The loops among scheduled `passes`, as the contiguous range each body occupies.
+"""
+function loopspans(ps)
+    out = Tuple{UnitRange{Int},Loop}[]
+    i = 1
+    while i <= length(ps)
+        l = ps[i].loop
+        if l === nothing
+            i += 1
+            continue
+        end
+        j = i
+        while j < length(ps) && ps[j + 1].loop === l
+            j += 1
+        end
+        any(x -> x[2] === l, out) && error(
+            "scheduling split the body of a loop; it has to be one run of passes")
+        push!(out, (i:j, l))
+        i = j + 1
+    end
+    return out
 end
 
 """Which passes a resource is live across. Inputs to placement."""
@@ -384,11 +480,37 @@ function run!(::Liveness, c)
     for t in ts
         t.first, t.last = typemax(Int), 0
     end
-    for (pos, p) in enumerate(ordered(c)), (id, _) in usages(p)
+    ord = ordered(c)
+    for (pos, p) in enumerate(ord), (id, _) in usages(p)
         t = transientfor(c, byid, id)
         t === nothing && continue
         t.first = min(t.first, pos)
         t.last = max(t.last, pos)
+    end
+    # A loop body runs again behind itself. A transient it shares with the
+    # passes around it, or one whose first use in the body READS (so it carries
+    # the previous iteration's value), is live across the whole body; one the
+    # body writes before it reads is scoped to its iteration, and the full
+    # barrier at each iteration's head orders its reuse.
+    for (r, _) in loopspans(ord)
+        seen = Base.IdSet{Any}()
+        carried = Base.IdSet{Any}()
+        for pos in r
+            firsthere = Base.IdSet{Any}()
+            for (id, U) in usages(ord[pos])
+                t = transientfor(c, byid, id)
+                t === nothing && continue
+                (t in seen && !(t in firsthere)) && continue
+                push!(seen, t); push!(firsthere, t)
+                reads(U) && push!(carried, t)
+            end
+        end
+        for t in seen
+            if t in carried || t.first < first(r) || t.last > last(r)
+                t.first = min(t.first, first(r))
+                t.last = max(t.last, last(r))
+            end
+        end
     end
     # A transient nothing touched has no interval, and the placer's `Span` reports
     # that as an inverted range with `typemax(Int)` in it — a message about the
@@ -538,15 +660,41 @@ to run; with aliasing off, every seed was stable.
 function run!(::Aliasing, c)
     a = analysis(c)
     ts = transients(c)
-    for (i, y) in enumerate(ts), (j, x) in enumerate(ts)
-        i == j && continue
-        a.parts[i] == a.parts[j] || continue   # offsets in different allocations never overlap
-        x.last < y.first || continue
-        a.offsets[i] < a.offsets[j] + nbytes(x) &&
-            a.offsets[j] < a.offsets[i] + nbytes(y) || continue
-        push!(get!(() -> Tuple{Int,Int}[], a.alias_begins, y.first), (i, j))
+    # Per allocation, by offset: sorted by where they start, a transient's bytes
+    # are met only by the ones that start inside it, so each is compared with
+    # those and not with every other. 6507 transients took 5.1 s pairwise.
+    # Offsets in different allocations -- another arena, or another part of one
+    # that `Place` spilled -- never overlap.
+    byarena = Dict{Any,Vector{Int}}()
+    for i in eachindex(ts)
+        push!(get!(Vector{Int}, byarena, a.parts[i]), i)
     end
+    for (_, idx) in byarena
+        sort!(idx; by = i -> a.offsets[i])
+        # Two loops and not `for p in …, q in …`: a `break` there leaves both.
+        for (p, i) in enumerate(idx)
+            for q in (p + 1):length(idx)
+                j = idx[q]
+                a.offsets[j] < a.offsets[i] + nbytes(ts[i]) || break
+                aliasbegin!(a, ts, i, j)
+                aliasbegin!(a, ts, j, i)
+            end
+        end
+    end
+    # In the order the pairwise walk produced them, which is what the barriers
+    # are emitted in.
+    foreach(sort!, values(a.alias_begins))
     return c
+end
+
+"""Transient `i` begins where `j`'s bytes were, after `j` is dead: a handover."""
+function aliasbegin!(a, ts, i::Int, j::Int)
+    y, x = ts[i], ts[j]
+    x.last < y.first || return nothing
+    a.offsets[i] < a.offsets[j] + nbytes(x) && a.offsets[j] < a.offsets[i] + nbytes(y) ||
+        return nothing
+    push!(get!(() -> Tuple{Int,Int}[], a.alias_begins, y.first), (i, j))
+    return nothing
 end
 
 """Transitions per pass, and which of them still need a barrier emitted."""

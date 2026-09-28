@@ -1275,6 +1275,24 @@ function emithead!(e::Emitter, pl::Plan)
     return nothing
 end
 
+"""
+    emitloophead!(e::Emitter, plan, body)
+
+The head of one iteration of a loop body: the same global barrier as the plan's
+head, and — when this recording writes timestamps — a reset of the body's own
+query slots, since a timestamp query has to be reset before it is written again
+and the body writes them once per iteration. What `timings` reads for a body pass
+is its last iteration.
+"""
+function emitloophead!(e::Emitter, pl::Plan, body::AbstractUnitRange)
+    headbarrier!(e.cmd, e.ctx)
+    if pl.stamped
+        VK.cmd_reset_query_pool(e.cmd, pl.profiler.pool, UInt32(2 * (first(body) - 1)),
+                                UInt32(2 * length(body)))
+    end
+    return nothing
+end
+
 
 """Mantle's own barriers, derived from the declared usage sequence. Layout
 changes first: a pass may both need an image transitioned and wait on a
@@ -1477,6 +1495,10 @@ devicearray(b::LavaBackend, data::AbstractArray) = LavaArray(data; bq = b.dispat
 # accepts `nothing`, which is what a KernelAbstractions backend answers.
 makeprofiler(dev::LavaDevice, passes, profile::Bool) =
     profile ? Profiler(dev.ctx, passes) : nothing
+# Asked once per plan, at `Plan`: a device reporting `timestampPeriod = 0` has
+# no usable timestamps, and building a profiler for it would throw.
+timestamps(dev::LavaDevice) =
+    VK.get_physical_device_properties(dev.ctx.physical_device).limits.timestamp_period > 0
 
 # What a `custom!` body records into — see `batchqueue` in `graph/queue.jl`.
 batchqueue(d::LavaDevice) = d.bq
@@ -1660,7 +1682,12 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         seal!(e.owner)
         return submit_and_present!(bq, win, e.owner)
     end
-    return submitrecording!(bq, pl.recording, e)
+    # Both kinds of recording by name: through the `Any` field the call is
+    # dynamic, and its `UInt64` token comes back boxed, 8 bytes a run once the
+    # timeline passes the small-integer cache.
+    rec = pl.recording
+    rec isa Recording && return submitrecording!(bq, rec, e)
+    return submitrecording!(bq, rec::RecordingParts{Recording}, e)
 end
 
 """
@@ -1696,6 +1723,30 @@ function submitrecording!(bq, rec::Recording, e)
     hold!(bq, rec)
     tok = submit!(bq, front, rec)
     rec.token = tok
+    handover!(bq, tok, front; tag = :run)
+    return tok
+end
+
+"""
+Several pieces of one recording in ONE submission: what core groups by the plan's
+budget (`submissionbatches`), a loop body's pieces once per iteration among them.
+The vector is the recording's own, kept from `record!`, so a run allocates nothing.
+"""
+function submitrecording!(bq, recs::Vector{Recording}, e)
+    front = e === nothing ? nothing : e.owner::OneShot
+    # With a front one-shot the submission holds what it executes, as for a
+    # single piece; without one the plan owns every piece and nothing is handed
+    # over.
+    if front !== nothing
+        seal!(front)
+        for r in recs
+            hold!(bq, r)
+        end
+    end
+    tok = submitlist!(bq, front, recs)
+    for r in recs
+        r.token = tok
+    end
     handover!(bq, tok, front; tag = :run)
     return tok
 end

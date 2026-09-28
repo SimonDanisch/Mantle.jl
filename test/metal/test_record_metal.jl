@@ -123,32 +123,21 @@ end
         counter = Mantle.Buffer(REC_DEV, Float32[0])
         flag = Mantle.Buffer(REC_DEV, Int32[start])
         Mantle.repeat!(g, 4; while_nonzero = flag) do i
-            Mantle.dispatch!(g, rec_bump!,
-                                 (counter,
-                                  flag), 1; name = "bump-$i")
+            Mantle.dispatch!(g, rec_bump!, (counter, flag), 1; name = "bump")
         end
         plan = Mantle.record!(Mantle.Plan(g))
 
-        # ONE execute per iteration, not two. The head segment holds the range
-        # reset, the first gate and its range writer; every gated segment then
-        # absorbs the NEXT iteration's gate and writer, so a discarded iteration
-        # takes the following gate down with it — which is the right answer,
-        # because a discarded iteration writes nothing the gate reads.
-        @test length(plan.recording.segments) == 5
-        @test count(s -> s.slot >= 0, plan.recording.segments) == 4
-        @test plan.recording.segments[1].slot == -1
+        # The body is compiled once and recorded as a piece of its own, which a run
+        # replays once per iteration: the gate with the range writer it feeds, the
+        # gated bump, and the index's advance.
+        body = plan.recording.parts[end]
+        @test length(body.segments) == 3
+        @test count(s -> s.slot >= 0, body.segments) == 1
 
         Mantle.run!(plan)
         Mantle.waitfor!(plan)
         @test Array(Mantle.storage(counter))[1] == want
         @test Array(Mantle.storage(flag))[1] == 0
-
-        # The execution ranges the device wrote: a length for the iterations that
-        # ran, zero for the ones the gate discarded. Read back rather than
-        # inferred, because a gate that never closed and a body that did nothing
-        # produce the same counter.
-        ranges = Array(plan.recording.ranges)
-        @test count(k -> ranges[2k] != 0, 1:4) == Int(want)
 
         # Run it again with the flag now at zero: nothing runs, and the counter
         # does not move. The recording is unchanged — only what the device read
@@ -159,14 +148,14 @@ end
     end
 end
 
-@testset "an unrolled loop compiles its kernel once, and a rebuild links nothing" begin
-    # `repeat!` declares its body once per iteration. Each recorded dispatch used
-    # to be named by its argument offset, and the name is part of the compile
-    # key: four copies were four compile jobs, four metallibs and four native
-    # links. And an indirect pipeline was never cached, so a REBUILT plan linked
-    # every dispatch again. Hikari's bounce loop is such a body, and a RayMakie
-    # material switch rebuilds its plans: 124 links and 138 s before the first
-    # GOLD frame of the isubd demo, 9 links and 21 s after.
+@testset "a loop compiles its body's kernels once, and a rebuild links nothing" begin
+    # Each recorded dispatch used to be named by its argument offset, and the name
+    # is part of the compile key: when `repeat!` unrolled its body, four copies
+    # were four compile jobs, four metallibs and four native links. And an
+    # indirect pipeline was never cached, so a REBUILT plan linked every dispatch
+    # again: 124 links and 138 s before the first GOLD frame of the isubd demo, 9
+    # links and 21 s after. The body is declared once now, and a rebuild must
+    # still find its pipeline.
     recorded(plan) = [d for pp in plan.passes for d in pp.dispatches
                       if d isa Mantle.MetalRecordedDispatch && occursin("rec_bump", d.name)]
     function bumps()
@@ -174,16 +163,14 @@ end
         counter = Mantle.Buffer(REC_DEV, Float32[0])
         flag = Mantle.Buffer(REC_DEV, Int32[4])
         Mantle.repeat!(g, 4; while_nonzero = flag) do i
-            Mantle.dispatch!(g, rec_bump!, (counter, flag), 1; name = "bump-$i")
+            Mantle.dispatch!(g, rec_bump!, (counter, flag), 1; name = "bump")
         end
         return Mantle.record!(Mantle.Plan(g)), counter
     end
     plan, counter = bumps()
     ds = recorded(plan)
-    @test length(ds) == 4
-    @test length(unique(d.name for d in ds)) == 1        # one compile key
-    @test all(d -> d.kernel.pipeline === ds[1].kernel.pipeline, ds)
-    # And it still runs: a shared pipeline is named by four commands.
+    @test length(ds) == 1
+    # And it runs four times.
     Mantle.run!(plan)
     Mantle.waitfor!(plan)
     @test Array(Mantle.storage(counter))[1] == 4f0

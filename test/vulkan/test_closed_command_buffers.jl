@@ -109,7 +109,10 @@ end
     out = Mantle.Buffer(dev, zeros(Int32, n))
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, ccb_add!, (out, kref), n; name = "add")
-    pl = Base.invokelatest(Mantle.Plan, g)
+    # `budget = Inf`: recorded whole, never measured. A plan on the device's
+    # budget submits once per pass on its first run and is re-recorded after it
+    # (see `partitionranges`), and this counts the steady state.
+    pl = Base.invokelatest(Mantle.Plan, g; budget = Inf)
     r = observe(bq) do
         Mantle.record!(pl)
     end

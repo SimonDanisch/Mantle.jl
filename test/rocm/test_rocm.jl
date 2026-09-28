@@ -523,45 +523,24 @@ end
     end
 end
 
-@testset "ROCm: a partitioned recording is several graphs, in order" begin
+@testset "ROCm: a recording replays its chain in order" begin
     dev = M.Device(M.ROCmAPI())
-    # `record!(pl; maxpasses = N)` splits the baked commands into submissions of
-    # at most N passes, so a workload longer than the driver's submission timeout
-    # has completion points inside it. HIP has no equivalent of one submission
-    # carrying several command buffers, so the pieces here are separate
-    # `hipGraphLaunch`es on the same in-order stream — same ordering, same
-    # completion points.
-    #
-    # This backend implements no `recordplan!` and no sequence type: the chunked
-    # walk is core's `recordparts!` and the sequence is core's `RecordingParts`,
-    # so all this backend answers is `submitrecording!` for ONE piece. Refusing a
-    # partition outright is what follows from the walk living in the Vulkan backend
-    # and nothing portable built one — which is also why `HorizonRunner`, whose
-    # prefill asks for 64, could only be recorded there.
+    # Where a recording is cut into submissions is core's: by the plan's budget,
+    # against pass times it measures with timestamps (`partitionranges`). This
+    # backend does not answer `timestamps`, so its plans are one piece plus any
+    # `when!` regions, and a cut that is not asked for by a condition cannot be
+    # forced here any more. Each piece is a `hipGraphLaunch` on the same in-order
+    # stream when there are several.
     n, links = 1024, 8
     _, ta, pa = chain(dev, n, links)
     M.record!(pa)
     M.run!(pa); M.waitidle(dev)
     want = Array(M.storage(ta[end]))
     @test all(==(Float32(links)), want)
-
-    _, tb, pb = chain(dev, n, links)
-    M.record!(pb; maxpasses = 3)
-    @test pb.recording isa M.RecordingParts
-    # `links` compute passes plus the update pass core adds for the host-written
-    # source, in pieces of three.
-    @test length(pb.passes) == links + 1
-    @test length(pb.recording.parts) == cld(links + 1, 3)
-    @test all(p -> p isa RE.ROCmRecording, pb.recording.parts)
-    @test pb.record_maxpasses == 3
-    M.run!(pb); M.waitidle(dev)
-    # The dependencies hold ACROSS the split: every link reads what the previous
-    # wrote, and a piece is a separate launch.
-    @test Array(M.storage(tb[end])) == want
-    # …and a second run replays the same pieces rather than the first one only.
-    fill!(M.storage(tb[end]), 0.0f0)
-    M.run!(pb); M.waitidle(dev)
-    @test Array(M.storage(tb[end])) == want
+    # …and a second run replays the whole chain again.
+    fill!(M.storage(ta[end]), 0.0f0)
+    M.run!(pa); M.waitidle(dev)
+    @test Array(M.storage(ta[end])) == want
 end
 
 @kernel function roc2d!(dst, @Const(src), n1)

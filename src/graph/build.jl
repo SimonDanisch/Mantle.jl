@@ -243,41 +243,52 @@ array type; everything else is walked into.
 isdevicearray(@nospecialize(x)) = false
 
 """
+    repeat!(f, graph, n) -> passes
     repeat!(f, graph, maxiters, count) -> passes
     repeat!(f, graph, maxiters; while_nonzero = flag) -> passes
 
-Record `maxiters` iterations of a loop body and let the DEVICE decide how many of
-them run. `f(i)` is called once per iteration, `i` in `1:maxiters`, and declares
-that iteration's passes exactly as it would outside a loop.
+A loop whose body is declared ONCE: `f(i)` is called once and declares the body's
+passes exactly as it would outside a loop, and the plan runs them `n` times. The
+body is compiled once too, whatever the count: fifty steps of a diffusion model are
+one model's passes, not fifty.
 
-The gate is re-evaluated BEFORE EACH ITERATION, from device memory, which is what
-makes this a loop rather than a bounded repeat: the body may move the value the
-gate reads, so a loop can end on a condition it discovers as it goes. That is the
-shape a wavefront bounce loop has — it runs until the ray queue empties, and
-nothing knows when that is until it happens.
+`i` is the iteration the device is on, a one-element `Int32` buffer counting from
+1, which a kernel reads for anything that differs per iteration (a timestep out of
+a schedule buffer, say). It is not a host number: nothing about the loop is
+declared per iteration.
 
-Two spellings of the gate, one mechanism:
+With no gate every one of the `n` iterations runs. With one, the loop runs at most
+`maxiters` times and the DEVICE decides how many. The gate is re-evaluated BEFORE
+EACH ITERATION, from device memory, which is what makes this a loop rather than a
+bounded repeat: the body may move the value the gate reads, so a loop can end on a
+condition it discovers as it goes. That is the shape a wavefront bounce loop has —
+it runs until the ray queue empties, and nothing knows when that is until it
+happens. Two spellings of the gate, one mechanism:
 
   * `count` — a device integer; iteration `i` runs while `i <= count[]`.
   * `while_nonzero` — a device integer; the iteration runs while it is not zero.
     A queue's own live count is usually already this, so the loop needs no
     bookkeeping of its own.
 
-Nothing about the trip count reaches the host. The loop is recorded once, at its
-maximum, and iterations the gate turns off are discarded at execution.
-
-The lowering is a per-iteration predicate and not device-generated commands, and
-the difference is not an implementation detail: DGC repeats a dispatch with NO
-barriers between the repetitions, which is right for `count` independent things
-and cannot express a loop whose iteration k+1 reads what k wrote.
-
-What a discarded iteration still costs is its barriers, its gate dispatch and its
+Nothing about the trip count reaches the host: the body is submitted `maxiters`
+times and iterations the gate turns off are discarded at execution. What a
+discarded iteration still costs is its barriers, its gate dispatch and its
 predicate test; what it saves is the body. So `maxiters` is a bound to be chosen,
-not a free parameter — a loop recorded at 1000 and running 3 pays 997 iterations
-of that overhead.
+not a free parameter.
 
-The body may not allocate transients that outlive their iteration: every
-iteration names the same resources, which is what makes one recording legal.
+Every iteration names the same resources, which is what makes one recording legal.
+A transient the body reads before it writes it, or one the loop shares with the
+passes around it, carries between iterations and lives across the whole body; one
+the body writes and then reads is scoped to its iteration. Each iteration starts
+behind a full barrier, so what one iteration wrote is visible to the next. The
+body may not touch an image, whose layout would have to be the same on the way in
+and out of every iteration, and loops do not nest. A single iteration
+(`maxiters = 1`) is none of this: it never runs behind itself, so it is a gated
+region of the plan like any other, with none of these restrictions.
+
+Recorded, the body is its own run of pieces and every iteration boundary is a
+place the recording can be cut into submissions (see `partitionranges`);
+iterations that fit the plan's budget together go in one.
 
 A loop whose body is ONE dispatch needs no body at all:
 
@@ -348,6 +359,9 @@ function when!(f, g::Graph, cond)
             "when!: pass \"$(pp.name)\" already has a host condition — nested " *
             "`when!` is not supported, because a pass carries one condition and " *
             "nesting needs their conjunction."))
+        pp.loop === nothing || throw(ArgumentError(
+            "when!: pass \"$(pp.name)\" is in a `repeat!` loop. A conditional " *
+            "region around or inside a loop is not supported."))
         pp.hostcond = cond
     end
     return nothing
@@ -356,60 +370,88 @@ end
 function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
                  while_nonzero = nothing)
     maxiters >= 1 || throw(ArgumentError("repeat!: maxiters must be at least 1, got $maxiters"))
-    (count === nothing) == (while_nonzero === nothing) && throw(ArgumentError(
-        "repeat!: give exactly one gate — a `count` positionally, or " *
+    (count === nothing || while_nonzero === nothing) || throw(ArgumentError(
+        "repeat!: give at most one gate — a `count` positionally, or " *
         "`while_nonzero = flag`."))
-    n = Int(maxiters)
-    src = count === nothing ? while_nonzero : count
-    # ONE flag, rewritten before each iteration, rather than an array expanded
-    # once up front. The array version was the first design and it cannot express
-    # a loop at all: expanding `count` into N flags before the body runs fixes
-    # the trip count at a moment when a bounce loop does not yet know it. Writing
-    # the flag per iteration costs one small dispatch each and is what lets the
-    # body decide whether there is a next one.
-    #
-    # A single slot is enough BECAUSE the gate is per iteration: the flag is
-    # written, read, and written again, and the graph derives both hazards from
-    # the usages declared below.
-    pred = Buffer(g.dev, [Predicate(0)])
-    out = Pass[]
-    for i in 1:n
-        if count === nothing
-            gate!(g, gate_nonzero!, (pred, src), "repeat!/gate-$i")
-        else
-            gate!(g, gate_count!, (pred, src, Int32(i)), "repeat!/gate-$i")
-        end
-        first_new = length(passes(g)) + 1
-        f(i)
-        for k in first_new:length(passes(g))
-            pp = passes(g)[k]
-            pp.predicate === nothing || throw(ArgumentError(
-                "repeat!: pass \"$(pp.name)\" already has a predicate — nested " *
-                "`repeat!` is not supported, because a pass has one predicate and " *
-                "nesting needs their conjunction."))
-            pp.predicate = (pred, 0)
-            # A gated pass whose every dispatch is sized on the device runs
-            # nothing when discarded on ANY backend: the prepare writes zero
-            # groups for it (`emitprepares!`). Fixed-size work — a draw, a
-            # host-sized dispatch — needs the backend to discard the commands
-            # themselves. `typeof` and not the device: a device `show`s its
-            # whole pool, and that buries the sentence that says what went wrong.
-            supportspredicate(g.dev) || devicesized(pp) || throw(ArgumentError(
-                "repeat!: pass \"$(pp.name)\" has fixed-size work and " *
-                "$(nameof(typeof(g.dev))) cannot discard recorded work on a " *
-                "device-written predicate. Size every dispatch of a gated pass " *
-                "on the device (a `DeviceRange`), or loop on the host."))
-            # The predicate READ is a hazard like any other, and declaring it is
-            # what makes the graph put a barrier between the gate that writes the
-            # flag and the passes gated on it — and between those passes and the
-            # NEXT gate, which overwrites it. Left undeclared both are races the
-            # scheduler cannot see.
-            push!(pp.usages, resourceid(g, pred) => Predicated)
-            touch!(g, pred)
-            push!(out, pp)
-        end
+    gated = count !== nothing || while_nonzero !== nothing
+    # One iteration never runs behind itself: it is a gated region, with no index
+    # to advance, no head barrier and no cut in the recording, and what a loop
+    # refuses (an image, a `when!` inside) is no hazard to it.
+    looped = maxiters > 1
+    index = Buffer(g.dev, Int32[1])
+    # Outside the body: the index starts at 1 on every run.
+    looped && gate!(g, loop_start!, (index,), "repeat!/start")
+    firstloop = length(passes(g)) + 1
+    # The gate is the body's first pass and is not gated itself: it WRITES the
+    # flag the rest of the body is gated on, once per iteration.
+    pred = gated ? Buffer(g.dev, [Predicate(0)]) : nothing
+    if count !== nothing
+        gate!(g, gate_count!, (pred, count, index), "repeat!/gate")
+    elseif while_nonzero !== nothing
+        gate!(g, gate_nonzero!, (pred, while_nonzero), "repeat!/gate")
     end
-    return out
+    firstbody = length(passes(g)) + 1
+    f(index)
+    for k in firstbody:length(passes(g))
+        pp = passes(g)[k]
+        if looped
+            pp.loop === nothing || throw(ArgumentError(
+                "repeat!: pass \"$(pp.name)\" is already in a loop. Nested `repeat!` " *
+                "is not supported: a pass belongs to one loop."))
+            pp.hostcond === nothing || throw(ArgumentError(
+                "repeat!: pass \"$(pp.name)\" has a `when!` condition. A conditional " *
+                "region inside a loop is not supported."))
+            for (id, _) in pp.usages
+                resourcekind(g.ids.by_id[id]) isa ImageKind && throw(ArgumentError(
+                    "repeat!: pass \"$(pp.name)\" touches an image. A loop body runs " *
+                    "again behind itself, so an image's layout would have to be the " *
+                    "same on the way in and out of every iteration; images in a " *
+                    "`repeat!` body are not supported."))
+            end
+        end
+        gated || continue
+        pp.predicate === nothing || throw(ArgumentError(
+            "repeat!: pass \"$(pp.name)\" already has a predicate."))
+        pp.predicate = (pred, 0)
+        # A gated pass whose every dispatch is sized on the device runs nothing
+        # when discarded on ANY backend: the prepare writes zero groups for it
+        # (`emitprepares!`). Fixed-size work — a draw, a host-sized dispatch —
+        # needs the backend to discard the commands themselves. `typeof` and not
+        # the device: a device `show`s its whole pool, and that buries the
+        # sentence that says what went wrong.
+        supportspredicate(g.dev) || devicesized(pp) || throw(ArgumentError(
+            "repeat!: pass \"$(pp.name)\" has fixed-size work and " *
+            "$(nameof(typeof(g.dev))) cannot discard recorded work on a " *
+            "device-written predicate. Size every dispatch of a gated pass " *
+            "on the device (a `DeviceRange`), or loop on the host."))
+        # The predicate READ is a hazard like any other, and declaring it is
+        # what makes the graph put a barrier between the gate that writes the
+        # flag and the passes gated on it.
+        push!(pp.usages, resourceid(g, pred) => Predicated)
+        touch!(g, pred)
+    end
+    body = passes(g)[firstloop:end]
+    looped || return body
+    # The body's last pass: the next iteration reads the next index.
+    gate!(g, loop_advance!, (index,), "repeat!/advance")
+    body = passes(g)[firstloop:end]
+    loop = Loop(Int(maxiters), index)
+    for pp in body
+        pp.loop = loop
+    end
+    return body
+end
+
+"""Before a loop: the index every run starts from."""
+function loop_start!(index)
+    @inbounds index[1] = Int32(1)
+    return nothing
+end
+
+"""The body's last pass: the iteration after this one."""
+function loop_advance!(index)
+    @inbounds index[1] += Int32(1)
+    return nothing
 end
 
 """
@@ -428,9 +470,9 @@ struct Predicate
     go::UInt32
 end
 
-"""The gate for `repeat!(…, count)`: this iteration runs while `i <= count[]`."""
-function gate_count!(pred, count, i::Int32)
-    @inbounds pred[1] = Predicate(i <= Int32(count[1]) ? UInt32(1) : UInt32(0))
+"""The gate for `repeat!(…, count)`: this iteration runs while `index[] <= count[]`."""
+function gate_count!(pred, count, index)
+    @inbounds pred[1] = Predicate(index[1] <= Int32(count[1]) ? UInt32(1) : UInt32(0))
     return nothing
 end
 
@@ -443,22 +485,22 @@ function gate_nonzero!(pred, flag)
     return nothing
 end
 
-# One gate, dispatched as a kernel where the device compiles one and as a CALL
-# where it cannot. The host device runs `@kernel`s through KernelAbstractions and
-# has no KernelInterface compiler, so since the gates stopped being `@kernel`s
-# every `repeat!` there was refused, naming a kernel the caller never wrote. It
-# walks its plan on this thread, though, and a call there is the function run on
-# the host arrays -- which IS the gate, because both gates index `pred[1]` and
-# their source and call no device intrinsic. A device that can do neither is
-# refused by the call form, saying so.
+# One single-item pass -- a gate, or a step of the loop index -- dispatched as a
+# kernel where the device compiles one and as a CALL where it cannot. A device
+# with no KernelInterface compiler that walks its plan on this thread runs a call
+# as the function on the host arrays, which IS the pass: each of these reads and
+# writes element 1 of its arguments and calls no device intrinsic. A device that
+# can do neither is refused by the call form, saying so.
 gate!(g::Graph, f, args::Tuple, name) =
     kisupported(g.dev, f) ? dispatch!(g, f, args, 1; name) : dispatch!(g, f, args; name)
 
 # Declared for the call form, which has no body the walk may read; the kernel
 # form would infer the same.
-argument_usage(::Type{typeof(gate_count!)}, ::Type{<:Tuple{Any,Any,Int32}}) =
-    (WRITE, READ, NOTOUCH)
+argument_usage(::Type{typeof(gate_count!)}, ::Type{<:Tuple{Any,Any,Any}}) =
+    (WRITE, READ, READ)
 argument_usage(::Type{typeof(gate_nonzero!)}, ::Type{<:Tuple{Any,Any}}) = (WRITE, READ)
+argument_usage(::Type{typeof(loop_start!)}, ::Type{<:Tuple{Any}}) = (WRITE,)
+argument_usage(::Type{typeof(loop_advance!)}, ::Type{<:Tuple{Any}}) = (READ | WRITE,)
 
 """
     supportspredicate(device) -> Bool
@@ -563,7 +605,7 @@ asviewport(v) = NTuple{4,Float32}(v)
 # `Pass` is Mantle's now — see `src/graph/types.jl`.
 
 Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing, nothing,
-                        DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing)
+                        DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing, nothing)
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 
@@ -737,7 +779,12 @@ function refit!(pl::Plan)
     # and `run!` writes it again against the new one before it submits.
     invalidate!(pl)
     c = compile!(Compile(pl.graph; pl.alias, pl.coalesce, pl.policy))
+    # What a pass was measured to cost belongs to the pass, not to its position:
+    # the recompile may schedule the passes in another order.
+    cost = IdDict{Any,Float64}(pp.pass => pl.passcost[i] for (i, pp) in enumerate(pl.passes))
     pl.transitions, pl.passes, pl.pipelines = c.transitions, c.passes, c.pipelines
+    pl.passcost = [get(cost, pp.pass, NaN) for pp in pl.passes]
+    pl.loops = loopspans([pp.pass for pp in pl.passes])
     let a = analysis(c)
         pl.slabs, pl.arenas, pl.offsets, pl.parts = a.regions, a.arenas, a.offsets, a.parts
         pl.peak, pl.naive = a.peak, a.naive
@@ -1272,6 +1319,7 @@ Compile(g::Graph; alias = true, coalesce = true, policy = Overlap()) =
 usages(p::Pass) = p.usages
 
 overlapping(c::Compile, a::Int, b::Int) = overlapping(c.graph, a, b)
+overlapgroup(c::Compile, id::Int) = overlapgroup(c.graph, id)
 
 pool(c::Compile) = c.graph.dev.pool
 
@@ -1311,6 +1359,16 @@ function overlapping(g::Graph, a::Int, b::Int)
     # A whole-resource usage covers every slice of it.
     (ra isa BufferRange && rb isa BufferRange) || return true
     !isempty(intersect(ra.range, rb.range))
+end
+
+"""The id of a slice's parent, and any other id itself: see [`overlapgroup`](@ref)."""
+function overlapgroup(g::Graph, id::Int)
+    r = get(g.ids.by_id, id, nothing)
+    r isa BufferRange || return id
+    p = get(g.ids.ids, r.parent, 0)
+    # An unregistered parent overlaps nothing (`overlapping` answers false), so
+    # the slice is a group of its own.
+    return p == 0 ? id : p
 end
 
 """Give a placed transient its storage.
@@ -1459,16 +1517,27 @@ them; the two things that are not are hooks — [`makeprofiler`](@ref) and
 neither.
 """
 Plan(g::Graph; coalesce::Bool = true, alias::Bool = true,
-            profile::Bool = false, policy::Policy = Overlap()) =
+            profile::Bool = false, policy::Policy = Overlap(),
+            budget::Real = submissionbudget(g.dev)) =
     # Before the compile: registering the host-written resources adds the update
     # pass and its `CopyDst` usages, which the barrier phase derives from.
     let hw = hostwritten!(g), c = compile!(Compile(g; alias, coalesce, policy))
         let a = analysis(c)
+            # A device that can time a pass gets a profiler whether or not the
+            # caller asked: the plan measures itself once, to cut its recording
+            # into submissions that fit the budget (see `partitionranges`).
+            prof = profile || (timestamps(g.dev) && isfinite(budget)) ?
+                   makeprofiler(g.dev, c.passes, true) : nothing
             pl = Plan(g, c.transitions, c.passes, c.pipelines, a.regions, a.arenas,
-                          a.offsets, a.parts, a.peak, a.naive,
-                          makeprofiler(g.dev, c.passes, profile),
+                          a.offsets, a.parts, a.peak, a.naive, prof,
                           alias, coalesce, policy,
-                          makeargmemory(g.dev, c.passes), nothing, 0,
+                          makeargmemory(g.dev, c.passes), nothing,
+                          Float64(budget), profile, fill(NaN, length(c.passes)),
+                          UnitRange{Int}[], loopspans([pp.pass for pp in c.passes]),
+                          # `stamped`: a walked plan (a window's) writes timestamps
+                          # when it was asked to profile; `recordplan!` decides it
+                          # again for a recording.
+                          profile,
                           Dict{UInt64,Vector{Tuple{Any,Int}}}(),
                           Tuple{Any,Int,UInt64}[], hw, false, false, false)
             # After construction, because a plan cannot be a tenant before it is a

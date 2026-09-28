@@ -1,12 +1,12 @@
 """
-`repeat!` — a loop recorded once, whose trip count the DEVICE decides.
+`repeat!` — a loop whose body is declared and compiled ONCE and run `n` times,
+with an optional gate that lets the DEVICE decide how many of them run.
 
-The body is recorded `maxiters` times and the iterations past `count[]` are
-discarded at execution, so nothing about the trip count reaches the host. That is
-the shape a wavefront bounce loop wants, and it is why the lowering is a
-per-iteration predicate rather than device-generated commands: DGC repeats a
-dispatch with no barriers between the repetitions, which cannot express a loop
-whose iteration k+1 reads what k wrote.
+With a gate, iterations past `count[]` are discarded at execution, so nothing
+about the trip count reaches the host. That is the shape a wavefront bounce loop
+wants, and it is why the lowering is a per-iteration predicate rather than
+device-generated commands: DGC repeats a dispatch with no barriers between the
+repetitions, which cannot express a loop whose iteration k+1 reads what k wrote.
 
 Three properties, and the third is the one that makes it usable:
 
@@ -22,6 +22,9 @@ Three properties, and the third is the one that makes it usable:
 `2^k - 1` is also why the counter is not just "how many ran": 3 iterations gives
 7 and 7 iterations gives 127, so an off-by-one is not a small error in the
 result, it is a different order of magnitude.
+
+Without a gate every iteration runs, and the body tells them apart by the index
+`f` is handed, a device `Int32` counting from 1.
 """
 
 using Test, Mantle, Lava, KernelAbstractions
@@ -43,7 +46,7 @@ function _repeatplan(dev, x, count, src, maxiters, n)
     # The count itself is produced by a kernel, so the host never supplies it.
     Mantle.dispatch!(g, repeat_decide!, (count, src), 1; name = "decide")
     Mantle.repeat!(g, maxiters, count) do i
-        Mantle.dispatch!(g, repeat_step!, (x,), n; name = "step-$i")
+        Mantle.dispatch!(g, repeat_step!, (x,), n; name = "step")
     end
     Mantle.record!(Mantle.Plan(g))
 end
@@ -133,7 +136,7 @@ end
 
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, maxiters; while_nonzero = budget) do i
-        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
+        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain")
     end
     pl = Mantle.record!(Mantle.Plan(g))
 
@@ -163,9 +166,9 @@ end
 #
 # Hikari found this before this test did: the fused sample ran at `max_depth` 8
 # (47 dispatches) and hung at 16 (~95), with a submit threshold at 64 in
-# between. A plan's recording is one command buffer, whole, and nothing cuts it;
-# the loop below is sized past where such thresholds sat, so this keeps pinning
-# the same boundary.
+# between. Core cuts a recording into pieces only BETWEEN passes (by the plan's
+# budget, and at a loop body's edge), never inside one; the loop below runs past
+# where such thresholds sat, so this keeps pinning the same boundary.
 #
 # **A regression here HANGS rather than fails.** The wait is a foreign call that
 # does not return and cannot be interrupted, so there is no error to catch and
@@ -181,10 +184,12 @@ end
 
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, maxiters; while_nonzero = budget) do i
-        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
+        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain")
     end
     pl = Mantle.record!(Mantle.Plan(g))
-    @test length(pl.passes) > 64          # the boundary is crossed
+    # The body is compiled once, whatever the count: the host-write updates, the
+    # index reset, then gate, drain and advance.
+    @test length(pl.passes) == 5
 
     for start in (3, maxiters - 1)
         copyto!(Mantle.storage(x), zeros(Int32, n))
@@ -221,17 +226,17 @@ end
 end
 
 # The other gate on the host. Both gates are plain functions since Mantle stopped
-# defining `@kernel`s, and the host device compiles none, so both were refused
-# there ("`gate_count!`, which is a macro-free kernel") until they became calls
-# on a device without a KernelInterface compiler.
+# defining `@kernel`s, and were refused there ("`gate_count!`, which is a
+# macro-free kernel") until the host ran them, as calls or as KernelInterface
+# kernels.
 @testset "repeat!(; while_nonzero) on the host stops when the body empties it" begin
     host = Mantle.Device(Mantle.HostAPI())
     n, maxiters = 8, 6
     x = Mantle.Buffer(host, zeros(Int32, n))
     budget = Mantle.Buffer(host, Int32[3])
     g = Mantle.Graph(host)
-    Mantle.repeat!(g, maxiters; while_nonzero = budget) do i
-        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain-$i")
+    Mantle.repeat!(g, maxiters; while_nonzero = budget) do _
+        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain")
     end
     pl = Mantle.Plan(g)
     Mantle.run!(pl)
@@ -240,11 +245,9 @@ end
     Mantle.free!(pl)
 end
 
-@testset "repeat! wants exactly one gate and at least one iteration" begin
-    # Neither both gates nor neither.
+@testset "repeat! wants at most one gate and at least one iteration" begin
     dev0 = Mantle.Device(Mantle.VulkanAPI())
     g0 = Mantle.Graph(dev0); c0 = Mantle.Buffer(dev0, zeros(Int32, 1))
-    @test_throws ArgumentError Mantle.repeat!(_ -> nothing, g0, 4)
     @test_throws ArgumentError Mantle.repeat!(_ -> nothing, g0, 4, c0; while_nonzero = c0)
     # …and `maxiters` has to name at least one iteration.
     dev = Mantle.Device(Mantle.VulkanAPI())
@@ -281,7 +284,7 @@ end
         g = Mantle.Graph(dev)
         Mantle.dispatch!(g, repeat_decide!, (count, src), 1; name = "decide")
         Mantle.repeat!(g, maxiters, count) do i
-            Mantle.dispatch!(g, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf); name = "step-$i")
+            Mantle.dispatch!(g, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf); name = "step")
         end
         pl = Mantle.record!(Mantle.Plan(g))
         Mantle.run!(pl)
@@ -296,4 +299,174 @@ end
     finally
         ctx.conditional_rendering_available = had
     end
+end
+
+# ── the compile-once loop ─────────────────────────────────────────────────────
+#
+# Without a gate every iteration runs; the body reads the index to differ per
+# iteration. Two transients carry across iterations and two are scoped to one:
+#
+#   * `t` is read by the body before it is written (an accumulator), and read
+#     after the loop, so it lives across the whole body and keeps its value
+#     from one iteration to the next;
+#   * `w` and `w2` are written and then read inside an iteration, so the placer
+#     may reuse their memory — and the head barrier of the next iteration is
+#     what orders that reuse.
+#
+# After `n` iterations `t = 1 + … + n` and `out2 = 2(1 + … + n)`. A body that ran
+# with a stale index, a carried value that was aliased away, or an iteration
+# that read the previous one's `w` gives a different number.
+@kernel function loop_zero!(t)
+    i = @index(Global)
+    @inbounds t[i] = Int32(0)
+end
+@kernel function loop_accum!(t, index)
+    i = @index(Global)
+    @inbounds t[i] += index[1]
+end
+@kernel function loop_twice!(w, index)
+    i = @index(Global)
+    @inbounds w[i] = index[1] * Int32(2)
+end
+@kernel function loop_addfrom!(out, w)
+    i = @index(Global)
+    @inbounds out[i] += w[i]
+end
+@kernel function loop_copy!(out, t)
+    i = @index(Global)
+    @inbounds out[i] = t[i]
+end
+
+function loopgraph(dev, n, iters)
+    g = Mantle.Graph(dev)
+    out1 = Mantle.Buffer(dev, zeros(Int32, n))
+    out2 = Mantle.Buffer(dev, zeros(Int32, n))
+    t = Mantle.Transient.Buffer(g, Int32, n)
+    Mantle.dispatch!(g, loop_zero!, (t,), n; name = "zero t")
+    Mantle.dispatch!(g, loop_zero!, (out2,), n; name = "zero out2")
+    Mantle.repeat!(g, iters) do i
+        Mantle.dispatch!(g, loop_accum!, (t, i), n; name = "accumulate")
+        w = Mantle.Transient.Buffer(g, Int32, n)
+        Mantle.dispatch!(g, loop_twice!, (w, i), n; name = "twice")
+        w2 = Mantle.Transient.Buffer(g, Int32, n)
+        Mantle.dispatch!(g, loop_copy!, (w2, w), n; name = "copy")
+        Mantle.dispatch!(g, loop_addfrom!, (out2, w2), n; name = "add")
+    end
+    Mantle.dispatch!(g, loop_copy!, (out1, t), n; name = "read t")
+    return g, out1, out2
+end
+
+@testset "repeat!: a host count, the index, and transients across iterations" begin
+    dev = Mantle.Device(Mantle.VulkanAPI())
+    n = 256
+    for iters in (1, 7, 50)
+        g, out1, out2 = loopgraph(dev, n, iters)
+        pl = Mantle.record!(Mantle.Plan(g))
+        # Compiled once, for every count: the host-write updates, two zeroings,
+        # the index reset, five body passes (the four above and the advance) and
+        # the read. One iteration is no loop, and has neither reset nor advance.
+        @test length(pl.passes) == (iters == 1 ? 8 : 10)
+        @test length(pl.loops) == (iters == 1 ? 0 : 1)
+        want = iters * (iters + 1) ÷ 2
+        for _ in 1:3
+            Mantle.run!(pl)
+            Mantle.waitfor!(pl)
+            @test all(==(Int32(want)), Array(Mantle.storage(out1)))
+            @test all(==(Int32(2want)), Array(Mantle.storage(out2)))
+        end
+        Mantle.free!(pl)
+    end
+end
+
+@testset "repeat!: the same loop on the host" begin
+    host = Mantle.Device(Mantle.HostAPI())
+    g, out1, out2 = loopgraph(host, 16, 7)
+    pl = Mantle.Plan(g)
+    Mantle.run!(pl)
+    @test all(==(Int32(28)), Array(Mantle.storage(out1)))
+    @test all(==(Int32(56)), Array(Mantle.storage(out2)))
+    Mantle.free!(pl)
+end
+
+# Where the recording is cut and what goes in one submission are core's, and a
+# loop is cut at its body's edge so a run can submit the body once per
+# iteration. The results cannot depend on either.
+#
+#   * `budget = Inf`: before, body, after; all iterations in ONE submission.
+#   * a budget no pass fits: every pass its own piece and every iteration of
+#     every body pass its own submission — 4 before + 7 × 5 + 1 after.
+#   * the default: measured by the first run, one pass per submission, and
+#     re-recorded at the start of the second into the budget partition, which
+#     for work this small is the three pieces in one submission again.
+@testset "repeat!: iterations are cut into submissions by the budget" begin
+    dev = Mantle.Device(Mantle.VulkanAPI())
+    n, iters = 256, 7
+    nbatches(pl) = length(pl.recording.batches)
+    # (pieces, submissions) after the first run and after the second.
+    for (budget, after) in ((Inf, [(3, 1), (3, 1)]),
+                            (1e-9, [(10, 40), (10, 40)]),
+                            (Mantle.submissionbudget(dev), [(10, 40), (3, 1)]))
+        g, out1, out2 = loopgraph(dev, n, iters)
+        pl = Mantle.record!(Mantle.Plan(g; budget))
+        for r in 1:2
+            Mantle.run!(pl)
+            Mantle.waitfor!(pl)
+            @test (length(pl.partition), nbatches(pl)) == after[r]
+            @test all(==(Int32(28)), Array(Mantle.storage(out1)))
+            @test all(==(Int32(56)), Array(Mantle.storage(out2)))
+        end
+        Mantle.free!(pl)
+    end
+end
+
+@testset "repeat! refuses what one recording of the body cannot express" begin
+    dev = Mantle.Device(Mantle.VulkanAPI())
+    x = Mantle.Buffer(dev, zeros(Int32, 4))
+    # Nested loops: a pass belongs to one loop.
+    g = Mantle.Graph(dev)
+    @test_throws ArgumentError Mantle.repeat!(g, 2) do i
+        Mantle.repeat!(g, 2) do j
+            Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "inner")
+        end
+    end
+    # A `when!` region inside a body, and a body inside one.
+    g = Mantle.Graph(dev)
+    flag = Ref(true)
+    @test_throws ArgumentError Mantle.repeat!(g, 2) do i
+        Mantle.when!(g, flag) do
+            Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "conditional")
+        end
+    end
+    g = Mantle.Graph(dev)
+    @test_throws ArgumentError Mantle.when!(g, flag) do
+        Mantle.repeat!(g, 2) do i
+            Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "looped")
+        end
+    end
+end
+
+# One iteration is a gated region: no loop in the plan, no index to reset or
+# advance, and a recording that is not cut around it. VideoEditor gates every
+# optional effect of its chain this way.
+@testset "repeat!(g, 1; gate) is a gated region, not a loop" begin
+    dev = Mantle.Device(Mantle.VulkanAPI())
+    n = 32
+    x = Mantle.Buffer(dev, zeros(Int32, n))
+    flag = Mantle.Buffer(dev, Int32[0])
+    g = Mantle.Graph(dev)
+    Mantle.repeat!(g, 1; while_nonzero = flag) do _
+        Mantle.dispatch!(g, repeat_drain!, (x, flag), n; name = "once")
+    end
+    pl = Mantle.record!(Mantle.Plan(g; budget = Inf))
+    @test isempty(pl.loops)
+    @test [pp.pass.name for pp in pl.passes] == ["updates", "repeat!/gate", "once"]
+    for start in (0, 1, 0, 1)
+        copyto!(Mantle.storage(x), zeros(Int32, n))
+        copyto!(Mantle.storage(flag), Int32[start])
+        Mantle.waitidle(dev)
+        Mantle.run!(pl)
+        Mantle.waitidle(dev)
+        @test all(==(Int32(start)), Array(Mantle.storage(x)))
+    end
+    Mantle.free!(pl)
 end

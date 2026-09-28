@@ -47,37 +47,35 @@ end
     trips = Mantle.GPURef(dev, Int32(1))          # the loop runs ONE of its two iterations
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, 2, trips) do i
-        Mantle.dispatch!(g, dip_bump!, (out, count), Mantle.DeviceRange(count); group = 64, name = "bump-$i")
+        Mantle.dispatch!(g, dip_bump!, (out, count), Mantle.DeviceRange(count); group = 64, name = "bump")
     end
     pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))
 
-    # One slot per iteration, in pass order.
+    # The body is compiled once, so its dispatch has ONE slot, which each
+    # iteration's prepare writes again.
     slots = Int[]
     for pp in pl.passes, d in pp.dispatches
         k = Mantle.indirectindex(d)
         k == 0 || push!(slots, k)
     end
-    @test length(slots) == 2
+    @test length(slots) == 1
+    slot = only(slots)
 
     # A sentinel no prepare would write: whatever the slot holds after the run
-    # is what the command processor read.
+    # is what the last iteration's prepare left there.
     sentinel = UInt32(0xFFFF0000)
-    for k in slots
-        KA.fill!(pl.args.indirect[k], sentinel)
-    end
+    KA.fill!(pl.args.indirect[slot], sentinel)
     KA.synchronize(Mantle.backend(dev))
 
     Mantle.run!(pl)
     Mantle.waitfor!(pl)
 
-    first_slot = Array(pl.args.indirect[slots[1]])
-    second_slot = Array(pl.args.indirect[slots[2]])
-    @test first_slot[1] == UInt32(cld(n, 64))     # the iteration that ran: its groups
-    @test first_slot[2:3] == UInt32[1, 1]
-    # THE assertion: the discarded iteration's prepare ran and wrote zero. Before
-    # the fix the slot still held the sentinel, which a trace would have read.
-    @test second_slot[1] == UInt32(0)
-    @test second_slot[2:3] == UInt32[1, 1]
+    # THE assertion: the second iteration was discarded and its prepare still ran
+    # and wrote zero. Had it been discarded with the iteration, the slot would
+    # still hold the first iteration's group count, which a trace would read.
+    got = Array(pl.args.indirect[slot])
+    @test got[1] == UInt32(0)
+    @test got[2:3] == UInt32[1, 1]
     # And the body of the discarded iteration did not run: one bump, not two.
     @test Array(Mantle.storage(out)) == fill(Int32(1), n)
     Mantle.free!(pl)

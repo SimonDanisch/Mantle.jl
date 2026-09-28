@@ -253,7 +253,7 @@ function seam_gatedplan(dev, n, iters)
         M.dispatch!(g, seam_gatecount!,
                         (a,
                          b,
-                         flag), n; name = "it-$i")
+                         flag), n; name = "it")
     end
     return M.record!(M.Plan(g)), a, flag
 end
@@ -275,8 +275,9 @@ if MTLm.supports_mtl4(Metal.device())
             dev = Mantle.MetalDevice(mtldev, q)
             Mantle.adoptqueue!(dev)
             pl, a, flag = seam_gatedplan(dev, 1 << 10, 8)
-            rec = pl.recording
-            @test count(s -> s.slot >= 0, rec.segments) == 8
+            # The loop body: one piece, replayed once per iteration.
+            rec = pl.recording.parts[end]
+            @test count(s -> s.slot >= 0, rec.segments) == 1
             # Captured only where it is needed, and then every command inside a
             # gated segment takes its grid from memory.
             if Mantle.encodes(q)
@@ -338,14 +339,17 @@ if MTLm.supports_mtl4(Metal.device())
         mtl4 = Mantle.MetalDevice(mtldev, Mantle.MTL4Queue(mtldev))
         pl_legacy, = seam_gatedplan(legacy, 256, 2)
         pl_mtl4, = seam_gatedplan(mtl4, 256, 2)
+        # The loop body, the piece whose gate writes a range or a grid.
+        rec_legacy = pl_legacy.recording.parts[end]
+        rec_mtl4 = pl_mtl4.recording.parts[end]
 
-        @test Mantle.canrun(legacy.queue, pl_legacy.recording)
-        @test Mantle.canrun(mtl4.queue, pl_mtl4.recording)
-        @test !Mantle.canrun(mtl4.queue, pl_legacy.recording)
-        @test !Mantle.canrun(legacy.queue, pl_mtl4.recording)
+        @test Mantle.canrun(legacy.queue, rec_legacy)
+        @test Mantle.canrun(mtl4.queue, rec_mtl4)
+        @test !Mantle.canrun(mtl4.queue, rec_legacy)
+        @test !Mantle.canrun(legacy.queue, rec_mtl4)
         # And `replay!` is where that is asked, so neither runs a command.
-        @test_throws ArgumentError Mantle.replay!(mtl4, pl_legacy.recording)
-        @test_throws ArgumentError Mantle.replay!(legacy, pl_mtl4.recording)
+        @test_throws ArgumentError Mantle.replay!(mtl4, rec_legacy)
+        @test_throws ArgumentError Mantle.replay!(legacy, rec_mtl4)
         Mantle.adoptqueue!(DEV_SEAM)
     end
 end
@@ -415,7 +419,7 @@ end
             M.dispatch!(g, seam_gatecount!,
                             (a,
                              b,
-                             flag), 256; name = "it-$i")
+                             flag), 256; name = "it")
         end
         pl = M.Plan(g)
         @test Metal.adopted_queue[] === Mantle.batchqueue(DEV_SEAM)
@@ -465,10 +469,11 @@ end
         M.dispatch!(g, seam_gate!,
                         (a,
                          b,
-                         flag), n; name = "it-$i")
+                         flag), n; name = "it")
     end
     plan = M.record!(M.Plan(g))
-    @test count(s -> s.slot >= 0, plan.recording.segments) == iters
+    # The body is one piece, replayed once per iteration, with one gated segment.
+    @test count(s -> s.slot >= 0, plan.recording.parts[end].segments) == 1
 
     # One run with the gate open: every iteration runs, and the last one closes it.
     M.run!(plan); M.waitfor!(plan)

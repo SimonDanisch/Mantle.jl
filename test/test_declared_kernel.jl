@@ -20,10 +20,10 @@
 # assertion below passed on one backend while failing on another at some point
 # in this file's first hour: the values on Lava (no KI path in
 # `compile_dispatch`), the same values on the host (no `KI.kernel_function` for
-# `KernelAbstractions.CPU` — still true, and the test states it as a named
-# refusal rather than skipping), and `peakbytes` on ROCm (a transient with no
-# interval, because a `range`d usage interns as the `BufferRange` and the
-# parent's `touch!` was discarded).
+# `KernelAbstractions.CPU` until the host backend ran plain functions one work
+# item at a time itself), and `peakbytes` on ROCm (a transient with no interval,
+# because a `range`d usage interns as the `BufferRange` and the parent's
+# `touch!` was discarded).
 
 using Test, Mantle
 using KernelAbstractions
@@ -78,8 +78,8 @@ end
 
 # Nothing to launch and nothing to touch: the two dispatches `dispatch!` refuses.
 #
-# A KA kernel rather than a macro-free one so this reaches every backend --
-# `kisupported` is false on the host, and the refusals are core's, not a
+# A KA kernel rather than a macro-free one so this reaches every backend,
+# including one without `KI.kernel_function`; the refusals are core's, not a
 # backend's. The body has to do something with its argument or the optimiser
 # deletes the whole kernel, and `donotdelete` is the cheapest way to say so
 # without touching memory.
@@ -149,10 +149,10 @@ end
 
     dev = M.Device(BE)
     if !M.kisupported(dev, bcast_f!)
-        # Stated, not skipped. `KernelInterface` has no backend for
-        # `KernelAbstractions.CPU` (only POCL), so a macro-free kernel cannot be
-        # compiled for the host at all, and `kikernel` says so by name. The
-        # refusal is the behaviour under test here.
+        # Stated, not skipped. A backend with no `KI.kernel_function` cannot
+        # compile a macro-free kernel at all, and `kikernel` says so by name. The
+        # refusal is the behaviour under test here. (The host was such a backend
+        # until it ran plain functions itself, one work item at a time.)
         #
         # `kisupported` and not a `hasmethod` written out here, because a device
         # can have two backend objects and only `kibackend` knows which one KI
@@ -233,6 +233,16 @@ end
     WG = 32
     g3 = M.Graph(dev)
     out3 = M.Transient.Buffer(g3, Float32, WG)
+    if M.caps(dev).sharedbudget == 0
+        # No workgroup memory: the host runs a workgroup's items one after
+        # another, so none can wait at `KI.barrier()` for the others, and the
+        # barrier is KernelInterface's own "outside a kernel" error there. The
+        # walk reads that as a body that only throws and refuses the kernel at
+        # declaration, which is the answer rather than a wrong tile.
+        @test_throws M.UnanalysableAccess M.dispatch!(g3, twotiles!, (out3, WG, Val(WG)), WG;
+                                                     group = WG, name = "twotiles")
+        return
+    end
     M.dispatch!(g3, twotiles!, (out3, WG, Val(WG)), WG;
                 group = WG, name = "twotiles")
     pl3 = M.Plan(g3)

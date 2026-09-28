@@ -172,8 +172,8 @@ A recorded DISPATCH is named by its kernel alone. It used to carry its argument
 offset too, "to keep two dispatches of one kernel apart", but nothing tells
 dispatches apart by name, and the name is part of the compile key: every copy of a
 kernel became its own compile job, its own metallib and its own native link.
-`repeat!` unrolls its body once per iteration, so Hikari's bounce kernels were
-compiled eight times over (80 links for ~10 kernels on the isubd demo). Two
+`repeat!` unrolled its body once per iteration then, so Hikari's bounce kernels
+were compiled eight times over (80 links for ~10 kernels on the isubd demo). Two
 dispatches of one kernel at the same types are one kernel.
 
 The slotted form stays for the recorder's own helpers, whose slot IS part of what
@@ -527,14 +527,7 @@ mutable struct MetalRecorder
     gridcursor::Int     # how many triples are spoken for
     gridfirst::Int      # the first triple of the segment under construction
     writers::Vector{MetalWriter}
-    # The pass about to be emitted, stashed by `emitbarriers!` — which is the only
-    # hook that sees one before `withpredicate` decides what segment it belongs to.
-    pass::Any
     nwriters::Int       # how many gated runs the plan holds, counted at open
-    # Set when a gate is absorbed into the open iteration. Every iteration of one
-    # `repeat!` names the SAME one-slot flag, so the predicate alone cannot tell the
-    # next iteration from the rest of this one — the gate that went by can.
-    newiter::Bool
 end
 
 """What a recorded frame replays, and everything it must keep alive to do so."""
@@ -608,8 +601,8 @@ How many commands `passes` needs, how many of them are range writers, and how ma
 CALLS they hold.
 
 A RANGE, because a recording covers the whole plan only when it is not partitioned:
-`record!(pl; maxpasses = N)` writes the walk into several, and each has to be sized
-for its own piece. Sizing every piece for the plan gave Qwen-Image 2.1's text
+core cuts the walk into several (`partitionranges`), and each has to be sized for
+its own piece. Sizing every piece for the plan gave Qwen-Image 2.1's text
 encoder eighteen indirect command buffers of 1116 commands each to hold 25.
 
 A call is not a command. It is host work the indirect command buffer has no way to
@@ -637,9 +630,7 @@ end
 
 """
 Whether two passes are gated by the same thing, which is what puts them in one
-segment. Identity of the flag AND the index: `repeat!` gives every iteration the same
-one-slot flag, and what separates two iterations is the ungated gate pass between
-them, not the flag.
+segment: identity of the flag AND the index.
 """
 samepredicate(a::Tuple{Any,Int}, b::Tuple{Any,Int}) = a[1] === b[1] && a[2] == b[2]
 samepredicate(::Tuple{Any,Int}, ::Nothing) = false
@@ -696,13 +687,20 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
     # HorizonRunner's prefill and Qwen-Image 2.1's text encoder want, and neither
     # gates — and a clear refusal is worth more than a recording that is wrong on
     # its second frame.
+    #
+    # A `repeat!` body is the exception. Its gate is the body's first pass and
+    # every iteration is a replay of its own, so each writer in the piece runs on
+    # every replay and writes its range whatever the gate said: a closed gate
+    # writes a length of zero rather than leaving the last one standing, and there
+    # is nothing for a reset to clear.
     head = first(passes) == 1 && nwriters > 0
-    nwriters == 0 || first(passes) == 1 || throw(ArgumentError(
+    inloop = !isempty(passes) && pl.passes[first(passes)].pass.loop !== nothing
+    nwriters == 0 || first(passes) == 1 || inloop || throw(ArgumentError(
         "record!: passes $(passes) hold $(nwriters) gated pass(es) and this is not " *
         "the first piece of the partition. A piece owns the range array its gates " *
         "write, and only the first is given the reset that clears it — so a later " *
-        "gated piece would replay stale counts. Record this plan without " *
-        "`maxpasses`, or keep the gated passes in its first $(first(passes) - 1)."))
+        "gated piece would replay stale counts. Keep the gated passes in its first " *
+        "$(first(passes) - 1), or no `when!` region before them."))
     ncommands = ndispatch + nwriters + (head ? 1 : 0)
     # `ray_tracing`, unconditionally: a command whose kernel traces — an inline
     # ray query against a hardware acceleration structure — is refused by a buffer
@@ -752,7 +750,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
                          MetalSegment[], Pair{Int,Any}[], 1, nothing, -1,
                          aux, convert(Ptr{UInt8}, MTL.contents(aux)), 0,
                          ranges, grids, templ, zeros(UInt32, ngrid), 0, 0,
-                         MetalWriter[], nothing, nwriters, false)
+                         MetalWriter[], nwriters)
 end
 
 """How many buffer slots a dispatch's arguments take, which is what the descriptor
@@ -900,10 +898,7 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
     # lets the table be built once.
     if encodes(e.dev.queue)
         # A command inside a gated segment takes its grid from memory, and the run
-        # it belongs to has one triple per command. The writer that opens the NEXT
-        # segment is encoded while this one is still open, so it takes a triple too
-        # and is discarded with the iteration that should not have run it — which is
-        # the whole of "once closed, a `repeat!` loop stays closed".
+        # it belongs to has one triple per command.
         goff = -1
         if e.slot >= 0
             goff = 3 * e.gridcursor
@@ -959,10 +954,6 @@ so a pass that needs one gets it on its first command and the rest of the pass s
 runs concurrently.
 """
 function Mantle.emitbarriers!(e::MetalRecorder, pp::Mantle.PassPlan)
-    # Stashed here because this is the only hook that sees the PASS before
-    # `withpredicate` has to decide which segment its work belongs to, and that
-    # decision reads what the pass writes — see `gatesopen`.
-    e.pass = pp
     isempty(pp.pre) || (e.barrier = true)
     return nothing
 end
@@ -976,14 +967,18 @@ Open a segment for this pass's predicate, closing the one before it.
 
 Consecutive passes with the same gate share a segment; a change of gate — including
 to and from no gate at all — ends one. A gated segment is preceded by its range
-writer, which is encoded into the segment BEFORE it so that it runs before the
-command processor reads what it wrote.
+writer, which is encoded into an UNGATED segment before it, so that it runs on
+every replay and before the command processor reads what it wrote.
 """
 function Mantle.withpredicate(f, e::MetalRecorder, pred::Tuple{Any,Int})
-    if !samepredicate(pred, e.pred) || e.newiter
-        # The writer belongs to the segment that is open now (the one holding the
-        # gate dispatch), and must wait for it: a barrier, then close, then the
-        # gated segment starts after it.
+    if !samepredicate(pred, e.pred)
+        # Never into another gated segment: a writer there is discarded with that
+        # segment's work when its gate is closed, and this segment would keep a
+        # range nothing wrote. Two gated regions back to back is a schedule's
+        # choice, not something a graph rules out.
+        e.pred === nothing || closesegment!(e)
+        # The writer waits for the segment open now (the one holding the gate
+        # dispatch): a barrier, then close, then the gated segment starts after it.
         e.barrier = true
         emitwriter!(e, pred)
         closesegment!(e)
@@ -993,44 +988,13 @@ function Mantle.withpredicate(f, e::MetalRecorder, pred::Tuple{Any,Int})
         # a segment's length is not known until its passes have been emitted, and
         # neither is the run of grids the gate has to zero.
         e.gridfirst = e.gridcursor
-        e.newiter = false
     end
     f()
     return nothing
 end
 
-"""
-Whether the pass about to be emitted is the GATE of the segment that is open.
-
-A `repeat!` gate is an ungated pass that writes the flag the next iteration reads,
-and it is the only ungated work that may be absorbed into the iteration before it:
-if that iteration is discarded the gate does not run, its range stays zero from
-`emithead!`'s reset, and the next iteration is discarded too — which is the right
-answer, because a discarded iteration writes nothing the gate reads and so the gate
-would have said the same thing. Once closed, a `repeat!` loop stays closed.
-
-Asked of what the pass WRITES rather than of its name: `repeat!`'s gate kernel
-writes the predicate, and a pass that happens to be scheduled
-between two iterations without touching the flag is real work and ends the segment.
-"""
-function gatesopen(e::MetalRecorder)
-    e.pred === nothing && return false
-    pp = e.pass
-    pp === nothing && return false
-    pid = Mantle.resourceid(e.plan.graph, e.pred[1])
-    for (id, u) in pp.pass.usages
-        id == pid && Mantle.writes(u) && return true
-    end
-    return false
-end
-
 function Mantle.withpredicate(f, e::MetalRecorder, ::Nothing)
-    # Absorbed rather than ending the segment: this is what makes a frame ONE
-    # `executeCommandsInBuffer` per iteration instead of two, and the gate is the
-    # only ungated pass it is sound for.
-    if e.pred !== nothing
-        gatesopen(e) ? (e.newiter = true) : closesegment!(e)
-    end
+    e.pred === nothing || closesegment!(e)
     f()
     return nothing
 end
@@ -1138,6 +1102,20 @@ function Mantle.emithead!(e::MetalRecorder, pl::Mantle.Plan)
     e.auxcursor += Mantle.argalign(nbytes)
     pack_recorded!(e.auxptr, args, (state, metal_reset_ranges!, adapted...))
     encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(1), MTL.MTLSize(1))
+    return nothing
+end
+
+"""
+    Mantle.emitloophead!(recorder, plan, body)
+
+Before each iteration of a `repeat!` body, which is a piece of its own: the next
+command carries the barrier bit. Nothing else is needed, because each iteration is
+a replay of its own and replays are already ordered behind each other: an MTL4
+submission waits for the previous one's event, and the legacy queue runs command
+buffers in order behind the resources `opensubmit!` declares.
+"""
+function Mantle.emitloophead!(e::MetalRecorder, ::Mantle.Plan, ::AbstractUnitRange)
+    e.barrier = true
     return nothing
 end
 
@@ -1266,8 +1244,8 @@ function submitrun!(d::MetalDevice, pl::Mantle.Plan)
     # queue that signals an event per submit knows which value this run will
     # reach, and one that does not falls back to bumping its retirement counter.
     # A walked plan submitted nothing here, so it asks for a bare fence.
-    # Through `submitrecording!` rather than straight to `replay!`: a plan recorded
-    # with `maxpasses` is several pieces, and core owns the sequence over them
+    # Through `submitrecording!` rather than straight to `replay!`: a plan cut into
+    # several pieces (`partitionranges`) is a sequence, and core owns it
     # (`RecordingParts`). Asserting one `MetalRecording` here is what Qwen-Image
     # 2.1's text encoder met — it asks for a partition, and until now only Vulkan
     # had ever been given one.

@@ -213,6 +213,50 @@ function kikernel(f, dev, args)
     return KI.kernel_function(be, f, tt)
 end
 
+"""Normalise KI's scalar / tuple / empty launch extents to a 3-tuple."""
+@inline function ki_extent(x, default::Int)
+    x isa Integer && return (Int(x), default, default)
+    n = length(x)
+    n == 0 && return (default, default, default)
+    return (Int(x[1]),
+            n >= 2 ? Int(x[2]) : default,
+            n >= 3 ? Int(x[3]) : default)
+end
+
+"""
+    ki_launch_extents(backend, ndrange, workgroupsize, numworkgroups;
+                      max_work_group_size) -> (wg, blocks)
+
+The workgroup size and workgroup count a KI launch resolves to, as 3-tuples.
+
+Shared by every backend's immediate KI launch (Vulkan's, the host's) and by
+Vulkan's `compile_dispatch`, which needs the same answer at COMPILE time — a
+recorded plan does no host work per run, so the extents have to be fixed when the
+plan is built. One copy, because two would be one place for the two paths to
+disagree about the same launch.
+
+`threads_to_workgroupsize` is KI's, and it SHAPES the device limit to the ndrange
+rather than putting it all on the first axis. Getting that wrong by hand cost 29%
+of SAM 2.1's encoder on the ROCm side; here it is upstream's arithmetic.
+"""
+function ki_launch_extents(backend, ndrange, workgroupsize, numworkgroups;
+                           max_work_group_size::Int = typemax(Int))
+    limit = min(max_work_group_size, KI.max_work_group_size(backend))
+    if length(ndrange) > 0
+        nd = ki_extent(ndrange, 1)
+        wg = length(workgroupsize) > 0 ? ki_extent(workgroupsize, 1) :
+             ki_extent(KI.threads_to_workgroupsize(limit, nd), 1)
+        blocks = ntuple(i -> cld(nd[i], wg[i]), 3)
+    else
+        # KI's default is one workgroup of one workitem.
+        wg     = ki_extent(workgroupsize, 1)
+        blocks = ki_extent(numworkgroups, 1)
+    end
+    prod(wg) <= limit ||
+        throw(ArgumentError("workgroupsize $wg exceeds the device limit of $limit workitems"))
+    return wg, blocks
+end
+
 kernelfor(k, ::Nothing, backend) = k(backend)
 kernelfor(k, group, backend) = k(backend, group)
 
@@ -628,6 +672,9 @@ function run!(pl::Plan)
         # a plan that follows nothing.
         refit!(pl)
         checkextents(pl)
+        # A plan measuring itself takes the last run's pass times here, and
+        # re-cuts its recording (below) once they are all in.
+        measure!(pl)
         # A recording that a move or a refit threw away is written again here,
         # on the owning thread, before it is submitted. Not a first recording: a
         # plan that was never recorded is refused by the backend's `execute!`.
@@ -651,8 +698,10 @@ be noticed; whatever it notices is what the frame is then refit for. Failing
 before the acquire leaves nothing behind.
 """
 function beforeframe!(dev, pl::Plan)
-    # Before this run overwrites them, and without waiting: see `collect!`.
-    pl.profiler === nothing || collect!(pl.profiler, dev)
+    # Before this run overwrites them, and without waiting: see `collect!`. Only
+    # a recording that writes timestamps has any to read; a measured plan keeps
+    # its profiler and must not pay a dynamic call for it every run.
+    pl.stamped && collect!(pl.profiler, dev)
     for s in pl.graph.surfaces
         beginframe!(s.win)
         acquire_next_image!(s.win)
@@ -705,7 +754,7 @@ function execute!(dev, pl::Plan)
     am = pl.args
     am === nothing || setargtoken!(am, tok)
     # A frame's timestamps are pending from the submission that writes them.
-    pl.profiler === nothing || (pl.profiler.pending = true)
+    pl.stamped && (pl.profiler.pending = true)
     return nothing
 end
 
@@ -788,9 +837,11 @@ What each pass cost, as a median over the last [`NSAMPLES`](@ref) frames.
 `run!` itself can see.
 """
 function timings(pl::Plan)
-    prof = pl.profiler
-    prof === nothing &&
+    # The profiler a plan measures its budget with is not a request for timings:
+    # its samples are the first run's and stop when the measurement ends.
+    pl.profile ||
         throw(ArgumentError("this plan was not built to be profiled; use Plan(g; profile = true)"))
+    prof = pl.profiler
     collect!(prof, pl.graph.dev)
     med(x) = isempty(x) ? NaN : (q = sort(x); q[(length(q) + 1) ÷ 2])
     return [PassTiming(prof.names[i], pl.passes[i].pass.kind,
@@ -820,7 +871,20 @@ Named for what it walks, beside `emithead!`, `emitpass!` and `emitwork!`.
 """
 function emitplan!(e, pl::Plan)
     emithead!(e, pl)
-    emitpasses!(e, pl, eachindex(pl.passes))
+    # A loop body is walked once per iteration, behind its loop head. Only a
+    # WALKED plan gets here with a loop (an interpreted run, a windowed frame):
+    # a recording cuts a loop into pieces of its own (`partitionranges`) and
+    # repeats them at submission.
+    i = 1
+    for (r, loop) in pl.loops
+        emitpasses!(e, pl, i:(first(r) - 1))
+        for _ in 1:loop.count
+            emitloophead!(e, pl, r)
+            emitpasses!(e, pl, r)
+        end
+        i = last(r) + 1
+    end
+    emitpasses!(e, pl, i:length(pl.passes))
     return nothing
 end
 
@@ -835,7 +899,7 @@ into each of its pieces and the head into the first only — see
 function emitpasses!(e, pl::Plan, range)
     # Two loops rather than one with a branch in it: a frame that is not being
     # profiled must not pay a comparison per pass.
-    if pl.profiler === nothing
+    if !pl.stamped
         for i in range
             emitpass!(e, pl, pl.passes[i])
         end
@@ -929,20 +993,12 @@ frame and a recording names one. Headless plans have no such thing.
 
 It does NOT run the plan.
 
-`maxpasses=N` splits the baked commands into submissions of at most N passes,
-preserving the full plan's ordering and barriers, on any backend that records at
-all — the chunked walk is [`recordparts!`](@ref) and the pieces are
-[`RecordingParts`](@ref), both core's, so a backend answers `submitrecording!`
-for one piece and needs nothing else. The default zero keeps one submission. Use
-this for long workloads that exceed the device's submission timeout; pass count
-is not a runtime guarantee, and a single long-running dispatch still needs to be
-split by its caller. The partition is retained if resource movement invalidates
-the recording.
+Where the recording is cut into submissions is core's, and no caller chooses it:
+see [`partitionranges`](@ref). A plan that has not been measured yet is cut after
+every pass and timed; `run!` re-records it once from what it measured, into
+submissions of at most the plan's `budget` of GPU time.
 """
-function record!(pl::Plan; maxpasses::Int = pl.record_maxpasses)
-    maxpasses >= 0 || throw(ArgumentError("record!: maxpasses must be nonnegative"))
-    pl.recording !== nothing && maxpasses != pl.record_maxpasses &&
-        throw(ArgumentError("record!: free the existing recording before changing maxpasses"))
+function record!(pl::Plan)
     pl.recording === nothing || return pl
     recordable(pl) || throw(ArgumentError(
         isempty(pl.graph.surfaces) ?
@@ -954,42 +1010,30 @@ function record!(pl::Plan; maxpasses::Int = pl.record_maxpasses)
         "image every frame and a recording names one, so a windowed plan needs a " *
         "recording per swapchain image — which is not built yet. Headless plans " *
         "record today."))
-    recordplan!(pl.graph.dev, pl, maxpasses)
-    # After the record, so the field holds the last partition that WORKED. A
-    # backend that cannot partition throws from `recordplan!`, and writing the
-    # requested value first left that plan asking for the same refused partition
-    # on every later `record!(pl)` — the default reads this field.
-    pl.record_maxpasses = maxpasses
+    recordplan!(pl.graph.dev, pl)
     return pl
 end
 
-function recordplan!(dev, pl::Plan, maxpasses::Int)
-    # The range this FIRST recording covers, which is the whole plan unless the
-    # caller asked for a partition. `recordparts!` opens the rest itself and knows
-    # its own chunks; this one is opened here because `recordplan!` has to open one
-    # to find out whether the backend records at all.
-    # The pieces this plan records as. With no `when!` condition and no
-    # `maxpasses` this is one range covering everything, and the single-piece
-    # path below is the one taken — unchanged, so a plan that uses neither pays
-    # nothing for their existence.
-    ranges = partitionranges(pl, maxpasses)
+function recordplan!(dev, pl::Plan)
+    # The pieces this plan records as: one range covering everything for a
+    # measured plan that fits its budget and has no `when!` condition, which is
+    # the single-piece path below.
+    ranges = partitionranges(pl)
+    # The measuring recording carries the timestamps; a measured one only if
+    # the caller asked for timings.
+    pl.stamped = pl.profiler !== nothing && (pl.profile || measuring(pl))
     e = openrecording(dev, pl, first(ranges))
     if e === nothing
         # A backend with no command buffers to build: `run!` walks the plan
-        # instead, which is the same walk. Asking for a partition of it is a
-        # different matter — the caller wants submission boundaries and there
-        # are no submissions — so that is refused rather than ignored.
-        maxpasses == 0 || throw(ArgumentError(
-            "record!: maxpasses = $maxpasses, and this backend does not record: " *
-            "`openrecording` declined the plan, so there is nothing to partition. " *
-            "`run!` walks it per frame."))
-        # Same argument for a `when!` region: skipping one means not submitting
-        # the piece it is in, and a backend with no pieces has nothing to skip.
-        length(ranges) == 1 || throw(ArgumentError(
+        # instead, which is the same walk, and there are no submissions to cut.
+        # A `when!` region is refused: skipping one means not submitting the
+        # piece it is in, and a backend with no pieces has nothing to skip.
+        any(pp -> pp.pass.hostcond !== nothing, pl.passes) && throw(ArgumentError(
             "record!: this plan has a `when!` condition and this backend does " *
             "not record: a conditional region is a recorded piece that the run " *
             "may omit, and `openrecording` declined the plan. Branch on the " *
             "host and declare the graph you want."))
+        pl.stamped = pl.profile
         return pl
     end
     # Where every device address the pack writes lands, keyed by the address —
@@ -1001,36 +1045,41 @@ function recordplan!(dev, pl::Plan, maxpasses::Int)
         emitplan!(e, pl)
         pl.recording = closerecording!(e, pl)
     else
-        pl.recording = recordparts!(dev, pl, e, maxpasses)
+        pl.recording = recordparts!(dev, pl, e, ranges)
     end
+    pl.partition = ranges
     listen_moves!(pool(pl.graph.dev), pl)
     return pl
 end
 
 """
-    recordparts!(device, plan, emitter, maxpasses) -> RecordingParts
+    recordparts!(device, plan, emitter, ranges) -> RecordingParts
 
-The chunked walk: at most `maxpasses` passes into each piece, `emithead!` into
-the first only, and every piece kept reachable so a throw part way through
-releases all of them rather than leaking a command buffer per chunk.
+The chunked walk: each of [`partitionranges`](@ref)' ranges into a piece of its
+own, `emithead!` into the first only, and every piece kept reachable so a throw
+part way through releases all of them rather than leaking a command buffer per
+chunk.
 
 `emitter` is the already-open first piece, because `recordplan!` has to open one
 to find out whether this backend records at all.
 
 Nothing here is a driver call, which is why it is core's: the arithmetic that
 picks the chunks is the same everywhere, and a piece is whatever this backend's
-`closerecording!` hands back. `HorizonRunner`'s prefill is the only caller that
-asks for a partition, because a 512-token prefill is over 20 seconds in one
-submission.
+`closerecording!` hands back.
 """
-function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
+function recordparts!(dev, pl::Plan, emitter, ranges)
     parts = Any[]
     conds = Any[]
     e = emitter
+    heads = Set(first(r) for (r, _) in pl.loops)
     try
-        for chunk in partitionranges(pl, maxpasses)
+        for chunk in ranges
             e === nothing && (e = openrecording(dev, pl, chunk))
             first(chunk) == 1 && emithead!(e, pl)
+            # The first piece of a loop body opens every iteration: a full
+            # barrier, so what the last iteration wrote is visible to this one.
+            isempty(chunk) || first(chunk) in heads &&
+                emitloophead!(e, pl, only(r for (r, _) in pl.loops if first(r) == first(chunk)))
             emitpasses!(e, pl, chunk)
             push!(parts, closerecording!(e, pl))
             push!(conds, isempty(chunk) ? nothing : pl.passes[first(chunk)].pass.hostcond)
@@ -1046,19 +1095,78 @@ function recordparts!(dev, pl::Plan, emitter, maxpasses::Int)
     end
     # Narrowed from `Any[]`: the pieces are all one backend type, and
     # `submitrecording!` over them should specialise.
-    return RecordingParts(identity.(parts), conds, any(!isnothing, conds))
+    parts = identity.(parts)
+    batches, batchconds = submissionbatches(pl, ranges, parts, conds)
+    return RecordingParts(parts, conds, batches, batchconds)
 end
 
 """
-    partitionranges(plan, maxpasses) -> Vector{UnitRange{Int}}
+    submissionbatches(plan, ranges, parts, conds) -> (batches, conds)
 
-The pass ranges each recorded piece covers.
+The pieces in the order a run submits them, grouped into submissions.
+
+The ORDER repeats a loop body's pieces once per iteration. The GROUPING puts
+consecutive pieces into one submission while their measured cost fits the plan's
+budget, so a loop whose iterations are cheap is still one submission and one that
+is not is cut between iterations; a piece not measured yet is a submission of its
+own. A conditional (`when!`) piece is always its own, so a run can leave it out.
+"""
+function submissionbatches(pl::Plan, ranges, parts::Vector{R}, conds) where {R}
+    loopof(r) = isempty(r) ? nothing : pl.passes[first(r)].pass.loop
+    order = Int[]
+    k = 1
+    while k <= length(ranges)
+        l = loopof(ranges[k])
+        if l === nothing
+            push!(order, k)
+            k += 1
+        else
+            j = k
+            while j < length(ranges) && loopof(ranges[j + 1]) === l
+                j += 1
+            end
+            for _ in 1:l.count
+                append!(order, k:j)
+            end
+            k = j + 1
+        end
+    end
+    timed = measurable(pl)
+    cost(k) = timed ? sum(i -> isnan(pl.passcost[i]) ? Inf : pl.passcost[i], ranges[k]; init = 0.0) : 0.0
+    batches = Vector{R}[]
+    bconds = Any[]
+    t = Inf
+    for k in order
+        c = cost(k)
+        if conds[k] !== nothing || !isempty(bconds) && bconds[end] !== nothing ||
+           isempty(batches) || t + c > pl.budget
+            push!(batches, R[])
+            push!(bconds, conds[k])
+            t = 0.0
+        end
+        push!(batches[end], parts[k])
+        t += c
+    end
+    return batches, bconds
+end
+
+"""
+    partitionranges(plan) -> Vector{UnitRange{Int}}
+
+The pass ranges each recorded piece covers, and so each submission.
 
 Two things cut a piece, and they are independent:
 
-  * `maxpasses`, which is a submission-length bound — see [`record!`](@ref);
+  * the plan's `budget` of GPU time per submission, against what each pass was
+    measured to cost. A pass not measured yet is taken to be unbounded, so an
+    unmeasured plan is cut after every pass: nothing else bounds how long a pass
+    runs, and a submission the watchdog kills returns garbage with no error. A
+    device without timestamps cannot measure and keeps one piece, and so does
+    `budget = Inf`;
   * a change of [`when!`](@ref) condition, because a piece is the unit that can
-    be left unsubmitted, so a conditional region has to be one.
+    be left unsubmitted, so a conditional region has to be one;
+  * the edge of a [`repeat!`](@ref) body, because a run submits the body's pieces
+    once per iteration.
 
 The FIRST range is always unconditional, and that is not a convenience: the head
 (`emithead!`) is baked into piece one and carries the head barrier and the
@@ -1066,21 +1174,32 @@ profiler's query-pool reset. A piece that might not be submitted cannot hold it,
 so a graph whose very first pass is conditional gets an empty leading piece
 rather than a head that sometimes does not run.
 """
-function partitionranges(pl::Plan, maxpasses::Int)
+function partitionranges(pl::Plan)
     n = length(pl.passes)
     out = UnitRange{Int}[]
     n == 0 && return push!(out, 1:0)
     cond(i) = pl.passes[i].pass.hostcond
-    # An empty leading piece when the graph opens on a conditional region: the
-    # head has to go somewhere that always runs.
-    cond(1) === nothing || push!(out, 1:0)
+    loop(i) = pl.passes[i].pass.loop
+    budget = pl.budget
+    timed = measurable(pl)
+    # Untimed is unbounded: a submission of its own at any finite budget, and
+    # `budget = Inf` is the one that keeps everything together regardless.
+    cost(i) = timed ? (isnan(pl.passcost[i]) ? Inf : pl.passcost[i]) : 0.0
+    # An empty leading piece when the graph opens on a conditional region or a
+    # loop: the head has to go somewhere that runs once, always.
+    (cond(1) === nothing && loop(1) === nothing) || push!(out, 1:0)
     i = 1
     while i <= n
         c = cond(i)
+        l = loop(i)
         j = i
-        # Extend while the condition is the SAME OBJECT and the bound allows.
-        while j < n && cond(j + 1) === c && (maxpasses == 0 || j + 1 - i + 1 <= maxpasses)
+        t = cost(i)
+        # Extend while the condition and the loop are the SAME OBJECTS and the
+        # budget allows: a piece never straddles a loop body's edge, because the
+        # body's pieces are the ones a run submits once per iteration.
+        while j < n && cond(j + 1) === c && loop(j + 1) === l && t + cost(j + 1) <= budget
             j += 1
+            t += cost(j)
         end
         push!(out, i:j)
         i = j + 1
@@ -1088,12 +1207,61 @@ function partitionranges(pl::Plan, maxpasses::Int)
     return out
 end
 
+"""Whether this plan can time its passes, and so cut itself by its budget. An
+infinite budget never cuts, so there is nothing to measure for."""
+measurable(pl::Plan) =
+    pl.profiler !== nothing && !isnan(pl.profiler.period_ns) && isfinite(pl.budget)
+
+"""Whether this plan still has an unconditional pass it has not timed."""
+function measuring(pl::Plan)
+    measurable(pl) || return false
+    for i in eachindex(pl.passcost)
+        isnan(pl.passcost[i]) && pl.passes[i].pass.hostcond === nothing && return true
+    end
+    return false
+end
+
+"""
+    measure!(plan) -> plan
+
+Take the pass times the last timed run left into `passcost`, and throw the
+recording away when they change how it is cut — or when they complete the
+measurement and the timestamps it carried can go. `run!` then records again
+before it submits, which happens once in a plan's life.
+
+The WORST sample is what counts: a budget is a bound, and the first run of a
+pass is often its slowest.
+
+A `repeat!` body writes its timestamps again every iteration and what is read is
+the last iteration's. So a gated loop whose last iteration the gate discarded is
+measured as nearly free, and its iterations are batched as if they were: a
+budget that holds for plain loops and is only as good as that last iteration for
+a gated one.
+"""
+function measure!(pl::Plan)
+    # Only a recording that carries timestamps has anything to measure, and a
+    # measured plan's does not: its runs pay one field read here.
+    (pl.stamped && measuring(pl)) || return pl
+    prof = pl.profiler
+    for i in eachindex(pl.passcost)
+        isnan(pl.passcost[i]) || continue
+        s = prof.gpu_ns[i]
+        isempty(s) || (pl.passcost[i] = maximum(s) * 1e-9)
+    end
+    # Only once every unconditional pass is timed: re-cutting on a partial
+    # measurement re-records again when the rest arrives.
+    measuring(pl) && return pl
+    pl.recording === nothing && return pl
+    (partitionranges(pl) != pl.partition || (pl.stamped && !pl.profile)) && invalidate!(pl)
+    return pl
+end
+
 """
 The baked pieces of one plan, in the order they are submitted.
 
-`record!(pl; maxpasses = N)` writes the walk into several recordings of at most N
-passes each instead of one, so a workload that would exceed the driver's
-submission timeout has completion points inside it. They remain ONE plan: the
+A recording is cut into several pieces (see [`partitionranges`](@ref)) so that no
+submission runs longer than the plan's budget, and so a workload that would
+exceed the driver's submission timeout has completion points inside it. They remain ONE plan: the
 barriers between the pieces are the ones the graph derived, and a piece is
 submitted only after the one before it has been.
 
@@ -1108,12 +1276,14 @@ struct RecordingParts{R}
     # field on the piece, because a piece is whatever the backend's
     # `closerecording!` hands back and core does not get to add to it.
     conds::Vector{Any}
-    # Whether any of them is a condition at all. A plan partitioned only by
-    # `maxpasses` — which is every partitioned plan that predates `when!` — takes
-    # the unconditional submit below, and that loop is over the CONCRETE
-    # `parts`. Asking `conds` per piece instead costs a dynamic call, which is 16
-    # bytes a run on a path whose whole point is that it allocates none.
-    anycond::Bool
+    # What a run submits, in order: the pieces grouped into submissions, a loop
+    # body's repeated once per iteration (`submissionbatches`). Each is one
+    # submission, handed to the backend as one vector so a backend that can put
+    # several command buffers in one submission does.
+    batches::Vector{Vector{R}}
+    # One per batch: `nothing`, or the condition of the one conditional piece
+    # the batch is.
+    batchconds::Vector{Any}
 end
 
 release!(rec::RecordingParts) = (foreach(release!, rec.parts); nothing)
@@ -1129,39 +1299,34 @@ with the FIRST piece — it carries this run's host stores and address patches,
 which have to land before any baked command reads them — and the rest go alone.
 """
 function submitrecording!(ctx, rec::RecordingParts, e)
-    rec.anycond && return submitconditional!(ctx, rec, e)
-    # No `when!` anywhere: the loop a plan partitioned by `maxpasses` alone has
-    # always taken, over the concrete `parts`, allocating nothing.
-    tok = submitrecording!(ctx, first(rec.parts), e)
-    for part in Iterators.drop(rec.parts, 1)
-        tok = submitrecording!(ctx, part, nothing)
+    tok = nothing
+    pending = e
+    for k in eachindex(rec.batches)
+        c = rec.batchconds[k]
+        c === nothing || c[] || continue
+        tok = submitrecording!(ctx, rec.batches[k], pending)
+        pending = nothing
     end
+    # Every batch was conditional and every condition false. The run still has to
+    # land its host stores and patches, and something has to answer for the
+    # submission, so the unconditional head goes on its own.
+    pending === nothing || (tok = submitrecording!(ctx, first(rec.parts), pending))
     return tok
 end
 
 """
-Submit only the pieces whose [`when!`](@ref) condition asks for them.
+    submitrecording!(ctx, pieces::AbstractVector, emitter) -> token
 
-The run's emitter rides with the first piece ACTUALLY SUBMITTED, not with
-`parts[1]`: it carries this run's host stores and address patches, which have to
-land before any baked command reads them, and a conditional piece may not go at
-all. (`partitionranges` keeps piece one unconditional so the recorded head
-always runs — but the run emitter is a separate thing and has to find its own
-way to the front.)
+One submission made of several pieces, in order. A backend that can put several
+command buffers in one submission answers this for its own piece type; this
+default submits them one after another, which is the same order and a completion
+point between each.
 """
-function submitconditional!(ctx, rec::RecordingParts, e)
-    tok = nothing
-    pending = e
-    for i in eachindex(rec.parts)
-        c = rec.conds[i]
-        c === nothing || c[] || continue
-        tok = submitrecording!(ctx, rec.parts[i], pending)
-        pending = nothing
+function submitrecording!(ctx, pieces::AbstractVector, e)
+    tok = submitrecording!(ctx, pieces[1], e)
+    for k in 2:length(pieces)
+        tok = submitrecording!(ctx, pieces[k], nothing)
     end
-    # Every piece was conditional and every condition false. The run still has to
-    # land its host stores and patches, and something has to answer for the
-    # submission, so the unconditional head goes on its own.
-    pending === nothing || (tok = submitrecording!(ctx, first(rec.parts), pending))
     return tok
 end
 
@@ -1212,6 +1377,9 @@ emitupdate!(::Immediate, pl::Plan, ::PassPlan) =
     (landstores!(landhost!, pl.hostwritten); nothing)
 
 emitdispatch!(::Immediate, d, ::AbstractString) = (d(); nothing)
+
+# Walked on the host, one pass after another: nothing is in flight to order.
+emitloophead!(::Immediate, ::Plan, ::AbstractUnitRange) = nothing
 
 function emitcopy!(::Immediate, pl::Plan, pp::PassPlan)
     p = pp.pass

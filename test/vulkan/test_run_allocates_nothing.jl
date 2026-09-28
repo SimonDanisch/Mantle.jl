@@ -26,11 +26,11 @@ KA.@kernel function _allocfree_step!(a)
     @inbounds a[i] = a[i] + 1f0
 end
 
-function _allocfree_plan(dev, n)
+function _allocfree_plan(dev, n; budget)
     a = Mantle.Buffer(dev, zeros(Float32, n))
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, _allocfree_step!, (a,), n; name = "step")
-    pl = Mantle.Plan(g)
+    pl = Mantle.Plan(g; budget)
     Mantle.record!(pl)
     return pl, a
 end
@@ -53,10 +53,39 @@ end
 
 @testset "run! of a recorded plan allocates nothing" begin
     dev = Mantle.Device(Mantle.VulkanAPI())
-    pl, a = _allocfree_plan(dev, 256)
+    # `budget = Inf` is recorded whole and never measures; the device's budget
+    # measures itself in the warm-up and is re-recorded from it, and the steady
+    # state after that has to be just as free.
+    for budget in (Inf, Mantle.submissionbudget(dev))
+        pl, a = _allocfree_plan(dev, 256; budget)
+        per_run = _allocfree_measure(pl)
+        # …and the run still ran: 300 cycles of +1 from 0.
+        @test all(==(300f0), Array(Mantle.storage(a)))
+        @test per_run == 0
+        isfinite(budget) && @test !any(isnan, pl.passcost)
+        Mantle.free!(pl)
+    end
+end
+
+# A loop: the body's pieces are submitted once per iteration, from vectors the
+# recording kept, and a measured loop is still one submission.
+function _allocfree_loopplan(dev, n, iters)
+    a = Mantle.Buffer(dev, zeros(Float32, n))
+    g = Mantle.Graph(dev)
+    Mantle.repeat!(g, iters) do i
+        Mantle.dispatch!(g, _allocfree_step!, (a,), n; name = "step")
+    end
+    pl = Mantle.Plan(g)
+    Mantle.record!(pl)
+    return pl, a
+end
+
+@testset "run! of a recorded loop allocates nothing" begin
+    dev = Mantle.Device(Mantle.VulkanAPI())
+    pl, a = _allocfree_loopplan(dev, 256, 5)
     per_run = _allocfree_measure(pl)
-    # …and the run still ran: 300 cycles of +1 from 0.
-    @test all(==(300f0), Array(Mantle.storage(a)))
+    @test all(==(1500f0), Array(Mantle.storage(a)))
+    @test length(pl.recording.batches) == 1
     @test per_run == 0
     Mantle.free!(pl)
 end

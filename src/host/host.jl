@@ -75,8 +75,11 @@ Mantle.backend(d::HostDevice) = d.backend
 # still answers the portable capability query so graph clients can make the
 # same feature decisions for every Mantle device.  A one-lane subgroup is the
 # scalar CPU model; zero means that no bounded device-local memory budget or
-# GPU occupancy count is available.
-Mantle.caps(::HostDevice) = Mantle.DeviceCaps(false, 0, 1, 1, 0, 1024, 0, 0)
+# GPU occupancy count is available. Stated on the backend, because a
+# KernelInterface launch asks the backend (`KI.max_work_group_size`) and has no
+# device in hand.
+Mantle.caps(::KA.CPU) = Mantle.DeviceCaps(false, 0, 1, 1, 0, 1024, 0, 0)
+Mantle.caps(d::HostDevice) = Mantle.caps(d.backend)
 
 # Nothing is ever outstanding here: a CPU launch has completed by the time it
 # returns, which is the same fact the header states about a step doing no
@@ -265,6 +268,96 @@ hierarchy would make a GPU that lacks `Float64` and forgot to declare silently c
 it. A CPU having `Float64` is a fact; the rest is the other backends' to say.
 """
 Mantle.KI.supports_float64(::KA.CPU) = true
+
+# ── macro-free kernels ────────────────────────────────────────────────────────
+#
+# A `KernelInterface` kernel is a plain function that ASKS where it is
+# (`KI.get_global_id()` and the rest) instead of being handed an index. On a GPU
+# those queries are overrides on the backend's method table; here the function
+# runs as itself, one work item after another on this thread, and the queries
+# are plain methods that answer for the item the launch is on.
+#
+# Without this the host could run no plain-function kernel at all, and core
+# writes its own passes that way: every `repeat!` gate, and the loop index a
+# body reads.
+#
+# The items of a workgroup run one after another, so none can wait for the
+# others: `KI.barrier()` stays KernelInterface's own "used outside a kernel"
+# error, which is what a kernel that needs one gets on this backend.
+
+"""
+The work item a host launch is running, which KernelInterface's position queries
+read. One per task, because the queries take no argument and a launch runs on the
+task that called it.
+"""
+mutable struct HostWorkItem
+    local_id::NTuple{3,Int}
+    group_id::NTuple{3,Int}
+    const local_size::NTuple{3,Int}
+    const num_groups::NTuple{3,Int}
+end
+
+function hostworkitem()
+    item = get(task_local_storage(), HostWorkItem, nothing)
+    item === nothing && outsidelaunch()
+    return item::HostWorkItem
+end
+
+# Not inlined, so a kernel's inferred body holds a call that cannot return, which
+# the access walk skips as an abort path, rather than the string it would build.
+@noinline outsidelaunch() = error(
+    "a KernelInterface position query ran outside a kernel launch; on the host " *
+    "backend a kernel only knows where it is while a `KI.Kernel` call runs it")
+
+xyz(::Type{T}, v::NTuple{3,Int}) where {T} = (x = T(v[1]), y = T(v[2]), z = T(v[3]))
+
+Mantle.KI.get_local_id(::Type{T}) where {T} = xyz(T, hostworkitem().local_id)
+Mantle.KI.get_group_id(::Type{T}) where {T} = xyz(T, hostworkitem().group_id)
+Mantle.KI.get_local_size(::Type{T}) where {T} = xyz(T, hostworkitem().local_size)
+Mantle.KI.get_num_groups(::Type{T}) where {T} = xyz(T, hostworkitem().num_groups)
+function Mantle.KI.get_global_id(::Type{T}) where {T}
+    w = hostworkitem()
+    return xyz(T, (w.group_id .- 1) .* w.local_size .+ w.local_id)
+end
+function Mantle.KI.get_global_size(::Type{T}) where {T}
+    w = hostworkitem()
+    return xyz(T, w.local_size .* w.num_groups)
+end
+
+# Nothing to strip: a host kernel takes the arrays `resolve` produced.
+Mantle.KI.argconvert(::KA.CPU, x) = x
+Mantle.KI.max_work_group_size(b::KA.CPU) = Mantle.caps(b).workgrouplimit
+Mantle.KI.kernel_max_work_group_size(b::KA.CPU, kernel; max_work_items::Int = typemax(Int)) =
+    min(Mantle.KI.max_work_group_size(b), max_work_items)
+# The function IS the kernel; there is nothing to compile ahead of the call.
+Mantle.KI.kernel_function(backend::KA.CPU, @nospecialize(f), @nospecialize(tt) = Tuple{};
+                          name = nothing, kwargs...) =
+    Mantle.KI.Kernel(backend, f)
+
+function (k::Mantle.KI.Kernel{<:KA.CPU})(args...; numworkgroups = (), workgroupsize = (),
+                                         ndrange = (), max_work_group_size::Int = typemax(Int))
+    Mantle.KI.check_launch_args(numworkgroups, workgroupsize, ndrange)
+    (length(ndrange) > 0 && any(==(0), Mantle.ki_extent(ndrange, 1))) && return nothing
+    (length(numworkgroups) > 0 && any(==(0), Mantle.ki_extent(numworkgroups, 1))) && return nothing
+    wg, blocks = Mantle.ki_launch_extents(k.backend, ndrange, workgroupsize, numworkgroups;
+                                          max_work_group_size)
+    # The same resolution `dispatch!` gives a declared pass, as on Lava.
+    args = map(Mantle.storage, args)
+    tls = task_local_storage()
+    outer = get(tls, HostWorkItem, nothing)
+    item = HostWorkItem((1, 1, 1), (1, 1, 1), wg, blocks)
+    tls[HostWorkItem] = item
+    try
+        for g in CartesianIndices(blocks), l in CartesianIndices(wg)
+            item.group_id = Tuple(g)
+            item.local_id = Tuple(l)
+            k.kern(args...)
+        end
+    finally
+        outer === nothing ? delete!(tls, HostWorkItem) : (tls[HostWorkItem] = outer)
+    end
+    return nothing
+end
 
 """
 Yes, trivially: nothing here is recorded. A GPU discards a predicated iteration

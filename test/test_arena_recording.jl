@@ -34,7 +34,9 @@ function chainplan(dev, n, nstage)
     end
     out = M.Buffer(dev, zeros(Float32, n))
     M.dispatch!(g, bump!, (out, t[end]), n; name = "out")
-    (; g, out, seed, plan = M.record!(M.Plan(g)), keep = (seed, t))
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    (; g, out, seed, plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t))
 end
 
 @kernel function add2!(d, @Const(x), @Const(y))
@@ -519,7 +521,7 @@ end
     @test ndims(t) == 2
     @test eltype(t) === Float32
     M.dispatch!(g, nd_shape!, (t,), size(t); name = "shape")
-    pl = M.Plan(g)
+    pl = M.Plan(g; budget = Inf)
     @test M.storage(t) isa AbstractArray{Float32,2}
     @test size(M.storage(t)) == (3, 4)
     M.record!(pl)

@@ -56,7 +56,9 @@ function _bumpplan(dev, counter, n)
     for k in 1:4
         Mantle.dispatch!(g, capture_bump!, (counter,), n; name = "bump$k")
     end
-    Mantle.Plan(g)
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    Mantle.Plan(g; budget = Inf)
 end
 
 @testset "record! writes without executing" begin

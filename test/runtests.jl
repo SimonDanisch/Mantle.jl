@@ -585,9 +585,9 @@ foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
 # rule in core, checked against GPUCompiler's own: two rules in two backends is
 # only ever one of them in a build.
 foreachbackend(joinpath(@__DIR__, "test_argument_packing.jl"))
-# And once on the host, which is where the file's other half runs: the host has
-# no `KI.kernel_function` at all, so what it pins is the named refusal. Driven
-# separately because `eachbackend()` reports GPU backends.
+# And once on the host, which runs a plain-function kernel one work item at a
+# time and answers KernelInterface's position queries itself. Driven separately
+# because `eachbackend()` reports GPU backends.
 for path in (joinpath(@__DIR__, "test_declared_kernel.jl"),
              joinpath(@__DIR__, "test_declared_call.jl"),
              joinpath(@__DIR__, "test_argument_packing.jl"))

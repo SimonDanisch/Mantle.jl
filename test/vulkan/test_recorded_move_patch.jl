@@ -32,7 +32,9 @@ end
 function _movepatch_plan(dev, src, out, n)
     g = M.Graph(dev)
     M.dispatch!(g, _movepatch_copy!, (out, src), n; name = "copy")
-    M.record!(M.Plan(g))
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    M.record!(M.Plan(g; budget = Inf))
 end
 
 # A chain of transients (stage k reads t[k], writes t[k+1]) so the plan has
@@ -52,7 +54,7 @@ function _movepatch_chainplan(dev, n, nstage)
     end
     out = M.Buffer(dev, zeros(Float32, n))
     M.dispatch!(g, _movepatch_bump!, (out, t[end]), n; name = "out")
-    (; out, plan = M.record!(M.Plan(g)), keep = (seed, t))
+    (; out, plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t))
 end
 
 """Two transients alive at once — the placement that forces the arena to grow."""
@@ -63,7 +65,7 @@ function _movepatch_fatplan(dev, n)
     t2 = M.Transient.Buffer(g, Float32, n)
     M.dispatch!(g, _movepatch_bump!, (t1, seed), 16; name = "a")
     M.dispatch!(g, _movepatch_bump!, (t2, t1), 16; name = "b")
-    (; plan = M.record!(M.Plan(g)), keep = (seed, t1, t2))
+    (; plan = M.record!(M.Plan(g; budget = Inf)), keep = (seed, t1, t2))
 end
 
 function _movepatch_tri_vertex()
@@ -144,7 +146,7 @@ end
         M.draw!(p, _MOVEPATCH_TRI, (), 3)
     end
     M.copy!(g, "read", out, img)
-    pl = M.record!(M.Plan(g))
+    pl = M.record!(M.Plan(g; budget = Inf))
     M.run!(pl)
     KA.synchronize(be)
     @test pl.recording !== nothing
@@ -158,7 +160,7 @@ end
     M.render!(g2, "big", big_img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
         M.draw!(p, _MOVEPATCH_TRI, (), 3)
     end
-    pl2 = M.record!(M.Plan(g2))
+    pl2 = M.record!(M.Plan(g2; budget = Inf))
     @test pl.recording === nothing
 
     # …and the next run writes it again, against the new placement.

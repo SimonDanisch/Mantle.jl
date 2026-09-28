@@ -100,9 +100,9 @@ Open a command buffer for `plan`'s `passes` and hand back what the walk emits in
 walked by every `execute!` instead, which is the same walk.
 
 `passes` is the range this recording will cover, which is the WHOLE plan only when
-it is not partitioned. `record!(pl; maxpasses = N)` writes the walk into several
-recordings of at most N passes each, and a backend that has to size its buffer up
-front has to size it for the piece rather than for the plan. A Vulkan command
+it is not partitioned. Core cuts a recording into pieces by the plan's budget and
+by `when!` regions (see [`partitionranges`](@ref)), and a backend that has to size
+its buffer up front has to size it for the piece rather than for the plan. A Vulkan command
 buffer grows and ignores this; a Metal indirect command buffer is fixed-length, and
 sizing it from the plan gave `recordparts!` one buffer per part each large enough
 for all of them — Qwen-Image 2.1's text encoder is 1116 commands in 18 parts.
@@ -125,6 +125,17 @@ reading the pool this plan is about to write, and a cross-plan hazard cannot be
 derived — so a backend puts one global barrier here, always.
 """
 emithead!(e, ::Plan) = nothing
+
+"""
+    emitloophead!(emitter, plan, body)
+
+Before every iteration of a [`repeat!`](@ref) body (the pass range `body`): a
+barrier covering all memory, because the iteration follows the previous one's
+last pass, which the per-pass barriers were not derived against; and whatever
+the profiler needs to write the body's timestamps again. No default: a backend
+that records a loop without this would race its own iterations.
+"""
+function emitloophead! end
 
 """
     emitbarriers!(emitter, passplan)
@@ -603,6 +614,35 @@ makeprofiler(dev::Device, passes, profile::Bool) =
     profile ? hostprofiler(passes) : nothing
 
 """
+    timestamps(device) -> Bool
+
+Whether this device's profiler reads the GPU time of a pass back without
+waiting for it (timestamp queries). A plan on such a device measures itself on
+its first run and cuts its recording into submissions of at most
+[`submissionbudget`](@ref) from what it measured. A device that cannot keeps one
+submission per plan.
+"""
+timestamps(::Device) = false
+
+"""
+    submissionbudget(device) -> Float64
+
+Seconds of GPU time one submission may take.
+
+A submission that runs too long is killed by the driver's watchdog, and the call
+that made it returns whatever its output held: TRELLIS.2's DINOv3 at 1024 px as
+one submission came back as NaN, and only the NEXT submission reported the lost
+device. The watchdog's limit is the kernel's (seconds, on amdgpu), and the GPU
+drives the display too, so a long submission is also a frozen desktop. A
+budget far below both costs a submission boundary every so often, which is tens
+of microseconds.
+
+A plan takes this as its default (`Plan(g; budget)`); cutting the recording by it
+is core's, and no caller chooses a partition.
+"""
+submissionbudget(::Device) = 0.1
+
+"""
 A profiler that measures the host side only.
 
 `pool = nothing` and `period_ns = NaN` say there are no timestamps: `timings`
@@ -888,6 +928,9 @@ const BACKEND_VOCABULARY = (
     # four are listed below, once.
     :callgroup,
     :makeprofiler, :Profiler,
+    # Whether the profiler can time a pass, and so whether a plan can cut its
+    # recording by the budget; and the budget itself (`partitionranges`).
+    :timestamps, :submissionbudget,
     # Asked of whatever `compile_dispatch` returned. DECLARED, because core
     # dispatches through them and a backend must answer: undeclared, they were
     # contract points the ratchets below could not see. They exist at all only
@@ -900,7 +943,8 @@ const BACKEND_VOCABULARY = (
     # a backend overrides it.
     :retire!, :blocksize, :copy_target!, :gpupasstime!,
     # the walk's primitives
-    :openrecording, :closerecording!, :emithead!, :emitbarriers!, :withpredicate,
+    :openrecording, :closerecording!, :emithead!, :emitloophead!, :emitbarriers!,
+    :withpredicate,
     :emitupdate!, :emitdispatch!, :emitcopy!, :beginrender!, :emitdraw!, :endrender!,
     # `argument_usage` is NOT repeated here: it is listed once above, with the
     # reason it is a declaration rather than a hook. A second entry changed no

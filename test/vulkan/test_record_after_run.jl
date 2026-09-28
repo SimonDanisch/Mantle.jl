@@ -35,7 +35,9 @@ end
 function _barplan(dev, out, kref, n)
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, ring_add!, (out, kref), n; name = "add")
-    Mantle.record!(Mantle.Plan(g))
+    # `budget = Inf`: recorded whole from the first run, which is what these tests
+    # are about. How a plan is cut by its budget is `test_partitioned_recording.jl`.
+    Mantle.record!(Mantle.Plan(g; budget = Inf))
 end
 
 """Run `pre` times, record again (a no-op), then run `post` more; return the

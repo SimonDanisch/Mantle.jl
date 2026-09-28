@@ -175,6 +175,22 @@ end
 # `frag_args` tuple for a while and this is the field it will arrive in. Empty
 # is what the pipeline phase compiles against today.
 
+"""
+    Loop
+
+One [`repeat!`](@ref) loop. Its body passes are declared and compiled once and
+run `count` times: every iteration when the count is the host's, or up to
+`count` with the device discarding the rest behind `gate`.
+
+`index` is the iteration the device is on, from 1: a one-element `Int32` buffer a
+pass sets before the loop and one in the body advances, which is what a body
+reads for anything that differs per iteration.
+"""
+struct Loop
+    count::Int
+    index::Any
+end
+
 mutable struct Pass
     name::String
     kind::Symbol
@@ -213,6 +229,11 @@ mutable struct Pass
     # a readback. A condition on the pass, like the predicate, because the graph
     # still has no nesting.
     hostcond::Any
+    # `nothing`, or the [`Loop`](@ref) this pass is the body of — see
+    # [`repeat!`](@ref). A body is declared and compiled ONCE and run `count`
+    # times; like the predicate, a property of the pass that travels with it
+    # through every rewrite, and the scheduler keeps a loop's passes together.
+    loop::Any
 end
 
 abstract type TransientResource <: Resource end
@@ -695,13 +716,27 @@ mutable struct Plan{D,H<:Tuple}
     # (see [`ArgMemory`](@ref) and [`GPURef`](@ref)). So there is one set of
     # addresses and one command buffer holding them.
     recording::Any
-    # Explicit submission partition, retained when an arena move invalidates
-    # the recording. Zero keeps the entire plan in one submission. A field and
-    # not just an argument to `record!` BECAUSE of that retention: the default is
-    # this value, so a plan whose recording was thrown away is recorded again
-    # with the same split instead of collapsing to one submission and hitting
-    # the timeout the split was asked for.
-    record_maxpasses::Int
+    # Seconds of GPU time one submission may take — see [`submissionbudget`](@ref).
+    # The partition of the recording into submissions is core's, derived from
+    # this and `passcost`; no caller chooses it.
+    budget::Float64
+    # Whether the caller asked for timings. Without it a plan still carries
+    # timestamps, but only in the recording that MEASURES it (see `passcost`),
+    # and drops them once it is measured.
+    profile::Bool
+    # Measured GPU seconds per pass, in `passes` order; `NaN` until measured. An
+    # unmeasured pass is recorded as a submission of its own, because nothing
+    # else is known about it that bounds how long it runs.
+    passcost::Vector{Float64}
+    # The pass ranges the current recording was cut into, so a measurement that
+    # changes the partition is noticed and one that does not costs nothing.
+    partition::Vector{UnitRange{Int}}
+    # The loops, as the contiguous range of `passes` each body was scheduled into
+    # and the loop it runs. Ascending and disjoint; empty for a plan without one.
+    loops::Vector{Tuple{UnitRange{Int},Loop}}
+    # Whether the current recording (or walk) writes the profiler's timestamps,
+    # so a run only asks for them when there are some to read.
+    stamped::Bool
     # Where every device address the recording's arguments hold was written:
     # recorded address → the (region, offset inside it) of its eight bytes.
     # The region is usually the plan's `ArgMemory` store, but a prepare kernel

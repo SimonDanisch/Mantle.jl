@@ -60,43 +60,62 @@ end
     end
 end
 
-@testset "partitioned recordings preserve dependencies and replay" begin
+@testset "a plan measures itself and is cut by its budget" begin
     back = Mantle.LavaBackend()
     a = KernelAbstractions.allocate(back, Float32, 128)
-    fill!(a, 1f0)
-    g = Mantle.Graph(Mantle.Device(back))
-    # Ten dependent passes, declared. This read `a .*= 2f0` ten times inside a
-    # `record_into`, which captured ten broadcast launches; the property under
-    # test is the same either way — that a partition preserves the ordering
-    # between them — and declaring it says which pass writes.
-    for k in 1:10
-        Mantle.dispatch!(g, partition_double!,
-                             (a,), length(a); name = "double$k")
+    function tendoublings(budget)
+        g = Mantle.Graph(Mantle.Device(back))
+        # Ten dependent passes: a cut anywhere must keep the order between them.
+        for k in 1:10
+            Mantle.dispatch!(g, partition_double!, (a,), length(a); name = "double$k")
+        end
+        Mantle.Plan(g; budget)
     end
-    pl = Mantle.Plan(g)
-    @test_throws ArgumentError Mantle.record!(pl; maxpasses=-1)
-    Mantle.record!(pl; maxpasses=3)
-    @test length(pl.recording.parts) == 4
-    @test all(==(1f0), Array(a)) # recording itself must not execute
-    for _ in 1:2
+    pl = tendoublings(0.1)
+    Mantle.record!(pl)
+    # Not measured yet: nothing bounds a pass, so each is a submission, timed.
+    @test length(pl.recording.parts) == 10
+    @test pl.stamped
+    fill!(a, 1f0)
+    @test all(==(1f0), Array(a))            # recording itself must not execute
+    for _ in 1:3
         fill!(a, 1f0)
         Mantle.run!(pl)
         @test all(==(1024f0), Array(a))
     end
-    @test_throws ArgumentError Mantle.record!(pl; maxpasses=2)
+    # Measured on the first run and re-recorded on the second: ten tiny passes
+    # fit one submission, and the timestamps went with the measurement.
+    @test !any(isnan, pl.passcost)
+    @test !(pl.recording isa Mantle.RecordingParts)
+    @test !pl.stamped
     Mantle.invalidate!(pl)
     fill!(a, 1f0)
     Mantle.run!(pl)
-    @test length(pl.recording.parts) == 4
+    @test !(pl.recording isa Mantle.RecordingParts)   # re-recorded from the measurement
     @test all(==(1024f0), Array(a))
     Mantle.free!(pl)
     @test pl.recording === nothing
-    # Two assertions that a host read or write INSIDE a capture throws were here,
-    # deleted 2026-09-15 with the capture path: the host moves those bytes and no
-    # command in the buffer does, so a capture could not replay them and
-    # `copy_buffer!` refused. A declared graph states a host write as an update
-    # pass, which IS in the plan, so the unreplayable thing cannot be asked
-    # for.
+
+    # A budget no pass fits keeps every pass apart after it is measured.
+    pl = tendoublings(0.0)
+    Mantle.record!(pl)
+    for _ in 1:3
+        fill!(a, 1f0)
+        Mantle.run!(pl)
+        @test all(==(1024f0), Array(a))
+    end
+    @test !any(isnan, pl.passcost)
+    @test length(pl.recording.parts) == 10
+    Mantle.free!(pl)
+
+    # `budget = Inf` never cuts, measured or not.
+    pl = tendoublings(Inf)
+    Mantle.record!(pl)
+    @test !(pl.recording isa Mantle.RecordingParts)
+    fill!(a, 1f0)
+    Mantle.run!(pl)
+    @test all(==(1024f0), Array(a))
+    Mantle.free!(pl)
 end
 
 @testset "partitioned recording follows moved inputs" begin
@@ -107,10 +126,14 @@ end
     for i in 1:3
         Mantle.dispatch!(g, partition_copy!, (out, src), 128; name = "copy$i")
     end
-    pl = Mantle.record!(Mantle.Plan(g); maxpasses=1)
-    Mantle.run!(pl)
-    @test Array(Mantle.storage(out)) == ones(Float32, 128)
+    # `budget = 0.0`: every pass its own piece for good.
+    pl = Mantle.record!(Mantle.Plan(g; budget = 0.0))
+    for _ in 1:2                       # measure, then the re-recording it asks for
+        Mantle.run!(pl)
+        @test Array(Mantle.storage(out)) == ones(Float32, 128)
+    end
     rec = pl.recording
+    @test rec isa Mantle.RecordingParts
     Mantle.resize!(src, 512)
     copyto!(Mantle.storage(src), fill(3f0, 512))
     Mantle.run!(pl)
