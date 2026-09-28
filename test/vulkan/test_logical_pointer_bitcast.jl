@@ -97,10 +97,12 @@ end
     # In-memory too: a kernel compiled earlier in this process answers from
     # `ctx.caches` without compiling — and without dumping. They rebuild on
     # demand, so clearing costs the next kernels a recompile and nothing else.
-    caches = Mantle.vk_context().caches
-    empty!(caches.linked)
-    empty!(caches.pipelines)
     try
+        # Inside the `try`: this is the first thing that can throw, and the
+        # environment above has to be restored whatever it does.
+        caches = Mantle.vk_context().caches
+        empty!(caches.linked)
+        empty!(caches.pipelines)
         out = Mantle.LavaArray(zeros(Float32, M))
         lpb_clamped_ternary!(Mantle.defaultbackend())(out; ndrange = M, workgroupsize = M)
         KA.synchronize(Mantle.defaultbackend())
@@ -184,10 +186,12 @@ end
     # In-memory too: a kernel compiled earlier in this process answers from
     # `ctx.caches` without compiling — and without dumping. They rebuild on
     # demand, so clearing costs the next kernels a recompile and nothing else.
-    caches = Mantle.vk_context().caches
-    empty!(caches.linked)
-    empty!(caches.pipelines)
     try
+        # Inside the `try`: this is the first thing that can throw, and the
+        # environment above has to be restored whatever it does.
+        caches = Mantle.vk_context().caches
+        empty!(caches.linked)
+        empty!(caches.pipelines)
         for T in types
             xc = zeros(T, (2, 3, 4))
             yc = rand(T, (2, 3))

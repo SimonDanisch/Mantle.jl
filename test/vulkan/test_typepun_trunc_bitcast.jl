@@ -9,8 +9,6 @@ using Test
 using Lava, Mantle
 using KernelAbstractions
 
-ENV["VK_ICD_FILENAMES"] = get(ENV, "VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json")
-
 @testset "Type-punned trunc+bitcast SPIR-V emission" begin
     backend = Mantle.defaultbackend()
 

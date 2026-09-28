@@ -920,6 +920,16 @@ if _VULKAN_OK
         end
 
 
+        @testset "a float conversion keeps its rounding" begin
+            include(joinpath(VULKAN_TESTS, "test_float_conversion_exact.jl"))
+        end
+
+
+        @testset "base alignment of a device array" begin
+            include(joinpath(VULKAN_TESTS, "test_basealignment_lava.jl"))
+        end
+
+
         @testset "pipeline cache avoids driver compilation" begin
             include(joinpath(VULKAN_TESTS, "test_pipeline_cache_no_compile.jl"))
         end

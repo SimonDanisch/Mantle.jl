@@ -863,6 +863,10 @@ const BACKEND_VOCABULARY = (
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
     :deviceslice,
+    # How far a kernel may trust an operand's base address. Core answers its own
+    # resources; a backend answers for its device array, whose offset lives
+    # inside it where no core type can see it.
+    :basealignment,
     :upload!, :download, :devicecopy!, :hostspan, :deviceaddress, :patchable, :release!,
     :indexbuffer,
     # The recording primitives a submission channel needs — 2.3. Core owns the
