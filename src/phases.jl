@@ -552,7 +552,7 @@ function run!(::Place, c)
         # One allocation per part, as many parts as it takes. The first placement
         # is the whole kind; what it put entirely inside the room stays there, at
         # the offsets it was given — a subset of a valid placement is one — and
-        # the rest is placed again as the next part. Each part asks `headroom`
+        # the rest is placed again as the next part. Each part asks `arenaroom`
         # anew AFTER the previous one reserved, so the parts together are still
         # bounded by the device's budget, not only each by `maxalloc`. A plan that
         # fits in one allocation is one part, placed exactly as before.
@@ -561,14 +561,25 @@ function run!(::Place, c)
         while !isempty(rest)
             part += 1
             key = arenapart(ar, part)
-            # Bounded by what the device can actually give (see `headroom`), and
-            # checked here rather than at `rawalloc`: this is the only point that
-            # still knows the ITEMS, and "over budget by 40 MB" is answerable by
-            # dropping one buffer and unanswerable without knowing which. Finding
-            # out at allocation time instead attributes the failure to whatever
-            # allocated next.
-            prob = Problem(a.items[rest], headroom(pool(c), device(c), key))
+            # Bounded by what the part's arena has or the device can still give
+            # (see `arenaroom`), and checked here rather than at `rawalloc`: this
+            # is the only point that still knows the ITEMS, and "over budget by
+            # 40 MB" is answerable by dropping one buffer and unanswerable without
+            # knowing which. Finding out at allocation time instead attributes the
+            # failure to whatever allocated next.
+            prob = Problem(a.items[rest], arenaroom(pool(c), device(c), key))
             pl = place(prob)
+            if pl.height > prob.capacity
+                # The headroom counts every block the pool holds as spent, used or
+                # not: a finished stage's arena, an upload's staging not yet swept
+                # and the buffers the collector has not yet finalized. Allocation
+                # recovers from exactly this before it gives up (see `acquire!`
+                # and the Lava allocator); the bound has to as well, or it spills
+                # or refuses what allocation would have found.
+                makeroom!(pool(c), device(c))
+                prob = Problem(a.items[rest], arenaroom(pool(c), device(c), key))
+                pl = place(prob)
+            end
             ends(i) = pl.offsets[string(i)] + a.items[i].size
             idx = pl.height <= prob.capacity ? rest : filter(i -> ends(i) <= prob.capacity, rest)
             # Nothing ended inside the room: an item is larger than one

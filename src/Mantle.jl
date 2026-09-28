@@ -308,7 +308,7 @@ export Span, OffsetWindow, Gap, Item, Problem, Placement
 export segments, maxload, hmax, fragmentation
 export place, LowestFit, BestFit
 export Pool, Block, Region, acquire!, release!, trim!, reserved, retire!, reclaim!, fence, passed, waitfor, waitfor!
-export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, largestfree, remappable
+export Arena, reserve!, tenant!, untenant!, sharing, remap!, headroom, arenaroom, largestfree, remappable
 export DeviceArray, giveup!, blocksize
 export upload!, download, deviceview, bufferusage, devicecopy!, Persistent, Unified, Readback
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints

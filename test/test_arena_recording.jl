@@ -90,12 +90,12 @@ end
     # Whichever bound is binding on THIS device. `maxalloc` is 4 GB on the APU
     # this runs on and `typemax(Int)` — "no limit" — on NVIDIA, so a
     # test pinned to it passes on one machine and allocates 8 exabytes on the
-    # other. `headroom` is the number the compiler actually checks against.
+    # other. `arenaroom` is the number the compiler actually checks against.
     #
     # ONE transient past it, not two of it: a placement too tall for one
     # allocation now spills into another (the testset below), so what still
     # cannot run is an item no single allocation holds.
-    n = M.headroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32) + 1024
+    n = M.arenaroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32) + 1024
     err = try
         g = M.Graph(dev)
         seed = M.Buffer(dev, zeros(Float32, 16))

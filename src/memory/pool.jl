@@ -481,6 +481,21 @@ reserved, and the two device facts it needs are already primitives.
 headroom(p::Pool, dev, kind) =
     min(maxalloc(dev), max(capacity(dev) - reserved(p), 0) + largestfree(p, kind))
 
+"""
+    arenaroom(pool, dev, kind) -> Int
+
+The tallest placement arena `kind` can take: the region it already has, which
+[`reserve!`](@ref) hands every tenant at offset 0, or a fresh one of what the
+device can still give.
+
+Not [`headroom`](@ref) alone, which counts the arena's own region as spent. A
+plan no taller than a sibling placed before it costs nothing, and the bound
+refused it: TRELLIS.2's texture decoder needed 2.92 GB, the arena held the 2.92
+GB its shape decoder had sized, and 232 MB was "available". A bound, like
+`largestfree`: compatibility is `reserve!`'s to settle.
+"""
+arenaroom(p::Pool, dev, kind) = max(arenaof(p, kind).bytes, headroom(p, dev, kind))
+
 """First offset at or after `from` that satisfies `align`."""
 alignup(from::Int, align::Int) = align <= 1 ? from : cld(from, align) * align
 
@@ -803,6 +818,27 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
     finally
         unlock(p.lock)
     end
+end
+
+"""
+    makeroom!(pool, dev) -> pool
+
+Everything the pool holds that nothing uses goes back to the device: a full
+collection so dropped `Buffer`s retire, a flush of the device's channel so the
+scratch its finished submissions borrowed is released, a waiting
+[`reclaim!`](@ref) so what the device has finished with is released, then
+[`trim!`](@ref). What a placement that does not fit tries before it gives up.
+
+The flush is what frees an upload's staging: those bytes belong to the one-shot
+that copies out of them and go back when the channel sweeps it, which nothing
+else here does. A 175 MB staging region kept its 1.77 GB block alive through
+the trim, and the placement that asked for room was refused.
+"""
+function makeroom!(pool::Pool, dev)
+    GC.gc(true)
+    supports_batch_queue(dev) && flush!(dev)
+    reclaim!(pool, dev; wait = true)
+    return trim!(pool, dev)
 end
 
 """
