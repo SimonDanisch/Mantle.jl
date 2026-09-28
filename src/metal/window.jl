@@ -115,6 +115,9 @@ function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
                        color_format::Type = BGRA{N0f8})
     GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
     gw = GLFW.CreateWindow(Int(width), Int(height), String(title))
+    # Window hints are process-global. Left at `NO_API`, the next OpenGL window
+    # anything in this process opens — GLMakie's — has no context to make current.
+    GLFW.DefaultWindowHints()
     sx, sy = GLFW.GetWindowContentScale(gw)
     GLFW.SetWindowSize(gw, round(Int, width / sx), round(Int, height / sy))
     w = attach!(MetalWindow(color_format, width, height; vsync), gw)

@@ -81,6 +81,9 @@ function VulkanWindow(width::Integer, height::Integer;
     GLFW.WindowHint(GLFW.RESIZABLE, true)
 
     handle = GLFW.CreateWindow(width, height, title)
+    # Window hints are process-global. Left at `NO_API`, the next OpenGL window
+    # anything in this process opens — GLMakie's — has no context to make current.
+    GLFW.DefaultWindowHints()
 
     # Create Vulkan surface via GLFW
     surface_ptr = GLFW.CreateWindowSurface(ctx.instance.vks, handle)

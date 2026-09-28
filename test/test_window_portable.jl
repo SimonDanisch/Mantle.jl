@@ -13,6 +13,7 @@
 
 using Test
 import Mantle
+import GLFW
 const M = Mantle
 using ColorTypes: BGRA
 using ColorTypes.FixedPointNumbers: N0f8
@@ -48,5 +49,21 @@ const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
         Mantle.present_frame!(Mantle.Device(TESTBACKEND), w)
     finally
         close(w)
+    end
+end
+
+# Window hints are GLFW-global. A Mantle window asks for `CLIENT_API = NO_API`,
+# because it presents through Vulkan or Metal, and it left the hint set: the next
+# OpenGL window anything in the process opened had no context to make current.
+# RayMakie's comparison against GLMakie failed that way, with NO_WINDOW_CONTEXT.
+@testset "a Mantle window leaves GLFW's hints as it found them" begin
+    w = Mantle.Window(TESTBACKEND, 64, 64; title = "hints")
+    close(w)
+    # Hidden: a visible window can hang on XWayland (see `runtests.jl`).
+    gl = GLFW.Window(; name = "gl", resolution = (16, 16), visible = false, focus = false)
+    try
+        @test GLFW.GetCurrentContext().handle == gl.handle
+    finally
+        GLFW.DestroyWindow(gl)
     end
 end
