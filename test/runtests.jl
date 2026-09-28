@@ -490,6 +490,7 @@ include(joinpath(@__DIR__, "test_isubd_mesh.jl"))
 # that has it. Both were found by RayMakie's RASTER mode on a Mac.
 include(joinpath(@__DIR__, "test_mesh_pipeline_graph.jl"))
 include(joinpath(@__DIR__, "test_discard.jl"))
+include(joinpath(@__DIR__, "test_headless_rebindable_draw.jl"))
 # A texture from device data, and one updated in place. Found by RayMakie's
 # `test_device_arrays.jl`: an `image!` of a device array drew nothing on Metal.
 include(joinpath(@__DIR__, "test_texture_upload.jl"))

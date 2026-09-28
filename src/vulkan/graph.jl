@@ -1682,11 +1682,14 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         seal!(e.owner)
         return submit_and_present!(bq, win, e.owner)
     end
-    # Both kinds of recording by name: through the `Any` field the call is
+    # Every kind of recording by name: through the `Any` field the call is
     # dynamic, and its `UInt64` token comes back boxed, 8 bytes a run once the
-    # timeline passes the small-integer cache.
+    # timeline passes the small-integer cache. `nothing` is a headless plan
+    # that cannot be recorded (see `recordable`), walked into `e`; asserting
+    # `RecordingParts` there made every such run a `TypeError`.
     rec = pl.recording
     rec isa Recording && return submitrecording!(bq, rec, e)
+    rec === nothing && return submitrecording!(bq, nothing, e::Emitter)
     return submitrecording!(bq, rec::RecordingParts{Recording}, e)
 end
 
@@ -1838,8 +1841,14 @@ function emitdraw!(e::Emitter, ::Nothing, d::CompiledDraw)
     # its own overrides it for itself, which is how several axes share a pass.
     # No pin either way: the plan holds the pipeline for longer than any frame.
     d.viewport === nothing || set_viewport!(e, d.viewport...)
-    d.bindings === nothing || use_bindings!(e, d.compiled, d.bindings)
-    emit_draw!(e, d.compiled, d.count, e.args.address + d.argoff, d.indices, d.instances)
+    # Through the binding, as core's interpreted walk reads them: a draw from a
+    # `DrawBinding` is walked every run precisely so that its count, index
+    # buffer, instances and texture table are this run's, and reading the values
+    # it was compiled with drew the first frame's forever.
+    bind = boundbindings(d.args, d.bindings)
+    bind === nothing || use_bindings!(e, d.compiled, bind)
+    emit_draw!(e, d.compiled, boundcount(d.args, d.count), e.args.address + d.argoff,
+               boundindices(d.args, d.indices), boundinstances(d.args, d.instances))
 end
 
 # Where the counts come from, decided once by type rather than per frame by a
