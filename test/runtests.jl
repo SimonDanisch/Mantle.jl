@@ -461,6 +461,8 @@ end  # if _VULKAN_OK — the sync lowering names Vulkan enums in every assertion
 # Outside the driver gate on purpose: that they need no GPU is the assertion.
 include(joinpath(@__DIR__, "test_pool.jl"))
 include(joinpath(@__DIR__, "test_host.jl"))
+# The host half needs no GPU; the Vulkan half is gated inside on `_VULKAN_OK`.
+include(joinpath(@__DIR__, "test_basealignment.jl"))
 # Also outside the driver gate, and for a stronger reason than "needs no GPU":
 # it reads the extension SOURCE, so it checks the Metal extension's import list
 # on a Linux box and the Vulkan one on a Mac. Gating it on a loaded backend
@@ -910,6 +912,11 @@ if _VULKAN_OK
 
         @testset "systematic struct alignment" begin
             include(joinpath(VULKAN_TESTS, "test_struct_alignment_systematic.jl"))
+        end
+
+
+        @testset "vector loads and stores through a device pointer" begin
+            include(joinpath(VULKAN_TESTS, "test_vector_pointer_access.jl"))
         end
 
 

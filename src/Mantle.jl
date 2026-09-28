@@ -507,6 +507,36 @@ it, so both the recording path and the launch path get the same answer.
 storage(x::Tuple) = map(storage, x)
 
 """
+    basealignment(x) -> Int
+
+Bytes to which the first element of `x` is known to be aligned on the device: a
+power of two, and `1` where nothing is known.
+
+For a kernel that reads wider than its element type — sixteen bytes of `Float16`
+at a time — which must know the base is aligned before it may. It is asked of
+the operand, and each representation answers for itself: an array from the
+address it already has, a declared resource from the placement rule that will
+give it one.
+"""
+basealignment(x) = 1
+basealignment(b::Buffer) = basealignment(storage(b))
+basealignment(r::BufferRange) = basealignment(r.parent)
+basealignment(v::ResourceView{T}) where {T} =
+    min(basealignment(v.parent), powalign(v.offset * sizeof(T)))
+"""
+A transient's offset is not known before it is placed, only its alignment, and
+that differs by backend (`alignment(dev, ::TransientBuffer)`: 256 on Vulkan, 64
+on the host, 16 on Metal). The transient carries no device, so this is the
+floor of the three, and `test_basealignment.jl` holds every backend to it.
+"""
+basealignment(::TransientBuffer) = TRANSIENT_ALIGN_FLOOR
+const TRANSIENT_ALIGN_FLOOR = 16
+
+"""The power of two dividing byte offset or address `off`; zero constrains nothing.
+Any integer type: device addresses have their top bits set and are no `Int`."""
+powalign(off::Integer) = iszero(off) ? typemax(Int) : 1 << min(trailing_zeros(off), 62)
+
+"""
     capacity(dev) -> Int
 
 How many bytes of device memory a transient arena may use.

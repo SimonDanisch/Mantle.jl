@@ -383,7 +383,12 @@ The wide vec2 kernel had no other caller: `vec2 = false` selects the scalar
 staged family and `vec2 = true` selects a narrow one whenever `gemm_fits32`
 holds, which is every shape in this repo. That is how it stayed broken — its
 only exercise was a test that compared it to something and blamed the
-something."""
+something.
+
+**No longer reproduces (2026-09-28):** 0 wrong at every shape above and at the
+two that faulted, 4096x2304x576 and 4096x576x2304. The fix was not isolated —
+it came with one of the emitter corrections since — and `test_gemm_staged.jl`
+now asserts the two kernels agree everywhere, the faulting shapes included."""
 const GEMM_NARROW_DEFAULT = true
 
 @inline function gemm_tiling(M::Int, N::Int, K::Int; forced = nothing)

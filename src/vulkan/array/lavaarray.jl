@@ -191,6 +191,10 @@ function bda_address(a::LavaArray{T}) where T
     a.buf[].address + a.offset
 end
 
+# From the address itself, view offset included: the one representation whose
+# alignment is a fact rather than a rule.
+basealignment(a::LavaArray) = powalign(bda_address(a))
+
 # `hold!(owner, a)` holds the LavaArray WRAPPER, not just its VkManagedBuffer.
 # The wrapper is what Julia's GC traces: holding the raw buffer would not keep
 # the array alive, so its finalizer could fire mid-recording, release the
