@@ -207,7 +207,7 @@ function AdaptedAccel(hwtlas::VulkanTLAS{Tri}) where Tri
     # `nothing` for `scene`: Vulkan binds the TLAS as a descriptor, so the kernel
     # does not carry a handle to it. See `AdaptedAccel` in `raytracing/accel.jl`.
     AdaptedAccel(hwtlas, hwtlas.tri_gpu, hwtlas.off_gpu, Raycore.empty_triangle(Tri),
-                 nothing, hwtlas.procedural)
+                 nothing, hwtlas.procedural, hwtlas.combined_instance_buf)
 end
 
 # pin_leaves! stops at VulkanTLAS — its LavaArray contents (`tri_gpu` / `off_gpu`)
@@ -260,6 +260,7 @@ function Adapt.adapt_structure(to::LavaAdaptor, accel::AdaptedAccel)
         accel.empty,
         accel.scene,
         Adapt.adapt(to, accel.procedural),
+        Adapt.adapt(to, accel.instances),
     )
 end
 
@@ -993,8 +994,7 @@ const COMMITTED_GENERATED = UInt32(2)
     prim_idx = lava_ray_query_get_primitive_index(true)
     bx, by = lava_ray_query_get_barycentrics(true)
 
-    @inbounds tri_idx = Int(accel.offsets[inst_id + UInt32(1)]) + Int(prim_idx) + 1
-    @inbounds tri = accel.triangles[tri_idx]
+    tri = hittriangle(accel, inst_id, prim_idx)
 
     bary = SVector{3,Float32}(1f0 - bx - by, bx, by)
     return (true, tri, t, bary, inst_custom_idx)

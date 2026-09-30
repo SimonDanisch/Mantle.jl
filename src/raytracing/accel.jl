@@ -13,6 +13,10 @@ GPU-adapted form of `VulkanTLAS`.  Carries the kernel-side data needed by
   * `triangles` — flat array of all BLAS triangles, concatenated.
   * `offsets`   — per-instance offset into `triangles`, indexed by `gl_InstanceID + 1`.
   * `empty`     — sentinel triangle returned on miss.
+  * `instances` — the TLAS's instance records, indexed by `gl_InstanceID + 1`,
+                  so a hit triangle can be moved from its BLAS into world
+                  space (see [`hittriangle`](@ref)); `nothing` where a backend
+                  has none, and then triangles come back as stored.
   * `hwtlas`    — CPU-side `VulkanTLAS` reference for callers that need it
                   (descriptor binding, sync, RT pipeline path); `nothing` in
                   the kernel-form produced by `Adapt.adapt`.
@@ -21,7 +25,7 @@ Constructed by `sync!(hwtlas)` from the live VulkanTLAS state.  The kernel-form
 (returned by `Adapt.adapt(LavaAdaptor, accel)`) drops `hwtlas` (Nothing) and
 adapts the array fields to `LavaDeviceArray`.
 """
-struct AdaptedAccel{H, T, O, Tri, S, P} <: Raycore.AbstractAdaptedAccel
+struct AdaptedAccel{H, T, O, Tri, S, P, I} <: Raycore.AbstractAdaptedAccel
     hwtlas::H
     triangles::T
     offsets::O
@@ -46,15 +50,34 @@ struct AdaptedAccel{H, T, O, Tri, S, P} <: Raycore.AbstractAdaptedAccel
     # `(t, ξ)` is what lets an isoparametric FEM element be intersected exactly
     # instead of being tessellated first.
     procedural::P
+    instances::I
 end
 
 # Shorter forms for the backends and call sites that need neither of the
 # trailing fields. Keeping them means adding a field did not touch a single
 # existing construction site.
 AdaptedAccel(hwtlas, triangles, offsets, empty) =
-    AdaptedAccel(hwtlas, triangles, offsets, empty, nothing, nothing)
+    AdaptedAccel(hwtlas, triangles, offsets, empty, nothing, nothing, nothing)
 AdaptedAccel(hwtlas, triangles, offsets, empty, scene) =
-    AdaptedAccel(hwtlas, triangles, offsets, empty, scene, nothing)
+    AdaptedAccel(hwtlas, triangles, offsets, empty, scene, nothing, nothing)
+AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
+    AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural, nothing)
+
+"""
+    hittriangle(accel::AdaptedAccel, inst_id, prim_idx) -> triangle
+
+The triangle a hit landed on, in world space: looked up in the flat triangle
+array by instance and primitive index, then moved by its instance's transform.
+The BLAS stores triangles in object space, and everything downstream (normals,
+tangents, the side a shadow ray starts on) is computed against world-space rays.
+"""
+@inline function hittriangle(accel::AdaptedAccel, inst_id::UInt32, prim_idx::UInt32)
+    @inbounds tri = accel.triangles[Int(accel.offsets[inst_id + UInt32(1)]) + Int(prim_idx) + 1]
+    return toworld(accel.instances, inst_id, tri)
+end
+@inline toworld(::Nothing, inst_id, tri) = tri
+@inline toworld(instances, inst_id, tri) =
+    @inbounds Raycore.transform(instances[inst_id + UInt32(1)].transform, tri)
 
 
 
