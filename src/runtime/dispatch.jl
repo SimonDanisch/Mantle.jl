@@ -277,7 +277,7 @@ message naming what to declare instead, rather than running and quietly
 computing the wrong thing.
 
 Two shapes say yes. A backend that WALKS its plans calls the function in order,
-which is what the host backend does. A backend whose recording is a stream
+which is what the Metal backend does. A backend whose recording is a stream
 CAPTURE gets it for free, because the library's own submission lands in the
 capture — that is ROCm, where a `mul!` becomes the rocBLAS kernels the graph
 then replays without rocBLAS being involved again.

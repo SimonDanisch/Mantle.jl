@@ -2,8 +2,7 @@
 #
 # Every backend whose kernels are KA kernels executes a plan the same way: bake
 # one callable per dispatch at compile time, then a frame is a loop over
-# callables. The host and Metal backends share ALL of it — neither overrides a
-# single function here, because `storage` already knows how to turn each
+# callables. The Metal backend uses ALL of it — it overrides no function here, because `storage` already knows how to turn each
 # resource kind into the array a kernel takes.
 #
 # This file was `src/host/host.jl`. Moving it here is what makes the Metal
@@ -92,9 +91,7 @@ ndrangeof(::Device, n) = n
 Read a device-computed dispatch count, on the host, at launch.
 
 **This reads memory an earlier kernel wrote, so the earlier kernel has to have
-finished.** On the host backend that is free: the previous step ran to
-completion on this thread before this one started. On a GPU backend it is not —
-the producing launch is queued, the host read races it, and the count comes back
+finished.** On a GPU backend that is not free: the producing launch is queued, the host read races it, and the count comes back
 stale.
 
 That race is exactly what a wavefront path tracer trips over: Hikari dispatches
@@ -119,8 +116,7 @@ Ensure device work already submitted has completed, before the host reads memory
 it wrote.
 
 Defaults to `synchronize`, because on any backend that queues work a host read
-of device memory races whatever wrote it. The host backend overrides this to a
-no-op: its "device" writes happen on the calling thread.
+of device memory races whatever wrote it.
 """
 awaitwrites(dev::Device) = KernelAbstractions.synchronize(backend(dev))
 
@@ -153,9 +149,14 @@ macro generates a function too.
 macro-free kernel that takes exactly one argument — `rngadvance_kernel!(state)`
 — answers that yes, and the access walk then tried to construct it, reaching
 `MethodError: no method matching rngadvance_kernel!(::LavaBackend, ::Int64)`
-from inside `kernelfor`. What actually distinguishes them is WHERE the methods
-come from: `@kernel` generates its constructors in KernelAbstractions' own
-`macros.jl`, and nothing else in either package does.
+from inside `kernelfor`. What distinguishes them is what that call RETURNS:
+`@kernel`'s constructor builds a `KernelAbstractions.Kernel`, and a macro-free
+kernel called with a backend does not.
+
+(It used to be asked by where the methods were defined — KernelAbstractions'
+`macros.jl`. KernelAbstractions 0.10 relocates the generated constructors to the
+`@kernel` line in the caller's file, so that test said "not a kernel" for every
+`@kernel`, and the access walk tried to run the constructor as the kernel.)
 
 One predicate, in core, because this is a decision about what a dispatch MEANS
 and not about any backend's machinery: Lava's `compile_dispatch`, the ROCm
@@ -163,9 +164,11 @@ extension, `bake` below and `runlaunches!` all ask it here, and a caller that
 does not ask is a `MethodError: no method matching ew2!(::CPU)` on the host.
 Deletes itself with the last `@kernel`.
 """
-buildskernel(f, backend) =
-    hasmethod(f, Tuple{typeof(backend)}) &&
-    any(m -> occursin("KernelAbstractions", String(m.file)), methods(f))
+function buildskernel(f, backend)
+    hasmethod(f, Tuple{typeof(backend)}) || return false
+    R = Base.infer_return_type(f, Tuple{typeof(backend)})
+    return R !== Union{} && R <: KernelAbstractions.Kernel
+end
 
 """
     kibackend(dev) -> backend

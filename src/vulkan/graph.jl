@@ -53,7 +53,7 @@ const DEVICES = IdDict{Any,LavaDevice}()
 # `Device(VulkanAPI())`, not `Device(Lava)`. Passing the Lava MODULE as the
 # selector meant something while Lava was the backend package; the backend is
 # this package now, and the marker is what names an API — the same spelling
-# `Device(HostAPI())` uses.
+# `Device(MetalAPI())` uses.
 function Device(::VulkanAPI; select = nothing, debug::Union{Nothing,DebugConfig} = nothing)
     # No selector and no debug configuration: the process default, cached per
     # context. Anything else is a device of the caller's own, built now and
@@ -577,8 +577,7 @@ end
 #
 # On the BLOCK, which is this backend's `BufferBlock` — see `storage` in
 # `src/graph/build.jl`. Written as `storage(t::TransientBuffer{T})` this is the
-# same signature as core's and OVERWRITES it, taking Metal and the host backend
-# with it.
+# same signature as core's and OVERWRITES it, taking Metal with it.
 storage(t::TransientBuffer{T,N}, block::BufferBlock) where {T,N} =
     LavaArray{T,N}(copy(block.ref), size(t); offset = t.offset)
 
@@ -1569,7 +1568,7 @@ openrecording(dev::LavaDevice, pl::Plan, ::AbstractUnitRange) =
 # submits it at the END, so a host call made during the walk submits its own work
 # BEFORE any of the commands the walk is still writing: the barriers the graph
 # derived would order the dispatches
-# against each other and nothing against the call. The host backend can run one
+# against each other and nothing against the call. Metal can run one
 # because it executes each pass as it walks; ROCm can because the library's own
 # submission lands inside the stream capture. This backend would have to split
 # its submission at every call, which is a design, not an oversight.

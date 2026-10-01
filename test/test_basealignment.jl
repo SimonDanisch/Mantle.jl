@@ -17,7 +17,6 @@ import Mantle as M
     # A transient's offset is decided at placement; the floor is what every
     # backend's placement rule promises.
     @test M.basealignment(t) == M.TRANSIENT_ALIGN_FLOOR
-    @test M.alignment(M.Device(M.HostAPI()), t) >= M.TRANSIENT_ALIGN_FLOOR
     # Nothing is known about an arbitrary array, so nothing is claimed.
     @test M.basealignment(zeros(Float16, 8)) == 1
     # A view is as aligned as its parent and its offset both allow.

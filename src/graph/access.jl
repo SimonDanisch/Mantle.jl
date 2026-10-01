@@ -1258,7 +1258,7 @@ devicetype(dev::Device, x::NamedTuple{K}) where {K} =
     argtype(device, y) -> Type
 
 What a launch on this device turns an already-`resolve`d value into. The default
-is nothing at all — the host backend hands a kernel the array it resolved — and a
+is nothing at all — the kernel gets the array `resolve` produced — and a
 backend that adapts its arguments on the way to the shader answers with the
 adapted type, through the same `Adapt` rules the dispatch is packed with.
 

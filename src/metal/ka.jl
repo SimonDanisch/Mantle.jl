@@ -8,7 +8,7 @@
 #
 # None of that is needed here twice over. Metal.jl already IS a KA backend, so
 # the launch machinery is its; and `graph/kalaunch.jl` already IS the plan
-# execution, shared with the host backend, so the baking is Mantle's. What is
+# execution, so the baking is Mantle's. What is
 # genuinely this backend's is how a graph resource becomes a kernel argument,
 # and whether barriers have to be emitted.
 
@@ -105,8 +105,8 @@ Give a transient its slice of the pool block.
 rather than per launch — core's `storage(::TransientBuffer)` hands it straight
 back.
 
-The slab is an `MTLBuffer`, where the host backend's is a `Vector{UInt8}` and
-the Vulkan backend's is a `BufferBlock`. Same hook, three storages.
+The slab is an `MTLBuffer`, where the Vulkan backend's is a `BufferBlock`. Same
+hook, two storages.
 """
 function deviceslice(::MetalDevice, ::Type{T}, dims::Dims{N},
                      buf::MTL.MTLBuffer, off::Int) where {T,N}

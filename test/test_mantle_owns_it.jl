@@ -392,13 +392,10 @@ end
 # The exceptions are named, not waved through:
 #   * `runtests.jl` — the harness itself, which has to name the sections it
 #     guards on.
-#   * `test_host.jl` — its "Host and Vulkan devices coexist" testset is about
-#     two named backends being usable at once, which cannot be asked of one.
 #   * this file — 0.6 asks a Metal-specific question about a second device.
 
 const BACKEND_NAMED_ALLOWED = Set([
     "runtests.jl",                # the harness names the sections it guards
-    "test_host.jl",               # "Host and Vulkan devices coexist" needs two
     "test_mantle_owns_it.jl",     # 0.6 asks a Metal-specific question
     # Two of its assertions are Vulkan's: a `pool_offset` inside a VkBuffer and
     # `plan.recording isa Recording`. The second has a portable spelling

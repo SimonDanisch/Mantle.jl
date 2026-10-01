@@ -453,15 +453,11 @@ end
 
 end  # if _VULKAN_OK — the sync lowering names Vulkan enums in every assertion
 
-# CPU-only, so they go first and fail fast. These sat next to this file without
-# being included by it, which meant every regression they pin was unguarded —
-# the host backend could not write a struct with padding for as long as it has
-# existed, and `test_host.jl` is the file that would have said so.
+# CPU-only, so they go first and fail fast.
 #
 # Outside the driver gate on purpose: that they need no GPU is the assertion.
 include(joinpath(@__DIR__, "test_pool.jl"))
-include(joinpath(@__DIR__, "test_host.jl"))
-# The host half needs no GPU; the Vulkan half is gated inside on `_VULKAN_OK`.
+# The Vulkan half is gated inside on `_VULKAN_OK`.
 include(joinpath(@__DIR__, "test_basealignment.jl"))
 # Also outside the driver gate, and for a stronger reason than "needs no GPU":
 # it reads the extension SOURCE, so it checks the Metal extension's import list
@@ -685,8 +681,7 @@ end
 # resolvable on any platform while `Metal.functional()` is the honest question.
 #
 # These sat in `test/metal/` without being included by anything, which meant
-# every regression they pin was unguarded — the same way `test_host.jl` was
-# before the note above. Two of them were failing when they were finally run.
+# every regression they pin was unguarded. Two of them were failing when they were finally run.
 global METAL_TESTS = joinpath(@__DIR__, "metal")
 
 # `_METAL_OK` is decided at the top, beside `_VULKAN_OK`.

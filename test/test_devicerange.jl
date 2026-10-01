@@ -134,8 +134,7 @@ end
     # workgroups over it (Vulkan's indirect dispatch). One that is not launches
     # the CEILING, deliberately: resolving the range by reading the count on the
     # host means synchronising before every such dispatch, which measured 320
-    # synchronises and 0.585 s of a 0.602 s frame on an M5. `test_host.jl`
-    # states that contract and the equivalence it rests on — the kernel must
+    # synchronises and 0.585 s of a 0.602 s frame on an M5. The kernel must
     # bound itself either way.
     #
     # Asked of the dispatch, `devicesized`, which each backend declares. It was

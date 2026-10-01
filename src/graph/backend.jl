@@ -436,9 +436,7 @@ the plan's argument memory, so `notify_move!` queues a patch and both the
 recording and the launches that read it survive. `false` is a backend whose
 baked work names the old storage in a form nothing can reach: a captured HIP
 graph holds its kernel arguments where only `hipGraphExecKernelNodeSetParams`
-could, and capture does not hand back the node handles that would need — and
-the host backend, whose `bake` resolved each launch into a `Vector` view over
-the block that moved. Such a plan is [`invalidate!`](@ref)d and marked for the
+could, and capture does not hand back the node handles that would need. Such a plan is [`invalidate!`](@ref)d and marked for the
 recompile `refit!` does before the next `run!` submits.
 
 Asked rather than assumed for the reason [`deviceaddress`](@ref) replaced
@@ -519,8 +517,8 @@ collect!(::Profiler, dev) = nothing
     syncbackend(device) -> Backend
 
 The marker the `Barriers` phase asks `needs_transition` of, and the lowering
-asks `stages`, `access` and `layout` of: `VulkanAPI()`, `MetalAPI()`,
-`HostAPI()`. A device says which; core never guesses from its type.
+asks `stages`, `access` and `layout` of: `VulkanAPI()`, `MetalAPI()`. A device
+says which; core never guesses from its type.
 """
 function syncbackend end
 

@@ -299,8 +299,7 @@ const SGEMM_MAXWASTE = 4
 # allocator with neither.
 #
 # `src/vulkan/` and `src/metal/` are `@static include`d at the BOTTOM of this
-# file, one or the other, after every declaration they add a method to. So is
-# the host backend, which every platform gets.
+# file, one or the other, after every declaration they add a method to.
 
 export Span, OffsetWindow, Gap, Item, Problem, Placement
 # `overlaps` is deliberately not exported: it is a Span predicate nothing outside
@@ -314,7 +313,7 @@ export upload!, download, deviceview, bufferusage, devicecopy!, Persistent, Unif
 export rawalloc, rawfree, constraintof, compatible, maxalloc, mergeconstraints
 export readproblem
 
-export Backend, VulkanAPI, MetalAPI, WebGPUAPI, HostAPI, ROCmAPI
+export Backend, VulkanAPI, MetalAPI, WebGPUAPI, ROCmAPI
 export Usage, ResourceKind, BufferKind, ImageKind, AccelKind
 export Access, ReadOnly, WriteOnly, ReadWrite, NoAccess, Src, Dst
 export Vertices, Indices, Indirect, Predicated, Uniform, Sampled, Present, Undefined
@@ -554,11 +553,6 @@ capacity(dev) = typemax(Int)
 # Vulkan context, and Metal's does neither.
 
 
-# The host backend, last: every method in it is a method on something declared
-# above, and it says so: the file qualifies all 83 of them as `Mantle.x`, which
-# reads as the backend-facing surface it is and stays extractable.
-include("host/host.jl")
-
 # ── The GPU backend, chosen at parse time ─────────────────────────────────────
 #
 # An `@static include` and not an extension. An extension exists to make a
@@ -573,8 +567,6 @@ include("host/host.jl")
 # `import Mantle: …` across the two — and a name MISSED there does not fail,
 # it silently DEFINES `MantleVulkanExt.release!` instead of extending
 # `Mantle.release!`, and nothing breaks until something calls the wrong one.
-# `ext/MantleHostExt.jl` came back into core for the same reason; see the
-# paragraph above `host/host.jl`.
 #
 # Vulkan is imported QUALIFIED. It exports 8573 names, and five of them —
 # `Buffer`, `Device`, `DrawIndirectCommand`, `Framebuffer`, `Sampler` — are

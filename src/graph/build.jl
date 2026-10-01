@@ -667,6 +667,10 @@ deriveview(::Type{T}, a::AbstractArray{T}, dims::Dims, off::Int) where {T} =
 Base.length(t::TransientBuffer) = prod(t.dims)
 Base.size(t::TransientBuffer) = t.dims
 Base.size(t::TransientBuffer, d::Integer) = d <= ndims(t) ? t.dims[d] : 1
+# A transient is a dense region of its arena, so its strides are its shape's —
+# the answer `strides(::Buffer)` gives, with no array to ask. Flash attention's
+# plan reads it to check that the innermost dimension is the contiguous one.
+Base.strides(t::TransientBuffer) = Base.size_to_strides(1, size(t)...)
 Base.ndims(::TransientBuffer{<:Any,N}) where {N} = N
 Base.eltype(::TransientBuffer{T}) where {T} = T
 
@@ -1769,8 +1773,8 @@ function remap!(pl::Plan, kind, region)
     # the OLD region when the plan was built, and nothing above touches those.
     # Vulkan patches those addresses (`notify_move!`), which is what
     # [`patchable`](@ref) answers and why it is asked here rather than assumed
-    # either way; the host backend has neither a recording nor addresses to
-    # patch, so it wrote the old block and read the new one — 100% wrong pixels,
+    # either way; a backend with neither a recording nor addresses to patch
+    # wrote the old block and read the new one — 100% wrong pixels,
     # silently. A recompile is the only thing that re-resolves them, so the
     # plan is marked and `refit!` — which `run!` calls before every submit —
     # does it. NOT done here: this runs while the pool is mid-growth, and a

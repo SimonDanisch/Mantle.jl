@@ -29,9 +29,8 @@
 # information here — the reason a Vulkan-less machine cannot load Vulkan is the
 # first line of it.
 #
-# Guarded, because this file is included TWICE: `runtests.jl` needs it before
-# anything else, and `test_host.jl` includes it again so that it also runs
-# standalone. A second `const BACKEND_PROBED = Dict()` binds a fresh empty one and
+# Guarded, because a test file that also runs standalone includes it again after
+# `runtests.jl` did. A second `const BACKEND_PROBED = Dict()` binds a fresh empty one and
 # the memo above it is lost — which is exactly what happened, and why the Vulkan
 # notice appeared twice in a suite that asks four times.
 if !@isdefined(BACKEND_PROBED)

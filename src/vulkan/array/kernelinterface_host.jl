@@ -16,14 +16,9 @@
 
 import KernelInterface as KI
 
-KI.synchronize(backend::LavaBackend) = KA.synchronize(backend)
-
-KI.allocate(backend::LavaBackend, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool} = nothing) where {T} =
-    KA.allocate(backend, T, dims; unified = something(unified, false))
-
-KI.get_backend(a::LavaArray) = KA.get_backend(a)
-
-KI.supports_unified(::LavaBackend) = true
+# `synchronize`, `allocate`, `get_backend` and `supports_unified` are not
+# restated here: on KernelAbstractions 0.10 they ARE KernelInterface's functions,
+# and `array/ka_backend.jl` implements them once.
 KI.supports_atomics(::LavaBackend) = true
 # `KernelInterface`'s docstring says a backend implements this only if it does
 # NOT support Float64, and Vulkan's `shaderFloat64` is core. It still has to be
@@ -33,27 +28,6 @@ KI.supports_atomics(::LavaBackend) = true
 # Metal backend states the other side of the same trait in
 # `src/metal/kernelinterface.jl`.
 KI.supports_float64(::LavaBackend) = true
-
-# ── The KA 0.9 gap ──────────────────────────────────────────────────────────
-#
-# `LavaBackend <: KA.GPU`, and on KernelAbstractions 0.9 that is KA's OWN
-# `Backend` hierarchy — a different abstract type from `KI.Backend`, because 0.9
-# predates KernelInterface. Julia has single inheritance, so `LavaBackend` cannot
-# be both, and KI's derived methods (`matrix_shapes(::Backend)` and the
-# `supports`/`bestshape` forwards beside it) do not reach it.
-#
-# So the forwards are written here. Three lines, each the SAME body KI has: not
-# a second implementation, but the dispatch KI would do if the type hierarchies
-# were one. Everything they forward to, including the `coopmat` gate, is KI's and
-# written once.
-#
-# This block is deleted by the KernelAbstractions 0.10 upgrade, where
-# `KA.Backend` IS `KI.Backend` and the derivations apply directly. It is the
-# clearest cost of staying on 0.9, and it is three lines.
-KI.matrix_shapes(b::LavaBackend) = KI.matrix_shapes(caps(b))
-KI.supports(b::LavaBackend, s::MatrixShape) = KI.supports(caps(b), s)
-KI.bestshape(b::LavaBackend, ab, acc; scope::MatrixScope = SubgroupScope()) =
-    KI.bestshape(caps(b), ab, acc; scope)
 
 # Which element types `shfl_down` covers. It dispatches on a backend — a host
 # handle — so it is here, while the methods themselves are generated on the

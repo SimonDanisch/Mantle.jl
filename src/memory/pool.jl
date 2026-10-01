@@ -83,8 +83,8 @@ not said otherwise: two constraints that are not the same are not reconciled by
 core guessing.
 
 Impossibility is a THROW, not a returned `nothing`. `nothing` is a perfectly good
-constraint — it is the host backend's, whose memory is just memory — so using it
-as the failure signal made every host graph unplaceable. A sentinel that a
+constraint — memory with no placement rule — so using it as the failure signal
+made such graphs unplaceable. A sentinel that a
 backend can legitimately return is not a sentinel.
 """
 mergeconstraints(dev, kind, a, b) = a == b ? a : throw(ArgumentError(

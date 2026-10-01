@@ -127,7 +127,7 @@ not AMDGPU.jl is present, and this one loads beside it rather than instead of
 it — `availablebackends()` answers `[:vulkan, :rocm]` here. That is why every
 method below is written `Mantle.x`: a name missed in a module of its own does
 not fail, it silently defines `MantleROCmExt.release!`, and nothing breaks until
-the wrong one is called. `src/host/host.jl` is written the same way.
+the wrong one is called.
 """
 module MantleROCmExt
 

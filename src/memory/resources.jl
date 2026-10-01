@@ -126,9 +126,8 @@ function deviceview end
 Where a block of this backend's memory begins in the HOST address space, and how
 many bytes there are.
 
-This is the whole difference between a backend the CPU can address directly and
-the host backend itself: Metal answers from a `Shared` `MTLBuffer`'s `contents`,
-the host backend from its slab's `pointer`. Everything over it — [`hostview`](@ref)
+This is what a backend the CPU can address directly answers: Metal from a
+`Shared` `MTLBuffer`'s `contents`. Everything over it — [`hostview`](@ref)
 and the three transfer verbs below — is then one implementation.
 
 A backend whose device memory is not mapped does not answer, and writes
@@ -186,9 +185,6 @@ them has finished. Reading without waiting returns whatever was there before the
 launch — silently, and correctly often enough to look fine in a test that
 uploads and reads straight back. `upload!` does not wait: the graph orders a
 write against the passes that read it.
-
-The host backend answers `awaitwrites` with nothing, because its "device" writes
-happen on the calling thread, and so gets the same three at no cost.
 """
 function hostupload!(dev, a::DeviceArray, first::Integer, data::AbstractVector)
     copyto!(hostview(dev, a), first, data, 1, length(data))

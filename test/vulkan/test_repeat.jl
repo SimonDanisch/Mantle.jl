@@ -202,49 +202,6 @@ end
     Mantle.free!(pl)
 end
 
-# A backend that cannot discard recorded work must say so at build. Running every
-# recorded iteration instead is the one wrong answer that still produces output,
-# and on a bounce loop it would be a slower render rather than a broken one —
-# invisible until someone measured it.
-#
-# The host backend is not such a device: it never records, so it predicates by
-# reading the flag between passes — and that read must GATE, not just exist.
-@testset "repeat! on the host predicates by reading the flag" begin
-    host = Mantle.Device(Mantle.HostAPI())
-    @test Mantle.supportspredicate(host)
-    n = 8
-    x = Mantle.Buffer(host, zeros(Int32, n))
-    count = Mantle.Buffer(host, zeros(Int32, 1))
-    src = Mantle.Buffer(host, Int32[3])
-    pl = _repeatplan(host, x, count, src, 7, n)
-    Mantle.run!(pl)
-    # Three iterations of `2x + 1` from 0 give 2^3 - 1. Ungated it would be
-    # 2^7 - 1, so a flag nobody reads is a different order of magnitude, not a
-    # rounding error.
-    @test all(==(Int32(7)), Array(Mantle.storage(x)))
-    Mantle.free!(pl)
-end
-
-# The other gate on the host. Both gates are plain functions since Mantle stopped
-# defining `@kernel`s, and were refused there ("`gate_count!`, which is a
-# macro-free kernel") until the host ran them, as calls or as KernelInterface
-# kernels.
-@testset "repeat!(; while_nonzero) on the host stops when the body empties it" begin
-    host = Mantle.Device(Mantle.HostAPI())
-    n, maxiters = 8, 6
-    x = Mantle.Buffer(host, zeros(Int32, n))
-    budget = Mantle.Buffer(host, Int32[3])
-    g = Mantle.Graph(host)
-    Mantle.repeat!(g, maxiters; while_nonzero = budget) do _
-        Mantle.dispatch!(g, repeat_drain!, (x, budget), n; name = "drain")
-    end
-    pl = Mantle.Plan(g)
-    Mantle.run!(pl)
-    @test all(==(Int32(3)), Array(Mantle.storage(x)))
-    @test Array(Mantle.storage(budget))[1] == 0
-    Mantle.free!(pl)
-end
-
 @testset "repeat! wants at most one gate and at least one iteration" begin
     dev0 = Mantle.Device(Mantle.VulkanAPI())
     g0 = Mantle.Graph(dev0); c0 = Mantle.Buffer(dev0, zeros(Int32, 1))
@@ -376,16 +333,6 @@ end
         end
         Mantle.free!(pl)
     end
-end
-
-@testset "repeat!: the same loop on the host" begin
-    host = Mantle.Device(Mantle.HostAPI())
-    g, out1, out2 = loopgraph(host, 16, 7)
-    pl = Mantle.Plan(g)
-    Mantle.run!(pl)
-    @test all(==(Int32(28)), Array(Mantle.storage(out1)))
-    @test all(==(Int32(56)), Array(Mantle.storage(out2)))
-    Mantle.free!(pl)
 end
 
 # Where the recording is cut and what goes in one submission are core's, and a
