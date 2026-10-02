@@ -29,12 +29,14 @@ mtl_primitive(::Mantle.PointList)     = MTLm.MTLPrimitiveTypePoint
 
 mtl_depth_compare(::Mantle.DepthLess)    = MTLm.MTLCompareFunctionLess
 mtl_depth_compare(::Mantle.DepthLessEq)  = MTLm.MTLCompareFunctionLessEqual
+mtl_depth_compare(::Mantle.DepthLessEqReadOnly) = MTLm.MTLCompareFunctionLessEqual
 mtl_depth_compare(::Mantle.DepthGreater) = MTLm.MTLCompareFunctionGreater
 mtl_depth_compare(::Mantle.DepthAlways)  = MTLm.MTLCompareFunctionAlways
 mtl_depth_compare(::Mantle.DepthOff)     = MTLm.MTLCompareFunctionAlways
 
 depth_writes(::Mantle.DepthMode)  = true
 depth_writes(::Mantle.DepthOff)   = false
+depth_writes(::Mantle.DepthLessEqReadOnly) = false
 
 """Configure one colour attachment's blending from the portable `BlendMode`."""
 function apply_blend!(att, ::Mantle.Opaque)

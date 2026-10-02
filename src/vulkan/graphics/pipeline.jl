@@ -139,7 +139,7 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
             "`depth = DepthOff()`."))
     end
     depth_stencil = VK.PipelineDepthStencilStateCreateInfo(
-        depth_enable, depth_enable,
+        depth_enable, depth_enable && vk_depth_write(depth),
         depth_compare,
         false,    # depth bounds test
         false,    # stencil test
@@ -288,9 +288,15 @@ end
 function vk_depth(::DepthAlways)
     (true, VK.COMPARE_OP_ALWAYS)
 end
+function vk_depth(::DepthLessEqReadOnly)
+    (true, VK.COMPARE_OP_LESS_OR_EQUAL)
+end
 function vk_depth(::DepthOff)
     (false, VK.COMPARE_OP_ALWAYS)
 end
+
+vk_depth_write(::DepthMode) = true
+vk_depth_write(::DepthLessEqReadOnly) = false
 
 function vk_blend(::Opaque)
     VK.PipelineColorBlendAttachmentState(

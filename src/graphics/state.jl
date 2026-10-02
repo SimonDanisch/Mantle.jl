@@ -66,6 +66,13 @@ struct DepthLess <: DepthMode end
 "Closer or equal wins."
 struct DepthLessEq <: DepthMode end
 
+"""
+Closer or equal wins, without writing depth: for see-through draws (glass, a
+glow) drawn after the opaque ones, which are hidden behind what is solid but
+hide nothing themselves.
+"""
+struct DepthLessEqReadOnly <: DepthMode end
+
 "Farther wins — reversed-Z."
 struct DepthGreater <: DepthMode end
 

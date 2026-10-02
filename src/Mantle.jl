@@ -328,7 +328,7 @@ export stages, access, layout
 # defined, since the compiler needs the same names.
 export BlendMode, Opaque, AlphaBlend, Additive, Premultiplied
 export CullFace, NoCull, CullBack, CullFront
-export DepthMode, DepthLess, DepthLessEq, DepthGreater, DepthAlways, DepthOff
+export DepthMode, DepthLess, DepthLessEq, DepthLessEqReadOnly, DepthGreater, DepthAlways, DepthOff
 export RenderTarget
 
 # The resources a pipeline is built from. Abstract here, concrete in whichever
