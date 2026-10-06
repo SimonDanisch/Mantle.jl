@@ -425,32 +425,30 @@ function metalinterpreter(@nospecialize(f), @nospecialize(tt))
     return GPUCompiler.get_interpreter(GPUCompiler.CompilerJob(source, config))
 end
 
-"""
-What the kernel does to each dispatch argument, inferred through Metal's method
-table.
+"""The interpreter a macro-free kernel is compiled through on Metal."""
+Mantle.kernelinterpreter(::MetalDevice, kernel, tt) = metalinterpreter(kernel, tt)
 
-The leading entries `accessof` reports are dropped the same way the Vulkan side
-drops them: index 1 is the function itself, and a KA kernel is compiled at
-`(ctx, args...)` where the iteration context is the kernel's own rather than
-anything the caller declared. A macro-free kernel has neither.
+"""
+The signature a retained KernelAbstractions kernel is compiled at on Metal.
+
+Core's (`graph/access.jl`), except for the iteration context's type: the kernel
+receives `mtlconvert(ctx)`, Metal.jl's device-side form, and inferring it at the
+host type infers different code. Core's `kerneltouches` does the rest, the walk
+and which leading entries to drop, for every backend. This file used to carry
+its own copy of that, and with it the macro-free path, which is why Metal had no
+`kernelinterpreter` and the vocabulary test listed the name as lonely.
 
 `group` is threaded through because the context's TYPE depends on it — the same
 `launch_config`/`mkcontext` pair `compile_dispatch` uses, so the signature walked
 here is the signature compiled there.
 """
-function Mantle.kerneltouches(dev::MetalDevice, kernel, args::Tuple, ndrange, group)
-    argT = map(a -> Mantle.devicetype(dev, a), args)
-    if !Mantle.buildskernel(kernel, Mantle.backend(dev))
-        interp = metalinterpreter(kernel, Tuple{argT...})
-        return Mantle.accessof(interp, kernel, argT; cache = Mantle.accesscache(dev))[2:end]
-    end
+function Mantle.kakernelaccesssignature(dev::MetalDevice, kernel, argT::Tuple, ndrange, group)
     obj = Mantle.kernelfor(kernel, group, Mantle.backend(dev))
-    nd = Mantle.recordedrange(ndrange)
-    ndr, _ws, iterspace, _ = KA.launch_config(obj, nd, Mantle.callgroup(obj, group))
+    ndr, _ws, iterspace, _ = KA.launch_config(obj, Mantle.dispatchrange(ndrange),
+                                              Mantle.callgroup(obj, group))
     ctx = KA.mkcontext(obj, ndr, iterspace)
     tt = (Core.Typeof(Metal.mtlconvert(ctx)), argT...)
-    interp = metalinterpreter(obj.f, Base.to_tuple_type(tt))
-    return Mantle.accessof(interp, obj.f, tt; cache = Mantle.accesscache(dev))[3:end]
+    return metalinterpreter(obj.f, Base.to_tuple_type(tt)), obj.f, tt
 end
 
 
