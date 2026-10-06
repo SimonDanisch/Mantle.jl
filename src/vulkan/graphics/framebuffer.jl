@@ -146,6 +146,12 @@ function device_memory(ctx::VkContext, bytes::Integer, type_bits::Integer)
     # pass it, and this third site did not.
     flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
         flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
+    # Past the driver's budget is out of memory, also where the driver would
+    # accept it (see `overbudget`). The pool reclaims before it grows, so by
+    # the time a block is asked for here, that has happened.
+    overbudget(ctx, idx, bytes) && throw(LavaError("memory allocation",
+        format_oom_error(ctx, AllocFailure(VK.ERROR_OUT_OF_DEVICE_MEMORY, :budget, Int(bytes), Int(idx))),
+        "Free unused arrays, reduce the problem size, or check for leaks with gpu_memory_usage()."))
     VK.DeviceMemory(ctx.device, UInt64(bytes), idx; next = flags)
 end
 

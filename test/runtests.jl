@@ -1102,6 +1102,12 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_tolerated_alloc_failure.jl"))
         end
 
+        # Past the driver's memory budget is out of memory, also where RADV would
+        # have moved buffers to system memory (which froze a desktop, 2026-10-06).
+        @testset "allocation budget" begin
+            include(joinpath(VULKAN_TESTS, "test_alloc_budget.jl"))
+        end
+
 
         # The frozen path is the one the runners ship, and the profiler could not see
         # it: 0 kernels reported against 45 live dispatches.
