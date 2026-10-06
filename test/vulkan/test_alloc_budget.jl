@@ -32,10 +32,30 @@ using Test, Mantle
         # the request is over its budget.
         over = maximum(h -> h.budget - h.usage, heaps) + (256 << 20)
 
-        @testset "images and graph arenas (device_memory) throw" begin
+        @testset "images and graph arenas (device_memory) throw the driver's refusal" begin
             bits = typemax(UInt32)                         # any memory type
-            @test_throws Mantle.LavaError Mantle.device_memory(ctx, over, bits)
-            @test_throws r"budget" Mantle.device_memory(ctx, over, bits)
+            # The exception the driver's own out-of-memory is: the pool grows
+            # through here, and its reclaim-and-retry catches exactly that.
+            err = try
+                Mantle.device_memory(ctx, over, bits)
+                nothing
+            catch e
+                e
+            end
+            @test err isa Mantle.VK.VulkanError
+            @test err.code == Mantle.VK.ERROR_OUT_OF_DEVICE_MEMORY
+            @test occursin("budget", sprint(showerror, err))
+        end
+
+        @testset "the pool escalates a budget refusal and reports it" begin
+            err = try
+                Mantle.pool_alloc(ctx.default_bq, over)
+                nothing
+            catch e
+                e
+            end
+            @test err isa Mantle.LavaError
+            @test occursin("reserved by this pool", sprint(showerror, err))
         end
 
         @testset "buffers (try_vk_alloc) report a failure, not a buffer" begin

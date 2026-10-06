@@ -147,11 +147,14 @@ function device_memory(ctx::VkContext, bytes::Integer, type_bits::Integer)
     flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
         flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
     # Past the driver's budget is out of memory, also where the driver would
-    # accept it (see `overbudget`). The pool reclaims before it grows, so by
-    # the time a block is asked for here, that has happened.
-    overbudget(ctx, idx, bytes) && throw(LavaError("memory allocation",
+    # accept it (see `overbudget`). Refused with the exception the driver's own
+    # refusal is, because that is what the callers handle: the pool grows
+    # through here (`rawalloc`), and `acquire_or_reclaim!` collects, drains and
+    # retries on a `VulkanError` with an out-of-memory code and rethrows
+    # anything else. A `LavaError` here skipped that escalation.
+    overbudget(ctx, idx, bytes) && throw(VK.VulkanError(
         format_oom_error(ctx, AllocFailure(VK.ERROR_OUT_OF_DEVICE_MEMORY, :budget, Int(bytes), Int(idx))),
-        "Free unused arrays, reduce the problem size, or check for leaks with gpu_memory_usage()."))
+        VK.ERROR_OUT_OF_DEVICE_MEMORY))
     VK.DeviceMemory(ctx.device, UInt64(bytes), idx; next = flags)
 end
 
