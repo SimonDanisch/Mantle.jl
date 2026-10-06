@@ -219,10 +219,15 @@ end
         # a failure, which is the signal that `splitidx` could be relaxed.
         @testset "the plain division form still drops stores" begin
             @test sid_survivors(backend, sid_udiv_16!, 32) == total   # one trip is fine
+            # `broken` on NVIDIA, whose compiler this is (SETTLED above). It was
+            # promoted to `@test` on 2026-09-04 on RADV, which does not drop; on
+            # 2026-10-06 an RTX 4000 Ada (595.99) and an RTX 3070 Laptop (595.91)
+            # still keep 240-256 of 3072. An unexpected pass on NVIDIA fails, and
+            # that is the day `splitidx` could be relaxed there.
+            nvidia = Mantle.VK.get_physical_device_properties(
+                Mantle.vk_context().physical_device).vendor_id == 0x10de
             for K in (64, 128, 256)
-                # Was `@test_broken` waiting on a driver fix; the fix announced
-                # itself on 2026-09-04 (RADV, this tree), so it is `@test` now.
-                @test sid_survivors(backend, sid_udiv_16!, K) == total
+                @test sid_survivors(backend, sid_udiv_16!, K) == total broken = nvidia
             end
         end
     end

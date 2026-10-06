@@ -30,6 +30,15 @@ using Test, Mantle, Lava, KernelAbstractions
 @isdefined(LavaBackend) || (LavaBackend = Mantle.LavaBackend)
 const KA = KernelAbstractions
 
+# NVIDIA's driver still decodes these launches wrong with the guard off: measured
+# 2026-10-06 on an RTX 4000 Ada (595.99) and an RTX 3070 Laptop (595.91), the same
+# `min(1, b3/b2)` law as ever, while lavapipe runs the same kernel exactly. The
+# repair the testsets below record ("2026-09-04, RADV") was measured on RADV only.
+# So every guard-off assertion is `broken` on NVIDIA — an unexpected pass there
+# fails, which is the day the guard can go — and `WORKGROUP_FALLBACK` stays on.
+const SWG_NVIDIA = Mantle.VK.get_physical_device_properties(
+    Mantle.vk_context().physical_device).vendor_id == 0x10de
+
 @kernel function wgmark!(d)
     I = @index(Global, NTuple)
     @inbounds d[I...] = 1.0f0
@@ -120,15 +129,15 @@ end
             @test coverage(ND, wg, :typed; fallback = false, limit = 512) == 1.0
         end
         for wg in ((32, 4, 1, 1), (32, 4, 1, 2), (32, 1, 1, 1), (32, 8, 1, 1))
-            @test coverage(ND, wg, :typed; fallback = false) == 1.0
+            @test coverage(ND, wg, :typed; fallback = false) == 1.0 broken = SWG_NVIDIA
         end
     end
 
     @testset "an INTERIOR unit extent is not a trigger either" begin
         # The same, generalised past rank 4.
         ND5 = (32, 128, 8, 4, 2)
-        @test coverage(ND5, (16, 4, 1, 1, 1), :typed; fallback = false) == 1.0
-        @test coverage(ND5, (16, 4, 2, 1, 1), :typed; fallback = false) == 1.0
+        @test coverage(ND5, (16, 4, 1, 1, 1), :typed; fallback = false) == 1.0 broken = SWG_NVIDIA
+        @test coverage(ND5, (16, 4, 2, 1, 1), :typed; fallback = false) == 1.0 broken = SWG_NVIDIA
         @test coverage(ND5, (16, 4, 2, 2, 1), :typed) == 1.0
     end
 
@@ -138,7 +147,8 @@ end
         law(b2, b3) = coverage((64, 4b2, b3, 2), (32, 4, 1, 1), :typed; fallback = false)
         for (b2, b3) in ((2, 1), (4, 2), (8, 1), (16, 4), (64, 8),
                          (2, 2), (4, 4), (8, 16), (2, 8))
-            @test law(b2, b3) == 1.0
+            # The law itself: whole wherever b3 >= b2, on NVIDIA as anywhere.
+            @test law(b2, b3) == 1.0 broken = SWG_NVIDIA && b3 < b2
         end
     end
 
@@ -268,8 +278,8 @@ end
         prev = Mantle.WORKGROUP_FALLBACK[]
         try
             Mantle.WORKGROUP_FALLBACK[] = false
-            @test written((576, 16, 16, 4, 4, 1), (16, 2, 2, 2, 2, 1)) == 1.0
-            @test written((64, 4, 4, 4, 1), (16, 2, 2, 2, 1)) == 1.0
+            @test written((576, 16, 16, 4, 4, 1), (16, 2, 2, 2, 2, 1)) == 1.0 broken = SWG_NVIDIA
+            @test written((64, 4, 4, 4, 1), (16, 2, 2, 2, 1)) == 1.0 broken = SWG_NVIDIA
         finally
             Mantle.WORKGROUP_FALLBACK[] = prev
         end

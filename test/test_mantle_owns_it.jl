@@ -150,8 +150,21 @@ end
 # suite builds synthetic ones and asks the planner about them. Those vary the
 # DEVICE; the BUILD is fixed, and which tile Mantle emits kernels at is a property
 # of the build.
+#
+# `deviceslice` is the other kind of deliberate answer: a per-device verb that one
+# backend must NOT implement. It is how `materialize!` wraps a transient's bytes in
+# the backend's array type, and its docstring (`phases.jl`) says a backend that
+# keeps the block instead implements no method. Vulkan keeps the block, because a
+# buffer barrier scopes to (VkBuffer, offset, size), which an array view cannot
+# name; Metal wraps. Answering it on Vulkan would hand barriers a view.
+#
+# `hostspan` the same way, by its docstring (`memory/resources.jl`): it is where a
+# backend's memory begins in the HOST address space, answered by a backend whose
+# device memory the CPU addresses directly (Metal's `Shared` buffers). Vulkan's is
+# not mapped; it writes `upload!`, `download` and `devicecopy!` itself, through a
+# staging copy, and has no span to give.
 const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
-    :staged_gemm_tile, :use_frozen_kernels
+    :staged_gemm_tile, :use_frozen_kernels, :deviceslice, :hostspan
 ])
 
 # The 56 that are lonely TODAY, so the guard can fail on a 57th.
@@ -226,7 +239,12 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
         isdefined(Mantle, n) || return false
         v = getglobal(Mantle, n)
         (v isa Function || v isa Type) || return false
-        return any(m -> !isbackendfile(m.file), methods(v))
+        # Nor a TEST file: the suite's `FaultDevice` forwards every verb, so once
+        # it is loaded each name has a method outside the backends, and this read
+        # every one of them as defaulted. Run after the suite the guard passed;
+        # run alone it named `hostspan`. A test double is not a default.
+        return any(m -> !isbackendfile(m.file) && !startswith(string(m.file), @__DIR__),
+                   methods(v))
     end
 
     lonely = Symbol[]

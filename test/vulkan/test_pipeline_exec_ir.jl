@@ -50,10 +50,18 @@ exec_ir_probe!(out) = (i = Lava.lava_global_invocation_id_x(); @inbounds out[i] 
         pipe1 = Mantle.get_compute_pipeline(ctx1, spv.spirv_bytes, spv.entry_name)
         if offered
             ir = Mantle.pipeline_exec_ir(ctx1, pipe1)
-            @test !isempty(ir)
-            # The second call of the two-call idiom filled the text, which
-            # Vulkan.jl's own wrapper never makes.
-            @test any(r -> !isempty(r.text), ir)
+            @test ir isa Vector
+            # A driver may offer the extension and capture no representation at
+            # all: the count is allowed to be zero. The RTX 3070 Laptop on 595.91
+            # does exactly that, for a fresh shader with the capture flag set, while
+            # the RTX 4000 Ada on 595.99 fills them. Where there are some, the
+            # second call of the two-call idiom filled the text, which Vulkan.jl's
+            # own wrapper never makes.
+            if isempty(ir)
+                @info "$(ctx1.device_name) offers VK_KHR_pipeline_executable_properties but captures no internal representation"
+            else
+                @test any(r -> !isempty(r.text), ir)
+            end
             @test !isempty(Mantle.pipeline_exec_stats(ctx1, pipe1).raw_stats)
         else
             @info "$(ctx1.device_name) does not offer VK_KHR_pipeline_executable_properties"
