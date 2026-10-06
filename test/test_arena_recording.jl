@@ -95,6 +95,15 @@ end
     # ONE transient past it, not two of it: a placement too tall for one
     # allocation now spills into another (the testset below), so what still
     # cannot run is an item no single allocation holds.
+    #
+    # Measured AFTER `makeroom!`, which is what `Plan` itself runs when a placement
+    # overflows: it collects and trims, and the room it finds is the room the check
+    # compares against. Measured before it, the room could grow by a whole staging
+    # block between here and the check, and a 4 KB margin was swallowed: on NVIDIA,
+    # where the budget and not `maxalloc` is the bound, the "too large" transient
+    # fit, ~19 GB were reserved, and every later testset in this file ran out of
+    # budget.
+    M.makeroom!(M.pool(dev), dev)
     n = M.arenaroom(M.pool(dev), dev, E.Buffers()) ÷ sizeof(Float32) + 1024
     err = try
         g = M.Graph(dev)
@@ -128,7 +137,10 @@ end
 @testset "a placement larger than one allocation spills into parts" begin
     dev = M.Device(TESTBACKEND)
     cap = M.maxalloc(dev)
-    if 2 * cap < M.capacity(dev)
+    # `cap < capacity ÷ 2`, not `2cap < capacity`: NVIDIA's `maxalloc` is
+    # `typemax(Int)`, "no limit", and doubling it wrapped negative, so the test ran
+    # on the one device it means nothing on and built a transient of 0 elements.
+    if cap < M.capacity(dev) ÷ 2
         n = (6 * cap ÷ 10) ÷ sizeof(Float32)
         g = M.Graph(dev)
         seed = M.Buffer(dev, zeros(Float32, 16))
@@ -566,7 +578,12 @@ end
     # …and the blocks those regions came from, which a drain empties but does not
     # hand back: the count of RESERVED bytes below is about `b`'s block alone.
     M.trim!(pool, dev)
-    reserved = M.reserved(pool)
+    # The PERSISTENT kind, where `b` lives. The whole pool also holds the staging
+    # and argument blocks, and those come and go with whatever the next upload or
+    # launch needs: once uploads staged through `Readback` instead of `Unified`,
+    # the slow launch below took a fresh 4 MiB argument block and a whole-pool
+    # count read that as `b2` not reusing `b`'s bytes.
+    reserved = M.reserved(pool, M.Persistent())
 
     # Retire with a submission IN FLIGHT, which is the case that must wait: a
     # command the device is still running can name these bytes. A slow kernel
@@ -584,7 +601,7 @@ end
     @test M.reclaim!(pool, dev) == 0
 
     b2 = M.Buffer(dev, fill(2f0, 4096))
-    @test M.reserved(pool) == reserved      # reused, not reallocated
+    @test M.reserved(pool, M.Persistent()) == reserved   # reused, not reallocated
     @test Array(b2) == fill(2f0, 4096)
     M.free!(b2)
 
