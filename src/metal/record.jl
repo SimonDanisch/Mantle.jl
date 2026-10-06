@@ -459,6 +459,9 @@ mutable struct MetalGridWriter <: MetalWriter
     slot::Int
 end
 
+"""A recorded dispatch's buffer bindings for a legacy encoder: `(buffer, offset, index)`."""
+const LegacyBindings = Vector{Tuple{MTL.MTLBuffer,Int,Int}}
+
 """
 One recorded dispatch as an ENCODER needs it, rather than as a command in a buffer.
 
@@ -472,7 +475,7 @@ at all on a queue whose `executeCommandsInBuffer:` stalls.
 """
 struct MetalEncodedCommand
     pipeline::MTL.MTLComputePipelineState
-    table::MTL.MTL4ArgumentTable
+    table::Union{MTL.MTL4ArgumentTable,LegacyBindings}
     groups::MTL.MTLSize
     threads::MTL.MTLSize
     barrier::Bool
