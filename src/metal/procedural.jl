@@ -83,7 +83,7 @@ struct ProceduralVisible{P,B} end
 
 function (::ProceduralVisible{P,B})(b1::Float32, b2::Float32, b3::Float32, b4::Float32,
                                     payload::Core.LLVMPtr{UInt8, Metal.AS.Device},
-                                    out::Core.LLVMPtr{ProceduralOut,1}) where {P,B}
+                                    out::StageOut{ProceduralOut}) where {P,B}
     p = unsafe_load(reinterpret(Core.LLVMPtr{P, Metal.AS.Device}, payload))
     best = unpackbest(B, (b1, b2, b3, b4))
     nb = procedural_candidate(p, best)::B
@@ -94,7 +94,7 @@ end
 """The argument tuple `ProceduralVisible` is compiled against."""
 procedural_visible_tt() = Tuple{Float32, Float32, Float32, Float32,
                                 Core.LLVMPtr{UInt8, Metal.AS.Device},
-                                Core.LLVMPtr{ProceduralOut,1}}
+                                StageOut{ProceduralOut}}
 
 # ── The traversal ────────────────────────────────────────────────────────────
 #
@@ -313,7 +313,8 @@ end
 """Compile `ProceduralVisible{P,B}` and keep its library alive with the function."""
 function compile_procedural_candidate(d::MetalDevice, ::Type{P}, ::Type{B}) where {P,B}
     name = "__metal_linked_procedural_candidate"
-    cfg = Metal.compiler_config(d.dev; stage = :candidate, name)
+    # Inlined whole for the reason `compile_stage_function` gives.
+    cfg = Metal.compiler_config(d.dev; stage = :candidate, name, always_inline = true)
     job = Metal.GPUCompiler.CompilerJob(
         Metal.methodinstance(ProceduralVisible{P,B}, procedural_visible_tt()), cfg)
     lib = MTL.MTLLibraryFromData(d.dev, Metal.compile_to_metallib(job).metallib)

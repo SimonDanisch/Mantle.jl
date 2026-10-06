@@ -508,7 +508,7 @@ MetalVertexStage{F,Out}() where {F,Out} = MetalVertexStage{F,Out,false}()
     quote
         Base.@_inline_meta
         r = $call
-        Base.unsafe_store!(args[$N]::Core.LLVMPtr{Out,1}, Out($vals))
+        Base.unsafe_store!(args[$N]::StageOut{Out}, Out($vals))
         return nothing
     end
 end
@@ -543,7 +543,7 @@ MetalFragmentStage{F,VIn,Out}() where {F,VIn,Out} = MetalFragmentStage{F,VIn,Out
     quote
         Base.@_inline_meta
         r = $call
-        Base.unsafe_store!(args[$N]::Core.LLVMPtr{Out,1}, stage_fragment_out(Out, r))
+        Base.unsafe_store!(args[$N]::StageOut{Out}, stage_fragment_out(Out, r))
         return nothing
     end
 end
@@ -621,7 +621,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     # stage through `lower_geometry_to_mesh`.
     vid = KI.wantsvertexindex(vf, fieldtypes(bodytypes(vert_bufs)))
     vfn = MetalVertexStage{typeof(vf), VOut, vid}()
-    vert_tt = Tuple{vert_bufs.parameters..., Core.LLVMPtr{VOut,1}}
+    vert_tt = Tuple{vert_bufs.parameters..., StageOut{VOut}}
     # No colour attachment means no fragment stage at all — a shadow pass writes
     # depth and nothing else, and its `fragment` returns `nothing`. Metal spells
     # that as a pipeline with a nil `fragmentFunction`; compiling a stage that
@@ -631,7 +631,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     ntex = Mantle.ntextures(p.fragment)
     ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
-                    texture_markers(ntex)..., Core.LLVMPtr{FOut,1}}
+                    texture_markers(ntex)..., StageOut{FOut}}
     return vfn, ffn, vert_tt, frag_tt
 end
 
@@ -735,7 +735,14 @@ up as a render that draws nothing rather than as an error.
 """
 function compile_stage_function(f, tt::Type, stage::Symbol, name::String)
     dev = Metal.device()
-    cfg = Metal.compiler_config(dev; stage, name)
+    # `always_inline`: a stage binds its textures and samplers as ENTRY parameters
+    # (Metal's `lower_texture_bindings!`), so every call that samples has to be
+    # inlined into the entry. The optimiser does not promise that: RayMakie's
+    # textured mesh fragment, grown by per-instance placement, stayed out of line
+    # and the compile refused it ("a texture binding is named from
+    # `julia_mesh_fragment_textured_…`, which is not the stage entry"). Lava
+    # forces the same for every Vulkan graphics stage (`force_inline_all`).
+    cfg = Metal.compiler_config(dev; stage, name, always_inline = true)
     job = Metal.GPUCompiler.CompilerJob(Metal.methodinstance(typeof(f), tt), cfg)
     lib = MTLm.MTLLibraryFromData(dev, Metal.compile_to_metallib(job).metallib)
     return (MTLm.MTLFunction(lib, name), lib)
