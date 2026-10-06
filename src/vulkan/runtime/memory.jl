@@ -1424,7 +1424,8 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
         # waits — the next reader of `managed` on this queue is ordered behind
         # the copy, and a host reader waits on `last_write`.
         oneshot!(bq; tag = :upload) do e
-            r = scratch!(e.owner, nbytes)
+            # Staged in host memory and moved by the copy engine; see `scratch!`.
+            r = scratch!(e.owner, nbytes, Readback())
             mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
             unsafe_copyto!(mb.mapped_ptr + Mantle.offset(r), host_ptr, nbytes)
             cmd_copy_buffer!(e, mb, managed, nbytes;

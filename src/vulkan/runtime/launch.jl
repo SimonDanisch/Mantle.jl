@@ -708,18 +708,32 @@ compiled kernel, adapts an argument tree and packs it on every call, while a
 bump pointer costs five fields of state that can rewind under a recording still
 holding the address. A modelled plan does not come through here at all.
 """
-@inline function scratch!(owner::O, nbytes::Integer) where {O<:Closed}
+@inline scratch!(owner::O, nbytes::Integer) where {O<:Closed} = scratch!(owner, nbytes, Unified())
+
+"""
+    scratch!(owner, nbytes, kind) -> Region
+
+`nbytes` of `kind` memory that belong to the recording `owner`: given back by the
+sweep once its submission has passed. `Unified` (the default) is what launch
+arguments need, memory the GPU reads by address. A staging upload needs
+`Readback`, host-cached system memory: the CPU writes it at memory speed and the
+copy engine moves it, where a memcpy into `Unified` (BAR) memory crosses PCIe
+from the CPU, 0.78 GB/s measured on an RTX 3070 Laptop.
+"""
+@inline function scratch!(owner::O, nbytes::Integer, kind) where {O<:Closed}
     bq = queueof(owner)
     ownthread(bq)
     dev = lavadevice(ctxof(bq))
     # `maywait = false`: see the pool's `acquire!`. This runs INSIDE an open
     # recording, and a waiting reclaim would sweep the channel and take that
     # recording's hold frame out from under it.
-    r = acquire!(pool(dev), dev, Unified(), nothing, max(Int(nbytes), 16);
-                 align = ARG_ALIGN, blocksize = UNIFIED_BLOCK_SIZE, maywait = false)
+    r = acquire!(pool(dev), dev, kind, nothing, max(Int(nbytes), 16);
+                 align = ARG_ALIGN, blocksize = scratchblock(kind), maywait = false)
     push!(owner.regions, r)
     return r
 end
+scratchblock(::Unified) = UNIFIED_BLOCK_SIZE
+scratchblock(::Readback) = READBACK_BLOCK_SIZE
 
 """Bytes for one launch's arguments, as the address the push constant carries and
 the pointer the packer writes through."""
