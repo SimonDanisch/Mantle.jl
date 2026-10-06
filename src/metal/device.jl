@@ -85,6 +85,9 @@ mutable struct LegacyQueue
     # only when its fence is <= `completed`.
     next::UInt64
     completed::UInt64
+    # Whether recorded plans are encoded every frame instead of replayed; see
+    # `encodesrecordings`.
+    encodes::Bool
 end
 
 function LegacyQueue(dev::MTL.MTLDevice)
@@ -92,7 +95,22 @@ function LegacyQueue(dev::MTL.MTLDevice)
     mtl.label = "Mantle"
     bq = Metal.BatchedCommandQueue(mtl)
     pinpipeline!(bq)
-    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0))
+    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0), encodesrecordings(dev))
+end
+
+"""
+    encodesrecordings(dev) -> Bool
+
+Whether a legacy queue on `dev` encodes recorded plans instead of replaying their
+indirect command buffer. On M1 (Apple7), replaying with `executeCommandsInBuffer:`
+while WindowServer composites hangs the GPU: the watchdog resets it, WindowServer is
+blamed and the replay is discarded as an innocent victim. Encoding the same
+dispatches does not. `MANTLE_METAL_ENCODE=1` or `0` overrides the default.
+"""
+function encodesrecordings(dev::MTL.MTLDevice)
+    override = get(ENV, "MANTLE_METAL_ENCODE", "")
+    isempty(override) || return override == "1"
+    return MTL.is_m1(dev)
 end
 
 """
@@ -512,7 +530,8 @@ function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
     return LegacySubmission(q.bq, enc)
 end
 
-function executesegment!(::LegacyQueue, s::LegacySubmission, rec, seg)
+function executesegment!(q::LegacyQueue, s::LegacySubmission, rec, seg)
+    q.encodes && return encodecommands!(s.enc, rec, seg.first:seg.last)
     if seg.slot < 0
         MTL.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
     else
@@ -682,6 +701,7 @@ record time and nothing per frame.
 """
 encodes(q) = false
 encodes(::MTL4Queue) = true
+encodes(q::LegacyQueue) = q.encodes
 
 """
 An argument table holding one dispatch's addresses, built once at record time.
@@ -690,7 +710,9 @@ The MTL4 replacement for the buffer bindings a recorded command carries. A
 recorded plan's addresses do not move — that is what makes a recording a
 recording — so the table is filled here and only bound at run time.
 """
-function argtable(d::MetalDevice, args, store::MTL.MTLBuffer)
+argtable(d::MetalDevice, args, store::MTL.MTLBuffer) = argtable(d.queue, d, args, store)
+
+function argtable(::MTL4Queue, d::MetalDevice, args, store::MTL.MTLBuffer)
     nslots = maximum(a -> a.index, args; init = 0)
     t = MTL.MTL4ArgumentTable(d.dev; buffers = max(nslots, 1))
     for a in args
@@ -727,6 +749,32 @@ function encodeplan!(s::MTL4Submission, rec)
             MTL.dispatch_threadgroups_indirect!(enc, rec.gridbuf,
                                                 rec.gridoff + 4 * c.gridoff,
                                                 c.threads)
+        end
+    end
+    return nothing
+end
+
+function argtable(::LegacyQueue, d::MetalDevice, args, store::MTL.MTLBuffer)
+    return LegacyBindings([(a.buffer === nothing ? store : a.buffer,
+                            a.buffer === nothing ? a.offset : a.bufoffset,
+                            a.index) for a in args])
+end
+
+bufferbarrier!(enc::MTL.MTLComputeCommandEncoder) =
+    @objc [enc::id{MTL.MTLComputeCommandEncoder} memoryBarrierWithScope:MTL.MTLBarrierScopeBuffers::MTL.MTLBarrierScope]::Nothing
+
+function encodecommands!(enc::MTL.MTLComputeCommandEncoder, rec, commands::UnitRange{Int})
+    for c in view(rec.encoded, commands)
+        c.barrier && bufferbarrier!(enc)
+        MTL.set_function!(enc, c.pipeline)
+        for (buf, off, index) in c.table
+            MTL.set_buffer!(enc, buf, off, index)
+        end
+        if c.gridoff < 0
+            MTL.dispatchThreadgroups!(enc, c.groups, c.threads)
+        else
+            MTL.dispatchThreadgroupsIndirect!(enc, rec.gridbuf, rec.gridoff + 4 * c.gridoff,
+                                              c.threads)
         end
     end
     return nothing
