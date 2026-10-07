@@ -398,8 +398,8 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     for (i, fmt) in enumerate(color_formats)
         att = desc.colorAttachments[i]
         att.pixelFormat = fmt
-        apply_blend!(att, fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint) ?
-                     Mantle.Opaque() : p.blend)
+        apply_blend!(att, Mantle.attachmentblend(p.blend, i,
+                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
     end
     depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
     # The declared threadgroup width. Metal compares this against what the shader

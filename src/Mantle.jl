@@ -327,7 +327,7 @@ export stages, access, layout
 # SPIR-V compiler exporting `AlphaBlend` and `CullBack` — and nothing in it
 # dispatched on them. `Topology` is re-exported from KernelInterface rather than
 # defined, since the compiler needs the same names.
-export BlendMode, Opaque, AlphaBlend, Additive, Premultiplied
+export BlendMode, Opaque, AlphaBlend, Additive, Premultiplied, NoWrite, PerAttachment
 export CullFace, NoCull, CullBack, CullFront
 export DepthMode, DepthLess, DepthLessEq, DepthLessEqReadOnly, DepthGreater, DepthAlways, DepthOff
 export RenderTarget

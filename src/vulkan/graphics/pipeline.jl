@@ -153,11 +153,10 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
     # Integer attachments are unblended: IDs must remain exact even when the
     # colour target uses alpha blending. Device creation enables independentBlend.
     color_formats = colorformats(color_format)
-    blend_attachment = vk_blend(blend)
     color_blend = VK.PipelineColorBlendStateCreateInfo(
         false, VK.LOGIC_OP_COPY,
-        [f in (VK.FORMAT_R32_UINT, VK.FORMAT_R32G32_UINT) ? vk_blend(Opaque()) :
-         blend_attachment for f in color_formats],
+        [vk_blend(attachmentblend(blend, i, f in (VK.FORMAT_R32_UINT, VK.FORMAT_R32G32_UINT)))
+         for (i, f) in enumerate(color_formats)],
         (0.0f0, 0.0f0, 0.0f0, 0.0f0),
     )
 
@@ -325,6 +324,15 @@ function vk_blend(::Additive)
         VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE, VK.BLEND_OP_ADD,
         VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
         VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT,
+    )
+end
+
+function vk_blend(::NoWrite)
+    VK.PipelineColorBlendAttachmentState(
+        false,
+        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
+        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
+        VK.ColorComponentFlag(0),
     )
 end
 

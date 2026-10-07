@@ -43,6 +43,11 @@ function apply_blend!(att, ::Mantle.Opaque)
     att.blendingEnabled = false
     return att
 end
+function apply_blend!(att, ::Mantle.NoWrite)
+    att.blendingEnabled = false
+    att.writeMask = MTLm.MTLColorWriteMaskNone
+    return att
+end
 function apply_blend!(att, ::Mantle.AlphaBlend)
     att.blendingEnabled = true
     att.sourceRGBBlendFactor        = MTLm.MTLBlendFactorSourceAlpha
@@ -715,8 +720,8 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     for (i, fmt) in enumerate(color_formats)
         att = desc.colorAttachments[i]
         att.pixelFormat = fmt
-        apply_blend!(att, fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint) ?
-                     Mantle.Opaque() : p.blend)
+        apply_blend!(att, Mantle.attachmentblend(p.blend, i,
+                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
     end
     depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
     state = MTLm.MTLRenderPipelineState(dev, desc)

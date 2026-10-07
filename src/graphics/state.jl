@@ -37,6 +37,44 @@ struct Additive <: BlendMode end
 struct Premultiplied <: BlendMode end
 
 """
+The fragment writes nothing to this attachment: the target keeps what it holds.
+
+For a draw whose colour should land but whose id should not, as in a
+[`PerAttachment`](@ref) blend. The fragment still tests and writes depth as
+the pipeline's depth mode says.
+"""
+struct NoWrite <: BlendMode end
+
+"""
+    PerAttachment(modes...)
+
+One blend mode per colour attachment, in the order the pass declares them.
+Any other mode applies to every floating-point attachment, and an integer
+attachment (an id) is written unblended; here an integer attachment takes
+`Opaque()` or `NoWrite()`, since ids cannot be blended.
+"""
+struct PerAttachment{M<:Tuple{Vararg{BlendMode}}} <: BlendMode
+    modes::M
+end
+PerAttachment(modes::BlendMode...) = PerAttachment(modes)
+
+"""
+    attachmentblend(blend, i, integer) -> BlendMode
+
+The mode colour attachment `i` is written with: `integer` is whether it holds
+integers, which are never blended.
+"""
+attachmentblend(blend::BlendMode, i::Integer, integer::Bool) = integer ? Opaque() : blend
+function attachmentblend(blend::PerAttachment, i::Integer, integer::Bool)
+    i <= length(blend.modes) || throw(ArgumentError(
+        "PerAttachment has $(length(blend.modes)) modes and the pass has an attachment $i"))
+    mode = blend.modes[i]
+    integer && !(mode isa Union{Opaque, NoWrite}) && throw(ArgumentError(
+        "attachment $i holds integers, which are written (Opaque) or left alone (NoWrite), not $(nameof(typeof(mode)))"))
+    return mode
+end
+
+"""
     CullFace
 
 Which triangle winding is discarded before rasterization.
