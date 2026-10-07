@@ -24,13 +24,16 @@ struct _VkCreatePipelineArgs
     _pad2::Int32
 end
 
+# Runs on a thread Julia did not create, so entering it ADOPTS the thread into
+# the runtime — and adoption allocates, which can start a garbage collection
+# right here. See the wait in `create_compute_pipeline_large_stack` for what that
+# requires of the thread waiting for this one. The driver call is GC-safe so a
+# compile that takes seconds does not hold up a collection on any other thread.
 function vk_pipeline_thread_callback(args_ptr::Ptr{Cvoid})::UInt32
     args = unsafe_load(Ptr{_VkCreatePipelineArgs}(args_ptr))
-    result = ccall((:vkCreateComputePipelines, "vulkan-1"),
-        Int32,
-        (Ptr{Cvoid}, Ptr{Cvoid}, UInt32, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
-        args.device, args.PIPELINE_CACHE, args.create_info_count,
-        args.p_create_infos, args.p_allocator, args.p_pipelines)
+    result = @ccall gc_safe = true "vulkan-1".vkCreateComputePipelines(
+        args.device::Ptr{Cvoid}, args.PIPELINE_CACHE::Ptr{Cvoid}, args.create_info_count::UInt32,
+        args.p_create_infos::Ptr{Cvoid}, args.p_allocator::Ptr{Cvoid}, args.p_pipelines::Ptr{Cvoid})::Int32
     unsafe_store!(Ptr{Int32}(args_ptr + 48), result)
     return UInt32(0)
 end
@@ -64,18 +67,24 @@ function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
             C_NULL, LARGE_STACK_SIZE, PIPELINE_THREAD_CFUNC[], args_ptr,
             UInt32(0), thread_id)
         handle == C_NULL && error("CreateThread failed for vkCreateComputePipelines")
-        # 600 second timeout — AMD's Windows driver can be very slow under
-        # accumulated session state (~thousands of prior compiles). Real hangs
-        # are exceedingly rare; the failure mode is "slow but progressing".
-        # If we timeout-and-CloseHandle while the thread is still inside
-        # AMDVLK's compiler, the thread later crashes accessing freed
-        # _VkCreatePipelineArgs (observed: access violation in vkResetEvent
-        # after a Pkg.test Tier 4 broadcast Complex{Int32}). The crash kills
-        # the whole process. To avoid that, we TerminateThread on timeout —
-        # leaks the AMDVLK internal allocations but keeps Julia alive so
-        # the test/user can recover gracefully (or call reset_device!).
-        wait_result = ccall((:WaitForSingleObject, "kernel32"), UInt32,
-            (Ptr{Cvoid}, UInt32), handle, UInt32(600_000))
+        # The wait is GC-SAFE, and that is not a detail. The thread above is
+        # adopted into the runtime on entry, adoption allocates, and an
+        # allocation can start a collection — which waits for every thread to
+        # reach a safepoint. A plain `ccall` here never reaches one, so the
+        # collection waited for this thread and this thread waited for the
+        # collection's: a deadlock that ended only at the timeout below. Rare
+        # per compile, so it surfaced deep into long sessions, which is why this
+        # comment used to blame "AMD's Windows driver being slow under
+        # accumulated session state". Measured 2026-10-07 on LapWin (8060S):
+        # the Mantle suite died in `test_gemm_staged.jl`, which passes alone in
+        # 95 s; a callback that collects deadlocks a plain wait (timeout after
+        # 5 s) and finishes in 8 ms under a GC-safe one.
+        #
+        # 600 seconds remains the bound for a driver that really hangs. On
+        # timeout the thread is terminated rather than abandoned: abandoned, it
+        # would later write into `args`, which is freed when this returns.
+        wait_result = @ccall gc_safe = true "kernel32".WaitForSingleObject(
+            handle::Ptr{Cvoid}, UInt32(600_000)::UInt32)::UInt32
         if wait_result == 0x00000102  # WAIT_TIMEOUT
             # Force-kill the leaked AMDVLK thread so it can't crash the
             # process later when it accesses our freed args memory.
