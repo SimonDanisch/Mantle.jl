@@ -1386,7 +1386,11 @@ emitloophead!(::Immediate, ::Plan, ::AbstractUnitRange) = nothing
 
 function emitcopy!(::Immediate, pl::Plan, pp::PassPlan)
     p = pp.pass
-    copy_target!(pl.graph.dev, storage(p.dst), first_target(p))
+    if p.viewport === nothing
+        copy_target!(pl.graph.dev, storage(p.dst), first_target(p))
+    else
+        copy_target!(pl.graph.dev, storage(p.dst), first_target(p); region = p.viewport)
+    end
     return nothing
 end
 

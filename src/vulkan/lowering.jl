@@ -237,3 +237,7 @@ vkformat(::VulkanAPI, ::Type{RGBA{Float32}}; srgb::Bool = false) =
 # Depth-ness is the usage, not the element type: this is D32_SFLOAT because
 # nothing else in Vulkan is a single-component 32-bit float attachment.
 vkformat(::VulkanAPI, ::Type{Float32}; srgb::Bool = false) = VK.FORMAT_D32_SFLOAT
+vkformat(::VulkanAPI, ::Type{UInt32}; srgb::Bool = false) =
+    srgb ? error("there is no sRGB integer format") : VK.FORMAT_R32_UINT
+vkformat(::VulkanAPI, ::Type{<:StaticVector{2,UInt32}}; srgb::Bool = false) =
+    srgb ? error("there is no sRGB integer format") : VK.FORMAT_R32G32_UINT

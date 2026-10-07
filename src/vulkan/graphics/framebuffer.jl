@@ -342,23 +342,25 @@ doing before and what it will do next and can often need no barrier at all.
 """
 function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image,
                                width::Integer, height::Integer, format::VK.Format;
-                               aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT) where {T}
+                               aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT,
+                               region = nothing) where {T}
     # Any element type, because the copy moves bytes and the destination's is the
     # caller's way of saying what the pixels mean: `UInt8` for a BGRA target read
     # back as bytes, `Float32` for a depth target read back as depth.
-    nbytes = width * height * pixelbytes(eltypeof(format))
+    x, y, w, h = region === nothing ? (0, 0, width, height) : region
+    nbytes = w * h * pixelbytes(eltypeof(format))
     sizeof(T) * length(dst) >= nbytes ||
         error("destination holds $(sizeof(T) * length(dst)) bytes, need $nbytes")
     managed = dst.buf[]
-    region = VK.BufferImageCopy(
+    copyregion = VK.BufferImageCopy(
         UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
         VK.ImageSubresourceLayers(aspect,
             UInt32(0), UInt32(0), UInt32(1)),
-        VK.Offset3D(0, 0, 0),
-        VK.Extent3D(UInt32(width), UInt32(height), UInt32(1)),
+        VK.Offset3D(Int32(x), Int32(y), 0),
+        VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)),
     )
     VK.cmd_copy_image_to_buffer(e.cmd, image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
+        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [copyregion])
     hold!(e, dst)
     return dst
 end

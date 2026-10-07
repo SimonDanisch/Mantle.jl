@@ -1355,7 +1355,7 @@ function emitcopy!(e::Emitter, ::Plan, pp::PassPlan)
     src, dst = first_target(p), p.dst
     copy_image_to_buffer!(e, storage(dst), target_image(src),
                           size(src)..., target_format(src);
-                          aspect = aspect(src))
+                          aspect = aspect(src), region = p.viewport)
     return nothing
 end
 

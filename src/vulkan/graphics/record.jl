@@ -66,6 +66,8 @@ function eltypeof(f::VK.Format)
     f === VK.FORMAT_R16G16B16A16_SFLOAT && return RGBA{Float16}
     f === VK.FORMAT_R32G32B32A32_SFLOAT && return RGBA{Float32}
     f === VK.FORMAT_D32_SFLOAT      && return Float32
+    f === VK.FORMAT_R32_UINT       && return UInt32
+    f === VK.FORMAT_R32G32_UINT    && return SVector{2,UInt32}
     throw(ArgumentError("no Julia element type is registered for $f — add it " *
                         "here and to `vkformat`, which is the other direction"))
 end

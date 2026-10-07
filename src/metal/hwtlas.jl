@@ -140,8 +140,7 @@ const DeviceU8Ptr = Core.LLVMPtr{UInt8, Metal.AS.Device}
     end
     # Same indexing as Vulkan: per-instance offset into the flat triangle array,
     # plus the primitive index within that instance's BLAS.
-    @inbounds tri_idx = Int(accel.offsets[Int(h.inst) + 1]) + Int(h.prim) + 1
-    @inbounds tri = accel.triangles[tri_idx]
+    tri = hittriangle(accel, h.inst, h.prim)
     bary = SVector{3,Float32}(1f0 - h.bu - h.bv, h.bu, h.bv)
     # The fifth value is the instance CUSTOM index, not the instance index:
     # Vulkan's `gl_InstanceCustomIndexEXT`, Metal's `user_instance_id`, written
@@ -317,8 +316,9 @@ Raycore.n_instances(t::MetalHWTLAS)  = Mantle.ninstances(t.instances)
 Raycore.wait_for_gpu!(t::MetalHWTLAS) = (Metal.synchronize(); t)
 
 function AdaptedAccel(t::MetalHWTLAS{Tri}) where {Tri}
+    records = MtlArray([(transform = m,) for m in instance_transforms(t)])
     AdaptedAccel(t, t.tri_gpu, t.off_gpu, Raycore.empty_triangle(Tri), t.scene_buf,
-                 t.procedural)
+                 t.procedural, records)
 end
 
 function Adapt.adapt_structure(to, t::MetalHWTLAS)
@@ -343,6 +343,7 @@ function Adapt.adapt_structure(to::Metal.Adaptor, accel::AdaptedAccel)
         accel.empty,
         Adapt.adapt(to, accel.scene),
         Adapt.adapt(to, accel.procedural),
+        Adapt.adapt(to, accel.instances),
     )
 end
 
@@ -510,7 +511,11 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     # image.
     if !t.dirty && t.built !== nothing && t.built.refittable &&
        t.built.count == Mantle.ninstances(t.instances) && t.static_tlas !== nothing
-        refit_tlas!(t.device, t.built, instance_transforms(t))
+        transforms = instance_transforms(t)
+        refit_tlas!(t.device, t.built, transforms)
+        # The AS and the shading metadata must use the same world transform.
+        # Update this buffer in place: recorded kernels retain its device view.
+        copyto!(t.static_tlas.instances, [(transform = m,) for m in transforms])
         t.transforms_dirty = false
         return t
     end

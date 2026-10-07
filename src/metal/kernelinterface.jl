@@ -14,7 +14,11 @@
 
 const MB = Metal.MetalBackend
 
-KI.synchronize(b::MB) = KA.synchronize(b)
+# Older Metal runtimes already provide this forwarding method. Cede it rather
+# than overwriting a dependency's method and disabling Julia precompilation.
+if !hasmethod(KI.synchronize,Tuple{MB})
+    KI.synchronize(b::MB) = KA.synchronize(b)
+end
 # `KI.get_backend(::MtlArray)` is NOT here: Metal.jl defines it now, and it is
 # typed on the ARRAY rather than on a backend, so two definitions is a
 # redefinition and Mantle stopped precompiling outright. Metal's answers
@@ -24,16 +28,24 @@ KI.synchronize(b::MB) = KA.synchronize(b)
 # but the two backend types are a seam worth knowing about before anything
 # starts routing through `KI.get_backend`.
 
-KI.allocate(b::MB, ::Type{T}, dims::Tuple;
-            unified::Union{Nothing,Bool} = nothing) where {T} =
-    KA.allocate(b, T, dims)
+if !hasmethod(KI.allocate,Tuple{MB,Type{UInt8},Tuple})
+    KI.allocate(b::MB, ::Type{T}, dims::Tuple;
+                unified::Union{Nothing,Bool} = nothing) where {T} =
+        KA.allocate(b, T, dims)
+end
 
 # Both true and both structural rather than a capability flag: Apple silicon has
 # one physical memory, so every allocation is unified, and Metal's atomics are
 # core to the shading language rather than an extension.
-KI.supports_unified(::MB) = true
-KI.supports_atomics(::MB) = true
-KI.supports_float64(::MB) = false
+if !hasmethod(KI.supports_unified,Tuple{MB})
+    KI.supports_unified(::MB) = true
+end
+if !hasmethod(KI.supports_atomics,Tuple{MB})
+    KI.supports_atomics(::MB) = true
+end
+if !hasmethod(KI.supports_float64,Tuple{MB})
+    KI.supports_float64(::MB) = false
+end
 
 # ── Device limits, all out of `caps` ──────────────────────────────────────────
 #

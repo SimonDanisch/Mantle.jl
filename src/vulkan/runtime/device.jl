@@ -1681,6 +1681,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     core_features = VK.PhysicalDeviceFeatures(
         :shader_int_64, :shader_float_64,
         :shader_int_16,
+        :independent_blend,
         :geometry_shader, :tessellation_shader,
         :fill_mode_non_solid, :wide_lines, :large_points,
     )

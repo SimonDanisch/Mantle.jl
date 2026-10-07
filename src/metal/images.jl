@@ -155,7 +155,7 @@ attachment per frame.
 kernel that reads it indexes `y * width + x` — the same layout the Vulkan side's
 `vkCmdCopyImageToBuffer` produces with a zero `bufferRowLength`.
 """
-function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}) where {T}
+function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}; region = nothing) where {T}
     tex = src.image
     tex === nothing &&
         error("copying from a target that has not been placed; the plan is not compiled")
@@ -163,9 +163,11 @@ function Mantle.copy_target!(d::MetalDevice, dst, src::MetalTransientImage{T}) w
     buf === nothing &&
         error("a copy pass writes into device memory, and $(typeof(dst)) is not any")
     cmd = framebuffer!(d.dev)
+    x, y, w, h = region === nothing ? (0, 0, src.width, src.height) : region
+    sizeof(dst) >= w * h * sizeof(T) || error("copy destination is too small")
     MTL.MTLBlitCommandEncoder(cmd) do enc
-        MTL.append_copy!(enc, buf, byteoffset(dst), src.width * sizeof(T), 0, tex,
-                         MTL.MTLOrigin(0, 0, 0), MTL.MTLSize(src.width, src.height, 1))
+        MTL.append_copy!(enc, buf, byteoffset(dst), w * sizeof(T), 0, tex,
+                         MTL.MTLOrigin(x, y, 0), MTL.MTLSize(w, h, 1))
     end
     # Committed, like a render pass: one command buffer per copy, nothing left
     # open. See `framebuffer!`.

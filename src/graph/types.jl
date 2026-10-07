@@ -123,7 +123,7 @@ struct DrawCall
     # own because a plotting frame is many draws into ONE pass, each clipped to a
     # different rectangle — an axis. Declared here rather than set imperatively
     # between draws, so a pass stays a description the scheduler may reorder.
-    viewport::Any
+    viewport::Any                       # copy passes: source (x,y,width,height), or whole image
     # What this draw samples, `nothing` for a draw that samples nothing. On the
     # draw rather than the pass because a pipeline that samples is compiled
     # around its bindings on one backend, so the compile needs them and the

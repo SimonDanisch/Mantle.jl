@@ -380,8 +380,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
               "depth-only mesh pipeline, and a nil fragment function is refused " *
               "for one.")
     VIn  = varying_type(p)
-    FOut = NamedTuple{ntuple(i -> Symbol(:color, i), length(color_formats)),
-                      NTuple{length(color_formats), NTuple{4,Float32}}}
+    FOut = fragment_output_type(color_formats)
     ntex = Mantle.ntextures(p.fragment)
     ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
@@ -395,7 +394,8 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     for (i, fmt) in enumerate(color_formats)
         att = desc.colorAttachments[i]
         att.pixelFormat = fmt
-        apply_blend!(att, p.blend)
+        apply_blend!(att, fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint) ?
+                     Mantle.Opaque() : p.blend)
     end
     depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
     # The declared threadgroup width. Metal compares this against what the shader

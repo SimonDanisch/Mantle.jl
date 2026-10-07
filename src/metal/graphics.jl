@@ -294,6 +294,8 @@ function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     # reaching this by way of its element type would be created as colour and
     # rejected by the render pass.
     T === Float32 && return MTLm.MTLPixelFormatDepth32Float
+    T === UInt32 && return MTLm.MTLPixelFormatR32Uint
+    T <: StaticVector{2,UInt32} && return MTLm.MTLPixelFormatRG32Uint
     T <: Real && error("no Metal pixel format for the scalar $T")
     T === BGRA{N0f8}    && return srgb ? MTLm.MTLPixelFormatBGRA8Unorm_sRGB :
                                          MTLm.MTLPixelFormatBGRA8Unorm
@@ -367,6 +369,13 @@ the same shader compiled for one attachment would silently drop two of them.
 stage_output_type(::Mantle.GraphicsPipeline, ::Val{:fragment}, ncolor::Int = 1) =
     NamedTuple{ntuple(i -> Symbol(:color, i), ncolor),
                NTuple{ncolor, NTuple{4,Float32}}}
+
+# Integer attachments carry exact IDs rather than float colour values.
+fragment_attachment_type(fmt) = fmt == MTLm.MTLPixelFormatR32Uint ? UInt32 :
+    fmt == MTLm.MTLPixelFormatRG32Uint ? NTuple{2,UInt32} : NTuple{4,Float32}
+fragment_output_type(formats) = NamedTuple{
+    ntuple(i -> Symbol(:color, i), length(formats)),
+    Tuple{map(fragment_attachment_type, formats)...}}
 
 # ── Shaders that RETURN their outputs ────────────────────────────────────────
 #
@@ -610,7 +619,7 @@ backend compiles is an implementation detail of AIR — a caller who had to know
 which spelling a backend wanted would be writing two shaders.
 """
 function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
-                          vert_bufs::Type, frag_bufs::Type)
+                          vert_bufs::Type, frag_bufs::Type; color_formats = nothing)
     VIn  = varying_type(p)
     VOut = stage_output_type(p, Val(:vertex))
     vf = Mantle.stagefunction(p.vertex)
@@ -627,7 +636,8 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
     # that as a pipeline with a nil `fragmentFunction`; compiling a stage that
     # returns an EMPTY struct instead is not a thing AIR has.
     ncolor == 0 && return vfn, nothing, vert_tt, nothing
-    FOut = stage_output_type(p, Val(:fragment), ncolor)
+    FOut = color_formats === nothing ? stage_output_type(p, Val(:fragment), ncolor) :
+        fragment_output_type(color_formats)
     ntex = Mantle.ntextures(p.fragment)
     ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
@@ -687,7 +697,7 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
 
     dev = Metal.device()
     vfn, ffn, vert_tt, frag_tt =
-        stage_signatures(p, length(color_formats), vert_bufs, frag_bufs)
+        stage_signatures(p, length(color_formats), vert_bufs, frag_bufs; color_formats)
     vname = string(nameof(Mantle.stagefunction(p.vertex))) * "_vs"
     vfun, vlib = compile_stage_function(vfn, vert_tt, :vertex, vname)
     ffun, flib = ffn === nothing ? (nothing, nothing) :
@@ -702,7 +712,8 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     for (i, fmt) in enumerate(color_formats)
         att = desc.colorAttachments[i]
         att.pixelFormat = fmt
-        apply_blend!(att, p.blend)
+        apply_blend!(att, fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint) ?
+                     Mantle.Opaque() : p.blend)
     end
     depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
     state = MTLm.MTLRenderPipelineState(dev, desc)

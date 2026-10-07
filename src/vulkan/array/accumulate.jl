@@ -34,7 +34,7 @@ Device prefix scan, delegating to AcceleratedKernels.
 block-parallel scan has no way to derive it and no way to detect a wrong one.
 """
 function Base.accumulate!(op, dest::AnyLavaArray, src::AbstractArray;
-                          init = AK.neutral_element(op, eltype(dest)),
+                          init = GPUArrays.neutral_element(op, eltype(dest)),
                           dims::Union{Nothing,Int} = nothing)
     dest === src || copyto!(dest, src)
     AK.accumulate!(op, dest; init, neutral = init, dims)
@@ -42,7 +42,7 @@ function Base.accumulate!(op, dest::AnyLavaArray, src::AbstractArray;
 end
 
 function Base.accumulate(op, src::AnyLavaArray;
-                         init = AK.neutral_element(op, eltype(src)),
+                         init = GPUArrays.neutral_element(op, eltype(src)),
                          dims::Union{Nothing,Int} = nothing)
     return AK.accumulate(op, src; init, neutral = init, dims)
 end

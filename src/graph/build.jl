@@ -690,6 +690,7 @@ Base.isopen(s::WindowSurface) = isopen(s.win)
 clearvalue(::LoadOp) = nothing
 
 clearvalue(c::Clear) = NTuple{4,Float32}(c.value)
+clearvalue(c::Clear{NTuple{4,UInt32}}) = c.value
 
 """What a depth attachment clears to. One number, not four, and `nothing` loads."""
 depthclear(::LoadOp) = nothing
@@ -1195,7 +1196,7 @@ function hostwritten!(g::Graph)
 end
 
 """
-    copy!(g, name, dst, src) -> Pass
+    copy!(g, name, dst, src; region = nothing) -> Pass
 
 A pass that reads an IMAGE and writes a buffer: a framebuffer readback, which is
 `vkCmdCopyImageToBuffer` and not a dispatch.
@@ -1205,6 +1206,9 @@ a transient image. A BUFFER source is refused here, because the emitter would
 reach `target_image` on it and raise a `MethodError` about a function the caller
 never named, several phases after the declaration that caused it.
 
+`region = (x,y,width,height)` copies only that zero-based image rectangle into a
+tightly packed destination. The default copies the whole image.
+
 There is deliberately no buffer-to-buffer form. `vkCmdCopyBuffer` is a transfer
 command, so it is not a pass whose accesses the walk can read off a kernel body,
 and a graph that wants those bytes moved declares the kernel that moves them —
@@ -1212,7 +1216,7 @@ one `ew!` with `identity` is the whole of it, and then `Barriers` orders it like
 anything else. `copyto!` on two device arrays is the ad hoc form, outside a
 graph.
 """
-function copy!(g::Graph, name::AbstractString, dst, src)
+function copy!(g::Graph, name::AbstractString, dst, src; region = nothing)
     hasmethod(target_image, Tuple{typeof(src)}) || throw(ArgumentError(
         "copy!: `$(name)`'s source is a $(typeof(src)), which is not an image " *
         "attachment — only those answer `target_image`, and this pass records " *
@@ -1220,6 +1224,14 @@ function copy!(g::Graph, name::AbstractString, dst, src)
         "kernel that moves them: a dispatch is a pass whose accesses the walk " *
         "reads off the body, and a transfer command is not."))
     p = Pass(name, :copy)
+    if region !== nothing
+        length(region) == 4 || throw(ArgumentError("copy region must be (x, y, width, height)"))
+        x, y, w, h = Int.(region)
+        sw, sh = size(src)
+        0 <= x && 0 <= y && w > 0 && h > 0 && x + w <= sw && y + h <= sh ||
+            throw(ArgumentError("copy region $region lies outside image $(size(src))"))
+        p.viewport = (x, y, w, h)
+    end
     push!(p.targets, src)
     p.dst = dst
     push!(g.passes, p)

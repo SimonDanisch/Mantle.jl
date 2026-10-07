@@ -150,14 +150,14 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
         0.0f0, 1.0f0,
     )
 
-    # Color blend, one attachment state per colour target: with several targets
-    # Vulkan requires the counts to match, and every target blends the same way
-    # because blending is pipeline state and the pipeline is one.
+    # Integer attachments are unblended: IDs must remain exact even when the
+    # colour target uses alpha blending. Device creation enables independentBlend.
     color_formats = colorformats(color_format)
     blend_attachment = vk_blend(blend)
     color_blend = VK.PipelineColorBlendStateCreateInfo(
         false, VK.LOGIC_OP_COPY,
-        [blend_attachment for _ in color_formats],
+        [f in (VK.FORMAT_R32_UINT, VK.FORMAT_R32G32_UINT) ? vk_blend(Opaque()) :
+         blend_attachment for f in color_formats],
         (0.0f0, 0.0f0, 0.0f0, 0.0f0),
     )
 

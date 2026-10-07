@@ -190,9 +190,8 @@ function mapreducedim_ak!(f::F, op::OP, R::LavaArray{T}, A;
             vk_reduce_sum(A::LavaArray{Float32}) + init_val
         else
             # Fallback: AK.mapreduce to scalar
-            AK.mapreduce(f, op, A, KA.get_backend(A);
-                         init=init_val, neutral=init_val,
-                         block_size=64, switch_below=0)
+            AK.mapreduce(f, op, A; backend=KA.get_backend(A),
+                         init=init_val, neutral=init_val)
         end
         # Write scalar result into R
         R_host = T[convert(T, result)]
@@ -216,9 +215,8 @@ function mapreducedim_ak!(f::F, op::OP, R::LavaArray{T}, A;
             else
                 R
             end
-            AK.mapreduce(f, op, A_arr, KA.get_backend(R_temp);
-                         init=init_val, neutral=init_val,
-                         dims=rdim, temp=R_temp, block_size=64)
+            AK.mapreducedim!(f, op, R_temp, A_arr; backend=KA.get_backend(R_temp),
+                            init=init_val, neutral=init_val)
         elseif size(A_arr) == size(R)
             # No dimension reduced: R and A have same shape (e.g., dims=[]).
             #
@@ -270,13 +268,13 @@ function multi_dim_reduce!(f::F, op::OP, R::LavaArray{T}, A::LavaArray,
             end
             if new_sz == size(R)
                 # Last reduction — write directly into R
-                AK.mapreduce(map_fn, op, current, KA.get_backend(R);
-                             init=init_val, neutral=init_val, dims=d, temp=R, block_size=64)
+                AK.mapreducedim!(map_fn, op, R, current; backend=KA.get_backend(R),
+                                init=init_val, neutral=init_val)
             else
                 temp = LavaArray{T}(undef, new_sz; bq = KernelAbstractions.get_backend(R).dispatch_bq)
                 fill!(temp, init_val)
-                AK.mapreduce(map_fn, op, current, KA.get_backend(temp);
-                             init=init_val, neutral=init_val, dims=d, temp=temp, block_size=64)
+                AK.mapreducedim!(map_fn, op, temp, current; backend=KA.get_backend(temp),
+                                init=init_val, neutral=init_val)
                 current = temp
             end
         end

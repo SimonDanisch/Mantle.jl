@@ -496,6 +496,7 @@ include(joinpath(@__DIR__, "test_many_stage_args.jl"))
 # A varying spelled `NTuple{N,Float32}`, which Metal takes and Lava had no
 # method for.
 include(joinpath(@__DIR__, "test_tuple_varyings.jl"))
+include(joinpath(@__DIR__, "test_integer_attachments.jl"))
 # Under `test/vulkan/` and guarded, because it is that backend's: it builds a
 # `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
 # default and no other backend's answer. It sat in the section above, whose

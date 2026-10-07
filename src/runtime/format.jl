@@ -16,6 +16,8 @@ rather than merely read well:
 | `RGBA{Float16}` | 8     | `R16G16B16A16_SFLOAT`           |
 | `RGBA{Float32}` | 16    | `R32G32B32A32_SFLOAT`           |
 | `Float32`       | 4     | `D32_SFLOAT` as a depth target  |
+| `UInt32`        | 4     | `R32_UINT`                     |
+| `SVector{2,UInt32}` | 8 | `R32G32_UINT`                  |
 
 The one thing an element type cannot express is sRGB: `B8G8R8A8_SRGB` and
 `B8G8R8A8_UNORM` have identical memory and differ only in how the hardware
