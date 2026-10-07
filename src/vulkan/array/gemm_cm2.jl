@@ -321,9 +321,9 @@ function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
         throw(ArgumentError("nw=$nw wants $(nw * 32) invocations, past this " *
                             "device's limit of $(dev.workgrouplimit)"))
     span = 4 * GEMM_TILE
-    gemm_cm2_sg!(backend, nw * 32)(C, A, B, Int32(M), Int32(N), Int32(K), Val(nw);
-                                   ndrange = (nw * 32 * cld(M, span),
-                                              cld(N, nw * span)))
+    KI.Kernel(backend, gemm_cm2_sg!)(C, A, B, Int32(M), Int32(N), Int32(K), Val(nw);
+                                     numworkgroups = (cld(M, span), cld(N, nw * span)),
+                                     workgroupsize = nw * 32)
     C
 end
 
@@ -359,8 +359,13 @@ function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
     # path" is; `clamp = true` forces it, which is what the A/B measures against.
     cl = something(clamp, !(M % BM == 0 && N % BN == 0 && K % BK == 0))
     cmode = cl ? TENSOR_CLAMP_CONSTANT : TENSOR_CLAMP_UNDEFINED
-    gemm_cm2!(backend, NT)(C, A, B, Int32(M), Int32(N), Int32(K),
-                           Val(BM), Val(BN), Val(BK), Val(unroll), Val(cmode);
-                           ndrange = (NT * cld(M, BM), cld(N, BN)))
+    # A plain kernel since e9ecae9, so it launches through KernelInterface. This
+    # call still spelled the `@kernel` form `gemm_cm2!(backend, NT)(…)` and threw a
+    # MethodError on every coopmat2 device; nothing else has the extension, so no
+    # suite run on RADV reached it.
+    KI.Kernel(backend, gemm_cm2!)(C, A, B, Int32(M), Int32(N), Int32(K),
+                                  Val(BM), Val(BN), Val(BK), Val(unroll), Val(cmode);
+                                  numworkgroups = (cld(M, BM), cld(N, BN)),
+                                  workgroupsize = NT)
     C
 end

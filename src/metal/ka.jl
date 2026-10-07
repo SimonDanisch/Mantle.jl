@@ -425,16 +425,18 @@ function metalinterpreter(@nospecialize(f), @nospecialize(tt))
     return GPUCompiler.get_interpreter(GPUCompiler.CompilerJob(source, config))
 end
 
-"""
-The interpreter a macro-free kernel is compiled through on Metal. Core's
-`kerneltouches` walks the kernel with it, as it does on every backend.
-"""
+"""The interpreter a macro-free kernel is compiled through on Metal."""
 Mantle.kernelinterpreter(::MetalDevice, kernel, tt) = metalinterpreter(kernel, tt)
 
 """
-Interpreter, body and signature of a KernelAbstractions kernel as Metal compiles
-it: core's launch shape, with the iteration context as `mtlconvert` hands it to
-the kernel.
+The signature a retained KernelAbstractions kernel is compiled at on Metal.
+
+Core's (`graph/access.jl`), except for the iteration context's type: the kernel
+receives `mtlconvert(ctx)`, Metal.jl's device-side form, and inferring it at the
+host type infers different code. Core's `kerneltouches` does the rest, the walk
+and which leading entries to drop, for every backend. This file used to carry
+its own copy of that, and with it the macro-free path, which is why Metal had no
+`kernelinterpreter` and the vocabulary test listed the name as lonely.
 
 `group` is threaded through because the context's TYPE depends on it: the same
 `launch_config`/`mkcontext` pair `compile_dispatch` uses, so the signature walked
@@ -442,7 +444,8 @@ here is the signature compiled there.
 """
 function Mantle.kakernelaccesssignature(dev::MetalDevice, kernel, argT::Tuple, ndrange, group)
     obj = Mantle.kernelfor(kernel, group, Mantle.backend(dev))
-    ndr, _, iterspace, _ = KA.launch_config(obj, recordedrange(ndrange), Mantle.callgroup(obj, group))
+    ndr, _ws, iterspace, _ = KA.launch_config(obj, Mantle.dispatchrange(ndrange),
+                                              Mantle.callgroup(obj, group))
     ctx = KA.mkcontext(obj, ndr, iterspace)
     tt = (Core.Typeof(Metal.mtlconvert(ctx)), argT...)
     return metalinterpreter(obj.f, Base.to_tuple_type(tt)), obj.f, tt

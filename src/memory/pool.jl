@@ -436,6 +436,9 @@ blocksof(p::Pool, kind) = get!(() -> Block[], p.blocks, kind)
 """Every byte the pool has taken from the device, across all blocks."""
 reserved(p::Pool) = sum(b -> b.bytes, Iterators.flatten(values(p.blocks)); init = 0)
 
+"""The bytes the pool has taken from the device for one kind of memory."""
+reserved(p::Pool, kind) = sum(b -> b.bytes, get(p.blocks, kind, Block[]); init = 0)
+
 """
     largestfree(pool, kind) -> Int
 

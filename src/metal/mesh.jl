@@ -377,7 +377,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     ntex = Mantle.ntextures(p.fragment)
     ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
-                    texture_markers(ntex)..., Core.LLVMPtr{FOut,1}}
+                    texture_markers(ntex)..., StageOut{FOut}}
     fstage = compile_stage_function(ffn, frag_tt, :fragment,
                                     string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
 

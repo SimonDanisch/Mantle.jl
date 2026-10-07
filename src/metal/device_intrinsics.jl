@@ -45,3 +45,23 @@ end
 for T in (Float32, Float16, Int32, UInt32)
     @eval @device_override @inline KI.sub_group_reduce_add(val::$T) = Metal.simd_sum(val)
 end
+
+# ── The output pointer of a shader stage ─────────────────────────────────────
+
+"""
+    StageOut{T}
+
+The trailing output-pointer argument every Metal shader stage wrapper here is
+compiled with — vertex, fragment, the mesh pipeline's fragment and the procedural
+candidate function. Metal's `stage_return!` replaces it with a stack slot and
+returns the slot's contents as the stage's value.
+
+Address space 0, the slot's own. With the device address space (`1`) the slot was
+`addrspacecast` into it, and a private alloca seen through a device pointer is
+not the same memory on Apple GPUs: the body's stores went through the cast, the
+return loaded the slot, and the two met only where LLVM folded the cast away. A
+fragment comparing two `Vec3f` with `==` — Base's `AbstractArray` method, whose
+bounds-check exits keep the slot from being promoted — returned zeros for every
+pixel, clear colour included, with no error anywhere (`test_tuple_varyings.jl`).
+"""
+const StageOut{T} = Core.LLVMPtr{T,0}

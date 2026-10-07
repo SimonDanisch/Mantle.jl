@@ -232,8 +232,15 @@ end
         # Only a backend that patches a recording keeps the table, so this asks
         # `patchable`. It asked `recordsplans`, which ROCm answers `true` while
         # holding its arguments in a HIP graph that nothing rewrites.
+        #
+        # Asked by ADDRESS, not by count: Metal's argument memory also carries its
+        # `KernelState` — the malloc and exception-info buffers' addresses, at
+        # offsets 8 and 16 — and the table notes those too, so the count was
+        # `3 + length(ops)` there and this asserted a Vulkan-only number.
         if M.patchable(dev)
-            @test length(pl3.patchtab) == 1 + length(ops)
+            noted(x) = haskey(pl3.patchtab, M.deviceaddress(dev, x.store.region))
+            @test all(noted, ops)
+            @test length(pl3.patchtab) >= 1 + length(ops)
         end
         M.free!(pl3)
     end

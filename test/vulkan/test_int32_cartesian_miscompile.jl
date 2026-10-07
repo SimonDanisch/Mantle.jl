@@ -99,6 +99,14 @@ using Test, Lava, KernelAbstractions
 using Mantle: FastDiv32, cart32
 const KA = KernelAbstractions
 
+# The `@test_broken`s below were promoted on 2026-09-04 on RADV, which never had
+# this fault: the verdict above is NVIDIA's compiler, and on 2026-10-06 an RTX 4000
+# Ada (595.99) and an RTX 3070 Laptop (595.91) still produce the wrong answer. So
+# they are `broken` on NVIDIA and plain tests elsewhere; an unexpected pass on
+# NVIDIA fails, which is the signal the driver was fixed.
+const I32C_NVIDIA = Mantle.VK.get_physical_device_properties(
+    Mantle.vk_context().physical_device).vendor_id == 0x10de
+
 # Four decompositions of the same linear index into the same `Broadcasted`. The
 # point of running all four is to separate the three things that could be at
 # fault — the 32-bit width, the division, and `CartesianIndices` — since only
@@ -142,7 +150,7 @@ end
         @test run(:wide) ≈ want              # 64-bit through Base: correct
         # Base's `CartesianIndices` under a narrow index, which the
         # `@test_broken` announced correct on 2026-09-04 (RADV, this tree).
-        @test run(:narrowci) ≈ want
+        @test run(:narrowci) ≈ want broken = I32C_NVIDIA
         # The two that isolate it. `:handdiv` is 32-bit AND divides and is exact,
         # which rules out both the width and the division; `:magic` is the form
         # Lava's broadcast kernels actually use.
@@ -175,7 +183,7 @@ end
 
     h3 = reshape(collect(1f0:75f0), 5, 5, 3)
     A3 = KA.allocate(be, Float32, 5, 5, 3); copyto!(A3, h3)
-    @test narrow(A3, h3, (5, 5, 3))              # rank 3 + Extruded: was the bug,
-                                                 # fixed — the `@test_broken` announced it
+    # rank 3 + Extruded: the bug. Exact on RADV and lavapipe, still wrong on NVIDIA.
+    @test narrow(A3, h3, (5, 5, 3)) broken = I32C_NVIDIA
 end
 

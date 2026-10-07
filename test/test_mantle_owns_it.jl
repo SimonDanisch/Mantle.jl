@@ -145,23 +145,20 @@ end
 # DEVICE; the BUILD is fixed, and which tile Mantle emits kernels at is a property
 # of the build.
 #
-# `deviceslice` and `hostspan` are each ONE OF TWO ways a backend can answer, and
-# a backend that takes the other way must not define them. Their docstrings say so:
+# `deviceslice` is the other kind of deliberate answer: a per-device verb that one
+# backend must NOT implement. It is how `materialize!` wraps a transient's bytes in
+# the backend's array type, and its docstring (`phases.jl`) says a backend that
+# keeps the block instead implements no method. Vulkan keeps the block, because a
+# buffer barrier scopes to (VkBuffer, offset, size), which an array view cannot
+# name; Metal wraps. Answering it on Vulkan would hand barriers a view.
 #
-#   deviceslice
-#       For a backend that hands a placed transient out as an array over pool
-#       memory (Metal, ROCm). Vulkan keeps the block instead, because a buffer
-#       barrier names the `VkBuffer`, which an array view cannot.
-#   hostspan
-#       For a backend whose memory the CPU addresses (Metal). Core's transfer
-#       verbs are written over it. Vulkan and ROCm stage transfers and write
-#       `upload!`, `download` and `devicecopy!` themselves.
-#
-# Both passed this guard until the host backend was removed on 2026-10-01, and
-# only because `src/host/` was not one of `BACKEND_DIRS`: its methods counted as
-# core defaults. They never were.
+# `hostspan` the same way, by its docstring (`memory/resources.jl`): it is where a
+# backend's memory begins in the HOST address space, answered by a backend whose
+# device memory the CPU addresses directly (Metal's `Shared` buffers). Vulkan's is
+# not mapped; it writes `upload!`, `download` and `devicecopy!` itself, through a
+# staging copy, and has no span to give.
 const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
-    :staged_gemm_tile, :deviceslice, :hostspan,
+    :staged_gemm_tile, :deviceslice, :hostspan
 ])
 
 # The 56 that are lonely TODAY, so the guard can fail on a 57th.
@@ -236,7 +233,12 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
         isdefined(Mantle, n) || return false
         v = getglobal(Mantle, n)
         (v isa Function || v isa Type) || return false
-        return any(m -> !isbackendfile(m.file), methods(v))
+        # Nor a TEST file: the suite's `FaultDevice` forwards every verb, so once
+        # it is loaded each name has a method outside the backends, and this read
+        # every one of them as defaulted. Run after the suite the guard passed;
+        # run alone it named `hostspan`. A test double is not a default.
+        return any(m -> !isbackendfile(m.file) && !startswith(string(m.file), @__DIR__),
+                   methods(v))
     end
 
     lonely = Symbol[]

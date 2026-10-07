@@ -40,6 +40,15 @@ end
     # The unrounded chain differs in about a quarter of the elements; the device
     # may differ from the rounded one only where it fuses the final multiply,
     # which it has no add to fuse with.
-    @test count(got .!= unrounded) > n ÷ 10
-    @test got == rounded
+    #
+    # `broken` on NVIDIA: its compiler folds the narrowing and the widening away
+    # despite `NoContraction` — on 2026-10-06 an RTX 4000 Ada (595.99) and an RTX
+    # 3070 Laptop (595.91) returned the UNROUNDED chain in every element. Mesa
+    # honours the decoration; NVIDIA would need something else (untried:
+    # `FPFastMathMode` from `VK_KHR_shader_float_controls2`). An unexpected pass on
+    # NVIDIA fails, which is the signal that something now holds the rounding.
+    nvidia = Mantle.VK.get_physical_device_properties(
+        Mantle.vk_context().physical_device).vendor_id == 0x10de
+    @test count(got .!= unrounded) > n ÷ 10 broken = nvidia
+    @test got == rounded broken = nvidia
 end

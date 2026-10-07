@@ -84,15 +84,17 @@ end
 end
 
 @testset "HW HWTLAS — adapt-once-then-mutate via hwtlas.static_tlas" begin
-    # Invariant: sync!(hwtlas) is the single owner of hwtlas.static_tlas. A
-    # consumer that holds hwtlas.static_tlas (a thin AdaptedAccel wrapper around
-    # the mutable VulkanTLAS) sees any mutation that went through push!/delete! + sync!
-    # because the wrapper always references the live mutable struct.
+    # Invariant: sync!(hwtlas) is the single owner of hwtlas.static_tlas, and
+    # MAY reassign it when a buffer was reallocated (the `VulkanTLAS` docstring,
+    # "Adapted-form invariant"). `AdaptedAccel` holds the adapted device buffers,
+    # not a reference to the mutable `VulkanTLAS`, so whether the wrapper survives
+    # a rebuild depends on whether every buffer could be reused — and the
+    # acceleration-structure sizes are the driver's to report. This asserted `===`
+    # across the rebuild, which held on RADV and not on NVIDIA; failing, it then
+    # printed the stale wrapper, whose buffers `sync!` had freed, and errored.
     #
-    # Note: unlike StaticTLAS (which is a value-snapshot), AdaptedAccel is a
-    # thin immutable wrapper holding a mutable VulkanTLAS reference. Two wrappers around
-    # the same VulkanTLAS are always ===. The identity-change contract doesn't apply here
-    # — instead we verify that trace results reflect the mutation.
+    # What a consumer may rely on, and what is asserted: after `sync!`,
+    # `static_tlas` is what `adapt` hands out, and tracing sees the mutation.
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
 
@@ -108,10 +110,8 @@ end
     handle = push!(hwtlas, sphere_mesh(48), translation(0, 0, 2f0))
     Raycore.sync!(hwtlas)
 
-    # AdaptedAccel wraps the live mutable VulkanTLAS — the wrapper identity is
-    # stable (=== holds) but the underlying geometry has changed.
     st_after = hwtlas.static_tlas
-    @test st_after === st_before    # same thin wrapper, updated internals
+    @test Adapt.adapt(HW_BACKEND, hwtlas) === st_after
 
     r_after = hw_trace_one(hwtlas)
     @test r_after.hit

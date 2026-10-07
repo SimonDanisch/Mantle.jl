@@ -258,9 +258,11 @@ deviceview(::LavaDevice, a::DeviceArray{T,N}) where {T,N} =
 # recordings are dropped instead.
 deviceaddress(::LavaDevice, mem::BufferBlock) = UInt64(mem.address)
 
-upload!(d::LavaDevice, a::DeviceArray{T}, first::Integer,
-               data::AbstractVector) where {T} =
-    (copyto!(deviceview(d, a), Int(first), collect(T, data), 1, length(data)); a)
+# A `Vector{T}` goes as it is; anything else is collected into one first.
+upload!(d::LavaDevice, a::DeviceArray{T}, first::Integer, data::Vector{T}) where {T} =
+    (copyto!(deviceview(d, a), Int(first), data, 1, length(data)); a)
+upload!(d::LavaDevice, a::DeviceArray{T}, first::Integer, data::AbstractVector) where {T} =
+    upload!(d, a, first, collect(T, data))
 download(d::LavaDevice, a::DeviceArray) = Array(deviceview(d, a))
 devicecopy!(d::LavaDevice, dst::DeviceArray, src::DeviceArray,
                    n::Integer) =
@@ -432,7 +434,7 @@ function storebytes!(e::Emitter, t::TransientBuffer, off::Int, p::Ptr{Cvoid}, n:
         VK.cmd_update_buffer(e.cmd, dst.buffer, UInt64(dst_off), UInt64(n), p)
         hold!(e, dst)
     else
-        r = scratch!(e.owner, n)
+        r = scratch!(e.owner, n, Readback())   # staged in host memory, see `scratch!`
         src = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
         unsafe_copyto!(src.mapped_ptr + offset(r), Ptr{UInt8}(p), n)
         cmd_copy_buffer!(e, src, dst, n;

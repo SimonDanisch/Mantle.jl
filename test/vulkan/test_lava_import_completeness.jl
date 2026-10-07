@@ -303,7 +303,12 @@ end
     # on purpose. Core's is the hook "which interpreter compiles this kernel"
     # (`graph/access.jl`), and the Vulkan backend's answer IS Lava's function,
     # named qualified at every call in `src/vulkan/access.jl`.
-    known = [(:Attribute, :LLVM), (:Backend, :KernelAbstractions),
+    #
+    # `declare!` against GPUCompiler, reviewed 2026-10-06: Mantle's is the graph
+    # verb that records what a pass touches (`graph/build.jl`); GPUCompiler's is an
+    # internal of its Metal target (`src/metal.jl`) that Mantle never calls. Not
+    # imported, not extended, and the two never meet.
+    known = [(:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Mat4f, :GeometryBasics), (:Pass, :LLVM), (:Window, :GLFW),
              (:alignment, :LLVM), (:allocate, :KernelAbstractions),
              (:backend, :KernelAbstractions), (:count, :AcceleratedKernels),

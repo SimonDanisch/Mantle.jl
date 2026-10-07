@@ -587,18 +587,6 @@ foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
 # rule in core, checked against GPUCompiler's own: two rules in two backends is
 # only ever one of them in a build.
 foreachbackend(joinpath(@__DIR__, "test_argument_packing.jl"))
-# And once on the host, which runs a plain-function kernel one work item at a
-# time and answers KernelInterface's position queries itself. Driven separately
-# because `eachbackend()` reports GPU backends.
-for path in (joinpath(@__DIR__, "test_declared_kernel.jl"),
-             joinpath(@__DIR__, "test_declared_call.jl"),
-             joinpath(@__DIR__, "test_argument_packing.jl"))
-    @eval Main MANTLE_TEST_BACKEND = $(Mantle.KernelAbstractions.CPU())
-    @eval Main module $(gensym(:HostDeclared))
-        using Test
-        include($path)
-    end
-end
 # And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.
@@ -1103,6 +1091,12 @@ if _VULKAN_OK
         # aborts whatever unrelated code calls check_validation_errors! next.
         @testset "tolerated alloc failure" begin
             include(joinpath(VULKAN_TESTS, "test_tolerated_alloc_failure.jl"))
+        end
+
+        # Past the driver's memory budget is out of memory, also where RADV would
+        # have moved buffers to system memory (which froze a desktop, 2026-10-06).
+        @testset "allocation budget" begin
+            include(joinpath(VULKAN_TESTS, "test_alloc_budget.jl"))
         end
 
 

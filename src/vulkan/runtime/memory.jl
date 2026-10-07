@@ -139,7 +139,9 @@ end
 function probe_device_local_heap(ctx::VkContext)
     mem_props = ctx.memory_properties
     total = 0
-    for i in 0:(length(mem_props.memory_heaps) - 1)
+    # `memory_heaps` is the fixed array of VK_MAX_MEMORY_HEAPS (16); the device
+    # fills `memory_heap_count` of them.
+    for i in 0:(Int(mem_props.memory_heap_count) - 1)
         heap = mem_props.memory_heaps[i + 1]
         if (UInt32(heap.flags) & UInt32(VK.MEMORY_HEAP_DEVICE_LOCAL_BIT)) != 0
             total += Int(heap.size)
@@ -156,7 +158,7 @@ OOM error messages.
 """
 function probe_device_memory_budget(ctx::VkContext)
     mem_props = ctx.memory_properties
-    n = Int(length(mem_props.memory_heaps))
+    n = Int(mem_props.memory_heap_count)      # of the 16 slots in `memory_heaps`
     sizes = ntuple(i -> Int(mem_props.memory_heaps[i].size), n)
     flags = ntuple(i -> UInt32(mem_props.memory_heaps[i].flags), n)
     device_local = ntuple(i -> (flags[i] & UInt32(VK.MEMORY_HEAP_DEVICE_LOCAL_BIT)) != 0, n)
@@ -172,6 +174,33 @@ function probe_device_memory_budget(ctx::VkContext)
     return [(heap=i-1, device_local=device_local[i], size=sizes[i],
              budget=Int(bp.heap_budget[i]), usage=Int(bp.heap_usage[i])) for i in 1:n]
 end
+
+"""
+    overbudget(ctx, memtype, bytes) -> Bool
+
+Whether `bytes` more in memory type `memtype` (0-based) would take this process
+past the driver's budget for that type's heap (`VK_EXT_memory_budget`).
+
+The budget, not the heap size, because a driver does not have to fail an
+allocation past it. RADV does not: it moves buffers out of VRAM into system
+memory (GTT), and once GTT passes about half the RAM, the kernel's
+`ttm_global_swapout` path runs, which in amdgpu on kernel 7.2.6 corrupts a list
+under a spinlock and locks up the whole machine (two desktop freezes on
+2026-10-06, a 7900 XTX filled by one Julia process). An allocation past the
+budget is out of memory, as `docs/api.md` says for every backend; callers treat
+it as they treat the driver's own `ERROR_OUT_OF_DEVICE_MEMORY` (reclaim, retry,
+then throw with the heap figures).
+
+`false` without the extension: then the driver's own error is all there is.
+The second method is the rule alone, on one heap of a
+[`probe_device_memory_budget`](@ref) snapshot.
+"""
+function overbudget(ctx::VkContext, memtype::Integer, bytes::Integer)
+    ctx.memory_budget_available || return false
+    heap = Int(ctx.memory_properties.memory_types[memtype + 1].heap_index)
+    return overbudget(probe_device_memory_budget(ctx)[heap + 1], bytes)
+end
+overbudget(heap::NamedTuple, bytes::Integer) = heap.usage + bytes > heap.budget
 
 """
     maybe_collect(ctx::VkContext; blocking::Bool=false)
@@ -372,7 +401,7 @@ include the real `VkResult` and the failing op in the LavaError they throw.
 """
 struct AllocFailure
     code::VK.Result
-    op::Symbol          # :Buffer, :DeviceMemory, :bind_buffer_memory, :map_memory
+    op::Symbol          # :Buffer, :budget, :DeviceMemory, :bind_buffer_memory, :map_memory
     nbytes::Int
     mem_type_idx::Int   # -1 if the failure happened before memory-type selection
 end
@@ -382,7 +411,11 @@ function format_oom_error(ctx::VkContext, fail::AllocFailure)
     println(io, "Out of GPU memory.")
     req_mb = fail.nbytes ÷ (1024 * 1024)
     live_mb = gpu_live_bytes(ctx) ÷ (1024 * 1024)
-    println(io, "  Vulkan returned $(fail.code) from $(fail.op) for $(fail.nbytes) bytes ($(req_mb) MiB).")
+    if fail.op === :budget
+        println(io, "  $(fail.nbytes) bytes ($(req_mb) MiB) would exceed the driver's budget for the heap (VK_EXT_memory_budget); not asked for.")
+    else
+        println(io, "  Vulkan returned $(fail.code) from $(fail.op) for $(fail.nbytes) bytes ($(req_mb) MiB).")
+    end
     println(io, "  Lava tracked state: $(live_mb) MiB live across $(length(mempolicy(ctx).live_buffers)) buffers.")
     if fail.mem_type_idx >= 0
         mem_props = ctx.memory_properties
@@ -540,6 +573,31 @@ function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
     return true
 end
 
+"""
+    discardvalidation!(ctx)
+
+Forget the validation messages a refused allocation produced: an expected and
+handled refusal (`try_vk_alloc`) owns them.
+
+DRAIN, then empty. The validation callback writes into a ring
+(`ctx.validation`, per device since 49f3f17) and only
+`drain_validation_messages!` moves entries out of it into
+`.messages`. Emptying the drained list alone leaves this failure's
+own messages sitting in the ring, where the next
+`check_validation_errors!` picks them up and blames its own caller.
+
+Observed exactly that way: test_source_mapping.jl:699 asks for 40 GB
+deliberately, and the error surfaced 40 lines later at :739 as a
+`LavaError during flush!` on a FOUR-ELEMENT upload. An oversized
+allocation is the intended, handled outcome here, so its messages
+belong to it.
+"""
+function discardvalidation!(ctx::VkContext)
+    drain_validation_messages!(ctx)
+    empty!(ctx.validation.messages)
+    return
+end
+
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
 function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                       extra_usage::UInt32=UInt32(0), unified::Bool=false)
@@ -581,6 +639,13 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                 VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
         end
         mem_type_idx_local = Int(mem_type_idx)
+        # Past the budget is out of memory even where the driver would say yes
+        # (`overbudget`); returning the failure sends it through the same
+        # reclaim-and-retry as the driver's own refusal.
+        if overbudget(ctx, mem_type_idx, mem_reqs.size)
+            discardvalidation!(ctx)      # creating `buf` may already have complained
+            return AllocFailure(VK.ERROR_OUT_OF_DEVICE_MEMORY, :budget, Int(nbytes), mem_type_idx_local)
+        end
 
         alloc_flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
             flags=VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
@@ -601,22 +666,7 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
         if e isa VK.VulkanError &&
            (e.code == VK.ERROR_OUT_OF_DEVICE_MEMORY ||
             e.code == VK.ERROR_OUT_OF_HOST_MEMORY)
-            # DRAIN, then empty. The validation callback writes into a ring
-            # (`ctx.validation`, per device since 49f3f17) and only
-            # `drain_validation_messages!` moves entries out of it into
-            # `.messages`. Emptying the drained list alone leaves this failure's
-            # own messages sitting in the ring, where the next
-            # `check_validation_errors!` picks them up and blames its own caller.
-            #
-            # Observed exactly that way: test_source_mapping.jl:699 asks for 40 GB
-            # deliberately, and the error surfaced 40 lines later at :739 as a
-            # `LavaError during flush!` on a FOUR-ELEMENT upload. An oversized
-            # allocation is the intended, handled outcome here, so its messages
-            # belong to it.
-            let c = ctxof(bq)
-                drain_validation_messages!(c)
-                empty!(c.validation.messages)
-            end
+            discardvalidation!(ctxof(bq))
             return AllocFailure(e.code, op, Int(nbytes), mem_type_idx_local)
         end
         # DEVICE_LOST during alloc is a hard fault — mark + propagate so the
@@ -1374,7 +1424,8 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
         # waits — the next reader of `managed` on this queue is ordered behind
         # the copy, and a host reader waits on `last_write`.
         oneshot!(bq; tag = :upload) do e
-            r = scratch!(e.owner, nbytes)
+            # Staged in host memory and moved by the copy engine; see `scratch!`.
+            r = scratch!(e.owner, nbytes, Readback())
             mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
             unsafe_copyto!(mb.mapped_ptr + Mantle.offset(r), host_ptr, nbytes)
             cmd_copy_buffer!(e, mb, managed, nbytes;
