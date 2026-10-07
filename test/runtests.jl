@@ -983,7 +983,14 @@ if _VULKAN_OK
         # separate pieces of module-scope device state it found.
         @testset "two devices in one process" begin
             include(joinpath(VULKAN_TESTS, "twodevice_probe.jl"))
-            probe()
+            # Lavapipe is the second device, and not every machine has it: the
+            # Windows AMD driver box enumerates its GPU alone. Skipped loudly, as
+            # the shutdown check below does, rather than erroring in `VkContext`.
+            if any(i -> i.kind == :cpu, Mantle.devices(Mantle.VulkanAPI()))
+                probe()
+            else
+                @info "no lavapipe device here; the two-device probe needs a second driver"
+            end
             # And that the process can then EXIT. A passing probe is not enough:
             # the crash is in the shutdown finalizer sweep, after every summary
             # has printed. Nothing inside this process can observe that, so the

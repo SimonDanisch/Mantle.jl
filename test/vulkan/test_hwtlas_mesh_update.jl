@@ -32,8 +32,8 @@ end
 `offset_z`, the closest hit is at t = 4 - offset_z."""
 expected_t(offset_z::Real) = Float32(5) - Float32(offset_z) - Float32(1)
 
-# Shared HW-HWTLAS helpers — see test/hwtlas_helpers.jl (provides `translation`).
-isdefined(@__MODULE__, :translation) ||
+# Shared HW-HWTLAS helpers — see test/hwtlas_helpers.jl (provides `tlastranslation`).
+isdefined(@__MODULE__, :tlastranslation) ||
     include(joinpath(@__DIR__, "hwtlas_helpers.jl"))
 
 """Trace one ray down the +z axis via HW RT and return (hit, t) on CPU."""
@@ -47,7 +47,7 @@ end
 """Swap the mesh in `hwtlas` to a fresh sphere at `offset_z` with tessellation `n`."""
 function hw_swap_mesh!(hwtlas, handle, n, offset_z)
     Raycore.delete!(hwtlas, handle)
-    new_handle = push!(hwtlas, sphere_mesh(n), translation(0, 0, offset_z))
+    new_handle = push!(hwtlas, sphere_mesh(n), tlastranslation(0, 0, offset_z))
     Raycore.sync!(hwtlas)
     return new_handle
 end
@@ -64,7 +64,7 @@ end
 
 @testset "HW HWTLAS — mesh update correctness under size oscillation" begin
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
-    handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
+    handle = push!(hwtlas, sphere_mesh(16), tlastranslation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
     # Baseline
@@ -96,7 +96,7 @@ end
     # What a consumer may rely on, and what is asserted: after `sync!`,
     # `static_tlas` is what `adapt` hands out, and tracing sees the mutation.
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
-    handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
+    handle = push!(hwtlas, sphere_mesh(16), tlastranslation(0, 0, 0))
 
     st_before = Adapt.adapt(HW_BACKEND, hwtlas)
     @test hwtlas.static_tlas === st_before
@@ -107,7 +107,7 @@ end
 
     # Mutate: swap sphere to z=2 — expected t moves 4.0 -> 2.0.
     Raycore.delete!(hwtlas, handle)
-    handle = push!(hwtlas, sphere_mesh(48), translation(0, 0, 2f0))
+    handle = push!(hwtlas, sphere_mesh(48), tlastranslation(0, 0, 2f0))
     Raycore.sync!(hwtlas)
 
     st_after = hwtlas.static_tlas
@@ -120,7 +120,7 @@ end
 
 @testset "HW HWTLAS — transform update via sync!(hwtlas)" begin
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
-    handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
+    handle = push!(hwtlas, sphere_mesh(16), tlastranslation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
     r1 = hw_trace_one(hwtlas)
@@ -128,7 +128,7 @@ end
     @test isapprox(r1.t, expected_t(0); atol=0.05f0)
 
     # Move instance to z=1.5.
-    Raycore.update_transform!(hwtlas, handle, translation(0, 0, 1.5f0))
+    Raycore.update_transform!(hwtlas, handle, tlastranslation(0, 0, 1.5f0))
     Raycore.sync!(hwtlas)
 
     r2 = hw_trace_one(hwtlas)
@@ -153,7 +153,7 @@ end
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
     ids = UInt32[7, 11, 23]
     handle = push!(hwtlas, sphere_mesh(16),
-                   [translation(0, 0, Float32(k)) for k in 0:2];
+                   [tlastranslation(0, 0, Float32(k)) for k in 0:2];
                    instance_ids = ids, instance_mask = UInt8(0x0f),
                    sbt_offset = UInt32(2))
     Raycore.sync!(hwtlas)
@@ -168,7 +168,7 @@ end
 
     # A bulk transform update, which is what goes through the refit kernel.
     Raycore.update_transforms!(hwtlas, handle,
-        Mantle.LavaArray([Mantle.mat4_to_vk_transform(translation(0, 0, Float32(k) + 4f0))
+        Mantle.LavaArray([Mantle.mat4_to_vk_transform(tlastranslation(0, 0, Float32(k) + 4f0))
                           for k in 0:2]))
     Raycore.sync!(hwtlas)
 
@@ -183,7 +183,7 @@ end
     # The HardwareAccel (and thus the RT pipeline compiled into the SBT) must
     # survive mesh swaps — one RT pipeline per VulkanTLAS, not per rebuild.
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
-    handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
+    handle = push!(hwtlas, sphere_mesh(16), tlastranslation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
     accel_before = hwtlas.hw_accel
@@ -199,7 +199,7 @@ end
 
 @testset "HW HWTLAS — mesh update leak bound (GPU resources)" begin
     hwtlas = Mantle.VulkanTLAS(HW_BACKEND)
-    handle = push!(hwtlas, sphere_mesh(16), translation(0, 0, 0))
+    handle = push!(hwtlas, sphere_mesh(16), tlastranslation(0, 0, 0))
     Raycore.sync!(hwtlas)
 
     # Warm up: a few cycles to settle pool/kernel caches.

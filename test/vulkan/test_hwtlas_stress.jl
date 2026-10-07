@@ -53,12 +53,12 @@ end
 box_mesh(origin::Vec3f, extent::Vec3f) =
     GeometryBasics.normal_mesh(Rect3f(origin, extent))
 
-# Shared HW-HWTLAS helpers — see test/hwtlas_helpers.jl (provides `translation`).
-isdefined(@__MODULE__, :translation) ||
+# Shared HW-HWTLAS helpers — see test/hwtlas_helpers.jl (provides `tlastranslation`).
+isdefined(@__MODULE__, :tlastranslation) ||
     include(joinpath(@__DIR__, "hwtlas_helpers.jl"))
 
 """Translation as `Mat3x4f` (Vulkan row-major 3×4) for `update_transform!`."""
-vk_translation(dx, dy, dz) = Mantle.mat4_to_vk_transform(translation(dx, dy, dz))
+vk_translation(dx, dy, dz) = Mantle.mat4_to_vk_transform(tlastranslation(dx, dy, dz))
 
 """Downward ray hits a z=0 triangle translated by `offset` iff the ray's
 xy point lies inside the translated triangle; returns the analytic t."""
@@ -83,7 +83,7 @@ function build_scene(N::Int)
     offsets = NTuple{3,Float32}[]
     for i in 1:N
         off = (Float32(2i), 0f0, 0f0)  # spaced 2 apart in x, z=0
-        T = translation(off...)
+        T = tlastranslation(off...)
         h = push!(hwtlas, mesh, T; instance_id=UInt32(i))
         push!(handles, h)
         push!(offsets, off)
@@ -176,7 +176,7 @@ end
     new_offsets = [(Float32(100 + 2i), Float32(1), Float32(0.2 * i))
                    for i in 1:(N÷2)]
     for off in new_offsets
-        h = push!(hwtlas, unit_triangle_mesh(), translation(off...);
+        h = push!(hwtlas, unit_triangle_mesh(), tlastranslation(off...);
                   instance_id=UInt32(99))
         push!(kept_handles, h)
         push!(kept_offsets, off)
@@ -260,7 +260,7 @@ end
     for h in handles
         Raycore.delete!(hwtlas, h)
     end
-    init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
+    init_xfs = [tlastranslation(Float32(2i), 0f0, 0f0) for i in 1:N]
     multi_handle = push!(hwtlas, unit_triangle_mesh(), init_xfs;
                          instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
@@ -285,7 +285,7 @@ end
 
 @testset "HW HWTLAS — update_transforms! accepts LavaArray input" begin
     N = 4
-    init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
+    init_xfs = [tlastranslation(Float32(2i), 0f0, 0f0) for i in 1:N]
     hwtlas = Mantle.VulkanTLAS(LavaBackend())
     h = push!(hwtlas, unit_triangle_mesh(), init_xfs; instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
@@ -303,10 +303,10 @@ end
 
 @testset "HW HWTLAS — update_transforms! then delete!(handle) is safe" begin
     N = 4
-    init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
+    init_xfs = [tlastranslation(Float32(2i), 0f0, 0f0) for i in 1:N]
     hwtlas = Mantle.VulkanTLAS(LavaBackend())
     h_a = push!(hwtlas, unit_triangle_mesh(), init_xfs; instance_mask=UInt8(0xff))
-    h_b = push!(hwtlas, unit_triangle_mesh(), translation(20f0, 0f0, 0f0))
+    h_b = push!(hwtlas, unit_triangle_mesh(), tlastranslation(20f0, 0f0, 0f0))
     Raycore.sync!(hwtlas)
 
     new_xfs = Mantle.LavaArray([vk_translation(Float32(2i + 1f0), 0f0, 0f0) for i in 1:N])
@@ -333,7 +333,7 @@ end
     N = 1000
     hwtlas = Mantle.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
-    init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
+    init_xfs = [tlastranslation(Float32(2i), 0f0, 0f0) for i in 1:N]
     h = push!(hwtlas, mesh, init_xfs; instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
@@ -426,7 +426,7 @@ end
 
 @testset "HW HWTLAS — 500-iter mesh grow/shrink + HW trace per iter" begin
     hwtlas = Mantle.VulkanTLAS(LavaBackend())
-    h = push!(hwtlas, sphere_mesh_n(8), translation(0, 0, 0); instance_mask=UInt8(0xff))
+    h = push!(hwtlas, sphere_mesh_n(8), tlastranslation(0, 0, 0); instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
     n_iters = 500
@@ -437,7 +437,7 @@ end
         z_off = Float32((iter % 30) * 0.05)            # 0 .. 1.45 — ray always reaches
 
         Raycore.delete!(hwtlas, h)
-        h = push!(hwtlas, sphere_mesh_n(tess), translation(0, 0, z_off);
+        h = push!(hwtlas, sphere_mesh_n(tess), tlastranslation(0, 0, z_off);
                   instance_mask=UInt8(0xff))
         Raycore.sync!(hwtlas)
 
@@ -462,7 +462,7 @@ end
     N = 500
     hwtlas = Mantle.VulkanTLAS(LavaBackend())
     mesh = unit_triangle_mesh()
-    init_xfs = [translation(Float32(2i), 0f0, 0f0) for i in 1:N]
+    init_xfs = [tlastranslation(Float32(2i), 0f0, 0f0) for i in 1:N]
     h = push!(hwtlas, mesh, init_xfs; instance_mask=UInt8(0xff))
     Raycore.sync!(hwtlas)
 
@@ -470,7 +470,7 @@ end
     for frame in 1:n_frames
         # Drop the whole batch and re-push — full topology rebuild per frame.
         Raycore.delete!(hwtlas, h)
-        new_xfs = [translation(Float32(2i + 0.05 * frame),
+        new_xfs = [tlastranslation(Float32(2i + 0.05 * frame),
                                 Float32(0.1 * cospi(frame / 5)),
                                 0f0)
                    for i in 1:N]
@@ -501,7 +501,7 @@ end
         op = rand(rng, 1:3)
         if op == 1 && length(handles) < 12
             n = rand(rng, 1:5)
-            xfs = [translation(Float32(2i + iter), 0f0, 0f0) for i in 1:n]
+            xfs = [tlastranslation(Float32(2i + iter), 0f0, 0f0) for i in 1:n]
             h = push!(hwtlas, unit_triangle_mesh(), xfs)
             push!(handles, h)
             expected += n

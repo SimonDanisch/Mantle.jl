@@ -28,9 +28,14 @@ using Test, Mantle
         @test_skip ctx.memory_budget_available
     else
         heaps = Mantle.probe_device_memory_budget(ctx)
-        # More than any heap has left, so whichever heap a memory type maps to,
-        # the request is over its budget.
-        over = maximum(h -> h.budget - h.usage, heaps) + (256 << 20)
+        # More than any heap's WHOLE budget, so whichever heap a memory type maps
+        # to, the request is over it whatever is in use. Not "more than any heap
+        # has left": usage includes the pool's own empty blocks, which the pool
+        # hands back before it retries — measured on LapWin (Radeon 8060S,
+        # 2026-10-07): 0.38 GB in use, a request of budget - 0.38 + 0.25 GB
+        # refused, the empty blocks returned, the retry granted. The test then
+        # held 30 GB and every later file in the suite ran out of memory.
+        over = maximum(h -> h.budget, heaps) + (256 << 20)
 
         @testset "images and graph arenas (device_memory) throw the driver's refusal" begin
             bits = typemax(UInt32)                         # any memory type

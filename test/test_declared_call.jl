@@ -191,14 +191,18 @@ end
     M.waitidle(dev)
     @test Array(M.storage(tr))[1] ≈ want
 
-    # Big enough that the region `small` sized cannot hold it.
+    # Big enough that the arena cannot hold it: each transient alone is larger than
+    # the whole arena as it stands. Not a fixed size — the arena is the device's,
+    # and the files before this one leave it at whatever they needed (2.3 MB on an
+    # M5 in the full suite, where a fixed 2 x 1 MiB fit and nothing moved).
     before = M.pool(dev).arenas[M.Buffers()].bytes
+    len = max(1 << 18, cld(before, sizeof(Float32)) + 1)
     g2 = M.Graph(dev)
-    seed = M.Buffer(dev, zeros(Float32, 1 << 18))
-    u1 = M.Transient.Buffer(g2, Float32, 1 << 18)
-    u2 = M.Transient.Buffer(g2, Float32, 1 << 18)
-    M.dispatch!(g2, stepone!, (u1, seed), 1 << 18; name = "x")
-    M.dispatch!(g2, stepone!, (u2, u1), 1 << 18; name = "y")
+    seed = M.Buffer(dev, zeros(Float32, len))
+    u1 = M.Transient.Buffer(g2, Float32, len)
+    u2 = M.Transient.Buffer(g2, Float32, len)
+    M.dispatch!(g2, stepone!, (u1, seed), len; name = "x")
+    M.dispatch!(g2, stepone!, (u2, u1), len; name = "y")
     big = M.record!(M.Plan(g2))
     # The premise of the rest of this testset: if the arena did not grow, nothing
     # moved and a pass here would mean nothing.

@@ -340,7 +340,8 @@ end
         for m in eachmatch(r"\b(Lava\w*|lava_\w+|Vulkan\w*|vk_\w+|VK_\w+|MTL\w*|mtl[a-z]\w*)\b",
                            codeonly(read(p, String)))
             occursin(markers, m.match) && continue
-            push!(hits, (relpath(p, ROOT), m.match))
+            # `/` on every OS, so the pinned exceptions below match on Windows too.
+            push!(hits, (replace(relpath(p, ROOT), '\\' => '/'), m.match))
         end
     end
     # The one exception, pinned exactly rather than pattern-matched away.
