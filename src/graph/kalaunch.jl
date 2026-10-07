@@ -423,7 +423,15 @@ function run!(::Pipelines, c::Compile)
         compiled = Any[]
         for d in p.dispatches
             ind = d.ndrange isa DeviceRange ? (indcursor += 1) : 0
-            cd = compile_dispatch(c, d, argcursor, ind)
+            # `invokelatest` because the kernel can be newer than the caller's
+            # world. A generated family (`gemv_ncontig_kernel` and its kin)
+            # `@eval`s its function while the graph is being declared, and a
+            # plan built in the same top-level call compiles it here. Called
+            # directly, the backend looked the method up in the caller's world
+            # and threw "method too new" on Metal and on Vulkan alike. Vulkan got
+            # past it only while its frozen kernel cache, keyed on types, answered
+            # before anything looked the method up; that cache is gone.
+            cd = Base.invokelatest(compile_dispatch, c, d, argcursor, ind)
             push!(compiled, cd)
             argcursor += argalign(argsize(cd))
         end

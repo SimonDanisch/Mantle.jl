@@ -252,3 +252,44 @@ end
     @test Array(M.storage(out3)) == Float32[2l for l in 1:WG]
     M.free!(pl3)
 end
+
+# A kernel FAMILY generated on demand, the way `gemv_ncontig_kernel` makes one
+# function per configuration: it does not exist until the declaration asks for
+# it. A fresh name per call, so a second run of this file in one session still
+# defines a method newer than its caller.
+function generatedscale(k::Int)
+    name = Symbol(:generatedscale_, k, :_, string(time_ns(); base = 36))
+    @eval function $name(out, n::Int)
+        i = KI.get_global_id().x
+        i <= n || return
+        @inbounds out[i] = Float32($k * i)
+        return
+    end
+end
+
+# Generation, declaration and plan in ONE call, which is where the world matters:
+# the caller's world is fixed when it starts, and the generated method is newer.
+function plangenerated(dev, n::Int, k::Int)
+    g = M.Graph(dev)
+    out = M.Transient.Buffer(g, Float32, n)
+    M.dispatchlaunches!(g, [M.ArrayLaunch(generatedscale(k), (out, n), n)];
+                        name = "generated")
+    pl = M.record!(M.Plan(g))
+    M.run!(pl)
+    M.waitidle(dev)
+    got = Array(M.storage(out))
+    M.free!(pl)
+    return got
+end
+
+@testset "a kernel generated in the same call compiles — $(nameof(typeof(BE)))" begin
+    # `Plan` compiled each dispatch in the caller's world, so a kernel `@eval`ed
+    # during the declaration was "too new to be called from this world context".
+    # Found on Metal, where a declared `gemv` with a configuration nothing had
+    # used yet could not be built. Vulkan threw the same error whenever the
+    # kernel missed its frozen cache, which has since been removed.
+    dev = M.Device(BE)
+    M.kisupported(dev, bcast_f!) || return
+    n = 40
+    @test plangenerated(dev, n, 3) == Float32[3i for i in 1:n]
+end
