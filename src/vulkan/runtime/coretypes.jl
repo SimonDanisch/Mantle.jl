@@ -85,7 +85,15 @@ mutable struct VkManagedBuffer
     # Owning VkContext — so upload!/download!/vk_free! don't need the global.
     # Loose type because VkContext is declared in device.jl, included first.
     ctx::Any
+    # Where this buffer last went into an owner's `sync` list, so `syncbuf!`
+    # answers "already listed?" with one comparison instead of a scan. Only a
+    # hint: the list is checked at that position, so a stale value (the list was
+    # emptied, or the buffer went into another list since) reads as "not listed".
+    syncpos::Int
 end
+
+VkManagedBuffer(buffer, memory, address, mapped_ptr, size, region, stamp, state, ctx) =
+    VkManagedBuffer(buffer, memory, address, mapped_ptr, size, region, stamp, state, ctx, 0)
 
 """
 When one device grows, trims and collects, and what it currently holds.

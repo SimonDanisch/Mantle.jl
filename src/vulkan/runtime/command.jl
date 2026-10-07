@@ -474,18 +474,29 @@ end
 Record that these commands name `obj`'s buffer, for `crosswaits!` and `stamp!`
 at submit. A no-op for anything with no device-visible bytes of its own.
 
-Deduplicated by an identity SCAN and not by a set, for the reason the pin list
-was: the lists are short (a one-shot names a launch's worth, a plan's recording
-everything it names, once), and at that size a scan beats a hash — measured, at
-|list| = 4: 0.04 µs against 0.221 µs, with the crossover at 256. **If a
-recording ever names thousands of buffers this should become a set.**
+Deduplicated through the buffer's `syncpos`: where it last went into a list. If the
+owner's list holds this buffer at that position it is listed already; otherwise it
+is appended and the position recorded. One comparison, no hashing, nothing
+allocated.
+
+It was an identity SCAN of the list, on the grounds that lists are short — at
+|list| = 4 a scan beat a hash, 0.04 µs against 0.221 µs. A frame of a 1000-widget
+RayMakie GUI is a one-shot naming thousands of buffers, so the scan made every
+frame quadratic in its draws: 12 % of a `gui_1000` raster frame on a Radeon 8060S,
+and the reason giving each mesh draw four more (one-element instance) buffers cost
+that frame 13 % (measured 2026-10-07, interleaved A/B on Bosgame).
+
+A buffer listed by two owners in turn can be listed twice by one of them; `syncpos`
+names only the latest list. `crosswaits!` and `stamp!` read a buffer twice to the
+same effect, so a repeat costs a second look and nothing else.
 """
 @inline syncbuf!(::Closed, @nospecialize(obj)) = nothing
 @inline function syncbuf!(owner::Closed, buf::VkManagedBuffer)
-    for b in owner.sync
-        b === buf && return nothing
-    end
-    push!(owner.sync, buf)
+    list = owner.sync
+    p = buf.syncpos
+    (1 <= p <= length(list) && @inbounds(list[p]) === buf) && return nothing
+    push!(list, buf)
+    buf.syncpos = length(list)
     return nothing
 end
 
