@@ -963,6 +963,20 @@ end
 Mantle.emitupdate!(::MetalRecorder, ::Mantle.Plan, ::Mantle.PassPlan) = nothing
 
 """
+A pass going into a recording is encoded, not timed.
+
+Core profiles a pass where it is emitted, and for a recording that is `record!`:
+once, with nothing run. The default sampled it anyway, so a recorded compute
+plan's `timings` showed the encode time as the pass's host cost and `0.0` as its
+GPU cost. A replay is one command buffer for every pass, and an Apple GPU samples
+counters only at stage boundaries (the M5 answers `supportsCounterSampling:` with
+true for `AtStageBoundary` and false for the dispatch, draw and blit points), so
+this backend has no per-pass number to give for a recorded pass. It gives none:
+no samples, and `NaN` in `timings`.
+"""
+Mantle.profiled!(f, ::Mantle.Plan, ::MetalRecorder, ::Integer) = f()
+
+"""
 Open a segment for this pass's predicate, closing the one before it.
 
 Consecutive passes with the same gate share a segment; a change of gate — including

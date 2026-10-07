@@ -762,3 +762,22 @@ end
     @test (Int(tex2.width), Int(tex2.height)) == (64, 112)
     M.present_frame!(RG_DEV, win)
 end
+
+@testset "a recorded pass reports no GPU time rather than zero" begin
+    # The profiled plan further up is walked, because it draws. A compute plan is
+    # RECORDED, and core profiles a pass where it is emitted, which for a
+    # recording is `record!`: nothing has run there. `timings` said `0.0` GPU ms
+    # for every dispatch of such a plan, and a declared GEMV read as free.
+    g = M.Graph(RG_DEV)
+    x = M.Buffer(RG_DEV, zeros(Float32, 16))
+    M.dispatch!(g, rg_touch!, (x,), 16; name = "touch")
+    plan = M.record!(M.Plan(g; profile = true))
+    for _ in 1:3
+        M.run!(plan)
+    end
+    M.waitidle(RG_DEV)
+    @test Array(M.storage(x)) == fill(3f0, 16)
+    t = only(t for t in M.timings(plan) if t.name == "touch")
+    @test isnan(t.gpu_ms)
+    @test t.samples == 0
+end

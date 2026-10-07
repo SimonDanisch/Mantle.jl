@@ -923,6 +923,10 @@ Nanoseconds of GPU time for everything recorded since the last call.
 Submits and WAITS, which is what makes the number per-pass and what makes a
 profiled frame slower than a real one. A buffer that never reached the GPU
 reports zeros for both ends, and contributes nothing rather than a negative.
+
+`0.0` when nothing was committed since the last call: in a walked run that is a
+pass that gave the GPU no work, and zero is what it cost. A RECORDED pass never
+asks, because at `record!` nothing runs; see `profiled!` for `MetalRecorder`.
 """
 function Mantle.gpupasstime!(d::MetalDevice)
     bq = batchqueue(d)
