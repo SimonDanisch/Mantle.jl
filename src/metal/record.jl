@@ -1239,7 +1239,6 @@ Mantle.closerun!(d::MetalDevice, pl::Mantle.Plan, ::Nothing) = submitrun!(d, pl)
 
 function submitrun!(d::MetalDevice, pl::Mantle.Plan)
     enterrun!(d)
-    rec = pl.recording
     # The token `waitfor!(plan)` waits on, and it comes OUT of the submission: a
     # queue that signals an event per submit knows which value this run will
     # reach, and one that does not falls back to bumping its retirement counter.
@@ -1249,18 +1248,7 @@ function submitrun!(d::MetalDevice, pl::Mantle.Plan)
     # (`RecordingParts`). Asserting one `MetalRecording` here is what Qwen-Image
     # 2.1's text encoder met — it asks for a partition, and until now only Vulkan
     # had ever been given one.
-    #
-    # Split by hand on the two recordings a Metal plan holds, because core types
-    # `pl.recording` as `Any`: a call on it is dynamic, and a dynamic call boxes the
-    # `UInt64` token it returns. That is an allocation every frame once the token
-    # passes the small values Julia keeps boxed.
-    tok = if rec === nothing
-        closeframe!(d)
-    elseif rec isa MetalRecording
-        Mantle.submitrecording!(d, rec, nothing)
-    else
-        Mantle.submitrecording!(d, rec::RecordingParts{MetalRecording}, nothing)
-    end
+    tok = Mantle.submitplan!(d, pl, nothing, MetalRecording)
     for s in pl.graph.surfaces
         Mantle.present_frame!(d, s.win)
     end
@@ -1339,20 +1327,37 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
 end
 
 """
-One baked piece, replayed. Core's `RecordingParts` method calls this per piece and
-gives this backend the sequence for free; `e` is the run's emitter, which on this
-backend is always `nothing` because a Metal run's host stores ride in its own
-submission (`emitupdates!`) rather than in the recording.
+One baked piece, replayed. `e` is the run's emitter, which on this backend is always
+`nothing` because a Metal run's host stores ride in its own submission
+(`emitupdates!`) rather than in the recording.
 """
 Mantle.submitrecording!(d::MetalDevice, rec::MetalRecording, ::Any) = replay!(d, rec)
 
 """
-One frame of a recorded plan: an encoder, one `execute` per segment, and a commit.
+Several pieces in ONE command buffer: what core groups into one submission
+(`submissionbatches`), a loop body's pieces once per iteration among them.
+
+Core's fallback submits each piece on its own, and on this backend a submission is
+a command buffer and an encoder — two Objective-C wrappers the host allocates. A
+RayMakie sample is four pieces (head, the bounce loop's body twice, tail), so it
+was four command buffers and 256 bytes a sample where one is 64.
+"""
+Mantle.submitrecording!(d::MetalDevice, recs::Vector{MetalRecording}, ::Any) = replay!(d, recs)
+
+# A walked plan recorded nothing: its passes went into the batch, and closing the
+# frame is the submission.
+Mantle.submitrecording!(d::MetalDevice, ::Nothing, ::Any) = closeframe!(d)
+
+"""
+One frame of a recorded plan: an encoder, one `execute` per segment of each piece,
+and a commit.
 
 This is the whole of a baked frame's host work. Nothing here looks at a dispatch, an
 argument or a kernel; what runs was decided when the plan was recorded.
 """
-function replay!(d::MetalDevice, rec::MetalRecording)
+replay!(d::MetalDevice, rec::MetalRecording) = replay!(d, (rec,))
+
+function replay!(d::MetalDevice, recs::Union{Tuple{MetalRecording},Vector{MetalRecording}})
     # REFUSED rather than hung. `executeCommandsInBuffer:` on an MTL4 compute
     # encoder stops completing after roughly a second of replayed GPU work, and
     # reports nothing when it does: no error from the commit feedback, nothing in
@@ -1361,12 +1366,28 @@ function replay!(d::MetalDevice, rec::MetalRecording)
     # `metalqueue` in `device.jl` for the measurements, and
     # `Metal/research/mtl4_icb_stall.jl` for the reproducer with the knobs that
     # rule each cause out.
-    canrun(d.queue, rec) || refusereplay(d.queue)
+    #
     # Residency first, and for its EFFECT: everything this replay reaches by
-    # address has to be in the queue's set before the submission names the set.
-    # Cheap — it returns on a pointer comparison unless a block came or went.
-    ids = ensureresident!(d, rec)
-    sub = opensubmit!(d, ids)
+    # address has to be in the queue's set before the submission names the set —
+    # for EVERY piece, since the set a command buffer declared does not pick up an
+    # allocation added afterwards. Cheap — it returns on a pointer comparison unless
+    # a block came or went.
+    for rec in recs
+        canrun(d.queue, rec) || refusereplay(d.queue)
+        ensureresident!(d, rec)
+    end
+    sub = opensubmit!(d, first(recs).residentids)
+    for k in eachindex(recs)
+        rec = recs[k]
+        k == firstindex(recs) || nextpiece!(d, sub, rec.residentids)
+        sub = encodepiece!(d, sub, rec)
+    end
+    return closesubmit!(d, sub)
+end
+
+"""One piece into the open submission; the submission after it, which a piece
+holding calls has reopened."""
+function encodepiece!(d::MetalDevice, sub, rec::MetalRecording)
     if !canreplay(d.queue)
         encodeplan!(sub, rec)
     elseif isempty(rec.calls)
@@ -1374,9 +1395,9 @@ function replay!(d::MetalDevice, rec::MetalRecording)
             executesegment!(d, sub, rec, s)
         end
     else
-        sub = replaywithcalls!(d, sub, rec, ids)
+        sub = replaywithcalls!(d, sub, rec, rec.residentids)
     end
-    return closesubmit!(d, sub)
+    return sub
 end
 
 """

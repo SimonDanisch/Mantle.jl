@@ -1318,6 +1318,28 @@ function submitrecording!(ctx, rec::RecordingParts, e)
 end
 
 """
+    submitplan!(ctx, plan, emitter, R) -> token
+
+Submit what `plan` recorded, `R` being this backend's piece type.
+
+`Plan.recording` is an `Any` field, so a call through it is dynamic, and the
+`UInt64` token a dynamic call returns comes back boxed: 8 bytes a run once the
+timeline passes the small-integer cache. Narrowed here to the three things a
+recording can be — one piece, the pieces of a partition, or `nothing` for a plan
+that was not recorded — so every call below is static. Vulkan and Metal submit
+through this rather than reading the field themselves; Metal did read it, and its
+runs allocated the box (RayMakie `test_render_allocates_nothing.jl`). The ROCm
+extension still reads the field, and boxes nothing doing so: its
+`submitrecording!` returns `nothing`, and its token comes from `fence`.
+"""
+function submitplan!(ctx, pl::Plan, e, ::Type{R}) where {R}
+    rec = pl.recording
+    rec isa R && return submitrecording!(ctx, rec, e)
+    rec === nothing && return submitrecording!(ctx, nothing, e)
+    return submitrecording!(ctx, rec::RecordingParts{R}, e)
+end
+
+"""
     submitrecording!(ctx, pieces::AbstractVector, emitter) -> token
 
 One submission made of several pieces, in order. A backend that can put several

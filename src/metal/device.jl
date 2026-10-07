@@ -523,6 +523,23 @@ function executesegment!(::LegacyQueue, s::LegacySubmission, rec, seg)
 end
 
 """
+    nextpiece!(dev, sub, ids)
+
+The boundary between two pieces of one recording replayed into the same encoder
+(`replay!` over a submission's pieces).
+
+Legacy: the next piece's resources declared on the encoder, which is hazard tracking
+as much as residency (see `opensubmit!`); its `execute` calls are ordered behind the
+previous piece's because two `execute` calls on one encoder are. MTL4: residency is
+the set `ensureresident!` already granted, and the encoder does no hazard tracking,
+so the boundary is a barrier — the one a command buffer of its own used to be.
+"""
+nextpiece!(d::MetalDevice, s, ids) = nextpiece!(d.queue, s, ids)
+
+nextpiece!(::LegacyQueue, s::LegacySubmission, ids) =
+    (MTL.use!(s.enc, ids, MTL.ReadWriteUsage); nothing)
+
+"""
     suspendsubmit!(dev, sub)
 
 End the open encoder so a host CALL may encode into the same command buffer, without
@@ -817,6 +834,8 @@ function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     q.resset === nothing || MTL.use_residency_set!(cb, q.resset)
     return MTL4Submission(cb, enc, q.slot)
 end
+
+nextpiece!(::MTL4Queue, s::MTL4Submission, ids) = (MTL.barrier!(s.enc); nothing)
 
 """
 Close whatever this frame put on the LEGACY queue, and give back the timeline

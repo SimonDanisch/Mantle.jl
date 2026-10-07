@@ -1683,15 +1683,10 @@ function closerun!(dev::LavaDevice, pl::Plan, e::Union{Nothing,Emitter})
         seal!(e.owner)
         return submit_and_present!(bq, win, e.owner)
     end
-    # Every kind of recording by name: through the `Any` field the call is
-    # dynamic, and its `UInt64` token comes back boxed, 8 bytes a run once the
-    # timeline passes the small-integer cache. `nothing` is a headless plan
-    # that cannot be recorded (see `recordable`), walked into `e`; asserting
-    # `RecordingParts` there made every such run a `TypeError`.
-    rec = pl.recording
-    rec isa Recording && return submitrecording!(bq, rec, e)
-    rec === nothing && return submitrecording!(bq, nothing, e::Emitter)
-    return submitrecording!(bq, rec::RecordingParts{Recording}, e)
+    # `nothing` is a headless plan that cannot be recorded (see `recordable`),
+    # walked into `e`; asserting `RecordingParts` there made every such run a
+    # `TypeError`.
+    return submitplan!(bq, pl, e, Recording)
 end
 
 """
