@@ -2,7 +2,7 @@
 #
 # A single VkPipelineCache per device, seeded from disk and saved back so
 # AMDVLK / RADV / etc. don't recompile SPIR-V → ISA every session. Lives in the
-# same scratchspace as the SPIR-V cache (`lava_disk_cache_dir()`) for cohesion.
+# `lava_spirv_cache` scratch space, where the SPIR-V disk cache used to be.
 #
 # Safety: the header is validated HERE, before the driver ever sees the bytes.
 #
@@ -18,17 +18,16 @@
 # So the 32-byte `VkPipelineCacheHeaderVersionOne` is parsed and compared
 # against this physical device before the data is passed on, and anything that
 # does not match exactly is discarded. That is cheap, it is the one check that
-# makes the "load whatever is on disk" path safe, and it is what lets the
-# frozen kernel cache keep a driver-specific level at all.
+# makes the "load whatever is on disk" path safe.
 
 """
-Disk path for this device's pipeline-cache blob. Co-located with the SPIR-V
-disk cache; one file per (device, driver version) pair.
+Disk path for this device's pipeline-cache blob, one file per (device, driver
+version) pair. In the scratch space the SPIR-V disk cache used to share.
 """
 function lava_pipeline_cache_path(device_name::AbstractString, driver_version::AbstractString)
     sanitized_dev = replace(device_name, r"[^a-zA-Z0-9]+" => "_")
     sanitized_drv = replace(driver_version, r"[^a-zA-Z0-9]+" => "_")
-    return joinpath(lava_disk_cache_dir(),
+    return joinpath(first(Base.DEPOT_PATH), "scratchspaces", "lava_spirv_cache",
                     "vk_pipeline_cache_$(sanitized_dev)_drv$(sanitized_drv).bin")
 end
 

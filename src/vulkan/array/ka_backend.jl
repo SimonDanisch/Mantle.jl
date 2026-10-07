@@ -789,8 +789,8 @@ end
 # Measured on SAM 2's encoder, first call in a fresh process: 16 981
 # MethodInstances inferred, 11 729 of them owned by Lava, ~26 s of the ~36 s of
 # first-call latency. The launch path was ~1 000 of each of `build_launch_plan!`,
-# `get_compiled_kernel_and_pipeline`, `frozen_load` and `frozen_store` — one per
-# kernel, for four functions whose bodies do not depend on the kernel at all.
+# `get_compiled_kernel_and_pipeline` and the cache lookups beneath it — one per
+# kernel, for functions whose bodies do not depend on the kernel at all.
 # `@nospecialize` was already on `f` and `tt` and did not help: inference still
 # specialises a callee to inline it into a specialised caller, so the widening
 # has to be paired with a barrier the compiler will not cross.

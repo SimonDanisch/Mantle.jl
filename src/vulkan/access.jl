@@ -50,7 +50,7 @@ The union over a trace's shaders.
 closest-hit and miss shaders are compiled against the raygen's own signature and
 read the same queues, which is the pbrt-v4 pattern Hikari is on; without it they
 take none and only the raygen's accesses are the pass's. The any-hit always
-takes them — `compile_rt_pipeline` compiles it at `raygen_tt` either way.
+takes them — `rt_stages` compiles it at `raygen_tt` either way.
 """
 function kerneltouches(dev::LavaDevice, pipe::RayTracingPipeline, args::Tuple, ndrange, group)
     argT = map(a -> devicetype(dev, a), args)

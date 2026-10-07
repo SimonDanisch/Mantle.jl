@@ -111,7 +111,7 @@ function compile_draw(dev::LavaDevice, p::Union{GraphicsPipeline, MeshPipeline},
     # `compiledraw` applies, and for the same reason: a fullscreen pass whose
     # vertex stage takes nothing and whose fragment stage reads a g-buffer is
     # the case that makes the usual answer wrong.
-    isempty(fargs) || (shader = get_or_compile_gfx(ffn, ftt, :fragment; ctx))
+    isempty(fargs) || (shader = get_or_compile_gfx(ffn, ftt, :fragment))
     return VulkanDraw(compiled, shader)
 end
 

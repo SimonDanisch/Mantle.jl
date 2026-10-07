@@ -135,12 +135,18 @@ is equally explained by Lava's in-memory `ctx.caches.pipelines`, which never
 touches disk. Under this wrapper, a run that completes did zero driver
 compilation — the driver said so.
 
-Clears Lava's in-memory pipeline cache first, so only the `VkPipelineCache`
-(seeded from disk) can satisfy a creation. Restores the previous setting after.
+Clears every in-memory cache that holds a pipeline first, the pipelines dict and
+the linked kernels and launch plans above it (`clear_kernel_cache!`), so only the
+`VkPipelineCache` (seeded from disk) can satisfy a creation. Restores the
+previous setting after.
 
     no_pipeline_compilation() do
-        run_the_workload()          # throws if anything would compile
+        run_the_workload()
     end
+    PIPELINE_COMPILES_REFUSED[] == 0    # nothing needed the driver's compiler
+
+A refusal does not throw. The creation is recorded in `PIPELINE_COMPILE_MISSES`
+and retried without the flag, so a workload finishes and reports every miss.
 """
 function no_pipeline_compilation(f; ctx::VkContext = vk_context())
     old = PIPELINE_NO_COMPILE[]
@@ -153,6 +159,11 @@ function no_pipeline_compilation(f; ctx::VkContext = vk_context())
         empty!(c.pipelines)
         empty!(c.pipeline_order)
     end
+    # And the two caches that hold a kernel's pipeline above that dict. A kernel
+    # launched before this call found its pipeline there and created none, so
+    # the driver was never asked: measured 2026-10-07, 0 creations inside the
+    # wrapper for a kernel launched once before it.
+    clear_kernel_cache!(ctx)
     PIPELINE_NO_COMPILE[] = true
     PIPELINE_COMPILES_REFUSED[] = 0
     empty!(PIPELINE_COMPILE_MISSES)
@@ -294,8 +305,7 @@ Validates SPIR-V before creating the shader module.
 """
 function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_name::String;
                                push_constant_size::Integer=8,
-                               needs_tlas_descriptor::Bool=false,
-                               pipeline_cache=nothing)
+                               needs_tlas_descriptor::Bool=false)
     # `spirv_content_hash`, NOT `hash(spirv_bytes)` — see its docstring. The
     # length goes in too, so a truncation cannot alias a prefix.
     #
@@ -441,12 +451,8 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
     end
     ci = VK.ComputePipelineCreateInfo(stage, layout, -1; flags=pipeline_flags)
 
-    # `pipeline_cache` lets the frozen cache hand in a per-kernel one seeded from
-    # that kernel's own `.bin`; without it the device-wide cache is used, which is
-    # what every other caller wants.
-    pcache = pipeline_cache === nothing ? ctx.pipeline_cache : pipeline_cache
     pipeline = try
-        create_compute_pipeline(dev, ci; pipeline_cache=pcache)
+        create_compute_pipeline(dev, ci; pipeline_cache=ctx.pipeline_cache)
     catch e
         # A cache miss is RECORDED, not fatal: retry without the flag so the
         # workload finishes and every miss is reported, rather than dying at the
@@ -463,14 +469,13 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
             push!(PIPELINE_COMPILE_MISSES,
                   string(entry_name, " spirv=",
                          string(spirv_content_hash(spirv_bytes), base=16),
-                         " (", length(spirv_bytes), " bytes)",
-                         pipeline_cache === nothing ? "" : " [per-kernel cache]"))
+                         " (", length(spirv_bytes), " bytes)"))
             old_flag = PIPELINE_NO_COMPILE[]
             PIPELINE_NO_COMPILE[] = false
             try
                 ci_retry = VK.ComputePipelineCreateInfo(stage, layout, -1;
                     flags = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_DISPATCH_BASE_BIT))
-                create_compute_pipeline(dev, ci_retry; pipeline_cache=pcache)
+                create_compute_pipeline(dev, ci_retry; pipeline_cache=ctx.pipeline_cache)
             finally
                 PIPELINE_NO_COMPILE[] = old_flag
             end

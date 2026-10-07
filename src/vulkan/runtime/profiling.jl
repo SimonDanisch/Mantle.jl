@@ -111,69 +111,30 @@ end
 Stats for a single compiled+linked kernel. Use this from a debugger or
 test when you already have a `LavaLinkedKernel` in hand.
 """
-function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel; source::AbstractString = "")
+function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel)
     c = linked.compiled
     spirv = spirv_op_stats(c.spirv_bytes)
     exec = pipeline_exec_stats(ctx, linked)
     regs = exec === nothing ? nothing : get(exec, :registers, nothing)
     scratch = exec === nothing ? nothing : get(exec, :scratch_bytes, nothing)
-    # `source` given by the caller wins: a FROZEN entry has no IR to recover the
-    # name from — `frozen_store` writes `ir = ""` on purpose, the string being
-    # "session-specific and large" — but its cache KEY is
-    # `(typeof(f), tt, workgroup_size)`, which names the kernel outright.
-    name = isempty(source) ? kernel_source_name(c) : source
-    return KernelStats(c.entry_name, name, c.workgroup_size, spirv, regs, scratch)
-end
-
-"""Kernel name from a frozen-cache key, whose first element is `typeof(f)`."""
-function frozen_key_source_name(key)
-    key isa Tuple && !isempty(key) || return ""
-    K = key[1]
-    K isa DataType || return ""
-    return replace(string(nameof(K)), r"^#" => "", r"#\d+$" => "")
+    return KernelStats(c.entry_name, kernel_source_name(c), c.workgroup_size, spirv, regs, scratch)
 end
 
 """
     list_compiled_kernels() -> Vector{KernelStats}
 
-Stats for every kernel this device has compiled. Useful right after a render —
-you see every kernel involved.
+Stats for every kernel this device has a pipeline for. Useful right after a
+render — you see every kernel involved.
 
 ```julia
 render!(vp, scene, film, camera)
 sort(list_compiled_kernels(); by=k -> -k.spirv.bytes)  # biggest first
 ```
 
-Takes a context, because there is no global registry of them to walk. The
-cache belongs to a device and is one level deep per device: reading the outer
-level of a two-level dict hands `kernel_stats` another `Dict`.
-
-**Both of the context's caches, because the shipped path only populates one.**
-`get_compiled_kernel_and_pipeline` consults the frozen cache first and *returns*
-on a hit, so a kernel that came off disk never reaches
-`GPUCompiler.cached_compilation` and never enters `caches.linked`. Every runner
-calls `use_frozen_kernels` in its `__init__`, so for the configuration that
-actually ships `caches.linked` is empty and this returned an empty vector —
-measured on a Depth Anything forward: **0 kernels reported against 45 live
-dispatch names**, taking `kernel_stats`, `pipeline_exec_stats` and every
-register/scratch number with it. A profiler blind exactly where it is needed.
+Takes a context, because there is no global registry of them to walk.
 """
 function list_compiled_kernels(ctx::VkContext = vk_context())
-    stats = KernelStats[]
-    seen = Set{UInt64}()
-    for (_, linked) in ctx.caches.linked
-        push!(seen, objectid(linked))
-        push!(stats, kernel_stats(ctx, linked))
-    end
-    for (key, linked) in ctx.caches.frozen_mem
-        # `Any`-valued, and one kernel can land in both caches across a session.
-        linked isa LavaLinkedKernel && !(objectid(linked) in seen) || continue
-        push!(seen, objectid(linked))
-        # The frozen entry has no IR to recover a name from — `frozen_store`
-        # writes `ir = ""` on purpose — but its KEY is `(typeof(f), tt, wg)`.
-        push!(stats, kernel_stats(ctx, linked; source = frozen_key_source_name(key)))
-    end
-    return stats
+    return KernelStats[kernel_stats(ctx, linked) for linked in values(ctx.caches.linked)]
 end
 
 # ============================================================================

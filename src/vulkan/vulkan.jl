@@ -9,8 +9,8 @@
 # The four things that cross the line: `DeviceCaps` is `KernelInterface`'s, the
 # emitter reads `Lava.TargetFeatures` (pushed from here by `bind_context!`)
 # rather than a context ref, `spirv_content_hash` is the compiler's, and the
-# frozen cache is split — the SPIR-V half is the compiler's, the
-# `VkPipelineCache` half is this one's.
+# kernel cache is split — the SPIR-V, kept with each `CodeInstance`, is the
+# compiler's (`compile_or_lookup`), the pipelines built from it are this one's.
 #
 # These files are included INTO `Mantle` rather than a submodule, because the
 # methods in them are methods on Mantle's own functions — `caps`, `upload!`,
@@ -36,24 +36,20 @@
 # NamedTuple into and nobody outside writes them.
 using Lava
 using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
-            CoopMatrix, FROZEN_HITS, FROZEN_LOG_MISSES, FROZEN_MISSES,
-            FROZEN_PRUNED, FROZEN_RECORDING, FROZEN_RT_MEM, FROZEN_STORES,
-            FROZEN_VERSION, FragmentWrapper, GeometryConfig,
+            CoopMatrix, FragmentWrapper, GeometryConfig,
             KI_REDUCE_ADD_TYPES, KI_SHFL_TYPES, LavaCompilationError,
             LavaCompilerParams, LavaDeviceArray, LavaError, LavaGPUKernel,
             LavaGfxShader, LavaRTShader, LavaSharedArray, MatrixA, MatrixB,
             Op, PushConstantInfo, Scope, SourceMap, TENSOR_CLAMP_CONSTANT,
             TENSOR_CLAMP_UNDEFINED, TargetFeatures, TessConfig,
-            GeometryWrapper, MeshWrapper, VertexWrapper, WorkgroupMatrix, cache_io_error,
+            GeometryWrapper, MeshWrapper, VertexWrapper, WorkgroupMatrix,
+            cached_gfx_shader, cached_rt_shader, compile_or_lookup, compile_stats,
             coopmat_convert, coopmat_getcomp, coopmat_length, coopmat_load,
             coopmat_muladd, coopmat_setcomp, coopmat_store, coopmat_undef,
             coopmat_zero, disassemble_spirv, dump_spirv_to_disk,
-            frozen_binpath, frozen_cache_dir,
-            frozen_eligible, frozen_key, frozen_logging, frozen_max_bytes,
-            frozen_path, frozen_rt_load, frozen_rt_store, gfx_input,
-            gfx_output, invoke_frozen, kernel_dump_wanted,
-            kernel_source_name, lava_alloc_shared, lava_compile_gfx_shader,
-            lava_compile_gpu_from_job, lava_compile_rt_shader,
+            gfx_input,
+            gfx_output, kernel_dump_wanted,
+            kernel_source_name, lava_alloc_shared, lava_kernel_job,
             lava_compiler_config, lava_local_invocation_id_x,
             lava_local_invocation_index, lava_num_workgroups,
             lava_num_workgroups_x, lava_num_workgroups_y,
@@ -80,7 +76,7 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             subgroup_elect, subgroup_shuffle, subgroup_size,
             tensor_layout, tensor_load,
             tensor_setdim, tensor_setstride, tensor_slice, tensor_store,
-            typestring, unroll_loops!, validate_spirv,
+            reset_compile_stats!, unroll_loops!, validate_spirv,
             wg_compute_type_alignment, wg_compute_type_size
 
 
@@ -94,8 +90,6 @@ include("runtime/pipeline.jl")
 include("runtime/command.jl")
 include("array/lavaarray.jl")
 include("runtime/launch.jl")
-include("runtime/frozen_pipeline.jl")
-include("runtime/workload.jl")
 include("runtime/pipeline_cache.jl")
 include("array/ka_backend.jl")
 include("array/kernelinterface_host.jl")
@@ -149,11 +143,6 @@ include("graphics/record.jl")
 # them. `test_no_stale_exports.jl` covers the parent; nothing needs to cover an
 # export list that cannot exist.
 
-# `@compile_workload` was exported here too, and cannot be either — same reason.
-# It is reachable as `MantleVulkanExt.@compile_workload`; giving it a home in
-# Mantle means deciding what it does with no device, which is a question for
-# whoever needs it from a second backend.
-
 # ── What this backend does once, at load ──────────────────────────────────────
 #
 # Declared by core in `graph/backend.jl`; the body is here because every name in
@@ -162,7 +151,6 @@ function initbackend!()
     register_backend!(; name = :vulkan, priority = 100) do
         vulkan_available() ? LavaBackend() : nothing
     end
-    register_kernel_recorder!(with_frozen_recording; name = :vulkan)
     init_pipeline_thread!()
     atexit() do
         mark_all_devices_lost!()

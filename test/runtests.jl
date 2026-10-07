@@ -487,6 +487,8 @@ include(joinpath(@__DIR__, "test_isubd_mesh.jl"))
 include(joinpath(@__DIR__, "test_mesh_pipeline_graph.jl"))
 include(joinpath(@__DIR__, "test_discard.jl"))
 include(joinpath(@__DIR__, "test_headless_rebindable_draw.jl"))
+# A shader drawn after a method it inlines was redefined (Revise).
+include(joinpath(@__DIR__, "test_shader_redefinition.jl"))
 # A texture from device data, and one updated in place. Found by RayMakie's
 # `test_device_arrays.jl`: an `image!` of a device array drew nothing on Metal.
 include(joinpath(@__DIR__, "test_texture_upload.jl"))
@@ -1104,11 +1106,6 @@ if _VULKAN_OK
         end
 
 
-        # The frozen path is the one the runners ship, and the profiler could not see
-        # it: 0 kernels reported against 45 live dispatches.
-        @testset "frozen kernels are visible to the profiler" begin
-            include(joinpath(VULKAN_TESTS, "test_frozen_kernels_visible.jl"))
-        end
         # And what the driver says about a pipeline is asked of the context that
         # made it, not of a global flag that only describes the next one.
         @testset "pipeline executable properties per context" begin
@@ -1290,9 +1287,11 @@ if _VULKAN_OK
             end
 
 
-        # ── Tier 3h: Disk Cache & Two-Tier Caching ──
+        # ── Tier 3h: Kernel cache ──
+        # SPIR-V kept with each `CodeInstance`: an edited kernel is launched with
+        # its new code, an unrelated definition compiles nothing.
         @testset "Tier 3h: Kernel Cache" begin
-            include(joinpath(VULKAN_TESTS, "test_disk_cache.jl"))
+            include(joinpath(VULKAN_TESTS, "test_kernel_cache.jl"))
         end
 
 
@@ -1420,20 +1419,6 @@ if _VULKAN_OK
             end
 
 
-            # test_frozen_cache.jl shipped unregistered, so the compute-side frozen
-            # cache had no coverage in CI. It restores FROZEN_VERSION by plain
-            # assignment, so a throw part-way through would leave the cache ENABLED
-            # for every later testset here — silently, since a frozen hit looks like
-            # a normal launch. Restore it from a finally block instead.
-            @testset "frozen kernel cache (compute)" begin
-                _fv, _fr = Lava.FROZEN_VERSION[], Lava.FROZEN_RECORDING[]
-                try
-                    include(joinpath(VULKAN_TESTS, "test_frozen_cache.jl"))
-                finally
-                    Lava.FROZEN_VERSION[]   = _fv
-                    Lava.FROZEN_RECORDING[] = _fr
-                end
-            end
 
 
             @testset "HW HWTLAS — nonblocking sync!" begin

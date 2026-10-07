@@ -90,10 +90,7 @@ end
             let c = ctx.caches
                 empty!(c.pipelines); empty!(c.pipeline_order)
                 empty!(c.launchplans); empty!(c.linked)
-                # `frozen_mem` TOO: `get_compiled_kernel_and_pipeline` consults it
-                # first and RETURNS on a hit, so a frozen kernel never reaches
-                # `get_compute_pipeline` and the guard cannot fire at all.
-                empty!(c.frozen_mem); empty!(c.iterplans)
+                empty!(c.iterplans)
             end
 
             # 128 threads against a faked 64-lane subgroup: two subgroups, which
@@ -109,15 +106,13 @@ end
             ctx.caches.subgroup_size    = saved_size
             ctx.caches.coopmat_warned   = saved_warn
             let c = ctx.caches      # fields on the context since 28bf2de
-                # `frozen_mem` and `iterplans` TOO. `get_compiled_kernel_and_pipeline`
-                # consults the frozen memo first and RETURNS on a hit, so a cached
-                # frozen kernel never reaches `get_compute_pipeline` — and the
-                # refusal under test lives there. Leaving it populated made this
-                # positive control pass vacuously: no error, because no pipeline
-                # was ever built.
+                # `iterplans` TOO: a cached plan never reaches
+                # `get_compute_pipeline`, and the refusal under test lives there.
+                # Leaving it populated made this positive control pass vacuously:
+                # no error, because no pipeline was ever built.
                 empty!(c.pipelines); empty!(c.pipeline_order)
                 empty!(c.launchplans); empty!(c.linked)
-                empty!(c.frozen_mem); empty!(c.iterplans)
+                empty!(c.iterplans)
             end
         end
     end

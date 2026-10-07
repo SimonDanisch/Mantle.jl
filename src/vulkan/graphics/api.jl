@@ -7,8 +7,15 @@
 
 # ── Lazy Compilation ──
 
+"""
+    get_or_compile_gfx(f, tt, stage; config) -> LavaGfxShader
 
-# The graphics shader cache is a `VkContext` field; a reset makes a new one.
+Stage `stage` of `f` with arguments of types `tt`, compiled for the code `f`
+has now (`Lava.cached_gfx_shader`). SPIR-V names no device, so one compile
+serves every context.
+"""
+get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol; config=nothing) =
+    cached_gfx_shader(f, tt, stage; config)
 
 """
 Everything that changes the created `VkPipeline` but is not the shader pair.
@@ -26,6 +33,15 @@ pipeline_state_key(p::GraphicsPipeline) =
 
 pipeline_state_key(p::MeshPipeline) = (typeof(p), p.mesh, p.fragment, p.object)
 
+"""
+The key of a compiled pipeline: the shaders it is made of, by identity, and the
+state baked in with them. The shaders, not their functions: a stage compiled
+again after an edit is a new shader, and the pipeline has to follow it.
+"""
+pipeline_cache_key(shaders::Tuple, pipeline, color_format, depth_format, descriptor_set_layout) =
+    hash((map(objectid, shaders), color_format, depth_format, pipeline_state_key(pipeline),
+          descriptor_set_layout !== nothing))
+
 """Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
                               vert_fn, frag_fn, tt_vertex, tt_fragment;
@@ -33,7 +49,7 @@ function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing)
-    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex; ctx)
+    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
     compiled = ensure_compiled!(pipeline, vert_fn, frag_fn, tt_vertex, tt_fragment;
         ctx, color_format, depth_format, descriptor_set_layout)
     return vert, compiled
@@ -44,22 +60,11 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
                               ctx::VkContext)
-    # Cache key includes type tuples — different arg types get different compiled
-    # pipelines — and the pipeline state, which is the rest of what is baked in.
-    cache_key = hash((vert_fn, frag_fn, tt_vertex, tt_fragment, color_format, depth_format,
-                       pipeline_state_key(pipeline), descriptor_set_layout !== nothing))
-    cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
-    cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
-
-    # Compile vertex shader
-    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex; ctx)
-
-    # Compile fragment shader
-    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment; ctx)
+    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
+    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment)
 
     # Optional stages
-    geom_spirv = nothing
-    geom_config = nothing
+    geom = nothing
     if pipeline.geometry !== nothing
         # WRAPPED, like the other two stages: a geometry body takes
         # `(emitter, primitive, args...)` and emits through `emit!`, and the
@@ -70,33 +75,30 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
         # supplies.
         geom_cfg = Mantle.stageconfig(pipeline.geometry)
         geom = get_or_compile_gfx(geometrystage(pipeline, geom_cfg), tt_vertex,
-                                  :geometry; config=geom_cfg, ctx)
-        geom_spirv = geom.spirv_bytes
-        geom_config = geom_cfg
+                                  :geometry; config=geom_cfg)
     end
-
-    tc_spirv = nothing
-    te_spirv = nothing
+    tc = nothing
     tess_cfg = nothing
     if pipeline.tess_control !== nothing
-        tc_fn, tc_cfg = pipeline.tess_control
-        tc = get_or_compile_gfx(tc_fn, tt_vertex, :tess_control; config=tc_cfg, ctx)
-        tc_spirv = tc.spirv_bytes
-        tess_cfg = tc_cfg
+        tc_fn, tess_cfg = pipeline.tess_control
+        tc = get_or_compile_gfx(tc_fn, tt_vertex, :tess_control; config=tess_cfg)
     end
-    if pipeline.tess_eval !== nothing
-        te = get_or_compile_gfx(pipeline.tess_eval, tt_vertex, :tess_eval; ctx,
-            config=tess_cfg)
-        te_spirv = te.spirv_bytes
-    end
+    te = pipeline.tess_eval === nothing ? nothing :
+         get_or_compile_gfx(pipeline.tess_eval, tt_vertex, :tess_eval; config=tess_cfg)
+
+    cache_key = pipeline_cache_key((vert, frag, geom, tc, te), pipeline, color_format,
+                                   depth_format, descriptor_set_layout)
+    cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
+    cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
 
     compiled = create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
         ctx, blend=pipeline.blend, cull=pipeline.cull,
         topology=pipeline.topology, depth=pipeline.depth,
         color_format=color_format, depth_format=depth_format,
         push_constant_size=max(vert.push_info.push_size, frag.push_info.push_size),
-        geometry_spirv=geom_spirv,
-        tess_ctrl_spirv=tc_spirv, tess_eval_spirv=te_spirv,
+        geometry_spirv=geom === nothing ? nothing : geom.spirv_bytes,
+        tess_ctrl_spirv=tc === nothing ? nothing : tc.spirv_bytes,
+        tess_eval_spirv=te === nothing ? nothing : te.spirv_bytes,
         tess_config=tess_cfg,
         descriptor_set_layout=descriptor_set_layout)
 
@@ -117,7 +119,7 @@ function ensure_compiled_with_shader!(pipeline::MeshPipeline,
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing)
-    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline), ctx)
+    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline))
     compiled = ensure_compiled!(pipeline, mesh_fn, frag_fn, tt_mesh, tt_fragment;
         ctx, color_format, depth_format, descriptor_set_layout)
     return mesh, compiled
@@ -132,13 +134,13 @@ function ensure_compiled!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_
         "ensure_compiled!: this pipeline has an object stage, and the Vulkan " *
         "backend dispatches its mesh threadgroups from the host. The task stage " *
         "is what an object stage lowers onto here, and nothing emits one yet."))
-    cache_key = hash((mesh_fn, frag_fn, tt_mesh, tt_fragment, color_format, depth_format,
-                       pipeline_state_key(pipeline), descriptor_set_layout !== nothing))
+    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline))
+    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment)
+
+    cache_key = pipeline_cache_key((mesh, frag), pipeline, color_format, depth_format,
+                                   descriptor_set_layout)
     cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
     cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
-
-    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline), ctx)
-    frag = get_or_compile_gfx(frag_fn, tt_fragment, :fragment; ctx)
 
     # No `topology`: a mesh stage has no input stream to assemble, and what it
     # EMITS is an execution mode of its own entry point rather than pipeline
@@ -152,16 +154,6 @@ function ensure_compiled!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_
 
     ctx.caches.gfx_pipelines[cache_key] = compiled
     return compiled
-end
-
-function get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol;
-                            config=nothing, ctx::VkContext)
-    key = hash((f, tt, stage, config))
-    cached = get(ctx.caches.gfx_shaders, key, nothing)
-    cached !== nothing && return cached
-    shader = lava_compile_gfx_shader(f, tt; stage, config)
-    ctx.caches.gfx_shaders[key] = shader
-    return shader
 end
 
 # ── Draw API ──

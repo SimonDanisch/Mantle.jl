@@ -356,13 +356,6 @@ function compile_pipeline(p::Mantle.MeshPipeline,
               "program, so a MeshPipeline's mesh threadgroups are dispatched by the " *
               "host. Build the pipeline without one and pass the group count to `draw!`.")
 
-    key = (p.mesh, p.fragment, mesh_bufs, frag_bufs, color_formats, depth_format,
-           typeof(p.blend), typeof(p.cull), typeof(p.depth))
-    Base.@lock MESH_CACHE_LOCK begin
-        cached = get(MESH_CACHE, key, nothing)
-        cached === nothing || return cached::MetalCompiledMeshPipeline
-    end
-
     dev = Metal.device()
     cfg = Mantle.meshconfig(p)
     Obj = mesh_object_of(p)
@@ -372,8 +365,8 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     # shape, so there is nothing else to translate.
     mesh_tt = Tuple{mesh_stage_lead(p)..., mesh_bufs.parameters...}
     mfn = MetalMeshStage{typeof(Mantle.stagefunction(p.mesh))}()
-    mfun, mlib = compile_stage_function(mfn, mesh_tt, :mesh,
-                                        string(nameof(Mantle.stagefunction(p.mesh))) * "_ms")
+    mstage = compile_stage_function(mfn, mesh_tt, :mesh,
+                                    string(nameof(Mantle.stagefunction(p.mesh))) * "_ms")
 
     isempty(color_formats) &&
         error("a mesh pipeline needs a colour attachment: Metal has no " *
@@ -385,8 +378,19 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
                     texture_markers(ntex)..., Core.LLVMPtr{FOut,1}}
-    ffun, flib = compile_stage_function(ffn, frag_tt, :fragment,
-                                        string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
+    fstage = compile_stage_function(ffn, frag_tt, :fragment,
+                                    string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
+
+    # The compiled stage functions by identity, as the graphics pipeline's key:
+    # a stage compiled again after an edit is a new one.
+    key = (p.mesh, p.fragment, objectid(mstage), objectid(fstage), mesh_bufs, frag_bufs,
+           color_formats, depth_format, typeof(p.blend), typeof(p.cull), typeof(p.depth))
+    Base.@lock MESH_CACHE_LOCK begin
+        cached = get(MESH_CACHE, key, nothing)
+        cached === nothing || return cached::MetalCompiledMeshPipeline
+    end
+    mfun, mlib = mstage
+    ffun, flib = fstage
 
     desc = MTLm.MTLMeshRenderPipelineDescriptor()
     desc.meshFunction = mfun

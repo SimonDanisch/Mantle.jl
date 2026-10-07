@@ -83,13 +83,8 @@ end
 # ── What this backend does not have ───────────────────────────────────────────
 #
 # Declared by core in `runtime/backendhooks.jl`, and answered here rather than
-# left undefined: a caller asking either of these is asking whether the feature
-# EXISTS, and a name that is missing cannot say no. See that file.
-#
-# Metal.jl compiles its kernels through its own pipeline and keeps no cache of
-# Mantle's, so there are no frozen entries to read.
-use_frozen_kernels(version) = nothing
-
+# left undefined: a caller asking this is asking whether the feature EXISTS, and
+# a name that is missing cannot say no. See that file.
 # `simdgroup_matrix` is 8x8 and the staged GEMM is emitted at 16 — its `@nexprs`
 # unroll counts are literals derived from that extent, so it is not a parameter
 # this backend could pass a different value for. `nothing` and not `8`: the
@@ -98,7 +93,7 @@ staged_gemm_tile() = nothing
 
 # The compile cache is Metal.jl's, which is where it belongs; this is the runtime
 # forwarding the question so a caller never has to name Metal — the same two lines
-# the Vulkan backend writes over `Lava.frozen_stats`.
+# the Vulkan backend writes over `Lava.compile_stats`.
 #
 # Answered rather than left to core's `(; hits = 0, misses = 0)`. That default is
 # indistinguishable from "nothing was compiled", and zero is a measurement, not an

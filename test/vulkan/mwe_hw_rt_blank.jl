@@ -143,9 +143,11 @@ end
 
 # ── Run 1: default multi-OpFunction emission ─────────────────────────────
 empty!(Lava.FORCE_INLINE_KERNEL_PATTERNS)
-Mantle.clear_spirv_disk_cache!()
-empty!(Mantle.vk_context().caches.linked)
-default_ok = try_run("default (multi-OpFunction)")
+# Compile every kernel again under the setting above: a compile hook makes each
+# lookup compile, and the pipelines built from the old SPIR-V go.
+Mantle.clear_kernel_cache!(Mantle.vk_context())
+default_ok = Base.ScopedValues.with(() -> try_run("default (multi-OpFunction)"),
+                                    Mantle.GPUCompiler.compile_hook => (job -> nothing))
 
 # Reset between runs in case of crash
 try Mantle.reset_device!() catch e; @warn "reset failed: $(first(sprint(showerror,e),100))" end
@@ -153,9 +155,11 @@ try Mantle.reset_device!() catch e; @warn "reset failed: $(first(sprint(showerro
 # ── Run 2: force_inline_all=true via the debug hook ──────────────────────
 empty!(Lava.FORCE_INLINE_KERNEL_PATTERNS)
 push!(Lava.FORCE_INLINE_KERNEL_PATTERNS, "")  # empty matches everything
-Mantle.clear_spirv_disk_cache!()
-empty!(Mantle.vk_context().caches.linked)
-inlined_ok = try_run("force_inline_all=true")
+# Compile every kernel again under the setting above: a compile hook makes each
+# lookup compile, and the pipelines built from the old SPIR-V go.
+Mantle.clear_kernel_cache!(Mantle.vk_context())
+inlined_ok = Base.ScopedValues.with(() -> try_run("force_inline_all=true"),
+                                    Mantle.GPUCompiler.compile_hook => (job -> nothing))
 
 println("\n────────────────────────────────────────")
 println("default (multi-OpFunction):  ", default_ok ? "PASS" : "FAIL")

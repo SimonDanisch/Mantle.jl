@@ -426,31 +426,26 @@ function metalinterpreter(@nospecialize(f), @nospecialize(tt))
 end
 
 """
-What the kernel does to each dispatch argument, inferred through Metal's method
-table.
+The interpreter a macro-free kernel is compiled through on Metal. Core's
+`kerneltouches` walks the kernel with it, as it does on every backend.
+"""
+Mantle.kernelinterpreter(::MetalDevice, kernel, tt) = metalinterpreter(kernel, tt)
 
-The leading entries `accessof` reports are dropped the same way the Vulkan side
-drops them: index 1 is the function itself, and a KA kernel is compiled at
-`(ctx, args...)` where the iteration context is the kernel's own rather than
-anything the caller declared. A macro-free kernel has neither.
+"""
+Interpreter, body and signature of a KernelAbstractions kernel as Metal compiles
+it: core's launch shape, with the iteration context as `mtlconvert` hands it to
+the kernel.
 
-`group` is threaded through because the context's TYPE depends on it — the same
+`group` is threaded through because the context's TYPE depends on it: the same
 `launch_config`/`mkcontext` pair `compile_dispatch` uses, so the signature walked
 here is the signature compiled there.
 """
-function Mantle.kerneltouches(dev::MetalDevice, kernel, args::Tuple, ndrange, group)
-    argT = map(a -> Mantle.devicetype(dev, a), args)
-    if !Mantle.buildskernel(kernel, Mantle.backend(dev))
-        interp = metalinterpreter(kernel, Tuple{argT...})
-        return Mantle.accessof(interp, kernel, argT; cache = Mantle.accesscache(dev))[2:end]
-    end
+function Mantle.kakernelaccesssignature(dev::MetalDevice, kernel, argT::Tuple, ndrange, group)
     obj = Mantle.kernelfor(kernel, group, Mantle.backend(dev))
-    nd = Mantle.recordedrange(ndrange)
-    ndr, _ws, iterspace, _ = KA.launch_config(obj, nd, Mantle.callgroup(obj, group))
+    ndr, _, iterspace, _ = KA.launch_config(obj, recordedrange(ndrange), Mantle.callgroup(obj, group))
     ctx = KA.mkcontext(obj, ndr, iterspace)
     tt = (Core.Typeof(Metal.mtlconvert(ctx)), argT...)
-    interp = metalinterpreter(obj.f, Base.to_tuple_type(tt))
-    return Mantle.accessof(interp, obj.f, tt; cache = Mantle.accesscache(dev))[3:end]
+    return metalinterpreter(obj.f, Base.to_tuple_type(tt)), obj.f, tt
 end
 
 

@@ -245,6 +245,9 @@ mutable struct MetalInstanceBatch{Tri}
     mask::UInt8
     handle::Raycore.TLASHandle
     triangles::Vector{Tri}
+    # Built with mask 0, which no ray's mask matches (`Raycore.set_visible!`);
+    # `mask` is kept for when it is shown again.
+    hidden::Bool
 end
 Base.length(b::MetalInstanceBatch) = length(b.transforms)
 
@@ -401,7 +404,7 @@ function _addbatch!(t::MetalHWTLAS{Tri}, blas_idx::Int, transforms::Vector{Mat3x
     length(ids) == length(transforms) || throw(ArgumentError(
         "instance_ids length $(length(ids)) != transforms length $(length(transforms))"))
     return Mantle.register!(t.instances, h ->
-        MetalInstanceBatch{Tri}(blas_idx, transforms, ids, mask, h, t.blas_triangles[blas_idx]))
+        MetalInstanceBatch{Tri}(blas_idx, transforms, ids, mask, h, t.blas_triangles[blas_idx], false))
 end
 
 # `sbt_offset` is accepted and has nothing to do here: it selects a hit group in
@@ -483,6 +486,21 @@ function Base.delete!(t::MetalHWTLAS, handle::Raycore.TLASHandle)
     return true
 end
 
+"""
+    Raycore.set_visible!(t::MetalHWTLAS, handle, visible) -> Bool
+
+Hide a batch by building its instances with mask 0, or show it with its own
+mask again. Its BLAS and its instances' places are untouched.
+"""
+function Raycore.set_visible!(t::MetalHWTLAS, handle::Raycore.TLASHandle, visible::Bool)
+    batch = Mantle.batchof(t.instances, handle)
+    batch === nothing && return false
+    batch.hidden == !visible && return true
+    batch.hidden = !visible
+    t.dirty = true
+    return true
+end
+
 # ── The commit boundary ──────────────────────────────────────────────────────
 
 """Every instance transform, in the order `sync!` builds instances in."""
@@ -538,7 +556,7 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
             push!(blases, t.blas_list[b.blas_idx])
             push!(xforms, m)
             push!(ids, id)
-            push!(masks, b.mask)
+            push!(masks, b.hidden ? 0x00 : b.mask)
             push!(per_inst_offsets, tri_offset)
         end
         tri_offset += UInt32(length(b.triangles))

@@ -684,11 +684,10 @@ function fftmixed_kernel(RS::Tuple, sign::Int)
                 end
             end)
         end
-        # A DETERMINISTIC name, not `gensym`. `frozen_key` hashes
-        # `string(nameof(F))` (`runtime/frozen_cache.jl`), and a gensym carries a
-        # per-session counter — `##fftmixed#277` one run, `#281` the next — so
-        # every mixed kernel would miss the frozen cache and recompile on every
-        # load. That is precisely the cost the Runner packages exist to remove.
+        # A DETERMINISTIC name, not `gensym`, which carries a per-session
+        # counter — `##fftmixed#277` one run, `#281` the next. One plan is one
+        # function in every session, so the code a package image holds for it is
+        # found again instead of compiled on every load.
         kname = Symbol("fftmixed_", join(RS, "_"), sign > 0 ? "_inv" : "_fwd")
         @eval begin
             function $kname(dst, src)
@@ -905,7 +904,7 @@ downstream package whose `@compile_workload` runs an iSTFT dies with
 
 so the workload silently skips and every first call in a fresh process pays the
 compile the Runner packages exist to remove. `KokoroRunner` found this: its
-vocoder is an iSTFT at `n_fft = 20`, and nothing in its workload was ever frozen.
+vocoder is an iSTFT at `n_fft = 20`, and nothing in its workload was ever precompiled.
 
 Generating them here moves the `@eval` to module load, where it is ordinary. The
 lengths are the ones the shipped models transform:
@@ -920,7 +919,7 @@ Powers of two are absent on purpose: `fftany!` sends those to the tuned `fft!`,
 which is an ordinary method and needs nothing here.
 
 A length not on this list still works — the runtime generator is the fallback —
-it just cannot be frozen into a package image. Adding a model that transforms a
+it just cannot be compiled into a package image. Adding a model that transforms a
 new length means adding it here, and the symptom if it is forgotten is a slow
 first call rather than a wrong answer.
 """

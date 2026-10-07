@@ -98,12 +98,18 @@ function rt_compiled_for(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingP
     invalidate_stale_rt_cache!(pipeline)
     tt_key = Tuple{map(arg_sigtype, args)...}
     key = rt_cache_key(pipeline, tt_key)
-    cached = get(ctx.caches.rt_pipelines, key, nothing)
-    if cached === nothing
-        tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(nothing), a)), args)...}
-        cached = compile_rt_pipeline(ctx, pipeline, tt)
-        ctx.caches.rt_pipelines[key] = cached
-    end
+    world = Base.tls_world_age()
+    current = get(ctx.caches.rt_current, key, nothing)
+    current !== nothing && current[1] == world && return ctx.caches.rt_pipelines[current[2]]
+    # A new world: the stages are looked up again, which costs nothing for a
+    # stage whose code is unchanged and compiles the one that was edited. Keyed
+    # on the description alone, a pipeline went on running the SPIR-V of its
+    # first compile for the rest of the session.
+    tt = Tuple{map(a -> arg_sigtype(Adapt.adapt(LavaAdaptor(nothing), a)), args)...}
+    stages = rt_stages(ctx, pipeline, tt)
+    full = hash(map(objectid, stages.all), key)
+    cached = get!(() -> build_rt_pipeline(ctx, stages), ctx.caches.rt_pipelines, full)
+    ctx.caches.rt_current[key] = (world, full)
     return cached
 end
 
@@ -178,53 +184,56 @@ end
 
 # ── Internal: Compile RT pipeline ──
 
-function compile_rt_pipeline(ctx::VkContext, pipeline::RayTracingPipeline, raygen_tt)
+"""
+    get_or_compile_rt(f, tt; stage, push_constant_size, payload_type, features) -> LavaRTShader
+
+Stage `stage` of `f`, compiled for the code `f` has now (`Lava.cached_rt_shader`).
+"""
+get_or_compile_rt(@nospecialize(f), @nospecialize(tt); stage::Symbol, push_constant_size::Integer,
+                  payload_type::Symbol, features::TargetFeatures) =
+    cached_rt_shader(f, tt; stage, push_constant_size, payload_type, features)
+
+"""
+    rt_stages(ctx, pipeline, raygen_tt) -> NamedTuple
+
+Every stage of `pipeline`, compiled for the code it has now: `raygen`, `chits`,
+`miss`, `anyhit` (or `nothing`), and `all` of them in one tuple.
+"""
+function rt_stages(ctx::VkContext, pipeline::RayTracingPipeline, raygen_tt)
     pt = pipeline.payload_type
+    features = ctx.features
+    raygen = get_or_compile_rt(pipeline.raygen_func, raygen_tt; stage = :raygen,
+                               push_constant_size = 8, payload_type = pt, features)
+    # When `chit_miss_take_args` is set the chit and miss receive the raygen's
+    # BDA arg signature (same push-constant pointer the raygen sees), enabling
+    # the pbrt-v4 OptiX pattern where shading happens in closesthit. Otherwise
+    # they're compiled with no args (legacy `hw_closesthit` / `hw_miss` contract).
+    takes = pipeline.chit_miss_take_args
+    chit_tt, chit_push = takes ? (raygen_tt, 8) : (Tuple{}, 0)
+    chits = LavaRTShader[get_or_compile_rt(chit, chit_tt; stage = :closesthit,
+                                           push_constant_size = chit_push, payload_type = pt, features)
+                         for chit in pipeline.closesthit_funcs]
+    miss = get_or_compile_rt(pipeline.miss_func, chit_tt; stage = :miss,
+                             push_constant_size = chit_push, payload_type = pt, features)
+    # Any-hit gets the raygen's args (shares the BDA arg buffer via push constant)
+    anyhit = pipeline.anyhit_func === nothing ? nothing :
+             get_or_compile_rt(pipeline.anyhit_func, raygen_tt; stage = :anyhit,
+                               push_constant_size = 8, payload_type = pt, features)
+    return (; raygen, chits, miss, anyhit, all = (raygen, chits..., miss, anyhit))
+end
 
-    # Compile raygen
-    raygen_compiled = lava_compile_rt_shader(pipeline.raygen_func, raygen_tt;
-        stage=:raygen, push_constant_size=8, payload_type=pt, validate=true, features=ctx.features)
-
-    # Compile closesthits & miss.  When `chit_miss_take_args` is set the chit
-    # and miss receive the raygen's BDA arg signature (same push-constant
-    # pointer the raygen sees), enabling the pbrt-v4 OptiX pattern where
-    # shading happens in closesthit.  Otherwise they're compiled with no
-    # args (legacy `hw_closesthit` / `hw_miss` contract).
-    chit_tt, chit_push = pipeline.chit_miss_take_args ? (raygen_tt, 8) : (Tuple{}, 0)
-    chit_spirvs = Vector{UInt8}[]
-    for chit in pipeline.closesthit_funcs
-        c = lava_compile_rt_shader(chit, chit_tt;
-            stage=:closesthit, push_constant_size=chit_push, payload_type=pt, validate=true, features=ctx.features)
-        push!(chit_spirvs, c.spirv_bytes)
-    end
-
-    miss_tt, miss_push = pipeline.chit_miss_take_args ? (raygen_tt, 8) : (Tuple{}, 0)
-    miss_compiled = lava_compile_rt_shader(pipeline.miss_func, miss_tt;
-        stage=:miss, push_constant_size=miss_push, payload_type=pt, validate=true, features=ctx.features)
-
-    # Compile any-hit (optional)
-    anyhit_spirv = nothing
-    if pipeline.anyhit_func !== nothing
-        # Any-hit gets same args as raygen (shares BDA arg buffer via push constant)
-        anyhit_compiled = lava_compile_rt_shader(pipeline.anyhit_func, raygen_tt;
-            stage=:anyhit, push_constant_size=8, payload_type=pt, validate=true, features=ctx.features)
-        anyhit_spirv = anyhit_compiled.spirv_bytes
-    end
-
-    # Create Vulkan RT pipeline from compiled SPIR-V
+"""The Vulkan pipeline of compiled `stages` (`rt_stages`), with the raygen's argument layout."""
+function build_rt_pipeline(ctx::VkContext, stages)
     vk_pipeline = create_rt_pipeline(
         ctx,
-        raygen_compiled.spirv_bytes,
-        miss_compiled.spirv_bytes,
-        chit_spirvs;
-        anyhit_spirv=anyhit_spirv,
-        push_constant_size=8)
-
+        stages.raygen.spirv_bytes,
+        stages.miss.spirv_bytes,
+        Vector{UInt8}[c.spirv_bytes for c in stages.chits];
+        anyhit_spirv = stages.anyhit === nothing ? nothing : stages.anyhit.spirv_bytes,
+        push_constant_size = 8)
     # Cache arg layout offsets and byval sizes for zero-alloc packing
-    offsets = raygen_compiled.push_info.arg_offsets
-    byval_sizes = raygen_compiled.push_info.byval_llvm_sizes
-
-    return (vk_pipeline, raygen_compiled, offsets, byval_sizes)
+    raygen = stages.raygen
+    return (vk_pipeline, raygen, raygen.push_info.arg_offsets, raygen.push_info.byval_llvm_sizes)
 end
 
 # RT args go through the same LavaAdaptor contract as lava_launch! / KA —

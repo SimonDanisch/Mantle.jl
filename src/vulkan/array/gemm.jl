@@ -2131,14 +2131,13 @@ const SGEMM_NKSTEP = SGEMM_BK ÷ SGEMM_BKSTEP
     # (both on the reference's tiling, before the sweep above chose 2/2/2),
     # because every staging address and every bounds test is built from them. The
     # cost is a SPIR-V module per (M, N, K, FAST), which is what the coopmat path
-    # already pays and what the frozen-kernel cache exists to absorb.
+    # already pays and what a package's precompile workload exists to absorb.
     #
-    # It does mean a RECORDED FROZEN CACHE IS STALE once this kernel starts
-    # being selected: a product that compiled one `strided_gemm_kernel!` variant
-    # per K compiles one of these per shape instead. Re-record in a
-    # cold session and check `Lava.frozen_stats().misses == 0`, or first use will
-    # compile on the editor's hot path, which is the entire cost the freeze
-    # exists to remove.
+    # It does mean a workload written before this kernel was selected no longer
+    # covers it: a product that compiled one `strided_gemm_kernel!` variant per K
+    # compiles one of these per shape instead. Run the workload's calls again in
+    # a new session and check `Lava.compile_stats().misses == 0`, or first use
+    # will compile on the editor's hot path.
     # `FAST` is the reference's `is_aligned && is_in_bounds`, hoisted to a type
     # parameter instead of a per-tile branch: true when the extents tile exactly
     # and all three operands have unit row stride, so every bounds test and every

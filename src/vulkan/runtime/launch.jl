@@ -4,36 +4,13 @@
 
 # ── GPU kernel cache ──
 #
-# Lookup is delegated to `GPUCompiler.cached_compilation`, which is the same
-# primitive AMDGPU.jl and CUDA.jl use. It keys by Julia's `MethodInstance`
-# (type-based), so two different closure instances of the same type share
-# one compiled kernel — important for KA `@kernel` expansions inside outer
-# functions (e.g. WaterLily's `measure!(...) function fill!(...) @loop fill!`
-# pattern creates a fresh closure instance on every call, but all of them
-# hit the same MethodInstance). `cached_compilation` also carries the
-# current world age in the key, so Revise edits to kernel bodies correctly
-# invalidate the cache.
-#
-# Our `compiler` function wraps `lava_compile_gpu_from_job` with Lava's
-# own disk cache (KA-generated funcs don't get GPUCompiler's build_id, so
-# its built-in disk cache doesn't trigger for them). The `linker` function
-# creates the session-dependent `VkPipeline` via `link_kernel(ctx, ...)`.
-
-# Cache shape matches `GPUCompiler.cached_compilation`'s expectation:
-# `Dict{Any, LavaLinkedKernel}` with keys like `(objectid(ci), world, cfg)`.
-# Per device, because a `LavaLinkedKernel` owns a `VkPipeline` (GUARDRAILS §8).
-#
-# `Dict{Any, LavaLinkedKernel}` because the dict is handed to
-# `GPUCompiler.cached_compilation`, which derives the key from `(source, config)`
-# itself — there is no device to add to it from here. One dict per device is the
-# guarantee at the level we do control, and it is a field on the device.
-
-"""
-    linked_kernel_cache(ctx) -> Dict
-
-This device's compiled-kernel cache, created on first use.
-"""
-@inline linked_kernel_cache(ctx) = ctx.caches.linked
+# Two levels, as CUDA.jl has them. The SPIR-V is the compiler's: Lava keeps it
+# with the kernel's `CodeInstance` (`compile_or_lookup`), so an edit to the
+# kernel or anything it inlines compiles it again, an unrelated method
+# definition does not, and a package's precompile workload leaves it compiled
+# in the package image. The `VkPipeline` built from it is this device's, in
+# `ctx.caches.linked`, keyed on the compiled kernel by identity: a kernel
+# compiled again is a new object and gets its own pipeline.
 
 # No reset callback: arg slabs are per-BQ and die with their ctx, and the kernel
 # cache is a field on it, so a reset produces a fresh one.
@@ -394,117 +371,17 @@ end
 
 
 
-# ── Lava disk cache ──
-# GPUCompiler's disk cache only works for precompiled package code (needs build_id).
-# A generated kernel function carries no build_id at expansion time, so we
-# implement our own disk cache keyed by (specTypes hash, workgroup_size).
-# The specTypes hash is stable across sessions for the same kernel+argtypes.
-
-const LAVA_DISK_CACHE_DIR = Ref("")
-
-function lava_disk_cache_dir()
-    dir = LAVA_DISK_CACHE_DIR[]
-    if isempty(dir)
-        dir = joinpath(first(Base.DEPOT_PATH), "scratchspaces", "lava_spirv_cache")
-        LAVA_DISK_CACHE_DIR[] = dir
-    end
-    return dir
-end
-
-function lava_disk_cache_key(source::Core.MethodInstance, workgroup_size)
-    # Hash the type signature as a STRING for stability across sessions.
-    # Julia's hash(Type) uses object identity which changes per session.
-    # String representation is stable for the same source code.
-    h = hash(string(source.specTypes))
-    h = hash(workgroup_size, h)
-    return string(h, base=16) * ".jls"
-end
-
-"""
-    lava_disk_cache_load(source, workgroup_size) -> Union{Nothing, LavaGPUKernel}
-
-Try to load cached SPIR-V from disk. Returns nothing on miss.
-"""
-function lava_disk_cache_load(source::Core.MethodInstance, workgroup_size)
-    dir = lava_disk_cache_dir()
-    isdir(dir) || return nothing
-    path = joinpath(dir, lava_disk_cache_key(source, workgroup_size))
-    isfile(path) || return nothing
-    local entry
-    try
-        entry = open(Serialization.deserialize, path)
-    catch ex
-        # Narrowed like the frozen cache's readers: a truncated or
-        # version-mismatched entry is a recompile, anything else is a bug here
-        # and must not be absorbed by a cache miss.
-        cache_io_error(ex) || rethrow()
-        @warn "Lava: disk cache load failed" path exception=(ex, catch_backtrace()) maxlog = 1
-        return nothing
-    end
-    if string(entry.spec_types) == string(source.specTypes) && entry.workgroup_size == workgroup_size
-        return entry.kernel::LavaGPUKernel
-    end
-    return nothing
-end
-
-"""
-    lava_disk_cache_store(source, workgroup_size, kernel::LavaGPUKernel)
-
-Store compiled SPIR-V to disk for future sessions.
-"""
-function lava_disk_cache_store(source::Core.MethodInstance, workgroup_size, kernel::LavaGPUKernel)
-    dir = lava_disk_cache_dir()
-    mkpath(dir)
-    path = joinpath(dir, lava_disk_cache_key(source, workgroup_size))
-    entry = (
-        spec_types = source.specTypes,
-        workgroup_size = workgroup_size,
-        kernel = LavaGPUKernel(
-            kernel.spirv_bytes, kernel.entry_name, kernel.workgroup_size,
-            kernel.push_info, "",  # don't cache the LLVM IR string (large, session-specific)
-            kernel.enable_ray_query,
-            kernel.source_name     # …but DO keep it: small, portable, and the profiler needs it
-        ),
-    )
-    try
-        tmppath, io = mktemp(dir; cleanup=false)
-        Serialization.serialize(io, entry)
-        close(io)
-        mv(tmppath, path; force=true)
-    catch ex
-        # A cache is an optimisation, so a failed WRITE may not take the session
-        # down — but it must be visible, or a permanently unwritable cache looks
-        # exactly like a working one. IO faults only; anything else is a bug here.
-        ex isa Union{SystemError, IOError, ArgumentError} || rethrow()
-        @warn "Lava: disk cache store failed; kernels will recompile next session" path exception = ex maxlog = 1
-    end
-end
-
-"""Clear Lava's SPIR-V disk cache."""
-function clear_spirv_disk_cache!()
-    dir = lava_disk_cache_dir()
-    isdir(dir) && rm(dir; recursive=true, force=true)
-end
-
 """
     clear_kernel_cache!()
 
-Evict this device's in-session kernel + pipeline caches so the next dispatch of
-each kernel recompiles from Julia source.
-
-Use this after editing a Julia kernel under Revise — Revise invalidates the
-Julia method, but Lava's hash-keyed kernel cache stays populated with the old
-SPIR-V because `hash(f, tt, workgroup_size)` doesn't change when the method
-body changes. Unlike `reset_device!()`, this keeps all existing
-`LavaArray`s and the Vulkan context alive.
+Drop this device's pipelines for compiled kernels, and its launch plans, so the
+next dispatch of each kernel builds them again. The SPIR-V stays with its
+`CodeInstance`; an edited kernel needs none of this, since its new code is a
+new `CodeInstance` and a new compile.
 
 **Both** caches have to go. `caches.launchplans` holds its own `VkPipeline` and
 is consulted *before* `caches.linked` on every dispatch, so emptying only the
-latter leaves the previous pipeline running with no symptom: a SPIR-V A/B then
-reports "no difference" for every variant, including one with its `OpStore`
-deleted. The Revise path survives that anyway, because a method redefinition
-moves the world counter and `launch_plan` rejects plans from a superseded world;
-a caller who only clears the cache has no such luck.
+latter leaves the previous pipeline running with no symptom.
 """
 function clear_kernel_cache!(ctx::VkContext = vk_context())
     empty!(ctx.caches.linked)
@@ -517,137 +394,44 @@ end
 
 Create session-dependent Vulkan objects (VkPipeline) from cached SPIR-V bytes.
 """
-function link_kernel(ctx::VkContext, compiled::LavaGPUKernel; pipeline_cache=nothing)
+function link_kernel(ctx::VkContext, compiled::LavaGPUKernel)
     pipeline = get_compute_pipeline(ctx, compiled.spirv_bytes, compiled.entry_name;
                                     push_constant_size=compiled.push_info.push_size,
-                                    needs_tlas_descriptor=compiled.enable_ray_query,
-                                    pipeline_cache)
+                                    needs_tlas_descriptor=compiled.enable_ray_query)
     offsets = compiled.push_info.arg_offsets
     byval_sizes = compiled.push_info.byval_llvm_sizes
     return LavaLinkedKernel(compiled, pipeline, offsets, byval_sizes)
 end
 
 """
-    lava_kernel_compile(job::GPUCompiler.CompilerJob) -> LavaGPUKernel
-
-`compiler` function passed to `GPUCompiler.cached_compilation`. Must call
-`GPUCompiler.compile` (which `lava_compile_gpu_from_job` does) so that a
-`CodeInstance` is registered in GPUCompiler's ci_cache — `cached_compilation`
-looks it up after the linker runs.  Still writes to Lava's disk cache on
-compile so subsequent sessions can short-circuit via `lava_disk_cache_load`
-in `link_kernel` (see below).
-"""
-function lava_kernel_compile(job::GPUCompiler.CompilerJob)
-    # enable_ray_query is read from the job's LavaCompilerParams,
-    # where it was set by lava_compiler_config(; enable_ray_query).
-    # Try the disk cache first — same (specTypes, workgroup_size) yields the
-    # same SPIR-V bytes across sessions, which lets the driver's persistent
-    # VkPipelineCache match by bit-identical SPIR-V hash.
-    #
-    # Opt-in via env var: empirically AMDVLK Windows crashes when fed
-    # previously-serialized SPIR-V (even byte-identical to a fresh compile).
-    # Other drivers are fine. We always WRITE to disk so the cache is ready
-    # if/when the load gets enabled; only the LOAD path is gated.
-    if get(ENV, "LAVA_LOAD_SPIRV_DISK_CACHE", "0") == "1"
-        cached = lava_disk_cache_load(job.source, job.config.params.workgroup_size)
-        cached === nothing || return cached
-    end
-    # Run the whole pipeline in the world frozen at `__init__`. CUDACore does
-    # this around `GPUCompiler.compile` and cuTile around its entire
-    # `cufunction_compile`; the latter is the right analogue here because Lava's
-    # own SPIR-V emitter is roughly half of compile time and is just as
-    # invalidatable as GPUCompiler's codegen.
-    #
-    # `invoke_in_world` is not inferable, hence the return-type annotation.
-    compiled = invoke_frozen(lava_compile_gpu_from_job, job)::LavaGPUKernel
-    lava_disk_cache_store(job.source, job.config.params.workgroup_size, compiled)
-    return compiled
-end
-
-"""
-    LavaLinker(ctx)
-
-`linker` for `GPUCompiler.cached_compilation`.  A callable struct with one
-field, NOT a closure — closures get a fresh anonymous type per call site,
-which forces Julia to re-infer `cached_compilation` (and its 5+ generic
-parameters) on every dispatch.  That cost showed up as massive
-`typeinf_ext_toplevel` time in the profile during WaterLily steady-state.
-With a struct, `typeof(linker)` is stable, so cached_compilation hits its
-own MethodInstance cache and skips inference.
-"""
-# `<: Function` lets it satisfy `cached_compilation`'s `linker::Function` arg.
-struct LavaLinker <: Function
-    ctx::VkContext
-end
-# While recording, each kernel is linked through a pipeline cache holding only
-# itself, so `frozen_store` can snapshot that kernel's ISA rather than whatever
-# the device-wide cache has accumulated. Outside recording this is the plain
-# path and the device-wide cache is used as before.
-@inline function (l::LavaLinker)(::GPUCompiler.CompilerJob, compiled::LavaGPUKernel)
-    if FROZEN_RECORDING[] && !isempty(FROZEN_VERSION[])
-        # No try. Creating an EMPTY pipeline cache cannot fail for any reason
-        # this code can handle: it takes no input to be malformed. The bare
-        # `catch nothing` here meant a failure produced `pc = nothing`, which
-        # `frozen_store` reads as "no ISA to snapshot" — so the frozen cache
-        # would silently degrade to level 1 forever, invisibly.
-        pc = VK.PipelineCache(l.ctx.device,
-                                  VK.PipelineCacheCreateInfo(Ptr{Cvoid}(C_NULL);
-                                                                 initial_data_size=UInt64(0)))
-        l.ctx.caches.frozen_last_pcache = pc
-        return link_kernel(l.ctx, compiled; pipeline_cache=pc)
-    end
-    l.ctx.caches.frozen_last_pcache = nothing
-    return link_kernel(l.ctx, compiled)
-end
-
-"""
-    get_compiled_kernel_and_pipeline(ctx, f, tt, workgroup_size)
+    get_compiled_kernel_and_pipeline(ctx, f, tt, workgroup_size; enable_ray_query=false)
       -> (compiled, pipeline, offsets, byval_sizes)
 
-Look up (or compile + cache) the SPIR-V kernel + VkPipeline for `(f, tt,
-workgroup_size)`.  Delegates to `GPUCompiler.cached_compilation`, which
-hashes by `(objectid(MethodInstance), world, cfg)` — type-based, so
-different closure instances of the same type share one compiled kernel,
-and world-age tracking means Revise edits invalidate correctly.
+The SPIR-V for `(f, tt, workgroup_size)` (`compile_or_lookup`) and this device's
+pipeline for it.
 """
 #
 # `@noinline` is load-bearing, not a code-size preference. `@nospecialize` on `f`
 # and `tt` widens this method's OWN signature, but inference will still infer a
 # specialised copy in order to inline it into a caller that is itself specialised
 # per kernel — which is every launch site. Measured on SAM 2's encoder: 1 002
-# specialisations of this function and of `frozen_load`/`frozen_store` beneath
-# it, one per kernel, for bodies that do not vary with the kernel. The barrier in
-# `build_launch_plan!` supplies the type-erased caller; this keeps the compiler
-# from undoing it.
+# specialisations of this function, one per kernel, for a body that does not
+# vary with the kernel. The barrier in `build_launch_plan!` supplies the
+# type-erased caller; this keeps the compiler from undoing it.
 @noinline function get_compiled_kernel_and_pipeline(ctx::VkContext, @nospecialize(f), @nospecialize(tt),
                                           workgroup_size;
                                           enable_ray_query::Bool=false)
-    # The frozen cache first, and deliberately before anything that needs a
-    # `MethodInstance`. `GPUCompiler.methodinstance` infers the kernel, so
-    # reaching `cached_compilation` at all costs the inference the cache exists
-    # to avoid — SAM 2's encoder spends 70 s there with every kernel already on
-    # disk. `frozen_load` keys on types the caller already holds.
-    let hit = frozen_load(ctx, f, tt, workgroup_size)
-        if hit !== nothing
-            hit = hit::LavaLinkedKernel
-            return hit.compiled, hit.pipeline, hit.offsets, hit.byval_sizes
-        end
-    end
-    isempty(FROZEN_VERSION[]) || (FROZEN_MISSES[] += 1)
-
-    # `invokelatest` around the compile, for the same reason `vk_context` uses one
-    # (see `device.jl`): a direct call puts GPUCompiler, the SPIR-V emitter and
-    # the file-path handling in `run_spirv_opt`/`validate_spirv`/
-    # `dump_spirv_to_disk` into the inference chain of the LAUNCH path. That is a
-    # lot of foreign surface to depend on — `FilePathsBase` pirates `Base.arg_gen`
-    # and `Base.*`, `Unitful` pirates `Base.Colon` — so loading anything that
-    # pulls them in invalidates `get_or_build_iter_plan` and every launch above
-    # it. This runs once per kernel; the dispatch is free next to compiling one.
-    config = lava_compiler_config(; workgroup_size, enable_ray_query, features = ctx.features)
-    source = GPUCompiler.methodinstance(typeof(f), tt)
-    linked = Base.invokelatest(GPUCompiler.cached_compilation, linked_kernel_cache(ctx),
-                               source, config, lava_kernel_compile, LavaLinker(ctx))::LavaLinkedKernel
-    frozen_store(ctx, f, tt, workgroup_size, linked.compiled)
+    job = lava_kernel_job(f, tt; workgroup_size, enable_ray_query, features = ctx.features)
+    # `invokelatest`, for the same reason `vk_context` uses one (see `device.jl`):
+    # a direct call puts GPUCompiler, the SPIR-V emitter and the file-path
+    # handling in `run_spirv_opt`/`validate_spirv`/`dump_spirv_to_disk` into the
+    # inference chain of the LAUNCH path. That is a lot of foreign surface to
+    # depend on — `FilePathsBase` pirates `Base.arg_gen` and `Base.*`, `Unitful`
+    # pirates `Base.Colon` — so loading anything that pulls them in invalidates
+    # `get_or_build_iter_plan` and every launch above it. This runs once per
+    # kernel and world; the dispatch is free next to compiling one.
+    compiled = Base.invokelatest(compile_or_lookup, job)::LavaGPUKernel
+    linked = get!(() -> link_kernel(ctx, compiled), ctx.caches.linked, compiled)
 
     # Dump SPIR-V if dump dir is set
     dd = ctx.diag.spirv_dump_dir

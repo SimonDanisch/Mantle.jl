@@ -432,7 +432,7 @@ mutable struct VkContext
     ser_available::Bool
     # The two flags above as the record the compiler takes: what a module
     # compiled FOR THIS DEVICE may declare. Every compile this context runs
-    # passes it, and every frozen key it reads mixes it in.
+    # passes it, in the job's compiler configuration.
     features::TargetFeatures
     # Whether VK_EXT_conditional_rendering is enabled. `repeat!` needs it — it is
     # how a device-written count decides which iterations of a recorded loop
@@ -852,10 +852,6 @@ and with every compile job the context runs.
 """
 function bind_context!(ctx::Union{Nothing, VkContext})
     VK_CONTEXT_REF[] = ctx
-    # The frozen cache's miss logging, for the same reason: the half of that
-    # cache the compiler consults is `compiler/frozen_spirv.jl`, which needs
-    # `ctx.diag.frozen_log_misses` for a `println`. A boolean, pushed as one.
-    FROZEN_LOG_MISSES[] = ctx !== nothing && ctx.diag.frozen_log_misses
     return ctx
 end
 # Guards the lazy init below. `VkContext(; …)` builds a whole VkDevice and has no

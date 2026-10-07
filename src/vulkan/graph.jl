@@ -163,10 +163,10 @@ extrausage(::Type{Predicate}) = UInt32(VK.BUFFER_USAGE_CONDITIONAL_RENDERING_BIT
 # than record one that runs every iteration unconditionally.
 supportspredicate(d::LavaDevice) = (d.ctx::VkContext).conditional_rendering_available
 
-# The frozen-SPIR-V cache is the COMPILER's, which is where it belongs; this is
-# the runtime forwarding the question so a caller never has to name Lava.
-kernelcompiles(::LavaDevice) = (s = Lava.frozen_stats(); (; hits = s.hits, misses = s.misses))
-resetkernelcompiles!(::LavaDevice) = (Lava.frozen_reset_stats!(); nothing)
+# The kernel cache is the COMPILER's, which is where it belongs; this is the
+# runtime forwarding the question so a caller never has to name Lava.
+kernelcompiles(::LavaDevice) = compile_stats()
+resetkernelcompiles!(::LavaDevice) = reset_compile_stats!()
 bufferusage(::LavaDevice, ::Type{T}) where {T} = extrausage(T)
 
 # Vulkan refuses an index buffer that was not allocated as one, so this backend
@@ -920,7 +920,7 @@ function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
     # `ensure_compiled_with_shader!` hands back the vertex shader because that
     # is the usual answer; a fullscreen pass whose vertex stage takes nothing
     # and whose fragment stage reads a g-buffer is the other one.
-    isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment; ctx = c.graph.dev.ctx))
+    isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment))
     # The CELL when there is one, so a rebind reaches the packer. A plan holding
     # one is not `recordable`, so it is never frozen into a recording.
     packed = packedargs(d.args, d.args, d.frag_args)

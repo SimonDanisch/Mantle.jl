@@ -112,10 +112,11 @@ const KI = KernelInterface
 # not what stood between this package and a driverless machine.
 import Serialization
 import PrecompileTools
-# `@setup_workload` is PrecompileTools', re-exported because Hikari says
-# `Mantle.@setup_workload`. The device-taking `@compile_workload` is a different
-# macro and stays with the backend that needs a device to freeze kernels for.
-using PrecompileTools: @setup_workload
+# PrecompileTools' workload macros, re-exported because Hikari says
+# `Mantle.@setup_workload`. Nothing is added to `@compile_workload`: a kernel or
+# shader stage compiled inside one is kept with its `CodeInstance`
+# (`Lava.compile_or_lookup`, Metal.jl's), and so goes into the package image.
+using PrecompileTools: @setup_workload, @compile_workload
 export @setup_workload, @compile_workload
 using GPUCompiler
 using LLVM
@@ -348,7 +349,7 @@ export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
 export supports_procedural_traversal
 export batchqueue
-export defaultbackend, availablebackends, eachbackend, register_backend!, register_kernel_recorder!
+export defaultbackend, availablebackends, eachbackend, register_backend!
 export devicearray
 export bind_textures
 

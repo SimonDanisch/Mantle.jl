@@ -80,68 +80,54 @@ end
     dumpdir = mktempdir()
     prev = get(ENV, "LAVA_SPIRV_DUMP_DIR", nothing)
     ENV["LAVA_SPIRV_DUMP_DIR"] = dumpdir
-    # The dump is written at COMPILE, and the disk cache answers from a prior
-    # process without compiling — so on a warm cache `dumpdir` stays empty and
-    # the test asserts nothing. Point the cache at a scratch dir of its own so
-    # every kernel below compiles and dumps.
-    cachedir = mktempdir()
-    prevcache = Mantle.LAVA_DISK_CACHE_DIR[]
-    Mantle.LAVA_DISK_CACHE_DIR[] = cachedir
-    # …and the FROZEN cache is consulted before either, and never dumps.
-    # Redirect all three so every kernel below really compiles and really
-    # writes to `dumpdir`, since the assert goes vacuously green the moment any
-    # cache answers.
-    frozendir = mktempdir()
-    prevfrozen = Lava.FROZEN_CACHE_DIR[]
-    Lava.FROZEN_CACHE_DIR[] = frozendir
-    # In-memory too: a kernel compiled earlier in this process answers from
-    # `ctx.caches` without compiling — and without dumping. They rebuild on
-    # demand, so clearing costs the next kernels a recompile and nothing else.
+    # The dump is written at COMPILE, and a kernel compiled earlier in this
+    # process, or in a package image, answers without compiling, so `dumpdir`
+    # would stay empty and the test assert nothing. A compile hook makes every
+    # lookup compile (`Lava.compile_or_lookup`), the way GPUCompiler's
+    # reflection tools observe a compile on a cache hit; it is a scoped value,
+    # set for the body below. The launch plans and pipelines go too, or a
+    # launch would not look the kernel up at all.
     try
-        # Inside the `try`: this is the first thing that can throw, and the
-        # environment above has to be restored whatever it does.
-        caches = Mantle.vk_context().caches
-        empty!(caches.linked)
-        empty!(caches.pipelines)
-        out = Mantle.LavaArray(zeros(Float32, M))
-        lpb_clamped_ternary!(Mantle.defaultbackend())(out; ndrange = M, workgroupsize = M)
-        KA.synchronize(Mantle.defaultbackend())
+        Base.ScopedValues.with(Mantle.GPUCompiler.compile_hook => (job -> nothing)) do
+            # Inside the `try`: this is the first thing that can throw, and the
+            # environment above has to be restored whatever it does.
+            Mantle.clear_kernel_cache!(Mantle.vk_context())
+            out = Mantle.LavaArray(zeros(Float32, M))
+            lpb_clamped_ternary!(Mantle.defaultbackend())(out; ndrange = M, workgroupsize = M)
+            KA.synchronize(Mantle.defaultbackend())
 
-        # The answer must still be right — the fix reconciles the select's
-        # operands, it does not change what the kernel computes.
-        v = Float32.(1:M)
-        ref = [ (i == 1 ? v[i] : v[i-1]) + v[i] + (i == M ? v[i] : v[i+1]) for i in 1:M ] ./ 3f0
-        @test Array(out) ≈ ref
+            # The answer must still be right — the fix reconciles the select's
+            # operands, it does not change what the kernel computes.
+            v = Float32.(1:M)
+            ref = [ (i == 1 ? v[i] : v[i-1]) + v[i] + (i == M ? v[i] : v[i+1]) for i in 1:M ] ./ 3f0
+            @test Array(out) ≈ ref
 
-        spvs = filter(f -> endswith(f, ".spv"), readdir(dumpdir; join = true))
-        @test !isempty(spvs)          # a dump we never wrote would assert nothing
+            spvs = filter(f -> endswith(f, ".spv"), readdir(dumpdir; join = true))
+            @test !isempty(spvs)          # a dump we never wrote would assert nothing
 
-        for f in spvs
-            words = reinterpret(UInt32, read(f))
-            # Walk the instruction stream: OpBitcast = 124. Its result type is the
-            # first operand, so flag any whose result type id was declared by
-            # OpTypePointer = 32. Done on the binary rather than on disassembler
-            # text so it does not depend on spirv-dis being installed.
-            ptr_types = Set{UInt32}()
-            bad = 0
-            i = 6                      # first word past the 5-word header
-            while i <= length(words)
-                wc = words[i] >> 16
-                op = words[i] & 0xFFFF
-                wc == 0 && break
-                op == 32 && push!(ptr_types, words[i+1])          # OpTypePointer result id
-                op == 124 && words[i+1] in ptr_types && (bad += 1) # OpBitcast to a pointer
-                i += Int(wc)
+            for f in spvs
+                words = reinterpret(UInt32, read(f))
+                # Walk the instruction stream: OpBitcast = 124. Its result type is the
+                # first operand, so flag any whose result type id was declared by
+                # OpTypePointer = 32. Done on the binary rather than on disassembler
+                # text so it does not depend on spirv-dis being installed.
+                ptr_types = Set{UInt32}()
+                bad = 0
+                i = 6                      # first word past the 5-word header
+                while i <= length(words)
+                    wc = words[i] >> 16
+                    op = words[i] & 0xFFFF
+                    wc == 0 && break
+                    op == 32 && push!(ptr_types, words[i+1])          # OpTypePointer result id
+                    op == 124 && words[i+1] in ptr_types && (bad += 1) # OpBitcast to a pointer
+                    i += Int(wc)
+                end
+                @test bad == 0
             end
-            @test bad == 0
         end
     finally
         prev === nothing ? delete!(ENV, "LAVA_SPIRV_DUMP_DIR") : (ENV["LAVA_SPIRV_DUMP_DIR"] = prev)
-        Mantle.LAVA_DISK_CACHE_DIR[] = prevcache
-        Lava.FROZEN_CACHE_DIR[] = prevfrozen
         rm(dumpdir; recursive = true, force = true)
-        rm(cachedir; recursive = true, force = true)
-        rm(frozendir; recursive = true, force = true)
     end
 end
 
@@ -169,52 +155,38 @@ end
     dumpdir = mktempdir()
     prev = get(ENV, "LAVA_SPIRV_DUMP_DIR", nothing)
     ENV["LAVA_SPIRV_DUMP_DIR"] = dumpdir
-    # The dump is written at COMPILE, and the disk cache answers from a prior
-    # process without compiling — so on a warm cache `dumpdir` stays empty and
-    # the test asserts nothing. Point the cache at a scratch dir of its own so
-    # every kernel below compiles and dumps.
-    cachedir = mktempdir()
-    prevcache = Mantle.LAVA_DISK_CACHE_DIR[]
-    Mantle.LAVA_DISK_CACHE_DIR[] = cachedir
-    # …and the FROZEN cache is consulted before either, and never dumps.
-    # Redirect all three so every kernel below really compiles and really
-    # writes to `dumpdir`, since the assert goes vacuously green the moment any
-    # cache answers.
-    frozendir = mktempdir()
-    prevfrozen = Lava.FROZEN_CACHE_DIR[]
-    Lava.FROZEN_CACHE_DIR[] = frozendir
-    # In-memory too: a kernel compiled earlier in this process answers from
-    # `ctx.caches` without compiling — and without dumping. They rebuild on
-    # demand, so clearing costs the next kernels a recompile and nothing else.
+    # The dump is written at COMPILE, and a kernel compiled earlier in this
+    # process, or in a package image, answers without compiling, so `dumpdir`
+    # would stay empty and the test assert nothing. A compile hook makes every
+    # lookup compile (`Lava.compile_or_lookup`), the way GPUCompiler's
+    # reflection tools observe a compile on a cache hit; it is a scoped value,
+    # set for the body below. The launch plans and pipelines go too, or a
+    # launch would not look the kernel up at all.
     try
-        # Inside the `try`: this is the first thing that can throw, and the
-        # environment above has to be restored whatever it does.
-        caches = Mantle.vk_context().caches
-        empty!(caches.linked)
-        empty!(caches.pipelines)
-        for T in types
-            xc = zeros(T, (2, 3, 4))
-            yc = rand(T, (2, 3))
-            x = Mantle.LavaArray(copy(xc))
-            y = Mantle.LavaArray(copy(yc))
+        Base.ScopedValues.with(Mantle.GPUCompiler.compile_hook => (job -> nothing)) do
+            # Inside the `try`: this is the first thing that can throw, and the
+            # environment above has to be restored whatever it does.
+            Mantle.clear_kernel_cache!(Mantle.vk_context())
+            for T in types
+                xc = zeros(T, (2, 3, 4))
+                yc = rand(T, (2, 3))
+                x = Mantle.LavaArray(copy(xc))
+                y = Mantle.LavaArray(copy(yc))
 
-            x[:, :, 2] = y                 # the store path
-            xc[:, :, 2] = yc
-            @test Array(x) == xc
+                x[:, :, 2] = y                 # the store path
+                xc[:, :, 2] = yc
+                @test Array(x) == xc
 
-            z = x[:, :, 2]                 # the load path, same packed slots
-            @test Array(z) == yc
+                z = x[:, :, 2]                 # the load path, same packed slots
+                @test Array(z) == yc
+            end
+
+            spvs = filter(f -> endswith(f, ".spv"), readdir(dumpdir))
+            @test !isempty(spvs)               # a dump we never wrote would assert nothing
+            @test isempty(lpb_ptr_bitcasts(dumpdir))
         end
-
-        spvs = filter(f -> endswith(f, ".spv"), readdir(dumpdir))
-        @test !isempty(spvs)               # a dump we never wrote would assert nothing
-        @test isempty(lpb_ptr_bitcasts(dumpdir))
     finally
         prev === nothing ? delete!(ENV, "LAVA_SPIRV_DUMP_DIR") : (ENV["LAVA_SPIRV_DUMP_DIR"] = prev)
-        Mantle.LAVA_DISK_CACHE_DIR[] = prevcache
-        Lava.FROZEN_CACHE_DIR[] = prevfrozen
         rm(dumpdir; recursive = true, force = true)
-        rm(cachedir; recursive = true, force = true)
-        rm(frozendir; recursive = true, force = true)
     end
 end

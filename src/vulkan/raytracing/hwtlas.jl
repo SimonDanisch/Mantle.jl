@@ -162,6 +162,10 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
     # `AdaptedAccel`, which is what the traversal loop reads. See
     # `procedural_candidate` in `raytracing/accel.jl`.
     procedural::Any
+
+    # Hidden batches and the masks their records had: a hidden record's mask is
+    # 0, which no ray's cull mask matches (`Raycore.set_visible!`).
+    hidden::Dict{Raycore.TLASHandle, Vector{UInt8}}
 end
 
 """
@@ -187,6 +191,7 @@ function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=
         false,                    # transforms_dirty
         Dict{Raycore.TLASHandle, Any}(),  # pending_updates
         nothing,                  # procedural
+        Dict{Raycore.TLASHandle, Vector{UInt8}}(),  # hidden
     )
 end
 
@@ -684,6 +689,39 @@ function Base.delete!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle)::Bool
     # The reindex of every handle whose batch shifted is core's, and it is the
     # half that was written twice and is easy to get wrong.
     delete!(hwtlas.instances, handle) || return false
+    delete!(hwtlas.hidden, handle)
+    hwtlas.dirty = true
+    return true
+end
+
+# ============================================================================
+# set_visible!
+# ============================================================================
+
+"""
+    Raycore.set_visible!(hwtlas::VulkanTLAS, handle, visible) -> Bool
+
+Hide a batch by giving its records mask 0, which no ray's cull mask matches;
+show it by giving them back the masks they had. The BLAS, the records' places
+and their custom indices are untouched, so per-instance lookups stay valid.
+"""
+function Raycore.set_visible!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, visible::Bool)
+    batch = batchof(hwtlas.instances, handle)
+    batch === nothing && return false
+    haskey(hwtlas.hidden, handle) == !visible && return true
+    # A caller's record buffer may be longer than its batch.
+    records = Array(batch.instance_buf)[1:batch.n]
+    masks = if visible
+        pop!(hwtlas.hidden, handle)
+    else
+        hwtlas.hidden[handle] = map(r -> UInt8(r.custom_index_and_mask >> 24), records)
+        zeros(UInt8, length(records))
+    end
+    records = map(records, masks) do r, m
+        VulkanInstanceRecord(r.transform, (r.custom_index_and_mask & 0x00FFFFFF) | (UInt32(m) << 24),
+                             r.sbt_offset_and_flags, r.blas_address)
+    end
+    Base.copyto!(batch.instance_buf, 1, records, 1, batch.n)
     hwtlas.dirty = true
     return true
 end

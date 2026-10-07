@@ -684,25 +684,28 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
               "`supports_tessellation(backend)` before building a pipeline " *
               "with it.")
 
+    dev = Metal.device()
+    vfn, ffn, vert_tt, frag_tt =
+        stage_signatures(p, length(color_formats), vert_bufs, frag_bufs; color_formats)
+    vname = string(nameof(Mantle.stagefunction(p.vertex))) * "_vs"
+    vstage = compile_stage_function(vfn, vert_tt, :vertex, vname)
+    fstage = ffn === nothing ? nothing :
+        compile_stage_function(ffn, frag_tt, :fragment,
+                               string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
+
     # The stages themselves, because each carries its function, its config and
     # its interface, and keying those separately lets them disagree about which
-    # pipeline they belong to.
-    key = (p.vertex, p.fragment, p.geometry, vert_bufs, frag_bufs,
-           color_formats, depth_format,
+    # pipeline they belong to. And the compiled stage functions, by identity: a
+    # stage compiled again after an edit is a new one, and the pipeline follows.
+    key = (p.vertex, p.fragment, p.geometry, objectid(vstage), objectid(fstage),
+           vert_bufs, frag_bufs, color_formats, depth_format,
            typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth))
     Base.@lock GFX_CACHE_LOCK begin
         cached = get(GFX_CACHE, key, nothing)
         cached === nothing || return cached::MetalCompiledGraphicsPipeline
     end
-
-    dev = Metal.device()
-    vfn, ffn, vert_tt, frag_tt =
-        stage_signatures(p, length(color_formats), vert_bufs, frag_bufs; color_formats)
-    vname = string(nameof(Mantle.stagefunction(p.vertex))) * "_vs"
-    vfun, vlib = compile_stage_function(vfn, vert_tt, :vertex, vname)
-    ffun, flib = ffn === nothing ? (nothing, nothing) :
-        compile_stage_function(ffn, frag_tt, :fragment,
-                               string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
+    vfun, vlib = vstage
+    ffun, flib = fstage === nothing ? (nothing, nothing) : fstage
 
     desc = MTLm.MTLRenderPipelineDescriptor()
     desc.vertexFunction = vfun
@@ -736,9 +739,22 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
 end
 
 """
+The Metal stage functions compiled from one Julia function at one point in its
+history, by `(stage, name)`. GPUCompiler holds them against the function's
+`CodeInstance` (`cached_results`), so an edit to the function or to anything
+inlined into it (Revise) compiles the stage again, where a cache keyed on the
+pipeline description drew its first compile for the rest of the session.
+"""
+mutable struct MetalStages
+    stages::Dict{Any,Tuple{Any,Any}}
+    MetalStages() = new(Dict{Any,Tuple{Any,Any}}())
+end
+
+"""
     compile_stage_function(f, tt, stage, name) -> (MTLFunction, MTLLibrary)
 
-Compile one Julia shader into a Metal stage function.
+Compile one Julia shader into a Metal stage function, or hand back the one
+compiled from the code `f` has now.
 
 The library is handed back, not discarded: an `MTLFunction` does not keep it
 alive, and a released library takes the pipeline's shaders with it — which shows
@@ -748,8 +764,18 @@ function compile_stage_function(f, tt::Type, stage::Symbol, name::String)
     dev = Metal.device()
     cfg = Metal.compiler_config(dev; stage, name)
     job = Metal.GPUCompiler.CompilerJob(Metal.methodinstance(typeof(f), tt), cfg)
+    key = (stage, name)
+    stages = Metal.GPUCompiler.cached_results(MetalStages, job)
+    if stages !== nothing
+        compiled = get(stages.stages, key, nothing)
+        compiled === nothing || return compiled
+    end
     lib = MTLm.MTLLibraryFromData(dev, Metal.compile_to_metallib(job).metallib)
-    return (MTLm.MTLFunction(lib, name), lib)
+    compiled = (MTLm.MTLFunction(lib, name), lib)
+    # Compiling the job made its `CodeInstance`, so this finds one.
+    stages === nothing && (stages = Metal.GPUCompiler.cached_results(MetalStages, job))
+    stages.stages[key] = compiled
+    return compiled
 end
 
 # ── drawing ──────────────────────────────────────────────────────────────────

@@ -26,21 +26,6 @@
 # fails instead at `Mantle.GEMM_TILINGS`, two frames into a kernel, as an
 # `UndefVarError` on a name the caller was never supposed to know.
 
-"""
-    use_frozen_kernels(version)
-
-Read the kernel entries frozen under `version`, recording none.
-
-What a *using* package calls at load time; `__init__` is the natural place. The
-version has to match the one the workload froze under, which is why it belongs
-in a `const` both refer to.
-
-A backend that compiles kernels fresh each session answers by doing nothing —
-nothing to read is not an error, it is no cache. Callers need no guard, and
-before this was declared they all carried one, because an `UndefVarError` in an
-`__init__` is an `InitError` that stops `using` the package at all.
-"""
-function use_frozen_kernels end
 
 """
     staged_gemm_tile() -> Union{Int,Nothing}

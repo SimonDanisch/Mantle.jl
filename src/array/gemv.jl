@@ -145,9 +145,8 @@ Column-major is what makes this coalesce: `B[:, n]` is contiguous in `k`, so
 lanes reading `k, k+1, ...` for one `n` touch one cache line. llama.cpp's matrix
 is row-major and its "rows" are our columns; the memory pattern is the same.
 
-The name is deterministic, not a `gensym` — `frozen_key` hashes
-`string(nameof(F))`, so a per-session counter would miss the frozen cache on
-every load.
+The name is deterministic, not a `gensym`: one shape is one function in every
+session, so the code a package image holds for it is found again.
 """
 function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
     get!(GEMV_KERNELS, (NROWS, BLOCK, SUB)) do
@@ -535,7 +534,7 @@ so the workload silently skips and every first call in a fresh process pays the
 compile the Runner packages exist to remove. That is not hypothetical and it is
 not new — `FFT_PREGENERATED` exists for exactly this, found by `KokoroRunner`.
 The GEMV port reintroduced it, and `SAM2Runner` is where it showed up: its
-workload skipped with that message, so nothing SAM 2 runs was frozen.
+workload skipped with that message, so nothing SAM 2 runs was precompiled.
 
 Generating at load moves the `@eval` to ordinary top-level code. The set is small
 and derived — the loop below asks `gemv_config` and `gemv_ncontig_config`

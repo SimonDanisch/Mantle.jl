@@ -135,7 +135,7 @@ using Test, Lava, Mantle
         # develop this defect, which is why they are listed rather than trusted.
         for f in (:alloc_debug, :free_debug, :freed_bda_scan, :destroy_freed_bdas_throws,
                   :presubmit_scan, :presubmit_scan_throws, :pack_arg_assert_live,
-                  :batch_timing, :dispatch_logging, :dispatch_timing, :frozen_log_misses)
+                  :batch_timing, :dispatch_logging, :dispatch_timing)
             v = getfield(d, f)
             @test v isa Bool
             @test !v

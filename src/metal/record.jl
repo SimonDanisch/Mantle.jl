@@ -1249,7 +1249,18 @@ function submitrun!(d::MetalDevice, pl::Mantle.Plan)
     # (`RecordingParts`). Asserting one `MetalRecording` here is what Qwen-Image
     # 2.1's text encoder met — it asks for a partition, and until now only Vulkan
     # had ever been given one.
-    tok = rec === nothing ? closeframe!(d) : Mantle.submitrecording!(d, rec, nothing)
+    #
+    # Split by hand on the two recordings a Metal plan holds, because core types
+    # `pl.recording` as `Any`: a call on it is dynamic, and a dynamic call boxes the
+    # `UInt64` token it returns. That is an allocation every frame once the token
+    # passes the small values Julia keeps boxed.
+    tok = if rec === nothing
+        closeframe!(d)
+    elseif rec isa MetalRecording
+        Mantle.submitrecording!(d, rec, nothing)
+    else
+        Mantle.submitrecording!(d, rec::RecordingParts{MetalRecording}, nothing)
+    end
     for s in pl.graph.surfaces
         Mantle.present_frame!(d, s.win)
     end

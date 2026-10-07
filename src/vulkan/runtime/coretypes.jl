@@ -301,7 +301,6 @@ mutable struct Diagnostics
     dispatch_log_file::Union{Nothing,String}
     dispatch_timing::Bool
     # ── compiler / cache
-    frozen_log_misses::Bool
     launch_arg_validation::Bool
     spirv_dump_dir::Union{Nothing,String}
     spirv_dump_counter::Int
@@ -340,7 +339,7 @@ end
 
 Diagnostics() = Diagnostics(false, false, false, true, false, false, false, false, UInt64(0),
                             false, false, nothing, false,
-                            false, true, nothing, 0, 0, nothing,
+                            true, nothing, 0, 0, nothing,
                             NamedTuple[], NamedTuple[], NamedTuple[], NamedTuple[],
                             Dict{Symbol,Tuple{Int,Int}}(), ReentrantLock(),
                             String[], Float64[], String[], Int[],
@@ -652,7 +651,10 @@ mutable struct DeviceCaches
     pipelines::Dict{UInt64,LavaComputePipeline}
     pipeline_order::Vector{UInt64}
     # `Dict{Any,…}` because GPUCompiler.cached_compilation derives the key itself.
-    linked::Dict{Any,LavaLinkedKernel}
+    # This device's pipeline for each compiled kernel, keyed on the kernel by
+    # identity: the SPIR-V is kept with its `CodeInstance` (`compile_or_lookup`),
+    # so a kernel compiled again is a new key.
+    linked::IdDict{LavaGPUKernel,LavaLinkedKernel}
     # `Vector{Any}`, NOT `Vector{LaunchPlan}` — and the difference is one heap
     # allocation on EVERY dispatch, on the path that HITS this cache.
     #
@@ -680,8 +682,10 @@ mutable struct DeviceCaches
     caps::Union{Nothing,DeviceCaps}
     # One warning per device about a subgroup width that cannot be pinned.
     coopmat_warned::Bool
+    # Keyed on the shaders a pipeline is made of (`pipeline_cache_key`). The
+    # shaders themselves are not a device's: GPUCompiler keeps them with the
+    # code they were compiled from (`GfxShaders`).
     gfx_pipelines::Dict{UInt64,VulkanCompiledGraphicsPipeline}
-    gfx_shaders::Dict{UInt64,LavaGfxShader}
     # Ray-tracing pipelines, here for the same reason the graphics ones are: a
     # compiled pipeline is a device object, so it belongs to the device.
     #
@@ -695,6 +699,12 @@ mutable struct DeviceCaches
     # `CompiledRTPipeline` and not `LavaRTPipeline`: see the supertype above for
     # why the concrete name cannot be spelled here.
     rt_pipelines::Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
+    # Which entry of `rt_pipelines` a pipeline description, called with these
+    # argument types, draws with now, and the world age that was checked in.
+    # In a newer world its stages are looked up again (`rt_compiled_for`), and an
+    # edited stage makes a new entry; the old one stays, since a recording may
+    # still hold its pipeline.
+    rt_current::Dict{UInt64,Tuple{UInt,UInt64}}
     timestamp_pool::Union{Nothing,VK.QueryPool}
     timestamp_next_slot::Int
     timestamp_period_ns::Float64
@@ -703,16 +713,6 @@ mutable struct DeviceCaches
     # a module-level vector was a list of one device's slot numbers read against
     # whichever device's pool happened to be current.
     recorded_dispatches::Vector{Any}
-    # The frozen kernel cache's session memo, holding `LavaLinkedKernel`s — each
-    # of which owns a `VkPipeline`. Same §8 class as the caches above, and missed
-    # for the same reason `BLIT_PIPELINE` was: nothing on the two-device probe's
-    # path enables the frozen cache. Its RT sibling `FROZEN_RT_MEM` stays a
-    # global on purpose — a `LavaRTShader` is bytes and metadata, no handle.
-    frozen_mem::Dict{Tuple{DataType,DataType,Any},Any}
-    # A baton, not a cache: `frozen_link_recording` leaves the per-kernel
-    # `VkPipelineCache` here for `frozen_store` to snapshot. Narrow window, but a
-    # driver object all the same, and two devices recording at once would swap it.
-    frozen_last_pcache::Any
     # Launch decompositions, keyed by (kernel type, ndrange, workgroupsize) — a
     # key that does NOT name the device, while the value does: `block_dims` is
     # `pad_to_3d(ctx, …)` over `ctx.max_wg_dims`. Two devices with different
@@ -742,10 +742,10 @@ end
 # `MemoryPolicy()` resolves at call time, long after `memory.jl` is loaded.
 DeviceCaches() = DeviceCaches(
     Dict{UInt64,LavaComputePipeline}(), UInt64[],
-    Dict{Any,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
+    IdDict{LavaGPUKernel,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
     MemoryPolicy(), 0, nothing, nothing, false,
-    Dict{UInt64,VulkanCompiledGraphicsPipeline}(), Dict{UInt64,LavaGfxShader}(),
+    Dict{UInt64,VulkanCompiledGraphicsPipeline}(),
     Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
+    Dict{UInt64,Tuple{UInt,UInt64}}(),
     nothing, 0, 1.0, Any[],
-    Dict{Tuple{DataType,DataType,Any},Any}(), nothing,
     IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[], AccessCache())

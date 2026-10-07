@@ -132,26 +132,36 @@ end
 # WRONG requirement, not when it is merely unmet. An unmet one is
 # `UNIMPLEMENTED_BACKEND_FUNCS` below.
 #
-# Both entries are BUILD-GLOBAL hooks, and that is the distinction. They take no
-# device or backend argument -- `staged_gemm_tile()` takes nothing,
-# `use_frozen_kernels(version)` takes a version -- so they are answered once per
-# build, not once per device. `src/vulkan/` and `src/metal/` are `@static include`d
-# on `Sys.isapple()` and are therefore mutually exclusive, which is the mechanism
-# that makes a no-argument hook well defined. `src/host/` is ALWAYS included
-# alongside whichever of those is compiled in, so a host definition is not a second
-# method, it is the SAME signature: defining it there is `ERROR: Method overwriting
-# is not permitted during Module precompilation`, and Mantle stops precompiling.
+# Two kinds of entry.
 #
-# So "every backend answers it" cannot be satisfied here, and is not the right ask.
-#
-# `staged_gemm_tile` could in principle dispatch on a backend. It must not: its
+# `staged_gemm_tile` is a BUILD-GLOBAL hook. It takes no device or backend
+# argument, so it is answered once per build, not once per device. `src/vulkan/`
+# and `src/metal/` are `@static include`d on `Sys.isapple()` and are therefore
+# mutually exclusive, which is the mechanism that makes a no-argument hook well
+# defined. It could in principle dispatch on a backend. It must not: its
 # consumers are `DNNKernels`' plan functions, which take a `DeviceCaps` and no
 # backend precisely so they can be asked about hardware this machine is not -- the
 # suite builds synthetic ones and asks the planner about them. Those vary the
 # DEVICE; the BUILD is fixed, and which tile Mantle emits kernels at is a property
 # of the build.
+#
+# `deviceslice` and `hostspan` are each ONE OF TWO ways a backend can answer, and
+# a backend that takes the other way must not define them. Their docstrings say so:
+#
+#   deviceslice
+#       For a backend that hands a placed transient out as an array over pool
+#       memory (Metal, ROCm). Vulkan keeps the block instead, because a buffer
+#       barrier names the `VkBuffer`, which an array view cannot.
+#   hostspan
+#       For a backend whose memory the CPU addresses (Metal). Core's transfer
+#       verbs are written over it. Vulkan and ROCm stage transfers and write
+#       `upload!`, `download` and `devicecopy!` themselves.
+#
+# Both passed this guard until the host backend was removed on 2026-10-01, and
+# only because `src/host/` was not one of `BACKEND_DIRS`: its methods counted as
+# core defaults. They never were.
 const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
-    :staged_gemm_tile, :use_frozen_kernels
+    :staged_gemm_tile, :deviceslice, :hostspan,
 ])
 
 # The 56 that are lonely TODAY, so the guard can fail on a 57th.

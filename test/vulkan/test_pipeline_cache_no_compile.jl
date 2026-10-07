@@ -2,7 +2,7 @@
 #
 # Lava has two caches and they answer different questions:
 #
-#   frozen / disk kernel cache  Julia  -> SPIR-V   (test_frozen_cache.jl, test_disk_cache.jl)
+#   kernel cache                Julia  -> SPIR-V   (Lava's test_compile_cache.jl)
 #   VkPipelineCache             SPIR-V -> binary   (here)
 #
 # Only the second one avoids the driver's shader compiler, and it was the one
