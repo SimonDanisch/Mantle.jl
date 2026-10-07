@@ -339,6 +339,40 @@ end
 `TM = 32` is the warp width and is not a free parameter: it is what makes one
 warp read one contiguous 128-byte line.
 
+**`(32, 1024, 4)`, measured 2026-10-07 on the same Radeon 8060S under two
+drivers**: RADV on Linux and AMD's own driver on Windows. GPU time from
+`with_dispatch_timing`, µs per call, after a clock spin-up, two sweeps each:
+
+    shape            driver    (32,512,8)   (32,512,4)   (32,1024,4)   (32,1024,8)
+    (1280, 1280)     RADV      8.7-10.3     10.2-10.8    9.9           9.7
+    (1280, 1280)     Windows   15.5-16.1    9.0-11.2     10.1-10.2     11.2-13.0
+    (5120, 1280)     RADV      28.1         29.3-29.4    30.5-30.6     29.8
+    (5120, 1280)     Windows   30.8-34.6    34.7         36.6-36.8     36.3
+    (1280, 5120)     RADV      30.7-31.2    37.0-37.9    30.1-35.3     27.9-28.2
+    (1280, 5120)     Windows   60.3-61.7    34.3         35.6-36.2     38.9
+    (51866, 1280)    both      1152-1213 for every configuration
+
+`(32, 512, 8)` was chosen on RADV alone, and the Windows driver runs it at
+nearly twice the time of every neighbour on the two small-`M` shapes. The driver
+reports no spills for it (`scratchMemUsageInBytes = 0`) and nothing else, so the
+cause is not visible from here. Summed over one Whisper decoder layer (six
+`(1280, 1280)`, one each of the other two), `(32, 1024, 4)` is 28% faster than
+`(32, 512, 8)` on Windows and within the run-to-run spread of it on RADV. Four
+accumulators rather than eight is also the choice that asks less of a compiler
+nobody has measured yet.
+
+An Apple M5 is bandwidth-bound at every one of these shapes and barely cares.
+Host-timed over a recorded plan of 50 passes, one run, µs per call:
+
+    shape            (32,512,8)   (32,512,4)   (32,1024,4)   (32,1024,8)
+    (1280, 1280)     47.4         47.0         48.9          48.9
+    (5120, 1280)     210.1        206.1        224.5         218.0
+    (1280, 5120)     203.0        210.5        205.7         209.6
+    (51866, 1280)    2318.6       2256.0       2352.3        2357.8
+
+The decoder layer costs 3.7% more there under `(32, 1024, 4)` than under
+`(32, 512, 8)`, from a single run. NVIDIA is not measured.
+
 **`(32, 512, 8)`, measured 2026-09-26 on RADV (Radeon 8060S, 40 CUs)**, clock
 spun up first, µs per call:
 
@@ -378,9 +412,9 @@ dispatch**, which a 16 KiB GEMV pays in full — see the header.
 """
 function gemv_ncontig_config(M::Int, K::Int, limit::Int)
     tm = 32
-    block = min(limit, 512)
+    block = min(limit, 1024)
     block = max(block - block % tm, tm)
-    return (tm, block, 8)
+    return (tm, block, 4)
 end
 
 """

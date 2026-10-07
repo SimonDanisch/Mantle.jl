@@ -28,6 +28,13 @@ gemvref(A::Vector{Float32}, B::Matrix{Float32}) = vec(Float64.(A)' * Float64.(B)
 
 relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
 
+# GPU time of one call: the median of every dispatch `f` issues, summed over the
+# kernels it runs. Wall clock was the measure here and it is the host launch path
+# as much as the kernel: on Windows (LapWin, 8060S) the transposed comparison
+# read 1.42x, 1.61x and 4.39x on three runs of the same build, while the GPU
+# medians hold to within 1% over eight runs.
+gputime(f) = sum(r -> r.median_ns, Mantle.with_dispatch_timing(f))
+
 @testset "gemv" begin
     backend = LavaBackend()
 
@@ -135,8 +142,16 @@ relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
 
         @testset "it beats mul! at one column" begin
             # The reason this second kernel exists. `mul!` on this shape measured
-            # 3.5% of roofline: one thread per output is 1280 threads, five
-            # workgroups, and the device is latency-bound however well it reads.
+            # 3.5% of roofline when it ran one thread per output: 1280 threads,
+            # five workgroups, and the device latency-bound however well it reads.
+            # It now takes the split-K GEMV and its reduction, which narrowed the
+            # gap. Measured on the 8060S in GPU time over five runs: 1.79-1.81x
+            # under RADV, 1.30-1.56x under AMD's Windows driver, which runs the
+            # split-K kernels faster (13-16 us against RADV's 18) and `gemv!` no
+            # faster. The floor of
+            # 1.5 was set against the per-element kernel and held on neither
+            # driver's worst run once split-K arrived; 1.1 asserts what is true
+            # on both, that the decoder's kernel beats the general path.
             M, K, iters = 1280, 1280, 50
             hw = fill(0.01f0, M, K)
             W = KA.allocate(backend, Float32, M, K); copyto!(W, hw)
@@ -148,15 +163,10 @@ relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
             rm() = (for _ in 1:iters; mul!(C2, W, x2); end)
             for _ in 1:3; rg(); rm(); end
             KA.synchronize(backend)
-            tg = tm_ = Inf
-            for _ in 1:5
-                KA.synchronize(backend); s = time_ns(); rg()
-                KA.synchronize(backend); tg = min(tg, time_ns() - s)
-                KA.synchronize(backend); s = time_ns(); rm()
-                KA.synchronize(backend); tm_ = min(tm_, time_ns() - s)
-            end
-            @info "gemv(transposed) vs mul! at ($M,$K)" gemv_ms=tg/iters/1e6 mul_ms=tm_/iters/1e6 speedup=tm_/tg
-            @test tm_ / tg > 1.5
+            tg = gputime(rg)
+            tm_ = gputime(rm)
+            @info "gemv(transposed) vs mul! at ($M,$K), GPU" gemv_us=tg/1e3 mul_us=tm_/1e3 speedup=tm_/tg
+            @test tm_ / tg > 1.1
         end
     end
 
@@ -185,15 +195,11 @@ relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
         rm() = (for _ in 1:iters; mul!(C2, A2, B); end)
         for _ in 1:3; rg(); rm(); end
         KA.synchronize(backend)
-        tg = tm = Inf
-        for _ in 1:5
-            KA.synchronize(backend); s = time_ns(); rg()
-            KA.synchronize(backend); tg = min(tg, time_ns() - s)
-            KA.synchronize(backend); s = time_ns(); rm()
-            KA.synchronize(backend); tm = min(tm, time_ns() - s)
-        end
-        @info "gemv vs mul! at (1,$K)@($K,$N)" gemv_ms=tg/iters/1e6 mul_ms=tm/iters/1e6 speedup=tm/tg
-        # Measured 3.5x. The floor is deliberately far below that: this asserts
+        tg = gputime(rg)
+        tm = gputime(rm)
+        @info "gemv vs mul! at (1,$K)@($K,$N), GPU" gemv_us=tg/1e3 mul_us=tm/1e3 speedup=tm/tg
+        # Measured 6.4x in GPU time on the 8060S, 3.5x in wall clock when the
+        # kernel was written. The floor is deliberately far below that: this asserts
         # the kernel is doing its job, not the exact number, which moves with the
         # driver and with whatever else holds the card.
         @test tm / tg > 1.5
