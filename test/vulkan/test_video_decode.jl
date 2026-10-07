@@ -11,6 +11,11 @@ using Test
 using Lava, Mantle
 @testset "H.264 hardware decode" begin
     ctx = Mantle.vk_context()
+    # What a caller asks before opening a decode stream, on every device it can
+    # hold: the context, the KA backend and the graph device all say the same.
+    @test Mantle.videodecodes(ctx) === ctx.video_decode_available
+    @test Mantle.videodecodes(Mantle.LavaBackend(ctx)) === ctx.video_decode_available
+    @test Mantle.videodecodes(Mantle.Device()) === ctx.video_decode_available
     # A video-decode queue is necessary but not sufficient: the device must also
     # say whether the DPB and the decode target may share ONE image
     # (DPB_AND_OUTPUT_COINCIDE) or must be separate (DPB_AND_OUTPUT_DISTINCT).

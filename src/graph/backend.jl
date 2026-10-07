@@ -785,8 +785,8 @@ const BACKEND_VOCABULARY = (
     # What core asks a backend OUTSIDE the graph — `runtime/backendhooks.jl`,
     # which says why they are declarations rather than names a caller sniffs for
     # with `isdefined`. Listed here because this is the enumerated surface a
-    # backend may add a method to, and it is one more of it.
-    :staged_gemm_tile,
+    # backend may add a method to, and they are two more of it.
+    :staged_gemm_tile, :videodecodes,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
     :bestshape,

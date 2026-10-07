@@ -103,6 +103,10 @@ vk_context(a::LavaArray) = (a.buf[].ctx)::VkContext
 # it in KI and are not written on this side at all.
 caps(b::LavaBackend) = caps(vk_context(b))
 caps(a::LavaArray) = caps(vk_context(a))
+# `videodecodes` is core's question (`runtime/backendhooks.jl`); the answer is a
+# property of the context, decided when the device was created.
+videodecodes(ctx::VkContext) = ctx.video_decode_available
+videodecodes(b::LavaBackend) = videodecodes(vk_context(b))
 # A view of a device array is still on that device. `probe_broadcast!` is handed
 # `dest`, which the broadcast machinery may hand it as a `SubArray` or a
 # `ReshapedArray` — walking to the parent is the whole answer, and it is the same

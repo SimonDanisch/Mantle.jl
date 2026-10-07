@@ -128,6 +128,7 @@ function, so there is no second type to convert into and no
 that method.
 """
 caps(dev::LavaDevice) = caps(dev.ctx)
+videodecodes(dev::LavaDevice) = videodecodes(dev.ctx)
 
 # ── window ────────────────────────────────────────────────────────────────────
 #

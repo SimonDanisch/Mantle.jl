@@ -638,6 +638,11 @@ end
     # RayMakie calls it, and on Metal it would be right anyway, since Metal does
     # not record plans (`recordsplans`) and packs a draw's arguments again on
     # every run, so no address is baked for a reallocation to leave stale.
+    #
+    # `videodecodes` joined on 2026-10-07, and it is the capability-question kind
+    # named at the top of this testset: core answers `false`, and only Vulkan has
+    # a hardware decoder to say `true` about. A backend that reaches the default
+    # reads its video on the CPU, which is the right lane for it, not a silence.
     @test length(lonely) <= 31
 end
 

@@ -526,3 +526,11 @@ end
         end
     end
 end
+
+@testset "a Metal device has no hardware video decode" begin
+    # Asked by the editor before it opens a decode stream. The decoder is Vulkan
+    # Video; on this backend the answer is the core default, and the caller reads
+    # on the CPU without having tried.
+    @test M.videodecodes(DEV_SEAM) === false
+    @test M.videodecodes(Metal.MetalBackend()) === false
+end

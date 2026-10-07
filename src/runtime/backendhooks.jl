@@ -48,3 +48,21 @@ caller had grown its own copy of `16` to compare `dev.tile` against, and a
 restated constant is a second place for the two to disagree.
 """
 function staged_gemm_tile end
+
+"""
+    videodecodes(dev) -> Bool
+
+Whether `dev` has a hardware video decode session that `VideoDecode` drives.
+
+What a caller asks before it opens a GPU decode stream. Only the Vulkan backend has
+a decoder, and only on a device created with video decode; every other device
+answers `false` here. Before this was declared the editor asked
+`Mantle.vk_context().video_decode_available`, which on a build without the Vulkan
+backend is an `UndefVarError`. Its export path caught that and fell back to the
+CPU reader with a warning on every source, so on Metal the lane was chosen by an
+exception instead of by the device.
+
+`dev` is whatever the caller launches on: a device, or the KernelAbstractions
+backend that stands for one.
+"""
+videodecodes(dev) = false
