@@ -1400,13 +1400,28 @@ function replay!(d::MetalDevice, recs::Union{Tuple{MetalRecording},Vector{MetalR
     for rec in recs
         claimbuffers!(batchqueue(d), rec.managed)
     end
-    sub = opensubmit!(d, first(recs).residentids)
-    for k in eachindex(recs)
-        rec = recs[k]
-        k == firstindex(recs) || nextpiece!(d, sub, rec.residentids)
-        sub = encodepiece!(d, sub, rec)
+    # Under Metal.jl's `submission_lock` from the encoder `opensubmit!` opens to the
+    # commit that ends it. The batch is not this task's: `adoptqueue!` made it every
+    # task's, and Metal.jl keeps a shared batch consistent by changing it only under
+    # that lock — each of its launches, copies and flushes takes it. An encoder held
+    # open across a replay without the lock is one that another thread's launch or
+    # flush lands in: a second encoder on the command buffer, or a commit while ours
+    # is open, and Metal aborts the process (`A command encoder is already encoding
+    # to this command buffer`, `commit command buffer with uncommitted encoder`). The
+    # editor did exactly that, a composite on the GPU worker beside a track preview
+    # on thread 1. The wait for a free in-flight slot comes after, without the lock,
+    # as in Metal.jl's own `flush!`.
+    tok = Base.@lock Metal.submission_lock begin
+        sub = opensubmit!(d, first(recs).residentids)
+        for k in eachindex(recs)
+            rec = recs[k]
+            k == firstindex(recs) || nextpiece!(d, sub, rec.residentids)
+            sub = encodepiece!(d, sub, rec)
+        end
+        closesubmit!(d, sub)
     end
-    return closesubmit!(d, sub)
+    Metal.limit_inflight!(batchqueue(d))
+    return tok
 end
 
 """One piece into the open submission; the submission after it, which a piece

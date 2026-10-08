@@ -603,7 +603,9 @@ function closesubmit!(q::LegacyQueue, s::LegacySubmission)
     # this sends the next ordinary launch through whatever the recording left.
     s.bq.last_pipeline = nothing
     Metal.note_recorded!(s.bq, 0, nothing)
-    Metal.flush!(s.bq)
+    # Committed only: `replay!` holds `submission_lock` around this and waits for a
+    # free in-flight slot after releasing it, which is the other half of `flush!`.
+    Metal.commit_batch!(s.bq)
     # Nothing here signals anything, so the token is the retirement counter and
     # waiting on it is a device drain. See `LegacyQueue`.
     return fence(q)
