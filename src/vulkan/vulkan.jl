@@ -146,8 +146,10 @@ include("graphics/record.jl")
 #
 # Declared by core in `graph/backend.jl`; the body is here because every name in
 # it is this backend's.
-function initbackend!()
-    register_backend!(; name = :vulkan, priority = 100) do
+function initbackend!(::VulkanAPI)
+    # Not a candidate for the default on a Mac, where Metal is the GPU and a
+    # Vulkan device is a CPU driver asked for by name.
+    @static Sys.isapple() || register_backend!(; name = :vulkan, priority = 100) do
         vulkan_available() ? LavaBackend() : nothing
     end
     init_pipeline_thread!()

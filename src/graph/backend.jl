@@ -755,9 +755,10 @@ is `caps(device)` or one of the `supports_*` predicates.
 function devicename end
 
 """
-    initbackend!()
+    initbackend!(api)
 
-Whatever the backend this build compiled in has to do once, at `__init__`.
+Whatever the backend of `api` has to do once, at `__init__`, for each backend this
+build compiled in: Vulkan everywhere a loader is, and Metal on a Mac besides.
 
 Declared here and answered in `src/vulkan/` or `src/metal/`, rather than written
 as a body inside the `@static if` in `Mantle.jl`: a Vulkan `initbackend!` names

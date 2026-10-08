@@ -554,13 +554,15 @@ capacity(dev) = typemax(Int)
 # Vulkan context, and Metal's does neither.
 
 
-# ── The GPU backend, chosen at parse time ─────────────────────────────────────
+# ── The backends, chosen at parse time ───────────────────────────────────────
 #
 # An `@static include` and not an extension. An extension exists to make a
 # dependency OPTIONAL and load-triggered; here the trigger is a platform fact,
-# so there is nothing conditional left for it to express — `using Mantle` on a
-# Mac wants Metal and never anything else, and MoltenVK is a translation layer
-# we deliberately do not reach for.
+# so there is nothing conditional left for it to express. A Mac's GPU is Metal's;
+# MoltenVK is a translation layer we deliberately do not reach for. Vulkan is
+# compiled in wherever a loader is, which on a Mac means a CPU driver (lavapipe)
+# and nothing else: the device a reference or a CPU lane runs on, on every
+# machine the same way.
 #
 # What that buys is not ergonomics. `src/vulkan/` and `src/metal/` were written
 # inside `module Mantle`, where every name they extend resolved for free; as
@@ -575,6 +577,7 @@ capacity(dev) = typemax(Int)
 # win silently, which is the shadow hazard again with its sign flipped.
 # `src/vulkan/` already says `VK.` everywhere, so the only names it ever took
 # from the blanket import are the three `ResultTypes` ones Vulkan re-exports.
+import Vulkan as VK
 @static if Sys.isapple()
     using Metal: MtlArray
     using Metal.ObjectiveC: NSArray
@@ -584,8 +587,13 @@ capacity(dev) = typemax(Int)
     import Raycore: closest_hit, any_hit, sync!, world_bound, n_geometries,
         n_instances, update_transforms!, update_transform!, wait_for_gpu!
     include("metal/metal.jl")
-else
-    import Vulkan as VK
+end
+# The Vulkan backend wherever there is a Vulkan loader: every Linux and Windows
+# machine, and a Mac through `Vulkan_Loader_jll`, VulkanCore's fallback. On a Mac
+# its device is a CPU driver, lavapipe from `Lavapipe_jll`, asked for by name —
+# `Device(VulkanAPI(); select = "lavapipe")` — for the references and the CPU
+# lane that used to be `KA.CPU()`. `Device()` there stays Metal.
+@static if !Sys.isapple() || VK.HAS_LOADER
     using Vulkan: unwrap, iserror, unwrap_error
     include("vulkan/vulkan.jl")
 end
@@ -631,6 +639,10 @@ answers from now on, and return it.
 """
 defaultdevice!(select::DeviceSelector) = defaultdevice!(Device(select))
 
-__init__() = initbackend!()
+function __init__()
+    @static Sys.isapple() && initbackend!(MetalAPI())
+    @static (!Sys.isapple() || VK.HAS_LOADER) && initbackend!(VulkanAPI())
+    return nothing
+end
 
 end

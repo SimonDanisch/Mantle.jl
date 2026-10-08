@@ -76,7 +76,7 @@ include("record.jl")
 #
 # Declared by core in `graph/backend.jl`. No pipeline thread and no `atexit`
 # hook: neither half of Vulkan's has anything to reach for here.
-Mantle.initbackend!() = register_backend!(; name = :metal, priority = 90) do
+Mantle.initbackend!(::MetalAPI) = register_backend!(; name = :metal, priority = 90) do
     Metal.functional() ? Metal.MetalBackend() : nothing
 end
 
