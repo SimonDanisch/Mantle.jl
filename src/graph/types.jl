@@ -674,6 +674,13 @@ apart. Slots are `2i-1, 2i` for pass `i` in scheduled order.
 `pending` says a frame's timestamps have been written and not yet read. They are
 read without `WAIT_BIT`: a frame still in flight is skipped rather than waited
 for, so turning profiling on does not change the frame time it reports.
+
+`sampled` is, per pass, the start timestamp of the frame last sampled. Reading
+without waiting finds the SAME finished frame again whenever the device is behind
+the host, and each read used to count as a sample: on an RTX 3070 one early frame
+was 25 of 26 samples, identical to the nanosecond, and its slower clock put the
+median above the wall time of the runs being measured. A timestamp is a
+free-running counter, so a new frame always starts at a new value.
 """
 mutable struct Profiler{Q}
     pool::Q
@@ -682,6 +689,7 @@ mutable struct Profiler{Q}
     names::Vector{String}
     host_ns::Vector{Vector{Float64}}    # one ring per pass
     gpu_ns::Vector{Vector{Float64}}
+    sampled::Vector{UInt64}
     pending::Bool
 end
 

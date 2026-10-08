@@ -655,7 +655,8 @@ shaders.
 """
 hostprofiler(passes) =
     Profiler(nothing, NaN, 0, [pp.pass.name for pp in passes],
-             [Float64[] for _ in passes], [Float64[] for _ in passes], false)
+             [Float64[] for _ in passes], [Float64[] for _ in passes],
+             zeros(UInt64, length(passes)), false)
 
 """
     gpupasstime!(device) -> Float64

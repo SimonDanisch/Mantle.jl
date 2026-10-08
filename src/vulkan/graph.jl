@@ -563,7 +563,7 @@ function Profiler(ctx, passes)
     period = Float64(VK.get_physical_device_properties(ctx.physical_device).limits.timestamp_period)
     period > 0 || error("this device reports timestampPeriod = 0, so it cannot time passes")
     Profiler(pool, period, nslots, [pp.pass.name for pp in passes],
-             [Float64[] for _ in 1:n], [Float64[] for _ in 1:n], false)
+             [Float64[] for _ in 1:n], [Float64[] for _ in 1:n], zeros(UInt64, n), false)
 end
 
 
@@ -1218,6 +1218,10 @@ function collect!(prof::Profiler, dev::LavaDevice)
         # A GPU timestamp is a free-running counter and is never 0, so this
         # tells the two apart without a wait.
         (raw[lo] == 0 || raw[hi] == 0) && continue
+        # …and a frame already sampled, read again because the next one has not
+        # reset the slots yet (`Profiler`'s `sampled`).
+        raw[lo] == prof.sampled[i] && continue
+        prof.sampled[i] = raw[lo]
         ns = elapsed(raw[lo], raw[hi], prof.period_ns)
         ns === nothing || sample!(prof.gpu_ns[i], ns)
     end
