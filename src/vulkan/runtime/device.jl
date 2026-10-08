@@ -1337,10 +1337,14 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # front end it replaces is still the only one on hardware without it.
     has_mesh_shader = has_extension(phys_dev, "VK_EXT_mesh_shader")
 
-    # Device extensions
-    extensions = String[
-        "VK_KHR_swapchain",
-    ]
+    # Device extensions. A swapchain only where there is one: a headless device —
+    # lavapipe on a Mac — has none, and a window on it is not something to ask
+    # for. A device that advertises `VK_KHR_portability_subset` must have it
+    # enabled (the spec's rule, not a choice).
+    extensions = String[]
+    has_extension(phys_dev, "VK_KHR_swapchain") && push!(extensions, "VK_KHR_swapchain")
+    has_extension(phys_dev, "VK_KHR_portability_subset") &&
+        push!(extensions, "VK_KHR_portability_subset")
     if has_rt
         append!(extensions, [
             "VK_KHR_acceleration_structure",
