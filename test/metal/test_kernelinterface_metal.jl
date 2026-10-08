@@ -68,8 +68,9 @@ end
     @test Mantle.sharedbudget(a) > 0
     # Float64 is absent on purpose: Apple GPUs do not have it, which is the
     # divergence the shuffle and reduce type lists were separated for.
-    @test !(Float64 in KI.shfl_down_types(b))
-    @test KI.shfl_types(b) == KI.shfl_down_types(b)
+    @test !KI.supports_shuffle(b, Float64)
+    @test !(Float64 in KI.shfl_types(b))
+    @test all(T -> KI.supports_shuffle(b, T), KI.shfl_types(b))
     @test !(Float64 in KI.sub_group_reduce_add_types(b))
     @test Float32 in KI.sub_group_reduce_add_types(b)
     @test !KI.supports_float64(b)
@@ -90,13 +91,13 @@ end
 @testset "Metal: macro-free KernelInterface launch and absolute shuffle" begin
     b = Metal.MetalBackend()
     ids = Metal.zeros(UInt32, 37)
-    KI.@kernel b workgroupsize = 32 ndrange = 37 _ki_ids!(ids)
+    KI.@launch b workgroupsize = 32 ndrange = 37 _ki_ids!(ids)
     Metal.synchronize()
     @test Array(ids) == UInt32.(1:37)
 
     a = MtlArray(Float32.(1:32))
     out = Metal.zeros(Float32, 32)
-    KI.@kernel b workgroupsize = 32 _ki_shfl!(out, a)
+    KI.@launch b workgroupsize = 32 _ki_shfl!(out, a)
     Metal.synchronize()
     @test Array(out) == fill(32.0f0, 32)
 end

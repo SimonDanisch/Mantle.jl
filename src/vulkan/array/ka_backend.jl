@@ -1,6 +1,6 @@
 # KernelAbstractions.jl backend for Lava.jl
 #
-# Implements LavaBackend <: KA.GPU for Vulkan compute dispatch.
+# Implements LavaBackend <: KA.Backend for Vulkan compute dispatch.
 # Pattern follows AMDGPU.jl's ROCKernels implementation.
 
 import KernelAbstractions as KA
@@ -28,7 +28,7 @@ end
 # ── Backend struct ──
 
 """
-    LavaBackend <: KA.GPU
+    LavaBackend <: KA.Backend
 
 Lava's GPU compute backend: a device and the two queues its work goes out on.
 
@@ -51,7 +51,7 @@ code that also held a second device dispatched on whichever one was current. A
 backend built before a `reset_device!` is dead after it, like every array it
 allocated, and is rebuilt the same way they are.
 """
-struct LavaBackend <: KA.GPU
+struct LavaBackend <: KA.Backend
     dispatch_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
     upload_bq::SubmitChannel{VulkanQueue{VkContext},OneShot,UInt64,Submission{Union{Nothing,OneShot}}}
 end

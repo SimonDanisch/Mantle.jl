@@ -268,7 +268,7 @@ function procedural_resident!(d::MetalDevice, payload)
     for i in 1:fieldcount(typeof(payload))
         f = getfield(payload, i)
         f isa MtlArray || continue
-        make_resident!(d, f.data[])
+        make_resident!(d, f.data[].buffer)
     end
     return nothing
 end

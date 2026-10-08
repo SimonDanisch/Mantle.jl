@@ -216,47 +216,24 @@ function kikernel(f, dev, args)
     return KI.kernel_function(be, f, tt)
 end
 
-"""Normalise KI's scalar / tuple / empty launch extents to a 3-tuple."""
-@inline function ki_extent(x, default::Int)
-    x isa Integer && return (Int(x), default, default)
-    n = length(x)
-    n == 0 && return (default, default, default)
-    return (Int(x[1]),
-            n >= 2 ? Int(x[2]) : default,
-            n >= 3 ? Int(x[3]) : default)
-end
-
 """
-    ki_launch_extents(backend, ndrange, workgroupsize, numworkgroups;
+    ki_launch_extents(kernel::KI.Kernel, ndrange, workgroupsize, numgroups;
                       max_work_group_size) -> (wg, blocks)
 
 The workgroup size and workgroup count a KI launch resolves to, as 3-tuples.
 
-Shared by every backend's immediate KI launch (Vulkan's, the host's) and by
-Vulkan's `compile_dispatch`, which needs the same answer at COMPILE time — a
-recorded plan does no host work per run, so the extents have to be fixed when the
-plan is built. One copy, because two would be one place for the two paths to
-disagree about the same launch.
-
-`threads_to_workgroupsize` is KI's, and it SHAPES the device limit to the ndrange
-rather than putting it all on the first axis. Getting that wrong by hand cost 29%
-of SAM 2.1's encoder on the ROCm side; here it is upstream's arithmetic.
+KernelInterface's own `launch_geometry`, which calling a `KI.Kernel` runs before
+`KI.launch`. Vulkan's `compile_dispatch` needs the same answer at COMPILE time —
+a recorded plan does no host work per run, so the extents have to be fixed when
+the plan is built — and asking KI is what keeps the two paths from disagreeing
+about the same launch. It shapes the device limit to the ndrange rather than
+putting it all on the first axis; getting that wrong by hand cost 29% of SAM
+2.1's encoder on the ROCm side.
 """
-function ki_launch_extents(backend, ndrange, workgroupsize, numworkgroups;
+function ki_launch_extents(kernel::KI.Kernel, ndrange, workgroupsize, numgroups;
                            max_work_group_size::Int = typemax(Int))
-    limit = min(max_work_group_size, KI.max_work_group_size(backend))
-    if length(ndrange) > 0
-        nd = ki_extent(ndrange, 1)
-        wg = length(workgroupsize) > 0 ? ki_extent(workgroupsize, 1) :
-             ki_extent(KI.threads_to_workgroupsize(limit, nd), 1)
-        blocks = ntuple(i -> cld(nd[i], wg[i]), 3)
-    else
-        # KI's default is one workgroup of one workitem.
-        wg     = ki_extent(workgroupsize, 1)
-        blocks = ki_extent(numworkgroups, 1)
-    end
-    prod(wg) <= limit ||
-        throw(ArgumentError("workgroupsize $wg exceeds the device limit of $limit workitems"))
+    blocks, wg = KI.launch_geometry(kernel, numgroups, workgroupsize, ndrange,
+                                    max_work_group_size)
     return wg, blocks
 end
 

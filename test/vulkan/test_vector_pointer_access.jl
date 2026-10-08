@@ -78,12 +78,12 @@ end
     for (kern, n) in ((vpa_indexed_copy!, 1024), (vpa_byteaddr_copy!, 1024),
                       (vpa_aligned_copy!, 1024), (vpa_half_copy!, 2048))
         dst = LavaArray(zeros(Float16, length(x)))
-        KI.@kernel backend ndrange = n workgroupsize = 64 kern(dst, src, Int32(n))
+        KI.@launch backend ndrange = n workgroupsize = 64 kern(dst, src, Int32(n))
         @test Array(dst) == x
     end
 
     dst = LavaArray(zeros(Float16, length(x)))
-    KI.@kernel backend ndrange = 2048 workgroupsize = 64 vpa_split_swap!(dst, src, Int32(2048))
+    KI.@launch backend ndrange = 2048 workgroupsize = 64 vpa_split_swap!(dst, src, Int32(2048))
     @test Array(dst) == vec(reshape(x, 4, :)[[3, 4, 1, 2], :])
 
     # And the declaration: a 16-byte-aligned access says so to the driver.

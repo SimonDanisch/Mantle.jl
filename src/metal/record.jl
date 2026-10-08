@@ -351,7 +351,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
         wrapped = KI.Kernel(Mantle.backend(dev), kernel)
         nd = recordedrange(d.ndrange)
         group = d.group === nothing ? () : d.group
-        groups, threads = KI.auto_launch_sizes(wrapped, (), group, nd)
+        threads, groups = Mantle.ki_launch_extents(wrapped, nd, group, ())
         kernel.loggingEnabled && throw(ArgumentError(
             "record!: kernel $(entry) uses device-side logging, which needs a per-launch buffer"))
         state = recorded_state(dev, kernel)
@@ -386,7 +386,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     # will actually run: a kernel with a dynamic workgroup size is partitioned by
     # what its own pipeline can hold, and the context is rebuilt for the partition.
     if KA.workgroupsize(obj) <: KA.DynamicSize && workgroupsize === nothing
-        ws = Metal.MetalKernels.threads_to_workgroupsize(kernel.maxthreads, ndrange)
+        ws = KI.threads_to_workgroupsize(kernel.maxthreads, ndrange)
         iterspace, _ = KA.partition(obj, ndrange, ws)
         ctx = KA.mkcontext(obj, ndrange, iterspace)
         adapted = (Metal.mtlconvert(ctx), args...)
@@ -1153,8 +1153,8 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
         markgates!(e)
     end
     return MetalRecording(e.icb, e.segments, e.calls,
-                          e.ranges.data[], Int(e.ranges.offset),
-                          e.ranges, e.grids.data[], Int(e.grids.offset), e.grids,
+                          e.ranges.data[].buffer, Int(e.ranges.offset),
+                          e.ranges, e.grids.data[].buffer, Int(e.grids.offset), e.grids,
                           e.templ, e.aux, am.store, e.writers, e.ncommands,
                           e.encoded, MTL.MTLBuffer[],
                           MTL.ObjectiveC.id{MTL.MTLBuffer}[], Ref(-1))
@@ -1319,7 +1319,7 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
     push!(rec.resources, rec.aux)
     push!(rec.resources, rec.rangebuf)
     push!(rec.resources, rec.gridbuf)
-    push!(rec.resources, rec.templ.data[])
+    push!(rec.resources, rec.templ.data[].buffer)
     # Residency granted HERE, where the list is built, and nowhere per frame.
     #
     # This is a cache miss: the early return above means it runs only when a block

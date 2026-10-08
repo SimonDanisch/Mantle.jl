@@ -23,17 +23,18 @@ KI.supports_atomics(::LavaBackend) = true
 # `KernelInterface`'s docstring says a backend implements this only if it does
 # NOT support Float64, and Vulkan's `shaderFloat64` is core. It still has to be
 # stated: the `= true` default is declared on `KI.Backend`, and `LavaBackend` is
-# a `KA.GPU`, so nothing dispatched and a Float64 literal reaching
+# a `KA.Backend`, so nothing dispatched and a Float64 literal reaching
 # `DNNKernels.kernelnumber` threw `MethodError` rather than being kept. The
 # Metal backend states the other side of the same trait in
 # `src/metal/kernelinterface.jl`.
 KI.supports_float64(::LavaBackend) = true
 
-# Which element types `shfl_down` covers. It dispatches on a backend — a host
-# handle — so it is here, while the methods themselves are generated on the
-# device side. `KI_SHFL_TYPES` is the one list both read, so KI's own suite
+# Which element types `shfl_down` and `shfl` cover. They dispatch on a backend — a
+# host handle — so they are here, while the methods themselves are generated on
+# the device side. `KI_SHFL_TYPES` is the one list both read, so KI's own suite
 # cannot end up exercising a type Lava never generated.
-KI.shfl_down_types(::LavaBackend) = collect(KI_SHFL_TYPES)
+KI.supports_subgroups(::LavaBackend) = true
+KI.supports_shuffle(::LavaBackend, ::Type{T}) where {T} = T in KI_SHFL_TYPES
 KI.shfl_types(::LavaBackend) = collect(KI_SHFL_TYPES)
 
 # …and the same for the reduce-add, off its own list for the reason given beside
@@ -50,6 +51,10 @@ KI.sub_group_size(backend::LavaBackend) = caps(backend).subgroup
 
 KI.max_work_group_size(backend::LavaBackend) = caps(backend).workgrouplimit
 
+KI.max_work_group_dims(backend::LavaBackend) = max_workgroup_dims(vk_context(backend))
+
+KI.max_num_groups(backend::LavaBackend) = vk_context(backend).max_wg_dims
+
 KI.multiprocessor_count(backend::LavaBackend) = caps(backend).cores
 
 # `KI.caps(::LavaBackend)` is not written here — `caps(b::LavaBackend)` in
@@ -63,21 +68,15 @@ KI.multiprocessor_count(backend::LavaBackend) = caps(backend).cores
 # register pressure lowers it would report less, which is why KI asks per kernel
 # rather than once — VK_KHR_pipeline_executable_properties is where that number
 # would come from.
-KI.kernel_max_work_group_size(backend::LavaBackend, kernel; max_work_items::Int = typemax(Int)) =
-    min(KI.max_work_group_size(backend), max_work_items)
+KI.max_work_group_size(k::KI.Kernel{LavaBackend}) = KI.max_work_group_size(k.backend)
 
 # ── Launch ──────────────────────────────────────────────────────────────────
 #
-# KI's `@kernel` macro is sugar over three calls a backend supplies:
-#
-#     kernel_f = argconvert(backend, f)
-#     tt       = Tuple{map(Core.Typeof, map(x -> argconvert(backend, x), args))...}
-#     kernel   = kernel_function(backend, kernel_f, tt)
-#     kernel(args...; numworkgroups = …, workgroupsize = …)
-#
-# Note the kernel is invoked with the ORIGINAL args: `argconvert` exists to
-# derive the compiled signature, and the adaptation that pins device memory
-# happens at launch. That is Lava's split already, which is why this is an
+# Calling a `KI.Kernel` validates the launch keywords and resolves the geometry
+# (`KI.launch_geometry`), then calls `KI.launch` with three-dimensional workgroup
+# counts and sizes. The kernel is launched with the ORIGINAL args: `argconvert`
+# exists to derive the compiled signature, and the adaptation that pins device
+# memory happens here. That is Lava's split already, which is why this is an
 # adapter over `ka_launch!` and not a second launch path.
 
 """
@@ -91,7 +90,7 @@ KI.argconvert(::LavaBackend, x) = x
 
 # The signature is compiled from the actual arguments at launch, so `tt` is not
 # held here; `KI.Kernel` carries the function and the backend, which is all the
-# launch needs. `tt` still defaults, because KI documents the two-argument form.
+# launch needs.
 #
 # `name` is accepted and ignored: Lava's kernels are named after the function
 # they were compiled from, and there is nowhere to put an override that the
@@ -100,20 +99,10 @@ KI.kernel_function(backend::LavaBackend, @nospecialize(f), @nospecialize(tt) = T
                    name = nothing, kwargs...) =
     KI.Kernel(backend, f)
 
-function (k::KI.Kernel{LavaBackend})(args...;
-                                     numworkgroups = (), workgroupsize = (),
-                                     ndrange = (), max_work_group_size::Int = typemax(Int))
-    KI.check_launch_args(numworkgroups, workgroupsize, ndrange)
-
-    # "An ndrange with a zero-sized dimension … is not an error: the call must be
-    # a no-op and return `nothing` instead of launching." Same for an explicit
-    # zero workgroup count, which `cld` below would otherwise turn into one.
-    (length(ndrange) > 0 && any(==(0), ki_extent(ndrange, 1))) && return nothing
-    (length(numworkgroups) > 0 && any(==(0), ki_extent(numworkgroups, 1))) && return nothing
-
-    wg, blocks = ki_launch_extents(k.backend, ndrange, workgroupsize, numworkgroups;
-                                   max_work_group_size)
-
+function KI.launch(k::KI.Kernel{LavaBackend}, groups::Dims{3}, items::Dims{3}, args::Tuple;
+                   kwargs...)
+    isempty(kwargs) ||
+        throw(ArgumentError("Lava kernels take no launch keywords besides KernelInterface's, got $(keys(kwargs))"))
     # A `Buffer` or `GPURef` resolves to the array over its region, exactly as
     # `dispatch!` resolves one when it packs a declared pass. Without this a
     # resource is a legal argument to the declared path and an
@@ -140,7 +129,7 @@ function (k::KI.Kernel{LavaBackend})(args...;
         # `nothing` — zero-sized, hence dropped by both — to satisfy the same
         # contract.
         all_args = (nothing, map(a -> Adapt.adapt(adaptor, a), args)...)
-        ka_launch!(e, k.kern, all_args, blocks, wg, tlas)
+        ka_launch!(e, k.kern, all_args, groups, items, tlas)
     end
     return nothing
 end

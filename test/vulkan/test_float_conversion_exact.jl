@@ -32,7 +32,7 @@ end
     ch = randn(rng, Float32, n)
     r = 0.7310585f0
     out = LavaArray(zeros(Float16, n))
-    KI.@kernel backend ndrange = n workgroupsize = 64 fce_roundtrip!(
+    KI.@launch backend ndrange = n workgroupsize = 64 fce_roundtrip!(
         out, LavaArray(ah), LavaArray(ch), r, Int32(n))
     got = Array(out)
     rounded = [Float16(Float32(Float16(Float32(ah[i]) * r)) * ch[i]) for i in 1:n]

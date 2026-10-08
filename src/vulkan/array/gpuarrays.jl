@@ -160,42 +160,6 @@ const AnyLavaArray{T} = Union{LavaArray{T},
                               LinearAlgebra.Transpose{T, <:LavaArray},
                               LinearAlgebra.Adjoint{T, <:LavaArray}}
 
-"""
-Reducing a `PermutedDimsArray` into a device array is **ambiguous** without this.
-
-`Base.PermutedDimsArrays` specialises `mapreducedim!` on the *source* being a
-`PermutedDimsArray`, GPUArrays specialises it on the *destination* being a GPU
-array, and neither is more specific than the other:
-
-    mapreducedim!(f, op, R::AnyGPUArray, A::AbstractArray)              # GPUArrays
-    mapreducedim!(f, op, B::AbstractArray, A::PermutedDimsArray)        # Base
-
-So `sum(permuted; dims)` throws `MethodError: ... is ambiguous` rather than
-running. Fixing both argument positions at once is strictly more specific than
-either candidate, which is what resolves it; the body is GPUArrays' — Base's
-would iterate and trip the scalar-indexing guard.
-
-Found on Kokoro, whose duration encoder transposes on nearly every line: the
-graph converter folds each permute into buffer metadata, they nest, and the
-layer norm that reduces the result arrived holding a **five-deep**
-`PermutedDimsArray`. `Base.tail`-style unwrapping is not needed — the parent
-only has to bottom out in something GPUArrays can reduce.
-"""
-Base.mapreducedim!(f, op, R::LavaArray, A::PermutedDimsArray) =
-    GPUArrays.mapreducedim!(f, op, R, A)
-
-# ...and the same again, matching Base's *exact* constraints plus the device
-# destination. Specialising only on `R` is NOT enough: Base's method also pins
-# `op` to a union of seven reducers and requires `ndims(R) == ndims(A)`, so it
-# is more specific in two places where the method above is more specific in one,
-# and neither wins. This one is more specific in all three, which is what
-# actually settles it — `sum(::PermutedDimsArray; dims)` reaches here.
-const REDUCERS = Union{typeof(&), typeof(+), typeof(Base._extrema_rf),
-                       typeof(Base.add_sum), typeof(max), typeof(min), typeof(|)}
-Base.mapreducedim!(f, op::REDUCERS, R::LavaArray{T, N},
-                   A::PermutedDimsArray{S, N, perm, iperm}) where {T, S, N, perm, iperm} =
-    GPUArrays.mapreducedim!(f, op, R, A)
-
 # ── broadcast: always launch over a flat index space ──
 #
 # GPUArrays' `_copyto!` launches with `ndrange = size(dest)`, so an N-D

@@ -221,6 +221,19 @@ function device_subgroup_size(ctx::VkContext)
 end
 
 """
+    max_workgroup_dims(ctx) -> NTuple{3,Int}
+
+The device's `maxComputeWorkGroupSize`: workitems per workgroup along each axis,
+queried once. `workgroup_limit(ctx)` bounds their product.
+"""
+function max_workgroup_dims(ctx::VkContext)
+    d = ctx.caches.wg_size_dims
+    d[1] != 0 && return d
+    s = VK.get_physical_device_properties(ctx.physical_device).limits.max_compute_work_group_size
+    ctx.caches.wg_size_dims = (Int(s[1]), Int(s[2]), Int(s[3]))
+end
+
+"""
     subgroup_size_control(ctx) -> SubgroupSizeControl
 
 The device's `VkPhysicalDeviceSubgroupSizeControlProperties`, queried once.

@@ -395,10 +395,10 @@ kernel void trace_proc(
         # Residency for the structures the TLAS points at: bound alone, its
         # BLASes are not resident and traversal silently misses everything.
         Metal.MTL.use!(cce, [b.handle for b in hw.blas_list], Metal.MTL.ReadUsage)
-        Metal.MTL.set_buffer!(cce, out.data[], 0, 2)
+        Metal.MTL.set_buffer!(cce, out.data[].buffer, 0, 2)
         Metal.MTL.set_visible_function_table!(cce, tbl, 2)
-        Metal.MTL.set_buffer!(cce, org.data[], 0, 4)
-        Metal.MTL.set_buffer!(cce, dir.data[], 0, 5)
+        Metal.MTL.set_buffer!(cce, org.data[].buffer, 0, 4)
+        Metal.MTL.set_buffer!(cce, dir.data[].buffer, 0, 5)
         Metal.MTL.dispatchThreads!(cce, Metal.MTL.MTLSize(nr,1,1), Metal.MTL.MTLSize(nr,1,1))
     end
     Metal.MTL.commit!(cb)
@@ -588,11 +588,11 @@ kernel void trace_radius(
         Metal.MTL.set_function!(cce, pipe)
         Metal.MTL.set_acceleration_structure!(cce, hw.built.handle, 1)
         Metal.MTL.use!(cce, [b.handle for b in hw.blas_list], Metal.MTL.ReadUsage)
-        Metal.MTL.set_buffer!(cce, out.data[], 0, 2)
+        Metal.MTL.set_buffer!(cce, out.data[].buffer, 0, 2)
         Metal.MTL.set_visible_function_table!(cce, tbl, 2)
-        Metal.MTL.set_buffer!(cce, org.data[], 0, 4)
-        Metal.MTL.set_buffer!(cce, dir.data[], 0, 5)
-        Metal.MTL.set_buffer!(cce, drad.data[], 0, 6)
+        Metal.MTL.set_buffer!(cce, org.data[].buffer, 0, 4)
+        Metal.MTL.set_buffer!(cce, dir.data[].buffer, 0, 5)
+        Metal.MTL.set_buffer!(cce, drad.data[].buffer, 0, 6)
         Metal.MTL.dispatchThreads!(cce, Metal.MTL.MTLSize(nr,1,1), Metal.MTL.MTLSize(nr,1,1))
     end
     Metal.MTL.commit!(cb)

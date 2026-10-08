@@ -96,14 +96,11 @@ end
         end
     end
 
-    # The other half of the contract: an explicit `init` must ignore the
-    # destination's contents, because `_mapreduce` hands over uninitialized
-    # memory. Breaking this would break every `sum`/`prod` on the package.
-    @testset "an explicit init overwrites instead" begin
+    # The other half of the contract: an explicit `init` is applied once per
+    # result, as in Base, whatever memory the result is allocated in.
+    @testset "an explicit init starts each result" begin
         A = LavaArray(Float32[1 2; 3 4])
-        R = LavaArray(Float32[999, 999])
-        GPUArrays.mapreducedim!(identity, +, R, A; init = 0.0f0)
-        @test Array(R) == Float32[3, 7]
+        @test Array(sum(A; dims = 2, init = 10.0f0)) == reshape(Float32[13, 17], 2, 1)
 
         @test sum(LavaArray(Float32[1, 2, 3, 4])) == 10.0f0
         @test Array(sum(LavaArray(Float32[1 2; 3 4]); dims = 2)) == reshape(Float32[3, 7], 2, 1)

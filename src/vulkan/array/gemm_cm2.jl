@@ -322,7 +322,7 @@ function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
                             "device's limit of $(dev.workgrouplimit)"))
     span = 4 * GEMM_TILE
     KI.Kernel(backend, gemm_cm2_sg!)(C, A, B, Int32(M), Int32(N), Int32(K), Val(nw);
-                                     numworkgroups = (cld(M, span), cld(N, nw * span)),
+                                     numgroups = (cld(M, span), cld(N, nw * span)),
                                      workgroupsize = nw * 32)
     C
 end
@@ -365,7 +365,7 @@ function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
     # suite run on RADV reached it.
     KI.Kernel(backend, gemm_cm2!)(C, A, B, Int32(M), Int32(N), Int32(K),
                                   Val(BM), Val(BN), Val(BK), Val(unroll), Val(cmode);
-                                  numworkgroups = (cld(M, BM), cld(N, BN)),
+                                  numgroups = (cld(M, BM), cld(N, BN)),
                                   workgroupsize = NT)
     C
 end

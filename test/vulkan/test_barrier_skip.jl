@@ -42,7 +42,7 @@ const KA = KernelAbstractions
             mod = parse(LLVM.Module, ir)
             memo = Dict{LLVM.Function,Bool}()
             barrier = "llvm.spv.group.memory.barrier.with.group.sync"
-            fns = LLVM.functions(mod)
+            fns = mod.functions
             # Direct barrier wrapper, a transitive caller, and a plain helper.
             @test Lava.function_contains_barrier(fns["sync_wrapper"], barrier, memo)
             @test Lava.function_contains_barrier(fns["calls_wrapper"], barrier, memo)

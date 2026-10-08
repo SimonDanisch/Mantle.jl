@@ -584,12 +584,12 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
             # the host pointer means nothing to it. Same verb `deviceaddress`
             # uses, and the same trap as any buffer reached by a stored address
             # -- it also has to be made resident, below.
-            UInt64(t.proc_payload.data[].gpuAddress) +
+            UInt64(t.proc_payload.data[].buffer.gpuAddress) +
                 UInt64(t.proc_payload.offset * sizeof(UInt8)),
         ])
         # The table and the payload are reached through the argument buffer, so
         # Metal cannot infer their residency any more than it can the TLAS's.
-        make_resident!(t.device, t.proc_table, t.proc_payload.data[])
+        make_resident!(t.device, t.proc_table, t.proc_payload.data[].buffer)
         # …and everything the payload POINTS AT. Its bytes hold device addresses,
         # which Metal cannot follow for residency.
         procedural_resident!(t.device, t.procedural)

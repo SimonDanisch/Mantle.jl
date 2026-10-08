@@ -97,7 +97,6 @@ include("array/gpuarrays.jl")
 include("array/gemm.jl")
 include("array/gemm_cm2.jl")
 include("array/mapreduce.jl")
-include("array/accumulate.jl")
 include("runtime/debug.jl")
 include("runtime/diagnostics.jl")   # gpu_memory_usage, dump_state
 include("runtime/external.jl")

@@ -1436,7 +1436,7 @@ metal_texture(t) = error("not something Metal can attach as a render target: $(t
 
 """The `MTLBuffer` behind a draw argument, or `nothing` if it is not one."""
 metal_buffer(x::MTLm.MTLBuffer) = x
-# `pointer`, not `x.data[]`: an `MtlArray` may be a VIEW over a pool region — a
+# `pointer`, not `x.data[].buffer`: an `MtlArray` may be a VIEW over a pool region — a
 # transient's storage always is — and the buffer is the one its `MtlPtr` names.
 metal_buffer(x::Metal.MtlArray) = pointer(x).buffer
 metal_buffer(@nospecialize(x))  = nothing

@@ -685,6 +685,8 @@ mutable struct DeviceCaches
     # 0 means "not yet queried" — the device never reports 0.
     subgroup_size::Int
     subgroup_control::Union{Nothing,SubgroupSizeControl}
+    # `maxComputeWorkGroupSize`; (0, 0, 0) until `max_workgroup_dims` queries it
+    wg_size_dims::NTuple{3,Int}
     # What kernels ask the device — see `DeviceCaps`. `nothing` until first read;
     # built from this context, so a second device cannot be handed the first's.
     caps::Union{Nothing,DeviceCaps}
@@ -751,7 +753,7 @@ end
 DeviceCaches() = DeviceCaches(
     Dict{UInt64,LavaComputePipeline}(), UInt64[],
     IdDict{LavaGPUKernel,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
-    MemoryPolicy(), 0, nothing, nothing, false,
+    MemoryPolicy(), 0, nothing, (0, 0, 0), nothing, false,
     Dict{UInt64,VulkanCompiledGraphicsPipeline}(),
     Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     Dict{UInt64,Tuple{UInt,UInt64}}(),

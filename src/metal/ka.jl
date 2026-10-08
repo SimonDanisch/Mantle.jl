@@ -3,7 +3,7 @@
 # Two methods. That is the whole compute path, and it is the measurement this
 # refactor was for: the Vulkan backend's equivalent is `array/ka_backend.jl`,
 # 1,122 lines, because it implements a KernelAbstractions backend from scratch —
-# `LavaBackend <: KA.GPU`, `launch_config`, `mkcontext`, ndrange padding, the
+# `LavaBackend <: KA.Backend`, `launch_config`, `mkcontext`, ndrange padding, the
 # kernel object, indirect dispatch.
 #
 # None of that is needed here twice over. Metal.jl already IS a KA backend, so

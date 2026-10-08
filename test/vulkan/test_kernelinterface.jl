@@ -11,7 +11,7 @@ can get wrong quietly:
     backend that trusts the interface.
   * a **zero-sized `ndrange`** is a no-op returning `nothing`, not an error.
     Launching over an empty array is ordinary.
-  * `ndrange` and `numworkgroups` are **mutually exclusive** — one says how much
+  * `ndrange` and `numgroups` are **mutually exclusive** — one says how much
     work there is, the other says how it is cut up.
   * a `workgroupsize` above the device's limit is an **error at the call**, not a
     dispatch the driver rejects later with a validation message.
@@ -19,7 +19,7 @@ can get wrong quietly:
     32 or 64 on RDNA3 depending on how the driver compiled the shader, 8 on
     lavapipe, and nothing may hard-code it.
 
-Both launch forms are exercised. `KI.@kernel` is sugar over `argconvert` /
+Both launch forms are exercised. `KI.@launch` is sugar over `argconvert` /
 `kernel_function` / calling the `Kernel`, and a backend can satisfy the macro
 while leaving one of the three wrong — the macro-less form is what catches that.
 """
@@ -66,13 +66,13 @@ end
 
     @testset "launch, macro form" begin
         a = LavaArray(zeros(Float32, 64))
-        KI.@kernel backend ndrange = 64 ki_fill_kernel(a)
+        KI.@launch backend ndrange = 64 ki_fill_kernel(a)
         KI.synchronize(backend)
         @test all(Array(a) .== 1.0f0)
     end
 
     @testset "launch, macro-less form" begin
-        # The three calls `KI.@kernel` expands to, spelled out. A backend can
+        # The three calls `KI.@launch` expands to, spelled out. A backend can
         # satisfy the macro and still have `argconvert` or `kernel_function`
         # wrong, because the macro is free to route around them.
         a = LavaArray(zeros(Float32, 64))
@@ -98,25 +98,25 @@ end
         n, wg = 64, 16
 
         got = LavaArray(zeros(UInt32, n))
-        KI.@kernel backend ndrange = n workgroupsize = wg ki_global_id_kernel(got)
+        KI.@launch backend ndrange = n workgroupsize = wg ki_global_id_kernel(got)
         KI.synchronize(backend)
         @test Array(got) == UInt32.(1:n)
 
         got = LavaArray(zeros(UInt32, n))
-        KI.@kernel backend ndrange = n workgroupsize = wg ki_local_id_kernel(got)
+        KI.@launch backend ndrange = n workgroupsize = wg ki_local_id_kernel(got)
         KI.synchronize(backend)
         # 1:wg, repeated once per workgroup. A 0-based leak shows up as a zero.
         @test Array(got) == UInt32.(repeat(1:wg, n ÷ wg))
 
         got = LavaArray(zeros(UInt32, n))
-        KI.@kernel backend ndrange = n workgroupsize = wg ki_group_id_kernel(got)
+        KI.@launch backend ndrange = n workgroupsize = wg ki_group_id_kernel(got)
         KI.synchronize(backend)
         @test Array(got) == UInt32.(repeat(1:(n ÷ wg), inner = wg))
 
         # A COUNT is a count in both numbering schemes, so this one must NOT
         # gain a one — the mirror-image mistake to the three above.
         got = LavaArray(zeros(UInt32, n))
-        KI.@kernel backend ndrange = n workgroupsize = wg ki_num_groups_kernel(got)
+        KI.@launch backend ndrange = n workgroupsize = wg ki_num_groups_kernel(got)
         KI.synchronize(backend)
         @test all(Array(got) .== UInt32(n ÷ wg))
     end
@@ -130,18 +130,20 @@ end
         # workgroup, which is a dispatch that writes nothing but still runs.
         @test kernel(a; ndrange = 0) === nothing
         @test kernel(a; ndrange = (4, 0)) === nothing
-        @test kernel(a; numworkgroups = 0) === nothing
+        @test kernel(a; numgroups = 0) === nothing
         @test all(Array(a) .== 0.0f0)
 
         # One says how much work there is, the other how it is cut up.
-        @test_throws ArgumentError kernel(a; ndrange = 4, numworkgroups = 1)
+        @test_throws ArgumentError kernel(a; ndrange = 4, numgroups = 1)
 
         # Over the device's limit, refused here rather than by the driver.
         limit = KI.max_work_group_size(backend)
-        @test_throws ArgumentError kernel(a; numworkgroups = 1, workgroupsize = limit + 1)
-        # `max_work_group_size` also bounds it from the call site.
-        @test_throws ArgumentError kernel(a; ndrange = 4, workgroupsize = 4,
-                                          max_work_group_size = 2)
+        @test_throws ArgumentError kernel(a; numgroups = 1, workgroupsize = limit + 1)
+        # A per-axis size above the device's per-axis limit, likewise.
+        dims = KI.max_work_group_dims(backend)
+        @test_throws ArgumentError kernel(a; numgroups = 1, workgroupsize = (1, 1, dims[3] + 1))
+        # `max_work_group_size` bounds the size KI picks; it has to be positive.
+        @test_throws ArgumentError kernel(a; ndrange = 4, max_work_group_size = 0)
     end
 
     @testset "device queries" begin
@@ -166,9 +168,16 @@ end
 
         # Per kernel, because register pressure can lower it; the device limit
         # until the driver gives a better number, and never above it.
-        @test KI.kernel_max_work_group_size(backend, ki_fill_kernel) == limit
-        @test KI.kernel_max_work_group_size(backend, ki_fill_kernel;
-                                            max_work_items = 32) == 32
+        kernel = KI.kernel_function(backend, ki_fill_kernel,
+                                    Tuple{Lava.LavaDeviceArray{Float32, 1}})
+        @test KI.max_work_group_size(kernel) == limit
+        @test KI.launch_configuration(kernel; max_work_group_size = 32).workgroupsize == 32
+
+        # Per axis, and per launch, from the device's limits.
+        dims = KI.max_work_group_dims(backend)
+        @test dims isa NTuple{3, Int} && all(>(0), dims) && prod(dims) >= limit
+        groups = KI.max_num_groups(backend)
+        @test groups isa NTuple{3, Int} && all(>(0), groups)
 
         # `allocate` goes through the same path as `KA.allocate`.
         a = KI.allocate(backend, Float32, (8,))
@@ -185,12 +194,15 @@ end
         inlava(f, T) = !isempty(Base._methods_by_ftype(Tuple{typeof(f), T, Int},
                                                          Lava.lava_method_table, -1,
                                                          Base.get_world_counter()))
-        types = KI.shfl_down_types(backend)
+        @test KI.supports_subgroups(backend)
+        types = filter(T -> KI.supports_shuffle(backend, T),
+                       [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+                        Float16, Float32, Float64])
         @test Set(types) == Set(Lava.KI_SHFL_TYPES)
         for T in types
             @test inlava(KI.shfl_down, T)
         end
-        @test KI.shfl_types(backend) == types
+        @test Set(KI.shfl_types(backend)) == Set(types)
         for T in types
             @test inlava(KI.shfl, T)
         end

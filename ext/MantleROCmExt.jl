@@ -610,7 +610,7 @@ Mantle.devicesized(::ROCmCompiledDispatch) = false
 Compile a macro-free kernel through `KernelInterface`.
 
 `Mantle.kikernel` reaches `KI.kernel_function`, which is `hipfunction` here, and
-`KI.auto_launch_sizes` is the launch configuration. Both happen HERE and neither
+KernelInterface's `launch_geometry` is the launch configuration. Both happen HERE and neither
 happens per run: a capture cannot contain host work, and a replay has none to do.
 
 **Not 40 lines of this file doing it by hand.** Reading whether a workgroup size
@@ -619,8 +619,8 @@ call substitutes a
 default of its own for a `DynamicSize` kernel — so the occupancy autotune never
 ran, and 1,014 of SAM 2.1's broadcast kernels replayed in the wrong group shape
 for 29% of the encoder (647.3 ms recorded against 454.9 eager; 460.8 after).
-`auto_launch_sizes` is the same three steps done once, upstream, where every
-backend gets them: `kernel_max_work_group_size` for the occupancy limit,
+`launch_geometry` is the same three steps done once, upstream, where every
+backend gets them: `launch_configuration` for the occupancy limit,
 `threads_to_workgroupsize` to SHAPE it to the ndrange — the step whose absence
 was the bug — then `cld.(ndrange, workgroupsize)`.
 """
@@ -632,10 +632,10 @@ function kicompile(c::Mantle.Compile{ROCmDevice}, dev::ROCmDevice, d::Mantle.Dis
     kern = Mantle.kikernel(d.kernel, dev, args)
     wgin = d.group === nothing ? () :
            (d.group isa Integer ? (Int(d.group),) : map(Int, Tuple(d.group)))
-    ng, wg = KI.auto_launch_sizes(kern, (), wgin, ndt)
+    wg, ng = Mantle.ki_launch_extents(kern, ndt, wgin, ())
     # The tuples, not their products: see `ROCmCompiledDispatch`. This is the
-    # same call `AMDGPU`'s own `KI.Kernel` launch makes, and it takes up to
-    # three dimensions on either.
+    # geometry calling a `KI.Kernel` resolves before `KI.launch`, so a replay
+    # launches the shape an immediate call would.
     return ROCmCompiledDispatch(kern.kern, nothing, args, d.args, wg, ng)
 end
 

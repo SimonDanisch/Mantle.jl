@@ -93,7 +93,7 @@ end
 
         # One level now: the cache is a field on the context, so there is no
         # outer dict to iterate by mistake.
-        cache = Mantle.linked_kernel_cache(Mantle.vk_context())
+        cache = Mantle.vk_context().caches.linked
         @test !isempty(cache)
 
         # All byval_sizes non-negative. Every entry is still checked, but as ONE

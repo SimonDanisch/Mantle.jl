@@ -121,7 +121,7 @@ end
 # The MTLBuffer behind a device array, and the byte offset into it. Mantle's
 # `deviceview` hands out borrowed `MtlArray`s over pool regions, so the offset
 # is load-bearing — binding the buffer at 0 would read another tenant's bytes.
-_mtlbuffer(a::MtlArray) = (a.data[], a.offset * sizeof(eltype(a)))
+_mtlbuffer(a::MtlArray) = (a.data[].buffer, a.offset * sizeof(eltype(a)))
 
 """
     trace_closest_hits!(hits, rays, tlas, n_rays; cull_mask = 0xFF)
