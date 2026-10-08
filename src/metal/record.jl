@@ -562,6 +562,10 @@ struct MetalRecording
     # exists to avoid. Both are rebuilt together and only together; `resources`
     # is what keeps the objects alive.
     residentids::Vector{MTL.ObjectiveC.id{MTL.MTLBuffer}}
+    # The pool blocks' records of which queue last used them (`managedbuffer`),
+    # rebuilt with `resources`: a replay claims them, so that a host read through
+    # any view of a block waits for it (`claimbuffers!`).
+    managed::Vector{Metal.Managed}
     nblocks::Base.RefValue{Int}
 end
 
@@ -1157,7 +1161,7 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
                           e.ranges, e.grids.data[].buffer, Int(e.grids.offset), e.grids,
                           e.templ, e.aux, am.store, e.writers, e.ncommands,
                           e.encoded, MTL.MTLBuffer[],
-                          MTL.ObjectiveC.id{MTL.MTLBuffer}[], Ref(-1))
+                          MTL.ObjectiveC.id{MTL.MTLBuffer}[], Metal.Managed[], Ref(-1))
 end
 
 """
@@ -1308,8 +1312,11 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
     # frame would not notice it.
     n = lock(p.lock) do
         empty!(rec.resources)
+        empty!(rec.managed)
         for (_, blocks) in p.blocks, b in blocks
-            b.memory isa MTL.MTLBuffer && push!(rec.resources, b.memory)
+            b.memory isa MTL.MTLBuffer || continue
+            push!(rec.resources, b.memory)
+            push!(rec.managed, managedbuffer(d, b.memory))
         end
         p.blockgen[]
     end
@@ -1389,6 +1396,9 @@ function replay!(d::MetalDevice, recs::Union{Tuple{MetalRecording},Vector{MetalR
     for rec in recs
         canrun(d.queue, rec) || refusereplay(d.queue)
         ensureresident!(d, rec)
+    end
+    for rec in recs
+        claimbuffers!(batchqueue(d), rec.managed)
     end
     sub = opensubmit!(d, first(recs).residentids)
     for k in eachindex(recs)

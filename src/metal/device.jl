@@ -423,6 +423,25 @@ has to see that claim.
 """
 managedbuffer(d::MetalDevice, buf::MTL.MTLBuffer) =
     get!(() -> Metal.Managed(buf), d.managed, Base.bitcast(UInt, pointer(buf)))
+
+"""
+    claimbuffers!(bq, managed)
+
+Record that `bq`'s next submission uses the buffers of `managed`, as Metal.jl's own
+launches do for theirs, so that a host read through a view of one waits for it. A
+buffer another queue may still be using is waited for first, without the lock.
+"""
+function claimbuffers!(bq::Metal.BatchedCommandQueue, managed::Vector{Metal.Managed})
+    while true
+        conflict = Base.@lock Metal.submission_lock begin
+            i = findfirst(m -> !Metal.can_take_ownership(m, bq), managed)
+            i === nothing && foreach(m -> Metal.take_ownership!(m, bq), managed)
+            i === nothing ? nothing : managed[i]
+        end
+        conflict === nothing && return
+        Metal.synchronize(conflict)
+    end
+end
 # A heap is freed by releasing it: `Metal.free` is the buffer path (it goes
 # through `MTLBuffer`'s own deallocation), and a heap's textures die with it.
 rawfree(::MetalDevice, heap::MTL.MTLHeap) = (Metal.ObjectiveC.release(heap); nothing)
