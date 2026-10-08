@@ -91,6 +91,7 @@ julia = "1.12"
 # KernelAbstractions, Lava, Vulkan, ColorTypes, StaticArrays, LinearAlgebra — is
 # a hard dependency now, which is what moving the runtime here means.
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+Lavapipe_jll = "89601188-ea2b-501d-a121-fa144db6cabf"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SPIRV_LLVM_Backend_jll = "4376b9bf-cff8-51b6-bb48-39421dff0d0c"
@@ -100,5 +101,5 @@ StructArrays = "09ab397b-f2b6-538f-b94a-2f83cf4a842a"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["JLD2", "Logging", "Random", "SPIRV_LLVM_Backend_jll", "SparseArrays",
+test = ["JLD2", "Lavapipe_jll", "Logging", "Random", "SPIRV_LLVM_Backend_jll", "SparseArrays",
         "Statistics", "StructArrays", "Test"]
