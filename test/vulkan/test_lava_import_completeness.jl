@@ -308,7 +308,20 @@ end
     # verb that records what a pass touches (`graph/build.jl`); GPUCompiler's is an
     # internal of its Metal target (`src/metal.jl`) that Mantle never calls. Not
     # imported, not extended, and the two never meet.
+    #
+    # Eight more, reviewed 2026-10-08, all names the dependencies ADDED in the move
+    # to the newest stack and none of them a Mantle definition meant to extend one:
+    # LLVM.jl 10's loop analysis and pass-manager names (`Loop`, `access`,
+    # `disjoint`, `invalidate!`) against the graph's own; KernelAbstractions 0.10's
+    # launch configuration against the graph's `Launch` record (`graph/kalaunch.jl`);
+    # AcceleratedKernels 0.5's sort helpers `slice` and `_lower` against the graph's
+    # sub-range and the geometry-stage lowering; and Metal.jl's `claim!`, its
+    # buffer-ownership step, against the lifetime claim in `graph/lifetime.jl`.
+    # `src/metal/` takes ownership through `Metal.take_ownership!`, qualified.
     known = [(:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
+             (:Launch, :KernelAbstractions), (:Loop, :LLVM), (:_lower, :AcceleratedKernels),
+             (:access, :LLVM), (:claim!, :Metal), (:disjoint, :LLVM),
+             (:invalidate!, :LLVM), (:slice, :AcceleratedKernels),
              (:Mat4f, :GeometryBasics), (:Pass, :LLVM), (:Window, :GLFW),
              (:alignment, :LLVM), (:allocate, :KernelAbstractions),
              (:backend, :KernelAbstractions), (:count, :AcceleratedKernels),

@@ -545,11 +545,15 @@ end
 
 # Slow enough that a submission is still in flight when the next line runs:
 # every element spins, and the total is far past what a fence poll sees pass.
+# The loop reads its step from the array, so no driver can evaluate it at
+# compile time: with a constant step it is a constant, and a kernel that is
+# folded away has signalled before the next line runs.
 @kernel function arena_slow!(a)
     i = @index(Global)
+    @inbounds step = a[i]
     acc = 0f0
     for k in 1:2_000_000
-        acc += sin(Float32(k) * 1f-3)
+        acc += sin(Float32(k) * step)
     end
     @inbounds a[i] = acc
 end
@@ -589,6 +593,7 @@ end
     # command the device is still running can name these bytes. A slow kernel
     # keeps the timeline behind the value the region is stamped with.
     scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
+    fill!(scratch, 1f-3)
     arena_slow!(M.backend(dev), 16)(scratch; ndrange = 16)
     @test !isempty(dev.bq.outstanding)
     M.free!(b)
