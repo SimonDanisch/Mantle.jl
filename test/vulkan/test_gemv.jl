@@ -35,6 +35,16 @@ relerr(got, want) = maximum(abs, got .- want) / max(maximum(abs, want), eps())
 # medians hold to within 1% over eight runs.
 gputime(f) = sum(r -> r.median_ns, Mantle.with_dispatch_timing(f))
 
+# GPU time of `a` and of `b`, measured in alternation and each its fastest of
+# `rounds`. One measurement of each, one after the other, compares two different
+# clock states: inside the full suite the 8060S once timed `gemv!` at 25.9 us,
+# where it takes 9.9 us on its own, and an RTX 3070 laptop ramps its clock by an
+# order of magnitude within a testset.
+function interleaved(a, b; rounds = 5)
+    ts = [(gputime(a), gputime(b)) for _ in 1:rounds]
+    return minimum(first, ts), minimum(last, ts)
+end
+
 @testset "gemv" begin
     backend = LavaBackend()
 
@@ -163,8 +173,7 @@ gputime(f) = sum(r -> r.median_ns, Mantle.with_dispatch_timing(f))
             rm() = (for _ in 1:iters; mul!(C2, W, x2); end)
             for _ in 1:3; rg(); rm(); end
             KA.synchronize(backend)
-            tg = gputime(rg)
-            tm_ = gputime(rm)
+            tg, tm_ = interleaved(rg, rm)
             @info "gemv(transposed) vs mul! at ($M,$K), GPU" gemv_us=tg/1e3 mul_us=tm_/1e3 speedup=tm_/tg
             @test tm_ / tg > 1.1
         end
@@ -195,8 +204,7 @@ gputime(f) = sum(r -> r.median_ns, Mantle.with_dispatch_timing(f))
         rm() = (for _ in 1:iters; mul!(C2, A2, B); end)
         for _ in 1:3; rg(); rm(); end
         KA.synchronize(backend)
-        tg = gputime(rg)
-        tm = gputime(rm)
+        tg, tm = interleaved(rg, rm)
         @info "gemv vs mul! at (1,$K)@($K,$N), GPU" gemv_us=tg/1e3 mul_us=tm/1e3 speedup=tm/tg
         # Measured 6.4x in GPU time on the 8060S, 3.5x in wall clock when the
         # kernel was written. The floor is deliberately far below that: this asserts
