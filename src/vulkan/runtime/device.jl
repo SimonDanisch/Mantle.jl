@@ -1315,8 +1315,12 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # cores). Probed once here; kernels pick a coopmat or a scalar
     # instantiation from `ctx.coopmat_available` / `ctx.coopmat_shapes`.
     #
-    # Uses the portable VK_KHR_cooperative_matrix.
-    has_coopmat = has_extension(phys_dev, "VK_KHR_cooperative_matrix")
+    # Uses the portable VK_KHR_cooperative_matrix. The FEATURE, not only the
+    # extension: lavapipe on a Mac lists the extension with `cooperative_matrix`
+    # off, and asking for it fails device creation with FEATURE_NOT_PRESENT.
+    has_coopmat = has_extension(phys_dev, "VK_KHR_cooperative_matrix") &&
+        VK.get_physical_device_features_2(phys_dev,
+            VK.PhysicalDeviceCooperativeMatrixFeaturesKHR).next.cooperative_matrix
     # VK_NV_cooperative_matrix2 layers per-element operations, row reductions,
     # flexible dimensions and tensor addressing onto the KHR matrices. Which of
     # its seven sub-features are actually on is read back below, after device
