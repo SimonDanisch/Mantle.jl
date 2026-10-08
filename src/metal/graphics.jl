@@ -845,9 +845,13 @@ function framebuffer!(d::MetalDevice)
 end
 
 """Commit a command buffer this backend opened. Every caller of `framebuffer!`
-ends with this or with `submitwait!`."""
+ends with this or with `submitwait!`.
+
+Through `Metal.submit_command_buffer`, which commits Metal.jl's open batch first and
+claims the arrays the passes bound (`metal_buffer`) for this queue, so host reads of
+them wait for this buffer."""
 function commit!(cb::MTLm.MTLCommandBuffer)
-    MTLm.commit!(cb)
+    Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb)
     committed!(cb)
     return cb
 end
@@ -1436,9 +1440,12 @@ metal_texture(t) = error("not something Metal can attach as a render target: $(t
 
 """The `MTLBuffer` behind a draw argument, or `nothing` if it is not one."""
 metal_buffer(x::MTLm.MTLBuffer) = x
-# `pointer`, not `x.data[].buffer`: an `MtlArray` may be a VIEW over a pool region — a
-# transient's storage always is — and the buffer is the one its `MtlPtr` names.
-metal_buffer(x::Metal.MtlArray) = pointer(x).buffer
+# Through `unsafe_convert`, which also records the array as used by the next command
+# buffer this task submits: `commit!` claims it for the queue, so that a host read of the
+# array (`Array(x)`) waits for the pass. Metal.jl waits per buffer, for the queue that
+# last claimed it, and an unclaimed buffer is read at once. An `MtlArray` may be a VIEW
+# over a pool region — a transient's storage always is — and this is its block's buffer.
+metal_buffer(x::Metal.MtlArray) = Base.unsafe_convert(MTLm.MTLBuffer, x)
 metal_buffer(@nospecialize(x))  = nothing
 
 # Three answers, and the CLEAR is asked for first.

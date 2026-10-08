@@ -43,6 +43,9 @@ mutable struct MetalDevice{Q} <: Device
     # signature. `Dag` asks per dispatch per build, and the answer is a property
     # of the code rather than of the graph.
     accesses::AccessCache
+    # Metal.jl's ownership record of each pool buffer, keyed by its handle: one per
+    # buffer, so that every view of it shares it (`managedbuffer`).
+    managed::Dict{UInt,Metal.Managed}
 end
 
 """
@@ -259,7 +262,7 @@ that a test can decide differently by handing `MetalDevice` a queue directly.
 metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 
 MetalDevice(mtldev::MTL.MTLDevice, q) =
-    MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache())
+    MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache(), Dict{UInt,Metal.Managed}())
 MetalDevice(mtldev::MTL.MTLDevice = Metal.device()) = MetalDevice(mtldev, metalqueue(mtldev))
 
 # One device per process, cached: a second `MetalDevice` would mean a second
@@ -404,7 +407,22 @@ finished and want the memory back now", and an answer that depends on when
 Julia next collects is not an answer to that — the same reasoning the Vulkan
 backend's `rawfree` records.
 """
-rawfree(::MetalDevice, buf::MTL.MTLBuffer) = (Metal.free(buf); nothing)
+function rawfree(d::MetalDevice, buf::MTL.MTLBuffer)
+    delete!(d.managed, Base.bitcast(UInt, pointer(buf)))
+    Metal.free(buf)
+    return nothing
+end
+
+"""
+    managedbuffer(dev, buf) -> Metal.Managed
+
+The record Metal.jl keeps of which of its queues last used `buf`, and that a host
+read through an `MtlArray` waits for. ONE per pool buffer: Metal.jl claims a buffer
+when it launches on a view of it, and a read through another view of the same buffer
+has to see that claim.
+"""
+managedbuffer(d::MetalDevice, buf::MTL.MTLBuffer) =
+    get!(() -> Metal.Managed(buf), d.managed, Base.bitcast(UInt, pointer(buf)))
 # A heap is freed by releasing it: `Metal.free` is the buffer path (it goes
 # through `MTLBuffer`'s own deallocation), and a heap's textures die with it.
 rawfree(::MetalDevice, heap::MTL.MTLHeap) = (Metal.ObjectiveC.release(heap); nothing)

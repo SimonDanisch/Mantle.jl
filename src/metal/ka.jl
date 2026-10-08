@@ -108,9 +108,9 @@ back.
 The slab is an `MTLBuffer`, where the Vulkan backend's is a `BufferBlock`. Same
 hook, two storages.
 """
-function deviceslice(::MetalDevice, ::Type{T}, dims::Dims{N},
+function deviceslice(d::MetalDevice, ::Type{T}, dims::Dims{N},
                      buf::MTL.MTLBuffer, off::Int) where {T,N}
-    ref = GPUArrays.DataRef(_ -> nothing, Metal.Managed(buf))
+    ref = GPUArrays.DataRef(_ -> nothing, managedbuffer(d, buf))
     MtlArray{T,N}(ref, dims; maxsize = Int(buf.length) - off, offset = off)
 end
 
