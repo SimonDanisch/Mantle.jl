@@ -24,7 +24,9 @@ copying. `a` keeps a suballocated view of a block the pool owns.
 
 Borrowed is the load-bearing word. The `DataRef` finalizer frees NOTHING — the
 `MTLBuffer` belongs to the pool, and a second owner would free it out from under
-every other tenant of the same block. `MtlArray`'s own `offset` field is what
+every other tenant of the same block. Metal.jl's `Managed` around it only tracks
+which of Metal.jl's queues last used this view, so its own host reads wait for
+them; Mantle orders its submissions itself. `MtlArray`'s own `offset` field is what
 makes the suballocation invisible to the consumer, so nothing downstream has to
 learn about regions.
 """
@@ -32,7 +34,7 @@ function deviceview(::MetalDevice, a::DeviceArray{T,N}) where {T,N}
     r = region(a)
     buf = memoryof(r)::MTL.MTLBuffer
     off = offset(a)
-    ref = GPUArrays.DataRef(_ -> nothing, buf)
+    ref = GPUArrays.DataRef(_ -> nothing, Metal.Managed(buf))
     return MtlArray{T,N}(ref, size(a); maxsize = Int(buf.length) - off, offset = off)
 end
 

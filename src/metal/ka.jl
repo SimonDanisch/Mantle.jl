@@ -110,7 +110,7 @@ hook, two storages.
 """
 function deviceslice(::MetalDevice, ::Type{T}, dims::Dims{N},
                      buf::MTL.MTLBuffer, off::Int) where {T,N}
-    ref = GPUArrays.DataRef(_ -> nothing, buf)
+    ref = GPUArrays.DataRef(_ -> nothing, Metal.Managed(buf))
     MtlArray{T,N}(ref, dims; maxsize = Int(buf.length) - off, offset = off)
 end
 
