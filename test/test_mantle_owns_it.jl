@@ -191,7 +191,7 @@ const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
 const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
-    :blittarget, :build_accel!, :colorimage, :compile_draw, :currentimage,
+    :build_accel!, :colorimage, :compile_draw, :currentimage,
     :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
     :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,
     :end_render_pass!, :imageusage, :indirectslot, :initbackend!, :layout,
