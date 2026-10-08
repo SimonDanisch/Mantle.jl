@@ -418,7 +418,7 @@ export ContactRecord, NO_CONTACT, narrow_phase_kernel, narrow_phase_contacts_ker
 
 export pixelbytes
 export LoadOp, Clear, Keep, Discard
-export Device, device, Resource, Graph, Plan, Transient, Window, backend, screenshot
+export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
 export DeviceInfo, devices, defaultdevice!
 export DeviceCaps, caps
 export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
@@ -603,25 +603,33 @@ GPUs of the one that is here.
 """
 Device() = @static Sys.isapple() ? Device(MetalAPI()) : Device(VulkanAPI())
 
+"""What selects a device: a case-insensitive substring of its name or driver, its
+index in [`devices`](@ref), or a predicate over [`DeviceInfo`](@ref). See
+[`selectdevice`](@ref)."""
+const DeviceSelector = Union{AbstractString,Integer,Function}
+
 """
-    device([select]) -> Device
+    Device(select) -> Device
 
-The process device, or a device selected by a case-insensitive substring of its
-name or driver. Each selected device owns an independent context, so several can
-be used in the same process.
+A device of your own, the one `select` names (see [`DeviceSelector`](@ref)). It
+owns an independent context and is not installed as the default, so several can
+be used in one process; [`defaultdevice!`](@ref) is how one becomes the default.
 
-    nvidia = device("nvidia")
-    lavapipe = device("lavapipe")
-
-See [`devices`](@ref) for the values a selector can match.
+    nvidia = Device("NVIDIA")
+    cpu = Device("lavapipe")
 """
-function device(select = nothing)
-    @static if Sys.isapple()
-        return Device(MetalAPI(); select)
-    else
-        return Device(VulkanAPI(); select)
-    end
-end
+Device(select::DeviceSelector) =
+    @static Sys.isapple() ? Device(MetalAPI(); select) : Device(VulkanAPI(); select)
+
+"""
+    defaultdevice!(select) -> Device
+
+Build the device `select` names and make it the process default, the one `Device()`
+answers from now on, and return it.
+
+    dev = Mantle.defaultdevice!("NVIDIA")
+"""
+defaultdevice!(select::DeviceSelector) = defaultdevice!(Device(select))
 
 __init__() = initbackend!()
 

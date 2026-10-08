@@ -272,12 +272,8 @@ function Device(::MetalAPI; select = nothing)
     if select === nothing
         d = METAL_DEVICE[]
         d === nothing || return d
-        # `MANTLE_DEVICE` names the default the way it does on Vulkan; without
-        # it Metal.jl's own choice stands.
-        s = get(ENV, "MANTLE_DEVICE", nothing)
-        mtl = s === nothing ? Metal.device() :
-              Metal.devices()[selectdevice(s, devices(MetalAPI()))]
-        return defaultdevice!(MetalDevice(mtl))
+        # Metal.jl's own choice; `defaultdevice!(select)` is how a caller picks another.
+        return defaultdevice!(MetalDevice(Metal.device()))
     end
     # A device asked for BY NAME is not the process device and does not adopt the
     # queue — see `defaultdevice!`.

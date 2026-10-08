@@ -29,9 +29,9 @@ end
     if lvp === nothing
         @info "no software rasterizer here; the two-device identity check needs a second driver"
     else
-        gpudev = Mantle.device()                            # the process default
+        gpudev = Mantle.Device()                            # the process default
         gpu = gpudev.ctx
-        cpudev = Mantle.device("lavapipe")
+        cpudev = Mantle.Device("lavapipe")
         cpu = cpudev.ctx
         try
             @test gpu !== cpu

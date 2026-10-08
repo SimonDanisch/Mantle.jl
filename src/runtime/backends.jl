@@ -19,8 +19,7 @@ end
 # ── Which device ──────────────────────────────────────────────────────────────
 #
 # `Device(api)` is the process default and the ONE ambient thing in Mantle. It is
-# chosen once, lazily, by the `MANTLE_DEVICE` environment variable when that is
-# set and by the backend's ranking otherwise, and changed with `defaultdevice!`.
+# chosen once, lazily, by the backend's ranking, and changed with `defaultdevice!`.
 # Everything else names its device: `Device(api; select)` builds one the caller
 # holds, `Device(backend)` is the device a backend already belongs to, and every
 # constructor takes one of those. The selector vocabulary below is shared by the
@@ -45,7 +44,7 @@ end
     devices(api) -> Vector{DeviceInfo}
 
 The physical devices `api` can build a device on, in enumeration order. What
-`Device(api; select)` and the `MANTLE_DEVICE` variable select from.
+`Device(select)`, `Device(api; select)` and `defaultdevice!(select)` select from.
 """
 function devices end
 
@@ -56,8 +55,10 @@ Make `dev` the device its API answers `Device(api)` with from now on, and the
 one `defaultbackend()` reports. The previous default is not torn down: it stays
 a device of its own, and everything built on it keeps working.
 
-    dev = Device(VulkanAPI(); select = "NVIDIA")
+    dev = Device("NVIDIA")
     defaultdevice!(dev)
+
+or, in one step, `defaultdevice!("NVIDIA")`.
 """
 function defaultdevice! end
 

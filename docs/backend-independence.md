@@ -416,11 +416,13 @@ entries with no cache clear between them.
 **Selection replaces the ICD pin.** `Mantle.devices(api)` lists physical devices
 (name, kind, driver); `selectdevice(select, infos)` turns `nothing`, a name
 substring, an index or a predicate into one index, discrete-first. The process
-default is `MANTLE_DEVICE` when set and the ranking otherwise — so a session
-picks the RTX by name instead of hiding the 7900 XTX and lavapipe with
-`VK_DRIVER_FILES`, and the two-device tests can enumerate lavapipe. `Device(api;
-select)` and `VkContext(; select)` take the same vocabulary; `defaultdevice!(dev)`
-switches the default without tearing the old one down.
+default is the ranking's first until `defaultdevice!` installs another — so a
+session picks the RTX by name, `defaultdevice!("NVIDIA")`, instead of hiding the
+7900 XTX and lavapipe with `VK_DRIVER_FILES`, and the two-device tests can
+enumerate lavapipe. `Device(select)`, `Device(api; select)` and `VkContext(;
+select)` take the same vocabulary; `defaultdevice!` switches the default without
+tearing the old one down. There is no environment variable: a device is chosen
+in code, where the call that chose it can be read.
 
 **Cross-device copies stage through the host.** `copyto!` between two
 `LavaArray`s on different contexts downloads and re-uploads instead of recording
@@ -494,7 +496,7 @@ buffer lands on the default) and passes after.
 and lavapipe, interleaved four renders deep, each produce a correct image with
 no cross-context error and no segfault, and the default stays put. Rendering on a
 single GPU chosen as the session default works on the RTX and the 7900 XTX
-(`MANTLE_DEVICE=NAVI31`, or `defaultdevice!`). The integrated Raphael APU is the
+(`defaultdevice!("NAVI31")`). The integrated Raphael APU is the
 remaining gap: `VkContext` requests a fixed feature set (subgroup rotate among
 them) it does not advertise, so `vkCreateDevice` returns `ERROR_FEATURE_NOT_PRESENT`
 — device creation needs to probe features per device rather than demand the

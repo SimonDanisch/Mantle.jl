@@ -925,7 +925,7 @@ function vk_context()
         # method), and it cost 50 506 Lava MethodInstances and ~41 s of
         # re-inference on the first GPU call afterwards. The dynamic dispatch is
         # paid once, on the single call that creates the context.
-        ctx = Base.invokelatest(VkContext; select = defaultselector())::VkContext
+        ctx = Base.invokelatest(VkContext)::VkContext
         bind_context!(ctx)
         return ctx::VkContext
     finally
@@ -936,11 +936,15 @@ end
 vk_device() = vk_context().device
 
 """
-    reset_device!(; select = <MANTLE_DEVICE, or the ranking>,
+    reset_device!(; select = nothing,
                        debug = <the outgoing device's config>)
 
 Replace the process-default Vulkan device. Destroys the old context and creates a
 fresh one; clears all caches (pipelines, kernels, arg buffers).
+
+`select` names the new device as [`selectdevice`](@ref) reads it; `nothing` is the
+best one by the ranking. Unlike `debug` it does not carry across, so after
+`defaultdevice!("NVIDIA")` a reset that should stay there says so again.
 
 Two reasons to call it.
 
@@ -964,7 +968,7 @@ Two reasons to call it.
 **WARNING**: All existing `LavaArray`s become INVALID after reset — their backing
 GPU buffers no longer exist. You must reallocate all GPU data.
 """
-function reset_device!(; select = defaultselector(),
+function reset_device!(; select = nothing,
                             debug::Union{Nothing,DebugConfig} = nothing)
     cfg = debug !== nothing ? debug :
           let old = VK_CONTEXT_REF[]
@@ -1956,12 +1960,6 @@ function devices(::VulkanAPI)
     return deviceinfos(unwrap(VK.enumerate_physical_devices(instance)))
 end
 
-# The process default is chosen by `MANTLE_DEVICE` when it is set (a name
-# substring, the same selector `Device(VulkanAPI(); select)` takes) and by the
-# kind ranking in `selectdevice` otherwise: the best GPU there is. This replaces
-# pinning the loader to one ICD through `VK_DRIVER_FILES`, which also hid every
-# other device from the two-device tests.
-defaultselector() = get(ENV, "MANTLE_DEVICE", nothing)
 
 function find_graphics_compute_queue_family(phys_dev)
     qf_props = VK.get_physical_device_queue_family_properties(phys_dev)

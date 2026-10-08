@@ -1,9 +1,9 @@
 """
 Choosing a device: the listing, the selector vocabulary, and the default.
 
-`Device(VulkanAPI(); select)` and the `MANTLE_DEVICE` variable replace pinning
-the loader to one ICD with `VK_DRIVER_FILES`, which also hid every other device
-from these tests. `selectdevice` is where a name substring, an index, a predicate
+`Device(select)` and `defaultdevice!(select)` replace pinning the loader to one ICD
+with `VK_DRIVER_FILES`, which also hid every other device from these tests, and
+the `MANTLE_DEVICE` variable after it: a device is chosen in code. `selectdevice` is where a name substring, an index, a predicate
 and `nothing` all become one physical-device index, ranked discrete-first, so the
 answer is the same on every backend.
 """
@@ -36,4 +36,22 @@ using Test, Mantle, Lava
               Mantle.DeviceInfo(3, "dGPU", :discrete, "z")]
     @test Mantle.selectdevice(nothing, ranked) == 3
     @test Mantle.selectdevice("", ranked) == 3            # empty string admits all, then ranks
+end
+
+@testset "a device chosen by selector, and made the default" begin
+    infos = Mantle.devices(Mantle.VulkanAPI())
+    i = Mantle.selectdevice(nothing, infos)
+    old = Mantle.Device()
+    # A device of your own: a context of its own, not the default.
+    mine = Mantle.Device(i)
+    @test mine isa Mantle.Device
+    @test mine !== old
+    @test Mantle.Device() === old
+    # …and in one step installed and returned. The old default stays a device
+    # of its own, so putting it back is another `defaultdevice!`.
+    new = Mantle.defaultdevice!(i)
+    @test new !== old
+    @test Mantle.Device() === new
+    @test Mantle.defaultdevice!(old) === old
+    @test Mantle.Device() === old
 end

@@ -233,10 +233,7 @@ function Mantle.Device(::ROCmAPI; select = nothing)
     if select === nothing
         d = ROCM_DEVICE[]
         d === nothing || return adopt!(d)
-        s = get(ENV, "MANTLE_DEVICE", nothing)
-        hip = s === nothing ? AMDGPU.device() :
-              AMDGPU.devices()[selectdevice(s, Mantle.devices(ROCmAPI()))]
-        return ROCM_DEVICE[] = ROCmDevice(hip)
+        return ROCM_DEVICE[] = ROCmDevice(AMDGPU.device())
     end
     return ROCmDevice(AMDGPU.devices()[selectdevice(select, Mantle.devices(ROCmAPI()))])
 end

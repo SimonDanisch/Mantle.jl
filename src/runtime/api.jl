@@ -14,10 +14,9 @@ makes a device-owned thing takes: `Graph(dev)`, `Buffer(dev, …)`,
 `GPURef(dev, …)`, `Framebuffer(backend(dev), …)`, `Window(backend(dev), …)`,
 `allocate_batch_queue!(dev)`.
 
-`Device(api)` is the one ambient thing: a lazily built default, chosen by the
-`MANTLE_DEVICE` environment variable when it is set (a name substring, see
-[`selectdevice`](@ref)) and by the backend's ranking otherwise, and changed with
-[`defaultdevice!`](@ref). `Device(api; select)` builds a NEW device on every call
+`Device(api)` is the one ambient thing: a lazily built default, the best device by
+the backend's ranking (see [`selectdevice`](@ref)) until
+[`defaultdevice!`](@ref) installs another. `Device(api; select)` builds a NEW device on every call
 and never installs it; the caller holds it, and everything built from it stays
 on it. `Device(backend)` is the cached device of the backend's own context, never
 the default. [`devices`](@ref) lists what `select` can name.
