@@ -53,7 +53,7 @@ syncbackend(::MetalDevice) = MetalAPI()
 # Metal's simdgroup matrix load/store are opaque AIR intrinsics after inlining:
 # the IR contains no ordinary LLVM load or store for the access walker to read.
 # Their globally unique symbol names are therefore the authoritative direction.
-function intrinsic_usage(name::Symbol)
+function intrinsic_usage(::MetalAPI, name::Symbol)
     s = String(name)
     startswith(s, "air.simdgroup_matrix_8x8_load.") && return READ
     startswith(s, "air.simdgroup_matrix_8x8_store.") && return WRITE

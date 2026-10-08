@@ -987,16 +987,18 @@ const COMMITTED_TRIANGLE  = UInt32(1)
 const COMMITTED_GENERATED = UInt32(2)
 
 # The portable candidate accessors, on the inline ray query. See
-# `raytracing/accel.jl` for what they are for.
-@inline candidate_primitive_index() = Int(lava_ray_query_get_primitive_index(false)) + 1
-@inline candidate_object_ray() = (
+# `raytracing/accel.jl` for what they are for. Overlays, in Lava's method table:
+# a Mac compiles this tree and Metal's, and as plain methods the two backends'
+# answers would be one method defined twice.
+@lava_device_override @inline candidate_primitive_index() = Int(lava_ray_query_get_primitive_index(false)) + 1
+@lava_device_override @inline candidate_object_ray() = (
     Vec3f(lava_ray_query_get_object_ray_origin(false, 1),
           lava_ray_query_get_object_ray_origin(false, 2),
           lava_ray_query_get_object_ray_origin(false, 3)),
     Vec3f(lava_ray_query_get_object_ray_direction(false, 1),
           lava_ray_query_get_object_ray_direction(false, 2),
           lava_ray_query_get_object_ray_direction(false, 3)))
-@inline commit_intersection!(t) = lava_ray_query_generate_intersection(Float32(t))
+@lava_device_override @inline commit_intersection!(t) = lava_ray_query_generate_intersection(Float32(t))
 
 @inline function rq_collect(accel::AdaptedAccel)
     # The running best procedural hit, kept by the SHADER. See

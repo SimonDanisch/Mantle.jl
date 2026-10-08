@@ -622,6 +622,9 @@ supports_procedural_traversal(::MetalHWTLAS) = true
 
 # ── The three candidate verbs, inside a visible function ─────────────────────
 #
+# Overlays in Metal.jl's method table, as the Vulkan ones are in Lava's: a Mac
+# compiles both trees, and plain methods would be one method defined twice.
+#
 # `procedural_candidate` is written against these as ZERO-argument calls, because
 # on Vulkan they read an inline ray query that is already in scope. Here there is
 # no query in scope: the loop is MSL (`intersection_query<>` is a C++ class
@@ -629,23 +632,21 @@ supports_procedural_traversal(::MetalHWTLAS) = true
 # Julia VISIBLE function it calls. The values arrive as parameters that
 # `stage_builtins!` appends, which is the same mechanism `vertex_index()` uses.
 
-@inline candidate_primitive_index() = Int(Metal.candidate_prim_raw()) + 1
+@device_override @inline candidate_primitive_index() = Int(Metal.candidate_prim_raw()) + 1
 
-@inline candidate_object_ray() =
+@device_override @inline candidate_object_ray() =
     (Vec3f(Metal.candidate_ox(), Metal.candidate_oy(), Metal.candidate_oz()),
      Vec3f(Metal.candidate_dx(), Metal.candidate_dy(), Metal.candidate_dz()))
 
-"""
-A NO-OP here, and that is not a gap.
-
-The protocol says a payload calls this only for a `t` that IMPROVES on its
-running best, and then returns that improved best — so "the returned best
-improved" and "commit was called" are the same statement, and the MSL caller
-reads the first. It compares the `t` it gets back with the one it sent in and
-issues `commit_bounding_box_intersection` itself.
-
-Which is why there is no write-back channel: a visible function returns a value
-and has no other way out, and inventing one (a scratch slot per thread, say)
-would buy nothing the comparison does not already give.
-"""
-@inline commit_intersection!(t) = nothing
+# A NO-OP here, and that is not a gap.
+#
+# The protocol says a payload calls this only for a `t` that IMPROVES on its
+# running best, and then returns that improved best — so "the returned best
+# improved" and "commit was called" are the same statement, and the MSL caller
+# reads the first. It compares the `t` it gets back with the one it sent in and
+# issues `commit_bounding_box_intersection` itself.
+#
+# Which is why there is no write-back channel: a visible function returns a value
+# and has no other way out, and inventing one (a scratch slot per thread, say)
+# would buy nothing the comparison does not already give.
+@device_override @inline commit_intersection!(t) = nothing

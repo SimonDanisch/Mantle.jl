@@ -137,7 +137,7 @@ end
 # pointer and was not named for what it does would answer `nothing` here, and
 # `nothing` is a refusal rather than a guess.
 
-function intrinsic_usage(name::Symbol)
+function intrinsic_usage(::VulkanAPI, name::Symbol)
     s = String(name)
     op = if startswith(s, "_lava_coopmat_")
         SubString(s, ncodeunits("_lava_coopmat_") + 1)

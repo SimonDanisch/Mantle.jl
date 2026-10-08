@@ -1024,11 +1024,18 @@ same reason: there is nothing to read.
 `nothing` means undeclared, which is not permission to guess.
 
 No device parameter: an intrinsic symbol is globally unique, and `_lava_*` is
-Lava's whatever asks. The default is untyped rather than `::Symbol` so that a
-backend's method ADDS to it instead of overwriting it, which is not permitted
-during precompilation and cost a silent fallback to running Mantle from source.
+Lava's whatever asks. So every compiled backend is asked, through
+`intrinsic_usage(api, name)`, and the first that knows the name answers. A Mac
+compiles both, which is why a backend answers for its API and does not define
+`intrinsic_usage(name::Symbol)` itself: two of those are one method defined twice,
+which precompilation refuses.
 """
+function intrinsic_usage(name::Symbol)
+    u = intrinsic_usage(VulkanAPI(), name)
+    return u === nothing ? intrinsic_usage(MetalAPI(), name) : u
+end
 intrinsic_usage(@nospecialize(name)) = nothing
+intrinsic_usage(::Backend, name::Symbol) = nothing
 
 """
     llvmcallee(src) -> Symbol or nothing
