@@ -1540,7 +1540,14 @@ Metal.@device_override KI.sample_texture_2d(binding::UInt32, u::Float32, v::Floa
 # the bug fixed in September 2026 — the vertex stage mirrored and the shadow
 # lookup did not, which no test saw because a mirrored scene still looks like a
 # scene and its shadow map is mirrored with it.
-Metal.@device_override KI.clip_y(y::Float32) = -y
+#
+# A plain `@overlay`, not `Metal.@device_override`: that one is a
+# `@consistent_overlay`, a promise that the overlay returns what the host method
+# returns, and in exchange Julia folds calls with constant arguments by running
+# the HOST method. This overlay deliberately returns something else, so a mesh
+# stage writing constant positions got `clip_y(-0.9f0) == -0.9f0` and drew upside
+# down.
+Base.Experimental.@overlay Metal.method_table KI.clip_y(y::Float32) = -y
 
 @inline flip_clip(p::Vec4f) = Vec4f(p[1], KI.clip_y(p[2]), p[3], p[4])
 @inline flip_clip(p::NTuple{4,Float32}) = (p[1], KI.clip_y(p[2]), p[3], p[4])
