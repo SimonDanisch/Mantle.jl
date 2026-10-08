@@ -168,6 +168,22 @@ end
 # hand-recorded pass was a `MethodError` on both backends.
 target_extent(t::OffscreenTarget) = target_extent(t.fb)
 target_extent(t::WindowTarget) = target_extent(t.window)
+
+"""
+    eltypeof(format) -> Type
+
+The Julia element type of an attachment format: a backend's answer for its own
+format type, `VK.Format` or `MTLPixelFormat`.
+"""
+function eltypeof end
+
+# The element type of a target's colour attachment, which is what a pipeline is
+# compiled against: the format its framebuffer or window was made with, read back
+# as the Julia type it was lowered from. Core's like `target_extent`, and for the
+# same reason; it was one method per backend, the same in both, and a Mac that
+# compiles both trees cannot hold two.
+blittarget(t::OffscreenTarget) = eltypeof(target_format(t.fb))
+blittarget(t::WindowTarget) = eltypeof(target_format(t.window))
 target_format(t::OffscreenTarget) = target_format(t.fb)
 target_format(t::WindowTarget) = target_format(t.window)
 

@@ -1357,12 +1357,10 @@ Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
 
 Mantle.target_extent(fb::MetalFramebuffer) = (fb.width, fb.height)
 Mantle.target_format(fb::MetalFramebuffer) = fb.color_format
-# The ELEMENT type of the attachment, which is what a pipeline is compiled
-# against. `MetalFramebuffer` keeps the MTL format it was created with and not the
-# Julia type behind it, so this is the reverse of `mtlformat` — and only over the
-# formats a blit target can have, because that is the one caller.
-Mantle.blittarget(t::Mantle.OffscreenTarget) = eltypeof(t.fb.color_format)
-Mantle.blittarget(t::Mantle.WindowTarget) = eltypeof(Mantle.target_format(t.window))
+# The ELEMENT type of an attachment format, which is what `blittarget` (core's)
+# reads off a target. `MetalFramebuffer` keeps the MTL format it was created with
+# and not the Julia type behind it, so this is the reverse of `mtlformat` — and
+# only over the formats a blit target can have, because that is the one caller.
 
 eltypeof(f::MTLm.MTLPixelFormat) =
     f === MTLm.MTLPixelFormatBGRA8Unorm      ? BGRA{N0f8} :

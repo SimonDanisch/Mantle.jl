@@ -42,13 +42,9 @@ currentimage(w::VulkanWindow) =
 # window (`graphics/window.jl`); the two TARGET wrappers are core's and forward
 # to those.
 
-"""
-The element type of a target's colour attachment — what a pipeline is compiled
-against. `target_format` answers with the `VkFormat`; this is the Julia type it
-was lowered from, which is what every caller of `compile_draw` names.
-"""
-blittarget(t::OffscreenTarget) = eltypeof(target_format(t.fb))
-blittarget(t::WindowTarget)    = eltypeof(target_format(t.window))
+# `blittarget`, the element type of a target's colour attachment, is core's
+# (`graphics/resources.jl`): `target_format` answers with the `VkFormat`, and
+# `eltypeof` below is the Julia type it was lowered from.
 
 """
     eltypeof(::VK.Format) -> Type
