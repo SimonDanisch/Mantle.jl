@@ -392,7 +392,7 @@ end
     # take less time than the loop that ran it, to within the submission
     # overhead the wall time also includes.
     dev = M.Device(TESTBACKEND)
-    n = 1 << 22                                   # 4 Mi elements: milliseconds
+    n = 1 << 24          # 16 Mi elements: milliseconds, well above a submission
     g = M.Graph(dev)
     seed = M.Buffer(dev, zeros(Float32, n))
     out  = M.Buffer(dev, zeros(Float32, n))
@@ -401,30 +401,42 @@ end
     M.record!(profiled)
 
     # No synchronise inside the loop: running them back to back is what opens
-    # the reset window this is here for.
+    # the reset window this is here for. Every sample read in it is a real one.
     reps = 30
     for _ in 1:reps
         M.run!(profiled)
     end
     KernelAbstractions.synchronize(M.backend(dev))
-    wall = @elapsed begin
-        for _ in 1:reps
-            M.run!(profiled)
-        end
-        KernelAbstractions.synchronize(M.backend(dev))
-    end
-    wall_ms = 1000 * wall / reps
-
     t = M.timings(profiled)
-    only_ = t[findfirst(x -> x.name == "only", t)]
-    @test only_.samples >= 1
-    @test only_.gpu_ms > 0                        # the assertion that was missing
-    # Bracketed by the wall clock from both sides. The pass cannot have taken
-    # longer than the submission that contained it, and a pass that reports a
-    # small fraction of it is reporting a truncated interval rather than a fast
-    # kernel.
-    @test only_.gpu_ms <= wall_ms
-    @test only_.gpu_ms >= 0.2 * wall_ms
+    i = findfirst(x -> x.name == "only", t)
+    @test t[i].samples >= 1
+    @test t[i].gpu_ms > 0                         # the assertion that was missing
+    @test all(>(0), profiled.profiler.gpu_ns[i])
+    nwindow = length(profiled.profiler.gpu_ns[i])
+
+    # Bracketed by the wall clock from both sides, run by run: the pass cannot
+    # have taken longer than the submission that contained it, and a pass that
+    # reports a small fraction of it is reporting a truncated interval rather
+    # than a fast kernel. Each run waits, so the next one reads its frame, once.
+    #
+    # Not the loop above against a wall time of its own: back to back, a frame is
+    # sampled only when the read finds it finished, two or three of sixty on an
+    # RTX 3070, and that laptop's clock ramps from 3 ms to 0.1 ms a run within
+    # the testset. A median of the early samples against the wall time of later
+    # runs failed on clock speed alone.
+    walls = Float64[]
+    for _ in 1:reps
+        push!(walls, @elapsed begin
+            M.run!(profiled)
+            KernelAbstractions.synchronize(M.backend(dev))
+        end)
+    end
+    M.timings(profiled)                           # reads the last run's frame
+    med(x) = sort(x)[(length(x) + 1) ÷ 2]
+    timed = profiled.profiler.gpu_ns[i][nwindow+1:end] ./ 1e6
+    @test length(timed) == reps
+    @test med(timed) <= 1000 * med(walls)
+    @test med(timed) >= 0.2 * 1000 * med(walls)
     M.free!(profiled)
 end
 
