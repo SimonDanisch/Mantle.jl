@@ -258,8 +258,11 @@ end
 end
 
 # ── CPU-vs-GPU roundtrip tests ──
-# The ultimate correctness check: run the same kernel on CPU (KernelAbstractions.CPU()) and GPU,
-# compare results. This catches any SPIR-V emission bug that produces wrong values
+# The ultimate correctness check: run the same per-element function on the host,
+# as plain Julia, and inside a kernel on the GPU, and compare results. Plain Julia
+# and not `KernelAbstractions.CPU()`: that is POCL since KernelAbstractions 0.10,
+# and a reference for Lava's SPIR-V must not come out of another SPIR-V path, nor
+# out of Lava on lavapipe, where the same emission bug would agree with itself. This catches any SPIR-V emission bug that produces wrong values
 # (not just alignment faults). Uses struct types modeled after the actual VolPath
 # work items (164-byte VPRayWorkItem, 320-byte VPMediumSampleWorkItem, etc.).
 
@@ -300,28 +303,46 @@ struct RoundtripNested
     extra::Float32
 end
 
+function roundtrip_small(s::RoundtripSmall, scale::Float32)
+    p = s.pos; d = s.dir
+    return RoundtripSmall((p[1]*scale, p[2]*scale, p[3]*scale),
+                          (d[1]+1f0, d[2]+1f0, d[3]+1f0),
+                          s.t * 2f0, s.depth + Int32(1))
+end
+
+function roundtrip_bool(s::RoundtripWithBool)
+    val = s.active ? s.t_max + s.scale : s.time - s.scale
+    return RoundtripWithBool(s.pos, s.dir, s.t_max, s.time, !s.active,
+                             (s.origin[1]+val, s.origin[2]+val, s.origin[3]+val),
+                             s.target, s.scale * 2f0)
+end
+
+function roundtrip_twobool(s::RoundtripTwoBool)
+    val = s.beta[1] + s.r_u[1] + s.prev_p[1] + s.prev_n[1] + s.eta
+    if s.specular; val *= 2f0; end
+    if s.any_nonspecular; val += Float32(s.medium_type); end
+    return val + Float32(s.medium_idx)
+end
+
+function roundtrip_nested(s::RoundtripNested, offset::Float32)
+    inner = s.inner
+    val = inner.pos[1] + inner.t + s.weight + s.extra + offset
+    if s.flag; val *= -1f0; end
+    return val
+end
+
 @testset "CPU-vs-GPU Roundtrip" begin
     backend = Mantle.defaultbackend()
     N = 512
 
     @kernel function roundtrip_small_kernel(dst, @Const(src), scale::Float32)
         i = @index(Global)
-        @inbounds begin
-            s = src[i]
-            p = s.pos; d = s.dir
-            dst[i] = RoundtripSmall(
-                (p[1]*scale, p[2]*scale, p[3]*scale),
-                (d[1]+1f0, d[2]+1f0, d[3]+1f0),
-                s.t * 2f0,
-                s.depth + Int32(1)
-            )
-        end
+        @inbounds dst[i] = roundtrip_small(src[i], scale)
     end
 
     @testset "RoundtripSmall (no Bool)" begin
         data = [RoundtripSmall(ntuple(j->Float32(i*10+j), 3), ntuple(j->Float32(j), 3), Float32(i), Int32(i)) for i in 1:N]
-        src_cpu = copy(data); dst_cpu = similar(data)
-        roundtrip_small_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu, 0.5f0; ndrange=N)
+        dst_cpu = map(x -> roundtrip_small(x, 0.5f0), data)
         src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray{RoundtripSmall}(undef, N)
         roundtrip_small_kernel(backend)(dst_gpu, src_gpu, 0.5f0; ndrange=N)
         Mantle.flush!(Mantle.Device())
@@ -330,16 +351,7 @@ end
 
     @kernel function roundtrip_bool_kernel(dst, @Const(src))
         i = @index(Global)
-        @inbounds begin
-            s = src[i]
-            val = s.active ? s.t_max + s.scale : s.time - s.scale
-            dst[i] = RoundtripWithBool(
-                s.pos, s.dir, s.t_max, s.time,
-                !s.active,
-                (s.origin[1]+val, s.origin[2]+val, s.origin[3]+val),
-                s.target, s.scale * 2f0
-            )
-        end
+        @inbounds dst[i] = roundtrip_bool(src[i])
     end
 
     @testset "RoundtripWithBool (1 Bool + padding)" begin
@@ -348,8 +360,7 @@ end
             Float32(i), 0.5f0, isodd(i),
             ntuple(j->Float32(10+j), 3), ntuple(j->Float32(20+j), 3), Float32(i)*0.1f0
         ) for i in 1:N]
-        src_cpu = copy(data); dst_cpu = similar(data)
-        roundtrip_bool_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu; ndrange=N)
+        dst_cpu = map(roundtrip_bool, data)
         src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray{RoundtripWithBool}(undef, N)
         roundtrip_bool_kernel(backend)(dst_gpu, src_gpu; ndrange=N)
         Mantle.flush!(Mantle.Device())
@@ -358,14 +369,7 @@ end
 
     @kernel function roundtrip_twobool_kernel(dst_f, @Const(src))
         i = @index(Global)
-        @inbounds begin
-            s = src[i]
-            val = s.beta[1] + s.r_u[1] + s.prev_p[1] + s.prev_n[1] + s.eta
-            if s.specular; val *= 2f0; end
-            if s.any_nonspecular; val += Float32(s.medium_type); end
-            val += Float32(s.medium_idx)
-            dst_f[i] = val
-        end
+        @inbounds dst_f[i] = roundtrip_twobool(src[i])
     end
 
     @testset "RoundtripTwoBool (consecutive Bools at offset 60-61)" begin
@@ -374,8 +378,7 @@ end
             ntuple(j->Float32(j), 3), ntuple(j->Float32(j+3), 3),
             Float32(i)*0.01f0, isodd(i), i%3==0, UInt32(i%10), UInt32(i)
         ) for i in 1:N]
-        src_cpu = copy(data); dst_cpu = zeros(Float32, N)
-        roundtrip_twobool_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu; ndrange=N)
+        dst_cpu = map(roundtrip_twobool, data)
         src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray(zeros(Float32, N))
         roundtrip_twobool_kernel(backend)(dst_gpu, src_gpu; ndrange=N)
         Mantle.flush!(Mantle.Device())
@@ -384,13 +387,7 @@ end
 
     @kernel function roundtrip_nested_kernel(dst, @Const(src), offset::Float32)
         i = @index(Global)
-        @inbounds begin
-            s = src[i]
-            inner = s.inner
-            val = inner.pos[1] + inner.t + s.weight + s.extra + offset
-            if s.flag; val *= -1f0; end
-            dst[i] = val
-        end
+        @inbounds dst[i] = roundtrip_nested(src[i], offset)
     end
 
     @testset "RoundtripNested (Bool inside nested struct)" begin
@@ -398,8 +395,7 @@ end
             RoundtripSmall(ntuple(j->Float32(i+j),3), ntuple(j->1f0,3), Float32(i), Int32(0)),
             Float32(i)*0.5f0, isodd(i), Float32(i)*0.1f0
         ) for i in 1:N]
-        src_cpu = copy(data); dst_cpu = zeros(Float32, N)
-        roundtrip_nested_kernel(KernelAbstractions.CPU())(dst_cpu, src_cpu, 100f0; ndrange=N)
+        dst_cpu = map(x -> roundtrip_nested(x, 100f0), data)
         src_gpu = Mantle.LavaArray(data); dst_gpu = Mantle.LavaArray(zeros(Float32, N))
         roundtrip_nested_kernel(backend)(dst_gpu, src_gpu, 100f0; ndrange=N)
         Mantle.flush!(Mantle.Device())

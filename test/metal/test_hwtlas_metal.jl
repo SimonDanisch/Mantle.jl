@@ -97,12 +97,16 @@ end
     KA.synchronize(be)
     hh, ht, hi = Array(h_d), Array(t_d), Array(i_d)
 
-    sw = Raycore.TLAS(KA.CPU())
+    # The software BVH on the same device, not on `KA.CPU()`: that is POCL since
+    # KernelAbstractions 0.10, and POCL crashes intermittently on macOS. The two
+    # traversals share no code past the ray, so they cannot agree by accident.
+    sw = Raycore.TLAS(be)
     push!(sw, mesh); Raycore.sync!(sw)
-    accel_sw = Adapt.adapt(KA.CPU(), sw)
-    sh = zeros(Int32, n); st = zeros(Float32, n); si = zeros(UInt32, n)
-    _hw_probe!(KA.CPU())(sh, st, si, copy(dirs), accel_sw, O; ndrange = n)
-    KA.synchronize(KA.CPU())
+    accel_sw = Adapt.adapt(be, sw)
+    s_h = KA.zeros(be, Int32, n); s_t = KA.zeros(be, Float32, n); s_i = KA.zeros(be, UInt32, n)
+    _hw_probe!(be)(s_h, s_t, s_i, d_d, accel_sw, O; ndrange = n)
+    KA.synchronize(be)
+    sh, st = Array(s_h), Array(s_t)
 
     # Something must actually be hit, or every assertion below is vacuous.
     @test sum(sh) > n ÷ 4

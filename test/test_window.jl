@@ -1519,8 +1519,7 @@ else
         # the graph knows it happened, and the next run reads what it wrote.
         advect!(M.backend(s.dev))(M.storage(s.gpu.positions), M.storage(s.gpuvel), s.dt, 1.4f0;
                                   ndrange = s.n)
-        advect!(CPU())(s.cpupos, s.cpuvel, s.dt, 1.4f0; ndrange = s.n)
-        KernelAbstractions.synchronize(CPU())
+        advect!(s.cpupos, s.cpuvel, s.dt, 1.4f0)
         # A host array, stored: a copy, because the store retains what it is
         # given and the CPU simulation mutates `cpupos` before the next frame.
         s.cpu.positions[:] = copy(s.cpupos)

@@ -29,21 +29,33 @@ begin # ── packages: their own block, so the macros below are expandable ─
                            cull = NoCull(),
                            depth = DepthOff())
 
-    # One step of the simulation, run on three different backends below.
+    # One step of one point, run three ways below: in the graph, as a launch
+    # outside it, and on the host.
+    function advect(p, v, dt, radius)
+        p = p + v * dt
+        r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
+        if r > radius
+            n = p / r
+            p = n * radius
+            d = v[1] * n[1] + v[2] * n[2] + v[3] * n[3]
+            v = v - 2.0f0 * d * n
+        end
+        return p, v
+    end
     @kernel function advect!(pos, vel, dt, radius::Float32)
         i = @index(Global)
         @inbounds begin
-            v = vel[i]
-            p = pos[i] + v * dt[1]
-            r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
-            if r > radius
-                n = p / r
-                p = n * radius
-                d = v[1] * n[1] + v[2] * n[2] + v[3] * n[3]
-                vel[i] = v - 2.0f0 * d * n
-            end
+            p, v = advect(pos[i], vel[i], dt[1], radius)
             pos[i] = p
+            vel[i] = v
         end
+    end
+    # A loop and not `advect!(KA.CPU())`: that is POCL since KernelAbstractions 0.10.
+    function advect!(pos::Vector{Vec3f}, vel::Vector{Vec3f}, dt::Float32, radius::Float32)
+        for i in eachindex(pos, vel)
+            pos[i], vel[i] = advect(pos[i], vel[i], dt, radius)
+        end
+        return pos
     end
 
     cloud(n) = [normalize(Vec3f(randn(Float32), randn(Float32), randn(Float32))) *
@@ -167,8 +179,7 @@ begin # ── the render loop, async like GLMakie's, so evaling keeps working �
             if simulate
                 advect!(M.backend(dev))(M.storage(gpupos), M.storage(gpuvel), dt[], 1.4f0; ndrange = n)
                 update!(gpu; positions = M.storage(gpupos))     # device array, no host round trip
-                advect!(CPU())(cpupos, cpuvel, dt[], 1.4f0; ndrange = n)
-                KernelAbstractions.synchronize(CPU())
+                advect!(cpupos, cpuvel, dt[], 1.4f0)
                 update!(cpu; positions = cpupos)                # host array, staged once
             end
             handover!(sim); handover!(gpu); handover!(cpu)

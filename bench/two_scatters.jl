@@ -47,22 +47,37 @@ end
 
 drift(n) = [0.35f0 * Vec3f(randn(Float32), randn(Float32), randn(Float32)) for _ in 1:n]
 
+# One step of one point, returning its new position and velocity.
+function advect(p, v, dt, radius)
+    p = p + v * dt
+    r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
+    # Reflect rather than clamp: clamping piles every escapee onto the shell
+    # and the cloud slowly collapses into a sphere of stationary points.
+    if r > radius
+        n = p / r
+        p = n * radius
+        d = v[1] * n[1] + v[2] * n[2] + v[3] * n[3]
+        v = v - 2f0 * d * n
+    end
+    return p, v
+end
+
 @kernel function advect!(pos, vel, dt, radius::Float32)
     i = @index(Global)
     @inbounds begin
-        v = vel[i]
-        p = pos[i] + v * dt[1]
-        r = sqrt(p[1] * p[1] + p[2] * p[2] + p[3] * p[3])
-        # Reflect rather than clamp: clamping piles every escapee onto the shell
-        # and the cloud slowly collapses into a sphere of stationary points.
-        if r > radius
-            n = p / r
-            p = n * radius
-            d = v[1] * n[1] + v[2] * n[2] + v[3] * n[3]
-            vel[i] = v - 2f0 * d * n
-        end
+        p, v = advect(pos[i], vel[i], dt[1], radius)
         pos[i] = p
+        vel[i] = v
     end
+end
+
+# The same step on host arrays, for a simulation kept on the CPU. A loop and
+# not `advect!(KA.CPU())`: that is POCL since KernelAbstractions 0.10.
+function advect!(pos::Vector{Vec3f}, vel::Vector{Vec3f}, dt::Float32, radius::Float32)
+    for i in eachindex(pos, vel)
+        pos[i], vel[i] = advect(pos[i], vel[i], dt, radius)
+    end
+    return pos
 end
 
 struct Scatter{P,C,S}
