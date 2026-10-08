@@ -41,12 +41,14 @@ end
 end
 
 # The observable symptom: AK's block-level merge for len < 2*block_size (256).
-@testset "merge_sort_by_key! is correct below 2*block_size" begin
+# AcceleratedKernels 0.5 spells it `sort_by_key!` with the algorithm as an
+# argument; the block size is pinned so that 7 and 100 stay below two blocks.
+@testset "merge sort by key is correct below 2*block_size" begin
     for n in (7, 100, 511, 1000)
         h = rand(UInt32, n)
         k = Mantle.LavaArray(copy(h))
         v = Mantle.LavaArray(collect(Int32(1):Int32(n)))
-        AK.merge_sort_by_key!(k, v)
+        AK.sort_by_key!(k, v; alg = AK.MergeSort(block_size = 128))
         Mantle.flush!(Mantle.Device())
         @test Array(k) == sort(h)
         @test h[Array(v)] == sort(h)   # values permuted consistently with keys
