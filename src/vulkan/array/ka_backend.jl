@@ -201,10 +201,9 @@ Adapt.adapt_storage(::KA.CPU, a::LavaArray) = Array(a)
 # AMDGPU handles this by casting the pointer to constant address space; we just return
 # the device array as-is since Vulkan BDA pointers are already readonly-capable.
 Adapt.adapt_storage(::KA.ConstAdaptor, a::LavaDeviceArray) = a
-# Prevent ReshapedArray reconstruction during constify — @Const marks readonly,
-# it should not reconstruct wrapper arrays (which triggers SignedMultiplicativeInverse
-# constructor with its throwing string interpolation path on GPU).
-Adapt.adapt_structure(::KA.ConstAdaptor, A::Base.ReshapedArray) = A
+# Reshaped and permuted wrappers are KernelAbstractions' (0.10): it rebuilds them
+# around the adapted parent without re-validating, so no constructor with a
+# throwing, string-building error path reaches the device.
 
 # Type-based adapt_storage for Adapt.adapt(LavaArray, x) dispatch. `adapt(LavaArray, x)`
 # names a TYPE, not a device, so this is the one device-less allocation there can
