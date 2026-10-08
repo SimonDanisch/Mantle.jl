@@ -625,9 +625,21 @@ be used in one process; [`defaultdevice!`](@ref) is how one becomes the default.
 
     nvidia = Device("NVIDIA")
     cpu = Device("lavapipe")
+
+On a Mac a Metal device is looked for first and a Vulkan one when none matches,
+which is how `Device("lavapipe")` names the same CPU device on every machine
+(with `Lavapipe_jll` loaded; see the backend section below).
 """
-Device(select::DeviceSelector) =
-    @static Sys.isapple() ? Device(MetalAPI(); select) : Device(VulkanAPI(); select)
+function Device(select::DeviceSelector)
+    @static if Sys.isapple() && VK.HAS_LOADER
+        any(i -> admits(select, i), devices(MetalAPI())) || return Device(VulkanAPI(); select)
+        return Device(MetalAPI(); select)
+    elseif Sys.isapple()
+        return Device(MetalAPI(); select)
+    else
+        return Device(VulkanAPI(); select)
+    end
+end
 
 """
     defaultdevice!(select) -> Device
