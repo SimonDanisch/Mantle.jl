@@ -1082,7 +1082,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     end
 
     # Collect all available instance extensions (driver + layer-provided)
-    inst_extensions = String["VK_KHR_surface"]
+    inst_extensions = String[]
     available_ext = unwrap(VK.enumerate_instance_extension_properties())
     ext_names = Set(String(filter(!=('\0'), collect(e.extension_name))) for e in available_ext)
     # Also collect extensions provided by the validation layer
@@ -1097,7 +1097,10 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     if has_debug_utils
         push!(inst_extensions, "VK_EXT_debug_utils")
     end
-    # Platform-specific surface extension (ext_names already computed above)
+    # Surface extensions only where the drivers offer them. A device without
+    # any is headless — lavapipe on a Mac through `Vulkan_Loader_jll` has no
+    # `VK_EXT_metal_surface` — and asking for one it lacks fails the instance.
+    "VK_KHR_surface" in ext_names && push!(inst_extensions, "VK_KHR_surface")
     if Sys.islinux()
         if "VK_KHR_xcb_surface" in ext_names
             push!(inst_extensions, "VK_KHR_xcb_surface")
@@ -1108,9 +1111,9 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
             push!(inst_extensions, "VK_KHR_wayland_surface")
         end
     elseif Sys.iswindows()
-        push!(inst_extensions, "VK_KHR_win32_surface")
+        "VK_KHR_win32_surface" in ext_names && push!(inst_extensions, "VK_KHR_win32_surface")
     elseif Sys.isapple()
-        push!(inst_extensions, "VK_EXT_metal_surface")
+        "VK_EXT_metal_surface" in ext_names && push!(inst_extensions, "VK_EXT_metal_surface")
     end
 
     # Extended validation, all of it requiring VK_EXT_validation_features:
