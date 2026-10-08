@@ -158,6 +158,21 @@ function GPUArrays.derive(::Type{T}, a::LavaArray, dims::Dims{N}, offset::Int) w
     LavaArray{T,N}(ref, dims; offset=byte_offset)
 end
 
+"""
+    mightalias(a::LavaArray, b::LavaArray)
+
+Whether two arrays can share bytes: the same backing buffer, and byte ranges
+that intersect. `dataids` names the buffer only, and the pool places many
+`Buffer`s in one block, so on its own it reports two disjoint regions of a block
+as aliasing: `accumulate!` from one `Buffer` into another was refused, and
+`unalias` copied ahead of broadcasts that needed no copy.
+"""
+function Base.mightalias(a::LavaArray, b::LavaArray)
+    a.buf.rc === b.buf.rc || return false
+    return a.offset < b.offset + sizeof(eltype(b)) * length(b) &&
+           b.offset < a.offset + sizeof(eltype(a)) * length(a)
+end
+
 # ── copy ──
 
 function Base.copy(a::LavaArray{T,N}) where {T,N}

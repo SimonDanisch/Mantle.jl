@@ -1206,6 +1206,10 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_indexbuffer.jl"))
         end
 
+        @testset "pooled buffers alias by bytes, not by block" begin
+            include(joinpath(VULKAN_TESTS, "test_lavaarray_alias.jl"))
+        end
+
         @testset "phase 2 — error surfacing" begin
             include(joinpath(VULKAN_TESTS, "test_phase2_errors.jl"))
         end
