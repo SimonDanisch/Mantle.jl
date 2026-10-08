@@ -21,7 +21,9 @@ function _vk_reduce_fadd_kernel!(out, src, total_threads::Int32)
     # atomic pressure by `n / total_threads` vs "1 thread per element" — at
     # n=10M with ~16k threads, ~160 elements/thread → ~256 atomics/step
     # instead of 156k.
-    acc = 0f0
+    # -0.0, the identity of float addition: +0.0 is not one, and a sum of
+    # negative zeros starting from it comes out +0.0 where Base's is -0.0.
+    acc = -0f0
     i = gi
     @inbounds while i <= n
         acc += src[i]
@@ -71,11 +73,15 @@ tree-reduce path's multiple CPU readbacks.
 """
 function vk_reduce_sum(A::LavaArray{Float32})
     n = length(A)
+    # Base's empty sum is `zero(Float32)`, +0.0, which the -0.0 the reduction
+    # starts from would not give.
+    n == 0 && return 0f0
     ctx = A.buf[].ctx
     out = reduce_scratch(ctx)
-    # Zero the mapped cell directly — skips a fill! dispatch.
+    # Seed the mapped cell directly — skips a fill! dispatch. With -0.0, the
+    # identity of the addition, as the kernel's per-thread sums are.
     out_ptr = Base.unsafe_convert(Ptr{Float32}, out.buf[].mapped_ptr)
-    unsafe_store!(out_ptr, 0f0)
+    unsafe_store!(out_ptr, -0f0)
     # Fixed thread count — tuned for RX 7900 XTX-class GPUs. Too few threads
     # underutilizes SMs; too many causes atomic contention on out[1]. With
     # ~16k threads, n=10M → ~625 elems/thread → ~256 atomics → fast.

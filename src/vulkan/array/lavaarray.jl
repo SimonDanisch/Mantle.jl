@@ -51,6 +51,13 @@ function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
                         extra_usage::UInt32=UInt32(0),
                         scratch::Bool=false,
                         unified::Bool=false) where {T,N}
+    # An isbits union is refused, as `MtlArray` refuses it, and before anything is
+    # allocated. Julia stores such an array as the values followed by one
+    # type-selector byte per element; nothing here allocates, copies or indexes the
+    # selectors, so `Array(LavaArray(Union{Missing,Bool}[true]))` read back
+    # `[missing]` and `any` over it answered `false`, with no error.
+    Base.isbitsunion(T) &&
+        throw(ArgumentError("LavaArray does not support isbits-union element types like $T: their type-selector bytes are not stored"))
     ctx = ctxof(bq)
     nbytes = prod(dims) * sizeof(T)
 
