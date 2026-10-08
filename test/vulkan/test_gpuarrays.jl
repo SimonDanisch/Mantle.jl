@@ -17,8 +17,10 @@ TestSuite.supported_eltypes(::Type{<:LavaArray}) = (Int16, Int32, Int64,
                                                      ComplexF16, ComplexF32, ComplexF64,
                                                      Complex{Int16}, Complex{Int32}, Complex{Int64})
 
-# Disallow scalar indexing — matches CUDA/Metal/AMDGPU behavior
-GPUArrays.allowscalar(false)
+# Disallow scalar indexing — matches CUDA/Metal/AMDGPU behavior — for the testsuite
+# run only (below). `allowscalar(false)` here set it in the running task's local
+# storage for good, and every suite run after Mantle's in the same task inherited
+# it: the editor suite's `out[][3, 3]` failed as scalar indexing.
 
 function count_results(ts::Test.DefaultTestSet)
     pass = ts.n_passed; fail = 0; err = 0; broken = 0
@@ -142,4 +144,4 @@ function run_gpuarrays_tests()
     return all_results
 end
 
-run_gpuarrays_tests()
+task_local_storage(run_gpuarrays_tests, :ScalarIndexing, GPUArrays.GPUArraysCore.ScalarDisallowed)
