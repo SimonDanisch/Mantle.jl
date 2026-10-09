@@ -1,11 +1,10 @@
-# The window questions that are the same on every backend.
+# The window questions that are the same on every backend, and the quickest ones.
 #
-# Split out of `test_window.jl`, which is 2,000 lines and reaches for
-# `MantleVulkanExt` in twenty-six places — sixteen of them raw `VK.` enums for
-# image layouts, load ops and aspects, which are genuinely that backend's and
-# belong under `test/vulkan/`. Splitting the rest is still to do; until then the
-# big file stays Vulkan-gated and this one runs per backend,
-# because the property below is exactly the one that had no test on Metal.
+# Split out of `test_window.jl` while that file still reached into the Vulkan
+# backend, so that the property below — exactly the one that had no test on
+# Metal — ran per backend. Both files are portable now. This one stays separate
+# because `runtests.jl` runs each window file in a child process of its own with
+# a deadline: a hang in the long file (see its header) does not hide these.
 #
 # `Window(backend, w, h)` is in the BACKEND_VOCABULARY and was answered by Lava
 # alone. The Metal side said it could not, for a reason that turned out to be
@@ -18,8 +17,7 @@ const M = Mantle
 using ColorTypes: BGRA
 using ColorTypes.FixedPointNumbers: N0f8
 
-const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
-    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "the portable Window is answered by this backend" begin
     # `Window(backend, w, h)` is in the BACKEND_VOCABULARY and was answered by

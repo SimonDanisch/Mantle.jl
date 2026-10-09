@@ -451,6 +451,60 @@ import Vulkan
         @test !Mantle.reads(ColorAttachment{true})     # nothing is loaded, so nothing is read
         @test Mantle.reads(ColorAttachment{false})
     end
+
+    # The Vulkan lowering of what a render pass declares. The behaviour each one
+    # leads to (a kept target keeps its pixels, a depth test decides) is asserted
+    # on every backend in `test_window.jl`; these are the tables underneath.
+    @testset "a load op lowers to its attachment op" begin
+        @test Mantle.loadop(Mantle.Keep) == Vulkan.ATTACHMENT_LOAD_OP_LOAD
+        @test Mantle.loadop(Mantle.Discard) == Vulkan.ATTACHMENT_LOAD_OP_DONT_CARE
+        @test Mantle.loadop(Mantle.Clear((0f0, 0f0, 0f0, 1f0))) == Vulkan.ATTACHMENT_LOAD_OP_CLEAR
+    end
+
+    @testset "a Float32 target is depth, by format and by aspect" begin
+        @test Mantle.vkformat(be, Float32) == Vulkan.FORMAT_D32_SFLOAT
+        @test Mantle.aspect(Float32) == Vulkan.IMAGE_ASPECT_DEPTH_BIT
+    end
+
+    # NOT a barrier per buffer: a recording cannot bake a handle for anything that
+    # can move, and baking makes everything movable, so a pass barrier is one
+    # `VkMemoryBarrier2` per distinct `(waits, to)` hazard and no buffer barriers.
+    # The tuples are unique and never unioned: a union would make the shader's
+    # writes visible to a copy nothing performs.
+    @testset "a pass barrier carries mask tuples, not buffers" begin
+        R, W = Storage{BufferKind,ReadOnly}, Storage{BufferKind,WriteOnly}
+        # Two copies made visible to a shader read are one hazard; the third, made
+        # visible to a shader write, is another.
+        ts = [Transition(1, CopyDst, [CopyDst], R), Transition(2, CopyDst, [CopyDst], R),
+              Transition(3, CopyDst, [CopyDst], W)]
+        dep = Mantle.build_pass_barrier(nothing, ts)
+        v = dep.vks
+        @test Int(v.memoryBarrierCount) == length(barrierhazards(ts)) == 2
+        @test Int(v.bufferMemoryBarrierCount) == 0
+        GC.@preserve dep begin
+            mb = unsafe_wrap(Array, v.pMemoryBarriers, Int(v.memoryBarrierCount))
+            @test allunique((m.srcStageMask, m.srcAccessMask, m.dstStageMask, m.dstAccessMask)
+                            for m in mb)
+        end
+        # Four slices of one buffer, the same hazard each: one barrier.
+        same = [Transition(k, CopyDst, [CopyDst], R) for k in 1:4]
+        @test Int(Mantle.build_pass_barrier(nothing, same).vks.memoryBarrierCount) == 1
+        @test Mantle.build_pass_barrier(nothing, Transition[]) === nothing
+    end
+
+    @testset "an image barrier lowers from the state it leaves" begin
+        # A depth target re-cleared each frame still waits for the last frame's
+        # writes, from an UNDEFINED layout because its contents are discarded.
+        D = Depth{ReadWrite,NoAccess,true}
+        b = Mantle.ImageBarrier(nothing, Transition(1, D, [D], D))
+        @test b.old == Vulkan.IMAGE_LAYOUT_UNDEFINED
+        @test b.src_access != Vulkan.AccessFlag2(0)
+        @test b.src_stage != Vulkan.PipelineStageFlag2(0)
+        # A colour target read back is in the transfer-source layout.
+        c = Mantle.ImageBarrier(nothing, Transition(1, ColorAttachment{true},
+                                                    [ColorAttachment{true}], CopySrc))
+        @test c.new == Vulkan.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+    end
 end
 
 
@@ -713,10 +767,9 @@ foreachbackend(joinpath(@__DIR__, "test_kernelinterface.jl"))
 # with everything before it still in the stdout buffer. One child per FILE, so a
 # hang in one does not hide what the other would have said.
 @testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
-    # The big file names twenty-six backend sites, so it needs Vulkan; the
-    # portable half runs on every backend.
-    for wf in (_VULKAN_OK ? ("test_window_portable.jl", "test_window.jl") :
-                            ("test_window_portable.jl",))
+    # Both files on every backend, each in a child of its own with a deadline, so a
+    # hang in the long one does not hide the short one's results.
+    for wf in ("test_window_portable.jl", "test_window.jl")
         log = joinpath(mktempdir(), "window.log")
         # The child picks the backend by NAME and re-derives the object, because a
         # backend object does not survive being interpolated into a command line.

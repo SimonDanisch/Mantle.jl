@@ -35,12 +35,11 @@ using KernelAbstractions
 # the rest of the branch, so a `using` inside it cannot be what binds the name.
 using Atomix
 const M = Mantle
-# The backend this run is for. `runtests.jl` includes this file once per
-# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
-# gets the default one. Nothing below names a backend, which is the point:
-# these testsets check PORTABLE behaviour, on whichever backend is there.
-const TESTBACKEND = isdefined(Main, :MANTLE_TEST_BACKEND) ?
-    Main.MANTLE_TEST_BACKEND : M.defaultbackend()
+# The backend this run is for. `runtests.jl` runs this file once per available
+# backend (`Mantle.eachbackend()`); a bare `include` from the REPL gets the
+# default one. Nothing below names a backend, which is the point: these testsets
+# check PORTABLE behaviour, on whichever backend is there.
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 
 # The probe has to be at top level: `@eval using GLFW` followed by `GLFW.Init()`
@@ -140,14 +139,14 @@ else
         @inbounds dst[i] = src[i] * a
     end
 
-    """The memory barrier a pass emits, as (src stage, dst stage), or nothing."""
-    function passmasks(pp)
-        pp.barrier === nothing && return nothing
-        v = pp.barrier.vks
-        v.memoryBarrierCount == 0 && return nothing
-        m = unsafe_load(v.pMemoryBarriers, 1)
-        (Mantle.VK.PipelineStageFlag2(m.srcStageMask),
-         Mantle.VK.PipelineStageFlag2(m.dstStageMask))
+    # GLFW sizes a window in screen coordinates and a swapchain in pixels, and on
+    # a Retina display one is twice the other. The ratio is asked of the window
+    # rather than of the display: X11 reports a content scale and still sizes
+    # windows in pixels. `handle` is the GLFW window on every backend's window.
+    function resizewindow!(win, w, h)
+        fw, fh = GLFW.GetFramebufferSize(win.handle)
+        ww, wh = GLFW.GetWindowSize(win.handle)
+        GLFW.SetWindowSize(win.handle, round(Int, w * ww / fw), round(Int, h * wh / fh))
     end
 
     # A quad at a given depth, and a fragment that writes no attachment, which is
@@ -171,7 +170,7 @@ else
 
     @testset "two scatters share one pipeline" begin
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "mantle test")
+        win = M.Window(TESTBACKEND, W, H; title = "mantle test")
         s = build(dev, win, 50_000, 20_000)
         a, b = s.a, s.b
 
@@ -196,7 +195,7 @@ else
         # this demo had no compute pass at all: the cloud rotated, looked alive,
         # and every position was the one it was uploaded with.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "advect")
+        win = M.Window(TESTBACKEND, W, H; title = "advect")
         s = Base.invokelatest(build, dev, win, 20_000, 10_000)
 
         before = copy(Array(s.a.positions))
@@ -256,8 +255,9 @@ else
         end
         KernelAbstractions.synchronize(M.backend(dev))
 
-        # Nothing a later frame could wait for is still sitting unsubmitted.
-        @test Mantle.argtoken(s.plan.args) <= Mantle.driver(dev.bq).next_timeline
+        # Nothing a later frame could wait for is still sitting unsubmitted: the
+        # plan's last token is no newer than everything the device was given.
+        @test Mantle.argtoken(s.plan.args) <= Mantle.fence(dev)
         after = Array(M.storage(s.pos))
         moved = [norm(after[i] - before[i]) for i in eachindex(before)]
         @test count(<(1e-6), moved) == 0
@@ -306,37 +306,56 @@ else
         @test yielded == 0
     end
 
+    # What `build_chain` (bench/chain.jl) computes from its `raw` bytes, on the
+    # host: `unpack!`, then `stages` passes of `blur!`, in the kernels' own
+    # index order and layout.
+    function chainreference(raw::Vector{UInt8}, w, h, stages)
+        img = Vector{Vec4f}(undef, w * h)
+        for i in 1:w, j in 1:h
+            b = ((j - 1) * w + i - 1) * 4
+            img[(i - 1) * h + j] = Vec4f(raw[b + 3], raw[b + 2], raw[b + 1], 255f0) / 255f0
+        end
+        for _ in 1:stages
+            next = similar(img)
+            for i in 1:w, j in 1:h
+                acc = zero(Vec4f)
+                for dj in -1:1, di in -1:1
+                    acc += img[(clamp(i + di, 1, w) - 1) * h + clamp(j + dj, 1, h)]
+                end
+                next[(i - 1) * h + j] = acc / 9f0
+            end
+            img = next
+        end
+        return img
+    end
+
     @testset "transients are placed, not allocated separately" begin
         # A chain where stage k reads t[k] and writes t[k+1]: only adjacent
         # transients are ever live together, so every other one can share bytes.
         # This is the allocator from the headless tests, driving real memory.
         include(joinpath(@__DIR__, "..", "bench", "chain.jl"))
         dev = M.Device(TESTBACKEND)
-        # A Lava window, not a Mantle one: this test drives acquire/blit/present
-        # by hand because the chain ends in a compute pass and Mantle has no blit.
-        # Anything that renders through a plan uses `M.Window`.
-        win = Mantle.VulkanWindow(W, H; ctx = Mantle.vk_context(), title = "chain", vsync = false)
-        s = Base.invokelatest(build_chain, dev, win, 20_000)
+        # No window: the graph never names one. The benchmark's frame loop copies
+        # the framebuffer into `raw` and blits the chain's output to a window by
+        # hand, outside the graph and through one backend's own calls.
+        s = Base.invokelatest(build_chain, dev, nothing, 20_000)
 
         peak = M.peakbytes(s.plan)
         naive = Mantle.naivebytes(s.plan)
         @test peak < naive                       # aliasing happened at all
         @test peak <= naive ÷ 2 + 2^20           # about two buffers, not five
 
-        for _ in 1:20
-            acquire_next_image!(win)
-            M.run!(s.plan)
-            Mantle.copy_framebuffer!(M.storage(s.raw), s.fb)
-            blit!(dev, WindowTarget(win), M.storage(s.out))
-            Mantle.submit_and_present!(dev.bq, win, Mantle.oneshot(dev.bq) do e
-                Mantle.presentready!(e, win)
-            end)
-        end
+        # And sharing bytes changed nothing: from the same `raw`, the chain
+        # computes what the host does. Seeded right before the run, because no
+        # pass writes `raw` and a later stage may take its bytes.
+        bytes = rand(UInt8, length(s.raw))
+        copyto!(M.storage(s.raw), bytes)
+        M.run!(s.plan)
         KernelAbstractions.synchronize(M.backend(dev))
-        img = readback_window(win)
-        close(win)
-        bg = img[1, 1]
-        @test count(p -> p != bg, img) > length(img) ÷ 100
+        got = Array(M.storage(s.out))
+        want = Base.invokelatest(chainreference, bytes, W, H, STAGES)
+        @test length(got) == length(want)
+        @test maximum(k -> maximum(abs.(got[k] - want[k])), eachindex(want)) < 1f-4
     end
 
     @testset "no barrier is dropped because another resource's covers it" begin
@@ -425,7 +444,7 @@ else
         # skipped frame: a cleared-then-refilled counter sits at exactly its
         # previous correct value.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(64, 64; title = "every frame", vsync = false)
+        win = M.Window(TESTBACKEND, 64, 64; title = "every frame", vsync = false)
         g = M.Graph(dev)
         cnt, tally = M.Buffer(dev, UInt32[0]), M.Buffer(dev, UInt32[0])
         M.dispatch!(g, clear_and_tally!, (cnt,
@@ -438,7 +457,7 @@ else
         frames = 40
         for _ in 1:frames
             M.run!(plan)
-            Mantle.flush!(dev.bq)
+            Mantle.flush!(dev)
         end
         @test Int(Array(tally)[1]) == frames        # every frame ran its first pass
         @test Int(Array(cnt)[1]) == 512             # and the counter restarted each time
@@ -567,10 +586,10 @@ else
 
         # Slicing a buffer partitions it, and a later whole-buffer usage then
         # stands for every segment: four transitions, one per segment. They are
-        # the same hazard, so they lower to one memory barrier rather than one
+        # the same hazard, so they are ONE entry in what a backend lowers to a
+        # barrier (`barrierhazards`, which drops the resource) rather than one
         # per segment — otherwise naming a range anywhere makes every whole use
-        # of that buffer cost a barrier per cut. And no buffer barrier at all: a
-        # recording names no `VkBuffer`.
+        # of that buffer cost a barrier per cut.
         gm = M.Graph(dev)
         bm = M.Buffer(dev, zeros(Float32, n))
         for (k, r) in enumerate((1:64, 65:128, 129:192, 193:256))
@@ -580,9 +599,8 @@ else
         M.dispatch!(gm, fill_span!, (bm, Int32(0), 9f0), n; name = "whole")
         pm = M.Plan(gm)
         whole = only(pp for pp in pm.passes if pp.pass.name == "whole")
-        @test length(whole.pre) == 4                                   # four segments
-        @test Int(whole.barrier.vks.memoryBarrierCount) == 1            # merged to one
-        @test Int(whole.barrier.vks.bufferMemoryBarrierCount) == 0      # and nothing named
+        @test length(whole.pre) == 4                              # four segments
+        @test length(M.barrierhazards(whole.pre)) == 1            # one hazard
 
         # Out of bounds is still a mistake worth naming.
         g2 = M.Graph(dev)
@@ -670,41 +688,20 @@ else
         @test issubset(got, required)
     end
 
-    @testset "the hazard set is lowered to mask tuples, not per-buffer barriers" begin
-        # Everything above asserts the *derived* set. Nothing in it looks at what
-        # is handed to Vulkan, and the two can disagree: a pass could carry ten
-        # correct transitions and still lower them to one `VkMemoryBarrier2` with
-        # the masks ORed together, which orders all memory and is exactly the
-        # thing being removed. The derivation would look perfect and the barrier
-        # would still be a global one.
-        #
-        # So this reads the emitted `VkDependencyInfo`. A pass lowers its
-        # transitions to one memory barrier per DISTINCT (stage, access) tuple
-        # and to no
-        # buffer barrier at all: a recording names no `VkBuffer`, which is what
-        # lets a buffer move under a recorded plan without invalidating it. Two
-        # transitions that are the same hazard collapse into one barrier; two
-        # that are not stay two, never ORed. A handover names two resources and
-        # no single buffer, so it was global anyway — hence aliasing off here,
-        # and its own test elsewhere.
-        include(joinpath(@__DIR__, "..", "bench", "independent.jl"))
-        dev = M.Device(TESTBACKEND)
-        s = Base.invokelatest(build_interleaved, dev, 1 << 10, 2, 3; alias = false)
-        nbuf = nmem = ntrans = 0
-        for pp in s.plan.passes
-            ntrans += length(pp.pre)
-            pp.barrier === nothing && continue
-            v = pp.barrier.vks
-            nbuf += Int(v.bufferMemoryBarrierCount)
-            nmem += Int(v.memoryBarrierCount)
-            # Every tuple a pass emits is distinct — dedupe, never union.
-            mb = unsafe_wrap(Array, v.pMemoryBarriers, Int(v.memoryBarrierCount))
-            @test allunique((m.srcStageMask, m.srcAccessMask, m.dstStageMask, m.dstAccessMask)
-                            for m in mb)
-            @test Int(v.memoryBarrierCount) <= length(pp.pre)
-        end
-        @test nbuf == 0                   # nothing names a buffer
-        @test 1 <= nmem <= ntrans         # tuples, one per distinct hazard, never one for all
+    # How a backend lowers these sets is its own: Vulkan's is one
+    # `VkMemoryBarrier2` per distinct (stage, access) tuple and no buffer barrier,
+    # a host function of the transitions that belongs with the host lowering
+    # tables, not in a file that runs on every backend.
+
+    # `fuzz` (bench/fuzz.jl) opens a device of its own on one named backend. The
+    # per-case `check` takes the device, so the sweep runs here, on the one under
+    # test, and adds up the same counts.
+    function fuzzcases(dev, seeds; kw...)
+        rs = [check(dev, s; kw...) for s in seeds]
+        (wrong = count(r -> !r.correct, rs),
+         disagreements = count(r -> !r.agree, rs),
+         emitted_total = sum(r -> r.emitted, rs),
+         uncoalesced_total = sum(r -> r.uncoalesced, rs))
     end
 
     @testset "the local hazard set holds over a corpus, not one topology" begin
@@ -767,7 +764,7 @@ else
         #     subsequent read visible
         #   - comparing every transient is meaningless once they are aliased
         include(joinpath(@__DIR__, "..", "bench", "fuzz.jl"))
-        r = Base.invokelatest(fuzz, 1:20)
+        r = Base.invokelatest(fuzzcases, M.Device(TESTBACKEND), 1:20)
         @test r.disagreements == 0
         # Against the same graphs compiled with coalescing off, which is the
         # question, and NOT `possible_total`, which is `passes - 1`: a plan is
@@ -911,7 +908,7 @@ else
         include(joinpath(@__DIR__, "..", "bench", "fuzz.jl"))
         dev = M.Device(TESTBACKEND)
         for pol in (M.Overlap(), M.Compact())
-            r = Base.invokelatest(fuzz, 1:12; passes = 12, policy = pol)
+            r = Base.invokelatest(fuzzcases, dev, 1:12; passes = 12, policy = pol)
             @test r.wrong == 0
             @test r.disagreements == 0
         end
@@ -943,7 +940,7 @@ else
         # everything before it, which shows up as `both` being darker than either.
         lit(which) = begin
             dev = M.Device(TESTBACKEND)
-            win = M.Window(W, H; title = "t")
+            win = M.Window(TESTBACKEND, W, H; title = "t")
             sa, sb = cloud(50_000), cloud(20_000)
             a = Scatter(M.Buffer(dev, sa), M.Buffer(dev, tint.(sa)), M.GPURef(dev, 2.0f0))
             b = Scatter(M.Buffer(dev, sb), M.GPURef(dev, Vec4f(0.10, 0.04, 0.01, 1)),
@@ -957,7 +954,7 @@ else
                 end
             end
             plan = M.Plan(g)
-            for _ in 1:20; Mantle.GLFW.PollEvents(); M.run!(plan); end
+            for _ in 1:20; GLFW.PollEvents(); M.run!(plan); end
             KernelAbstractions.synchronize(M.backend(dev))
             img = M.screenshot(win); close(win)
             # A colour is not indexable: `p[1]` is a `MethodError` on
@@ -989,8 +986,8 @@ else
         # Placed and aliased means the two targets land at the SAME offset in
         # their arena — that is what sharing bytes is — and unaliased means they
         # do not. Asserted on the placement rather than on a slab size, because
-        # the slab is a physical VkImage requirement (tiling included) and the
-        # logical `nbytes` is not the same number.
+        # the slab is the driver's physical image requirement (tiling included)
+        # and the logical `nbytes` is not the same number.
         ti, li = imgtrans(tight.plan), imgtrans(loose.plan)
         @test length(ti) == 2
         @test allequal(tight.plan.offsets[i] for i in ti)     # both share the bytes
@@ -1028,7 +1025,7 @@ else
     # reads. Without this the tests below fail one time in several, and the size
     # assertion still passes — it is only the pixels that are missing.
     function resize_and_settle!(dev, plan, win, w, h)
-        GLFW.SetWindowSize(win.handle, w, h)
+        resizewindow!(win, w, h)
         for _ in 1:200
             M.run!(plan)
             size(win) == (w, h) && break
@@ -1048,7 +1045,7 @@ else
         # is comparing the framebuffer size against what the swapchain was built
         # for, every frame.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "resize")
+        win = M.Window(TESTBACKEND, W, H; title = "resize")
         s = Base.invokelatest(build, dev, win, 20_000, 10_000)
         for _ in 1:10; M.run!(s.plan); end
         KernelAbstractions.synchronize(M.backend(dev))
@@ -1078,7 +1075,7 @@ else
                              cull = NoCull(),
                              depth = DepthLess())
         dev = M.Device(TESTBACKEND)
-        win = M.Window(800, 600; title = "tracking depth")
+        win = M.Window(TESTBACKEND, 800, 600; title = "tracking depth")
         g = M.Graph(dev)
         screen = M.Surface(g, win)
         z = M.Transient.Image(g, Float32, screen)
@@ -1125,7 +1122,7 @@ else
                              cull = NoCull(),
                              depth = DepthLess())
         dev = M.Device(TESTBACKEND)
-        win = M.Window(800, 600; title = "resize mismatch")
+        win = M.Window(TESTBACKEND, 800, 600; title = "resize mismatch")
         g = M.Graph(dev)
         screen = M.Surface(g, win)
         z = M.Transient.Image(g, Float32, size(win))
@@ -1139,7 +1136,7 @@ else
         M.run!(plan)                              # same size: fine
         KernelAbstractions.synchronize(M.backend(dev))
 
-        GLFW.SetWindowSize(win.handle, 1200, 900)
+        resizewindow!(win, 1200, 900)
         sleep(0.2)
         @test_throws ErrorException M.run!(plan)  # bigger window, same depth target
         close(win)
@@ -1157,9 +1154,10 @@ else
         # notices is what the frame is refit for.
         #
         # Forced rather than raced: the window is resized between the two steps
-        # `run!` takes, with X asked until it reports the new size. The first
-        # assertion is structural — the image is acquired before the refit — and
-        # gates the rest, because the behaviour it guards is a lost device.
+        # `run!` takes, with X asked until it reports the new size. That the
+        # image is acquired before the refit is checked by `execute!` itself: a
+        # frame whose image was not acquired fails there with an error, before
+        # anything mismatched reaches the device.
         zfrag(inputs) = inputs.color
         zpipe = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs = (color = Vec4f,)),
                              fragment = FragmentShader(zfrag),
@@ -1168,7 +1166,7 @@ else
                              cull = NoCull(),
                              depth = DepthLess())
         dev = M.Device(TESTBACKEND)
-        win = M.Window(800, 600; title = "resize at acquire")
+        win = M.Window(TESTBACKEND, 800, 600; title = "resize at acquire")
         g = M.Graph(dev)
         screen = M.Surface(g, win)
         z = M.Transient.Image(g, Float32, screen)
@@ -1183,41 +1181,43 @@ else
         M.waitidle(dev)
 
         M.beforeframe!(dev, plan)                  # poll, sync at 800x600, acquire
-        acquired = win.acquired
-        @test acquired
-        if acquired
-            GLFW.SetWindowSize(win.handle, 1200, 900)
-            t0 = time()
-            fbsize() = (fb = GLFW.GetFramebufferSize(win.handle); (Int(fb[1]), Int(fb[2])))
-            while fbsize() != (1200, 900) && time() - t0 < 5; sleep(0.01); end
-            @test fbsize() == (1200, 900)          # X has applied it; the swapchain has not
-            M.refit!(plan)
-            M.checkextents(plan)
-            @test size(z) == (800, 600)            # sized for the image the frame acquired
-            M.execute!(dev, plan)                  # must record at that size, not rebuild
-            M.waitidle(dev)                        # a mismatched frame loses the device here
-            M.run!(plan)
-            M.waitidle(dev)
-            @test size(win) == (1200, 900)         # the next frame follows the resize
-            @test size(z) == (1200, 900)           # and its attachments with it
-        end
+        resizewindow!(win, 1200, 900)
+        t0 = time()
+        fbsize() = (fb = GLFW.GetFramebufferSize(win.handle); (Int(fb[1]), Int(fb[2])))
+        while fbsize() != (1200, 900) && time() - t0 < 5; sleep(0.01); end
+        @test fbsize() == (1200, 900)              # X has applied it; the swapchain has not
+        M.refit!(plan)
+        M.checkextents(plan)
+        @test size(z) == (800, 600)                # sized for the image the frame acquired
+        M.execute!(dev, plan)                      # must record at that size, not rebuild
+        M.waitidle(dev)                            # a mismatched frame loses the device here
+        M.run!(plan)
+        M.waitidle(dev)
+        @test size(win) == (1200, 900)             # the next frame follows the resize
+        @test size(z) == (1200, 900)               # and its attachments with it
         close(win)
     end
 
     @testset "a readback returns the image it acquired" begin
-        # `readback_window` acquires an image when no frame is in flight. Leaving
-        # it outstanding is invisible once and a deadlock in a loop: a swapchain
+        # A readback acquires an image when no frame is in flight. Leaving it
+        # outstanding is invisible once and a deadlock in a loop: a swapchain
         # has two or three images, so the fourth readback waits forever inside
         # vkAcquireNextImageKHR for one that is never handed back. Found by
         # measuring two graphs against one window, which hung on the second.
         #
-        # The assertion is on the state rather than on not hanging, so a
-        # regression fails on the first iteration instead of stopping the suite.
-        win = Mantle.VulkanWindow(256, 256; ctx = Mantle.vk_context(), title = "readback pairing", vsync = false)
+        # Asserted through what the window allows afterwards rather than on not
+        # hanging: a window refuses a second image while it holds one (next
+        # testset), so an image a readback left outstanding makes the next
+        # readback, or the acquire after the loop, an error on the spot instead
+        # of a wait that stops the suite.
+        dev = M.Device(TESTBACKEND)
+        win = M.Window(TESTBACKEND, 256, 256; title = "readback pairing", vsync = false)
         for _ in 1:6
-            readback_window(win)
-            @test !win.acquired
+            @test size(M.screenshot(win)) == (256, 256)
         end
+        M.beginframe!(win)
+        M.acquire_next_image!(win)
+        M.present_frame!(dev, win)
         close(win)
     end
 
@@ -1234,28 +1234,27 @@ else
         # Found by measuring a running demo from the REPL, which wedged the whole
         # session. A regression here hangs the suite rather than failing it —
         # that is exactly what the check is for.
-        win = Mantle.VulkanWindow(256, 256; ctx = Mantle.vk_context(), title = "one frame at a time", vsync = false)
-        acquire_next_image!(win)
-        @test win.acquired
-        @test win.acquirer === current_task()
+        dev = M.Device(TESTBACKEND)
+        win = M.Window(TESTBACKEND, 256, 256; title = "one frame at a time", vsync = false)
+        M.beginframe!(win)
+        M.acquire_next_image!(win)
 
-        err = try; acquire_next_image!(win); catch e; e; end
-        @test err isa ErrorException
-        @test occursin("the same task", err.msg)
+        # The error is caught to be read: what it says is the assertion, and it
+        # must name which of the two cases this is.
+        err = try; M.acquire_next_image!(win); catch e; e; end
+        @test err isa ErrorException && occursin("the same task", err.msg)
 
-        other = fetch(@async(try; acquire_next_image!(win); nothing; catch e; e; end))
-        @test other isa ErrorException
-        @test occursin("another task", other.msg)
+        other = fetch(@async(try; M.acquire_next_image!(win); nothing; catch e; e; end))
+        @test other isa ErrorException && occursin("another task", other.msg)
 
         # The refused acquires changed nothing, so the frame that owns the image
-        # can still finish, and the window is usable afterwards.
-        bq = win.ctx.default_bq
-        Mantle.submit_and_present!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
-        @test !win.acquired
-        @test win.acquirer === nothing
-        acquire_next_image!(win)
-        Mantle.submit_and_present!(bq, win, Mantle.oneshot(bq) do e; Mantle.presentready!(e, win); end)
-        @test !win.acquired
+        # can still finish, and the window hands out the next one afterwards —
+        # twice, so the second present is seen to have given its image back too.
+        M.present_frame!(dev, win)
+        for _ in 1:2
+            M.acquire_next_image!(win)
+            M.present_frame!(dev, win)
+        end
         close(win)
     end
 
@@ -1269,26 +1268,25 @@ else
         # The surface needs destroying by name rather than by `finalize`: Lava
         # wraps it around the pointer GLFW returns without going through
         # Vulkan.jl's `init_handle!`, so it has no destructor and no finalizer.
-        win = Mantle.VulkanWindow(64, 64; ctx = Mantle.vk_context(), title = "close test", vsync = false)
-        @test !isempty(win.views)
-        @test win.swapchain !== nothing
-        @test win.surface.destructor isa UndefInitializer   # why finalize cannot work
+        #
+        # What a leak looks like is a validation message at exit, which no
+        # assertion here can see; what can be seen is that a closed window says
+        # so, closes twice, and refuses a frame with an error rather than asking
+        # the driver about a destroyed handle, which is a segfault.
+        win = M.Window(TESTBACKEND, 64, 64; title = "close test", vsync = false)
+        @test isopen(win)
 
         close(win)
-        @test isempty(win.views)
-        @test isempty(win.image_available)
-        @test win.swapchain === nothing
+        @test !isopen(win)
         close(win)                                          # idempotent
+        @test_throws ErrorException M.beginframe!(win)
     end
 
-    @testset "each load op reaches its Vulkan attachment op" begin
+    @testset "each load op reaches its pass and does what it says" begin
         # Discard is the point of the exercise: inferring the op from whether a
         # clear colour was given can only ever pick CLEAR or LOAD, so a pass that
-        # covers every pixel pays for a load it discards.
-        E = Mantle
-        @test Mantle.loadop(M.Keep) == Mantle.VK.ATTACHMENT_LOAD_OP_LOAD
-        @test Mantle.loadop(M.Discard) == Mantle.VK.ATTACHMENT_LOAD_OP_DONT_CARE
-        @test Mantle.loadop(M.Clear((0f0, 0f0, 0f0, 1f0))) == Mantle.VK.ATTACHMENT_LOAD_OP_CLEAR
+        # covers every pixel pays for a load it discards. Which attachment op each
+        # one lowers to is the backend's table, not this file's.
         @test Mantle.clearvalue(M.Keep) === nothing
         @test Mantle.clearvalue(M.Clear(Vec4f(0.1, 0.2, 0.3, 1))) == (0.1f0, 0.2f0, 0.3f0, 1f0)
 
@@ -1320,6 +1318,39 @@ else
             lit = count(j -> Int(px[1, j]) + Int(px[2, j]) + Int(px[3, j]) > 40, axes(px, 2))
             @test lit > 1000
         end
+
+        # What each op does to what is already there, which the loop above cannot
+        # see: its target starts undefined every time. A first pass clears to
+        # blue; the second draws the lower of two bands white and leaves the other
+        # half to its op. `Keep` has to show the first pass's blue there and
+        # `Clear` its own black; `Discard` promises nothing about it, so only the
+        # band is checked. Counted rather than located, so the result does not
+        # depend on which way up the target is.
+        N = 64
+        function overdraw(op)
+            g = M.Graph(dev)
+            img = M.Transient.Image(g, BGRA{N0f8}, (N, N))
+            raw = M.Transient.Buffer(g, UInt8, N * N * 4)
+            M.render!(g, "first", img => M.Clear((0f0, 0f0, 1f0, 1f0))) do p
+            end
+            M.render!(g, "second", img => op) do p
+                M.draw!(p, BANDS, (Int32(2),), 6)
+            end
+            M.copy!(g, "read", raw, img)
+            plan = M.record!(M.Plan(g))
+            M.run!(plan)
+            KernelAbstractions.synchronize(M.backend(dev))
+            px = reshape(Array(M.storage(raw)), 4, :)        # B, G, R, A per pixel
+            rgb(r, gr, b) = count(j -> (px[3, j], px[2, j], px[1, j]) == (r, gr, b), axes(px, 2))
+            (white = rgb(0xff, 0xff, 0xff), blue = rgb(0x00, 0x00, 0xff),
+             black = rgb(0x00, 0x00, 0x00))
+        end
+        half = N * N ÷ 2
+        kept = overdraw(M.Keep)
+        @test kept.white == half && kept.blue == half       # the first pass's clear survived
+        cleared = overdraw(M.Clear((0f0, 0f0, 0f0, 1f0)))
+        @test cleared.white == half && cleared.black == half # and here it was replaced
+        @test overdraw(M.Discard).white == half
     end
 
     @testset "a depth attachment decides which fragment wins" begin
@@ -1375,11 +1406,6 @@ else
         probe = shot((near, far), ZPIPE)
         @test any(last(u) === M.Depth{M.ReadWrite,M.NoAccess,true}
                   for u in first(p for p in probe.plan.graph.passes if p.kind === :render).usages)
-        E = Mantle
-        zt = only(t for t in probe.plan.graph.transients
-                  if t isa E.TransientImage && eltype(t) === Float32)
-        @test zt.format == Mantle.VK.FORMAT_D32_SFLOAT
-        @test Mantle.aspect(zt) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT
 
         for order in ((near, far), (far, near))
             got = shot(order, ZPIPE)
@@ -1461,11 +1487,14 @@ else
         # coalescing tested it by masks alone and dropped the second transition.
         # Synchronization validation reports the second copy reading its source in
         # COLOR_ATTACHMENT_OPTIMAL; the pixels below come out right anyway, which
-        # is why this is asserted on the barrier rather than on the picture.
+        # is why this is asserted on the derived transitions rather than on the
+        # picture: each copy carries one into `CopySrc` for its OWN source. The
+        # layout change a backend makes of it is that backend's.
         copies = [pp for pp in plan.passes if pp.pass.kind === :copy]
         @test length(copies) == 2
-        for pp in copies
-            @test any(b -> b.new == Mantle.VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pp.images)
+        for (name, src) in (("read a", a), ("read b", b))
+            pp = only(pp for pp in copies if pp.pass.name == name)
+            @test any(t -> t.resource == plan.graph.ids[src] && t.to === M.CopySrc, pp.pre)
         end
 
         M.run!(plan)
@@ -1530,7 +1559,7 @@ else
         # the plot's buffer, and a host array stored through the buffer. The
         # three differ only in where the bytes come from.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "three updates")
+        win = M.Window(TESTBACKEND, W, H; title = "three updates")
         s = Base.invokelatest(three_plots, dev, win, 5_000)
         @test M.npipelines(s.plan) == 1          # three plots, one shader
 
@@ -1551,7 +1580,7 @@ else
         @test after[1] != after[2] && after[2] != after[3]
 
         # A store from another task reaches the next frame: it retains a
-        # reference and touches no Vulkan, so where it is made from is free.
+        # reference and touches no device API, so where it is made from is free.
         fresh = cloud(5_000)
         fetch(Threads.@spawn (s.cpu.positions[:] = fresh))
         M.run!(s.plan)
@@ -1564,7 +1593,7 @@ else
         # `profile = true` is the whole of it, and asking an unprofiled plan is an
         # error rather than a table of zeros.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "profiled")
+        win = M.Window(TESTBACKEND, W, H; title = "profiled")
 
         plain = Base.invokelatest(three_plots, dev, win, 5_000)
         @test_throws ArgumentError M.timings(plain.plan)
@@ -1581,14 +1610,17 @@ else
         @test [t.kind for t in ts] == [:update, :compute, :render]
         # Timestamps came back for every pass, and they are times rather than
         # zeros: a query pool that is never reset, or read with the wrong stride,
-        # gives exactly zeros.
+        # gives exactly zeros. GPU times only where the device has timestamp
+        # queries; without them `gpu_ms` is NaN and the host side is the answer.
         for t in ts
             # The update pass lands its stores as a transfer the profiler does
             # not bracket, so it carries no GPU or host sample; the passes that
             # run kernels do.
             t.kind === :update && continue
             @test t.samples > 0
-            @test 0 < t.gpu_ms < 100
+            if Mantle.timestamps(dev)
+                @test 0 < t.gpu_ms < 100
+            end
             @test 0 < t.host_ms < 100
         end
         # Kept bounded: the ring is NSAMPLES long however long the plan runs.
@@ -1623,14 +1655,14 @@ else
         end
         plan = M.Plan(g)
 
-        E = Mantle
-        depth = only(b for b in first(pp for pp in plan.passes if pp.pass.kind === :render).images
-                     if Mantle.aspect(b.resource) == Mantle.VK.IMAGE_ASPECT_DEPTH_BIT)
-        # The layout still comes from UNDEFINED — the clear discards — but the
-        # barrier has to wait for the previous frame's depth write all the same.
-        @test depth.old == Mantle.VK.IMAGE_LAYOUT_UNDEFINED
-        @test depth.src_access != Mantle.VK.AccessFlag2(0)
-        @test depth.src_stage != Mantle.VK.PipelineStageFlag2(0)
+        # The transition into the depth target starts from the previous frame's
+        # depth write, not from `Undefined`, so it has something to wait for. The
+        # clear discards, so a backend with layouts still transitions from
+        # UNDEFINED; that lowering is the backend's, the wait is the graph's.
+        rp = first(pp for pp in plan.passes if pp.pass.kind === :render)
+        zt = only(t for t in rp.pre if t.resource == plan.graph.ids[z])
+        @test zt.from <: M.Depth
+        @test any(w -> w <: M.Depth, zt.waits)
     end
 
     @testset "a scalar attribute is written in place" begin
@@ -1640,7 +1672,7 @@ else
         # a per-element attribute are one pipeline precisely because the binding
         # is the same shape, and swapping the store would be a needless allocation.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "scalar update")
+        win = M.Window(TESTBACKEND, W, H; title = "scalar update")
         pts = cloud(1_000)
         sc = Scatter(M.Buffer(dev, pts), M.Buffer(dev, tint.(pts)), M.GPURef(dev, 2f0))
         mvp = M.GPURef(dev, camera(0f0))
@@ -1670,7 +1702,7 @@ else
         # store that RENAMES into a fresh store is what a recording cannot
         # follow; nothing renames, and a ranged store moves only its range.
         dev = M.Device(TESTBACKEND)
-        win = M.Window(W, H; title = "store")
+        win = M.Window(TESTBACKEND, W, H; title = "store")
 
         function scene(n)
             pts = cloud(n)
@@ -1995,13 +2027,12 @@ else
         # vacated the bytes and what the state walk says that
         # transient was last doing.
         #
-        # So the discriminating question is whether the masks *follow* the old
-        # tenant. Two graphs, identical except for what last touched the memory:
-        # if the barrier is derived they differ, and if it is assumed they cannot.
+        # So the discriminating question is whether the handover *follows* the
+        # old tenant. Two graphs, identical except for what last touched the
+        # memory: if the barrier is derived they differ, and if it is assumed they
+        # cannot. Which stage masks a backend makes of it is that backend's.
         N = 256
         dev = M.Device(TESTBACKEND)
-        every = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
-        copybit = Mantle.VK.PipelineStageFlag2(Mantle.VK.PIPELINE_STAGE_2_COPY_BIT)
 
         # (a) the vacating transient was last *read by a shader*
         function shaderlast(dev)
@@ -2037,7 +2068,6 @@ else
             (; plan = M.record!(M.Plan(g)), out)
         end
 
-        E = Mantle
         # The alias handover is the transition that names no resource: `later`
         # taking `raw`'s bytes. Its `from` is what the vacating transient last
         # did. Read from the transition, not the lowered barrier masks, because
@@ -2057,16 +2087,7 @@ else
         @test aliashandover(b.plan).from === M.CopyDst
         @test aliashandover(a.plan).from !== M.CopyDst
 
-        # And neither of them, nor any other barrier in either frame, says
-        # "wait for everything", which is what an assumed handover says.
-        for plan in (a.plan, b.plan)
-            masks = filter(!isnothing, [passmasks(pp) for pp in plan.passes])
-            @test !isempty(masks)
-            @test all(m -> (first(m) & every) == zero(every), masks)
-            @test all(m -> (last(m) & every) == zero(every), masks)
-        end
-
-        # And they compute what they should, derived barriers against Lava's own.
+        # And they compute what they should, the same on every run.
         for s in (a, b)
             M.run!(s.plan)
             KernelAbstractions.synchronize(M.backend(dev))
