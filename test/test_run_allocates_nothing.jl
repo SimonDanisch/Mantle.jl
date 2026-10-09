@@ -17,8 +17,15 @@
 # Everything measured lives inside `cycle`/`measure` — locals, not globals —
 # because a non-const global read boxes its way into the count and a fresh
 # world age recompiles into it too.
+#
+# Counted by the allocation profiler's STACKS, not by `@allocated`. `@allocated`
+# reads the process-wide counter, and `waitfor!` waits: whatever else runs during
+# that wait is counted as the run's. Inside a bt session that is its own timer task,
+# 112 bytes every ~250 ms, which failed this test at 1.1-1.7 bytes per run while
+# the profiler recorded no allocation from the run at all. An allocation is the
+# run's when one of the frames on its stack is in a package the run goes through.
 
-using Test, Mantle
+using Test, Mantle, Profile
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "testbackend.jl"))
 
@@ -46,11 +53,19 @@ function _allocfree_measure(pl)
     for _ in 1:50
         cycle()
     end
-    bytes = @allocated for _ in 1:200
+    Profile.Allocs.clear()
+    Profile.Allocs.@profile sample_rate = 1 for _ in 1:200
         cycle()
     end
-    return bytes / 200
+    allocs = Profile.Allocs.fetch().allocs
+    return sum(a -> a.size, filter(byrun, allocs); init = 0) / 200
 end
+
+"""Whether an allocation was made by the code under test: one of its frames is in the
+SOURCE of a package a run goes through (`src/` or `lib/`, so not this test file)."""
+byrun(a) = any(f -> occursin(RUN_PACKAGES, string(f.file)), a.stacktrace)
+
+const RUN_PACKAGES = r"/(Mantle|Metal|Lava|ObjectiveC|KernelAbstractions|KernelInterface|GPUArrays|Vulkan)/([^/]+/)?(src|lib)/"
 
 @testset "run! of a recorded plan allocates nothing" begin
     dev = Mantle.Device(TESTBACKEND)
