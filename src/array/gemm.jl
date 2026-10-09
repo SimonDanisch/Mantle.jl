@@ -503,31 +503,19 @@ function gemm_padn(M::Int, N::Int, K::Int;
     best != 0 && best <= base * (1 + slack) ? best : base
 end
 
-"""Does this device implement the tile `mul!` wants?"""
+# The cooperative-matrix kernels here are written against a 32-lane subgroup: they
+# index their subgroup as `lane ÷ 32` and size their workgroups in multiples of it.
+# Cooperative-matrix operations are subgroup-scoped, so on a device with a wider
+# wave those lanes do not form a subgroup and the kernel writes only part of its
+# output tile. A property of these kernels, so core's; the Vulkan pipeline layer
+# pins a coopmat pipeline's subgroup size to it.
+const COOPMAT_SUBGROUP = 32
+
 # The block kernel derives its subgroup index as `lane ÷ 32` and GEMM_WORKGROUP
 # is sized as "2 subgroups" on the same assumption, so the whole thing is only
-# correct where a subgroup is 32 lanes wide. Same constant the pipeline layer
-# uses when it pins a coopmat pipeline's subgroup size.
+# correct where a subgroup is 32 lanes wide.
 const GEMM_SUBGROUP = COOPMAT_SUBGROUP
 
-# Cooperative-matrix operations are subgroup-scoped, so a device whose subgroup
-# is not 32 lanes gets a different number of subgroups per workgroup than this
-# kernel assumes, and `lane ÷ 32` stops naming a real subgroup. The arithmetic
-# still comes out right for the lanes that run — on a wave64 device exactly half
-# the output tile is written, bit-exact, and the other half stays zero, which is
-# a silently wrong answer rather than a failure.
-#
-# Two ways to have a 32-lane subgroup: the device is natively wave32, or it lets
-# the pipeline pin its subgroup size, which `get_compute_pipeline` does for any
-# coopmat module. Failing both, `mul!` falls through to `gemmlaunch!`, which is
-# correct at any width — slower, but not wrong. Making the kernel itself
-# wave-size agnostic would mean retuning GEMM_WORKGROUP and the block factors
-# together, and those were measured at 32.
-function coopmat_gemm_available(ctx::VkContext)
-    coopmat_shape(ctx, Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) &&
-        (device_subgroup_size(ctx) == GEMM_SUBGROUP ||
-         can_require_subgroup_size(ctx, GEMM_SUBGROUP))
-end
 
 # Tile index comes from the global lane index, so a workgroup may hold several
 # subgroups. Nothing is masked: the caller guarantees M and N are multiples of

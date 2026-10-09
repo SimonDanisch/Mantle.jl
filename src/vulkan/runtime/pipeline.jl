@@ -186,12 +186,8 @@ end
 
 const MAX_PIPELINE_CACHE_SIZE = Ref(1024)
 
-# Lava's cooperative-matrix kernels are written against a 32-lane subgroup: they
-# index their subgroup as `lane ÷ 32` and size their workgroups in multiples of
-# it. Cooperative-matrix operations are subgroup-scoped, so on a device with a
-# wider wave those lanes do not form a subgroup and the kernel writes only part
-# of its output tile.
-const COOPMAT_SUBGROUP = 32
+# `COOPMAT_SUBGROUP` (core, `src/array/gemm.jl`) is the subgroup width the
+# cooperative-matrix kernels are written against; a coopmat pipeline is pinned to it.
 
 # Per device, for the same reason as `DEVICE_SUBGROUP_SIZE` above: RDNA 3.5
 # reports min 32 / max 64 where this card reports 32 / 32, and answering the

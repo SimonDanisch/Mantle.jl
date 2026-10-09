@@ -189,3 +189,23 @@ function LinearAlgebra.mul!(C::LavaArray{T,2},
     @. dc += α * da * db
     return C
 end
+
+"""Does this device implement the tile `mul!` wants?"""
+# Cooperative-matrix operations are subgroup-scoped, so a device whose subgroup
+# is not 32 lanes gets a different number of subgroups per workgroup than this
+# kernel assumes, and `lane ÷ 32` stops naming a real subgroup. The arithmetic
+# still comes out right for the lanes that run — on a wave64 device exactly half
+# the output tile is written, bit-exact, and the other half stays zero, which is
+# a silently wrong answer rather than a failure.
+#
+# Two ways to have a 32-lane subgroup: the device is natively wave32, or it lets
+# the pipeline pin its subgroup size, which `get_compute_pipeline` does for any
+# coopmat module. Failing both, `mul!` falls through to `gemmlaunch!`, which is
+# correct at any width — slower, but not wrong. Making the kernel itself
+# wave-size agnostic would mean retuning GEMM_WORKGROUP and the block factors
+# together, and those were measured at 32.
+function coopmat_gemm_available(ctx::VkContext)
+    coopmat_shape(ctx, Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) &&
+        (device_subgroup_size(ctx) == GEMM_SUBGROUP ||
+         can_require_subgroup_size(ctx, GEMM_SUBGROUP))
+end
