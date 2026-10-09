@@ -689,8 +689,10 @@ mutable struct MTL4Queue
     at::Vector{UInt64}
     slot::Int
     # The one-element array `commit:count:` takes, kept so that a replayed frame
-    # allocates nothing — the invariant `test_record_metal.jl` pins.
-    batch::Vector{MTL.MTL4CommandBuffer}
+    # allocates nothing — the invariant `test_record_metal.jl` pins. Pointers, not
+    # wrappers: an array of wrappers is converted into a fresh pointer array on every
+    # commit, which allocated the very thing this field exists to keep.
+    batch::Vector{id{MTL.MTL4CommandBuffer}}
     # The timeline. `signaledValue` is what the GPU has finished; `next` is the
     # value the last submission was given.
     event::MTL.MTLSharedEvent
@@ -729,7 +731,7 @@ function MTL4Queue(dev::MTL.MTLDevice)
                      [MTL.MTL4CommandAllocator(dev) for _ in 1:n],
                      [MTL.MTL4CommandBuffer(dev) for _ in 1:n],
                      zeros(UInt64, n), 0,
-                     Vector{MTL.MTL4CommandBuffer}(undef, 1),
+                     Vector{id{MTL.MTL4CommandBuffer}}(undef, 1),
                      MTL.MTLSharedEvent(dev), UInt64(0), mtl, bq,
                      MTL.MTL4Feedback(), resset)
 end
@@ -743,10 +745,11 @@ cmdqueue(q::MTL4Queue) = q.mtl
 ownflush!(q::MTL4Queue, ::MTL.MTLDevice, own::Bool) =
     (Metal.own_flushes!(q.bq, own); nothing)
 
-"""What one MTL4 submission is: a ring slot, its command buffer and its encoder."""
+"""What one MTL4 submission is: a ring slot, its command buffer and its encoder —
+unmanaged, with the one reference `opensubmit!` took, which `closesubmit!` gives back."""
 struct MTL4Submission
     cb::MTL.MTL4CommandBuffer
-    enc::MTL.MTL4ComputeCommandEncoder
+    enc::MTL.MTL4ComputeCommandEncoderRef
     slot::Int
 end
 
@@ -909,7 +912,7 @@ function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     MTL.reset!(alloc)
     cb = q.cbs[q.slot]
     MTL.begin_command_buffer!(cb, alloc)
-    enc = MTL.compute_encoder(cb)
+    enc = MTL.MTL4ComputeCommandEncoderRef(cb)
     q.resset === nothing || MTL.use_residency_set!(cb, q.resset)
     return MTL4Submission(cb, enc, q.slot)
 end
@@ -944,7 +947,7 @@ function flushlegacy!(q::MTL4Queue)
 end
 
 function closesubmit!(q::MTL4Queue, s::MTL4Submission)
-    MTL.endEncoding!(s.enc)
+    close(s.enc)
     MTL.end_command_buffer!(s.cb)
     # Wait for EVERYTHING earlier: the legacy work this frame put on the other
     # queue, and the previous submission on this one.
@@ -970,7 +973,7 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     fl = flushlegacy!(q)
     w = iszero(fl) ? prev : fl
     iszero(w) || MTL.wait_for_event!(q.q, q.event, w)
-    q.batch[1] = s.cb
+    q.batch[1] = pointer(s.cb)
     MTL.commit!(q.q, q.batch, q.feedback)
     f = (q.next += UInt64(1))
     MTL.signal_event!(q.q, q.event, f)
@@ -986,9 +989,17 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     # the other one. Safe to commit directly because `flushlegacy!` just closed
     # the batch, so no command buffer of Metal.jl's is open to be reordered
     # against.
-    bridge = MTL.MTLCommandBuffer(q.mtl)
+    #
+    # Directly in the plainest sense: `commit_with_queue_key!` and not `commit!`,
+    # whose submission hook asks the command buffer for its queue (a managed wrapper
+    # made per call) only to flush a batch that is already closed and to claim arrays
+    # this buffer does not touch. Unmanaged, so the bridge is no Julia object at all:
+    # its one reference is given back once the queue's submission record has taken
+    # its own.
+    bridge = MTL.MTLCommandBufferRef(q.mtl)
     MTL.encode_wait!(bridge, q.event, f)
-    MTL.commit!(bridge)
+    MTL.commit_with_queue_key!(bridge, pointer(q.mtl))
+    Metal.ObjectiveC.release(bridge)
     return f
 end
 
@@ -1242,7 +1253,7 @@ waitidle(d::MetalDevice) = waitidle(d.queue)
 # Recorded on the timeline, so the pool can reuse what was retired before the wait:
 # a drain the queue did not hear about left those regions waiting for another one.
 # An MTL4 device has two queues and waits for both.
-waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(); nothing)
+waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(q.bq); nothing)
 
 # `supports_graphics` is answered in `graphics.jl`, where the rasterisation half
 # lives. Metal.jl compiles vertex and fragment stages as well as compute.
