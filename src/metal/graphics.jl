@@ -950,8 +950,10 @@ function Mantle.gpupasstime!(d::MetalDevice)
     # Every buffer this backend opened for the pass has been committed by the
     # call that opened it; Metal.jl's batch may still be open and is picked up
     # here, so the numbers describe the frame as it ran.
+    # A managed wrapper with a reference of its own: the batch's buffer is borrowed,
+    # and the batch gives its reference back when the flush below commits it.
     open_cb = bq.cmdbuf
-    open_cb === nothing || push!(COMMITTED, open_cb)
+    open_cb === nothing || push!(COMMITTED, MTLm.retained(open_cb))
     Metal.flush!(bq)
     isempty(COMMITTED) && return 0.0
     total = 0.0

@@ -472,11 +472,14 @@ end
 """
 Nothing encoded and not committed, and the last command buffer committed to this
 queue has finished: the queue runs in order, so every one before it has too.
+
+`MTL.all_completed` and not the status of `MTL.last_committed`: that hands back an
+abstractly typed command buffer, and reading `.status` off it was a dynamic call that
+boxed the enum, 16 bytes on every `closesubmit!`.
 """
 function quiet(q::LegacyQueue)
     q.bq.cmdbuf === nothing || return false
-    last = MTL.last_committed(q.mtl)
-    return last === nothing || last.status >= MTL.MTLCommandBufferStatusCompleted
+    return MTL.all_completed(q.mtl)
 end
 
 passed(q::LegacyQueue, f) = UInt64(f) <= q.completed
@@ -499,15 +502,22 @@ end
 Wait for everything submitted, and record it: every fence handed out before the wait
 has passed.
 
-Drain everything: `Metal.synchronize()` waits on this task's queue, which is the one
-Metal.jl dispatches kernels on. There is no finer-grained wait available to this
-generation, and a coarse-but-correct one is the point — the alternative was handing
-back live memory. It commits the open batch first, so a region retired before this
-call is reached by nothing still to run.
+Drain THIS queue: `Metal.synchronize(q.bq)` commits the open batch, waits for the
+last command buffer committed to `q.mtl` — the batch's and the ones the render and
+acceleration-structure paths commit there themselves — and releases what the
+finished work held. That is everything a fence counts, because every submission of
+this backend goes to `q.mtl`, so a region retired before this call is reached by
+nothing still to run. It also reports a failed command buffer or a device-side
+exception, which a bare wait on one command buffer would not.
+
+The queue by name, not `Metal.synchronize()`. That one waits on the CURRENT TASK's
+queue, which is this one only when the device has adopted it (`defaultdevice!`); a
+device asked for by name has not, and there the task's queue is a different queue:
+waiting on it is not waiting for this backend's work.
 """
 function waitidle(q::LegacyQueue)
     issued = q.next
-    Metal.synchronize()
+    Metal.synchronize(q.bq)
     q.completed = max(q.completed, issued)
     return nothing
 end
@@ -528,10 +538,11 @@ end
 # (`useResource`, which is hazard tracking as much as residency), MTL4 has to
 # have the residency set complete before the command buffer declares it.
 
-"""What one legacy submission is: the batched queue, and its compute encoder."""
+"""What one legacy submission is: the batched queue, and its compute encoder —
+the batch's own, borrowed, which the batch ends and releases."""
 struct LegacySubmission
     bq::Metal.BatchedCommandQueue
-    enc::MTL.MTLComputeCommandEncoder
+    enc::MTL.MTLComputeCommandEncoderRef
 end
 
 """The compute encoder a submission records into."""
