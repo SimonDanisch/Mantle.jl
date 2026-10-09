@@ -970,18 +970,26 @@ end
 Mantle.emitupdate!(::MetalRecorder, ::Mantle.Plan, ::Mantle.PassPlan) = nothing
 
 """
-A pass going into a recording is encoded, not timed.
+A pass going into a recording is timed on the host only.
 
 Core profiles a pass where it is emitted, and for a recording that is `record!`:
-once, with nothing run. The default sampled it anyway, so a recorded compute
-plan's `timings` showed the encode time as the pass's host cost and `0.0` as its
-GPU cost. A replay is one command buffer for every pass, and an Apple GPU samples
-counters only at stage boundaries (the M5 answers `supportsCounterSampling:` with
-true for `AtStageBoundary` and false for the dispatch, draw and blit points), so
-this backend has no per-pass number to give for a recorded pass. It gives none:
-no samples, and `NaN` in `timings`.
+once, with nothing run. Its host number is what `timings` says it is, the cost of
+recording the pass, the same as on every backend. Its GPU number is not: the
+default asked `gpupasstime!`, which waits for work this pass did not submit, and
+reported `0.0`. A replay is one command buffer for every pass, and an Apple GPU
+samples counters only at stage boundaries (the M5 answers
+`supportsCounterSampling:` with true for `AtStageBoundary` and false for the
+dispatch, draw and blit points), so this backend has no per-pass GPU number to give
+for a recorded pass. It gives none: no GPU samples, and `NaN` in `timings`.
 """
-Mantle.profiled!(f, ::Mantle.Plan, ::MetalRecorder, ::Integer) = f()
+function Mantle.profiled!(f, pl::Mantle.Plan, ::MetalRecorder, i::Integer)
+    prof = pl.profiler
+    prof === nothing && return f()
+    t0 = time_ns()
+    r = f()
+    Mantle.sample!(prof.host_ns[i], Float64(time_ns() - t0))
+    return r
+end
 
 """
 Open a segment for this pass's predicate, closing the one before it.
