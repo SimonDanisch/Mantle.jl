@@ -471,15 +471,16 @@ end
 
 """
 Nothing encoded and not committed, and the last command buffer committed to this
-queue has finished: the queue runs in order, so every one before it has too.
+queue's `MTLCommandQueue` has finished: the queue runs in order, so every one before
+it has too. For an `MTL4Queue` this is its legacy side, where launches and blits go.
 
 `MTL.all_completed` and not the status of `MTL.last_committed`: that hands back an
 abstractly typed command buffer, and reading `.status` off it was a dynamic call that
 boxed the enum, 16 bytes on every `closesubmit!`.
 """
-function quiet(q::LegacyQueue)
-    q.bq.cmdbuf === nothing || return false
-    return MTL.all_completed(q.mtl)
+function quiet(q)
+    batchqueue(q).cmdbuf === nothing || return false
+    return MTL.all_completed(cmdqueue(q))
 end
 
 passed(q::LegacyQueue, f) = UInt64(f) <= q.completed
@@ -933,13 +934,28 @@ overlapped a 9 ms replay and 40 chained adds came out at 10.
 
 So the legacy side signals the same timeline the MTL4 side does, and the caller
 makes its submission wait for the value. One counter, both queues.
+
+Work Metal.jl has ALREADY committed counts too. Outside a run Metal.jl flushes its
+batch on its own (`maybe_autoflush!`, at 32 operations), so the batch can be empty
+while command buffers on `mtl` are still running, and a submission that waited only
+for the previous MTL4 value would signal past them. An empty command buffer behind
+them carries the signal instead; the queue runs in order, so it fires once they have.
 """
 function flushlegacy!(q::MTL4Queue)
     bq = q.bq
     # A signal cannot be encoded while an encoder is open.
     Metal.end_encoder!(bq)
     cb = bq.cmdbuf
-    cb === nothing && return UInt64(0)
+    if cb === nothing
+        quiet(q) && return UInt64(0)
+        f = (q.next += UInt64(1))
+        # Unmanaged and committed directly, like the bridge in `closesubmit!`.
+        behind = MTL.MTLCommandBufferRef(q.mtl)
+        MTL.encode_signal!(behind, q.event, f)
+        MTL.commit_with_queue_key!(behind, pointer(q.mtl))
+        Metal.ObjectiveC.release(behind)
+        return f
+    end
     f = (q.next += UInt64(1))
     MTL.encode_signal!(cb, q.event, f)
     Metal.flush!(bq)
@@ -1045,26 +1061,36 @@ Has the GPU finished everything `f` stands for?
 
 `min(f, next)` and not `f`, which is the counterpart of `fence` handing out
 `next + 1`. That token means "wait for the submission after the last one", and
-when no such submission has been made there is nothing left to wait FOR: every
-submission that exists is at or below `next`, so if the event has reached `next`
-then everything that could be reading those bytes is done. Comparing against `f`
-itself instead would leave a region retired on an idle device unreleasable until
+when no such submission has been made there is no signalled value left to wait
+FOR: every one that exists is at or below `next`. Comparing against `f` itself
+instead would leave a region retired on an idle device unreleasable until
 something unrelated was submitted — which is exactly the backlog
 `test_pool_metal.jl` measures.
+
+But the event says nothing about legacy work no signal follows yet: a kernel
+launch outside a run goes into Metal.jl's batch on `mtl`, and only the next
+`flushlegacy!` puts a value behind it. So a token no signal has reached passes only
+once the legacy queue is quiet, the legacy timeline's own rule. Without that, a
+buffer freed while an eager launch still read it came back at the next reclaim
+(`test_free_during_recording.jl`).
 """
-passed(q::MTL4Queue, f) = min(UInt64(f), q.next) <= q.event.signaledValue
+function passed(q::MTL4Queue, f)
+    min(UInt64(f), q.next) <= q.event.signaledValue || return false
+    return UInt64(f) <= q.next || quiet(q)
+end
 
 """
 Wait for the timeline, and say whether it got there.
 
-Never drains the device and never submits: it waits on the shared event for the
-last value actually submitted, which is what `passed` compares against. A token
-beyond that names a submission nobody has made, and `min` is what stops this from
-being a wait nothing can satisfy.
+Never drains the device: it waits on the shared event, for the last value actually
+submitted, which is what `passed` compares against. A token beyond that names a
+submission nobody has made, and `min` is what stops this from being a wait nothing
+can satisfy — unless legacy work is still running that no value covers yet, and
+then `flushlegacy!` gives it one to wait for.
 """
 function waitfor(q::MTL4Queue, f)
     passed(q, f) && return true
-    target = min(UInt64(f), q.next)
+    target = UInt64(f) > q.next && !quiet(q) ? flushlegacy!(q) : min(UInt64(f), q.next)
     # Bounded waits in a loop rather than one unbounded one, so that a submission
     # the driver has FAILED is reported instead of waited on forever. This is not
     # a timeout: healthy work is waited for as long as it takes, and the loop only
