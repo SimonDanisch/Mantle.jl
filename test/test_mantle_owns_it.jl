@@ -191,6 +191,10 @@ const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
 const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
+    # `build_blas_aabb` and `upload_texture_data!` joined the vocabulary 2026-10-09:
+    # declared in core, answered by Vulkan and Metal, not by the ROCm extension,
+    # which has no ray tracing or textures — the same as `build_accel!`.
+    :build_blas_aabb, :upload_texture_data!,
     :build_accel!, :colorimage, :compile_draw, :currentimage,
     :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
     :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,
