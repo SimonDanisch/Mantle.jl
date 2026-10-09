@@ -1,5 +1,6 @@
 # A constant lookup table indexed by a runtime value.
 
+using Test, Mantle, KernelAbstractions
 using StaticArrays: SVector   # the kernels below say `SVector` unqualified
 include(joinpath(@__DIR__, "testbackend.jl"))
 #

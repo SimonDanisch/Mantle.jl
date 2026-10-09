@@ -151,32 +151,34 @@ end
             end
         end
 
-        @testset "it beats mul! at one column" begin
-            # The reason this second kernel exists. `mul!` on this shape measured
-            # 3.5% of roofline when it ran one thread per output: 1280 threads,
-            # five workgroups, and the device latency-bound however well it reads.
-            # It now takes the split-K GEMV and its reduction, which narrowed the
-            # gap. Measured on the 8060S in GPU time over five runs: 1.79-1.81x
-            # under RADV, 1.30-1.56x under AMD's Windows driver, which runs the
-            # split-K kernels faster (13-16 us against RADV's 18) and `gemv!` no
-            # faster. The floor of
-            # 1.5 was set against the per-element kernel and held on neither
-            # driver's worst run once split-K arrived; 1.1 asserts what is true
-            # on both, that the decoder's kernel beats the general path.
-            M, K, iters = 1280, 1280, 50
-            hw = fill(0.01f0, M, K)
-            W = KA.allocate(backend, Float32, M, K); copyto!(W, hw)
-            x = KA.allocate(backend, Float32, K); fill!(x, 0.01f0)
-            x2 = KA.allocate(backend, Float32, K, 1); fill!(x2, 0.01f0)
-            C = KA.allocate(backend, Float32, M); fill!(C, 0.0f0)
-            C2 = KA.allocate(backend, Float32, M, 1); fill!(C2, 0.0f0)
-            rg() = (for _ in 1:iters; Mantle.gemv!(C, x, transpose(W)); end)
-            rm() = (for _ in 1:iters; mul!(C2, W, x2); end)
-            for _ in 1:3; rg(); rm(); end
-            KA.synchronize(backend)
-            tg, tm_ = interleaved(rg, rm)
-            @info "gemv(transposed) vs mul! at ($M,$K), GPU" gemv_us=tg/1e3 mul_us=tm_/1e3 speedup=tm_/tg
-            @test tm_ / tg > 1.1
+        if Mantle.timestamps(Mantle.Device(backend))   # GPU time, not wall clock
+            @testset "it beats mul! at one column" begin
+                # The reason this second kernel exists. `mul!` on this shape measured
+                # 3.5% of roofline when it ran one thread per output: 1280 threads,
+                # five workgroups, and the device latency-bound however well it reads.
+                # It now takes the split-K GEMV and its reduction, which narrowed the
+                # gap. Measured on the 8060S in GPU time over five runs: 1.79-1.81x
+                # under RADV, 1.30-1.56x under AMD's Windows driver, which runs the
+                # split-K kernels faster (13-16 us against RADV's 18) and `gemv!` no
+                # faster. The floor of
+                # 1.5 was set against the per-element kernel and held on neither
+                # driver's worst run once split-K arrived; 1.1 asserts what is true
+                # on both, that the decoder's kernel beats the general path.
+                M, K, iters = 1280, 1280, 50
+                hw = fill(0.01f0, M, K)
+                W = KA.allocate(backend, Float32, M, K); copyto!(W, hw)
+                x = KA.allocate(backend, Float32, K); fill!(x, 0.01f0)
+                x2 = KA.allocate(backend, Float32, K, 1); fill!(x2, 0.01f0)
+                C = KA.allocate(backend, Float32, M); fill!(C, 0.0f0)
+                C2 = KA.allocate(backend, Float32, M, 1); fill!(C2, 0.0f0)
+                rg() = (for _ in 1:iters; Mantle.gemv!(C, x, transpose(W)); end)
+                rm() = (for _ in 1:iters; mul!(C2, W, x2); end)
+                for _ in 1:3; rg(); rm(); end
+                KA.synchronize(backend)
+                tg, tm_ = interleaved(rg, rm)
+                @info "gemv(transposed) vs mul! at ($M,$K), GPU" gemv_us=tg/1e3 mul_us=tm_/1e3 speedup=tm_/tg
+                @test tm_ / tg > 1.1
+            end
         end
     end
 
@@ -188,29 +190,31 @@ end
                                                   KA.allocate(backend, Float32, 9), B)
     end
 
-    @testset "it beats mul! at M = 1" begin
-        # The reason the kernel exists. Interleaved, both live kernels, same
-        # allocation — a sequential A/B on this box drifts by 5-10%.
-        #
-        # NOT a roofline claim: at these sizes most of `B` is L2-resident, and an
-        # earlier version of this measurement reported 186% "of roofline" because
-        # the denominator was a DRAM copy. The claim is only the ratio.
-        K, N, iters = 1280, 1280, 50
-        A = KA.allocate(backend, Float32, K); fill!(A, 0.01f0)
-        A2 = KA.allocate(backend, Float32, 1, K); fill!(A2, 0.01f0)
-        B = KA.allocate(backend, Float32, K, N); fill!(B, 0.01f0)
-        C = KA.allocate(backend, Float32, N); fill!(C, 0.0f0)
-        C2 = KA.allocate(backend, Float32, 1, N); fill!(C2, 0.0f0)
-        rg() = (for _ in 1:iters; Mantle.gemv!(C, A, B); end)
-        rm() = (for _ in 1:iters; mul!(C2, A2, B); end)
-        for _ in 1:3; rg(); rm(); end
-        KA.synchronize(backend)
-        tg, tm = interleaved(rg, rm)
-        @info "gemv vs mul! at (1,$K)@($K,$N), GPU" gemv_us=tg/1e3 mul_us=tm/1e3 speedup=tm/tg
-        # Measured 6.4x in GPU time on the 8060S, 3.5x in wall clock when the
-        # kernel was written. The floor is deliberately far below that: this asserts
-        # the kernel is doing its job, not the exact number, which moves with the
-        # driver and with whatever else holds the card.
-        @test tm / tg > 1.5
+    if Mantle.timestamps(Mantle.Device(backend))   # GPU time, not wall clock
+        @testset "it beats mul! at M = 1" begin
+            # The reason the kernel exists. Interleaved, both live kernels, same
+            # allocation — a sequential A/B on this box drifts by 5-10%.
+            #
+            # NOT a roofline claim: at these sizes most of `B` is L2-resident, and an
+            # earlier version of this measurement reported 186% "of roofline" because
+            # the denominator was a DRAM copy. The claim is only the ratio.
+            K, N, iters = 1280, 1280, 50
+            A = KA.allocate(backend, Float32, K); fill!(A, 0.01f0)
+            A2 = KA.allocate(backend, Float32, 1, K); fill!(A2, 0.01f0)
+            B = KA.allocate(backend, Float32, K, N); fill!(B, 0.01f0)
+            C = KA.allocate(backend, Float32, N); fill!(C, 0.0f0)
+            C2 = KA.allocate(backend, Float32, 1, N); fill!(C2, 0.0f0)
+            rg() = (for _ in 1:iters; Mantle.gemv!(C, A, B); end)
+            rm() = (for _ in 1:iters; mul!(C2, A2, B); end)
+            for _ in 1:3; rg(); rm(); end
+            KA.synchronize(backend)
+            tg, tm = interleaved(rg, rm)
+            @info "gemv vs mul! at (1,$K)@($K,$N), GPU" gemv_us=tg/1e3 mul_us=tm/1e3 speedup=tm/tg
+            # Measured 6.4x in GPU time on the 8060S, 3.5x in wall clock when the
+            # kernel was written. The floor is deliberately far below that: this asserts
+            # the kernel is doing its job, not the exact number, which moves with the
+            # driver and with whatever else holds the card.
+            @test tm / tg > 1.5
+        end
     end
 end

@@ -46,7 +46,7 @@ end
 
 @testset "tree reduction (sum) × type × workgroup size" begin
     nblocks = 7
-    for TILE in (32, 64, 128, 256), T in (Float32, Float64, Int32, Int64)
+    for TILE in (32, 64, 128, 256), T in testeltypes(Float32, Float64, Int32, Int64)
         n = TILE * nblocks
         cpu = T <: Integer ? rand(T(1):T(9), n) : rand(T, n)
         g = Mantle.devicearray(TESTBACKEND, cpu)

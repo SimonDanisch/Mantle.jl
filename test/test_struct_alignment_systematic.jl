@@ -127,36 +127,33 @@ make_data(::Type{S15_AllF64}, n) =
 make_data(::Type{S16_MixedF32F64}, n) =
     [S16_MixedF32F64(Float32(i), Float64(i + 0.5), Float32(i + 0.75)) for i in 1:n]
 
-# ── Checksum functions for field-read verification ──
-# Each takes a struct and returns a Float64 combining all fields.
-# The checksum must be unique for each distinct struct value.
+# ── Field-wise transform for read/write verification ──
+# Every field is read, changed and written back on its own, so the loads and stores
+# go through the per-field offsets rather than one whole-struct copy. Exact on every
+# backend: no arithmetic beyond `+ 1` on values far from rounding.
 
-checksum(s::S01_ThreeF32) = Float64(s.x) + Float64(s.y) * 1000 + Float64(s.z) * 1e6
-checksum(s::S02_LeadingBool) = Float64(s.flag) + Float64(s.x) * 1000 + Float64(s.y) * 1e6
-checksum(s::S03_MiddleBool) = Float64(s.x) + Float64(s.flag) * 1000 + Float64(s.y) * 1e6
-checksum(s::S04_TrailingBool) = Float64(s.x) + Float64(s.y) * 1000 + Float64(s.flag) * 1e6
-checksum(s::S05_TwoBools) = Float64(s.f1) + Float64(s.f2) * 10 + Float64(s.x) * 1000
-checksum(s::S06_MixedI64) = Float64(s.a) + Float64(s.b) + Float64(s.c) * 1e6
-checksum(s::S07_LeadingI64) = Float64(s.a) + Float64(s.b) * 1e6
-checksum(s::S08_TinyBytes) = Float64(s.a) + Float64(s.b) * 256 + Float64(s.c) * 65536
-checksum(s::S09_ShortFields) = Float64(s.a) + Float64(s.b) * 1000 + Float64(s.c) * 1e6
-checksum(s::S10_Nested) = checksum(s.inner) + Float64(s.w) * 1e9
-checksum(s::S11_DeepNested) = checksum(s.mid) + Float64(s.flag) * 1e12 + Float64(s.extra) * 1e13
-checksum(s::S13_TupleField) = sum(Float64, s.data) + Float64(s.id) * 1e6
-checksum(s::S14_KitchenSink) = Float64(s.flag1) + Float64(s.small) + Float64(s.pad16) +
-    Float64(s.f32val) * 100 + Float64(s.i32val) + Float64(s.flag2) * 10 +
-    s.f64val * 1e4 + Float64(s.i64val) + Float64(s.final_f32) * 1e7
-checksum(s::S15_AllF64) = s.a + s.b * 1000 + s.c * 1e6
-checksum(s::S16_MixedF32F64) = Float64(s.a) + s.b * 1000 + Float64(s.c) * 1e6
+bump(x::Bool) = !x
+bump(x::Integer) = x + one(x)
+bump(x::AbstractFloat) = x + one(x)
+bump(t::Tuple) = map(bump, t)
+@generated bump(s::T) where {T} = :($T($((:(bump(getfield(s, $k))) for k in 1:fieldcount(T))...)))
+
+@kernel function bump_kernel!(dst, src)
+    i = @index(Global)
+    @inbounds dst[i] = bump(src[i])
+end
 
 # ── List of all testable struct types ──
+# A struct with a Float64 field needs a device that has Float64.
 
-const ALL_STRUCT_TYPES = [
+hasfloat64(::Type{T}) where {T} = T === Float64 || any(hasfloat64, fieldtypes(T))
+
+const ALL_STRUCT_TYPES = filter(S -> Mantle.supports_float64(TESTBACKEND) || !hasfloat64(S), [
     S01_ThreeF32, S02_LeadingBool, S03_MiddleBool, S04_TrailingBool,
     S05_TwoBools, S06_MixedI64, S07_LeadingI64, S08_TinyBytes,
     S09_ShortFields, S10_Nested, S11_DeepNested,
     S13_TupleField, S14_KitchenSink, S15_AllF64, S16_MixedF32F64,
-]
+])
 
 # ── Context C3: Whole-struct copy (simplest, test first) ──
 
@@ -171,166 +168,16 @@ const ALL_STRUCT_TYPES = [
     @test result == src_data
 end
 
-# ── Context C1: PSB read all fields (checksum) ──
-
-# We define per-type GPU kernels that compute checksum on GPU
-# and compare against CPU checksum.
-
-@kernel function checksum_kernel_S01(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.x) + Float64(s.y) * 1000.0 + Float64(s.z) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S02(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.flag) + Float64(s.x) * 1000.0 + Float64(s.y) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S03(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.x) + Float64(s.flag) * 1000.0 + Float64(s.y) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S04(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.x) + Float64(s.y) * 1000.0 + Float64(s.flag) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S05(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.f1) + Float64(s.f2) * 10.0 + Float64(s.x) * 1000.0
-    end
-end
-
-@kernel function checksum_kernel_S06(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.a) + Float64(s.b) + Float64(s.c) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S07(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.a) + Float64(s.b) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S08(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.a) + Float64(s.b) * 256.0 + Float64(s.c) * 65536.0
-    end
-end
-
-@kernel function checksum_kernel_S09(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.a) + Float64(s.b) * 1000.0 + Float64(s.c) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S10(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.inner.x) + Float64(s.inner.y) * 1000.0 + Float64(s.inner.z) * 1e6 + Float64(s.w) * 1e9
-    end
-end
-
-@kernel function checksum_kernel_S11(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.mid.inner.x) + Float64(s.mid.inner.y) * 1000.0 +
-                 Float64(s.mid.inner.z) * 1e6 + Float64(s.mid.w) * 1e9 +
-                 Float64(s.flag) * 1e12 + Float64(s.extra) * 1e13
-    end
-end
-
-@kernel function checksum_kernel_S13(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.data[1]) + Float64(s.data[2]) + Float64(s.data[3]) + Float64(s.data[4]) + Float64(s.id) * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S14(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.flag1) + Float64(s.small) + Float64(s.pad16) +
-                 Float64(s.f32val) * 100.0 + Float64(s.i32val) + Float64(s.flag2) * 10.0 +
-                 s.f64val * 1e4 + Float64(s.i64val) + Float64(s.final_f32) * 1e7
-    end
-end
-
-@kernel function checksum_kernel_S15(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = s.a + s.b * 1000.0 + s.c * 1e6
-    end
-end
-
-@kernel function checksum_kernel_S16(dst, src)
-    i = @index(Global)
-    @inbounds begin
-        s = src[i]
-        dst[i] = Float64(s.a) + s.b * 1000.0 + Float64(s.c) * 1e6
-    end
-end
-
-const CHECKSUM_KERNELS = Dict{DataType, Any}(
-    S01_ThreeF32 => checksum_kernel_S01,
-    S02_LeadingBool => checksum_kernel_S02,
-    S03_MiddleBool => checksum_kernel_S03,
-    S04_TrailingBool => checksum_kernel_S04,
-    S05_TwoBools => checksum_kernel_S05,
-    S06_MixedI64 => checksum_kernel_S06,
-    S07_LeadingI64 => checksum_kernel_S07,
-    S08_TinyBytes => checksum_kernel_S08,
-    S09_ShortFields => checksum_kernel_S09,
-    S10_Nested => checksum_kernel_S10,
-    S11_DeepNested => checksum_kernel_S11,
-    S13_TupleField => checksum_kernel_S13,
-    S14_KitchenSink => checksum_kernel_S14,
-    S15_AllF64 => checksum_kernel_S15,
-    S16_MixedF32F64 => checksum_kernel_S16,
-)
+# ── Context C1: PSB read and write every field ──
 
 @testset "C1: PSB read fields - $S" for S in ALL_STRUCT_TYPES
     n = 64
     src_data = make_data(S, n)
     src = Mantle.devicearray(TESTBACKEND, src_data)
-    dst = Mantle.devicearray(TESTBACKEND, Float64, n)
-
-    kern = CHECKSUM_KERNELS[S]
-    kern(TESTBACKEND, 64)(dst, src; ndrange=n)
+    dst = Mantle.devicearray(TESTBACKEND, S, n)
+    bump_kernel!(TESTBACKEND, 64)(dst, src; ndrange=n)
     Mantle.flush!(Mantle.Device(TESTBACKEND))
-
-    gpu_result = Array(dst)
-    cpu_result = [checksum(s) for s in src_data]
-    @test gpu_result == cpu_result
+    @test Array(dst) == bump.(src_data)
 end
 
 # ── Context C2: PSB write all fields ──
@@ -415,28 +262,30 @@ end
         @test result == expected
     end
 
-    @testset "S14_KitchenSink" begin
-        src_data = make_data(S14_KitchenSink, n)
-        src = Mantle.devicearray(TESTBACKEND, src_data)
-        dst = Mantle.devicearray(TESTBACKEND, S14_KitchenSink, n)
-        write_modified_S14(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device(TESTBACKEND))
-        result = Array(dst)
-        expected = [S14_KitchenSink(s.flag1, s.small, s.pad16,
-            s.f32val + offset, s.i32val, s.flag2,
-            s.f64val + Float64(offset), s.i64val, s.final_f32 + offset) for s in src_data]
-        @test result == expected
-    end
+    if Mantle.supports_float64(TESTBACKEND)
+        @testset "S14_KitchenSink" begin
+            src_data = make_data(S14_KitchenSink, n)
+            src = Mantle.devicearray(TESTBACKEND, src_data)
+            dst = Mantle.devicearray(TESTBACKEND, S14_KitchenSink, n)
+            write_modified_S14(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+            Mantle.flush!(Mantle.Device(TESTBACKEND))
+            result = Array(dst)
+            expected = [S14_KitchenSink(s.flag1, s.small, s.pad16,
+                s.f32val + offset, s.i32val, s.flag2,
+                s.f64val + Float64(offset), s.i64val, s.final_f32 + offset) for s in src_data]
+            @test result == expected
+        end
 
-    @testset "S15_AllF64" begin
-        src_data = make_data(S15_AllF64, n)
-        src = Mantle.devicearray(TESTBACKEND, src_data)
-        dst = Mantle.devicearray(TESTBACKEND, S15_AllF64, n)
-        write_modified_S15(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device(TESTBACKEND))
-        result = Array(dst)
-        expected = [S15_AllF64(s.a + Float64(offset), s.b + Float64(offset), s.c + Float64(offset)) for s in src_data]
-        @test result == expected
+        @testset "S15_AllF64" begin
+            src_data = make_data(S15_AllF64, n)
+            src = Mantle.devicearray(TESTBACKEND, src_data)
+            dst = Mantle.devicearray(TESTBACKEND, S15_AllF64, n)
+            write_modified_S15(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+            Mantle.flush!(Mantle.Device(TESTBACKEND))
+            result = Array(dst)
+            expected = [S15_AllF64(s.a + Float64(offset), s.b + Float64(offset), s.c + Float64(offset)) for s in src_data]
+            @test result == expected
+        end
     end
 end
 
@@ -468,16 +317,10 @@ end
         @testset "n=$n" begin
             src_data = make_data(S, n)
             src = Mantle.devicearray(TESTBACKEND, src_data)
-            dst = Mantle.devicearray(TESTBACKEND, Float64, n)
-
-            kern = CHECKSUM_KERNELS[S]
-            wg = min(n, 64)
-            kern(TESTBACKEND, wg)(dst, src; ndrange=n)
+            dst = Mantle.devicearray(TESTBACKEND, S, n)
+            bump_kernel!(TESTBACKEND, min(n, 64))(dst, src; ndrange=n)
             Mantle.flush!(Mantle.Device(TESTBACKEND))
-
-            gpu_result = Array(dst)
-            cpu_result = [checksum(s) for s in src_data]
-            @test gpu_result == cpu_result
+            @test Array(dst) == bump.(src_data)
         end
     end
 end
@@ -542,7 +385,7 @@ const SHARED_COPY_KERNELS = Dict{DataType, Any}(
     S15_AllF64 => shared_copy_S15,
 )
 
-@testset "C7: Workgroup shared memory - $S" for S in keys(SHARED_COPY_KERNELS)
+@testset "C7: Workgroup shared memory - $S" for S in filter(in(ALL_STRUCT_TYPES), collect(keys(SHARED_COPY_KERNELS)))
     n = 64
     src_data = make_data(S, n)
     src = Mantle.devicearray(TESTBACKEND, src_data)

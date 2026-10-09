@@ -59,7 +59,9 @@ end
 # sortperm must terminate (no mutual recursion) and not blow up the pool.
 @testset "sortperm terminates and does not balloon the pool" begin
     n = 100_000
-    before = Mantle.gpu_live_bytes()
+    # What the device's pool holds: device arrays suballocate from it.
+    held() = Mantle.reserved(Mantle.pool(Mantle.Device(TESTBACKEND)))
+    before = held()
     h = rand(UInt32, n)
     v = Mantle.devicearray(TESTBACKEND, copy(h))
     ix = Mantle.devicearray(TESTBACKEND, collect(Int32(1):Int32(n)))
@@ -67,5 +69,5 @@ end
     Mantle.flush!(Mantle.Device(TESTBACKEND))
     @test h[Array(ix)] == sort(h)
     # Recursion through that override grows the pool by tens of GB before dying.
-    @test Mantle.gpu_live_bytes() - before < 256_000_000
+    @test held() - before < 256_000_000
 end

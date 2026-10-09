@@ -583,7 +583,7 @@ foreachbackend(joinpath(@__DIR__, "test_narrow_phase_kernel.jl"))
 # every plan carries a finalizer, and the release happens on the
 # owning thread at the next `reclaim!`.
 foreachbackend(joinpath(@__DIR__, "test_dropped_resources.jl"))
-foreachbackend(joinpath(@__DIR__, "test_indirect_prepare_ordering.jl"))
+_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_indirect_prepare_ordering.jl"))
 
 # Recording a plan that has already run: the recording is one
 # command buffer and belongs to no argument slot.

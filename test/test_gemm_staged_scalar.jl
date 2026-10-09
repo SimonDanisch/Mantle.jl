@@ -148,18 +148,20 @@ end
         b32 = KA.allocate(back, Float32, K, N)
         @test Mantle.staged_gemm_ok(c32, a32, b32, M, N)
 
-        c64 = KA.allocate(back, Float64, M, N)
-        a64 = KA.allocate(back, Float64, M, K)
-        b64 = KA.allocate(back, Float64, K, N)
-        @test !Mantle.staged_gemm_ok(c64, a64, b64, M, N)
+        if Mantle.supports_float64(back)
+            c64 = KA.allocate(back, Float64, M, N)
+            a64 = KA.allocate(back, Float64, M, K)
+            b64 = KA.allocate(back, Float64, K, N)
+            @test !Mantle.staged_gemm_ok(c64, a64, b64, M, N)
 
-        # ...and a Float64 product still computes correctly, on the other kernel.
-        Ah = rand(Float64, 128, 64) .- 0.5; Bh = rand(Float64, 64, 128) .- 0.5
-        Ad = KA.allocate(back, Float64, 128, 64); copyto!(Ad, Ah)
-        Bd = KA.allocate(back, Float64, 64, 128); copyto!(Bd, Bh)
-        Cd = KA.allocate(back, Float64, 128, 128)
-        mul!(Cd, Ad, Bd); KA.synchronize(back)
-        @test maximum(abs.(Array(Cd) .- Ah * Bh)) < 1e-10
+            # ...and a Float64 product still computes correctly, on the other kernel.
+            Ah = rand(Float64, 128, 64) .- 0.5; Bh = rand(Float64, 64, 128) .- 0.5
+            Ad = KA.allocate(back, Float64, 128, 64); copyto!(Ad, Ah)
+            Bd = KA.allocate(back, Float64, 64, 128); copyto!(Bd, Bh)
+            Cd = KA.allocate(back, Float64, 128, 128)
+            mul!(Cd, Ad, Bd); KA.synchronize(back)
+            @test maximum(abs.(Array(Cd) .- Ah * Bh)) < 1e-10
+        end
     end
 
     # fp16 operands into an fp32 destination. `mul!` prefers cooperative matrices

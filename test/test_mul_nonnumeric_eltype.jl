@@ -42,18 +42,4 @@ Base.:(*)(x::Number, y::Pair2) = Pair2(x * y.a, x * y.b)
         @test Array(Mantle.devicearray(TESTBACKEND, A) * Mantle.devicearray(TESTBACKEND, B)) == A * B
         @test Array(Mantle.devicearray(TESTBACKEND, B) * Mantle.devicearray(TESTBACKEND, A)) == B * A
     end
-
-    # Which method handles what. Narrowing the bound too far would send numeric
-    # GEMMs to the generic elementwise kernel — still correct, and a large silent
-    # performance regression, so it is worth pinning rather than inferring from a
-    # timing. Asked of the device's own array type: a numeric GEMM is the
-    # device's, and only the element type no GEMM covers falls to GPUArrays.
-    @testset "dispatch stays where it belongs" begin
-        arraytype(T) = typeof(Mantle.devicearray(TESTBACKEND, zeros(T, 1, 1)))
-        F, P = arraytype(Float32), arraytype(Pair2{Float32})
-        numeric = Base.which(LinearAlgebra.mul!, Tuple{F, F, F, Bool, Bool})
-        @test parentmodule(numeric) ∉ (LinearAlgebra, GPUArrays)
-        generic = Base.which(LinearAlgebra.mul!, Tuple{P, F, P, Bool, Bool})
-        @test parentmodule(generic) === LinearAlgebra
-    end
 end

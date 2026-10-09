@@ -23,7 +23,7 @@ const AK = Mantle.AcceleratedKernels
     # Each n covers the BAR path for small scratch sizes (blocks*2 elements,
     # scratch = 16 bytes at n=2, growing). The staging path (n ≳ 512) is the
     # baseline that already worked.
-    for T in (Int32, Int64, UInt32, UInt64, Float64)
+    for T in testeltypes(Int32, Int64, UInt32, UInt64, Float64)
         for n in (2, 3, 4, 8, 16, 63, 64, 65, 127, 128, 129, 256, 500, 1000)
             a = Mantle.devicearray(TESTBACKEND, collect(T, 1:n))
             expected = T(n) * T(n + 1) ÷ T(2)
@@ -67,7 +67,7 @@ end
         i = @index(Global, Linear)
         dst[i] = val
     end
-    for T in (Int64, UInt32, Float64)
+    for T in testeltypes(Int64, UInt32, Float64)
         dst = KernelAbstractions.allocate(TESTBACKEND, T, 2)
         fill!(dst, zero(T))
         k = write_one_kernel!(TESTBACKEND)

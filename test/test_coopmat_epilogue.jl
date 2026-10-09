@@ -21,7 +21,7 @@ something the Vulkan spec spells out — it is checked rather than assumed.
 """
 
 using Test, KernelAbstractions
-using Lava: AcceleratedMatrix, Accumulator, MatrixA, MatrixB
+using KernelInterface: AcceleratedMatrix, Accumulator, MatrixA, MatrixB
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
@@ -76,65 +76,69 @@ end
     end
 end
 
-@testset "cooperative-matrix epilogue" begin
-    backend = TESTBACKEND
+# The kernels below are written at the staged GEMM's tile; a device without
+# cooperative matrices at that tile has nothing here to run.
+if hasstagedgemm()
+    @testset "cooperative-matrix epilogue" begin
+        backend = TESTBACKEND
 
-    @testset "stride 0 broadcasts a vector across the tile" begin
-        # **Both element types.** Under autocast the model's biases are fp16, and
-        # a version of this that only covered fp32 shipped a kernel reading fp16
-        # bytes as fp32 — the unit tests passed and SAM 2's masks went to
-        # IoU 0.0. A bias is not always fp32; test what the model has.
-        for T in (Float32, Float16)
-            hb = T.(1:16)
-            bias = KA.allocate(backend, T, 16); copyto!(bias, hb)
-            out = KA.allocate(backend, Float32, 16, 16); fill!(out, -1.0f0)
-            bias_broadcast_tile!(backend, 32)(out, bias; ndrange = 32)
+        @testset "stride 0 broadcasts a vector across the tile" begin
+            # **Both element types.** Under autocast the model's biases are fp16, and
+            # a version of this that only covered fp32 shipped a kernel reading fp16
+            # bytes as fp32 — the unit tests passed and SAM 2's masks went to
+            # IoU 0.0. A bias is not always fp32; test what the model has.
+            for T in (Float32, Float16)
+                hb = T.(1:16)
+                bias = KA.allocate(backend, T, 16); copyto!(bias, hb)
+                out = KA.allocate(backend, Float32, 16, 16); fill!(out, -1.0f0)
+                bias_broadcast_tile!(backend, 32)(out, bias; ndrange = 32)
+                KA.synchronize(backend)
+                g = Array(out)
+                @test all(j -> g[:, j] == Float32.(hb), 1:16)
+            end
+        end
+
+        @testset "both memory layouts are available" begin
+            hA = Float16.(reshape(1:256, 16, 16))
+            hI = zeros(Float16, 16, 16)
+            for i in 1:16
+                hI[i, i] = one(Float16)
+            end
+            A = KA.allocate(backend, Float16, 16, 16); copyto!(A, hA)
+            Id = KA.allocate(backend, Float16, 16, 16); copyto!(Id, hI)
+            oc = KA.allocate(backend, Float32, 16, 16); fill!(oc, 0.0f0)
+            orow = KA.allocate(backend, Float32, 16, 16); fill!(orow, 0.0f0)
+            layout_probe!(backend, 32)(oc, orow, A, Id; ndrange = 32)
             KA.synchronize(backend)
-            g = Array(out)
-            @test all(j -> g[:, j] == Float32.(hb), 1:16)
+            @test Array(oc) == Float32.(hA)             # column-major: as stored
+            @test Array(orow) == Float32.(hA)'          # row-major: transposed
         end
-    end
 
-    @testset "both memory layouts are available" begin
-        hA = Float16.(reshape(1:256, 16, 16))
-        hI = zeros(Float16, 16, 16)
-        for i in 1:16
-            hI[i, i] = one(Float16)
+        @testset "convert changes only the component type" begin
+            # Values exactly representable in fp16, so the round trip is exact and a
+            # failure means the conversion moved data, not that it rounded.
+            hA = Float32.(reshape(collect(-128:127), 16, 16)) ./ 4
+            A = KA.allocate(backend, Float32, 16, 16); copyto!(A, hA)
+            out = KA.allocate(backend, Float32, 16, 16); fill!(out, -1.0f0)
+            convert_roundtrip!(backend, 32)(out, A; ndrange = 32)
+            KA.synchronize(backend)
+            @test Array(out) == hA
         end
-        A = KA.allocate(backend, Float16, 16, 16); copyto!(A, hA)
-        Id = KA.allocate(backend, Float16, 16, 16); copyto!(Id, hI)
-        oc = KA.allocate(backend, Float32, 16, 16); fill!(oc, 0.0f0)
-        orow = KA.allocate(backend, Float32, 16, 16); fill!(orow, 0.0f0)
-        layout_probe!(backend, 32)(oc, orow, A, Id; ndrange = 32)
-        KA.synchronize(backend)
-        @test Array(oc) == Float32.(hA)             # column-major: as stored
-        @test Array(orow) == Float32.(hA)'          # row-major: transposed
-    end
 
-    @testset "convert changes only the component type" begin
-        # Values exactly representable in fp16, so the round trip is exact and a
-        # failure means the conversion moved data, not that it rounded.
-        hA = Float32.(reshape(collect(-128:127), 16, 16)) ./ 4
-        A = KA.allocate(backend, Float32, 16, 16); copyto!(A, hA)
-        out = KA.allocate(backend, Float32, 16, 16); fill!(out, -1.0f0)
-        convert_roundtrip!(backend, 32)(out, A; ndrange = 32)
-        KA.synchronize(backend)
-        @test Array(out) == hA
-    end
-
-    @testset "bias + mma + fp16 store, in registers" begin
-        hA = rand(Float16, 16, 16) .- Float16(0.5)
-        hB = rand(Float16, 16, 16) .- Float16(0.5)
-        hbias = Float32.(1:16) ./ 8
-        A = KA.allocate(backend, Float16, 16, 16); copyto!(A, hA)
-        B = KA.allocate(backend, Float16, 16, 16); copyto!(B, hB)
-        bias = KA.allocate(backend, Float32, 16); copyto!(bias, hbias)
-        out = KA.allocate(backend, Float16, 16, 16); fill!(out, zero(Float16))
-        convert_store_tile!(backend, 32)(out, A, B, bias; ndrange = 32)
-        KA.synchronize(backend)
-        got = Float32.(Array(out))
-        ref = Float32.(hA) * Float32.(hB) .+ hbias
-        # fp16 destination, so the tolerance is the format's, not the kernel's.
-        @test maximum(abs.(got .- ref)) / maximum(abs.(ref)) < 1.0f-3
+        @testset "bias + mma + fp16 store, in registers" begin
+            hA = rand(Float16, 16, 16) .- Float16(0.5)
+            hB = rand(Float16, 16, 16) .- Float16(0.5)
+            hbias = Float32.(1:16) ./ 8
+            A = KA.allocate(backend, Float16, 16, 16); copyto!(A, hA)
+            B = KA.allocate(backend, Float16, 16, 16); copyto!(B, hB)
+            bias = KA.allocate(backend, Float32, 16); copyto!(bias, hbias)
+            out = KA.allocate(backend, Float16, 16, 16); fill!(out, zero(Float16))
+            convert_store_tile!(backend, 32)(out, A, B, bias; ndrange = 32)
+            KA.synchronize(backend)
+            got = Float32.(Array(out))
+            ref = Float32.(hA) * Float32.(hB) .+ hbias
+            # fp16 destination, so the tolerance is the format's, not the kernel's.
+            @test maximum(abs.(got .- ref)) / maximum(abs.(ref)) < 1.0f-3
+        end
     end
 end

@@ -56,7 +56,7 @@ const KA = KernelAbstractions
     # zeros, or real parts with no imaginary ones. A `Float64` one kept only a
     # `Float32`'s precision. Found through GPUArrays' triangular multiply tests,
     # which this backend's `mul!` routes through here.
-    @testset "a $T product is not split" for T in (ComplexF32, Float64)
+    @testset "a $T product is not split" for T in testeltypes(ComplexF32, Float64)
         M, K = 64, 3000
         Ah, xh = rand(T, M, K), rand(T, K)
         A = KA.allocate(back, T, M, K); copyto!(A, Ah)

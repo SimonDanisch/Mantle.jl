@@ -141,6 +141,13 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
 
+# The address of the first element, which a wide load is aligned against: the
+# buffer's own GPU address plus the array's byte offset into it. Without this a
+# Metal array fell to the `1` of "nothing known", and every kernel that reads
+# sixteen bytes at a time took its narrow path.
+Mantle.basealignment(a::Metal.MtlArray) =
+    Mantle.powalign(UInt64(a.data[].buffer.gpuAddress) + UInt64(a.offset))
+
 """Whether Metal's native SIMD-group GEMM covers these element types."""
 Mantle.native_gemm_available(::Union{MetalDevice,Metal.MetalBackend},
                              ::Type{A}, ::Type{B}, ::Type{C}) where {A,B,C} =

@@ -669,7 +669,10 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
         "command reaches is reached by address — without one nothing it reads is " *
         "resident. Run the plan without recording it."))
     ndispatch, nwriters, ncalls = planshape(pl, passes)
-    ndispatch + ncalls > 0 ||
+    # The WHOLE plan, not a piece: a graph that opens on a `when!` region gets an
+    # empty head piece of its own (`emithead!` cannot live in a piece that might
+    # not be submitted), and that piece is recorded like any other.
+    ndispatch + ncalls > 0 || passes != eachindex(pl.passes) ||
         throw(ArgumentError("record!: the plan has no dispatches to record."))
     nslots = maximum(pp -> maximum(d -> maxslot(d), pp.dispatches; init = 0),
                      pl.passes; init = 0)
