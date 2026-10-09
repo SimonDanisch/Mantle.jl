@@ -166,18 +166,21 @@ function GPUArrays.derive(::Type{T}, a::LavaArray, dims::Dims{N}, offset::Int) w
 end
 
 """
-    mightalias(a::LavaArray, b::LavaArray)
+    GPUArrays.memory_location(a::LavaArray) -> (base, offset)
 
-Whether two arrays can share bytes: the same backing buffer, and byte ranges
-that intersect. `dataids` names the buffer only, and the pool places many
-`Buffer`s in one block, so on its own it reports two disjoint regions of a block
-as aliasing: `accumulate!` from one `Buffer` into another was refused, and
-`unalias` copied ahead of broadcasts that needed no copy.
+Where `a`'s elements are: the backing buffer's device address, and the byte offset of
+the first element from it. GPUArrays derives `mightalias`, `dataids` and the check that
+two `SubArray`s view the same memory from this, so two arrays alias exactly where their
+byte ranges meet: two `Buffer`s the pool placed in one block do not, an empty view
+aliases nothing, and two strided views of the same bytes are compared index by index.
+
+A buffer without a device address is named by its allocation instead, which only ever
+costs a false positive against a buffer with one.
 """
-function Base.mightalias(a::LavaArray, b::LavaArray)
-    a.buf.rc === b.buf.rc || return false
-    return a.offset < b.offset + sizeof(eltype(b)) * length(b) &&
-           b.offset < a.offset + sizeof(eltype(a)) * length(a)
+function GPUArrays.memory_location(a::LavaArray)
+    m = a.buf[]
+    base = m.address == 0 ? UInt(objectid(a.buf.rc)) : UInt(m.address)
+    return (base, a.offset)
 end
 
 # ── copy ──

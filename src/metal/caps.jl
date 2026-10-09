@@ -91,7 +91,7 @@ function caps(d::MetalDevice)
         w,                                      # coopmatsubgroup — same group
         Int(mtl.maxThreadgroupMemoryLength),    # sharedbudget
         max_threads(d),                         # workgrouplimit
-        0,                                      # cores: Metal does not report it
+        Metal.num_gpu_cores(),                  # cores: the IORegistry's gpu-core-count
         0,                                      # warps: nor resident simdgroups
         NTuple{4,Int}[],                        # wggran: no granularity table
         matrixshapes(d),

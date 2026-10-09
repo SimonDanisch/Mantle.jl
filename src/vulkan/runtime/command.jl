@@ -1201,7 +1201,11 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     # One question, one list: `newest` covers every submission path, so there
     # is no second record to fold a maximum over.
     target = something(newest(bq), UInt64(0))
-    target == UInt64(0) && return
+    # Nothing in flight is nothing to wait for, but not nothing to do: what the
+    # collector dropped since the last submission is held here until a drain, and
+    # returning before it left those regions on loan until the NEXT launch. A
+    # `waitidle` and a waiting `reclaim!` then gave back none of them.
+    target == UInt64(0) && (drain!(bq); return)
     budget = driver(bq).flush_timeout_ns
     quantum = budget == 0 ? typemax(UInt64) : min(budget, FLUSH_WAIT_QUANTUM_NS)
     waited = UInt64(0)

@@ -80,3 +80,17 @@ enables `shaderFloat64` at creation, so the Vulkan backend answers `true`.
 `dev` is a device or the KernelAbstractions backend that stands for one.
 """
 supports_float64(dev) = false
+
+"""
+    supports_int64_atomics(dev) -> Bool
+
+Whether a kernel on `dev` can update a 64-bit integer in device memory atomically:
+`Atomix.@atomic` add, sub, and the rest on an `Int64` or `UInt64` element.
+
+Apple GPUs cannot; Metal has 64-bit `umin` and `umax` on device memory and only
+without the result, so a kernel that adds to an `Int64` fails to compile there. A
+Vulkan device answers what its `shaderBufferInt64Atomics` feature says.
+
+`dev` is a device or the KernelAbstractions backend that stands for one.
+"""
+supports_int64_atomics(dev) = false

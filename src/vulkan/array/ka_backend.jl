@@ -109,6 +109,11 @@ videodecodes(ctx::VkContext) = ctx.video_decode_available
 videodecodes(b::LavaBackend) = videodecodes(vk_context(b))
 # `shaderFloat64` is enabled on every device this backend creates.
 supports_float64(::LavaBackend) = true
+# Asked of the physical device, which is what device creation asked before enabling it.
+supports_int64_atomics(ctx::VkContext) =
+    VK.get_physical_device_features_2(ctx.physical_device,
+        VK.PhysicalDeviceVulkan12Features).next.shader_buffer_int_64_atomics
+supports_int64_atomics(b::LavaBackend) = supports_int64_atomics(vk_context(b))
 # A view of a device array is still on that device. `probe_broadcast!` is handed
 # `dest`, which the broadcast machinery may hand it as a `SubArray` or a
 # `ReshapedArray` — walking to the parent is the whole answer, and it is the same

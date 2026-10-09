@@ -130,6 +130,7 @@ that method.
 caps(dev::LavaDevice) = caps(dev.ctx)
 videodecodes(dev::LavaDevice) = videodecodes(dev.ctx)
 supports_float64(::LavaDevice) = true
+supports_int64_atomics(dev::LavaDevice) = supports_int64_atomics(dev.ctx)
 supports_hwtlas(dev::LavaDevice) = dev.ctx.ray_query_available
 
 # ── window ────────────────────────────────────────────────────────────────────

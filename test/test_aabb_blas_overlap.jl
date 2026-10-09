@@ -1,9 +1,9 @@
 """
 Point location against a procedural (AABB) bottom-level structure: which of 1000
-overlapping boxes contains a point, answered by a zero-length ray.
+overlapping boxes contains a point, answered by a ray far shorter than any box.
 
 Setup: 1000 random boxes of side 1 in [-10, 10]^3 and 64 random query points. A
-ray of length zero starts at each point; the hardware offers every box the point
+ray of length 1e-3 starts at each point; the hardware offers every box the point
 might be in as a candidate, and the candidate answer (`procedural_candidate`
 below) checks the point against that box's own bounds and commits `t = 0` only
 when it is inside. So a ray hits exactly when the point is inside some box, and
@@ -11,8 +11,12 @@ the box it reports must contain it. The host answers the same question by brute
 force.
 
 The candidate's own bounds check is the point of the test. A driver may offer a
-box whose bounds do not strictly contain the point (degenerate zero-length ray
-edge cases); counting candidates instead of checking them would count those.
+box whose bounds do not contain the point, one the short ray enters; counting
+candidates instead of checking them would count those.
+
+Not a ray of length zero, which this was: Metal offers no candidates for one whose
+minimum and maximum distance are equal, and its traversal starts the best hit at
+the maximum, so a commit at `t = 0` could never improve on it either.
 
 This used to count every containing box per point, by walking the candidates of
 an inline ray query by hand. The portable procedural protocol answers the
@@ -73,7 +77,7 @@ Mantle.procedural_bary(::BoxElems, b::BoxHit) = SVector{3,Float32}(Float32(b.cel
 @kernel function aabb_locate!(hits, cells, ts, @Const(qs), accel)
     i = @index(Global)
     @inbounds q = qs[i]
-    r = Raycore.Ray(o = q, d = Vec3f(1, 0, 0), t_min = 0f0, t_max = 0f0)
+    r = Raycore.Ray(o = q, d = Vec3f(1, 0, 0), t_min = 0f0, t_max = 1f-3)
     hit, _prim, t, bary, _inst = Raycore.closest_hit(accel, r)
     @inbounds hits[i] = hit ? Int32(1) : Int32(0)
     @inbounds cells[i] = hit ? unsafe_trunc(UInt32, bary[1]) : UInt32(0)
@@ -82,7 +86,7 @@ end
 
 in_aabb(p, a::Mantle.AABB) = all(a.min .<= p .<= a.max)
 
-@testset "AABB BLAS: a zero-length ray locates a point among overlapping boxes" begin
+@testset "AABB BLAS: a short ray locates a point among overlapping boxes" begin
     if !(Mantle.supports_hwtlas(TESTBACKEND) && Mantle.supports_procedural_traversal(TESTBACKEND))
         @info "no procedural hardware traversal on this backend; skipping"
         @test_skip false

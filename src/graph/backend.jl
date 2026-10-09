@@ -828,7 +828,7 @@ const BACKEND_VOCABULARY = (
     :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
-    :supports_rt_pipeline, :supports_procedural_traversal, :supports_hwtlas, :supports_float64,
+    :supports_rt_pipeline, :supports_procedural_traversal, :supports_hwtlas, :supports_float64, :supports_int64_atomics,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
     # the queue and its tokens
     :devices, :defaultdevice!,

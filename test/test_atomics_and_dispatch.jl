@@ -262,7 +262,8 @@ end
     @test result[10] == 10f0 + 40f0
 end
 
-@testset "Int64/UInt64 atomics" begin
+# Only where the device has 64-bit integer atomics: Apple GPUs do not.
+Mantle.supports_int64_atomics(TESTBACKEND) && @testset "Int64/UInt64 atomics" begin
     @testset "Int64 atomic add" begin
         @kernel function atomic_add_i64!(counter)
             Atomix.@atomic counter[1] += Int64(1)

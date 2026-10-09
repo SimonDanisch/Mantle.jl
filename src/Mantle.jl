@@ -347,7 +347,7 @@ export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
-export supports_procedural_traversal, supports_hwtlas, supports_float64
+export supports_procedural_traversal, supports_hwtlas, supports_float64, supports_int64_atomics
 export batchqueue
 export defaultbackend, availablebackends, eachbackend, register_backend!
 export devicearray
