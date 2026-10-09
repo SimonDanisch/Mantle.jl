@@ -40,9 +40,9 @@ A presentation surface of pixel type `T`, sized in PIXELS.
 `BGRA{N0f8}` is what a display wants and what `mtlformat` lowers it to.
 """
 function MetalWindow(::Type{T}, width::Integer, height::Integer;
-                     vsync::Bool = true, handle = nothing) where {T}
+                     vsync::Bool = true, srgb::Bool = false, handle = nothing) where {T}
     dev = Metal.device()
-    layer = MTLm.CAMetalLayer(dev, width, height; format = mtlformat(T), vsync)
+    layer = MTLm.CAMetalLayer(dev, width, height; format = mtlformat(T; srgb), vsync)
     return MetalWindow{T}(handle, layer, Int(width), Int(height), nothing, true, nothing)
 end
 
@@ -115,7 +115,7 @@ because the composite pass indexed `hdr[py * 1600 + px]` over a 2940-wide target
 """
 function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
                        title::AbstractString = "", vsync::Bool = false,
-                       color_format::Type = BGRA{N0f8})
+                       color_format::Type = BGRA{N0f8}, srgb::Bool = false)
     GLFW.WindowHint(GLFW.CLIENT_API, GLFW.NO_API)
     gw = GLFW.CreateWindow(Int(width), Int(height), String(title))
     # Window hints are process-global. Left at `NO_API`, the next OpenGL window
@@ -123,7 +123,7 @@ function Mantle.Window(::Metal.MetalBackend, width::Integer, height::Integer;
     GLFW.DefaultWindowHints()
     sx, sy = GLFW.GetWindowContentScale(gw)
     GLFW.SetWindowSize(gw, round(Int, width / sx), round(Int, height / sy))
-    w = attach!(MetalWindow(color_format, width, height; vsync), gw)
+    w = attach!(MetalWindow(color_format, width, height; vsync, srgb), gw)
     # `attach!` ADOPTS whatever the layer could be given, so this is a real
     # check and not a restatement: a window that reports an extent its drawables
     # do not have breaks every pass that strides a buffer by hand.

@@ -1488,7 +1488,13 @@ adaptor(::SubmitChannel{<:VulkanQueue}) = LavaAdaptor(nothing)
 # On the BACKEND's device: falling through to a `ctx = vk_context()` default
 # creates a framebuffer asked of a second device's backend on the first.
 Framebuffer(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanFramebuffer(w, h; ctx = vk_context(b), kw...)
-Window(b::LavaBackend, w::Integer, h::Integer; kw...) = VulkanWindow(w, h; ctx = vk_context(b), kw...)
+# The portable defaults, stated rather than inherited: `VulkanWindow`'s own default
+# is an `_SRGB` swapchain, which encodes on write, while every other backend's
+# portable window stores what the shader wrote. One shader then showed brighter
+# here than on Metal (0.8 came out 0.906).
+Window(b::LavaBackend, w::Integer, h::Integer; color_format::Type = BGRA{N0f8},
+       srgb::Bool = false, kw...) =
+    VulkanWindow(w, h; ctx = vk_context(b), color_format, srgb, kw...)
 Texture2D(b::LavaBackend, data::AbstractArray; kw...) = VulkanTexture2D(data; ctx = vk_context(b), kw...)
 Sampler(b::LavaBackend; kw...) = VulkanSampler(; ctx = vk_context(b), kw...)
 

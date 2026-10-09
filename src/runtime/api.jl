@@ -88,9 +88,12 @@ readback synchronises itself, because it must.
 """
 abstract type Window end
 
-# `Window(backend, width, height; title, vsync, color_format)` is the portable
-# constructor, answered by whichever backend is loaded — see `Framebuffer` in
-# `graphics/resources.jl` for why the backend is the first argument.
+# `Window(backend, width, height; title, vsync, color_format = BGRA{N0f8},
+# srgb = false)` is the portable constructor, answered by whichever backend is
+# loaded — see `Framebuffer` in `graphics/resources.jl` for why the backend is the
+# first argument. By default the window stores what a shader writes, so a shader
+# writes display-referred values; `srgb = true` makes the hardware encode linear
+# ones. Same default on every backend, or one shader shows two brightnesses.
 
 # The no-backend spelling opens on `defaultbackend()`, and is CORE's because
 # deciding which backend that is, is core's job. It lived in the Vulkan backend
