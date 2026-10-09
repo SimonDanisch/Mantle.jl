@@ -28,6 +28,12 @@ using KernelInterface: CoopMatrix, AcceleratedMatrix, WorkgroupMatrix,
     coopmat_mul, coopmat_add,
     coopmat_zero, coopmat_undef, coopmat_convert, coopmat_length,
     coopmat_getcomp, coopmat_setcomp
+# Tensor addressing, KI's for the same reason: `gemm_cm2.jl` loads its operands
+# through a layout and names no compiler to do it.
+using KernelInterface: TensorLayout, TensorView, TENSOR_CLAMP_UNDEFINED,
+    TENSOR_CLAMP_CONSTANT, TENSOR_CLAMP_TO_EDGE, tensor_layout, tensor_setdim,
+    tensor_setstride, tensor_setclampvalue, tensor_slice, tensor_view, tensor_load,
+    tensor_store
 # Primitive topology: KI's, because a compiler emits execution modes from it and
 # every backend creates a pipeline from it. Re-exported below, same as `caps`.
 # The device-side shader vocabulary, re-exported so a downstream package writes
@@ -198,6 +204,7 @@ include("array/launch.jl")   # what a library routine IS, before it is submitted
 include("array/indexing.jl") # portable index decomposition and launch geometry
 include("array/gemv.jl")
 include("array/gemm.jl")
+include("array/gemm_cm2.jl")   # workgroup-scope matrices through tensor addressing
 include("array/fft.jl")
 
 # ── Geometry: shapes, transforms and the collision pipeline ───────────────────

@@ -34,8 +34,10 @@ thing that makes a naive port of `smearReduce` wrong outside the reference's own
 usage.
 """
 
-using Test, Lava, KernelAbstractions
-using Lava: AcceleratedMatrix, Accumulator, CoopMatReduce, coopmat_reduce
+using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
+using KernelInterface: AcceleratedMatrix, Accumulator, CoopMatReduce, coopmat_reduce
 const KA = KernelAbstractions
 const RT = Mantle.GEMM_TILE
 
@@ -54,22 +56,23 @@ rfirst(x::Float32, y::Float32) = x          # the reference's `smearReduce`
 end
 
 @testset "coopmat_reduce: OpCooperativeMatrixReduceNV" begin
-    ctx = Mantle.vk_context()
-    backend = LavaBackend()
-    if !ctx.coopmat2.available || !ctx.coopmat2.reductions
-        @info "no coopmat2 reductions on this device; skipping" ctx.device_name
+    backend = TESTBACKEND
+    if !KI.supports_coopmat_reduce(backend)
+        @info "no cooperative-matrix reductions on this device; skipping" Mantle.devicename(Mantle.Device(backend))
     else
+        # One subgroup, at the width a cooperative-matrix kernel runs at.
+        WG = Mantle.caps(backend).coopmatsubgroup
         # Column-major, so element (r, c) is at r + c*RT. Distinct per row so a
         # row reduction cannot pass by accident.
         xh = Float32[(r - 1) * 100 + (c - 1) for r in 1:RT, c in 1:RT]
-        x = Mantle.LavaArray(xh)
+        x = Mantle.devicearray(backend, xh)
         out = KA.allocate(backend, Float32, RT, RT)
 
         # ── Does a SUBGROUP-scoped reduce compile and run at all?
         ok = true
         try
             fill!(out, -1.0f0)
-            reducerow!(backend, 32)(out, x, Val(:max); ndrange = 32)
+            reducerow!(backend, WG)(out, x, Val(:max); ndrange = WG)
             KA.synchronize(backend)
         catch e
             ok = false
@@ -89,7 +92,7 @@ end
             # Sum, to show the combiner is genuinely applied pairwise and it is
             # not just broadcasting one element.
             fill!(out, -1.0f0)
-            reducerow!(backend, 32)(out, x, Val(:sum); ndrange = 32)
+            reducerow!(backend, WG)(out, x, Val(:sum); ndrange = WG)
             KA.synchronize(backend)
             s = Array(out)
             wsum = sum(xh; dims = 2)
@@ -110,7 +113,7 @@ end
             # the row — its `eM` comes from a row max. There it reduces nothing and
             # exists purely to RESIZE, and any order gives the same answer.
             fill!(out, -1.0f0)
-            reducerow!(backend, 32)(out, x, Val(:first); ndrange = 32)
+            reducerow!(backend, WG)(out, x, Val(:first); ndrange = WG)
             KA.synchronize(backend)
             nonassoc = Array(out)
             @test !all(nonassoc[3, c] == nonassoc[3, 1] for c in 1:RT)
@@ -118,9 +121,9 @@ end
             # And the same combiner on a row-uniform input — the reference's
             # actual usage — is exact.
             uh = Float32[(r - 1) * 10 for r in 1:RT, c in 1:RT]
-            u = Mantle.LavaArray(uh)
+            u = Mantle.devicearray(backend, uh)
             fill!(out, -1.0f0)
-            reducerow!(backend, 32)(out, u, Val(:first); ndrange = 32)
+            reducerow!(backend, WG)(out, u, Val(:first); ndrange = WG)
             KA.synchronize(backend)
             sm = Array(out)
             @test all(sm[r, c] == uh[r, 1] for r in 1:RT, c in 1:RT)

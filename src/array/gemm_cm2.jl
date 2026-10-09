@@ -309,14 +309,13 @@ Launch [`gemm_cm2_sg!`](@ref). `nw` subgroups per workgroup, so the workgroup is
 function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
     backend = KernelAbstractions.get_backend(C)
     dev = caps(backend)
-    # `wggran` is non-empty exactly when this device has coopmat2 — which is what
-    # supplies the tensor addressing this kernel needs, even though its matrices
-    # are subgroup-scope.
-    isempty(dev.wggran) && return nothing
+    # Asked by name: this kernel's matrices are subgroup-scope, so it is the tensor
+    # addressing it needs, not a workgroup-scope shape.
+    KI.supports_tensor_addressing(backend) || return nothing
     # The tiles are `GEMM_TILE` squares at subgroup scope, so the device's own
-    # KHR shape list is the authority rather than the workgroup-scope table.
-    coopmat_shape(vk_context(backend), Float16, GEMM_TILE, GEMM_TILE, GEMM_TILE) ||
-        return nothing
+    # shape table is the authority rather than the workgroup-scope one.
+    KI.supports(backend, MatrixShape(Float16, Float32, GEMM_TILE, GEMM_TILE, GEMM_TILE,
+                                     SubgroupScope())) || return nothing
     nw * 32 <= dev.workgrouplimit ||
         throw(ArgumentError("nw=$nw wants $(nw * 32) invocations, past this " *
                             "device's limit of $(dev.workgrouplimit)"))
@@ -344,6 +343,7 @@ function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
     # the wrong GPU. Same reason `coopmat_gemm!` derives it from the array.
     backend = KernelAbstractions.get_backend(C)
     dev = caps(backend)
+    KI.supports_tensor_addressing(backend) || return nothing
     tiling = something(tiling, gemm_cm2_tiling(dev))
     tiling === nothing && return nothing
     BM, BN, BK, NT = tiling

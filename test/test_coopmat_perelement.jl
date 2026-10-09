@@ -19,31 +19,21 @@ cannot pass by accident.
 `(u32, u32, T, extras...)` while LLVM is free to rewrite the signature of a
 function it can see every caller of. Dead-argument elimination removes an unused
 `col`; interprocedural constant propagation removes a `@localmem` pointer that it
-proved constant. Both were observed, and `Lava.coopmat_keepparam` exists because
+proved constant. Both were observed, and `KI.coopmat_keepparam` exists because
 of them — so the callback here deliberately ignores `col` and takes a shared
 pointer, which is the combination that broke.
 
-**That the callback is not left uninlinable.** The user's callback must melt into
-`coopmat_perelement_thunk`; marked `@noinline` it stays a separate `OpFunction`
-with `DontInline`, the driver honours that and calls it once per element, which
-measured 8.5x. Asserted on the disassembly, since it costs time rather than
-correctness and would otherwise go unnoticed.
+That the callback is left inlinable — a `DontInline` callback measured 8.5x — is a
+property of the compiled module, so Lava's suite asserts it on the disassembly
+(`Lava/test/spirv/test_coopmat_perelement_inline.jl`).
 """
 
-using Test, Lava, Mantle, KernelAbstractions
-
-# `compile_and_disasm` comes from Lava's SPIR-V test helpers, which moved to
-# `Lava/test/` with the emission suite. Taken from whatever has already been
-# included by the time `runtests.jl` reaches this file, it passes
-# in the full run and errored when run on its own. Included by name, with the
-# same `@isdefined` guard the other users have.
-if !@isdefined(SPIRVTestUtils)
-    include(joinpath(pkgdir(Lava), "test", "spirv_test_utils.jl"))
-end
-import .SPIRVTestUtils: compile_and_disasm, check, check_not, check_count
+using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 const KA = KernelAbstractions
-const AMpe = Lava.AcceleratedMatrix
+const AMpe = KI.AcceleratedMatrix
 const TILEpe = Mantle.GEMM_TILE
 
 # Depends on both indices, and is not symmetric under swapping them.
@@ -57,8 +47,8 @@ rowscale(row::UInt32, col::UInt32, e::Float32,
 
 @kernel cpu=false function pe_rowcol!(C, @Const(A))
     @inbounds begin
-        m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(A), 1, TILEpe)
-        Mantle.copyto!(pointer(C), 1, TILEpe, Lava.coopmat_perelement(rowcolmap, m))
+        m = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(pointer(A), 1, TILEpe)
+        Mantle.copyto!(pointer(C), 1, TILEpe, KI.coopmat_perelement(rowcolmap, m))
     end
 end
 
@@ -69,9 +59,9 @@ end
         tid <= 2 * TILEpe &&
             (cs[tid] = tid <= TILEpe ? Float32(tid) : Float32(100 + tid - TILEpe))
         @synchronize
-        m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(A), 1, TILEpe)
+        m = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(pointer(A), 1, TILEpe)
         Mantle.copyto!(pointer(C), 1, TILEpe,
-                     Lava.coopmat_perelement(rowscale, m, cs.ptr, base))
+                     KI.coopmat_perelement(rowscale, m, cs.ptr, base))
     end
 end
 
@@ -85,20 +75,19 @@ end
         tid <= 2 * TILEpe &&
             (cs[tid] = tid <= TILEpe ? Float32(tid) : Float32(100 + tid - TILEpe))
         @synchronize
-        m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(A), 1, TILEpe)
-        s = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(cs, 1 + base, 0, Val(false))
-        Mantle.copyto!(pointer(C), 1, TILEpe, Lava.coopmat_mul(m, s))
+        m = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(pointer(A), 1, TILEpe)
+        s = AMpe{Float32,TILEpe,TILEpe,KI.Accumulator}(cs, 1 + base, 0, Val(false))
+        Mantle.copyto!(pointer(C), 1, TILEpe, KI.coopmat_mul(m, s))
     end
 end
 
 @testset "cooperative-matrix per-element and component-wise ops" begin
-    ctx = Mantle.vk_context()
-    back = LavaBackend()
+    back = TESTBACKEND
     # A cooperative matrix is subgroup-scoped, and a workgroup smaller than one
     # subgroup has undefined behaviour — so the launches below are exactly one
     # subgroup wide. This must be asked, not assumed: it is 32 on Ada and 64 on
     # RDNA 3.5, and the hardcoded 32 this replaced was half a subgroup there.
-    WGpe = Mantle.device_subgroup_size(ctx)
+    WGpe = Mantle.caps(TESTBACKEND).coopmatsubgroup
     A = KA.allocate(back, Float32, TILEpe, TILEpe)
     copyto!(A, Float32.(reshape(1:TILEpe^2, TILEpe, TILEpe)))
     a = Array(A)
@@ -107,7 +96,7 @@ end
     # and is checked on every backend in `test/test_coopmat_add.jl`; here it is
     # only the reference the per-element callback is compared against below.
 
-    if !ctx.coopmat2.per_element_operations
+    if !KI.supports_coopmat_perelement(TESTBACKEND)
         @info "no VK_NV_cooperative_matrix2 per-element operations; skipping"
     else
         @testset "the callback sees the element's own row and column" begin
@@ -138,28 +127,6 @@ end
             fmul_rowscale!(back, (WGpe,))(C2, A, Int32(0); ndrange = (WGpe,))
             KA.synchronize(back)
             @test Array(C1) == Array(C2)
-        end
-
-        @testset "the callback is inlinable, not DontInline" begin
-            # A `DontInline` callback costs a real function call per element —
-            # 8.5x — so this is a performance regression test with no
-            # correctness symptom whatsoever.
-            function peplain(out, inp)
-                m = AMpe{Float32,TILEpe,TILEpe,Lava.Accumulator}(pointer(inp), 1, TILEpe)
-                Mantle.copyto!(pointer(out), 1, TILEpe,
-                             Lava.coopmat_perelement(rowcolmap, m))
-                return
-            end
-            d = first(compile_and_disasm(peplain,
-                    Tuple{LavaDeviceArray{Float32,2}, LavaDeviceArray{Float32,2}}))
-            @test occursin("OpCooperativeMatrixPerElementOpNV", d)
-            # Exactly one function carries the callback's signature, and it is
-            # the thunk, marked `Inline`.
-            @test occursin(r"OpFunction %float Inline", d)
-            @test !occursin(r"OpFunction %float DontInline", d)
-            # And nothing calls out of it per element.
-            body = split(d, "OpCooperativeMatrixPerElementOpNV")[1]
-            @test count("OpFunctionCall", d) == 0
         end
     end
 end

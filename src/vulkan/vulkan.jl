@@ -40,8 +40,7 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             KI_REDUCE_ADD_TYPES, KI_SHFL_TYPES, LavaCompilationError,
             LavaCompilerParams, LavaDeviceArray, LavaError, LavaGPUKernel,
             LavaGfxShader, LavaRTShader, LavaSharedArray, MatrixA, MatrixB,
-            Op, PushConstantInfo, Scope, SourceMap, TENSOR_CLAMP_CONSTANT,
-            TENSOR_CLAMP_UNDEFINED, TargetFeatures, TessConfig,
+            Op, PushConstantInfo, Scope, SourceMap, TargetFeatures, TessConfig,
             GeometryWrapper, MeshWrapper, VertexWrapper, WorkgroupMatrix,
             cached_gfx_shader, cached_rt_shader, compile_or_lookup, compile_stats,
             coopmat_convert, coopmat_getcomp, coopmat_length, coopmat_load,
@@ -74,8 +73,6 @@ using Lava: @lava_device_override, AcceleratedMatrix, Accumulator, Cap,
             lava_workgroup_id_x, lava_workgroup_id_y, lava_workgroup_id_z,
             run_spirv_opt, set_position!, spirv_content_hash, subgroup_add,
             subgroup_elect, subgroup_shuffle, subgroup_size,
-            tensor_layout, tensor_load,
-            tensor_setdim, tensor_setstride, tensor_slice, tensor_store,
             reset_compile_stats!, unroll_loops!, validate_spirv,
             wg_compute_type_alignment, wg_compute_type_size
 
@@ -95,7 +92,6 @@ include("array/ka_backend.jl")
 include("array/kernelinterface_host.jl")
 include("array/gpuarrays.jl")
 include("array/gemm.jl")
-include("array/gemm_cm2.jl")
 include("array/mapreduce.jl")
 include("runtime/debug.jl")
 include("runtime/diagnostics.jl")   # gpu_memory_usage, dump_state

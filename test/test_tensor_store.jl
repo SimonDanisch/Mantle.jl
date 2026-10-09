@@ -1,6 +1,8 @@
-using Test, Lava, KernelAbstractions
+using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-const AMs = Lava.AcceleratedMatrix
+const AMs = KI.AcceleratedMatrix
 
 # `OpCooperativeMatrixStoreTensorNV` — the mirror of the tensor load, and the
 # half that makes a ragged OUTPUT legal.
@@ -27,24 +29,23 @@ const TS = 16
 const SENT_S = -777.0f0
 
 @kernel cpu = false function tensorstore_kernel!(dst, @Const(src), off::Int32)
-    lay = Lava.tensor_slice(
-            Lava.tensor_setdim(
-                Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT)),
+    lay = KI.tensor_slice(
+            KI.tensor_setdim(
+                KI.tensor_layout(Val(2), Val(KI.TENSOR_CLAMP_CONSTANT)),
                 (Int32(EXT_S), Int32(EXT_S))),
             (off, off), (Int32(TS), Int32(TS)))
     # A plain (non-tensor) load of a full in-range tile, so the VALUES are not
     # themselves in question — only where they land.
-    m = AMs{Float32,TS,TS,Lava.Accumulator}(pointer(src), 1, TS)
-    Lava.tensor_store(m, UInt64(pointer(dst)), lay)
+    m = AMs{Float32,TS,TS,KI.Accumulator}(pointer(src), 1, TS)
+    KI.tensor_store(m, UInt64(pointer(dst)), lay)
 end
 
 @testset "OpCooperativeMatrixStoreTensorNV clamps writes" begin
-    ctx = Mantle.vk_context()
-    if !ctx.coopmat2.tensor_addressing
+    if !KI.supports_tensor_addressing(TESTBACKEND)
         @info "device has no coopmat2 tensor addressing — skipping"
     else
-        back = LavaBackend()
-        WG = Int(Mantle.device_subgroup_size(ctx))
+        back = TESTBACKEND
+        WG = Int(Mantle.caps(TESTBACKEND).coopmatsubgroup)
         src = KA.allocate(back, Float32, TS, TS)
         copyto!(src, Float32.(reshape(1:(TS * TS), TS, TS)))
 

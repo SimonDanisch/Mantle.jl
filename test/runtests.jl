@@ -712,6 +712,29 @@ foreachbackend(joinpath(@__DIR__, "test_coopmat_shape.jl"))
 foreachbackend(joinpath(@__DIR__, "test_coopmat_shared.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_batched.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_cm2.jl"))
+# Tensor addressing and the cooperative-matrix extensions, on every backend that
+# answers `KernelInterface.supports_tensor_addressing` and friends (Vulkan with
+# `VK_NV_cooperative_matrix2`); the rest skip on the predicate, not on a name.
+# The load: compiling and validating is not enough, the instruction validated twice
+# while still wrong, so this runs it and checks the values and the orientation.
+foreachbackend(joinpath(@__DIR__, "test_tensor_load.jl"))
+# What the load substitutes OUT of range, a value the caller chooses —
+# `attn_flash_cm2!` gets a whole row reduction deleted by asking for one.
+foreachbackend(joinpath(@__DIR__, "test_tensor_clampvalue.jl"))
+# What a PRODUCT of two tensor-loaded operands computes: the load returns the
+# transpose of its block, so the product is `P' * Q'`.
+foreachbackend(joinpath(@__DIR__, "test_tensor_gemm.jl"))
+# A clamping layout bounds-checks the load, so an extent that divides nothing is
+# legal and out-of-range reads come back as exact zeros.
+foreachbackend(joinpath(@__DIR__, "test_tensor_clamp.jl"))
+# A shape the device does NOT report is usable: a 64x16 operand where every reported
+# shape has M == 16.
+foreachbackend(joinpath(@__DIR__, "test_coopmat_flexible_dims.jl"))
+# The other half of the clamp: a clamping layout bounds-checks the STORE too,
+# asserted two-sided (in-range elements land, nothing outside moves).
+foreachbackend(joinpath(@__DIR__, "test_tensor_store.jl"))
+foreachbackend(joinpath(@__DIR__, "test_coopmat_perelement.jl"))
+foreachbackend(joinpath(@__DIR__, "test_coopmat_reduce.jl"))
 foreachbackend(joinpath(@__DIR__, "test_coopmat_components.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_aabb_blas_overlap.jl"))
@@ -925,40 +948,6 @@ if _VULKAN_OK
         @testset "Lava import completeness" begin
         end
 
-        # ── Tier 3a3: tensor addressing actually loads (GPU) ──
-        # Compiling and validating is not enough here: the instruction validated
-        # twice while still wrong. This runs it and checks the values and the
-        # orientation.
-        @testset "Tier 3a3: coopmat2 tensor load" begin
-            include(joinpath(VULKAN_TESTS, "test_tensor_load.jl"))
-            # What the load substitutes OUT of range, which is a value the caller
-            # chooses and not always zero — `attn_flash_cm2!` gets a whole row
-            # reduction deleted by asking for one.
-            include(joinpath(VULKAN_TESTS, "test_tensor_clampvalue.jl"))
-            # And what a PRODUCT of two tensor-loaded operands computes, which the
-            # load test cannot say: the load returns the transpose of its block, so
-            # the product is `P' * Q'`. A GEMM cannot be routed through this until
-            # that is pinned, and all four candidate orientations look sane.
-            include(joinpath(VULKAN_TESTS, "test_tensor_gemm.jl"))
-            # And the claim the port rests on: a clamping layout bounds-checks the
-            # load, so an extent that divides nothing is legal and out-of-range reads
-            # come back as exact zeros. That is what retires `gemm_padn`,
-            # `GEMM_BLOCK`, `padtile`/`crsextent` and `gemm_divides`.
-            include(joinpath(VULKAN_TESTS, "test_tensor_clamp.jl"))
-            # And that a shape the device does NOT report is usable at all: every
-            # KHR shape here has M == 16, so 64x16 exercises coopmat2's flexible
-            # dimensions. A hard-coded shape list in `KNOWN_INTRINSICS` rejects
-            # it before the emitter, which handles it correctly, ever sees it, so
-            # this guards a gate and not an instruction.
-            include(joinpath(VULKAN_TESTS, "test_coopmat_flexible_dims.jl"))
-            # The clamp test above covers READS. This is the other half: a clamping
-            # layout must bounds-check the STORE too, or a tensor GEMM can consume
-            # unpadded operands and still not write an unpadded result. Asserts
-            # two-sided — in-range elements land, and nothing outside the extent
-            # moves — because a store that trampled its neighbours would pass a
-            # one-sided "the right values are there" check.
-            include(joinpath(VULKAN_TESTS, "test_tensor_store.jl"))
-        end
 
 
         # ── Tier 3a: Workgroup barrier-skip fix (GPU; catches lavapipe deadlock) ──
@@ -1462,9 +1451,6 @@ if _VULKAN_OK
             end
 
 
-            @testset "coopmat per-element and component-wise ops" begin
-                include(joinpath(VULKAN_TESTS, "test_coopmat_perelement.jl"))
-            end
 
 
             @testset "coopmat component-wise add" begin
@@ -1475,9 +1461,6 @@ if _VULKAN_OK
             end
 
 
-            @testset "coopmat reductions (NV)" begin
-                include(joinpath(VULKAN_TESTS, "test_coopmat_reduce.jl"))
-            end
 
 
 

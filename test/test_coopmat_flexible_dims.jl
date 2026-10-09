@@ -12,31 +12,31 @@
 # the shape is asserted to be absent from the device list FIRST (otherwise this
 # tests the KHR path under a flexible-sounding name), and the result is compared
 # against a CPU reference elementwise.
-using Test, Lava, KernelAbstractions
+using Test, Mantle, KernelAbstractions
+import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-const AMg = Lava.AcceleratedMatrix
+const AMg = KI.AcceleratedMatrix
 
 @kernel cpu = false unsafe_indices = true function flexdim_mul!(C, @Const(A), @Const(B))
-    a = Lava.coopmat_load(AMg{Float16,64,16,Lava.MatrixA}, pointer(A), 1, 64)
-    b = Lava.coopmat_load(AMg{Float16,16,16,Lava.MatrixB}, pointer(B), 1, 16)
-    c = Lava.coopmat_muladd(a, b, Lava.coopmat_zero(AMg{Float32,64,16,Lava.Accumulator}))
+    a = KI.coopmat_load(AMg{Float16,64,16,KI.MatrixA}, pointer(A), 1, 64)
+    b = KI.coopmat_load(AMg{Float16,16,16,KI.MatrixB}, pointer(B), 1, 16)
+    c = KI.coopmat_muladd(a, b, KI.coopmat_zero(AMg{Float32,64,16,KI.Accumulator}))
     Mantle.copyto!(pointer(C), 1, 64, c)
 end
 
 @testset "coopmat2 flexible dimensions" begin
-    ctx = Mantle.vk_context()
-    if !ctx.coopmat_available || !ctx.coopmat2.flexible_dimensions
+    if !Mantle.caps(TESTBACKEND).coopmat || !KI.supports_flexible_coopmat_shapes(TESTBACKEND)
         @info "flexible dimensions unavailable — skipping"
     else
         # The premise. If some device DOES report a 64-row shape, this test is
         # exercising the ordinary KHR path and proves nothing about flexibility.
-        @test !any(s -> s.M == 64 && s.N == 16 && s.K == 16, ctx.coopmat_shapes)
-        @test !Mantle.coopmat_shape(ctx, Float16, 64, 16, 16)
+        @test !any(s -> s.M == 64 && s.N == 16 && s.K == 16, KI.matrix_shapes(TESTBACKEND))
 
-        back = LavaBackend()
+        back = TESTBACKEND
         # A cooperative matrix is subgroup-scoped, so the launch is exactly one
         # subgroup wide — asked rather than assumed (32 on Ada, 64 on RDNA 3.5).
-        WG = Int(Mantle.device_subgroup_size(ctx))
+        WG = Int(Mantle.caps(TESTBACKEND).coopmatsubgroup)
         a = Float16.(randn(Float32, 64, 16) .* 0.1f0)
         b = Float16.(randn(Float32, 16, 16) .* 0.1f0)
         Ad = KA.allocate(back, Float16, 64, 16); copyto!(Ad, a)

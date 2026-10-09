@@ -1,6 +1,8 @@
-using Test, Lava, KernelAbstractions, LinearAlgebra
+using Test, Mantle, KernelAbstractions, LinearAlgebra
+import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-const AMg = Lava.AcceleratedMatrix
+const AMg = KI.AcceleratedMatrix
 
 # What does a product of two TENSOR-LOADED operands actually compute?
 #
@@ -28,26 +30,25 @@ const TGt = 16          # one tile, one subgroup — the smallest thing that mul
 @kernel cpu = false function tensorgemm_kernel!(out, @Const(A), @Const(B))
     # Dims REVERSED relative to the Julia array: the tensor's last dimension is
     # fastest-varying, Julia's first is. See `test_tensor_load.jl`.
-    lay = Lava.tensor_slice(
-            Lava.tensor_setdim(
-                Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT)),
+    lay = KI.tensor_slice(
+            KI.tensor_setdim(
+                KI.tensor_layout(Val(2), Val(KI.TENSOR_CLAMP_CONSTANT)),
                 (Int32(TGt), Int32(TGt))),
             (Int32(0), Int32(0)), (Int32(TGt), Int32(TGt)))
-    za = Lava.coopmat_zero(AMg{Float16,TGt,TGt,Lava.MatrixA})
-    zb = Lava.coopmat_zero(AMg{Float16,TGt,TGt,Lava.MatrixB})
-    ma = Lava.tensor_load(za, UInt64(pointer(A)), lay)
-    mb = Lava.tensor_load(zb, UInt64(pointer(B)), lay)
-    acc = Lava.coopmat_zero(AMg{Float32,TGt,TGt,Lava.Accumulator})
-    Mantle.copyto!(pointer(out), 1, TGt, Lava.coopmat_muladd(ma, mb, acc))
+    za = KI.coopmat_zero(AMg{Float16,TGt,TGt,KI.MatrixA})
+    zb = KI.coopmat_zero(AMg{Float16,TGt,TGt,KI.MatrixB})
+    ma = KI.tensor_load(za, UInt64(pointer(A)), lay)
+    mb = KI.tensor_load(zb, UInt64(pointer(B)), lay)
+    acc = KI.coopmat_zero(AMg{Float32,TGt,TGt,KI.Accumulator})
+    Mantle.copyto!(pointer(out), 1, TGt, KI.coopmat_muladd(ma, mb, acc))
 end
 
 @testset "a product of tensor-loaded operands is P' * Q'" begin
-    ctx = Mantle.vk_context()
-    if !ctx.coopmat2.tensor_addressing
+    if !KI.supports_tensor_addressing(TESTBACKEND)
         @info "device has no coopmat2 tensor addressing — skipping"
     else
-        back = LavaBackend()
-        WG = Mantle.device_subgroup_size(ctx)
+        back = TESTBACKEND
+        WG = Mantle.caps(TESTBACKEND).coopmatsubgroup
 
         A = KA.allocate(back, Float16, TGt, TGt)
         B = KA.allocate(back, Float16, TGt, TGt)

@@ -42,6 +42,13 @@ KI.shfl_types(::LavaBackend) = collect(KI_SHFL_TYPES)
 # happen to cover the same six types on this backend.
 KI.sub_group_reduce_add_types(::LavaBackend) = collect(KI_REDUCE_ADD_TYPES)
 
+# The cooperative-matrix extensions and tensor addressing, all four from
+# `VK_NV_cooperative_matrix2` as the device reported it at creation.
+KI.supports_tensor_addressing(b::LavaBackend) = vk_context(b).coopmat2.tensor_addressing
+KI.supports_coopmat_perelement(b::LavaBackend) = vk_context(b).coopmat2.per_element_operations
+KI.supports_coopmat_reduce(b::LavaBackend) = vk_context(b).coopmat2.reductions
+KI.supports_flexible_coopmat_shapes(b::LavaBackend) = vk_context(b).coopmat2.flexible_dimensions
+
 """
 The width the shader will actually run at, from the device rather than a guess:
 32 on NVIDIA, 32 *or* 64 on RDNA3 depending on how the driver compiled the
