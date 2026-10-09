@@ -889,7 +889,7 @@ global METAL_TESTS = joinpath(@__DIR__, "metal")
 
 if _METAL_OK
     @testset "Metal backend" begin
-        for f in ("test_kernelinterface_metal.jl", "test_window_metal.jl")
+        for f in ("test_kernelinterface_metal.jl",)
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end

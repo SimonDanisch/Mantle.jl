@@ -98,6 +98,29 @@ later, on NVIDIA, one resize in three.
 function acquire_next_image! end
 
 """
+    checkacquirable(acquirer)
+
+Refuse a second image while `acquirer`, the task holding the window's image, has
+not presented it; `nothing` is a window between frames.
+
+A window lends ONE image at a time, on every backend. Recording is not atomic
+against the scheduler: compiling a kernel mid-frame yields, so a second task
+rendering the same window can arrive between the acquire and the present. On
+Vulkan its acquire then waits on the fence the missing present would signal, a
+blocking foreign call that leaves the process unkillable; on Metal it took a
+second drawable and two frames drew at once. The error names which case it is.
+"""
+checkacquirable(::Nothing) = nothing
+function checkacquirable(acquirer::Task)
+    who = acquirer === current_task() ?
+          "the same task that is asking for another one" :
+          "another task ($acquirer) that has not presented it yet"
+    error("acquire_next_image!: this window already holds an image, acquired by " *
+          who * ". A window is rendered by one task: pass it around, or hand it " *
+          "over once the frame that owns it has been presented.")
+end
+
+"""
     transition_image!(image, from, to)
 
 Move `image` between usage states.
@@ -121,9 +144,25 @@ function readback_framebuffer end
 """
     readback_window(window) -> Array
 
-Read the last presented image of `window` back to the host.
+Read an image of `window` back to the host, BETWEEN frames: it acquires one,
+copies it and gives it back. Which image the platform hands out is its own
+choice, so it holds an earlier frame — after a few frames of a still scene,
+what is on the window. Inside a frame the image is the frame's, and the copy
+would have to ride in a submission the frame owns; [`checkreadable`](@ref)
+refuses that.
 """
 function readback_window end
+
+"""
+    checkreadable(acquirer)
+
+Refuse a readback while `acquirer` holds the window's image (see
+[`readback_window`](@ref)); `nothing` is a window between frames.
+"""
+checkreadable(::Nothing) = nothing
+checkreadable(::Task) =
+    error("readback_window: the window holds an acquired image; read back after " *
+          "the frame that owns it has been presented")
 
 """
     readback_target(target) -> Matrix

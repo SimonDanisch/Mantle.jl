@@ -1221,6 +1221,57 @@ else
         close(win)
     end
 
+    # A triangle whose three channels all differ. A display wants `BGRA{N0f8}` and
+    # an offscreen target is usually `RGBA{N0f8}`: the shader writes `(r, g, b, a)`
+    # either way and the attachment's format reorders them, so a pipeline compiled
+    # for the wrong one swaps red and blue, which still looks like a plausible
+    # image. Hence channels compared, not eyeballed.
+    tinted_vertex(pos) = (position = pos[Int(vertex_index())],
+                          tint = Vec4f(0.8f0, 0.3f0, 0.1f0, 1f0))
+    tinted_fragment(inputs) = inputs.tint
+    TINTED = Rasterizer(; vertex = VertexShader(tinted_vertex; outputs = (tint = Vec4f,)),
+                          fragment = FragmentShader(tinted_fragment),
+                          topology = TriangleList(),
+                          blend = Opaque(),
+                          cull = NoCull(),
+                          depth = DepthOff())
+
+    @testset "a window shows what an offscreen target holds, channel for channel" begin
+        dev = M.Device(TESTBACKEND)
+        tri = M.Buffer(dev, Vec4f[(-0.9, -0.9, 0, 1), (0.9, -0.9, 0, 1), (0, 0.9, 0, 1)])
+        function draw_into(target_of)
+            g = M.Graph(dev)
+            t = target_of(g)
+            M.render!(g, "tri", t => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+                M.draw!(p, TINTED, (tri,), 3)
+            end
+            return M.Plan(g), t
+        end
+        win = M.Window(TESTBACKEND, 256, 256; title = "surface vs target", vsync = false)
+        plan_win, screen = draw_into(g -> M.Surface(g, win))
+        # A surface answers what an image does, which is what lets a render pass
+        # bind it without knowing which it has.
+        @test M.target_extent(screen) == size(win)
+        @test eltype(screen) == BGRA{N0f8}
+        plan_off, off = draw_into(g -> M.Transient.Image(g, RGBA{N0f8}, size(win)))
+        M.run!(plan_off)
+        a = M.readback_target(off)
+        # Every image the platform cycles through drawn, so the one a screenshot
+        # is handed holds this scene.
+        for _ in 1:6; M.run!(plan_win); end
+        KernelAbstractions.synchronize(M.backend(dev))
+        b = M.screenshot(win)
+        @test size(b) == size(a)
+        for ch in (red, green, blue, alpha)
+            @test all(p -> ch(p[1]) == ch(p[2]), zip(a, b))
+        end
+        # ...and it drew, with a tint that really is asymmetric, so the
+        # comparison above could have failed.
+        @test count(p -> red(p) > 0.5, b) > length(b) ÷ 10
+        @test red(a[128, 128]) != blue(a[128, 128])
+        close(win)
+    end
+
     @testset "a second frame started under an open one is an error" begin
         # Recording is not atomic against the Julia scheduler: compiling a kernel
         # mid-frame yields, and the launch plan is keyed on the world counter, so
@@ -1280,6 +1331,15 @@ else
         @test !isopen(win)
         close(win)                                          # idempotent
         @test_throws ErrorException M.beginframe!(win)
+
+        # The close button: `isopen` says so before anything is torn down,
+        # which is what a render loop polls. On Metal, `close` once only marked
+        # the window closed and the OS window stayed up, frozen on its last frame.
+        win = M.Window(TESTBACKEND, 64, 64; title = "close button", vsync = false)
+        GLFW.SetWindowShouldClose(win.handle, true)
+        @test !isopen(win)
+        close(win)
+        @test !isopen(win)
     end
 
     @testset "each load op reaches its pass and does what it says" begin

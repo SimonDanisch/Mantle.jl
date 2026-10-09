@@ -407,8 +407,7 @@ function readback_window(win::VulkanWindow)
     # presented — has no command buffer to add a copy to: the frame's one-shot
     # is `run!`'s and goes out with the present. Read back after the frame is
     # presented.
-    win.acquired && error("readback_window: the window holds an acquired image; " *
-                          "read back after the frame that owns it has been presented")
+    checkreadable(win.acquirer)
     acquire_next_image!(win)
     image = win.images[win.current_image_idx + 1]
 

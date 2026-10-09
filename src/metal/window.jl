@@ -26,6 +26,9 @@ mutable struct MetalWindow{T} <: Mantle.Window
     height::Int
     drawable::Union{Nothing,MTLm.CAMetalDrawable}
     open::Bool
+    # The task that took `drawable`, until it presents: core's one-image rule
+    # (`checkacquirable`) asks it.
+    acquirer::Union{Nothing,Task}
 end
 
 """
@@ -40,7 +43,7 @@ function MetalWindow(::Type{T}, width::Integer, height::Integer;
                      vsync::Bool = true, handle = nothing) where {T}
     dev = Metal.device()
     layer = MTLm.CAMetalLayer(dev, width, height; format = mtlformat(T), vsync)
-    return MetalWindow{T}(handle, layer, Int(width), Int(height), nothing, true)
+    return MetalWindow{T}(handle, layer, Int(width), Int(height), nothing, true, nothing)
 end
 
 """
@@ -159,6 +162,7 @@ Base.isopen(w::MetalWindow) =
 function Base.close(w::MetalWindow)
     w.open = false
     w.drawable = nothing
+    w.acquirer = nothing
     # The platform window too. Only marking this one closed left the OS window up,
     # frozen on its last frame, after the render loop drawing into it had ended:
     # four plots gave four windows that the close button could not get rid of.
@@ -227,12 +231,18 @@ flight — but a frame has nothing to draw into then, so it is an error here
 rather than a silently skipped frame that looks like a stall.
 """
 function Mantle.acquire_next_image!(w::MetalWindow)
+    Mantle.checkacquirable(w.acquirer)
+    w.drawable = nextdrawable(w)
+    w.acquirer = current_task()
+    return nothing
+end
+
+function nextdrawable(w::MetalWindow)
     d = MTLm.next_drawable(w.layer)
     d === nothing &&
         error("no drawable became available; every one is still in flight. " *
               "Present the frames already recorded before starting another.")
-    w.drawable = d
-    return nothing
+    return d
 end
 
 """
@@ -252,42 +262,49 @@ function Mantle.present_frame!(d::MetalDevice, w::MetalWindow)
     MTLm.present_drawable!(cb, dr)
     commit!(cb)
     w.drawable = nothing
+    w.acquirer = nothing
     return nothing
 end
 
 """
     readback_window(w) -> Matrix
 
-The last frame, read back.
+A drawable's pixels, read back between frames: a drawable of its own, copied and
+presented again. The layer recycles its drawables, so the one handed out holds an
+earlier frame, as an acquired swapchain image does on Vulkan.
 
-Only between `acquire_next_image!` and `present_frame!` — after presenting, the
-drawable belongs
-to the compositor and its texture is not the caller's to read. A layer made
-with `readable = false` (`framebufferOnly`) cannot be read at all, which is why
-this backend does not set that.
+Presented rather than dropped, which is how it goes back: a drawable that is never
+presented returns to the layer when its object is freed, which from Julia is
+whenever the GC runs, and a layer has three, so readbacks in a loop could run
+the layer out of them.
+
+A layer made with `readable = false` (`framebufferOnly`) cannot be read at all,
+which is why this backend does not set that.
 """
 function Mantle.readback_window(w::MetalWindow{T}) where {T}
-    tex = Mantle.target_view(w)
+    Mantle.checkreadable(w.acquirer)
+    d = nextdrawable(w)
+    tex = d.texture
+    # The TEXTURE's extent, not the one the window reports: a caller comparing
+    # the two is checking that they agree, which every pass striding a buffer
+    # by hand depends on.
+    width, height = Int(tex.width), Int(tex.height)
     dev = Mantle.Device(MetalAPI())
-    row = w.width * sizeof(T)
-    buf = MTLm.MTLBuffer(dev.dev, row * w.height; storage = Metal.SharedStorage)
+    row = width * sizeof(T)
+    buf = MTLm.MTLBuffer(dev.dev, row * height; storage = Metal.SharedStorage)
     cmd = framebuffer!(dev.dev)
     MTLm.MTLBlitCommandEncoder(cmd) do enc
         MTLm.append_copy!(enc, buf, 0, row, 0, tex,
-                          MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w.width, w.height, 1))
+                          MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(width, height, 1))
     end
+    MTLm.present_drawable!(cmd, d)
     submitwait!(cmd)
-    out = Matrix{T}(undef, w.width, w.height)
+    out = Matrix{T}(undef, width, height)
     unsafe_copyto!(pointer(out), convert(Ptr{T}, buf), length(out))
     return out
 end
 
-# `screenshot` is the portable name for the same thing, and the vocabulary entry
-# this backend did not answer at all. Same constraint as `readback_window`: it
-# reads the drawable in flight, so it belongs INSIDE a frame. On Vulkan the
-# swapchain image outlives the present and a screenshot may be taken after one;
-# here the drawable goes back to the compositor, and keeping a copy would cost a
-# blit on every frame to serve a call that is made in tests.
+# `screenshot` is the portable name for the same thing.
 Mantle.screenshot(w::MetalWindow) = Mantle.readback_window(w)
 
 # A frame that failed after its drawable was taken: dropping the reference is
@@ -296,6 +313,7 @@ Mantle.screenshot(w::MetalWindow) = Mantle.readback_window(w)
 function Mantle.abandonframe!(::MetalDevice, pl)
     for s in pl.graph.surfaces
         s.win.drawable = nothing
+        s.win.acquirer = nothing
     end
     return nothing
 end

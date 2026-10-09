@@ -344,14 +344,7 @@ function acquire_next_image!(win::VulkanWindow)
     # plan is keyed on the world counter, so one method definition anywhere in
     # the session is enough), and a second task that renders in that window then
     # arrives here between the acquire and the present.
-    if win.acquired
-        who = win.acquirer === current_task() ?
-              "the same task that is asking for another one" :
-              "another task ($(win.acquirer)) that has not presented it yet"
-        error("acquire_next_image!: this window already holds an image, acquired by " *
-              who * ". A window is rendered by one task: pass it around, or hand it " *
-              "over once the frame that owns it has been presented.")
-    end
+    checkacquirable(win.acquirer)
 
     fi = win.current_frame
     # The frame that last used this slot has passed once its fence has: the
