@@ -185,7 +185,7 @@ mp_pipeline(f; threads = 1) = Mantle.MeshPipeline(;
         vpx = drawn(dev, Mantle.GraphicsPipeline(;
                              vertex = Mantle.VertexShader(ref_vertex),
                              fragment = Mantle.FragmentShader(ref_fragment),
-                             cull = Mantle.NoCull()), 3; args = (vbuf,))
+                             cull = Mantle.NoCull(), depth = Mantle.DepthOff()), 3; args = (vbuf,))
         mpx = drawn(dev, mp_pipeline(mp_mesh_halfheight), 1)
         # The triangle is off centre, so the two halves differ and the comparison
         # has something to catch.

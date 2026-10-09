@@ -34,9 +34,11 @@ rg_vertex(verts) = (position = verts[Int(M.vertex_index())], tint = (0f0, 1f0, 0
 rg_fragment(inputs) = inputs.tint
 
 const RG_DEV = M.Device(TESTBACKEND)
+# No depth target behind it, so no depth test: a pipeline's default is DepthLess,
+# which every backend refuses against a target without depth.
 const RG_PIPE = M.GraphicsPipeline(; vertex = M.VertexShader(rg_vertex; outputs = (tint = NTuple{4,Float32},)),
                                      fragment = M.FragmentShader(rg_fragment),
-                                     cull = M.NoCull())
+                                     cull = M.NoCull(), depth = M.DepthOff())
 const RG_TRI = M.Buffer(RG_DEV, NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0f0,    0.9f0, 0f0, 1f0)])
@@ -75,7 +77,7 @@ mrt_fragment(inputs) = (inputs.albedo,
 
 const RG_MRT = M.GraphicsPipeline(; vertex = M.VertexShader(mrt_vertex; outputs = (albedo = Vec4f, normal = Vec3f)),
                                     fragment = M.FragmentShader(mrt_fragment),
-                                    cull = M.NoCull())
+                                    cull = M.NoCull(), depth = M.DepthOff())
 
 rg_depth_only(verts) = (position = verts[Int(M.vertex_index())],)
 rg_no_colour(inputs) = nothing

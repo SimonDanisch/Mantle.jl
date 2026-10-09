@@ -453,7 +453,7 @@ end
         fb = Mantle.Framebuffer(TESTBACKEND, 64, 64; depth = false, color_format = BGRA{N0f8})
         pipe = GraphicsPipeline(; vertex = VertexShader(posbuf_vertex; outputs = (tint = NTuple{4,Float32},)),
                                   fragment = FragmentShader(posbuf_fragment),
-                                  cull = NoCull())
+                                  cull = NoCull(), depth = DepthOff())
         verts = NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0), (0.9f0, -0.9f0, 0f0, 1f0),
                                   (0f0, 0.9f0, 0f0, 1f0)]
         vbuf = Mantle.Buffer(dev, verts)

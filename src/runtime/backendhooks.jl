@@ -68,6 +68,27 @@ backend that stands for one.
 videodecodes(dev) = false
 
 """
+    decode_h264_gpu(annexb::AbstractVector{UInt8}; maxframes) -> (width, height, frames)
+
+Hardware-decode an H.264 Annex-B elementary stream, keeping every decoded luma (Y)
+plane on the device: each frame is a device array of `UInt8`, cropped to the display
+size. Only on a device that [`videodecodes`](@ref); everywhere else this refuses.
+"""
+decode_h264_gpu(annexb::AbstractVector{UInt8}; kw...) = throw(ArgumentError(
+    "decode_h264_gpu: this device has no hardware video decode; ask `videodecodes(device)` first"))
+
+"""
+    decode_h264_luma(annexb; maxframes) -> (width, height, Vector{Matrix{UInt8}})
+
+[`decode_h264_gpu`](@ref), with every decoded luma plane downloaded to the host. Used
+to check the decoder against a reference such as ffmpeg.
+"""
+function decode_h264_luma(annexb::AbstractVector{UInt8}; kw...)
+    w, h, frames = decode_h264_gpu(annexb; kw...)
+    return (w, h, Matrix{UInt8}[Array(f) for f in frames])
+end
+
+"""
     supports_float64(dev) -> Bool
 
 Whether kernels and arrays on `dev` can hold `Float64` (and `ComplexF64`).

@@ -26,9 +26,11 @@ rg_vertex(verts) = (position = verts[Int(vertex_index())], tint = (0f0, 1f0, 0f0
 rg_fragment(inputs) = inputs.tint
 
 const RG_DEV = M.Device(M.MetalAPI())
+# No depth target behind it, so no depth test: a pipeline's default is DepthLess,
+# which every backend refuses against a target without depth.
 const RG_PIPE = M.GraphicsPipeline(; vertex = M.VertexShader(rg_vertex; outputs = (tint = NTuple{4,Float32},)),
                                      fragment = M.FragmentShader(rg_fragment),
-                                     cull = M.NoCull())
+                                     cull = M.NoCull(), depth = M.DepthOff())
 const RG_TRI = M.Buffer(RG_DEV, NTuple{4,Float32}[(-0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0.9f0, -0.9f0, 0f0, 1f0),
                                                   ( 0f0,    0.9f0, 0f0, 1f0)])
@@ -111,7 +113,7 @@ tinted_fragment(inputs) = inputs.tint
     # CHANNELS rather than eyeballing.
     pipe = M.GraphicsPipeline(; vertex = M.VertexShader(tinted_vertex; outputs = (tint = Vec4f,)),
                                 fragment = M.FragmentShader(tinted_fragment),
-                                cull = M.NoCull())
+                                cull = M.NoCull(), depth = M.DepthOff())
 
     function draw_into(target_of)
         g = M.Graph(RG_DEV)

@@ -476,8 +476,10 @@ end
         endswith(f, ".jl") && !(f in BACKEND_NAMED_ALLOWED) || continue
         code = codeonly(read(joinpath(dir, f), String))
         # A name with its bang: `\b` after `!` fails before `(`, and the match then
-        # backed off to `oneshot` for `oneshot!(` — a different function.
-        named = Set(Symbol(m.match) for m in eachmatch(r"(?<![A-Za-z0-9_!])[A-Za-z_][A-Za-z0-9_]*!?", code))
+        # backed off to `oneshot` for `oneshot!(` — a different function. And not a
+        # quoted symbol: `(:maybe_collect, :Metal)` is a list of names, not a use of
+        # one. A `::` is a type annotation and still counts.
+        named = Set(Symbol(m.match) for m in eachmatch(r"(?<![A-Za-z0-9_!])(?<![^:]:)[A-Za-z_][A-Za-z0-9_]*!?", code))
         bad = sort(collect(filter(backendonly, named)); by = string)
         isempty(bad) || push!(hits, (f, bad))
     end

@@ -32,17 +32,7 @@ function decode_h264_nv12(annexb::Vector{UInt8}; ctx::VkContext = vk_context(), 
     return (w, h, ys, uvs)
 end
 
-"""
-    decode_h264_luma(annexb::Vector{UInt8}; maxframes) -> (width, height, Vector{Matrix{UInt8}})
-
-Like [`decode_h264_gpu`] but downloads each decoded luma plane to a host
-`Matrix{UInt8}` (grayscale = the NV12 Y plane). Used to validate the GPU decoder
-against a reference (e.g. ffmpeg).
-"""
-function decode_h264_luma(annexb::Vector{UInt8}; kw...)
-    w, h, frames = decode_h264_gpu(annexb; kw...)
-    return (w, h, Matrix{UInt8}[Array(f) for f in frames])
-end
+# `decode_h264_luma` is core's: it is this decode plus a download, and names no driver.
 
 # ---- Profiling (kernel SPIR-V stats + per-dispatch GPU timing) ----
 
