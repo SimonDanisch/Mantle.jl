@@ -295,19 +295,12 @@ Base.collect(a::LavaArray) = Array(a)
 
 # ── Aliasing ──
 #
-# `dest .= src` where both sides are views asks Base whether the two might
-# overlap, and Base answers by comparing the parents: for `DenseArray` parents
-# that means `pointer(A) == pointer(B)` (multidimensional.jl `_parentsmatch`).
-# `LavaArray <: AbstractGPUArray <: DenseArray` but has no host pointer, so the
-# check threw `conversion to pointer not defined` — any `view(a) .= view(b)`
-# between device arrays was unreachable, whatever the shapes.
-#
-# Identity for a LavaArray is its backing buffer plus the byte offset into it,
-# which is exactly what a pointer would encode. Answering it directly keeps the
-# rest of Base's machinery — once the parents match it compares the actual index
-# ranges, so an overlapping copy still gets its temporary and a disjoint one
-# still does not.
-Base._parentsmatch(A::LavaArray, B::LavaArray) = A.buf === B.buf && A.offset == B.offset
+# `GPUArrays.memory_location` above is the whole of it: GPUArrays answers
+# `mightalias`, `dataids` and Base's `_parentsmatch` (whether two views' parents are
+# the same memory, so their index ranges are compared) from it. A method of our own
+# here compared the `DataRef`s by identity, and every view `derive` builds has a
+# fresh one, so two strided views of the same bytes through different parents were
+# taken to overlap.
 
 # ── Device-side array ──
 #

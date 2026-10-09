@@ -130,14 +130,8 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
     # it from `depth isa DepthOff` instead got both mismatches wrong — a DepthOff
     # draw into a framebuffer that has depth, and a DepthLess draw into a window
     # that has none — because neither combination is about the test being on.
-    has_depth = depth_format != VK.FORMAT_UNDEFINED
+    checkdepthtarget(depth, depth_format != VK.FORMAT_UNDEFINED)
     depth_enable, depth_compare = vk_depth(depth)
-    if depth_enable && !has_depth
-        throw(ArgumentError(
-            "$(typeof(depth)) needs a depth attachment, and this render target has none. " *
-            "Pass `depth_format` for the target's depth view, or build the pipeline with " *
-            "`depth = DepthOff()`."))
-    end
     depth_stencil = VK.PipelineDepthStencilStateCreateInfo(
         depth_enable, depth_enable && vk_depth_write(depth),
         depth_compare,

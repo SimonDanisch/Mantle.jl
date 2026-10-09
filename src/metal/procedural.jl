@@ -310,9 +310,17 @@ function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
     return (table, pipe)
 end
 
+"""The start of every procedural candidate's function name; the rest names its types."""
+const PROCEDURAL_CANDIDATE_PREFIX = "__metal_linked_procedural_candidate_"
+
 """Compile `ProceduralVisible{P,B}` and keep its library alive with the function."""
 function compile_procedural_candidate(d::MetalDevice, ::Type{P}, ::Type{B}) where {P,B}
-    name = "__metal_linked_procedural_candidate"
+    # A name per payload type. Every pipeline links each registered table function
+    # once, by NAME, so one name for all of them kept whichever payload registered
+    # first: a second payload type's traces called the first one's candidate, and
+    # a sphere solve answered a box query with t = 1700. Which one won depended on
+    # which test or scene ran first.
+    name = string(PROCEDURAL_CANDIDATE_PREFIX, string(hash((P, B)); base = 16))
     # Inlined whole for the reason `compile_stage_function` gives.
     cfg = Metal.compiler_config(d.dev; stage = :candidate, name, always_inline = true)
     job = Metal.GPUCompiler.CompilerJob(

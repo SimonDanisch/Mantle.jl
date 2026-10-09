@@ -321,7 +321,12 @@ end
     # sub-range and the geometry-stage lowering; and Metal.jl's `claim!`, its
     # buffer-ownership step, against the lifetime claim in `graph/lifetime.jl`.
     # `src/metal/` takes ownership through `Metal.take_ownership!`, qualified.
-    known = [(:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
+    #
+    # `stage_output_type` against Metal, reviewed 2026-10-09, the first time this
+    # ran on a Mac: Mantle's (`src/metal/graphics.jl`) asks a PIPELINE what a stage
+    # returns, Metal.jl's (`src/compiler/graphics.jl`) asks a compiler JOB. Neither
+    # is exported, neither calls the other, and `src/metal/` names only its own.
+    known = [(:stage_output_type, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Launch, :KernelAbstractions), (:Loop, :LLVM), (:_lower, :AcceleratedKernels),
              (:access, :LLVM), (:claim!, :Metal), (:disjoint, :LLVM),
              (:invalidate!, :LLVM), (:slice, :AcceleratedKernels),

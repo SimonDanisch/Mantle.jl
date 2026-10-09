@@ -41,7 +41,7 @@ end
 
 # `sums`, and not the obvious `acc`: guard 0.7b asks whether a shared test names
 # a binding only one backend defines, by token, and `acc` is one of them
-# (`src/vulkan/lowering.jl` has `acc(x) = VK.AccessFlag2(x)`). Over-approximate
+# (`src/vulkan/lowering.jl` has `accessflags(x) = VK.AccessFlag2(x)`). Over-approximate
 # on purpose, and cheaper to rename than to weaken.
 @kernel function ord_accumulate!(sums, @Const(src))
     i = @index(Global)

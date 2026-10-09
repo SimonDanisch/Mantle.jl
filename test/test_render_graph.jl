@@ -455,8 +455,10 @@ M.target_extent(s::ResizableSource) = s.extent
             @test !isnan(t.gpu_ms)
         else
             @test isnan(t.gpu_ms)
-            @test t.samples == 0
         end
+        # What recording the pass cost, on every device: that is the host half
+        # `timings` documents, and it was sampled once, at `record!`.
+        @test t.host_ms > 0
         M.free!(plan)
         M.free!(x)
     end

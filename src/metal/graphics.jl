@@ -723,6 +723,7 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
         apply_blend!(att, Mantle.attachmentblend(p.blend, i,
                      fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
     end
+    Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
     depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
     state = MTLm.MTLRenderPipelineState(dev, desc)
 

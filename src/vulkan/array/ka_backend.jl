@@ -580,7 +580,7 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
 end
 
 """
-    compiled(kernel, ndrange; workgroupsize = nothing) -> LavaKernel
+    lavakernel(kernel, ndrange; workgroupsize = nothing) -> LavaKernel
 
 A kernel with its iteration plan already resolved and **concretely typed**, so a
 launch is a static call with no cache lookup and no boxing.
@@ -617,7 +617,7 @@ struct LavaKernel{K,P,Q}
     bq::Q
 end
 
-function compiled(obj::KA.Kernel{LavaBackend}, ndrange; workgroupsize = nothing)
+function lavakernel(obj::KA.Kernel{LavaBackend}, ndrange; workgroupsize = nothing)
     bq = obj.backend.dispatch_bq
     plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, ctxof(bq))
     # `P` and `Q` come from the runtime types here, once, off the hot path.

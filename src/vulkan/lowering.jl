@@ -21,7 +21,7 @@ using ColorTypes.FixedPointNumbers: N0f8
 # every constant is normalised once here rather than at each use. Lava hit the
 # same thing for stages (command.jl:114) but not for access.
 stage(x) = VK.PipelineStageFlag2(x)
-acc(x) = VK.AccessFlag2(x)
+accessflags(x) = VK.AccessFlag2(x)
 
 const NO_STAGE = stage(0)
 """Where a shader-addressable resource is touched from. Every usage that means "a
@@ -29,7 +29,7 @@ shader reads or writes this" lowers to these three and nothing wider."""
 const SHADER_STAGES = VK.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                       VK.PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
                       VK.PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
-const NO_ACCESS = acc(0)
+const NO_ACCESS = accessflags(0)
 
 # ── stages ────────────────────────────────────────────────────────────────────
 # Pulled, not bound. This backend's pipelines declare an empty
@@ -102,24 +102,24 @@ stages(::VulkanAPI, ::Type{<:Depth}, ::Dst) =
 # is only legal alongside a vertex-input stage, so leaving it here while the stage
 # became VERTEX_SHADER is VUID-VkMemoryBarrier2-srcAccessMask-03902. It is also
 # what the read actually is — a storage load through a buffer device address.
-access(::VulkanAPI, ::Type{Vertices}, _) = acc(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
-access(::VulkanAPI, ::Type{Indices}, _) = acc(VK.ACCESS_2_INDEX_READ_BIT)
-access(::VulkanAPI, ::Type{Indirect}, _) = acc(VK.ACCESS_2_INDIRECT_COMMAND_READ_BIT)
+access(::VulkanAPI, ::Type{Vertices}, _) = accessflags(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
+access(::VulkanAPI, ::Type{Indices}, _) = accessflags(VK.ACCESS_2_INDEX_READ_BIT)
+access(::VulkanAPI, ::Type{Indirect}, _) = accessflags(VK.ACCESS_2_INDIRECT_COMMAND_READ_BIT)
 access(::VulkanAPI, ::Type{Predicated}, _) =
-    acc(VK.ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT) | acc(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
-access(::VulkanAPI, ::Type{Uniform}, _) = acc(VK.ACCESS_2_UNIFORM_READ_BIT)
-access(::VulkanAPI, ::Type{Sampled}, _) = acc(VK.ACCESS_2_SHADER_SAMPLED_READ_BIT)
-access(::VulkanAPI, ::Type{CopySrc}, _) = acc(VK.ACCESS_2_TRANSFER_READ_BIT)
-access(::VulkanAPI, ::Type{CopyDst}, _) = acc(VK.ACCESS_2_TRANSFER_WRITE_BIT)
-access(::VulkanAPI, ::Type{TraceRead}, _) = acc(VK.ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR)
-access(::VulkanAPI, ::Type{TraceBuild}, _) = acc(VK.ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
+    accessflags(VK.ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT) | accessflags(VK.ACCESS_2_SHADER_STORAGE_READ_BIT)
+access(::VulkanAPI, ::Type{Uniform}, _) = accessflags(VK.ACCESS_2_UNIFORM_READ_BIT)
+access(::VulkanAPI, ::Type{Sampled}, _) = accessflags(VK.ACCESS_2_SHADER_SAMPLED_READ_BIT)
+access(::VulkanAPI, ::Type{CopySrc}, _) = accessflags(VK.ACCESS_2_TRANSFER_READ_BIT)
+access(::VulkanAPI, ::Type{CopyDst}, _) = accessflags(VK.ACCESS_2_TRANSFER_WRITE_BIT)
+access(::VulkanAPI, ::Type{TraceRead}, _) = accessflags(VK.ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR)
+access(::VulkanAPI, ::Type{TraceBuild}, _) = accessflags(VK.ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)
 access(::VulkanAPI, ::Type{Present}, _) = NO_ACCESS
 access(::VulkanAPI, ::Type{Undefined}, _) = NO_ACCESS
 
 function access(::VulkanAPI, ::Type{Storage{K,A}}, _) where {K,A}
     a = NO_ACCESS
-    reads(A) && (a |= acc(VK.ACCESS_2_SHADER_STORAGE_READ_BIT))
-    writes(A) && (a |= acc(VK.ACCESS_2_SHADER_STORAGE_WRITE_BIT))
+    reads(A) && (a |= accessflags(VK.ACCESS_2_SHADER_STORAGE_READ_BIT))
+    writes(A) && (a |= accessflags(VK.ACCESS_2_SHADER_STORAGE_WRITE_BIT))
     a
 end
 
@@ -152,15 +152,15 @@ layout(be::VulkanAPI, ::Type{Traced{U}}, d) where {U} = layout(be, U, d)
 # our design instead scanned recorded draws for blending, which is later and more
 # fragile.
 access(::VulkanAPI, ::Type{ColorAttachment{Discard}}, _) where {Discard} =
-    Discard ? acc(VK.ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) :
-              acc(VK.ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) | acc(VK.ACCESS_2_COLOR_ATTACHMENT_READ_BIT)
+    Discard ? accessflags(VK.ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) :
+              accessflags(VK.ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) | accessflags(VK.ACCESS_2_COLOR_ATTACHMENT_READ_BIT)
 
 function access(::VulkanAPI, ::Type{Depth{DA,SA,D}}, _) where {DA,SA,D}
     a = NO_ACCESS
     # `D` is the discarding load op, and it drops the read bit for the same reason
     # it does on a colour attachment: nothing before the pass is read back.
-    !D && (reads(DA) || reads(SA)) && (a |= acc(VK.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT))
-    (writes(DA) || writes(SA)) && (a |= acc(VK.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
+    !D && (reads(DA) || reads(SA)) && (a |= accessflags(VK.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT))
+    (writes(DA) || writes(SA)) && (a |= accessflags(VK.ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
     a
 end
 

@@ -284,6 +284,24 @@ binds a texture to an argument slot and ignores this.
 function compile_draw end
 
 """
+    checkdepthtarget(depth, hasdepth::Bool)
+
+Refuse a depth test against a render target that has no depth attachment.
+
+Whether a pipeline declares a depth attachment is a property of the TARGET, not of
+the depth mode, and a test with nothing to test against is not a draw with the test
+off: refused by name rather than drawn untested. Every backend's `compile_draw` asks
+this before it builds a pipeline, so the refusal is the same on all of them; Metal
+skipped the depth state instead and drew.
+"""
+function checkdepthtarget(depth, hasdepth::Bool)
+    depth isa DepthOff || hasdepth || throw(ArgumentError(
+        "$(typeof(depth)) needs a depth attachment, and this render target has none. " *
+        "Give the target a depth view, or build the pipeline with `depth = DepthOff()`."))
+    return nothing
+end
+
+"""
     begin_render_pass!(device, targets, loads, depth, depth_load) -> handle
 
 Open a render pass over the given attachments and hand back whatever the backend

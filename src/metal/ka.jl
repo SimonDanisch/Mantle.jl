@@ -79,7 +79,7 @@ function intrinsic_usage(::MetalAPI, name::Symbol)
     s == "__metal_linked_closest_proc" && return READ
     s == "__metal_linked_any_proc" && return READ
     # The candidate itself, when a kernel happens to name it.
-    s == "__metal_linked_procedural_candidate" && return READ
+    startswith(s, PROCEDURAL_CANDIDATE_PREFIX) && return READ
     # A mesh stage's outputs (`Metal/src/compiler/mesh.jl`). All five write
     # through the mesh object, the stage's own output in address space 7, and
     # read nothing. The object is the stage's lead argument, so its entry is

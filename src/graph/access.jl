@@ -831,6 +831,11 @@ function stmttaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
             if usage !== nothing
                 for a in stmt.args
                     record!(touches, am, operandtaint(ir, st, a), usage)
+                    # What an atomic hands back is a slot no other invocation
+                    # gets, as for an `llvmcall` atomic below: Metal's atomics
+                    # arrive here, and without the claim a store at that slot
+                    # read as an ordered write.
+                    usage === ATOMIC && union!(st.claims[i], operandtaint(ir, st, a))
                 end
                 return Taint()
             end

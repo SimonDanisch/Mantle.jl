@@ -575,9 +575,11 @@ applying all pending updates.
 function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
                                     transforms::LavaArray{Mat3x4f, 1})
     batch = batchof(hwtlas.instances, handle)
-    batch === nothing && error("Invalid handle")
-    length(transforms) == batch.n || error(
-        "Transform count $(length(transforms)) != batch.n $(batch.n)")
+    # `ArgumentError`, as Metal throws: a caller's wrong handle or count is an
+    # argument error on every backend.
+    batch === nothing && throw(ArgumentError("update_transforms!: unknown handle $handle"))
+    length(transforms) == batch.n || throw(ArgumentError(
+        "update_transforms!: $(length(transforms)) transforms for a batch of $(batch.n) instances"))
     hwtlas.pending_updates[handle] = transforms
     hwtlas.transforms_dirty = true
     return nothing
