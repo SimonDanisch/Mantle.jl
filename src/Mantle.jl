@@ -197,6 +197,7 @@ include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases
 include("array/launch.jl")   # what a library routine IS, before it is submitted
 include("array/indexing.jl") # portable index decomposition and launch geometry
 include("array/gemv.jl")
+include("array/gemm.jl")
 include("array/fft.jl")
 
 # ── Geometry: shapes, transforms and the collision pipeline ───────────────────

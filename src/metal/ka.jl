@@ -141,6 +141,14 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
 
+# An `MtlArray` is dense, a derived one included (it is an offset into its
+# buffer), so core's GEMM reads it in place; see `gemmstrides` in
+# `src/array/gemm.jl`. `mul!` on Metal is MPS's and does not come here.
+Mantle.gemmstrides(A::Metal.MtlArray{T,2}) where {T} = (A, 1, 1, size(A, 1))
+Mantle.gemmstrides(A::Metal.MtlArray{T,1}) where {T} = (A, 1, 1, length(A))
+Mantle.gemmstrides(A::Base.ReshapedArray{T,2,<:Metal.MtlArray}) where {T} =
+    (parent(A), 1, 1, size(A, 1))
+
 # The address of the first element, which a wide load is aligned against: the
 # buffer's own GPU address plus the array's byte offset into it. Without this a
 # Metal array fell to the `1` of "nothing known", and every kernel that reads
