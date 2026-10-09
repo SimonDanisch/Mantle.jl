@@ -473,14 +473,25 @@ a block and never a deadlock.
 """
 function waitfor(q::LegacyQueue, f)
     passed(q, f) && return true
-    # Drain everything: `Metal.synchronize()` waits on this task's queue, which
-    # is the one Metal.jl dispatches kernels on. There is no finer-grained wait
-    # available to this generation, and a coarse-but-correct one is the point —
-    # the alternative was handing back live memory.
+    waitidle(q)
+    return true
+end
+
+"""
+Wait for everything submitted, and record it: every fence handed out before the wait
+has passed.
+
+Drain everything: `Metal.synchronize()` waits on this task's queue, which is the one
+Metal.jl dispatches kernels on. There is no finer-grained wait available to this
+generation, and a coarse-but-correct one is the point — the alternative was handing
+back live memory. It commits the open batch first, so a region retired before this
+call is reached by nothing still to run.
+"""
+function waitidle(q::LegacyQueue)
     issued = q.next
     Metal.synchronize()
     q.completed = max(q.completed, issued)
-    return true
+    return nothing
 end
 
 # ── Submission ────────────────────────────────────────────────────────────────
@@ -1193,7 +1204,12 @@ device handle, because a `MTLDevice` does not own the submission order; its
 queues do.
 """
 waitidle(::Metal.MetalBackend) = Metal.synchronize()
-waitidle(d::MetalDevice) = (Metal.synchronize(); nothing)
+waitidle(d::MetalDevice) = waitidle(d.queue)
+
+# Recorded on the timeline, so the pool can reuse what was retired before the wait:
+# a drain the queue did not hear about left those regions waiting for another one.
+# An MTL4 device has two queues and waits for both.
+waitidle(q::MTL4Queue) = (waitfor(q, q.next); Metal.synchronize(); nothing)
 
 # `supports_graphics` is answered in `graphics.jl`, where the rasterisation half
 # lives. Metal.jl compiles vertex and fragment stages as well as compute.

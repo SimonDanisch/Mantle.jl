@@ -95,13 +95,15 @@ end
     sp = M.pool(dev)
     # Live bytes over every block the pool holds, of every kind.
     live() = sum(b -> sum(values(b.live); init = 0), Iterators.flatten(values(sp.blocks)); init = 0)
-    # `free!` retires rather than releases, which is why `reclaim!` is part of the
-    # cycle rather than an aside.
+    # `free!` retires rather than releases: a region comes back once the device is
+    # past it, which is why the wait and `reclaim!` are part of the cycle rather
+    # than an aside.
     function cycle!()
         p = markplan(dev, 1024, 500, 2)
         M.run!(p.plan); M.waitidle(dev)
         M.free!(p.plan)
         foreach(M.free!, (p.src, p.count, p.outs...))
+        M.waitidle(dev)
         M.reclaim!(sp, dev)
         return nothing
     end
