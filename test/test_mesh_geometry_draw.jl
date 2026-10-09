@@ -120,7 +120,9 @@ mp_pipeline(f; threads = 1) = Mantle.MeshPipeline(;
     mesh = Mantle.MeshShader(f;
         outputs = (uv = NTuple{2,Float32}, colour = Mantle.Flat{NTuple{4,Float32}}),
         max_vertices = 4, max_primitives = 2,
-        topology = Mantle.TriangleStrip(), threads),
+        # A list: the bodies name each triangle with `set_mesh_triangle!`, and a mesh
+        # stage outputs points, lines or triangles on every API — no strips.
+        topology = Mantle.TriangleList(), threads),
     fragment = Mantle.FragmentShader(mp_frag),
     cull = Mantle.NoCull(), depth = Mantle.DepthOff())
 
