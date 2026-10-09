@@ -125,12 +125,16 @@ end
     end
 
     @testset "a submission after the free does not stand for launches before it" begin
-        # The slow launch is followed by `k` small ones, the free, and a recorded
-        # plan's submission. A backend that batches launches commits the slow one
-        # on its own at some `k` — Metal.jl does at 32 operations — and then has no
-        # open batch left to put a signal behind it: the plan's submission was
-        # signalled past the still-running launch on Metal 4, and the region came
-        # back at once. Every `k` up to 40, so no backend's threshold is named.
+        # `k` small launches, then the slow one, the free, and a recorded plan's
+        # submission. On a backend that batches launches the slow one lands at
+        # every position of its batch, the last included — Metal.jl commits at 32
+        # operations — and a batch committed with it leaves nothing open to put a
+        # signal behind it: the plan's submission was signalled past the
+        # still-running launch on Metal 4, and the region came back at once. Every
+        # `k` up to 40, so no backend's threshold is named. The small launches go
+        # FIRST because they finish at once: behind the slow one they pile up, and
+        # on RADV the 33rd unfinished submission blocked in `vkQueueSubmit2` until
+        # the slow one was done — after which handing the region back is right.
         g = Mantle.Graph(dev)
         tmp = Mantle.Buffer(dev, zeros(Float32, n))
         Mantle.dispatch!(g, bump!, (tmp,), n; name = "bump")
@@ -144,10 +148,10 @@ end
             a = Mantle.Buffer(dev, fill(5f0, n))
             out = Mantle.Buffer(dev, zeros(Float32, n))
             r = Mantle.region(a.store)
-            spinread!(TESTBACKEND, 64)(Mantle.storage(out), Mantle.storage(a), short; ndrange = n)
             for _ in 1:k
                 bump!(TESTBACKEND, 64)(small; ndrange = n)
             end
+            spinread!(TESTBACKEND, 64)(Mantle.storage(out), Mantle.storage(a), short; ndrange = n)
             Mantle.free!(a)
             Mantle.run!(plan)
             Mantle.reclaim!(sp, dev)
