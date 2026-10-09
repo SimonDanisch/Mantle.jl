@@ -714,7 +714,7 @@ Never records. A recordable plan on a recording backend that was not
 function execute!(dev, pl::Plan)
     rec = pl.recording
     tok = if rec === nothing
-        recordable(pl) && recordsplans(dev) && throw(ArgumentError(
+        recordsplans(dev) && recordable(dev, pl) && throw(ArgumentError(
             "run!: this plan has not been recorded. Call `record!(plan)` once after " *
             "building it; `run!` submits that recording and never records."))
         e = openrun(dev, pl)
@@ -1358,6 +1358,15 @@ the packer re-reads every cell on the way. A Makie frame, whose every draw is a
 cell, depends on that.
 """
 recordable(pl::Plan) = isempty(pl.graph.surfaces) && !hasrebindable(pl)
+
+"""
+    recordable(device, plan) -> Bool
+
+Whether `device` records this plan at `record!`: core's reasons above, and the
+backend's own. A backend whose recording cannot hold some kind of pass declines a
+plan that has one, and `run!` walks that plan instead of refusing it unrecorded.
+"""
+recordable(::Device, pl::Plan) = recordable(pl)
 
 """Does any draw in this plan take its arguments from a cell the host rewrites?"""
 function hasrebindable(pl::Plan)

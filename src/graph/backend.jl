@@ -240,8 +240,9 @@ passbarriers(::Compile, ::Pass) = (Nothing[], Transition[], nothing)
     recordsplans(device) -> Bool
 
 Whether this backend records plans at all. `false` by default — an
-interpreted backend walks every run — and it decides only whether `run!`
-refuses a recordable plan that was never `record!`ed.
+interpreted backend walks every run. With [`recordable`](@ref)`(device, plan)` it
+decides whether `run!` refuses a plan that was never `record!`ed: a backend that
+records refuses every plan it would have recorded, and walks the rest.
 """
 recordsplans(::Device) = false
 
@@ -889,7 +890,7 @@ const BACKEND_VOCABULARY = (
     :profiled!, :collect!,
     :emitkernel!, :emitpreparebarrier!, :workgroupsize,
     :storebytes!,
-    :recordsplans, :runscalls, :librarygemm, :native_gemm_available,
+    :recordsplans, :recordable, :runscalls, :librarygemm, :native_gemm_available,
     :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :native_attention_dispatch!,

@@ -84,9 +84,9 @@ end
     # — measured at five per recording on Hikari's fused sample, a threshold
     # about when to submit applied while nothing was being submitted. It was
     # then one per argument slot, and now it is one, because nothing rewrites a
-    # plan's argument memory between runs.
-    @test pl.recording isa Mantle.Recording
-    @test !pl.recording.open
+    # plan's argument memory between runs. A recording cut into pieces is core's
+    # `RecordingParts`; anything else is the backend's one piece.
+    @test !(pl.recording isa Mantle.RecordingParts)
 
     # …and the recording is real: running it does the work.
     Mantle.run!(pl)

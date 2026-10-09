@@ -147,28 +147,32 @@ end
         M.draw!(p, _MOVEPATCH_TRI, (), 3)
     end
     M.copy!(g, "read", out, img)
-    pl = M.record!(M.Plan(g; budget = Inf))
-    M.run!(pl)
-    KA.synchronize(be)
-    @test pl.recording !== nothing
-    px = Array(M.storage(out))
-    @test all(p -> Float32(p.r) ≈ 0.25f0 && Float32(p.g) ≈ 0.5f0, px)
+    pl = M.Plan(g; budget = Inf)
+    # A recording to drop exists only where this device records a render pass.
+    if M.recordable(dev, pl)
+        M.record!(pl)
+        M.run!(pl)
+        KA.synchronize(be)
+        @test pl.recording !== nothing
+        px = Array(M.storage(out))
+        @test all(p -> Float32(p.r) ≈ 0.25f0 && Float32(p.g) ≈ 0.5f0, px)
 
-    # Grow the images arena out from under the recording. The commands name the
-    # old VkImage and view — nothing to patch — so the recording is DROPPED…
-    g2 = M.Graph(dev)
-    big_img = M.Transient.Image(g2, RGBA{Float16}, (4096, 4096))
-    M.render!(g2, "big", big_img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
-        M.draw!(p, _MOVEPATCH_TRI, (), 3)
+        # Grow the images arena out from under the recording. The commands name the
+        # old VkImage and view — nothing to patch — so the recording is DROPPED…
+        g2 = M.Graph(dev)
+        big_img = M.Transient.Image(g2, RGBA{Float16}, (4096, 4096))
+        M.render!(g2, "big", big_img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, _MOVEPATCH_TRI, (), 3)
+        end
+        pl2 = M.record!(M.Plan(g2; budget = Inf))
+        @test pl.recording === nothing
+
+        # …and the next run writes it again, against the new placement.
+        M.run!(pl)
+        KA.synchronize(be)
+        @test pl.recording !== nothing
+        @test Array(M.storage(out)) == px
+        M.free!(pl2)
     end
-    pl2 = M.record!(M.Plan(g2; budget = Inf))
-    @test pl.recording === nothing
-
-    # …and the next run writes it again, against the new placement.
-    M.run!(pl)
-    KA.synchronize(be)
-    @test pl.recording !== nothing
-    @test Array(M.storage(out)) == px
     M.free!(pl)
-    M.free!(pl2)
 end

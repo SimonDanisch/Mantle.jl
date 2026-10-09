@@ -63,7 +63,9 @@ end
         # …and the run still ran: 300 cycles of +1 from 0.
         @test all(==(300f0), Array(Mantle.storage(a)))
         @test per_run == 0
-        isfinite(budget) && @test !any(isnan, pl.passcost)
+        # A device that times its passes measured every one of them; one without
+        # timestamps keeps a single submission and has nothing to measure.
+        isfinite(budget) && Mantle.timestamps(dev) && @test !any(isnan, pl.passcost)
         Mantle.free!(pl)
     end
 end

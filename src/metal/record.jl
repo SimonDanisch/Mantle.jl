@@ -1198,10 +1198,12 @@ Mantle.beginrender!(::MetalRecorder, ::Mantle.Plan, pp::Mantle.PassPlan) =
 
 # ── Running a recorded plan ──────────────────────────────────────────────────
 
-# `false`, and deliberately: a plan this backend cannot record — one that draws — is
-# given back unrecorded by `openrecording`, and `run!` walks it as it always did.
-# Answering `true` would make `run!` refuse those instead.
-Mantle.recordsplans(::MetalDevice) = false
+# This backend records, so `run!` refuses a plan it would have recorded and that
+# was never `record!`ed, as every recording backend does. A plan it cannot record,
+# one with a render or a copy pass, is given back unrecorded by `openrecording`
+# and `run!` walks it: `recordable` says which is which.
+Mantle.recordsplans(::MetalDevice) = true
+Mantle.recordable(::MetalDevice, pl::Mantle.Plan) = Mantle.recordable(pl) && !walkedplan(pl)
 
 """
     Mantle.openrun(dev, plan) -> Immediate

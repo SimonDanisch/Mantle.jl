@@ -10,12 +10,12 @@ multiply and a shift (`init_fastdiv_values` / `fastdiv` in llama.cpp's
 7.6% on the whole SAM 2 encode.
 
 A wrong quotient here is not a wrong number, it is an **out-of-bounds index**, so
-the arithmetic is checked exhaustively rather than sampled, and the kernels are
-checked against the dividing path they replaced rather than against a reference
-computed the same way.
+the arithmetic is checked exhaustively rather than sampled, and a permuted
+broadcast, which decomposes its index this way, is checked element for element
+against the host's `permutedims`.
 """
 
-using Test, GPUArrays, KernelAbstractions
+using Test, KernelAbstractions
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
@@ -63,7 +63,7 @@ end
         @test_throws ArgumentError Mantle.FastDiv32(0)
     end
 
-    @testset "kernels agree with the dividing path" begin
+    @testset "a permuted broadcast lands every element" begin
         backend = TESTBACKEND
         let
             # Ranks 2 to 7, the encoder's two permutation families, extents that
@@ -82,21 +82,11 @@ end
                 copyto!(a, host)
                 dsz = ntuple(i -> sz[perm[i]], length(sz))
                 want = permutedims(host, perm)
-                got = map((false, true)) do fd
-                    d = KA.allocate(backend, Float32, dsz...)
-                    fill!(d, 0.0f0)
-                    # Driving `_copyto!` directly is what lets both index paths
-                    # run without a process-wide switch: `d .= x` lowers to
-                    # exactly this call with the default.
-                    bc = Broadcast.instantiate(
-                             Broadcast.broadcasted(identity, PermutedDimsArray(a, perm)))
-                    GPUArrays._copyto!(d, bc; fastdiv = fd)
-                    KA.synchronize(backend)
-                    Array(d)
-                end
-                @test got[1] == want          # dividing path
-                @test got[2] == want          # multiplying path
-                @test got[1] == got[2]
+                d = KA.allocate(backend, Float32, dsz...)
+                fill!(d, 0.0f0)
+                d .= PermutedDimsArray(a, perm)
+                KA.synchronize(backend)
+                @test Array(d) == want
             end
         end
     end

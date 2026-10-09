@@ -61,7 +61,9 @@ end
     M.copy!(g, "read", out, img)
     pl = M.Plan(g)
     M.record!(pl)
-    @test M.recorded(pl)
+    # Recorded wherever this device records a render pass; walked per run where it
+    # does not, and the same pixels either way.
+    @test M.recorded(pl) == M.recordable(dev, pl)
     M.run!(pl)
     KA.synchronize(M.backend(dev))
     px = Array(M.storage(out))

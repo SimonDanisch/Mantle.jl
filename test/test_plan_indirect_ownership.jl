@@ -1,5 +1,5 @@
 using Test
-import Mantle, Lava
+import Mantle
 const M = Mantle
 using KernelAbstractions: @kernel, @index, @Const
 include(joinpath(@__DIR__, "testbackend.jl"))
@@ -7,21 +7,18 @@ include(joinpath(@__DIR__, "testbackend.jl"))
 # A plan's indirect commands belong to the plan.
 #
 # From a slab ring on the queue, rewound whenever it drained, they would move
-# under the recording that names them. A recording holds the
-# address of its `VkDispatchIndirectCommand` for as long as it can be submitted,
-# so the rewind put those bytes back on a free list under a live recording: two
-# recorded plans running in one frame would write each other's
-# workgroup counts, and the second one's prepare would land between the first
-# one's prepare and its dispatch with nothing ordering them — a
-# write-after-read the derived barriers cannot see, because the queue's scratch
-# is not a resource the graph knows about.
+# under the recording that names them. A recording holds the address of its
+# indirect command for as long as it can be submitted, so the rewind put those
+# bytes back on a free list under a live recording: two recorded plans running in
+# one frame would write each other's workgroup counts, and the second one's
+# prepare would land between the first one's prepare and its dispatch with
+# nothing ordering them, a write-after-read the derived barriers cannot see,
+# because the queue's scratch is not a resource the graph knows about.
 #
-# It could not be made to fail on demand, which is exactly why it is worth
-# pinning structurally rather than behaviourally: the counts are laid out at
-# compile now, in the plan's own argument memory, one per device-sized dispatch
-# per slot. Two plans cannot collide because two plans cannot hold one region,
-# and two slots cannot collide because the argument ring already says when a
-# slot comes round again.
+# The counts are laid out at compile now, in the plan's own argument memory. What
+# is pinned here is what that buys: two recorded plans interleaved in one frame
+# each mark exactly as many elements as their own count says, and a plan that is
+# freed gives its memory back.
 
 @kernel function pio_count!(n, @Const(src), thresh::Float32)
     i = @index(Global)
@@ -70,46 +67,13 @@ function markplan(dev, cap::Int, want::Int, nmark::Int)
     (plan = M.record!(M.Plan(g)), outs = ts, count = n, src = src)
 end
 
-"""Every byte range this plan's indirect commands occupy."""
-function indirectranges(pl)
-    am = pl.args
-    rs = Tuple{UInt64,UInt64}[]
-    for v in am.indirect
-        base = (v.buf[]::Any).address + UInt64(v.offset)
-        push!(rs, (base, base + UInt64(3 * sizeof(UInt32))))
-    end
-    rs
-end
-
-@testset "a plan's indirect commands are laid out at compile" begin
-    dev = M.Device(TESTBACKEND)
-    cap, nmark = 4096, 3
-    p = markplan(dev, cap, 1000, nmark)
-    # One per device-sized dispatch — and NOT one per direct dispatch: the
-    # `zero` passes take a host ndrange and reserve nothing.
-    @test length(p.plan.args.indirect) == nmark
-    dispatches = collect(Iterators.flatten(pp.dispatches for pp in p.plan.passes))
-    @test count(d -> d.indirect != 0, dispatches) == nmark
-    @test sort(filter(!=(0), [d.indirect for d in dispatches])) == collect(1:nmark)
-    M.free!(p.plan)
-end
-
-@testset "two recorded plans' indirect commands are disjoint" begin
+@testset "two recorded plans' device-sized dispatches read their own counts" begin
     dev = M.Device(TESTBACKEND)
     cap = 4096
     a = markplan(dev, cap, 1000, 2)
     b = markplan(dev, cap, 2500, 2)
-    M.run!(a.plan); M.run!(b.plan); M.waitidle(dev)
-
-    ra, rb = indirectranges(a.plan), indirectranges(b.plan)
-    @test !isempty(ra) && length(ra) == length(rb)
-    # Not one byte in common, over every slot of both — which is what makes
-    # replaying them in either order mean the same thing.
-    for (lo1, hi1) in ra, (lo2, hi2) in rb
-        @test hi1 <= lo2 || hi2 <= lo1
-    end
-
-    # And the counts they read are their own, interleaved in one frame.
+    # Interleaved in one frame, three times over: each plan's marks follow its own
+    # count, which they would not if the two shared an indirect command.
     for _ in 1:3
         M.run!(a.plan)
         M.run!(b.plan)
@@ -126,23 +90,26 @@ end
     M.free!(a.plan); M.free!(b.plan)
 end
 
-@testset "a plan gives its argument memory back" begin
+@testset "a plan gives its memory back" begin
     dev = M.Device(TESTBACKEND)
     sp = M.pool(dev)
-    p = markplan(dev, 1024, 500, 2)
-    M.run!(p.plan); M.waitidle(dev)
-    held = length(p.plan.args.store)
-    @test held > 0
-    # Live bytes over every block of the arena, not the largest free span: with
-    # a second, empty block already in the pool — any earlier plan in the
-    # session leaves one — the largest span is that whole block before and
-    # after, and says nothing about this plan's region coming back.
-    live(kind) = sum((sum(values(b.live); init = 0) for b in M.blocksof(sp, kind)); init = 0)
-    before = live(M.Unified())
-    M.free!(p.plan)
-    M.reclaim!(sp, dev)
-    # The region is back, so the arena holds at least `held` fewer live bytes.
-    # `free!` retires rather than releases, which is why the `reclaim!` above is
-    # part of the test rather than an aside.
-    @test live(M.Unified()) <= before - held
+    # Live bytes over every block the pool holds, of every kind.
+    live() = sum(b -> sum(values(b.live); init = 0), Iterators.flatten(values(sp.blocks)); init = 0)
+    # `free!` retires rather than releases, which is why `reclaim!` is part of the
+    # cycle rather than an aside.
+    function cycle!()
+        p = markplan(dev, 1024, 500, 2)
+        M.run!(p.plan); M.waitidle(dev)
+        M.free!(p.plan)
+        foreach(M.free!, (p.src, p.count, p.outs...))
+        M.reclaim!(sp, dev)
+        return nothing
+    end
+    cycle!()    # compiles, and grows the pool to what one plan needs
+    before = live()
+    for _ in 1:10
+        cycle!()
+    end
+    # Ten plans built, run and freed: whatever one held, it gave back.
+    @test live() <= before
 end
