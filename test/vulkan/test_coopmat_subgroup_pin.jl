@@ -52,19 +52,8 @@ end
         # ── the half that must hold on this machine ──────────────────────────
         @test Mantle.can_require_subgroup_size(ctx, Mantle.COOPMAT_SUBGROUP)
 
-        # A real coopmat kernel builds and computes correctly at the pinned width.
-        # `mul!` on fp16 operands with an fp32 destination is the shipped route
-        # onto `coopmat_gemm!`.
-        M = N = K = 128
-        A = Mantle.LavaArray(Float16.(randn(Float32, M, K) .* 0.1f0))
-        B = Mantle.LavaArray(Float16.(randn(Float32, K, N) .* 0.1f0))
-        C = Mantle.LavaArray(zeros(Float32, M, N))
-        ref = Float32.(Array(A)) * Float32.(Array(B))
-        Mantle.LinearAlgebra.mul!(C, A, B)
-        KA.synchronize(LavaBackend())
-        got = Array(C)
-        @test maximum(abs, got) > 1e-3                       # it wrote something
-        @test maximum(abs, got .- ref) / maximum(abs, ref) < 5e-3
+        # That a real coopmat GEMM builds and computes correctly at the pinned
+        # width is portable and lives in `test/test_coopmat_gemm_subgroup.jl`.
 
         # ── the positive control ─────────────────────────────────────────────
         # Describe a device whose subgroups are 64 and cannot be narrowed, which

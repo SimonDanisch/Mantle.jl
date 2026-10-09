@@ -103,20 +103,9 @@ end
     copyto!(A, Float32.(reshape(1:TILEpe^2, TILEpe, TILEpe)))
     a = Array(A)
 
-    @testset "component-wise multiply with a stride-0 factor matrix" begin
-        if !Mantle.coopmat_gemm_available(Mantle.vk_context())
-            @info "no cooperative-matrix support on this device; skipping"
-        else
-            for base in Int32.((0, TILEpe))
-                C = KA.zeros(back, Float32, TILEpe, TILEpe)
-                fmul_rowscale!(back, (WGpe,))(C, A, base; ndrange = (WGpe,))
-                KA.synchronize(back)
-                add = base == 0 ? 0.0f0 : 100.0f0
-                want = [a[i, j] * (Float32(i) + add) for i in 1:TILEpe, j in 1:TILEpe]
-                @test Array(C) == want
-            end
-        end
-    end
+    # The component-wise multiply on its own (`fmul_rowscale!`, KHR) is portable
+    # and is checked on every backend in `test/test_coopmat_add.jl`; here it is
+    # only the reference the per-element callback is compared against below.
 
     if !ctx.coopmat2.per_element_operations
         @info "no VK_NV_cooperative_matrix2 per-element operations; skipping"

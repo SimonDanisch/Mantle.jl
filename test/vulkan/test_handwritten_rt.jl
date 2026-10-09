@@ -1,28 +1,18 @@
 # test_handwritten_rt.jl
 #
-# End-to-end test: Handwritten SPIR-V RT shaders (raygen, closest-hit, miss),
-# built using Lava's SPIR-V module builder, validated with spirv-val, and
-# dispatched against a single triangle via VK_KHR_ray_tracing_pipeline.
+# Hand-written SPIR-V ray-tracing shaders (raygen, closest-hit, miss), built with
+# Lava's SPIR-V module builder and validated with spirv-val. A test of the
+# builder, not of a device: nothing here runs.
 #
-# Triangle: (0,0,0), (1,0,0), (0,1,0) in the XY plane at z=0.
-# Rays: 8x8 grid from (-0.5..1.5, -0.5..1.5) at z=-1, direction (0,0,1).
-# Expected: rays hitting the triangle get hit_t=1.0, others get -1.0 (miss).
+# It also dispatched the three against a single triangle through the Vulkan
+# backend's own pipeline objects. That half is portable now and lives in
+# `test/test_rt_pipeline.jl`, with the shaders written in Julia and traced
+# through `Mantle.trace!`: same triangle, same rays, same margins.
+#
+# The builders stay because `test_blas_refit.jl` includes this file for them.
 
-using Lava, Mantle
-using Vulkan
+using Lava
 using Test
-
-# The hand-written pipeline's dispatch, as the unmodelled path spells it today:
-# one one-shot holding the trace, submitted when it closes. `emit_trace!` holds
-# the structures it reads — one `hold!` covers the top level and every bottom
-# level it instances — so there is nothing to state here. `rt_dispatch!` was the
-# name of the open-batch version.
-function rt_dispatch!(bq, pipeline, tlas, push_bda, W, H)
-    Mantle.oneshot!(bq; tag = :trace) do e
-        Mantle.emit_trace!(e, pipeline, tlas, push_bda, W, H, 1)
-    end
-    return nothing
-end
 
 # =====================================================================
 # SPIR-V Shader Builders
@@ -357,97 +347,5 @@ end
         # Check miss
         miss_dis = Lava.disassemble_spirv(miss_spirv)
         @test occursin("OpEntryPoint MissKHR", miss_dis)
-    end
-
-    @testset "RT Dispatch Against Triangle" begin
-        ctx = Mantle.vk_context()
-        rt_props = ctx.rt_pipeline_properties
-        if rt_props === nothing
-            @warn "Skipping RT test: no ray tracing support"
-            return
-        end
-
-        W, H = 16, 16
-
-        # Build triangle: (0,0,0), (1,0,0), (0,1,0)
-        vertices = [(0f0, 0f0, 0f0), (1f0, 0f0, 0f0), (0f0, 1f0, 0f0)]
-        indices = UInt32[0, 1, 2]
-        blas, tlas = Mantle.build_accel!(Mantle.batchqueue(Mantle.Device())) do ctx
-            b = Mantle.build_blas(ctx, vertices, indices)
-            t = Mantle.build_tlas(ctx, [b])
-            (b, t)
-        end
-
-        # Build shaders
-        raygen_spirv = build_raygen_shader()
-        chit_spirv = build_closesthit_shader()
-        miss_spirv = build_miss_shader()
-
-        # Create output buffer (W*H float32 values)
-        output_buf = Mantle.vk_alloc(ctx.default_bq, W * H * sizeof(Float32))
-
-        # Create RT pipeline (argument order: ctx, raygen, miss, chit)
-        pipeline = Mantle.create_rt_pipeline(ctx, raygen_spirv, miss_spirv, chit_spirv;
-            push_constant_size=8)
-
-        # Push constant: BDA of output buffer
-        push_bda = output_buf.address
-
-        # Dispatch
-        rt_dispatch!(Mantle.batchqueue(Mantle.Device()), pipeline, tlas, push_bda, W, H)
-
-        # Read back results
-        result_bytes = Vector{UInt8}(undef, W * H * sizeof(Float32))
-        Mantle.download!(result_bytes, output_buf)
-        result = reinterpret(Float32, result_bytes)
-
-        # Verify: rays clearly inside the triangle should hit (t=1.0),
-        # rays clearly outside should miss (t=-1.0).
-        # Rays on edges may go either way (hardware edge-exclusion rules).
-        eps = 0.15f0  # generous margin for hardware edge-exclusion rules
-        n_hits = 0
-        n_misses = 0
-        n_edge = 0
-        for iy in 0:H-1, ix in 0:W-1
-            ray_x = Float32(ix) / Float32(W) * 2f0 - 0.5f0
-            ray_y = Float32(iy) / Float32(W) * 2f0 - 0.5f0
-            idx = iy * W + ix + 1
-            # Triangle: (0,0,0), (1,0,0), (0,1,0)
-            # Interior: ray_x > eps, ray_y > eps, ray_x + ray_y < 1 - eps
-            clearly_inside = ray_x > eps && ray_y > eps && (ray_x + ray_y) < 1f0 - eps
-            # Exterior: ray_x < -eps || ray_y < -eps || ray_x + ray_y > 1 + eps
-            clearly_outside = ray_x < -eps || ray_y < -eps || (ray_x + ray_y) > 1f0 + eps
-            if clearly_inside
-                @test result[idx] ≈ 1.0f0 atol=0.01f0
-                n_hits += 1
-            elseif clearly_outside
-                @test result[idx] == -1.0f0
-                n_misses += 1
-            else
-                # Edge case: either hit or miss is acceptable
-                @test isapprox(result[idx], 1.0f0; atol=0.01f0) || result[idx] == -1.0f0
-                n_edge += 1
-            end
-        end
-
-        @test n_hits > 0
-        @test n_misses > 0
-        println("RT test: $n_hits interior hits, $n_misses exterior misses, $n_edge edge cases out of $(W*H) rays")
-
-        # Explicit cleanup: idle the device and finalize Vulkan handles in the
-        # correct order (children before parents). After the AS-storage refactor,
-        # LavaBLAS/LavaTLAS hold their backing memory via LavaArray fields
-        # (`storage`, `preserves`) whose own finalizers handle vk_free! with
-        # timeline-gated deferred destruction — so we only need to finalize the
-        # AccelerationStructureKHR handles here.
-        Vulkan.device_wait_idle(ctx.device)
-        finalize(pipeline.pipeline)
-        finalize(pipeline.pipeline_layout)
-        finalize(pipeline.descriptor_set_layout)
-        for sm in pipeline.shader_modules
-            finalize(sm)
-        end
-        finalize(tlas.accel)
-        finalize(blas.accel)
     end
 end

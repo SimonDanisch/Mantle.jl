@@ -4,11 +4,11 @@ const AMg = Lava.AcceleratedMatrix
 
 # What does a product of two TENSOR-LOADED operands actually compute?
 #
-# `test_tensor_load.jl` shows a load returns the right elements and
-# `mwe_tensor_orientation.jl` pins which layout dimension is which. Neither
-# answers this, because the load hands back the TRANSPOSE of the block it
-# addressed — so the product is some transpose of `A*B`, and a GEMM cannot be
-# routed through tensor addressing until it is known which.
+# `test_tensor_load.jl` shows a load returns the right elements, and which
+# layout dimension a slice offset walks. It does not answer this, because the
+# load hands back the TRANSPOSE of the block it addressed — so the product is
+# some transpose of `A*B`, and a GEMM cannot be routed through tensor addressing
+# until it is known which.
 #
 # MEASURED, exactly:
 #
@@ -27,7 +27,7 @@ const TGt = 16          # one tile, one subgroup — the smallest thing that mul
 
 @kernel cpu = false function tensorgemm_kernel!(out, @Const(A), @Const(B))
     # Dims REVERSED relative to the Julia array: the tensor's last dimension is
-    # fastest-varying, Julia's first is. See `mwe_tensor_orientation.jl`.
+    # fastest-varying, Julia's first is. See `test_tensor_load.jl`.
     lay = Lava.tensor_slice(
             Lava.tensor_setdim(
                 Lava.tensor_layout(Val(2), Val(Lava.TENSOR_CLAMP_CONSTANT)),

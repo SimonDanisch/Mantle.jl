@@ -188,6 +188,8 @@ Accepts a backend, an `HWTLAS`, or an [`AdaptedAccel`](@ref), because the
 callers that need to ask have one of those to hand and not always the same one.
 """
 supports_rt_pipeline(::Any) = false
+# A device answers what its backend answers, as `supports_graphics` does.
+supports_rt_pipeline(dev::Device) = supports_rt_pipeline(backend(dev))
 # PROCEDURAL geometry forces the inline path, whatever the backend says.
 #
 # The two ray paths answer a box by different mechanisms: an inline ray query
@@ -227,6 +229,7 @@ in the middle of a shader compile, which names neither the geometry nor the
 backend nor the reason.
 """
 supports_procedural_traversal(::Any) = false
+supports_procedural_traversal(dev::Device) = supports_procedural_traversal(backend(dev))
 
 # An `AdaptedAccel` too, for the same reason `supports_rt_pipeline` takes one: a
 # caller that has to ask usually holds the adapted accel rather than the backend.

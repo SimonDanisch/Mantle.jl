@@ -159,7 +159,7 @@ end
             end
         end
 
-        @testset "it beats mul! at one column" begin
+        @testset "it is not slower than mul! at one column" begin
             # The reason this second kernel exists. `mul!` on this shape measured
             # 3.5% of roofline when it ran one thread per output: 1280 threads,
             # five workgroups, and the device latency-bound however well it reads.
@@ -167,10 +167,15 @@ end
             # gap. Measured on the 8060S in GPU time over five runs: 1.79-1.81x
             # under RADV, 1.30-1.56x under AMD's Windows driver, which runs the
             # split-K kernels faster (13-16 us against RADV's 18) and `gemv!` no
-            # faster. The floor of
-            # 1.5 was set against the per-element kernel and held on neither
-            # driver's worst run once split-K arrived; 1.1 asserts what is true
-            # on both, that the decoder's kernel beats the general path.
+            # faster. 2.5x in wall clock on RADV when the measure became the
+            # device sync rather than per-dispatch timestamps.
+            #
+            # The claim on every device is that the decoder's kernel is never the
+            # slower choice, which is what the decoder relies on. How much faster
+            # depends on how far the GENERAL path is from the memory floor, and
+            # that is the backend's: Metal's `mul!` is a library product already at
+            # the floor, 1.17x on the M5. A floor of 1.1 or 1.5, set where the
+            # general path is slow, failed there for that reason alone.
             M, K, iters = 1280, 1280, 50
             hw = fill(0.01f0, M, K)
             W = KA.allocate(backend, Float32, M, K); copyto!(W, hw)
@@ -184,7 +189,7 @@ end
             KA.synchronize(backend)
             tg, tm_ = interleaved(rg, rm, backend)
             @info "gemv(transposed) vs mul! at ($M,$K)" gemv_us=tg/iters/1e3 mul_us=tm_/iters/1e3 speedup=tm_/tg
-            @test tm_ / tg > 1.1
+            @test tm_ / tg >= 1
         end
     end
 
@@ -196,7 +201,7 @@ end
                                                   KA.allocate(backend, Float32, 9), B)
     end
 
-    @testset "it beats mul! at M = 1" begin
+    @testset "it is not slower than mul! at M = 1" begin
         # The reason the kernel exists. Interleaved, both live kernels, same
         # allocation — a sequential A/B on this box drifts by 5-10%.
         #
@@ -216,9 +221,10 @@ end
         tg, tm = interleaved(rg, rm, backend)
         @info "gemv vs mul! at (1,$K)@($K,$N)" gemv_us=tg/iters/1e3 mul_us=tm/iters/1e3 speedup=tm/tg
         # Measured 6.4x in GPU time on the 8060S, 3.5x in wall clock when the
-        # kernel was written. The floor is deliberately far below that: this asserts
-        # the kernel is doing its job, not the exact number, which moves with the
-        # driver and with whatever else holds the card.
-        @test tm / tg > 1.5
+        # kernel was written, 5.2x through the device sync on RADV, and 1.12x on
+        # the M5, where `mul!` is Metal's library product and both read `B` at the
+        # memory floor. The claim is the decoder's: this kernel is never the
+        # slower choice. The margin is the general path's, not this kernel's.
+        @test tm / tg >= 1
     end
 end

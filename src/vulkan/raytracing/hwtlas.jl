@@ -1108,13 +1108,16 @@ function bindtlas!(e::Emitter, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
     return nothing
 end
 
-# Vulkan drives an SBT through `vkCmdTraceRaysIndirect`. See
-# `supports_rt_pipeline` in `raytracing/api.jl`.
-supports_rt_pipeline(::LavaBackend) = true
+# Vulkan drives an SBT through `vkCmdTraceRaysIndirect`, where the device has the
+# pipeline extension. See `supports_rt_pipeline` in `raytracing/api.jl`. Asked of the
+# device: `true` unconditionally sent a device with ray query and no pipeline
+# extension into a pipeline it cannot create.
+supports_rt_pipeline(b::LavaBackend) = vk_context(b).rt_pipeline_properties !== nothing
 supports_hwtlas(b::LavaBackend) = vk_context(b).ray_query_available
-supports_rt_pipeline(::VulkanTLAS) = true
+supports_rt_pipeline(t::VulkanTLAS) = supports_rt_pipeline(t.backend)
 
 # …and the inline ray query answers a BOX as well as a triangle: the three
 # candidate verbs just above are what `procedural_candidate` is written against.
-supports_procedural_traversal(::LavaBackend) = true
-supports_procedural_traversal(::VulkanTLAS) = true
+# Without ray query there is no traversal to answer from.
+supports_procedural_traversal(b::LavaBackend) = vk_context(b).ray_query_available
+supports_procedural_traversal(t::VulkanTLAS) = supports_procedural_traversal(t.backend)
