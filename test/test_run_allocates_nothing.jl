@@ -22,8 +22,8 @@
 # reads the process-wide counter, and `waitfor!` waits: whatever else runs during
 # that wait is counted as the run's. Inside a bt session that is its own timer task,
 # 112 bytes every ~250 ms, which failed this test at 1.1-1.7 bytes per run while
-# the profiler recorded no allocation from the run at all. An allocation is the
-# run's when one of the frames on its stack is in a package the run goes through.
+# the profiler recorded no allocation from the run at all. Which allocations are the
+# run's is `byrun`'s question.
 
 using Test, Mantle, Profile
 import KernelAbstractions as KA
@@ -65,9 +65,26 @@ function _allocfree_measure(pl)
     return sum(a -> a.size, ours; init = 0) / 200
 end
 
-"""Whether an allocation was made by the code under test: one of its frames is in the
-SOURCE of a package a run goes through (`src/` or `lib/`, so not this test file)."""
-byrun(a) = any(f -> occursin(RUN_PACKAGES, string(f.file)), a.stacktrace)
+"""
+Whether an allocation was made by the code under test: walking out from the
+allocation, a frame in the SOURCE of a package a run goes through (`src/` or `lib/`,
+so not this test file) comes before any frame of the event loop.
+
+The event loop is the line between the run and everything else that happens while it
+waits. A wait yields, and the scheduler's `process_events` runs whatever libuv has
+pending on the waiting task's stack — a bt session's timer callback looks up its
+`cfunction` there, 32 + 24 + 24 bytes under the run's own `poll_completed`. Those
+callbacks belong to whoever registered them.
+"""
+function byrun(a)
+    for f in a.stacktrace
+        f.func in EVENT_LOOP && return false
+        occursin(RUN_PACKAGES, string(f.file)) && return true
+    end
+    return false
+end
+
+const EVENT_LOOP = (:uv_run, :ijl_process_events, :process_events)
 
 const RUN_PACKAGES = r"/(Mantle|Metal|Lava|ObjectiveC|KernelAbstractions|KernelInterface|GPUArrays|Vulkan)/([^/]+/)?(src|lib)/"
 
