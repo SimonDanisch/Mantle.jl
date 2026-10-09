@@ -1347,7 +1347,9 @@ the next replay starting before this one's writes land.
 
 The pool's BLOCKS rather than the plan's resources: every graph resource is a slice
 of one, a pool holds a handful of blocks where a plan holds thousands of resources,
-and a block covers its tenants exactly. Rebuilt only when the pool has grown, so a
+and a block covers its tenants exactly. An array Metal.jl allocated is no block's
+tenant, so the ones the plan's arguments reach (`argmanaged`) are declared beside
+the blocks. Rebuilt only when the pool has grown, so a
 steady frame is one `useResources:` call over an array that already exists — the
 MARSHALLED one, because passing the `MTLBuffer` vector converts it to object
 pointers on every call and that conversion allocates a fresh array each time,
@@ -1372,7 +1374,13 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
             push!(rec.resources, b.memory)
             push!(rec.managed, managedbuffer(d, b.memory))
         end
-        append!(rec.managed, rec.argmanaged)
+        # Metal.jl's own arrays the commands reach: declared like the blocks, or
+        # the driver overlaps a replay writing one with the next replay reading it
+        # (`test_partitioned_recording.jl`, a writer plan then its reader).
+        for m in rec.argmanaged
+            push!(rec.resources, m.buffer)
+            push!(rec.managed, m)
+        end
         p.blockgen[]
     end
     # The plan's own memory and the recording's, which are this backend's rather
