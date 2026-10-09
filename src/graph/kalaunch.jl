@@ -389,7 +389,7 @@ function run!(::Pipelines, c::Compile)
             cd = compiledraw(c, p, d, argcursor)
             # How many pipelines the draws resolved to — two draws sharing one
             # is the thing worth counting, which is why a dispatch's is not here.
-            push!(c.pipelines, cd.compiled)
+            push!(c.pipelines, cd.compiled.pipeline)
             push!(cds, cd)
             argcursor += argalign(argsize(cd))
         end

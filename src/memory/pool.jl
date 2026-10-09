@@ -759,6 +759,11 @@ the drop and the release, with the GC thread never asking the device anything.
 Cheap and idempotent, so a renderer can call it every frame; it is a no-op when
 nothing has been dropped.
 
+Regions only. A backend array the GC collected goes back through the channel
+that last named it (`retire!(ch, obj)`), because only a channel knows whether a
+recording that has not been submitted yet still names it; [`waitidle`](@ref)
+drains those, and [`makeroom!`](@ref) does both.
+
 `wait = true` additionally blocks on whatever the device has already been given,
 via [`waitfor`](@ref). That is what [`acquire!`](@ref) does before it grows the
 pool, and it is the only place in Mantle that waits for the device at all —

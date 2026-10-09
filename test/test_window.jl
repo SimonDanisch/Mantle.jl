@@ -1253,11 +1253,12 @@ else
         # bind it without knowing which it has.
         @test M.target_extent(screen) == size(win)
         @test eltype(screen) == BGRA{N0f8}
-        # Recorded, as a headless plan has to be; the windowed one is walked, since
-        # a recording names one swapchain image and a window has several.
-        plan_off, off = draw_into(g -> M.Transient.Image(g, RGBA{N0f8}, size(win)))
+        # An offscreen framebuffer the caller made, read back after the frame.
+        fb = M.Framebuffer(TESTBACKEND, size(win)...; depth = false, color_format = RGBA{N0f8})
+        plan_off, _ = draw_into(g -> fb)
         M.run!(M.record!(plan_off))
-        a = M.readback_target(off)
+        KernelAbstractions.synchronize(M.backend(dev))
+        a = M.readback_framebuffer(fb)
         # Every image the platform cycles through drawn, so the one a screenshot
         # is handed holds this scene.
         for _ in 1:6; M.run!(plan_win); end

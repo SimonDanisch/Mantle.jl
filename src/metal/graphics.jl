@@ -1365,6 +1365,11 @@ function buffercopy(d::MetalDevice, data::AbstractArray{T,N}) where {T,N}
     return a
 end
 
+# What a render pass binds, as for a window and a transient: a `MTLTexture` is
+# both the view and the image.
+Mantle.target_view(fb::MetalFramebuffer) = fb.color
+Mantle.target_image(fb::MetalFramebuffer) = fb.color
+
 Mantle.colorimage(fb::MetalFramebuffer) = fb.color
 Mantle.depthimage(fb::MetalFramebuffer) = fb.depth
 

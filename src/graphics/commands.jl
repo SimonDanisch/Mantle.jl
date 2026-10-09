@@ -319,6 +319,11 @@ the value can answer that.
 differently: Vulkan builds the pipeline layout around the descriptor set layout,
 and a set bound against a pipeline that was not built for it is invalid. Metal
 binds a texture to an argument slot and ignores this.
+
+What it answers holds the compiled pipeline in a `pipeline` field, which is what
+[`npipelines`](@ref) counts: the rest of a compiled draw may be per draw (Metal
+keeps each draw's stage arguments beside it), and counting the whole thing counted
+draws.
 """
 function compile_draw end
 
