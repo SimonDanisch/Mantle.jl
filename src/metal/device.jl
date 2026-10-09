@@ -455,10 +455,28 @@ passed(d::MetalDevice, f) = passed(d.queue, f)
 waitfor(d::MetalDevice, f) = waitfor(d.queue, f)
 
 # Asking a `LegacyQueue` for a fence ADVANCES it: this counts retirements, so
-# `q.next += 1` is the whole of what a new fence is here.
+# `q.next += 1` is what a new fence is here — unless nothing can still be reading
+# the bytes. On a quiet queue every retirement so far is done with, so they all
+# pass and the new one gets a fence that has passed already. Without that a region
+# dropped on an idle device waited for a drain nobody would ask for, where an MTL4
+# queue hands it back at once (see `passed(::MTL4Queue, f)`).
 function fence(q::LegacyQueue)
+    if quiet(q)
+        q.completed = q.next
+        return q.completed
+    end
     q.next += UInt64(1)
     return q.next
+end
+
+"""
+Nothing encoded and not committed, and the last command buffer committed to this
+queue has finished: the queue runs in order, so every one before it has too.
+"""
+function quiet(q::LegacyQueue)
+    q.bq.cmdbuf === nothing || return false
+    last = MTL.last_committed(q.mtl)
+    return last === nothing || last.status >= MTL.MTLCommandBufferStatusCompleted
 end
 
 passed(q::LegacyQueue, f) = UInt64(f) <= q.completed

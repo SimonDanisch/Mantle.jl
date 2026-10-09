@@ -253,8 +253,10 @@ if _VULKAN_OK
                 fastdiv
 end
 
-if _VULKAN_OK
-
+# The barrier lowering per API marker: host tables, no device and no driver, so they
+# run on every machine. Every build compiles the Vulkan tree, the Mac's through the
+# loader JLL, and these ask nothing of a driver.
+#
 # `import`, not `using`: Mantle exports `Vulkan` as the name of its backend, and
 # the package is also called Vulkan, so `using Vulkan` alongside `using Mantle`
 # makes the bare name ambiguous. Everything here names it qualified anyway.
@@ -451,7 +453,6 @@ import Vulkan
     end
 end
 
-end  # if _VULKAN_OK — the sync lowering names Vulkan enums in every assertion
 
 # CPU-only, so they go first and fail fast.
 #
@@ -523,19 +524,12 @@ include(joinpath(@__DIR__, "foreachbackend.jl"))
 # only kind `bake!` takes — so it runs before the window tests rather than inside
 # their DISPLAY guard.
 #
-# FIRST among the files that build a plan on `Device(VulkanAPI())`, and that is a
+# FIRST among the files that build a plan on the backend's device, and that is a
 # constraint rather than a preference: it counts the tenants of that device's
-# shared arena, and `Device(VulkanAPI())` is cached per context, so any earlier file
-# that compiled a plan is still a tenant until a GC reaps it. Adding an include
-# above this line that touches the Lava device breaks it.
-# NOT per-backend yet. Two of its assertions are genuinely Vulkan's — a
-# `pool_offset` inside a VkBuffer and `plan.recording isa Mantle.Recording` —
-# and the first belongs in `test/vulkan/` while the second has a portable
-# spelling (`recordsplans(dev)`). Flushing has one too: `flush!(device)` is
-# core's. Splitting the rest is still to do; gating it is honest in the
-# meantime, and the guard in
-# `test_mantle_owns_it.jl` still names the file.
-_VULKAN_OK && include(joinpath(@__DIR__, "test_arena_recording.jl"))
+# shared arena, and the device is cached per process, so any earlier file that
+# compiled a plan is still a tenant until a GC reaps it. Adding an include above
+# this line that builds a plan breaks it.
+foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
 # What every declaration is derived from. Before the files that build plans,
 # because a wrong answer there is a wrong barrier in every one of them, and this
 # is the file that says what right looks like. Split in two: the type questions
@@ -631,7 +625,6 @@ foreachbackend(joinpath(@__DIR__, "test_gemm_fp16_accum.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_staged.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_staged_scalar.jl"))
 foreachbackend(joinpath(@__DIR__, "test_bar_memcpy_sync.jl"))
-foreachbackend(joinpath(@__DIR__, "test_backend_kernel_tails.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #

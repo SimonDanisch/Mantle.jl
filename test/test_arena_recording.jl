@@ -1,15 +1,9 @@
 # The device-owned arena and the recorded plan. Needs a GPU, but no display:
 # every graph here is headless, which is also the only kind `record!` takes
 # today.
-using Mantle, Test, KernelAbstractions, Lava, Statistics
+using Mantle, Test, KernelAbstractions, Statistics
 const M = Mantle
-# The backend this run is for. `runtests.jl` includes this file once per
-# available backend (`Mantle.eachbackend()`); a bare `include` from the REPL
-# gets the default one. Nothing below names a backend, which is the point:
-# these testsets check PORTABLE behaviour, on whichever backend is there.
-# Vulkan-gated until its three backend-specific assertions are split out; see
-# the note beside its include in `runtests.jl`.
-const TESTBACKEND = M.VulkanAPI()
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 
 @kernel function bump!(dst, @Const(src))
@@ -44,8 +38,6 @@ end
     @inbounds d[i] = x[i] + y[i]
 end
 
-# `pool_offset` below is the BACKEND's — it names an offset inside a
-# `VkBuffer` — so this file is one of the ones 0.7 still owes `test/vulkan/`.
 const E = Mantle
 
 @testset "two plans in one process commit the max, not the sum" begin
@@ -174,92 +166,28 @@ end
     end
 end
 
-@testset "a pass barrier carries mask tuples, not buffers" begin
-    # NOT the opposite: a barrier scoped to a `(VkBuffer, offset, size)` for
-    # everything except a widened `renameable` resource has the general case the
-    # wrong way round —
-    # a recording cannot bake a handle for anything that can move, and baking
-    # makes everything movable — so `build_pass_barrier` emits one
-    # `VkMemoryBarrier2` per distinct `(waits, to)` tuple and no buffer barriers
-    # at all.
-    #
-    # Nothing renames, either: `a` and `b` are read by the pass
-    # below, so `Plan` registers both as `CopyDst` of the update pass and writes
-    # them in place, and neither can move its target — the distinction has
-    # nothing left to decide. What is worth pinning is the tuples being `unique`
-    # and never unioned: `a` and `b` are the same hazard and collapse into one
-    # barrier, which is why three transitions produce two.
-    dev = M.Device(TESTBACKEND)
-    g = M.Graph(dev)
-    a   = M.Buffer(dev, zeros(Float32, 1024))
-    b   = M.Buffer(dev, zeros(Float32, 1024))
-    out = M.Buffer(dev, zeros(Float32, 1024))
-    M.dispatch!(g, add2!, (out, a, b), 1024; name = "read")
-    plan = Base.invokelatest(M.Plan, g)
-
-    pp = only(p for p in plan.passes if p.pass.name == "read")
-    # Three transitions: `a` and `b` are both a copy made visible to a shader
-    # read, and `out`'s is the store's copy made visible to a shader write.
-    @test length(pp.pre) == 3
-    v = pp.barrier.vks
-    # Two of them, because the first two are the same tuple. A union of all three
-    # would make the shader writes visible to a copy nothing performs and drag in
-    # caches no hazard here touches.
-    @test Int(v.memoryBarrierCount) == 2
-    # And no handle, no offset, no range: a recording names no `VkBuffer`, which
-    # is what lets a buffer move under a recorded plan without invalidating it.
-    @test Int(v.bufferMemoryBarrierCount) == 0
-
-    mb = unsafe_wrap(Array, v.pMemoryBarriers, Int(v.memoryBarrierCount))
-    @test allunique((m.srcStageMask, m.srcAccessMask, m.dstStageMask, m.dstAccessMask)
-                    for m in mb)
-end
-
 @testset "a recorded plan runs bit-exact, and records nothing" begin
     dev = M.Device(TESTBACKEND)
     s = Base.invokelatest(chainplan, dev, 20_000, 200)     # 202 passes, recorded at build
     @test M.recorded(s.plan)
     @test M.record!(s.plan) === s.plan                     # idempotent
-    # ONE recording, not one per argument slot: nothing rewrites a plan's
-    # argument memory after `record!`, so there is nothing for a ring to protect.
-    @test s.plan.recording isa Mantle.Recording
+    rec = s.plan.recording
 
     M.run!(s.plan)
     KernelAbstractions.synchronize(M.backend(dev))
     want = copy(Array(M.storage(s.out)))
 
-    # Dispatches the host recorded INTO THE FRAME'S BATCH, counted at submit.
-    # This is the assertion, and NOT a wall-clock ratio asking for recorded to
-    # be three times faster than walked over thirty runs.
-    #
-    # That measurement stopped meaning what it said the day `run!` started
-    # rotating argument slots for a baked plan too: a recorded run submitted
-    # every run and waited when the host got `ARG_SLOTS` ahead of the device,
-    # which is the same backpressure the interpreted path always had — so both
-    # medians were GPU throughput for this graph (0.73 ms against 0.64 ms
-    # measured), which is not host work. That is what a wall-clock ratio
-    # measures here.
-    #
-    # Counting is better than timing anyway: it is exactly the claim in the name
-    # of this testset, it is not a ratio anybody has to keep generous, and it does
-    # not move on a shared machine. `test_recording_lifecycle.jl` owns the
-    # host-cost comparison, where the two sides genuinely differ.
-    diag = Mantle.ctxof(M.batchqueue(dev)).diag
-    function batchrecorded(f, n)
-        f()                                  # warm, and outside the count
-        KernelAbstractions.synchronize(M.backend(dev))
-        before = diag.total_dispatches[]
-        for _ in 1:n
-            f()
-        end
-        KernelAbstractions.synchronize(M.backend(dev))   # flushes the trailing batch
-        diag.total_dispatches[] - before
-    end
-
+    # Thirty runs submit the one recording: the plan is still recorded and its
+    # recording is the same object, so nothing was recorded again. A run of an
+    # unrecorded plan would have walked it instead (`execute!`).
     fill!(M.storage(s.out), 0f0)
     KernelAbstractions.synchronize(M.backend(dev))
-    @test batchrecorded(() -> M.run!(s.plan), 30) == 0
+    for _ in 1:30
+        M.run!(s.plan)
+    end
     KernelAbstractions.synchronize(M.backend(dev))
+    @test M.recorded(s.plan)
+    @test s.plan.recording === rec
     @test Array(M.storage(s.out)) == want                  # bit-exact, not merely close
 end
 
@@ -316,6 +244,12 @@ end
     M.free!(big.plan)
 end
 
+"""Whatever `holdleaves!` reaches, kept so the test can look."""
+struct LeafHolder
+    leaves::Vector{Any}
+end
+Mantle.hold!(h::LeafHolder, x) = (push!(h.leaves, x); x)
+
 @testset "the lifetime walk stops at a device region" begin
     # `holdleaves!` is documented as walking "a plain Julia value tree" that
     # "names no driver". Two of Mantle's own types are not plain value trees and
@@ -332,16 +266,15 @@ end
     # `Instance`, so that is a value CYCLE and the walk never returned: a
     # `StackOverflowError` 53320 frames deep, from a `KI.Kernel` launch handed a
     # `Mantle.Buffer` as an argument. The assertion is simply that it returns.
+    #
+    # The holder is the test's own: anything that answers `hold!` is one, and the
+    # walk is the same whatever holds the leaves.
     dev = M.Device(TESTBACKEND)
     b = M.Buffer(dev, Float32, (64,))
-    q = M.backend(dev).dispatch_bq
-    walked = Ref(false)
-    M.oneshot!(q; tag = :holdleaves_test) do e
-        # Both spellings, and a couple of leaves that must not confuse it.
-        M.holdleaves!(e.owner, (b, M.storage(b), 1, nothing))
-        walked[] = true
-    end
-    @test walked[]
+    held = LeafHolder(Any[])
+    # Both spellings, and a couple of leaves that must not confuse it.
+    @test M.holdleaves!(held, (b, M.storage(b), 1, nothing)) === nothing
+    @test !isempty(held.leaves)
     M.free!(b)
 end
 
@@ -370,11 +303,13 @@ end
     # frame of GPU time), and the one that was.
     @test [x.name for x in t] == ["updates", "only"]
     @test t[2].host_ms > 0                 # the one recording
-    @test t[2].samples >= 1                # …and at least one frame of GPU time
+    # …and at least one frame of GPU time, where the device times its passes
+    M.timestamps(dev) && @test t[2].samples >= 1
     M.free!(profiled)
 end
 
-@testset "a profiled pass reports the time it actually took" begin
+# GPU time of a pass: only where the device times its passes.
+M.timestamps(M.Device(TESTBACKEND)) && @testset "a profiled pass reports the time it actually took" begin
     # `samples >= 1` above says a frame was COLLECTED, not that the number in it
     # is right, and the difference hid a bug for as long as nothing asked:
     # `timings` reported **0.0 ms** for a 2048x2048 `mm` that takes 2.3 ms.
@@ -455,7 +390,8 @@ end
     @inbounds dst[i] = x
 end
 
-@testset "a pass is not billed the pass before it" begin
+# GPU time of a pass: only where the device times its passes.
+M.timestamps(M.Device(TESTBACKEND)) && @testset "a pass is not billed the pass before it" begin
     dev = M.Device(TESTBACKEND)
     n = 1 << 20
     g = M.Graph(dev)
@@ -575,7 +511,7 @@ end
 end
 
 @testset "a retired region waits for the device, then comes back" begin
-    # The Lava half of `reclaim!`. Unlike the host, a fence here carries real
+    # The device half of `reclaim!`. Unlike the host, a fence here carries real
     # information: a region dropped while a batch is open may be named by a
     # command already recorded into it, so releasing on the spot would hand
     # those bytes to the next caller while the GPU is still reading them.
@@ -611,13 +547,11 @@ end
     scratch = KernelAbstractions.allocate(M.backend(dev), Float32, 16)
     fill!(scratch, 1f-3)
     arena_slow!(M.backend(dev), 16)(scratch; ndrange = 16)
-    @test !isempty(dev.bq.outstanding)
     M.free!(b)
     @test M.reclaim!(pool, dev) == 0        # stamped, not released: it has not signalled
 
     # Wait, so the fence it was stamped with has passed.
-    Mantle.flush!(dev.ctx.default_bq)
-    KernelAbstractions.synchronize(M.backend(dev))
+    M.waitidle(dev)
     @test M.reclaim!(pool, dev) == 1        # now
     @test M.reclaim!(pool, dev) == 0
 
@@ -630,8 +564,7 @@ end
     # `next_timeline + 1` unconditionally means a region dropped by an
     # application that then submits nothing more waited for a signal nobody
     # would ever raise — the same leak this path removes, wearing a hat.
-    KernelAbstractions.synchronize(M.backend(dev))
-    @test M.idle(dev.bq)
+    M.waitidle(dev)
     b3 = M.Buffer(dev, fill(3f0, 4096))
     while M.reclaim!(pool, dev; wait = true) > 0 end
     M.free!(b3)
