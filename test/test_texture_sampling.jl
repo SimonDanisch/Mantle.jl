@@ -15,12 +15,16 @@ using ColorTypes: RGBA, BGRA
 using ColorTypes.FixedPointNumbers: N0f8
 include(joinpath(@__DIR__, "testbackend.jl"))
 
-# A fullscreen triangle whose `uv` sweeps 0..1 across the target.
+# A fullscreen triangle whose `uv` sweeps 0..1 across the target. The position is
+# in the PORTABLE clip space, where +y points down the screen: `uv.y = 0` is the
+# top row of the target. No `clip_y` here; the vertex stage applies it to every
+# position it writes, and calling it as well undid that on Metal, so this test
+# once read the rows the other way round there and only there.
 function tex_vertex()
     vid = Mantle.vertex_index() - Int32(1)
     x = Float32(Int32(vid & Int32(1)) * 4 - 1)
     y = Float32(Int32((vid >> Int32(1)) & Int32(1)) * 4 - 1)
-    return (position = Vec4f(x, Mantle.clip_y(y), 0f0, 1f0),
+    return (position = Vec4f(x, y, 0f0, 1f0),
             uv = (0.5f0 * (x + 1f0), 0.5f0 * (y + 1f0)))
 end
 
@@ -52,12 +56,12 @@ function tex_draw(dev, data; n = 4, filter = :nearest)
         Mantle.draw!(pr, compiled, (), 3)
     end
     px = Mantle.readback_framebuffer(fb)
-    # The red channel carries component 0. Its second index counts from the top
-    # while `uv.y = 0` is the bottom of the target, so the row is flipped.
+    # The red channel carries component 0. Its second index counts from the top,
+    # and so does `uv.y`.
     #
     # `.r`, and no division: the colorant says where red sits in a BGRA
     # attachment, and `Float32(::N0f8)` is already 0..1.
-    return [Float32(px[x, n + 1 - y].r) for x in 1:n, y in 1:n]
+    return [Float32(px[x, y].r) for x in 1:n, y in 1:n]
 end
 
 """The same sampling quad, drawn through the render GRAPH rather than by hand."""
@@ -75,9 +79,9 @@ function tex_graph(dev, data; n = 4, filter = :nearest)
     Mantle.copy!(g, "read", out, img)
     Mantle.run!(Mantle.record!(Mantle.Plan(g)))
     px = reshape(Array(Mantle.storage(out)), n, n)
-    # RGBA8 packed little-endian, so component 0 is the low byte; second index
-    # counts from the top and `uv.y = 0` is the bottom, as in `tex_draw`.
-    return [Float32(px[x, n + 1 - y] & 0xff) / 255 for x in 1:n, y in 1:n]
+    # RGBA8 packed little-endian, so component 0 is the low byte; the second
+    # index counts from the top, as `uv.y` does, as in `tex_draw`.
+    return [Float32(px[x, y] & 0xff) / 255 for x in 1:n, y in 1:n]
 end
 
 @testset "sampling a bound texture" begin
@@ -99,7 +103,7 @@ end
         # Four columns of the target over four texel columns; the two texel rows
         # each cover half the height. `data[x, y]`: x is the FIRST index.
         for x in 1:4, y in 1:2
-            rows = y == 1 ? (1:2) : (3:4)     # y = 1 is v ≈ 0, the bottom half
+            rows = y == 1 ? (1:2) : (3:4)     # y = 1 is v ≈ 0, the top half
             for r in rows
                 @test isapprox(got[x, r], data[x, y]; atol = 0.01)
             end
