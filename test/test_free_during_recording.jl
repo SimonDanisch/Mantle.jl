@@ -135,6 +135,9 @@ end
         # FIRST because they finish at once: behind the slow one they pile up, and
         # on RADV the 33rd unfinished submission blocked in `vkQueueSubmit2` until
         # the slow one was done — after which handing the region back is right.
+        # The pause after the plan is what makes it deterministic: the plan's own
+        # submission is done in well under a millisecond, and asked straight after
+        # `run!` the reclaim usually came before that signal too.
         g = Mantle.Graph(dev)
         tmp = Mantle.Buffer(dev, zeros(Float32, n))
         Mantle.dispatch!(g, bump!, (tmp,), n; name = "bump")
@@ -142,7 +145,7 @@ end
         Mantle.run!(plan)
         small = KA.zeros(TESTBACKEND, Float32, n)
         KA.synchronize(TESTBACKEND)
-        short = spinsfor(50)
+        short = spinsfor(100)
         early = Int[]
         for k in 0:40
             a = Mantle.Buffer(dev, fill(5f0, n))
@@ -154,6 +157,7 @@ end
             spinread!(TESTBACKEND, 64)(Mantle.storage(out), Mantle.storage(a), short; ndrange = n)
             Mantle.free!(a)
             Mantle.run!(plan)
+            sleep(0.02)
             Mantle.reclaim!(sp, dev)
             Mantle.reclaim!(sp, dev)
             islive(r) || push!(early, k)
