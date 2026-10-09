@@ -1502,19 +1502,21 @@ Metal.@device_override KI.dFdy(v::Float32) = Metal.dfdy(v)
 # is what `KI.discard`'s contract promises and what MSL does.
 Metal.@device_override KI.discard() = Metal.discard_fragment()
 
+# The size of a drawn point, `[[point_size]]`: a trailing field of what the vertex
+# stage returns, which Metal.jl's `stage_return!` appends when the body calls it.
+Metal.@device_override KI.set_point_size!(s::Float32) = Metal.set_point_size!(s)
+
 # What Metal does NOT have, and says so rather than leaving a MethodError for a
 # shader compile to find:
 #
-#   `set_point_size!`      needs `[[point_size]]` on the stage output struct,
-#                          which the AIR writer does not emit yet.
 #   `emit_vertex!`,        Metal has no geometry stage at all. Apple's
 #   `end_primitive!`,      replacement is the mesh pipeline, which this backend
 #   `primitive_id_in`      DOES run — a geometry pipeline is lowered onto it by
 #                          `Mantle.lower_geometry_to_mesh`, so these three are
 #                          the leaf of a lowering nothing here reaches.
 #
-# The first is unimplemented; the last three are absent from the hardware.
-# `caps` is where a caller asks which — see `supports_geometry`.
+# All three are absent from the hardware. `caps` is where a caller asks — see
+# `supports_geometry`.
 
 # Sampling a bound texture. The binding is a SLOT and AIR has no global textures,
 # so the texture reaches the intrinsic through a lowering rather than an argument
