@@ -13,6 +13,10 @@
 # 2. A DISTINCT-only device must actually get separate decode targets. If that
 #    silently fell back to the coincide allocation, `vkCreateImage` would reject
 #    VIDEO_DECODE_DST|VIDEO_DECODE_DPB and every frame would decode to zero.
+#
+# Still Vulkan-only: every assertion here opens the decoder on a `VkContext`
+# (`H264Decoder(ctx, annexb)`), and there is no constructor taking a device. The
+# fixture lives in `test/data/`, beside the portable `test_video_decode.jl`.
 
 using Test, Lava, Mantle
 const VD = Mantle.VideoDecode
@@ -24,7 +28,7 @@ const VD = Mantle.VideoDecode
         @info "skipping decoder layout test: no usable video-decode support on $(ctx.device_name)"
         @test_skip ctx.video_decode_available
     else
-        annexb = read(joinpath(@__DIR__, "data", "h264_decode_test.h264"))
+        annexb = read(joinpath(@__DIR__, "..", "data", "h264_decode_test.h264"))
         dec = VD.H264Decoder(ctx, annexb)
         try
             # The profile's own requirements, asked for independently of the decoder.
@@ -69,7 +73,7 @@ const VD = Mantle.VideoDecode
         # a reference, and the frames are reordered by (GOP, POC) afterwards. If a
         # boundary dropped a reference, reused a target too early, or lost the
         # inter-decode barrier, one-AU-at-a-time and all-at-once would disagree.
-        yref = read(joinpath(@__DIR__, "data", "h264_decode_test_y.raw"))
+        yref = read(joinpath(@__DIR__, "..", "data", "h264_decode_test_y.raw"))
         w, h = 128, 96
         nframes = length(yref) ÷ (w * h)
 

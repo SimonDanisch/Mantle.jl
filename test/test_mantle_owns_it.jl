@@ -475,7 +475,9 @@ end
     for f in readdir(dir)
         endswith(f, ".jl") && !(f in BACKEND_NAMED_ALLOWED) || continue
         code = codeonly(read(joinpath(dir, f), String))
-        named = Set(Symbol(m.match) for m in eachmatch(r"\b[A-Za-z_][A-Za-z0-9_]*!?\b", code))
+        # A name with its bang: `\b` after `!` fails before `(`, and the match then
+        # backed off to `oneshot` for `oneshot!(` — a different function.
+        named = Set(Symbol(m.match) for m in eachmatch(r"(?<![A-Za-z0-9_!])[A-Za-z_][A-Za-z0-9_]*!?", code))
         bad = sort(collect(filter(backendonly, named)); by = string)
         isempty(bad) || push!(hits, (f, bad))
     end

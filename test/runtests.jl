@@ -455,6 +455,17 @@ import Vulkan
     # The Vulkan lowering of what a render pass declares. The behaviour each one
     # leads to (a kept target keeps its pixels, a depth test decides) is asserted
     # on every backend in `test_window.jl`; these are the tables underneath.
+    @testset "a traced usage adds the ray-tracing stage and nothing else" begin
+        RT = S2(Vulkan.PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR)
+        T = Traced{Storage{BufferKind,ReadWrite}}
+        S = Storage{BufferKind,ReadWrite}
+        for d in (Src(), Dst())
+            @test (Mantle.stages(be, T, d) & RT) == RT
+            @test (Mantle.stages(be, S, d) & RT) == S2(0)
+            @test Mantle.access(be, T, d) == Mantle.access(be, S, d)
+        end
+    end
+
     @testset "a load op lowers to its attachment op" begin
         @test Mantle.loadop(Mantle.Keep) == Vulkan.ATTACHMENT_LOAD_OP_LOAD
         @test Mantle.loadop(Mantle.Discard) == Vulkan.ATTACHMENT_LOAD_OP_DONT_CARE
@@ -577,6 +588,11 @@ include(joinpath(@__DIR__, "test_lava_import_completeness.jl"))
 include(joinpath(@__DIR__, "test_no_stale_exports.jl"))
 
 include(joinpath(@__DIR__, "test_geometry_types.jl"))
+include(joinpath(@__DIR__, "test_hold_lifetime.jl"))
+include(joinpath(@__DIR__, "test_no_ambient_allocation.jl"))
+
+include(joinpath(@__DIR__, "test_submit_channel.jl"))
+include(joinpath(@__DIR__, "test_catch_returns_no_sentinel.jl"))
 include(joinpath(@__DIR__, "foreachbackend.jl"))
 
 # NOT gated on `_VULKAN_OK` any more. Everything below runs once per backend
@@ -599,7 +615,6 @@ foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
 # is the file that says what right looks like. Split in two: the type questions
 # need no device, and the walk needs the interpreter a backend compiles with.
 include(joinpath(@__DIR__, "test_access.jl"))
-_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_compile_golden.jl"))
 # Same shape: headless, GPU-only. A `DeviceRange` is the one ndrange whose value
 # never reaches the host, so the Host backend cannot pin the half that matters.
@@ -740,6 +755,54 @@ foreachbackend(joinpath(@__DIR__, "test_static_workgroup.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_kernelinterface.jl"))
 
+foreachbackend(joinpath(@__DIR__, "test_alloc_budget.jl"))
+foreachbackend(joinpath(@__DIR__, "test_argument_memory_isolation.jl"))
+foreachbackend(joinpath(@__DIR__, "test_caching_and_allocations.jl"))
+foreachbackend(joinpath(@__DIR__, "test_copyto_dropped_source.jl"))
+foreachbackend(joinpath(@__DIR__, "test_dispatch_allocation.jl"))
+foreachbackend(joinpath(@__DIR__, "test_free_during_recording.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gpu_memory_safety.jl"))
+foreachbackend(joinpath(@__DIR__, "test_kernel_cache.jl"))
+foreachbackend(joinpath(@__DIR__, "test_multitypeset_surgical.jl"))
+# Recording a plan big enough to allocate while it is being written.
+foreachbackend(joinpath(@__DIR__, "test_no_pool_trim_while_recorded.jl"))
+# The other end of the same allocator: what happens when the
+# device says no. Only reachable by asking for more VRAM than
+# exists, so nothing else covers it.
+foreachbackend(joinpath(@__DIR__, "test_pool_alloc_oom.jl"))
+foreachbackend(joinpath(@__DIR__, "test_pool_trim.jl"))
+foreachbackend(joinpath(@__DIR__, "test_rapid_alloc_free.jl"))
+foreachbackend(joinpath(@__DIR__, "test_backend_context.jl"))
+foreachbackend(joinpath(@__DIR__, "test_backend_equality.jl"))
+foreachbackend(joinpath(@__DIR__, "test_batch_queue_lifetime.jl"))
+foreachbackend(joinpath(@__DIR__, "test_device_caps.jl"))
+foreachbackend(joinpath(@__DIR__, "test_device_identity.jl"))
+foreachbackend(joinpath(@__DIR__, "test_discarded_iteration_prepare.jl"))
+foreachbackend(joinpath(@__DIR__, "test_partitioned_recording.jl"))
+foreachbackend(joinpath(@__DIR__, "test_phase3_lifecycle.jl"))
+foreachbackend(joinpath(@__DIR__, "test_recorded_run_semantics.jl"))
+foreachbackend(joinpath(@__DIR__, "test_repeat.jl"))
+foreachbackend(joinpath(@__DIR__, "test_repeat_inner_3d.jl"))
+foreachbackend(joinpath(@__DIR__, "test_traced_usages.jl"))
+foreachbackend(joinpath(@__DIR__, "test_waitidle_submits.jl"))
+foreachbackend(joinpath(@__DIR__, "test_graphics_pipeline.jl"))
+foreachbackend(joinpath(@__DIR__, "test_video_decode.jl"))
+
+foreachbackend(joinpath(@__DIR__, "test_access_kernels.jl"))
+foreachbackend(joinpath(@__DIR__, "test_device_array_wrappers.jl"))
+foreachbackend(joinpath(@__DIR__, "test_two_devices.jl"))
+foreachbackend(joinpath(@__DIR__, "test_mapreduce_struct_eltypes.jl"))
+foreachbackend(joinpath(@__DIR__, "test_uploads_back_to_back.jl"))
+foreachbackend(joinpath(@__DIR__, "test_mesh_geometry_draw.jl"))
+foreachbackend(joinpath(@__DIR__, "test_texture_sampling.jl"))
+foreachbackend(joinpath(@__DIR__, "test_render_graph.jl"))
+foreachbackend(joinpath(@__DIR__, "test_trace_hwtlas.jl"))
+foreachbackend(joinpath(@__DIR__, "test_trace_hit_record.jl"))
+foreachbackend(joinpath(@__DIR__, "test_trace_procedural.jl"))
+foreachbackend(joinpath(@__DIR__, "test_recorded_plan_runs.jl"))
+foreachbackend(joinpath(@__DIR__, "test_pool_on_device.jl"))
+foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
+
 # ── the window tests, in their own process, on a clock ────────────────────────
 #
 # `test_window.jl` can BLOCK, and its own header says so and says to run it alone
@@ -826,12 +889,7 @@ global METAL_TESTS = joinpath(@__DIR__, "metal")
 
 if _METAL_OK
     @testset "Metal backend" begin
-        for f in ("test_pool_metal.jl", "test_kernelinterface_metal.jl",
-                  "test_graph_metal.jl", "test_raytracing_metal.jl",
-                  "test_trace_metal.jl", "test_hwtlas_metal.jl",
-                  "test_residency_metal.jl", "test_graphics_metal.jl",
-                  "test_render_graph_metal.jl", "test_record_metal.jl",
-                  "test_device_metal.jl", "test_recorded_move_metal.jl")
+        for f in ("test_kernelinterface_metal.jl", "test_window_metal.jl")
             @testset "$f" begin
                 include(joinpath(METAL_TESTS, f))
             end
@@ -855,6 +913,11 @@ global VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
 
 if _VULKAN_OK
 @testset "Vulkan backend" begin
+        # The automatic trim, its rate limit and its GC budget: Vulkan's
+        # `pool_alloc` policy. Core's pool trims only when asked (`test_pool_trim.jl`).
+        @testset "pool trim policy" begin
+            include(joinpath(VULKAN_TESTS, "test_pool_trim_policy.jl"))
+        end
 
         # Source-and-bindings only, no device. First, so it is reported before
         # anything that can take a device down with it — and because what it
@@ -956,7 +1019,6 @@ if _VULKAN_OK
 
         # ── Tier 3v: hardware H.264 video decode (skips without a video-decode queue) ──
         @testset "Tier 3v: H.264 hardware decode" begin
-            include(joinpath(VULKAN_TESTS, "test_video_decode.jl"))
         end
 
 
@@ -1043,7 +1105,6 @@ if _VULKAN_OK
         # The one field the multi-device work rests on. Needs no second GPU: what it
         # pins is that "this device" and "whichever is current" stay distinguishable.
         @testset "a backend knows its device" begin
-            include(joinpath(VULKAN_TESTS, "test_backend_context.jl"))
         end
 
 
@@ -1058,7 +1119,6 @@ if _VULKAN_OK
         # device's backend land THERE, not on the default. Skips loudly without
         # a software rasterizer.
         @testset "a device is an explicit argument" begin
-            include(joinpath(VULKAN_TESTS, "test_device_identity.jl"))
         end
 
 
@@ -1075,7 +1135,6 @@ if _VULKAN_OK
         # process global. This is the structural guard the HWTLAS leak needed —
         # fixing the sites by hand does not stop the next one being written.
         @testset "no device-less allocation in the backend" begin
-            include(joinpath(VULKAN_TESTS, "test_no_ambient_allocation.jl"))
         end
 
 
@@ -1085,15 +1144,8 @@ if _VULKAN_OK
         # can still give the right answer by luck. See the file for the five
         # separate pieces of module-scope device state it found.
         @testset "two devices in one process" begin
-            include(joinpath(VULKAN_TESTS, "twodevice_probe.jl"))
-            # Lavapipe is the second device, and not every machine has it: the
-            # Windows AMD driver box enumerates its GPU alone. Skipped loudly, as
-            # the shutdown check below does, rather than erroring in `VkContext`.
-            if any(i -> i.kind == :cpu, Mantle.devices(Mantle.VulkanAPI()))
-                probe()
-            else
-                @info "no lavapipe device here; the two-device probe needs a second driver"
-            end
+            # Two devices computing side by side: `test_two_devices.jl`, on every
+            # backend. What stays here is the exit below.
             # And that the process can then EXIT. A passing probe is not enough:
             # the crash is in the shutdown finalizer sweep, after every summary
             # has printed. Nothing inside this process can observe that, so the
@@ -1118,25 +1170,16 @@ if _VULKAN_OK
 
 
         @testset "recording" begin
-            include(joinpath(VULKAN_TESTS, "test_recorded_run_semantics.jl"))
-            # Recording a plan big enough to allocate while it is being written.
-            include(joinpath(VULKAN_TESTS, "test_no_pool_trim_while_recorded.jl"))
-            include(joinpath(VULKAN_TESTS, "test_traced_usages.jl"))
 
-            include(joinpath(VULKAN_TESTS, "test_partitioned_recording.jl"))
             include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
             # No open command buffer on the queue: every call closes and submits
             # what it wrote, and a run is one submission.
             include(joinpath(VULKAN_TESTS, "test_closed_command_buffers.jl"))
-            include(joinpath(VULKAN_TESTS, "test_sweep_per_queue.jl"))
-            include(joinpath(VULKAN_TESTS, "test_discarded_iteration_prepare.jl"))
-            include(joinpath(VULKAN_TESTS, "test_backend_equality.jl"))
         end
 
         # What "wait for the GPU" has to mean when Mantle owns submission: a
         # wait that ignores the batch the caller is still holding is not one.
         @testset "waiting" begin
-            include(joinpath(VULKAN_TESTS, "test_waitidle_submits.jl"))
         end
 
         # A loop recorded once whose trip count the device decides. Also the
@@ -1144,7 +1187,6 @@ if _VULKAN_OK
         # predicate buffer without `CONDITIONAL_RENDERING_BIT` is undefined, and
         # the two drivers here disagreed — RADV answered correctly, NVIDIA hung.
         @testset "repeat!" begin
-            include(joinpath(VULKAN_TESTS, "test_repeat.jl"))
         end
 
 
@@ -1178,7 +1220,6 @@ if _VULKAN_OK
         # Past the driver's memory budget is out of memory, also where RADV would
         # have moved buffers to system memory (which froze a desktop, 2026-10-06).
         @testset "allocation budget" begin
-            include(joinpath(VULKAN_TESTS, "test_alloc_budget.jl"))
         end
 
 
@@ -1191,14 +1232,12 @@ if _VULKAN_OK
 
         # `vk_context` had methods for three of AnyLavaArray's six wrappers.
         @testset "vk_context through array wrappers" begin
-            include(joinpath(VULKAN_TESTS, "test_vk_context_wrappers.jl"))
         end
 
 
         # The buffer-lifetime case behind the intermittent flush hang. Asserted on
         # the state machine, not by provoking the hang — see the file.
         @testset "free during recording" begin
-            include(joinpath(VULKAN_TESTS, "test_free_during_recording.jl"))
         end
 
 
@@ -1264,7 +1303,6 @@ if _VULKAN_OK
         end
 
         @testset "what a submission holds" begin
-            include(joinpath(VULKAN_TESTS, "test_hold_lifetime.jl"))
         end
 
         @testset "index buffers" begin
@@ -1274,19 +1312,15 @@ if _VULKAN_OK
         end
 
         @testset "phase 2 — error surfacing" begin
-            include(joinpath(VULKAN_TESTS, "test_phase2_errors.jl"))
         end
 
         @testset "phase 3 — lifecycle" begin
-            include(joinpath(VULKAN_TESTS, "test_phase3_lifecycle.jl"))
         end
 
         @testset "phase 4 — single writer" begin
-            include(joinpath(VULKAN_TESTS, "test_phase4_singlethread.jl"))
         end
 
         @testset "phase 5 — transfer path" begin
-            include(joinpath(VULKAN_TESTS, "test_phase5_copy.jl"))
         end
 
         # `test_phase6_graphics.jl` was here, and it is deleted with the thing
@@ -1326,22 +1360,18 @@ if _VULKAN_OK
         end
 
             @testset "Tier 3d: SPIR-V Pattern Correctness & Stress" begin
-                include(joinpath(VULKAN_TESTS, "test_repeat_inner_3d.jl"))
             end
 
             @testset "Tier 3e: GPU Memory Safety" begin
-                include(joinpath(VULKAN_TESTS, "test_gpu_memory_safety.jl"))
             end
 
             @testset "Tier 3e2: BAR Memcpy Sync" begin
             end
 
             @testset "Tier 3e3: MultiTypeSet Surgical" begin
-                include(joinpath(VULKAN_TESTS, "test_multitypeset_surgical.jl"))
             end
 
             @testset "Tier 3f: Caching & Allocations" begin
-                include(joinpath(VULKAN_TESTS, "test_caching_and_allocations.jl"))
             end
 
 
@@ -1349,13 +1379,11 @@ if _VULKAN_OK
         # SPIR-V kept with each `CodeInstance`: an edited kernel is launched with
         # its new code, an unrelated definition compiles nothing.
         @testset "Tier 3h: Kernel Cache" begin
-            include(joinpath(VULKAN_TESTS, "test_kernel_cache.jl"))
         end
 
 
         # ── Tier 3g: Graphics Pipeline ──
         @testset "Tier 3g: Graphics Pipeline" begin
-            include(joinpath(VULKAN_TESTS, "test_graphics_pipeline.jl"))
         end
 
 
@@ -1375,12 +1403,10 @@ if _VULKAN_OK
 
 
             @testset "holdleaves! stops at a VulkanTLAS" begin
-                include(joinpath(VULKAN_TESTS, "test_hold_trace.jl"))
             end
 
 
             @testset "held buffer lifetime" begin
-                include(joinpath(VULKAN_TESTS, "test_held_buffer_lifetime.jl"))
             end
 
 
@@ -1389,18 +1415,12 @@ if _VULKAN_OK
 
 
             @testset "pool trim" begin
-                include(joinpath(VULKAN_TESTS, "test_pool_trim.jl"))
-                # The other end of the same allocator: what happens when the
-                # device says no. Only reachable by asking for more VRAM than
-                # exists, so nothing else covers it.
-                include(joinpath(VULKAN_TESTS, "test_pool_alloc_oom.jl"))
             end
 
 
             # Ported to the per-channel deferred-free list; it names
             # `drain_deferred_frees!(bq)` and not the module-level lists.
             @testset "rapid alloc/free" begin
-                include(joinpath(VULKAN_TESTS, "test_rapid_alloc_free.jl"))
             end
 
 
@@ -1409,13 +1429,11 @@ if _VULKAN_OK
 
 
             @testset "device capabilities" begin
-                include(joinpath(VULKAN_TESTS, "test_device_caps.jl"))
             end
 
 
             @testset "debug configuration" begin
                 include(joinpath(VULKAN_TESTS, "test_debug_config.jl"))
-                include(joinpath(VULKAN_TESTS, "test_dispatch_allocation.jl"))
             end
 
 
@@ -1468,7 +1486,6 @@ if _VULKAN_OK
             end
 
             @testset "argument memory isolation" begin
-                include(joinpath(VULKAN_TESTS, "test_argument_memory_isolation.jl"))
             end
 
             @testset "an indirect dispatch follows its own prepare" begin
@@ -1478,7 +1495,6 @@ if _VULKAN_OK
             # when nothing holds it. Its own file because no render test reaches it:
             # only device→device from a temporary is affected.
             @testset "copyto! from a dropped source" begin
-                include(joinpath(VULKAN_TESTS, "test_copyto_dropped_source.jl"))
             end
 
             # Who owns a queue from `allocate_batch_queue!`. A dropped one whose
@@ -1486,7 +1502,6 @@ if _VULKAN_OK
             # and the buffer finalizer's `vkGetSemaphoreCounterValue` then segfaulted
             # inside the driver.
             @testset "batch queue lifetime" begin
-                include(joinpath(VULKAN_TESTS, "test_batch_queue_lifetime.jl"))
             end
 
             # A `transpose(::LavaArray)` destination is not a `LavaArray`, so it
@@ -1503,7 +1518,6 @@ if _VULKAN_OK
             end
 
             @testset "compute" begin
-                include(joinpath(VULKAN_TESTS, "mwe_alloc_dispatch_free_loop.jl"))
             end
 
             @testset "RT direct" begin
