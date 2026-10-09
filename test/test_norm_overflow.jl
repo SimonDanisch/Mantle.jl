@@ -13,8 +13,9 @@
 # rescaling edges).
 
 using Test
-using Lava, Mantle
+using Mantle
 using LinearAlgebra
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "norm 2-norm FTZ rescaling (Float64/ComplexF64)" begin
     for T in (Float64, ComplexF64)
@@ -24,21 +25,21 @@ using LinearAlgebra
             # naive `x/maxabs` reciprocal would be subnormal → 0 under FTZ.
             arr = rand(T, sz)
             arr[1] = T(floatmax(R) / 2)
-            @test norm(Mantle.LavaArray(arr), 2) ≈ norm(arr, 2)
+            @test norm(Mantle.devicearray(TESTBACKEND, arr), 2) ≈ norm(arr, 2)
 
             # Underflow edge: all elements subnormal-adjacent.
             arr_lo = fill(T(floatmin(R) * 2), sz)
-            @test norm(Mantle.LavaArray(arr_lo), 2) ≈ norm(arr_lo, 2)
+            @test norm(Mantle.devicearray(TESTBACKEND, arr_lo), 2) ≈ norm(arr_lo, 2)
 
             # Normal magnitudes must remain exact.
             arr_n = rand(T, sz)
-            @test norm(Mantle.LavaArray(arr_n), 2) ≈ norm(arr_n, 2)
+            @test norm(Mantle.devicearray(TESTBACKEND, arr_n), 2) ≈ norm(arr_n, 2)
         end
     end
 
     # Direct check of the failing kernel value: sum of (x/maxabs)^2 must be ~1
     # for a single dominant element, not 0.
-    let v = Mantle.LavaArray([floatmax(Float64) / 2, 0.5])
+    let v = Mantle.devicearray(TESTBACKEND, [floatmax(Float64) / 2, 0.5])
         maxabs = convert(Float64, maximum(abs, v))
         @test Mantle.lava_norm_p2_rescale(v, maxabs) ≈ floatmax(Float64) / 2
     end

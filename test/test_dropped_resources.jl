@@ -20,6 +20,7 @@ of whenever a GC happens. What it is not any more is mandatory.
 
 using Test, Mantle, KernelAbstractions
 import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 const M = Mantle
 
 function drop_addone!(a, n::Int32)

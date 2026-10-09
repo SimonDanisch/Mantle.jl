@@ -4,12 +4,13 @@
 
 using Test
 import Mantle as M
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "base alignment of a device array" begin
     t = M.TransientBuffer{Float16,1}((64,), typemax(Int), 0, nothing, 0)
-    dev = M.Device(M.LavaBackend())
+    dev = M.Device(TESTBACKEND)
     @test M.alignment(dev, t) >= M.TRANSIENT_ALIGN_FLOOR
-    a = M.LavaArray(zeros(Float16, 64))
+    a = Mantle.devicearray(TESTBACKEND, zeros(Float16, 64))
     @test M.basealignment(a) >= 16
     # The offset lives inside the view: 4 halves in is 8 bytes.
     @test M.basealignment(view(a, 5:64)) == 8

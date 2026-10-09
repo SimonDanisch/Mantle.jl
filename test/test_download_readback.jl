@@ -14,12 +14,13 @@
 # loose on purpose — 16 MB in under 160 ms is 100 MB/s, three times the
 # write-combined figure and well under what a cached memcpy does — so it holds
 # on a slow PCIe link and on lavapipe, and fails only for the mistake it pins.
-using Test, Mantle, Lava
+using Test, Mantle
 import KernelAbstractions as KA
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "a download stages through Readback, at cached speed" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    backend = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    backend = TESTBACKEND
     n = 4 * 1024 * 1024                      # 16 MB of Float32
     host = rand(Float32, n)
     a = KA.allocate(backend, Float32, n)

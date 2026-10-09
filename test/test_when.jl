@@ -17,6 +17,7 @@ The assertions below are the four places this can be quietly wrong.
 
 using Test, Mantle, KernelAbstractions
 import KernelInterface as KI
+include(joinpath(@__DIR__, "testbackend.jl"))
 const M = Mantle
 
 function when_addone!(a, n::Int32)

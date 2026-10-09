@@ -2,8 +2,8 @@
 `mapreducedim!` into a transposed destination.
 
 `Base.mapreducedim!` routes every GPU-array destination to
-`GPUArrays.mapreducedim!`, but `transpose(::LavaArray)` is a `Transpose`, not a
-`LavaArray`, so it misses any method written for one and hits GPUArrays'
+`GPUArrays.mapreducedim!`, but `transpose` of a device array is a `Transpose`, not a
+device array, so it misses any method written for one and hits GPUArrays'
 generic `error("Not implemented")`. The GPUArrays conformance suite reduces
 into
 `transpose(...)`/`adjoint(...)` for every eltype it tests, so this one gap
@@ -16,7 +16,8 @@ a conjugated one for `adjoint`, so a test that only reads `collect(R)`, or that
 only uses real eltypes, passes against the broken implementation.
 """
 
-using Test, Lava, LinearAlgebra, GPUArrays
+using Test, LinearAlgebra, GPUArrays
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "mapreducedim! into transposed destinations" begin
     # The shapes the conformance suite uses: a vector parent presented as a row,
@@ -28,9 +29,9 @@ using Test, Lava, LinearAlgebra, GPUArrays
             A = ET <: Complex ? convert(Array{ET}, rand(1:5, szA) .+ rand(1:5, szA) .* im) :
                                 convert(Array{ET}, rand(1:5, szA))
 
-            P_cpu, P_gpu = zeros(ET, szR), LavaArray(zeros(ET, szR))
+            P_cpu, P_gpu = zeros(ET, szR), Mantle.devicearray(TESTBACKEND, zeros(ET, szR))
             Base.mapreducedim!(f, +, wrap(P_cpu), A)
-            Base.mapreducedim!(f, +, wrap(P_gpu), LavaArray(A))
+            Base.mapreducedim!(f, +, wrap(P_gpu), Mantle.devicearray(TESTBACKEND, A))
 
             @test Array(P_gpu) == P_cpu
         end
@@ -42,8 +43,8 @@ using Test, Lava, LinearAlgebra, GPUArrays
     # passes everything above on real eltypes.
     @testset "adjoint conjugates on write" begin
         A = Complex{Int64}[1+1im 2+2im; 3+3im 4+4im]
-        store(wrap) = (P = LavaArray(zeros(Complex{Int64}, 2));
-                       Base.mapreducedim!(identity, +, wrap(P), LavaArray(A));
+        store(wrap) = (P = Mantle.devicearray(TESTBACKEND, zeros(Complex{Int64}, 2));
+                       Base.mapreducedim!(identity, +, wrap(P), Mantle.devicearray(TESTBACKEND, A));
                        Array(P))
 
         @test store(transpose) == Complex{Int64}[4+4im, 6+6im]
@@ -55,14 +56,14 @@ using Test, Lava, LinearAlgebra, GPUArrays
     # overwriting it, and the seed has to be read back *through* the wrapper.
     @testset "accumulates into existing contents" begin
         A = Float32[1 2; 3 4]
-        P = LavaArray(Float32[10, 20])
-        Base.mapreducedim!(identity, +, transpose(P), LavaArray(A))
+        P = Mantle.devicearray(TESTBACKEND, Float32[10, 20])
+        Base.mapreducedim!(identity, +, transpose(P), Mantle.devicearray(TESTBACKEND, A))
         @test Array(P) == Float32[14, 26]
     end
 
     @testset "returns the destination it was given" begin
-        R = transpose(LavaArray(ones(Int64, (2, 3))))
-        @test Base.mapreducedim!(identity, *, R, LavaArray(rand(1:5, (3, 2, 10)))) === R
+        R = transpose(Mantle.devicearray(TESTBACKEND, ones(Int64, (2, 3))))
+        @test Base.mapreducedim!(identity, *, R, Mantle.devicearray(TESTBACKEND, rand(1:5, (3, 2, 10)))) === R
     end
 end
 
@@ -88,9 +89,9 @@ end
             A = convert(Array{ET}, reshape(collect(1:prod(szA)), szA))
             seed = convert(Array{ET}, reshape(collect(10:10:10*prod(szR)), szR))
 
-            R_cpu, R_gpu = copy(seed), LavaArray(copy(seed))
+            R_cpu, R_gpu = copy(seed), Mantle.devicearray(TESTBACKEND, copy(seed))
             Base.mapreducedim!(identity, op, R_cpu, A)
-            Base.mapreducedim!(identity, op, R_gpu, LavaArray(A))
+            Base.mapreducedim!(identity, op, R_gpu, Mantle.devicearray(TESTBACKEND, A))
 
             @test Array(R_gpu) == R_cpu
         end
@@ -99,11 +100,11 @@ end
     # The other half of the contract: an explicit `init` is applied once per
     # result, as in Base, whatever memory the result is allocated in.
     @testset "an explicit init starts each result" begin
-        A = LavaArray(Float32[1 2; 3 4])
+        A = Mantle.devicearray(TESTBACKEND, Float32[1 2; 3 4])
         @test Array(sum(A; dims = 2, init = 10.0f0)) == reshape(Float32[13, 17], 2, 1)
 
-        @test sum(LavaArray(Float32[1, 2, 3, 4])) == 10.0f0
-        @test Array(sum(LavaArray(Float32[1 2; 3 4]); dims = 2)) == reshape(Float32[3, 7], 2, 1)
-        @test prod(LavaArray(Float32[1, 2, 3, 4])) == 24.0f0
+        @test sum(Mantle.devicearray(TESTBACKEND, Float32[1, 2, 3, 4])) == 10.0f0
+        @test Array(sum(Mantle.devicearray(TESTBACKEND, Float32[1 2; 3 4]); dims = 2)) == reshape(Float32[3, 7], 2, 1)
+        @test prod(Mantle.devicearray(TESTBACKEND, Float32[1, 2, 3, 4])) == 24.0f0
     end
 end

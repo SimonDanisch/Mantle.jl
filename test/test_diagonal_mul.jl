@@ -14,27 +14,28 @@
 # to keep: a diagonal operand is a scaling, and routing it through the dense GEMM
 # would materialise the zeros.
 
-using Test, Lava, LinearAlgebra
+using Test, LinearAlgebra
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "Diagonal mul! disambiguation" begin
     n, m = 6, 4
     hd = rand(Float32, n); hB = rand(Float32, n, m); hC = rand(Float32, n, m)
     α, β = 2.0f0, 3.0f0
 
-    D = Diagonal(Mantle.LavaArray(copy(hd)))
-    B = Mantle.LavaArray(copy(hB))
-    C = Mantle.LavaArray(copy(hC))
+    D = Diagonal(Mantle.devicearray(TESTBACKEND, copy(hd)))
+    B = Mantle.devicearray(TESTBACKEND, copy(hB))
+    C = Mantle.devicearray(TESTBACKEND, copy(hC))
     LinearAlgebra.mul!(C, D, B, α, β)
     @test Array(C) ≈ α .* Diagonal(hd) * hB .+ β .* hC
 
     # β = 0 must ignore C's existing contents rather than scale them.
-    C0 = Mantle.LavaArray(copy(hC))
+    C0 = Mantle.devicearray(TESTBACKEND, copy(hC))
     LinearAlgebra.mul!(C0, D, B, 1.0f0, 0.0f0)
     @test Array(C0) ≈ Diagonal(hd) * hB
 
     # The dense path must be unaffected by the added method.
-    A = Mantle.LavaArray(rand(Float32, n, n))
-    C2 = Mantle.LavaArray(zeros(Float32, n, m))
+    A = Mantle.devicearray(TESTBACKEND, rand(Float32, n, n))
+    C2 = Mantle.devicearray(TESTBACKEND, zeros(Float32, n, m))
     LinearAlgebra.mul!(C2, A, B, 1.0f0, 0.0f0)
     @test Array(C2) ≈ Array(A) * hB
 
@@ -46,22 +47,22 @@ using Test, Lava, LinearAlgebra
     # Non-square on purpose: D scales COLUMNS here, so a square shape would hide a
     # rows/columns mix-up.
     hE = rand(Float32, m, n); hdn = rand(Float32, n)
-    Dn = Diagonal(Mantle.LavaArray(copy(hdn)))
-    E  = Mantle.LavaArray(copy(hE))
+    Dn = Diagonal(Mantle.devicearray(TESTBACKEND, copy(hdn)))
+    E  = Mantle.devicearray(TESTBACKEND, copy(hE))
     hC3 = rand(Float32, m, n)
-    C3 = Mantle.LavaArray(copy(hC3))
+    C3 = Mantle.devicearray(TESTBACKEND, copy(hC3))
     LinearAlgebra.mul!(C3, E, Dn, α, β)
     @test Array(C3) ≈ α .* hE * Diagonal(hdn) .+ β .* hC3
 
-    C4 = Mantle.LavaArray(copy(hC3))
+    C4 = Mantle.devicearray(TESTBACKEND, copy(hC3))
     LinearAlgebra.mul!(C4, E, Dn, 1.0f0, 0.0f0)
     @test Array(C4) ≈ hE * Diagonal(hdn)
 
     # ComplexF32 too: it is the other eltype GPUArrays exercises, and a conjugation
     # mistake would only show here.
     hEc = rand(ComplexF32, m, n); hdc = rand(ComplexF32, n)
-    Ec = Mantle.LavaArray(copy(hEc)); Dc = Diagonal(Mantle.LavaArray(copy(hdc)))
-    C5 = Mantle.LavaArray(zeros(ComplexF32, m, n))
+    Ec = Mantle.devicearray(TESTBACKEND, copy(hEc)); Dc = Diagonal(Mantle.devicearray(TESTBACKEND, copy(hdc)))
+    C5 = Mantle.devicearray(TESTBACKEND, zeros(ComplexF32, m, n))
     LinearAlgebra.mul!(C5, Ec, Dc, one(ComplexF32), zero(ComplexF32))
     @test Array(C5) ≈ hEc * Diagonal(hdc)
 
@@ -70,11 +71,11 @@ using Test, Lava, LinearAlgebra
     # whether the off-diagonal is written or merely scaled.
     for T in (Float32, ComplexF32)
         ha, hb, hC6 = rand(T, n), rand(T, n), rand(T, n, n)
-        Da, Db = Diagonal(Mantle.LavaArray(copy(ha))), Diagonal(Mantle.LavaArray(copy(hb)))
-        C6 = Mantle.LavaArray(copy(hC6))
+        Da, Db = Diagonal(Mantle.devicearray(TESTBACKEND, copy(ha))), Diagonal(Mantle.devicearray(TESTBACKEND, copy(hb)))
+        C6 = Mantle.devicearray(TESTBACKEND, copy(hC6))
         LinearAlgebra.mul!(C6, Da, Db, T(2), T(3))
         @test Array(C6) ≈ 2 .* Diagonal(ha) * Diagonal(hb) .+ 3 .* hC6
-        C7 = Mantle.LavaArray(fill(T(NaN), n, n))
+        C7 = Mantle.devicearray(TESTBACKEND, fill(T(NaN), n, n))
         LinearAlgebra.mul!(C7, Da, Db, one(T), zero(T))
         @test Array(C7) ≈ Diagonal(ha) * Diagonal(hb)
     end

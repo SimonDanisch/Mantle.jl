@@ -1,4 +1,4 @@
-using Test, Lava, Mantle
+using Test, Mantle
 using Mantle: UnitCube, gjk, GJKResult, transform_point, support_AB
 using GeometryBasics: Vec3f
 

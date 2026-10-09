@@ -1,4 +1,4 @@
-using Test, Lava, Mantle
+using Test, Mantle
 using Mantle: ContactRecord
 using GeometryBasics: Vec3f
 

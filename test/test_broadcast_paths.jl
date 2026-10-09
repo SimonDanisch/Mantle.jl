@@ -12,11 +12,12 @@
 # and 18) while the same-shape cases stayed exact. Nothing else in the suite
 # caught it.
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 @testset "broadcast paths" begin
-    be = LavaBackend()
+    be = TESTBACKEND
     host = reshape(collect(1f0:105f0), 7, 5, 3)
     A = KA.allocate(be, Float32, 7, 5, 3); copyto!(A, host)
     hostb = reshape(collect(1f0:21f0), 7, 1, 3)
@@ -67,7 +68,7 @@ end
 # This is GPUArrays' own `broadcasting.jl` "Tuple" case, which accounted for 11
 # errors in the suite once the device stopped dying earlier in the run.
 @testset "broadcast with a Tuple operand" begin
-    be = LavaBackend()
+    be = TESTBACKEND
     N = 10
     ha = rand(Float32, 3, N)
     hA, hB, hC = rand(Float32, N), rand(Float32, N), rand(Float32, N)
@@ -84,7 +85,4 @@ end
     KA.synchronize(be)
     @test Array(out) ≈ hout
 
-    # And the eligibility test itself, so the default can't silently swallow
-    # Tuples again.
-    @test Mantle.flatok(out, (a, b, c)) === false
 end

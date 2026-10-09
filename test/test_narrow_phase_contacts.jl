@@ -1,6 +1,7 @@
 using Test, Mantle
 using Mantle: UnitCube, ContactRecord, narrow_phase_contacts_kernel
 using GeometryBasics: Vec3f
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 # Shared narrow-phase helpers — see test/narrow_phase_helpers.jl.
 isdefined(@__MODULE__, :tx) ||
@@ -12,7 +13,7 @@ isdefined(@__MODULE__, :tx) ||
 # grains; the contact buffer is sized `n_grains * max_contacts`. Returns
 # (counters, contacts).
 function run_compact(transforms, pairs, shape, n_grains, max_contacts)
-    dev = Mantle.todevice(Mantle.defaultbackend())
+    dev = Mantle.Device(TESTBACKEND)
     sentinel = ContactRecord(typemax(UInt32), typemax(UInt32),
                              Vec3f(0f0, 0f0, 0f0),
                              Vec3f(0f0, 0f0, 0f0),

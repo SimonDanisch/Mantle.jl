@@ -1,5 +1,5 @@
 """
-`permutedims!` on a LavaArray: the right answer first, the throughput second.
+`permutedims!` on a device array: the right answer first, the throughput second.
 
 Written after a version that used `perm` where it needed `invperm(perm)` passed a
 throughput benchmark — because the shape being benchmarked, `(1,3,2,4)`, is
@@ -7,11 +7,12 @@ self-inverse — and then produced garbage for SAM 2, whose encoder also uses
 permutations that are not. Every case here is checked against Base.
 """
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
-@testset "permutedims! on LavaArray" begin
-    back = LavaBackend()
+@testset "permutedims! on a device array" begin
+    back = TESTBACKEND
 
     @testset "matches Base, including non-self-inverse permutations" begin
         cases = (((4, 6, 8), (2, 1, 3)),        # self-inverse

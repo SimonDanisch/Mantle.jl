@@ -15,10 +15,8 @@ these types. The two assertions below are the two halves of that: the fallback
 actually computes the right answer, and the numeric path is still Lava's own.
 """
 
-using Test, Lava, Mantle, LinearAlgebra, GPUArrays
-
-# Bound by the suite's preamble for every file; standalone, bind them here.
-@isdefined(LavaArray) || (LavaArray = Mantle.LavaArray)
+using Test, Mantle, LinearAlgebra, GPUArrays
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 # Everything `GPUArrays.generic_matmatmul!`'s kernel asks of an element type.
 # `zero` is needed for an INSTANCE, not just the type: the kernel seeds its
@@ -40,26 +38,21 @@ Base.:(*)(x::Number, y::Pair2) = Pair2(x * y.a, x * y.b)
         A = [Pair2(T(i), T(2i)) for i in 1:n, _ in 1:n]
         B = T.(reshape(1:n^2, n, n))
 
-        @test Array(LavaArray(A) * LavaArray(B)) == A * B
-        @test Array(LavaArray(B) * LavaArray(A)) == B * A
+        @test Array(Mantle.devicearray(TESTBACKEND, A) * Mantle.devicearray(TESTBACKEND, B)) == A * B
+        @test Array(Mantle.devicearray(TESTBACKEND, B) * Mantle.devicearray(TESTBACKEND, A)) == B * A
     end
 
     # Which method handles what. Narrowing the bound too far would send numeric
     # GEMMs to the generic elementwise kernel — still correct, and a large silent
     # performance regression, so it is worth pinning rather than inferring from a
-    # timing.
+    # timing. Asked of the device's own array type: a numeric GEMM is the
+    # device's, and only the element type no GEMM covers falls to GPUArrays.
     @testset "dispatch stays where it belongs" begin
-        numeric = Base.which(LinearAlgebra.mul!,
-                             Tuple{LavaArray{Float32,2}, LavaArray{Float32,2},
-                                   LavaArray{Float32,2}, Bool, Bool})
-        # MantleVulkanExt, not Mantle core: the array type and its GEMM moved
-        # to the Vulkan extension in the runtime split — the assertion is that
-        # the method belongs to the module that owns the type.
-        @test parentmodule(numeric) === Mantle
-
-        generic = Base.which(LinearAlgebra.mul!,
-                             Tuple{LavaArray{Pair2{Float32},2}, LavaArray{Pair2{Float32},2},
-                                   LavaArray{Float32,2}, Bool, Bool})
-        @test parentmodule(generic) !== Lava
+        arraytype(T) = typeof(Mantle.devicearray(TESTBACKEND, zeros(T, 1, 1)))
+        F, P = arraytype(Float32), arraytype(Pair2{Float32})
+        numeric = Base.which(LinearAlgebra.mul!, Tuple{F, F, F, Bool, Bool})
+        @test parentmodule(numeric) !== GPUArrays
+        generic = Base.which(LinearAlgebra.mul!, Tuple{P, F, P, Bool, Bool})
+        @test parentmodule(generic) === GPUArrays
     end
 end

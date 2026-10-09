@@ -1,6 +1,7 @@
 using Test, Mantle
 using Mantle: UnitCube, EPAResult, narrow_phase_kernel, NO_CONTACT, gjk, epa
 using GeometryBasics: Vec3f
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 # Shared narrow-phase helpers — see test/narrow_phase_helpers.jl.  Provides
 # `tx` (alias for `translation_transform`) and the other transform builders.
@@ -16,7 +17,7 @@ narrow_sentinel() = EPAResult(Vec3f(99, 99, 99), 99f0, Vec3f(88, 88, 88), 77, fa
 # that backend cannot compile; the host reference the kernel is held to is
 # `gjk`/`epa` called directly, in the last testset below.
 function run_narrow_phase(transforms, pairs, shape)
-    dev = Mantle.todevice(Mantle.defaultbackend())
+    dev = Mantle.Device(TESTBACKEND)
     t = Mantle.Buffer(dev, transforms)
     p = Mantle.Buffer(dev, pairs)
     r = Mantle.Buffer(dev, fill(narrow_sentinel(), length(pairs)))

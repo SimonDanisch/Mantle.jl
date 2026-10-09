@@ -1,4 +1,4 @@
-using Test, Lava, Mantle
+using Test, Mantle
 using Mantle: UnitCube, gjk, GJKResult, epa, EPAResult
 using GeometryBasics: Vec3f
 using LinearAlgebra: norm

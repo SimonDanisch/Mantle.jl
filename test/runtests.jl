@@ -512,32 +512,13 @@ include(joinpath(@__DIR__, "test_core_names_no_backend.jl"))
 include(joinpath(@__DIR__, "test_mantle_owns_it.jl"))
 
 
-"""
-    foreachbackend(path)
+include(joinpath(@__DIR__, "test_contact_record.jl"))
+include(joinpath(@__DIR__, "test_convex_shape.jl"))
+include(joinpath(@__DIR__, "test_gjk.jl"))
+include(joinpath(@__DIR__, "test_epa.jl"))
+include(joinpath(@__DIR__, "test_backend_vocabulary.jl"))
 
-Run a portable test file once for every backend this machine can use.
-
-Each run gets a fresh module, so the file's own `const`s are defined once per
-backend instead of redefined; the file reads `Main.MANTLE_TEST_BACKEND`.
-
-This exists because the files it is called on hardcoded `VulkanAPI()` 57 times
-between them — `test_window.jl` 35 times — so windows, surfaces, resize,
-presentation, arena recording and device ranges were only ever checked against
-one backend. Both bugs a person found by looking at a window in September 2026
-were in that blind spot.
-"""
-function foreachbackend(path)
-    bes = Mantle.eachbackend()
-    isempty(bes) && @info "no usable backend, skipping" file = basename(path)
-    for be in bes
-        @eval Main MANTLE_TEST_BACKEND = $be
-        @info "portable tests" file = basename(path) backend = nameof(typeof(be))
-        @eval Main module $(gensym(:PortableRun))
-            using Test
-            include($path)
-        end
-    end
-end
+include(joinpath(@__DIR__, "foreachbackend.jl"))
 
 # NOT gated on `_VULKAN_OK` any more. Everything below runs once per backend
 # `Mantle.eachbackend()` reports, which on a machine with no Vulkan driver is
@@ -591,6 +572,28 @@ foreachbackend(joinpath(@__DIR__, "test_argument_packing.jl"))
 # compile beside its arguments, rather than in a slab ring the queue rewinds.
 # The path is spelled out because `VULKAN_TESTS` is not bound until further down.
 _VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
+
+# ── device tests from test/vulkan and test/metal, now on every backend ──
+
+foreachbackend(joinpath(@__DIR__, "test_broadcast_paths.jl"))
+foreachbackend(joinpath(@__DIR__, "test_diagonal_mul.jl"))
+foreachbackend(joinpath(@__DIR__, "test_mul_nonnumeric_eltype.jl"))
+foreachbackend(joinpath(@__DIR__, "test_norm_overflow.jl"))
+foreachbackend(joinpath(@__DIR__, "test_permutedims.jl"))
+foreachbackend(joinpath(@__DIR__, "test_mapreduce_transposed.jl"))
+# …and survives a branch: `when!` records every branch once and the
+# run submits only the pieces its conditions ask for.
+foreachbackend(joinpath(@__DIR__, "test_when.jl"))
+foreachbackend(joinpath(@__DIR__, "test_basealignment_device.jl"))
+foreachbackend(joinpath(@__DIR__, "test_buffer_alias.jl"))
+foreachbackend(joinpath(@__DIR__, "test_download_readback.jl"))
+foreachbackend(joinpath(@__DIR__, "test_narrow_phase_contacts.jl"))
+foreachbackend(joinpath(@__DIR__, "test_narrow_phase_kernel.jl"))
+# Forgetting `free!` is not a leak: every persistent resource and
+# every plan carries a finalizer, and the release happens on the
+# owning thread at the next `reclaim!`.
+foreachbackend(joinpath(@__DIR__, "test_dropped_resources.jl"))
+foreachbackend(joinpath(@__DIR__, "test_indirect_prepare_ordering.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #
@@ -772,7 +775,6 @@ if _VULKAN_OK
 
         # ── Tier 3a2: norm FTZ rescaling regression (GPU; Float64/ComplexF64) ──
         @testset "Tier 3a2: norm FTZ rescaling" begin
-            include(joinpath(VULKAN_TESTS, "test_norm_overflow.jl"))
         end
 
 
@@ -811,12 +813,6 @@ if _VULKAN_OK
             end
 
             @testset "Narrow phase (CPU)" begin
-                include(joinpath(VULKAN_TESTS, "test_convex_shape.jl"))
-                include(joinpath(VULKAN_TESTS, "test_gjk.jl"))
-                include(joinpath(VULKAN_TESTS, "test_epa.jl"))
-                include(joinpath(VULKAN_TESTS, "test_narrow_phase_kernel.jl"))
-                include(joinpath(VULKAN_TESTS, "test_contact_record.jl"))
-                include(joinpath(VULKAN_TESTS, "test_narrow_phase_contacts.jl"))
             end
 
 
@@ -913,7 +909,6 @@ if _VULKAN_OK
 
 
         @testset "base alignment of a device array" begin
-            include(joinpath(VULKAN_TESTS, "test_basealignment_lava.jl"))
         end
 
 
@@ -1032,22 +1027,13 @@ if _VULKAN_OK
             # A recorded plan survives its storage moving: a resized buffer and
             # a grown buffers arena are patched, a grown images arena re-records.
             include(joinpath(VULKAN_TESTS, "test_recorded_move_patch.jl"))
-            # …and survives a branch: `when!` records every branch once and the
-            # run submits only the pieces its conditions ask for.
-            include(joinpath(VULKAN_TESTS, "test_when.jl"))
-            # Forgetting `free!` is not a leak: every persistent resource and
-            # every plan carries a finalizer, and the release happens on the
-            # owning thread at the next `reclaim!`.
-            include(joinpath(VULKAN_TESTS, "test_dropped_resources.jl"))
             # The point of all of the above: `run!` of a recorded plan, with
             # nothing pending, allocates zero bytes.
             include(joinpath(VULKAN_TESTS, "test_run_allocates_nothing.jl"))
-            include(joinpath(VULKAN_TESTS, "test_download_readback.jl"))
             include(joinpath(VULKAN_TESTS, "test_traced_usages.jl"))
 
             include(joinpath(VULKAN_TESTS, "test_partitioned_recording.jl"))
             include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
-            include(joinpath(VULKAN_TESTS, "test_backend_vocabulary.jl"))
             # No open command buffer on the queue: every call closes and submits
             # what it wrote, and a run is one submission.
             include(joinpath(VULKAN_TESTS, "test_closed_command_buffers.jl"))
@@ -1139,7 +1125,6 @@ if _VULKAN_OK
         # (test_struct_alignment_systematic.jl was excluded here while the
         # whole-struct-copy bug was open; that is fixed, and it is registered above.)
         @testset "broadcast paths" begin
-            include(joinpath(VULKAN_TESTS, "test_broadcast_paths.jl"))
         end
 
         @testset "closest_hit via ray query" begin
@@ -1195,7 +1180,6 @@ if _VULKAN_OK
         end
 
         @testset "permutedims" begin
-            include(joinpath(VULKAN_TESTS, "test_permutedims.jl"))
         end
 
         @testset "what a submission holds" begin
@@ -1207,7 +1191,6 @@ if _VULKAN_OK
         end
 
         @testset "pooled buffers alias by bytes, not by block" begin
-            include(joinpath(VULKAN_TESTS, "test_lavaarray_alias.jl"))
         end
 
         @testset "phase 2 — error surfacing" begin
@@ -1358,7 +1341,6 @@ if _VULKAN_OK
 
 
             @testset "Diagonal mul! disambiguation" begin
-                include(joinpath(VULKAN_TESTS, "test_diagonal_mul.jl"))
             end
 
 
@@ -1435,7 +1417,6 @@ if _VULKAN_OK
             end
 
             @testset "an indirect dispatch follows its own prepare" begin
-                include(joinpath(VULKAN_TESTS, "test_indirect_prepare_ordering.jl"))
             end
             include(joinpath(VULKAN_TESTS, "test_crossqueue_sync.jl"))
             # A recorded copy has to outlive the value that was copied FROM, even
@@ -1458,14 +1439,12 @@ if _VULKAN_OK
             # assertions have to read the destination's parent storage, which is the
             # only place `adjoint`'s conjugation is visible.
             @testset "mapreducedim! into transposed destinations" begin
-                include(joinpath(VULKAN_TESTS, "test_mapreduce_transposed.jl"))
             end
 
             # Lava's GEMM kernels need a numeric element type; anything else belongs
             # to `GPUArrays.generic_matmatmul!`. Its own file because it defines a
             # struct at top level to be the non-numeric element type.
             @testset "mul! with a non-numeric element type" begin
-                include(joinpath(VULKAN_TESTS, "test_mul_nonnumeric_eltype.jl"))
             end
 
             @testset "compute" begin

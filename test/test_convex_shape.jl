@@ -1,4 +1,4 @@
-using Test, Lava, Mantle
+using Test, Mantle
 using Mantle: UnitCube, support
 using GeometryBasics: Vec3f
 

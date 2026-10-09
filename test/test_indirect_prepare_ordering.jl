@@ -1,5 +1,5 @@
 using Test
-using Lava, Mantle
+using Mantle
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index
 
@@ -35,6 +35,7 @@ Adapt.adapt_structure(to, q::TestQueue) =
     TestQueue(Adapt.adapt(to, q.items), Adapt.adapt(to, q.size))
 
 import Atomix
+include(joinpath(@__DIR__, "testbackend.jl"))
 @inline function queue_push!(q::TestQueue, item::Int32)
     idx = Atomix.@atomic q.size[1] += Int32(1)
     if idx <= length(q.items)
@@ -56,7 +57,7 @@ end
 end
 
 @testset "an indirect dispatch is ordered after its own prepare" begin
-    backend = Mantle.defaultbackend()
+    backend = TESTBACKEND
     n = 65536
     cap = 100_000
 
@@ -95,7 +96,7 @@ end
     # fused them into one dispatch and put one shared barrier behind them; a
     # plan does that from `emitprepares!`, and an undeclared launch does not get
     # to.
-    backend = Mantle.defaultbackend()
+    backend = TESTBACKEND
     n = 65536
     cap = 100_000
 
