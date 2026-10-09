@@ -60,7 +60,7 @@ function _allocfree_measure(pl)
     ours = filter(byrun, Profile.Allocs.fetch().allocs)
     # Whose, when there is one: the stack is the whole point of counting this way.
     for a in first(ours, 3)
-        @info "an allocation by the run" a.type a.size stack = first(a.stacktrace, 16)
+        @info "an allocation by the run" a.type a.size stack = Text(join(first(a.stacktrace, 24), "\n"))
     end
     return sum(a -> a.size, ours; init = 0) / 200
 end
