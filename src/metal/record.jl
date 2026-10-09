@@ -567,6 +567,46 @@ struct MetalRecording
     # any view of a block waits for it (`claimbuffers!`).
     managed::Vector{Metal.Managed}
     nblocks::Base.RefValue{Int}
+    # The same records for the arrays Metal.jl allocated itself that the commands
+    # reach, which are not the pool's: collected once, when the recording closes,
+    # and claimed with the blocks. See `argmanaged`.
+    argmanaged::Vector{Metal.Managed}
+end
+
+"""
+What `argmanaged` collects through `holdleaves!`: the use record of every Metal.jl
+array a plan's arguments reach, each once.
+"""
+struct ManagedLeaves
+    records::Vector{Metal.Managed}
+end
+function Mantle.hold!(c::ManagedLeaves, a::Metal.MtlArray)
+    m = a.data[]
+    any(r -> r === m, c.records) || push!(c.records, m)
+    return a
+end
+# A pool region's block is claimed through `managedbuffer` already.
+Mantle.hold!(::ManagedLeaves, a) = a
+
+"""
+    argmanaged(plan) -> Vector{Metal.Managed}
+
+The use records of the arrays Metal.jl allocated that the plan's recorded commands
+reach.
+
+A recorded command names its arrays by address, so Metal.jl never sees them used:
+a host write through one did not wait for a replay still reading it, and a run
+read the value written after it (`test_partitioned_recording.jl`). Metal.jl's own
+launches claim their arrays (`take_ownership!`), and a host access through an
+`MtlArray` waits for the claim (`maybe_synchronize`); a replay now claims these as
+it does the pool's blocks.
+"""
+function argmanaged(pl::Mantle.Plan)
+    c = ManagedLeaves(Metal.Managed[])
+    for pp in pl.passes, d in pp.dispatches
+        d isa MetalRecordedDispatch && Mantle.holdleaves!(c, d.raw)
+    end
+    return c.records
 end
 
 # Nothing to hand back: the indirect command buffer, its range buffer and the
@@ -1172,7 +1212,8 @@ function Mantle.closerecording!(e::MetalRecorder, pl::Mantle.Plan)
                           e.ranges, e.grids.data[].buffer, Int(e.grids.offset), e.grids,
                           e.templ, e.aux, am.store, e.writers, e.ncommands,
                           e.encoded, MTL.MTLBuffer[],
-                          MTL.ObjectiveC.id{MTL.MTLBuffer}[], Metal.Managed[], Ref(-1))
+                          MTL.ObjectiveC.id{MTL.MTLBuffer}[], Metal.Managed[], Ref(-1),
+                          argmanaged(pl))
 end
 
 """
@@ -1331,6 +1372,7 @@ function ensureresident!(d::MetalDevice, rec::MetalRecording)
             push!(rec.resources, b.memory)
             push!(rec.managed, managedbuffer(d, b.memory))
         end
+        append!(rec.managed, rec.argmanaged)
         p.blockgen[]
     end
     # The plan's own memory and the recording's, which are this backend's rather
