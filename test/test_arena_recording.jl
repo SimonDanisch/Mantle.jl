@@ -503,11 +503,11 @@ end
 @kernel function arena_slow!(a)
     i = @index(Global)
     @inbounds step = a[i]
-    acc = 0f0
+    s = 0f0
     for k in 1:20_000_000
-        acc += sin(Float32(k) * step)
+        s += sin(Float32(k) * step)
     end
-    @inbounds a[i] = acc
+    @inbounds a[i] = s
 end
 
 @testset "a retired region waits for the device, then comes back" begin

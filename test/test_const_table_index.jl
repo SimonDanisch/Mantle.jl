@@ -45,18 +45,18 @@ end
     if idx <= w * h
         row = ((idx - Int32(1)) % h) + Int32(1)
         col = ((idx - Int32(1)) ÷ h) + Int32(1)
-        acc = 0f0
+        total = 0f0
         wsum = 0f0
         for dy_i in Int32(1):Int32(5)
             for dx_i in Int32(1):Int32(5)
                 q_row = clamp(row + (dy_i - Int32(3)) * step, Int32(1), h)
                 q_col = clamp(col + (dx_i - Int32(3)) * step, Int32(1), w)
                 weight = tap_weight(dx_i) * tap_weight(dy_i)
-                acc += src[q_row, q_col] * weight
+                total += src[q_row, q_col] * weight
                 wsum += weight
             end
         end
-        dst[row, col] = acc / wsum
+        dst[row, col] = total / wsum
     end
 end
 
@@ -65,15 +65,15 @@ function reference_filter(src::Matrix{Float32}, step::Int)
     kern = (0.0625f0, 0.25f0, 0.375f0, 0.25f0, 0.0625f0)
     dst = similar(src)
     for col in 1:w, row in 1:h
-        acc = 0f0; wsum = 0f0
+        total = 0f0; wsum = 0f0
         for dy_i in 1:5, dx_i in 1:5
             q_row = clamp(row + (dy_i - 3) * step, 1, h)
             q_col = clamp(col + (dx_i - 3) * step, 1, w)
             weight = kern[dx_i] * kern[dy_i]
-            acc += src[q_row, q_col] * weight
+            total += src[q_row, q_col] * weight
             wsum += weight
         end
-        dst[row, col] = acc / wsum
+        dst[row, col] = total / wsum
     end
     return dst
 end
