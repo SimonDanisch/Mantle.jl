@@ -741,7 +741,7 @@ function planshape(pl::Mantle.Plan, passes::AbstractUnitRange = eachindex(pl.pas
         # gate the pass before it had, this pass's gate needs a writer again.
         if pp.indirect
             nprepares += 1
-            nind = count(Mantle.devicesized, pp.dispatches)
+            nind = Base.count(Mantle.devicesized, pp.dispatches)
             # Kernel state and the gate, plus the three per-dispatch tuples at up
             # to 48 bytes an entry, each argument on its own 256-byte boundary.
             prepbytes += 2 * 256 + 3 * Mantle.argalign(48 * nind)
