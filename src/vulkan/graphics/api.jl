@@ -196,16 +196,25 @@ The mesh and fragment callables of a [`MeshPipeline`](@ref), and their type
 tuples.
 
 Same shape as the classic pair so every caller — `compile_draw`, the graph's
-`compiledraw`, `vertextouches` — stays one function. The mesh stage needs no
-output type parameter: it writes its varyings by name and the numbering follows
-declaration order, so only the CONSUMER has to be told what it is reading, and
-`stageoutputs(p.mesh)` is what tells it.
+`compiledraw`, `vertextouches` — stays one function.
+
+BOTH sides are told the declaration. The mesh stage numbers each field it writes
+by its place in `outputtype` — not by its place in the tuple the body writes,
+which agreed with the declaration only for a body that wrote every output per
+vertex and in order — and writes the `Flat` ones to the PRIMITIVE plane, a
+`PerPrimitiveEXT` array, whether the body names them per vertex or through
+`set_mesh_primitive_data!`; the topology says how many vertices a primitive has,
+which is what a per-vertex `Flat` field is attributed to a primitive by. The
+fragment stage reads those same names as per-primitive inputs (the fourth
+parameter), because Vulkan requires `PerPrimitiveEXT` on both sides of a location.
 """
 function resolve_shader_pair(pipeline::MeshPipeline, mesh_tt::Type, frag_tt::Type)
     vout = Mantle.outputtype(pipeline.mesh)
     flats = Mantle.flatoutputs(pipeline.mesh)
-    wrapped_mesh = MeshWrapper{typeof(Mantle.stagefunction(pipeline.mesh))}()
-    wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout, flats}()
+    topology = typeof(Mantle.meshconfig(pipeline).topology)
+    wrapped_mesh = MeshWrapper{typeof(Mantle.stagefunction(pipeline.mesh)), vout, flats, topology}()
+    wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout,
+                                   flats, flats}()
     return wrapped_mesh, mesh_tt, wrapped_frag, frag_tt
 end
 
