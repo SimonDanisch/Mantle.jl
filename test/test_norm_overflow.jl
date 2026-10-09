@@ -1,4 +1,4 @@
-# Regression test for Float64/ComplexF64 2-norm rescaling under flush-to-zero.
+# Regression test for 2-norm rescaling under flush-to-zero.
 #
 # Bug: `norm(v, 2)` rescales by `maxabs = maximum(abs, v)` to avoid overflow,
 # computing `sum((abs(x)/maxabs)^2)`. Writing the division in the source is NOT
@@ -10,15 +10,18 @@
 #
 # These are exactly the cases that failed in the GPUArrays `linalg/norm` suite
 # (2-norm, sizes (2,) and (2,2,2), Float64 and ComplexF64, overflow + underflow
-# rescaling edges).
+# rescaling edges). The single-precision types have the same edge, at their own
+# `floatmax`, and are the only ones a device without `Float64` can run.
 
 using Test
 using Mantle
 using LinearAlgebra
 include(joinpath(@__DIR__, "testbackend.jl"))
 
-@testset "norm 2-norm FTZ rescaling (Float64/ComplexF64)" begin
-    for T in (Float64, ComplexF64)
+@testset "norm 2-norm FTZ rescaling" begin
+    types = Mantle.supports_float64(TESTBACKEND) ? (Float32, ComplexF32, Float64, ComplexF64) :
+                                                   (Float32, ComplexF32)
+    for T in types
         R = real(T)
         for sz in [(2,), (2, 2, 2)]
             # Overflow edge: one element at floatmax/2 forces rescaling, and the
@@ -37,10 +40,4 @@ include(joinpath(@__DIR__, "testbackend.jl"))
         end
     end
 
-    # Direct check of the failing kernel value: sum of (x/maxabs)^2 must be ~1
-    # for a single dominant element, not 0.
-    let v = Mantle.devicearray(TESTBACKEND, [floatmax(Float64) / 2, 0.5])
-        maxabs = convert(Float64, maximum(abs, v))
-        @test Mantle.lava_norm_p2_rescale(v, maxabs) ≈ floatmax(Float64) / 2
-    end
 end

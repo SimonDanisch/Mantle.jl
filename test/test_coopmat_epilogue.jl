@@ -20,8 +20,9 @@ Neither is exotic, but neither was available, and the stride-0 behaviour is not
 something the Vulkan spec spells out — it is checked rather than assumed.
 """
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
 using Lava: AcceleratedMatrix, Accumulator, MatrixA, MatrixB
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 "Broadcast `bias` across a tile, reading it in its OWN element type."
@@ -76,7 +77,7 @@ end
 end
 
 @testset "cooperative-matrix epilogue" begin
-    backend = LavaBackend()
+    backend = TESTBACKEND
 
     @testset "stride 0 broadcasts a vector across the tile" begin
         # **Both element types.** Under autocast the model's biases are fp16, and

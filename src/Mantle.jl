@@ -347,7 +347,7 @@ export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
 export supports_graphics, supports_geometry_stage, supports_tessellation, supports_batch_queue, use_bindings!, supports_rt_pipeline
-export supports_procedural_traversal
+export supports_procedural_traversal, supports_hwtlas, supports_float64
 export batchqueue
 export defaultbackend, availablebackends, eachbackend, register_backend!
 export devicearray
@@ -610,6 +610,14 @@ to say which, and `devices`/`selectdevice`/`defaultdevice!` choose among the
 GPUs of the one that is here.
 """
 Device() = @static Sys.isapple() ? Device(MetalAPI()) : Device(VulkanAPI())
+
+"""
+    devices() -> Vector{DeviceInfo}
+
+The devices of the API `Device()` builds on: Metal on a Mac, Vulkan elsewhere.
+What an index passed to [`Device(select)`](@ref Device) refers to.
+"""
+devices() = @static Sys.isapple() ? devices(MetalAPI()) : devices(VulkanAPI())
 
 """What selects a device: a case-insensitive substring of its name or driver, its
 index in [`devices`](@ref), or a predicate over [`DeviceInfo`](@ref). See

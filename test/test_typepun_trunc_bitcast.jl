@@ -6,11 +6,12 @@
 # Root cause: map_type! cache mapped i32 → %float due to type-punned bitcast users.
 
 using Test
-using Lava, Mantle
+using Mantle
 using KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "Type-punned trunc+bitcast SPIR-V emission" begin
-    backend = Mantle.defaultbackend()
+    backend = TESTBACKEND
 
     # Struct with mixed int/float fields packed into i64 words (like StaticMultiTypeSet)
     struct PackedFields
@@ -34,7 +35,7 @@ using KernelAbstractions
     hi = UInt64(reinterpret(UInt32, test_val)) << 32
     packed = PackedFields(ntuple(i -> i == 1 ? hi : UInt64(0), 8))
 
-    out = Mantle.LavaArray{Float32}(undef, 4)
+    out = Mantle.devicearray(TESTBACKEND, Float32, 4)
     fill!(out, 0f0)
 
     extract_float_kernel!(backend)(out, packed; ndrange=4)

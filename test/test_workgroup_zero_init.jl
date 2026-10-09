@@ -13,7 +13,8 @@
 # OpConstantNull initializer (shaderZeroInitializeWorkgroupMemory, Vulkan 1.3
 # core), so every kernel starts with zeroed shared memory.
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const AK = Mantle.AcceleratedKernels
 const KA = KernelAbstractions
 
@@ -29,7 +30,7 @@ const KA = KernelAbstractions
 end
 
 @testset "workgroup memory is zero-initialized" begin
-    be = LavaBackend()
+    be = TESTBACKEND
     out = KA.allocate(be, Float32, 64)
     fill!(out, -1.0f0)
     _read_unwritten_shared!(be, 64)(out; ndrange = 64)
@@ -46,10 +47,10 @@ end
 @testset "merge sort by key is correct below 2*block_size" begin
     for n in (7, 100, 511, 1000)
         h = rand(UInt32, n)
-        k = Mantle.LavaArray(copy(h))
-        v = Mantle.LavaArray(collect(Int32(1):Int32(n)))
+        k = Mantle.devicearray(TESTBACKEND, copy(h))
+        v = Mantle.devicearray(TESTBACKEND, collect(Int32(1):Int32(n)))
         AK.sort_by_key!(k, v; alg = AK.MergeSort(block_size = 128))
-        Mantle.flush!(Mantle.Device())
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         @test Array(k) == sort(h)
         @test h[Array(v)] == sort(h)   # values permuted consistently with keys
     end
@@ -60,10 +61,10 @@ end
     n = 100_000
     before = Mantle.gpu_live_bytes()
     h = rand(UInt32, n)
-    v = Mantle.LavaArray(copy(h))
-    ix = Mantle.LavaArray(collect(Int32(1):Int32(n)))
+    v = Mantle.devicearray(TESTBACKEND, copy(h))
+    ix = Mantle.devicearray(TESTBACKEND, collect(Int32(1):Int32(n)))
     AK.sortperm!(ix, v)
-    Mantle.flush!(Mantle.Device())
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
     @test h[Array(ix)] == sort(h)
     # Recursion through that override grows the pool by tens of GB before dying.
     @test Mantle.gpu_live_bytes() - before < 256_000_000

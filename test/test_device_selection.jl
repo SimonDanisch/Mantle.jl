@@ -8,10 +8,11 @@ and `nothing` all become one physical-device index, ranked discrete-first, so th
 answer is the same on every backend.
 """
 
-using Test, Mantle, Lava
+using Test, Mantle
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "device selection" begin
-    infos = Mantle.devices(Mantle.VulkanAPI())
+    infos = Mantle.devices()
     @test !isempty(infos)
     @test all(i -> i.index isa Int && !isempty(i.name), infos)
 
@@ -39,7 +40,7 @@ using Test, Mantle, Lava
 end
 
 @testset "a device chosen by selector, and made the default" begin
-    infos = Mantle.devices(Mantle.VulkanAPI())
+    infos = Mantle.devices()
     i = Mantle.selectdevice(nothing, infos)
     old = Mantle.Device()
     # A device of your own: a context of its own, not the default.

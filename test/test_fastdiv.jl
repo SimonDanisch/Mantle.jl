@@ -15,7 +15,8 @@ checked against the dividing path they replaced rather than against a reference
 computed the same way.
 """
 
-using Test, Lava, GPUArrays, KernelAbstractions
+using Test, GPUArrays, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 # Every extent SAM 2 decomposes by, plus powers of two, primes, and the awkward
@@ -63,7 +64,7 @@ end
     end
 
     @testset "kernels agree with the dividing path" begin
-        backend = LavaBackend()
+        backend = TESTBACKEND
         let
             # Ranks 2 to 7, the encoder's two permutation families, extents that
             # are not powers of two, and a length that is not a multiple of the

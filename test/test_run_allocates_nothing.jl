@@ -18,8 +18,9 @@
 # because a non-const global read boxes its way into the count and a fresh
 # world age recompiles into it too.
 
-using Test, Mantle, Lava
+using Test, Mantle
 import KernelAbstractions as KA
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 KA.@kernel function _allocfree_step!(a)
     i = KA.@index(Global)
@@ -52,7 +53,7 @@ function _allocfree_measure(pl)
 end
 
 @testset "run! of a recorded plan allocates nothing" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
+    dev = Mantle.Device(TESTBACKEND)
     # `budget = Inf` is recorded whole and never measures; the device's budget
     # measures itself in the warm-up and is re-recorded from it, and the steady
     # state after that has to be just as free.
@@ -81,7 +82,7 @@ function _allocfree_loopplan(dev, n, iters)
 end
 
 @testset "run! of a recorded loop allocates nothing" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
+    dev = Mantle.Device(TESTBACKEND)
     pl, a = _allocfree_loopplan(dev, 256, 5)
     per_run = _allocfree_measure(pl)
     @test all(==(1500f0), Array(Mantle.storage(a)))

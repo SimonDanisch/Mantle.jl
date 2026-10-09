@@ -20,14 +20,15 @@
 # Fixed in `array/ka_backend.jl` by adding multi-index getindex/setindex!
 # overrides that route through the Horner `linear_index`.
 
-using Test, Lava, Mantle
+using Test, Mantle
 using KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 @testset "multi-index a[i,j,k,…] — NVIDIA stride-product miscompile" begin
     @testset "strided slices materialise correctly" begin
         h4 = reshape(Float32.(1:12), 3, 2, 2, 1)
-        g4 = Mantle.LavaArray(h4)
+        g4 = Mantle.devicearray(TESTBACKEND, h4)
         @test Array(g4[:, :, 2:2, :]) == h4[:, :, 2:2, :]
         @test Array(g4[:, :, 2, :]) == h4[:, :, 2, :]
         @test Array(g4[:, :, 2, 1]) == h4[:, :, 2, 1]
@@ -35,13 +36,13 @@ const KA = KernelAbstractions
         @test Array(copy(view(g4, :, :, 2:2, :))) == h4[:, :, 2:2, :]
 
         h3 = reshape(Float32.(1:24), 2, 3, 4)
-        g3 = Mantle.LavaArray(h3)
+        g3 = Mantle.devicearray(TESTBACKEND, h3)
         @test Array(g3[:, :, 2]) == h3[:, :, 2]
         @test Array(g3[:, 2:2, :]) == h3[:, 2:2, :]
         @test Array(g3[:, :, 2:3]) == h3[:, :, 2:3]
 
         h5 = reshape(Float32.(1:24), 2, 2, 3, 2, 1)
-        g5 = Mantle.LavaArray(h5)
+        g5 = Mantle.devicearray(TESTBACKEND, h5)
         @test Array(g5[:, :, :, 1, :]) == h5[:, :, :, 1, :]
         @test Array(g5[:, :, 2, :, :]) == h5[:, :, 2, :, :]
     end
@@ -55,11 +56,11 @@ const KA = KernelAbstractions
             @inbounds out[i] = src[is[1], is[2], 2, 1]
         end
         h = reshape(Float32.(1:12), 3, 2, 2, 1)
-        g = Mantle.LavaArray(h)
-        out = KA.allocate(Mantle.defaultbackend(), Float32, 3, 2, 1, 1)
+        g = Mantle.devicearray(TESTBACKEND, h)
+        out = KA.allocate(TESTBACKEND, Float32, 3, 2, 1, 1)
         fill!(out, -1.0f0)
-        readcomputed!(Mantle.defaultbackend())(out, g, (3, 2, 1, 1); ndrange=size(out))
-        KA.synchronize(Mantle.defaultbackend())
+        readcomputed!(TESTBACKEND)(out, g, (3, 2, 1, 1); ndrange=size(out))
+        KA.synchronize(TESTBACKEND)
         @test vec(Array(out)) == vec(h[:, :, 2:2, :])
     end
 
@@ -70,10 +71,10 @@ const KA = KernelAbstractions
             @inbounds dst[is[1], is[2], is[3], is[4]] = Float32(i)
         end
         dims = (3, 2, 2, 1)
-        dst = KA.allocate(Mantle.defaultbackend(), Float32, dims...)
+        dst = KA.allocate(TESTBACKEND, Float32, dims...)
         fill!(dst, -1.0f0)
-        writecomputed!(Mantle.defaultbackend())(dst, dims; ndrange=dims)
-        KA.synchronize(Mantle.defaultbackend())
+        writecomputed!(TESTBACKEND)(dst, dims; ndrange=dims)
+        KA.synchronize(TESTBACKEND)
         @test vec(Array(dst)) == Float32.(1:prod(dims))
     end
 end
@@ -91,13 +92,13 @@ end
 #
 # Nothing about it was type-specific; every eltype failed identically.
 @testset "trailing singleton indices (more indices than dims)" begin
-    be = Mantle.defaultbackend()
+    be = TESTBACKEND
 
     @testset "kron(vec, matrix) — $T" for T in (Int16, Float32, ComplexF32)
         ha = rand(T, 16, 32)
         hb = rand(T, 64, 8)
-        a = Mantle.LavaArray(ha)
-        b = Mantle.LavaArray(hb)
+        a = Mantle.devicearray(TESTBACKEND, ha)
+        b = Mantle.devicearray(TESTBACKEND, hb)
         for op in (identity, transpose, adjoint)
             got = Array(kron(vec(a), op(b)))
             ref = kron(vec(ha), op(hb))
@@ -110,8 +111,8 @@ end
 
     @testset "reading a 1-D device array with two indices" begin
         n = 8
-        src = Mantle.LavaArray(Float32.(1:n))
-        dst = Mantle.LavaArray(zeros(Float32, n))
+        src = Mantle.devicearray(TESTBACKEND, Float32.(1:n))
+        dst = Mantle.devicearray(TESTBACKEND, zeros(Float32, n))
         @kernel function trailing_one!(dst, @Const(src))
             i = @index(Global, Linear)
             @inbounds dst[i] = src[i, 1]      # trailing singleton

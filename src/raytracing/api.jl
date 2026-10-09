@@ -235,6 +235,21 @@ supports_procedural_traversal(::Any) = false
 # which is the worse of the two.
 supports_procedural_traversal(a::AdaptedAccel) = supports_procedural_traversal(a.hwtlas)
 
+"""
+    supports_hwtlas(x) -> Bool
+
+Whether this device builds an [`HWTLAS`](@ref) and traverses it in hardware from
+an ordinary kernel: Vulkan's ray query, Metal's intersector.
+
+What a caller asks before `HWTLAS{Tri}(backend)`, and what a test asks before
+exercising one, instead of reading a backend's own flag. `false` by default, so a
+backend opts in; a Vulkan device answers whether it was created with
+`VK_KHR_ray_query`.
+
+Accepts a device or the KernelAbstractions backend that stands for one.
+"""
+supports_hwtlas(::Any) = false
+
 #
 # There is no pinning verb here. "Hold this Julia object until a submission
 # completes" is `Outstanding(token, payload, tag)` in `graph/submission.jl`,

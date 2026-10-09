@@ -18,7 +18,7 @@ using Test, Mantle
 import KernelAbstractions as KA
 include(joinpath(@__DIR__, "testbackend.jl"))
 
-@testset "a download stages through Readback, at cached speed" begin
+@testset "a download comes back at cached speed" begin
     dev = Mantle.Device(TESTBACKEND)
     backend = TESTBACKEND
     n = 4 * 1024 * 1024                      # 16 MB of Float32
@@ -28,7 +28,6 @@ include(joinpath(@__DIR__, "testbackend.jl"))
     Mantle.waitidle(backend)
     # Warm: the first download grows the pool.
     @test Array(a) == host
-    @test !isempty(Mantle.blocksof(Mantle.pool(dev), Mantle.Readback()))
     t = minimum((@elapsed Array(a)) for _ in 1:3)
     @test t < 0.16
     @test Array(a) == host

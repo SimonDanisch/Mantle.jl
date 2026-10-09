@@ -15,8 +15,9 @@
 # reuses the global's deduplicated type id.
 
 using Test
-using Lava, Mantle
+using Mantle
 using KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 @testset "OpSelect of Workgroup pointers (clamped ternary)" begin
@@ -33,9 +34,9 @@ const KA = KernelAbstractions
         end
     end
 
-    out = Mantle.LavaArray(zeros(Float32, M))
-    _clamped_ternary!(Mantle.defaultbackend())(out; ndrange = M, workgroupsize = M)
-    KA.synchronize(Mantle.defaultbackend())
+    out = Mantle.devicearray(TESTBACKEND, zeros(Float32, M))
+    _clamped_ternary!(TESTBACKEND)(out; ndrange = M, workgroupsize = M)
+    KA.synchronize(TESTBACKEND)
     got = Array(out)
 
     # CPU reference: clamped 3-point average of v = 1:M.

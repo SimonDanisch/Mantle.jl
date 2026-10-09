@@ -1,6 +1,7 @@
 # A constant lookup table indexed by a runtime value.
 
 using StaticArrays: SVector   # the kernels below say `SVector` unqualified
+include(joinpath(@__DIR__, "testbackend.jl"))
 #
 # Julia writes `kern[i]` on a constant `SVector` as a pointer one element BEFORE
 # the table plus the index — the 1-based fold — and when the table is hoisted to
@@ -76,12 +77,12 @@ function reference_filter(src::Matrix{Float32}, step::Int)
     return dst
 end
 
-backend = LavaBackend()
+backend = TESTBACKEND
 h, w = 32, 24
 src = Float32[sin(0.3f0i) * cos(0.2f0j) + 0.5f0 for i in 1:h, j in 1:w]
 
 for step in (1, 2, 4)
-    d_src = LavaArray(src)
+    d_src = Mantle.devicearray(TESTBACKEND, src)
     d_dst = KernelAbstractions.allocate(backend, Float32, (h, w))
     KernelAbstractions.fill!(d_dst, 0f0)
     const_table_filter!(backend)(d_dst, d_src, Int32(w), Int32(h), Int32(step);

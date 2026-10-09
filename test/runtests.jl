@@ -499,12 +499,6 @@ include(joinpath(@__DIR__, "test_many_stage_args.jl"))
 # method for.
 include(joinpath(@__DIR__, "test_tuple_varyings.jl"))
 include(joinpath(@__DIR__, "test_integer_attachments.jl"))
-# Under `test/vulkan/` and guarded, because it is that backend's: it builds a
-# `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
-# default and no other backend's answer. It sat in the section above, whose
-# stated assertion is that its files need no GPU, so on a machine with no Vulkan
-# driver it threw from the first line of its testset rather than being skipped.
-_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_gemv_splitk.jl"))
 include(joinpath(@__DIR__, "test_core_names_no_backend.jl"))
 # The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
 # written before the refactor deletes anything, so each one fails today and
@@ -568,10 +562,6 @@ foreachbackend(joinpath(@__DIR__, "test_declared_call.jl"))
 # rule in core, checked against GPUCompiler's own: two rules in two backends is
 # only ever one of them in a build.
 foreachbackend(joinpath(@__DIR__, "test_argument_packing.jl"))
-# And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
-# compile beside its arguments, rather than in a slab ring the queue rewinds.
-# The path is spelled out because `VULKAN_TESTS` is not bound until further down.
-_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_plan_indirect_ownership.jl"))
 
 # ── device tests from test/vulkan and test/metal, now on every backend ──
 
@@ -594,6 +584,54 @@ foreachbackend(joinpath(@__DIR__, "test_narrow_phase_kernel.jl"))
 # owning thread at the next `reclaim!`.
 foreachbackend(joinpath(@__DIR__, "test_dropped_resources.jl"))
 foreachbackend(joinpath(@__DIR__, "test_indirect_prepare_ordering.jl"))
+
+# Recording a plan that has already run: the recording is one
+# command buffer and belongs to no argument slot.
+foreachbackend(joinpath(@__DIR__, "test_record_after_run.jl"))
+foreachbackend(joinpath(@__DIR__, "test_record_does_not_execute.jl"))
+# Which plans can be recorded at all, and that a render pass and both
+# `Update` routes come out the same either way.
+foreachbackend(joinpath(@__DIR__, "test_recordable_plans.jl"))
+# A recorded plan survives its storage moving: a resized buffer and
+# a grown buffers arena are patched, a grown images arena re-records.
+foreachbackend(joinpath(@__DIR__, "test_recorded_move_patch.jl"))
+# What a recording has to survive between the run that wrote it and
+# the runs that submit it: a collection, ad hoc work on the same
+# queue, and input rewritten in place.
+foreachbackend(joinpath(@__DIR__, "test_recording_lifecycle.jl"))
+# The point of all of the above: `run!` of a recorded plan, with
+# nothing pending, allocates zero bytes.
+foreachbackend(joinpath(@__DIR__, "test_run_allocates_nothing.jl"))
+# And where a `DeviceRange`'s workgroup counts live: in the plan, laid out at
+# compile beside its arguments, rather than in a slab ring the queue rewinds.
+# The path is spelled out because `VULKAN_TESTS` is not bound until further down.
+foreachbackend(joinpath(@__DIR__, "test_plan_indirect_ownership.jl"))
+foreachbackend(joinpath(@__DIR__, "test_device_selection.jl"))
+foreachbackend(joinpath(@__DIR__, "test_fastdiv.jl"))
+foreachbackend(joinpath(@__DIR__, "test_fft.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gemv.jl"))
+# Under `test/vulkan/` and guarded, because it is that backend's: it builds a
+# `Mantle.LavaBackend()` and asserts `Mantle.gemv_split`, a rule with no core
+# default and no other backend's answer. It sat in the section above, whose
+# stated assertion is that its files need no GPU, so on a machine with no Vulkan
+# driver it threw from the first line of its testset rather than being skipped.
+foreachbackend(joinpath(@__DIR__, "test_gemv_splitk.jl"))
+foreachbackend(joinpath(@__DIR__, "test_launch_plan_key.jl"))
+foreachbackend(joinpath(@__DIR__, "test_workgroup_zero_init.jl"))
+foreachbackend(joinpath(@__DIR__, "test_select_width_mismatch.jl"))
+foreachbackend(joinpath(@__DIR__, "test_shared_memory_stress.jl"))
+foreachbackend(joinpath(@__DIR__, "test_struct_alignment_systematic.jl"))
+foreachbackend(joinpath(@__DIR__, "test_struct_copy_alignment.jl"))
+foreachbackend(joinpath(@__DIR__, "test_typepun_trunc_bitcast.jl"))
+foreachbackend(joinpath(@__DIR__, "test_multiindex_getindex.jl"))
+foreachbackend(joinpath(@__DIR__, "test_double_indirect.jl"))
+foreachbackend(joinpath(@__DIR__, "test_const_table_index.jl"))
+foreachbackend(joinpath(@__DIR__, "test_coopmat_epilogue.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gemm_fp16_accum.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gemm_staged.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gemm_staged_scalar.jl"))
+foreachbackend(joinpath(@__DIR__, "test_bar_memcpy_sync.jl"))
+foreachbackend(joinpath(@__DIR__, "test_backend_kernel_tails.jl"))
 
 # ── the window tests, in their own process, on a clock ────────────────────────
 #
@@ -780,19 +818,16 @@ if _VULKAN_OK
 
         # ── Tier 3a3: workgroup (shared) memory stress (GPU) ──
         @testset "Tier 3a3: shared-memory stress" begin
-            include(joinpath(VULKAN_TESTS, "test_shared_memory_stress.jl"))
         end
 
 
         # ── Tier 3a4: OpSelect-of-Workgroup-pointers type-dedup regression (GPU) ──
         @testset "Tier 3a4: OpSelect Workgroup pointer dedup" begin
-            include(joinpath(VULKAN_TESTS, "test_select_width_mismatch.jl"))
         end
 
 
         # ── Tier 3a5: constant lookup table indexed at runtime (GPU) ──
         @testset "Tier 3a5: constant table storage class" begin
-            include(joinpath(VULKAN_TESTS, "test_const_table_index.jl"))
         end
 
 
@@ -842,7 +877,6 @@ if _VULKAN_OK
 
 
         @testset "double-indirect MVector access" begin
-            include(joinpath(VULKAN_TESTS, "test_double_indirect.jl"))
         end
 
 
@@ -857,12 +891,10 @@ if _VULKAN_OK
 
 
         @testset "fastdiv index decomposition" begin
-            include(joinpath(VULKAN_TESTS, "test_fastdiv.jl"))
         end
 
 
         @testset "cooperative-matrix epilogue" begin
-            include(joinpath(VULKAN_TESTS, "test_coopmat_epilogue.jl"))
         end
 
 
@@ -872,29 +904,24 @@ if _VULKAN_OK
 
 
         @testset "staged GEMM" begin
-            include(joinpath(VULKAN_TESTS, "test_gemm_staged.jl"))
         end
 
 
         @testset "scalar GEMM accumulator width" begin
-            include(joinpath(VULKAN_TESTS, "test_gemm_fp16_accum.jl"))
         end
 
 
         # The scalar half of the same port: `mul!`'s fp32 path, which had no tiling
         # at all and ran at 0.448 TFLOP/s where this reaches 4.301.
         @testset "staged scalar GEMM" begin
-            include(joinpath(VULKAN_TESTS, "test_gemm_staged_scalar.jl"))
         end
 
 
         @testset "whole-struct copy alignment" begin
-            include(joinpath(VULKAN_TESTS, "test_struct_copy_alignment.jl"))
         end
 
 
         @testset "systematic struct alignment" begin
-            include(joinpath(VULKAN_TESTS, "test_struct_alignment_systematic.jl"))
         end
 
 
@@ -940,7 +967,6 @@ if _VULKAN_OK
         # Choosing a device: the listing, the selector vocabulary (name, index,
         # predicate, ranking) and the default. No second card needed.
         @testset "device selection" begin
-            include(joinpath(VULKAN_TESTS, "test_device_selection.jl"))
         end
 
 
@@ -1010,26 +1036,9 @@ if _VULKAN_OK
 
 
         @testset "recording" begin
-            include(joinpath(VULKAN_TESTS, "test_record_does_not_execute.jl"))
             include(joinpath(VULKAN_TESTS, "test_recorded_run_semantics.jl"))
-            # What a recording has to survive between the run that wrote it and
-            # the runs that submit it: a collection, ad hoc work on the same
-            # queue, and input rewritten in place.
-            include(joinpath(VULKAN_TESTS, "test_recording_lifecycle.jl"))
-            # Recording a plan that has already run: the recording is one
-            # command buffer and belongs to no argument slot.
-            include(joinpath(VULKAN_TESTS, "test_record_after_run.jl"))
             # Recording a plan big enough to allocate while it is being written.
             include(joinpath(VULKAN_TESTS, "test_no_pool_trim_while_recorded.jl"))
-            # Which plans can be recorded at all, and that a render pass and both
-            # `Update` routes come out the same either way.
-            include(joinpath(VULKAN_TESTS, "test_recordable_plans.jl"))
-            # A recorded plan survives its storage moving: a resized buffer and
-            # a grown buffers arena are patched, a grown images arena re-records.
-            include(joinpath(VULKAN_TESTS, "test_recorded_move_patch.jl"))
-            # The point of all of the above: `run!` of a recorded plan, with
-            # nothing pending, allocates zero bytes.
-            include(joinpath(VULKAN_TESTS, "test_run_allocates_nothing.jl"))
             include(joinpath(VULKAN_TESTS, "test_traced_usages.jl"))
 
             include(joinpath(VULKAN_TESTS, "test_partitioned_recording.jl"))
@@ -1164,7 +1173,6 @@ if _VULKAN_OK
         end
 
         @testset "this backend's plain kernels guard their tails" begin
-            include(joinpath(VULKAN_TESTS, "test_backend_kernel_tails.jl"))
         end
 
         @testset "grain instance writer" begin
@@ -1247,7 +1255,6 @@ if _VULKAN_OK
         end
 
         @testset "typepun trunc/bitcast" begin
-            include(joinpath(VULKAN_TESTS, "test_typepun_trunc_bitcast.jl"))
         end
 
             @testset "Tier 3d: SPIR-V Pattern Correctness & Stress" begin
@@ -1255,7 +1262,6 @@ if _VULKAN_OK
                 include(joinpath(VULKAN_TESTS, "test_loop_unswitch_miscompile.jl"))
                 include(joinpath(VULKAN_TESTS, "test_psb_chain_fold.jl"))
                 include(joinpath(VULKAN_TESTS, "test_repeat_inner_3d.jl"))
-                include(joinpath(VULKAN_TESTS, "test_multiindex_getindex.jl"))
             end
 
             @testset "Tier 3e: GPU Memory Safety" begin
@@ -1263,7 +1269,6 @@ if _VULKAN_OK
             end
 
             @testset "Tier 3e2: BAR Memcpy Sync" begin
-                include(joinpath(VULKAN_TESTS, "test_bar_memcpy_sync.jl"))
             end
 
             @testset "Tier 3e3: MultiTypeSet Surgical" begin
@@ -1320,7 +1325,6 @@ if _VULKAN_OK
 
 
             @testset "workgroup zero-init" begin
-                include(joinpath(VULKAN_TESTS, "test_workgroup_zero_init.jl"))
             end
 
 
@@ -1356,18 +1360,15 @@ if _VULKAN_OK
 
 
             @testset "batched 1D FFT" begin
-                include(joinpath(VULKAN_TESTS, "test_fft.jl"))
             end
 
 
             @testset "batch-1 GEMV" begin
-                include(joinpath(VULKAN_TESTS, "test_gemv.jl"))
             end
 
             # Two kernels that differ in nothing an argument type can see. The
             # `gemv` family above is what found this; see the file.
             @testset "a launch plan is keyed on its kernel" begin
-                include(joinpath(VULKAN_TESTS, "test_launch_plan_key.jl"))
             end
 
 

@@ -32,11 +32,12 @@ What is pinned here:
     1.63x, so the wrong gate silently gave back most of the point of the kernel.
 """
 
-using Test, Lava, KernelAbstractions, LinearAlgebra, Random
+using Test, KernelAbstractions, LinearAlgebra, Random
 using LinearAlgebra: mul!
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
-back = LavaBackend()
+back = TESTBACKEND
 
 "Run `C = α*op(A)*op(B) + β*C` on device and on the host, return relative error."
 function gemmerr(M, K, N; tA = false, tB = false, α = 1.0f0, β = 0.0f0)

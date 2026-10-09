@@ -22,7 +22,8 @@
 # workgroup group size — `fftgroup` has to fall back to 1 there, and a partial
 # group would read past the end of the batch.
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 "The direct sum. Float64 throughout so it is the reference, not a competitor."
@@ -34,7 +35,7 @@ end
 relerr(got, want) = maximum(abs, got .- want) / maximum(abs, want)
 
 @testset "fft" begin
-    backend = LavaBackend()
+    backend = TESTBACKEND
 
     @testset "the plan covers every power of two" begin
         # k % 3 picks the leading stage: 0 none, 1 radix 2, 2 radix 4.

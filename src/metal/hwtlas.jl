@@ -618,6 +618,9 @@ supports_rt_pipeline(::MetalHWTLAS) = false
 # compiled to an AIR visible function and reached through a table. See
 # `src/metal/procedural.jl`.
 supports_procedural_traversal(::Metal.MetalBackend) = true
+# Every Apple-silicon GPU builds and traverses `MTLAccelerationStructure`s.
+supports_hwtlas(::Metal.MetalBackend) = true
+supports_hwtlas(::MetalDevice) = true
 supports_procedural_traversal(::MetalHWTLAS) = true
 
 # ── The three candidate verbs, inside a visible function ─────────────────────

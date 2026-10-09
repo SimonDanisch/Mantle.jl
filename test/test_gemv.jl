@@ -20,7 +20,8 @@
 #     single entry and an off-by-one in `nsub` shows up as a zero rather than a
 #     wrong value.
 
-using Test, Lava, KernelAbstractions, LinearAlgebra
+using Test, KernelAbstractions, LinearAlgebra
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 "Host reference in Float64. `A` is length K, `B` is (K, N), result is length N."
@@ -46,7 +47,7 @@ function interleaved(a, b; rounds = 5)
 end
 
 @testset "gemv" begin
-    backend = LavaBackend()
+    backend = TESTBACKEND
 
     function check(K, N; nrows = nothing, block = nothing)
         ha = Float32.(randn(K))

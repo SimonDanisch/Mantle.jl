@@ -19,6 +19,7 @@ using Test, Mantle, KernelAbstractions
 import Lava   # the extension trigger
 using ColorTypes: RGBA
 using GeometryBasics: Vec4f
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 const KA = KernelAbstractions
 const M = Mantle
@@ -83,7 +84,7 @@ const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_ver
                                       depth = M.DepthOff())
 
 @testset "a resize!d buffer under a recorded plan is patched, not re-recorded" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     be = M.backend(dev)
     n = 64
     src = M.Buffer(dev, ones(Float32, n))          # capacity == n, so a grow moves it
@@ -110,7 +111,7 @@ const _MOVEPATCH_TRI = M.Rasterizer(; vertex = M.VertexShader(_movepatch_tri_ver
 end
 
 @testset "a buffers arena growing under a recorded plan patches it" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     be = M.backend(dev)
     n = 250_000
     small = Base.invokelatest(_movepatch_chainplan, dev, n, 3)
@@ -136,7 +137,7 @@ end
 end
 
 @testset "an images arena growing under a recorded plan re-records it" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     be = M.backend(dev)
     N = 64
     g = M.Graph(dev)

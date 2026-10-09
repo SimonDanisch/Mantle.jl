@@ -23,7 +23,8 @@ and 8. A test that records a fresh plan and runs it three times passes.
 `pre = 0` is the case where the second `record!` follows the first directly.
 """
 
-using Test, Mantle, Lava, KernelAbstractions
+using Test, Mantle, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 @kernel function ring_add!(out, kref)
@@ -64,8 +65,8 @@ function _runrecordrun(dev, be, n, pre::Int, post::Int)
 end
 
 @testset "record! after run! accumulates the same as before it" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    be = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    be = TESTBACKEND
     n = 32
 
     # Six starting points and nine follow-ups from each — the sweep the ring
@@ -79,7 +80,7 @@ end
 end
 
 @testset "run! never records: an unrecorded plan is refused" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
+    dev = Mantle.Device(TESTBACKEND)
     n = 32
     out = Mantle.Buffer(dev, zeros(Int32, n))
     kref = Mantle.GPURef(dev, Int32(1))

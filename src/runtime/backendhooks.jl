@@ -66,3 +66,17 @@ exception instead of by the device.
 backend that stands for one.
 """
 videodecodes(dev) = false
+
+"""
+    supports_float64(dev) -> Bool
+
+Whether kernels and arrays on `dev` can hold `Float64` (and `ComplexF64`).
+
+Apple GPUs have no double precision and Metal refuses to allocate a `Float64`
+array, so a caller choosing an element type, or a test looping over element
+types, asks this instead of naming a backend. Every Vulkan device Mantle builds
+enables `shaderFloat64` at creation, so the Vulkan backend answers `true`.
+
+`dev` is a device or the KernelAbstractions backend that stands for one.
+"""
+supports_float64(dev) = false

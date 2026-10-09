@@ -29,7 +29,8 @@
 # size a multiple of 4, so genuinely aligned), 12 and 12-padded. Any change to the
 # chunk derivation must keep all of them correct.
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 struct CopyS6;  a::Int16; b::Int16; c::Int16; end                    # 6  — the bug
@@ -47,14 +48,14 @@ end
 function check_copy(::Type{S}, mk) where {S}
     n = 16
     src_data = [mk(i) for i in 1:n]
-    src = Mantle.LavaArray(src_data)
+    src = Mantle.devicearray(TESTBACKEND, src_data)
 
-    bcast = Mantle.LavaArray{S}(undef, n)
+    bcast = Mantle.devicearray(TESTBACKEND, S, n)
     bcast .= src
 
-    kern = Mantle.LavaArray{S}(undef, n)
-    aggregate_copy!(LavaBackend(), 64)(kern, src; ndrange = n)
-    KA.synchronize(LavaBackend())
+    kern = Mantle.devicearray(TESTBACKEND, S, n)
+    aggregate_copy!(TESTBACKEND, 64)(kern, src; ndrange = n)
+    KA.synchronize(TESTBACKEND)
 
     return Array(bcast) == src_data, Array(kern) == src_data
 end
@@ -84,9 +85,9 @@ end
     # cannot quietly start routing them through a broken one.
     n = 16
     sd = [CopyS6(Int16(i), Int16(i * 3), Int16(i * 7)) for i in 1:n]
-    src = Mantle.LavaArray(sd)
-    d = Mantle.LavaArray{CopyS6}(undef, n)
+    src = Mantle.devicearray(TESTBACKEND, sd)
+    d = Mantle.devicearray(TESTBACKEND, CopyS6, n)
     copyto!(d, src)
-    Mantle.flush!(Mantle.Device())
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
     @test Array(d) == sd
 end

@@ -7,8 +7,9 @@
 # Contexts exercise different SPIR-V emission paths (PSB, Function, Workgroup).
 
 using Test
-using Lava, Mantle
+using Mantle
 using KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 # ── Struct type definitions (Axis 1: ~16 types) ──
 
@@ -162,10 +163,10 @@ const ALL_STRUCT_TYPES = [
 @testset "C3: Whole-struct copy - $S" for S in ALL_STRUCT_TYPES
     n = 64
     src_data = make_data(S, n)
-    src = Mantle.LavaArray(src_data)
-    dst = Mantle.LavaArray{S}(undef, n)
+    src = Mantle.devicearray(TESTBACKEND, src_data)
+    dst = Mantle.devicearray(TESTBACKEND, S, n)
     dst .= src
-    Mantle.flush!(Mantle.Device())
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
     result = Array(dst)
     @test result == src_data
 end
@@ -320,12 +321,12 @@ const CHECKSUM_KERNELS = Dict{DataType, Any}(
 @testset "C1: PSB read fields - $S" for S in ALL_STRUCT_TYPES
     n = 64
     src_data = make_data(S, n)
-    src = Mantle.LavaArray(src_data)
-    dst = Mantle.LavaArray{Float64}(undef, n)
+    src = Mantle.devicearray(TESTBACKEND, src_data)
+    dst = Mantle.devicearray(TESTBACKEND, Float64, n)
 
     kern = CHECKSUM_KERNELS[S]
-    kern(Mantle.defaultbackend(), 64)(dst, src; ndrange=n)
-    Mantle.flush!(Mantle.Device())
+    kern(TESTBACKEND, 64)(dst, src; ndrange=n)
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
 
     gpu_result = Array(dst)
     cpu_result = [checksum(s) for s in src_data]
@@ -383,10 +384,10 @@ end
 
     @testset "S01_ThreeF32" begin
         src_data = make_data(S01_ThreeF32, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S01_ThreeF32}(undef, n)
-        write_modified_S01(Mantle.defaultbackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device())
+        src = Mantle.devicearray(TESTBACKEND, src_data)
+        dst = Mantle.devicearray(TESTBACKEND, S01_ThreeF32, n)
+        write_modified_S01(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         result = Array(dst)
         expected = [S01_ThreeF32(s.x + offset, s.y + offset, s.z + offset) for s in src_data]
         @test result == expected
@@ -394,10 +395,10 @@ end
 
     @testset "S03_MiddleBool" begin
         src_data = make_data(S03_MiddleBool, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S03_MiddleBool}(undef, n)
-        write_modified_S03(Mantle.defaultbackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device())
+        src = Mantle.devicearray(TESTBACKEND, src_data)
+        dst = Mantle.devicearray(TESTBACKEND, S03_MiddleBool, n)
+        write_modified_S03(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         result = Array(dst)
         expected = [S03_MiddleBool(s.x + offset, s.flag, s.y + offset) for s in src_data]
         @test result == expected
@@ -405,10 +406,10 @@ end
 
     @testset "S06_MixedI64" begin
         src_data = make_data(S06_MixedI64, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S06_MixedI64}(undef, n)
-        write_modified_S06(Mantle.defaultbackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device())
+        src = Mantle.devicearray(TESTBACKEND, src_data)
+        dst = Mantle.devicearray(TESTBACKEND, S06_MixedI64, n)
+        write_modified_S06(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         result = Array(dst)
         expected = [S06_MixedI64(s.a + offset, s.b + 1, s.c + offset) for s in src_data]
         @test result == expected
@@ -416,10 +417,10 @@ end
 
     @testset "S14_KitchenSink" begin
         src_data = make_data(S14_KitchenSink, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S14_KitchenSink}(undef, n)
-        write_modified_S14(Mantle.defaultbackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device())
+        src = Mantle.devicearray(TESTBACKEND, src_data)
+        dst = Mantle.devicearray(TESTBACKEND, S14_KitchenSink, n)
+        write_modified_S14(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         result = Array(dst)
         expected = [S14_KitchenSink(s.flag1, s.small, s.pad16,
             s.f32val + offset, s.i32val, s.flag2,
@@ -429,10 +430,10 @@ end
 
     @testset "S15_AllF64" begin
         src_data = make_data(S15_AllF64, n)
-        src = Mantle.LavaArray(src_data)
-        dst = Mantle.LavaArray{S15_AllF64}(undef, n)
-        write_modified_S15(Mantle.defaultbackend(), 64)(dst, src, offset; ndrange=n)
-        Mantle.flush!(Mantle.Device())
+        src = Mantle.devicearray(TESTBACKEND, src_data)
+        dst = Mantle.devicearray(TESTBACKEND, S15_AllF64, n)
+        write_modified_S15(TESTBACKEND, 64)(dst, src, offset; ndrange=n)
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         result = Array(dst)
         expected = [S15_AllF64(s.a + Float64(offset), s.b + Float64(offset), s.c + Float64(offset)) for s in src_data]
         @test result == expected
@@ -450,9 +451,9 @@ end
     n = 64
     test_vals = make_data(S, 1)
     fill_val = test_vals[1]
-    dst = Mantle.LavaArray{S}(undef, n)
+    dst = Mantle.devicearray(TESTBACKEND, S, n)
     fill!(dst, fill_val)
-    Mantle.flush!(Mantle.Device())
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
     result = Array(dst)
     @test all(x -> x == fill_val, result)
 end
@@ -466,13 +467,13 @@ end
     for n in [5, 7, 13, 64]
         @testset "n=$n" begin
             src_data = make_data(S, n)
-            src = Mantle.LavaArray(src_data)
-            dst = Mantle.LavaArray{Float64}(undef, n)
+            src = Mantle.devicearray(TESTBACKEND, src_data)
+            dst = Mantle.devicearray(TESTBACKEND, Float64, n)
 
             kern = CHECKSUM_KERNELS[S]
             wg = min(n, 64)
-            kern(Mantle.defaultbackend(), wg)(dst, src; ndrange=n)
-            Mantle.flush!(Mantle.Device())
+            kern(TESTBACKEND, wg)(dst, src; ndrange=n)
+            Mantle.flush!(Mantle.Device(TESTBACKEND))
 
             gpu_result = Array(dst)
             cpu_result = [checksum(s) for s in src_data]
@@ -544,12 +545,12 @@ const SHARED_COPY_KERNELS = Dict{DataType, Any}(
 @testset "C7: Workgroup shared memory - $S" for S in keys(SHARED_COPY_KERNELS)
     n = 64
     src_data = make_data(S, n)
-    src = Mantle.LavaArray(src_data)
-    dst = Mantle.LavaArray{S}(undef, n)
+    src = Mantle.devicearray(TESTBACKEND, src_data)
+    dst = Mantle.devicearray(TESTBACKEND, S, n)
 
     kern = SHARED_COPY_KERNELS[S]
-    kern(Mantle.defaultbackend(), 64)(dst, src; ndrange=n)
-    Mantle.flush!(Mantle.Device())
+    kern(TESTBACKEND, 64)(dst, src; ndrange=n)
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
 
     result = Array(dst)
     @test result == src_data

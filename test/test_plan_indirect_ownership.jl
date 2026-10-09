@@ -2,6 +2,7 @@ using Test
 import Mantle, Lava
 const M = Mantle
 using KernelAbstractions: @kernel, @index, @Const
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 # A plan's indirect commands belong to the plan.
 #
@@ -81,7 +82,7 @@ function indirectranges(pl)
 end
 
 @testset "a plan's indirect commands are laid out at compile" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     cap, nmark = 4096, 3
     p = markplan(dev, cap, 1000, nmark)
     # One per device-sized dispatch — and NOT one per direct dispatch: the
@@ -94,7 +95,7 @@ end
 end
 
 @testset "two recorded plans' indirect commands are disjoint" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     cap = 4096
     a = markplan(dev, cap, 1000, 2)
     b = markplan(dev, cap, 2500, 2)
@@ -126,7 +127,7 @@ end
 end
 
 @testset "a plan gives its argument memory back" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     sp = M.pool(dev)
     p = markplan(dev, 1024, 500, 2)
     M.run!(p.plan); M.waitidle(dev)

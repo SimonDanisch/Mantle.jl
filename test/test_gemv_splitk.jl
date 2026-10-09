@@ -24,11 +24,12 @@
 # than a measurement of one machine.
 
 using Test, Mantle, KernelAbstractions, LinearAlgebra, Random
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 const KA = KernelAbstractions
 
 @testset "split-K GEMV" begin
-    back = Mantle.LavaBackend()
+    back = TESTBACKEND
     Random.seed!(20260911)
 
     @testset "gemv_split rule" begin

@@ -107,6 +107,8 @@ caps(a::LavaArray) = caps(vk_context(a))
 # property of the context, decided when the device was created.
 videodecodes(ctx::VkContext) = ctx.video_decode_available
 videodecodes(b::LavaBackend) = videodecodes(vk_context(b))
+# `shaderFloat64` is enabled on every device this backend creates.
+supports_float64(::LavaBackend) = true
 # A view of a device array is still on that device. `probe_broadcast!` is handed
 # `dest`, which the broadcast machinery may hand it as a `SubArray` or a
 # `ReshapedArray` — walking to the parent is the whole answer, and it is the same

@@ -18,9 +18,9 @@
 # Every index is checked, not just the one that happened to be reported, since a
 # constant-folding bug can be right for some indices and wrong for others.
 
-using Test, Lava, KernelAbstractions, GeometryBasics, StaticArrays
-using Mantle: LavaArray, LavaBackend
+using Test, KernelAbstractions, GeometryBasics, StaticArrays
 using GeometryBasics: Vec3f
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @inline function double_indirect_body(idxs::AbstractVector, i::Integer)
     face_v = MVector{8, NTuple{3, Int32}}(ntuple(j -> (Int32(j), Int32(j+1), Int32(j+2)), Val(8)))
@@ -47,19 +47,19 @@ end
     # One index per launch: each is a separate runtime value reaching the same
     # chained access, which is what the folding bug keyed on.
     for k in 1:8
-        idxs = LavaArray(Int32[k])
-        out  = LavaArray([Vec3f(0, 0, 0)])
-        double_indirect_kernel(LavaBackend())(out, idxs; ndrange = 1)
-        Mantle.flush!(Mantle.Device())
+        idxs = Mantle.devicearray(TESTBACKEND, Int32[k])
+        out  = Mantle.devicearray(TESTBACKEND, [Vec3f(0, 0, 0)])
+        double_indirect_kernel(TESTBACKEND)(out, idxs; ndrange = 1)
+        Mantle.flush!(Mantle.Device(TESTBACKEND))
         @test Array(out)[1] == double_indirect_ref(k)
     end
 
     # ...and all of them in ONE launch, so the index is genuinely per-lane rather
     # than uniform across the dispatch.
-    idxs = LavaArray(Int32.(collect(1:8)))
-    out  = LavaArray(fill(Vec3f(0, 0, 0), 8))
-    double_indirect_kernel(LavaBackend())(out, idxs; ndrange = 8)
-    Mantle.flush!(Mantle.Device())
+    idxs = Mantle.devicearray(TESTBACKEND, Int32.(collect(1:8)))
+    out  = Mantle.devicearray(TESTBACKEND, fill(Vec3f(0, 0, 0), 8))
+    double_indirect_kernel(TESTBACKEND)(out, idxs; ndrange = 8)
+    Mantle.flush!(Mantle.Device(TESTBACKEND))
     @test Array(out) == [double_indirect_ref(k) for k in 1:8]
 end
 

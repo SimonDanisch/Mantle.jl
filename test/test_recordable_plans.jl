@@ -21,6 +21,7 @@ using Test, Mantle, KernelAbstractions
 import Lava, Vulkan   # the extension trigger; `import`, since Lava exports names Mantle does
 using GeometryBasics: Vec4f
 using ColorTypes: RGBA
+include(joinpath(@__DIR__, "testbackend.jl"))
 # `KA` and `M` are `const` in whichever test file gets there first, and a `const`
 # re-bound to what it already holds is not a redefinition.
 const KA = KernelAbstractions
@@ -49,7 +50,7 @@ const TRI = M.Rasterizer(; vertex = M.VertexShader(tri_vertex; outputs = (color 
 end
 
 @testset "a headless render pass records and runs" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     N = 64
     g = M.Graph(dev)
     img = M.Transient.Image(g, RGBA{Float16}, (N, N))
@@ -82,7 +83,7 @@ end
 # Both routes are in place now — see `emitstore!` — so the plan records and
 # every value reaches the recording that reads it.
 @testset "a whole-buffer store writes in place, so its plan records" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     n = 128
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
@@ -106,7 +107,7 @@ end
 end
 
 @testset "a ranged store writes in place, so its plan records" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     n = 128
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))
@@ -129,7 +130,7 @@ end
 # `Buffer` keeps a LIST of what is waiting, where a `GPURef` keeps the last
 # value. The second range overlaps the first, so the order is visible.
 @testset "two ranged stores before one run both land, in order" begin
-    dev = M.Device(M.VulkanAPI())
+    dev = M.Device(TESTBACKEND)
     n = 128
     g = M.Graph(dev)
     src = M.Buffer(dev, zeros(Float32, n))

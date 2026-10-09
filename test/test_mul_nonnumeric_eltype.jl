@@ -33,7 +33,8 @@ Base.:(*)(x::Pair2, y::Number) = Pair2(x.a * y, x.b * y)
 Base.:(*)(x::Number, y::Pair2) = Pair2(x * y.a, x * y.b)
 
 @testset "mul! with a non-numeric element type" begin
-    @testset "$T" for T in (Float16, Float32, Float64)
+    @testset "$T" for T in (Mantle.supports_float64(TESTBACKEND) ? (Float16, Float32, Float64) :
+                                                                   (Float16, Float32))
         n = 4
         A = [Pair2(T(i), T(2i)) for i in 1:n, _ in 1:n]
         B = T.(reshape(1:n^2, n, n))
@@ -51,8 +52,8 @@ Base.:(*)(x::Number, y::Pair2) = Pair2(x * y.a, x * y.b)
         arraytype(T) = typeof(Mantle.devicearray(TESTBACKEND, zeros(T, 1, 1)))
         F, P = arraytype(Float32), arraytype(Pair2{Float32})
         numeric = Base.which(LinearAlgebra.mul!, Tuple{F, F, F, Bool, Bool})
-        @test parentmodule(numeric) !== GPUArrays
+        @test parentmodule(numeric) ∉ (LinearAlgebra, GPUArrays)
         generic = Base.which(LinearAlgebra.mul!, Tuple{P, F, P, Bool, Bool})
-        @test parentmodule(generic) === GPUArrays
+        @test parentmodule(generic) === LinearAlgebra
     end
 end

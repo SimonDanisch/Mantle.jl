@@ -40,7 +40,8 @@ below is the minimum that reproduces it: record without draining, then run, then
 record again. Draining between the two hides it entirely.
 """
 
-using Test, Mantle, Lava, KernelAbstractions, Statistics
+using Test, Mantle, KernelAbstractions, Statistics
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 @kernel function reclife_add!(a, c)
@@ -65,8 +66,8 @@ function _stepplan(dev, a, d, n)
 end
 
 @testset "a recording runs, accumulates and reads its inputs" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    be = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    be = TESTBACKEND
     n = 4096
     a = Mantle.Buffer(dev, zeros(Float32, n))
     d = Mantle.Buffer(dev, zeros(Float32, n))
@@ -115,8 +116,8 @@ end
 end
 
 @testset "a run interleaves with ad hoc recording on the same queue" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    be = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    be = TESTBACKEND
     n = 1024
     a = Mantle.Buffer(dev, zeros(Float32, n))
     d = Mantle.Buffer(dev, zeros(Float32, n))
@@ -153,8 +154,8 @@ end
 end
 
 @testset "submitting a recording is cheaper than writing one" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    be = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    be = TESTBACKEND
     n = 4096
     a = Mantle.Buffer(dev, zeros(Float32, n))
     d = Mantle.Buffer(dev, zeros(Float32, n))

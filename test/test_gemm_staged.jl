@@ -21,9 +21,10 @@ shape the kernel had ever been benchmarked on chooses `splitk == 1`. A GEMM test
 suite made of the shapes a GEMM is fast at is a suite that cannot find this.
 """
 
-using Test, Lava, DNNKernels, KernelAbstractions
+using Test, DNNKernels, KernelAbstractions
 const KA = KernelAbstractions
 import KernelInterface
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 "Relative error of `matmul!` against a Float32 CPU reference, over a slice."
 function gemmerr(backend, ws, M, N, K; staged::Bool, withbias::Bool, gemmkw...)
@@ -90,7 +91,7 @@ function stagedcount(backend, cfg, K; blocks = 2,
 end
 
 @testset "staged GEMM" begin
-    backend = LavaBackend()
+    backend = TESTBACKEND
     # `nothing`, not a `Workspace`: the declared path deleted that bump
     # allocator and `Ctx`'s `ws` defaults to `nothing`, where `scratch!`
     # allocates directly. Same cross-repo staleness the comment in `gemmerr`
@@ -331,14 +332,14 @@ end
         M, N, K = 256, 256, 128
         hA = rand(Float16, M, K) .- Float16(0.5)
         hB = rand(Float16, K, N) .- Float16(0.5)
-        A, B = Mantle.LavaArray(hA), Mantle.LavaArray(hB)
-        bias = Mantle.LavaArray(rand(Float16, M) .- Float16(0.5))
+        A, B = Mantle.devicearray(TESTBACKEND, hA), Mantle.devicearray(TESTBACKEND, hB)
+        bias = Mantle.devicearray(TESTBACKEND, rand(Float16, M) .- Float16(0.5))
         for withbias in (false, true), epi in (identity, x -> x * 2.0f0)
             outs = map((true, false)) do vec2
-                C = KA.allocate(LavaBackend(), Float32, M, N); fill!(C, 0f0)
+                C = KA.allocate(TESTBACKEND, Float32, M, N); fill!(C, 0f0)
                 Mantle.coopmat_gemm!(C, A, B, M, N, K; blk_split = (1, 1), staged = true,
                                    vec2, bias = withbias ? bias : nothing, epilogue = epi)
-                KA.synchronize(LavaBackend())
+                KA.synchronize(TESTBACKEND)
                 Array(C)
             end
             @test maximum(abs, outs[1]) > 1e-3          # both computed something
@@ -365,13 +366,13 @@ end
     # `GEMM_NARROW_DEFAULT`. On 2026-09-28 both failures had stopped reproducing
     # — exact at all six shapes, the two faulting ones included — so all six are
     # asserted again.
-    back = LavaBackend()
+    back = TESTBACKEND
     let
         @testset "M$M N$N K$K" for (M, N, K) in
                 [(1024, 1152, 288), (256, 256, 256), (512, 128, 64), (2048, 576, 576),
                  (4096, 2304, 576), (4096, 576, 2304)]
-            A = Mantle.LavaArray(Float16.(reshape(0.2 .* sin.(range(0, 9, M * K)), M, K)))
-            B = Mantle.LavaArray(Float16.(reshape(0.2 .* cos.(range(0, 7, K * N)), K, N)))
+            A = Mantle.devicearray(TESTBACKEND, Float16.(reshape(0.2 .* sin.(range(0, 9, M * K)), M, K)))
+            B = Mantle.devicearray(TESTBACKEND, Float16.(reshape(0.2 .* cos.(range(0, 7, K * N)), K, N)))
             C = KA.allocate(back, Float16, M, N)
 
             fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = false)
@@ -408,7 +409,7 @@ end
     # The K values are chosen for the pipeline's edges: one block (the prologue
     # does everything and the loop's re-stage is pure overhead), two blocks, and
     # an ODD block count, where the last tile is read out of buffer 1.
-    back = LavaBackend()
+    back = TESTBACKEND
     for (M, N, K) in ((192, 256, 32), (192, 256, 64), (192, 256, 96),
                       (576, 512, 576), (96, 128, 32))
         for c in Mantle.GEMM_TILINGS

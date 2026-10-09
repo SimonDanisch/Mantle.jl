@@ -40,7 +40,8 @@ world-age problem is the obvious mistake and `invokelatest` does not fix it. No
 leading underscore on a kernel name.
 """
 
-using Test, Mantle, Lava, KernelAbstractions
+using Test, Mantle, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
 
 @kernel function capture_bump!(c)
@@ -62,8 +63,8 @@ function _bumpplan(dev, counter, n)
 end
 
 @testset "record! writes without executing" begin
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    be = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    be = TESTBACKEND
     n = 64
 
     counter = Mantle.Buffer(dev, zeros(Int32, n))
@@ -105,8 +106,8 @@ end
     # that was never recorded is refused rather than recorded on the owning
     # thread's first frame. Every run after the one `record!` submits the same
     # command buffer.
-    dev = Mantle.Device(Mantle.VulkanAPI())
-    be = Mantle.defaultbackend()
+    dev = Mantle.Device(TESTBACKEND)
+    be = TESTBACKEND
     n = 64
     counter = Mantle.Buffer(dev, zeros(Int32, n))
     pl = Base.invokelatest(_bumpplan, dev, counter, n)

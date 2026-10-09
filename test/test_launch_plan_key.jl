@@ -22,6 +22,7 @@ the kernel again, the second assertion reads `1` where it wants `2`.
 """
 
 using Test, Mantle, KernelAbstractions
+include(joinpath(@__DIR__, "testbackend.jl"))
 const KI = Mantle.KI
 
 # Same signature, same workgroup size, different constant written.
@@ -58,7 +59,7 @@ function lpk_writemany!(out, n::Int)
 end
 
 @testset "a launch plan is keyed on its kernel, not only its arguments" begin
-    backend = LavaBackend()
+    backend = TESTBACKEND
     n, wg = 256, 32
 
     run(f) = begin

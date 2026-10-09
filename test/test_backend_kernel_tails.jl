@@ -10,9 +10,10 @@
 using Test, Mantle
 using Mantle: viewof, VulkanInstanceRecord, Mat3x4f
 using GeometryBasics: Point3f, Vec4f
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 @testset "this backend's plain kernels write nothing past their ndrange" begin
-    dev = Mantle.todevice(Mantle.defaultbackend())
+    dev = Mantle.Device(TESTBACKEND)
     tailed(n, pad, v) = (p = Mantle.Buffer(dev, fill(v, n + pad)); (p, viewof(p, n)))
     tail(p, n) = Array(Mantle.storage(p))[(n + 1):end]
     function runtails!(f, args, n)

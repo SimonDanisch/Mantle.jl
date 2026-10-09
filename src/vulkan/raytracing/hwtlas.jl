@@ -1111,6 +1111,7 @@ end
 # Vulkan drives an SBT through `vkCmdTraceRaysIndirect`. See
 # `supports_rt_pipeline` in `raytracing/api.jl`.
 supports_rt_pipeline(::LavaBackend) = true
+supports_hwtlas(b::LavaBackend) = vk_context(b).ray_query_available
 supports_rt_pipeline(::VulkanTLAS) = true
 
 # …and the inline ray query answers a BOX as well as a triangle: the three

@@ -22,7 +22,7 @@
 # the fixed error and 48x below the broken one — so it pins the *behaviour*
 # rather than a measurement of this machine.
 
-using Test, Lava, KernelAbstractions
+using Test, KernelAbstractions
 using LinearAlgebra
 using Random
 const KA = KernelAbstractions
@@ -32,12 +32,13 @@ const KA = KernelAbstractions
 # testset errors out before a single assertion runs. It reported as a failing GEMM
 # for as long as that was true.
 using LinearAlgebra: mul!
+include(joinpath(@__DIR__, "testbackend.jl"))
 
 relrms(got, want) = sqrt(sum(abs2, Float64.(got) .- want) / sum(abs2, want))
 
 "Force the scalar path: a wrapped operand is what makes `mm_coopmat_applicable` decline."
 function scalar_mul(::Type{T}, A::Matrix{Float16}, B::Matrix{Float16}) where {T}
-    be = LavaBackend()
+    be = TESTBACKEND
     M, K = size(A); N = size(B, 2)
     # `transpose(Aᵀ)` is strided and wrapped: same numbers, scalar kernel.
     At = KA.allocate(be, Float16, K, M); copyto!(At, Matrix(transpose(A)))
