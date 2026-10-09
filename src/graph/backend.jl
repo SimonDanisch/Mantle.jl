@@ -731,12 +731,22 @@ backend that binds arguments directly, which is the default.
 argbytes(::Device, nbytes) = nothing
 
 """
-    indirectslot(device, store, offset) -> device array of three UInt32
+    indirectslot(device, store, offset) -> slot
 
-The indirect command `offset` bytes into `store`, as the view a prepare kernel
-writes and an indirect dispatch reads.
+The indirect command `offset` bytes into `store`: what a prepare kernel writes
+through [`writegroups!`](@ref) and an indirect dispatch reads. On most backends the
+slot IS the device array of the command's three `UInt32` words; a backend whose
+prepare has more to do answers a slot of its own, and [`slotgrid`](@ref) is those
+three words either way.
 """
 function indirectslot end
+
+"""
+    slotgrid(slot) -> device array of three UInt32
+
+The workgroup counts in an indirect slot, as a device array.
+"""
+slotgrid(s) = s
 
 
 """
@@ -888,7 +898,7 @@ const BACKEND_VOCABULARY = (
     # behaviour but counted twice in `test_mantle_owns_it.jl`'s 0.8 ratchet, which
     # walks this list and pushes one name per entry.
     :profiled!, :collect!,
-    :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!,
+    :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!, :slotgrid,
     :storebytes!,
     :recordsplans, :recordable, :runscalls, :librarygemm, :native_gemm_available,
     :native_conv2d_dispatch!,

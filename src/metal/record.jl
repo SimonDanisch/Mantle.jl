@@ -81,10 +81,14 @@ command's zero-based index (word 7) and its threads per group (word 8) — and
 struct MetalIndirectSlot
     store::MTL.MTLBuffer
     offset::Int
+    # The three grid words as a device array, which is what `slotgrid` answers.
+    grid::Metal.MtlVector{UInt32}
 end
 
-Mantle.indirectslot(::MetalDevice, store::MTL.MTLBuffer, off::Int) =
-    MetalIndirectSlot(store, off)
+Mantle.indirectslot(d::MetalDevice, store::MTL.MTLBuffer, off::Int) =
+    MetalIndirectSlot(store, off, deviceslice(d, UInt32, (3,), store, off))
+
+Mantle.slotgrid(s::MetalIndirectSlot) = s.grid
 
 """The slot as a prepare kernel holds it: its address."""
 struct ICBGridSlot

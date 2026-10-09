@@ -72,7 +72,7 @@ end
     # is what the last iteration's prepare left there.
     sentinel = UInt32(0xFFFF0000)
     for slot in slots
-        fill!(pl.args.indirect[slot], sentinel)
+        fill!(Mantle.slotgrid(pl.args.indirect[slot]), sentinel)
     end
     KA.synchronize(Mantle.backend(dev))
 
@@ -83,7 +83,7 @@ end
     # and wrote zero. Had it been discarded with the iteration, the slot would
     # still hold the first iteration's group count, which a trace would read.
     for slot in slots
-        got = Array(pl.args.indirect[slot])
+        got = Array(Mantle.slotgrid(pl.args.indirect[slot]))
         @test got[1] == UInt32(0)
         @test got[2:3] == UInt32[1, 1]
     end
