@@ -1245,7 +1245,7 @@ else
             M.render!(g, "tri", t => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
                 M.draw!(p, TINTED, (tri,), 3)
             end
-            return M.Plan(g), t
+            return M.record!(M.Plan(g)), t
         end
         win = M.Window(TESTBACKEND, 256, 256; title = "surface vs target", vsync = false)
         plan_win, screen = draw_into(g -> M.Surface(g, win))
