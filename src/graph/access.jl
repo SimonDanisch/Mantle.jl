@@ -1113,6 +1113,9 @@ function llvmcalltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         push!(st.addresses, i)
         out = Taint()
         foreach(a -> union!(out, operandtaint(ir, st, a)), tainted)
+        # An address computed from a claimed index is a claimed slot, as the
+        # integer arithmetic at the `PURE_OPS` branch keeps it one.
+        foreach(a -> union!(st.claims[i], operandclaim(st, a)), rest)
         return out
     end
     t = llvmcallusage(src)
@@ -1130,10 +1133,43 @@ function llvmcalltaint!(w::Walk, ir, touches, st::State, am::ArgMap, i::Int,
         return Taint()
     end
     for a in tainted
-        record!(touches, am, operandtaint(ir, st, a), t)
-        t === ATOMIC && union!(st.claims[i], operandtaint(ir, st, a))
+        target = operandtaint(ir, st, a)
+        record!(touches, am, target,
+                t === WRITE ? llvmstoretouch(st, src, rest, target) : t)
+        t === ATOMIC && union!(st.claims[i], target)
     end
     return Taint()
+end
+
+const STORED_VALUE = r"(?m)^\s*store\s+(?:atomic\s+)?(?:volatile\s+)?(?:<[^>]*>|\S+)\s+([^,\s]+)\s*,"
+
+"""
+A store spelled as an `llvmcall` — LLVM.jl's `LLVMPtr` store, which is how a Metal
+array writes: ordered unless the slot was claimed, as [`storetouch`](@ref) decides
+for `pointerset`.
+
+The stored VALUE is not consulted there and is not here, so the module's `store`
+names it: the claim is that of every other operand. A module whose store cannot be
+matched to one parameter (several stores, a value computed inside it) is ordered.
+"""
+function llvmstoretouch(st::State, src::String, rest, target::Taint)
+    stores = collect(eachmatch(STORED_VALUE, src))
+    length(stores) == 1 || return WRITE
+    value = only(stores).captures[1]
+    # `rest` is the `llvmcall`'s: the module, the return type, the argument types,
+    # then the operands, whose parameters are `%0`, `%1`, ...
+    ops = @view rest[4:end]
+    stored = 0
+    if startswith(value, '%')
+        p = tryparse(Int, value[2:end])
+        (p === nothing || p >= length(ops)) && return WRITE
+        stored = p + 1
+    end
+    claim = Taint()
+    for k in eachindex(ops)
+        k == stored || union!(claim, operandclaim(st, ops[k]))
+    end
+    return disjoint(claim, target) ? ATOMIC : WRITE
 end
 
 """
