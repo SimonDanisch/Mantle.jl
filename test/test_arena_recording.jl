@@ -560,11 +560,15 @@ end
 # The loop reads its step from the array, so no driver can evaluate it at
 # compile time: with a constant step it is a constant, and a kernel that is
 # folded away has signalled before the next line runs.
+# Long enough that the host reaches `reclaim!` while it still runs. 2M iterations
+# took 93 ms on LapWin's Radeon 8060S, and once, on a fresh Julia 1.12.7 process, the
+# host took longer than that between the launch and the first `reclaim!`; 20M take
+# 385 ms there, well inside Windows' 2 s GPU watchdog.
 @kernel function arena_slow!(a)
     i = @index(Global)
     @inbounds step = a[i]
     acc = 0f0
-    for k in 1:2_000_000
+    for k in 1:20_000_000
         acc += sin(Float32(k) * step)
     end
     @inbounds a[i] = acc
