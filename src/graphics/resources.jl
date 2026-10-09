@@ -183,6 +183,12 @@ function eltypeof end
 # same reason; it was one method per backend, the same in both, and a Mac that
 # compiles both trees cannot hold two.
 blittarget(t::OffscreenTarget) = eltypeof(target_format(t.fb))
+
+# …and the framebuffer itself, which a graph names as an attachment directly:
+# `attachment_format` asks its `eltype`, and without this a pipeline drawing into
+# a Metal framebuffer was compiled for `Any`. Vulkan's graph path asked the format
+# instead, so only the backend that records through core's walk ever reached it.
+Base.eltype(fb::Framebuffer) = eltypeof(target_format(fb))
 blittarget(t::WindowTarget) = eltypeof(target_format(t.window))
 target_format(t::OffscreenTarget) = target_format(t.fb)
 target_format(t::WindowTarget) = target_format(t.window)

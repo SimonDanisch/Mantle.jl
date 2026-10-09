@@ -366,7 +366,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     mesh_tt = Tuple{mesh_stage_lead(p)..., mesh_bufs.parameters...}
     mfn = MetalMeshStage{typeof(Mantle.stagefunction(p.mesh))}()
     mstage = compile_stage_function(mfn, mesh_tt, :mesh,
-                                    string(nameof(Mantle.stagefunction(p.mesh))) * "_ms")
+                                    stagename(Mantle.stagefunction(p.mesh), "_ms"))
 
     isempty(color_formats) &&
         error("a mesh pipeline needs a colour attachment: Metal has no " *
@@ -379,7 +379,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
                     texture_markers(ntex)..., StageOut{FOut}}
     fstage = compile_stage_function(ffn, frag_tt, :fragment,
-                                    string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
+                                    stagename(Mantle.stagefunction(p.fragment), "_fs"))
 
     # The compiled stage functions by identity, as the graphics pipeline's key:
     # a stage compiled again after an edit is a new one.

@@ -692,11 +692,11 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     dev = Metal.device()
     vfn, ffn, vert_tt, frag_tt =
         stage_signatures(p, length(color_formats), vert_bufs, frag_bufs; color_formats)
-    vname = string(nameof(Mantle.stagefunction(p.vertex))) * "_vs"
-    vstage = compile_stage_function(vfn, vert_tt, :vertex, vname)
+    vstage = compile_stage_function(vfn, vert_tt, :vertex,
+                                    stagename(Mantle.stagefunction(p.vertex), "_vs"))
     fstage = ffn === nothing ? nothing :
         compile_stage_function(ffn, frag_tt, :fragment,
-                               string(nameof(Mantle.stagefunction(p.fragment))) * "_fs")
+                               stagename(Mantle.stagefunction(p.fragment), "_fs"))
 
     # The stages themselves, because each carries its function, its config and
     # its interface, and keying those separately lets them disagree about which
@@ -755,6 +755,18 @@ mutable struct MetalStages
     stages::Dict{Any,Tuple{Any,Any}}
     MetalStages() = new(Dict{Any,Tuple{Any,Any}}())
 end
+
+"""
+`name` with every character an identifier cannot hold replaced by `_`: what an
+entry point is called once it reaches a metallib, and so what it has to be asked
+for by. An anonymous shader is `#332`, which the compiler spells `_332`, so the
+library was asked for a `#332_fs` it did not have.
+"""
+identifier(name::AbstractString) =
+    map(c -> (isletter(c) || isdigit(c) || c == '_') ? c : '_', String(name))
+
+"""The entry name of shader `f`'s `suffix` stage."""
+stagename(f, suffix::AbstractString) = identifier(string(nameof(f))) * suffix
 
 """
     compile_stage_function(f, tt, stage, name) -> (MTLFunction, MTLLibrary)

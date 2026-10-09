@@ -1427,11 +1427,26 @@ function emitdraw!(::Immediate, handle, d)
     # Every one of these through the binding when there is one: a tick count is a
     # vertex count and a relaid-out plot is a new index buffer, so freezing them
     # would rebuild a plan for a zoom just as surely as freezing the camera did.
-    record_draw!(handle, d.compiled, drawargs(d.args), boundcount(d.args, d.count);
+    record_draw!(handle, d.compiled, drawargs(d.args), drawcount(boundcount(d.args, d.count));
                  instances = boundinstances(d.args, d.instances),
                  indices = boundindices(d.args, d.indices))
     return nothing
 end
+
+"""
+    drawcount(count)
+
+The count `record_draw!` is handed: a number as it is, a `Commands` as it is (an
+INDIRECT draw, whose count the host never learns), and anything else — a `Buffer`
+drawn whole — by its [`count`](@ref), read when the draw is recorded.
+
+Here and not in a backend: the Vulkan emitter counted a buffer and the walk every
+other backend records through handed it on, so Metal had no `draw!` over a
+`Buffer` at all.
+"""
+drawcount(n::Integer) = n
+drawcount(c::Commands) = c
+drawcount(x) = count(x)
 endrender!(::Immediate, handle) = (end_render_pass!(handle); nothing)
 
 """

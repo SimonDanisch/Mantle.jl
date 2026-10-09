@@ -1245,7 +1245,7 @@ else
             M.render!(g, "tri", t => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
                 M.draw!(p, TINTED, (tri,), 3)
             end
-            return M.record!(M.Plan(g)), t
+            return M.Plan(g), t
         end
         win = M.Window(TESTBACKEND, 256, 256; title = "surface vs target", vsync = false)
         plan_win, screen = draw_into(g -> M.Surface(g, win))
@@ -1253,8 +1253,10 @@ else
         # bind it without knowing which it has.
         @test M.target_extent(screen) == size(win)
         @test eltype(screen) == BGRA{N0f8}
+        # Recorded, as a headless plan has to be; the windowed one is walked, since
+        # a recording names one swapchain image and a window has several.
         plan_off, off = draw_into(g -> M.Transient.Image(g, RGBA{N0f8}, size(win)))
-        M.run!(plan_off)
+        M.run!(M.record!(plan_off))
         a = M.readback_target(off)
         # Every image the platform cycles through drawn, so the one a screenshot
         # is handed holds this scene.

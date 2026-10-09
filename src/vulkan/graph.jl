@@ -1887,10 +1887,8 @@ function emit_draw!(e, pipe, n, addr::UInt64, indices, inst::Int)
                           indices_offset = UInt64(pool_offset(mb) + indices.offset))
 end
 
-# An indexed draw's count is an index count, so the same two spellings the
-# vertex ones take: a number, or something with a length.
-drawcount(n::Integer) = n
-drawcount(x) = count(x)
+# An indexed draw's count is an index count, so the same spellings the vertex
+# ones take: core's `drawcount`.
 
 """
 Write one dispatch's arguments into the plan's argument memory, and answer with

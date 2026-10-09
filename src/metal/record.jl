@@ -179,10 +179,7 @@ dispatches of one kernel at the same types are one kernel.
 The slotted form stays for the recorder's own helpers, whose slot IS part of what
 they are.
 """
-function icb_name(name::AbstractString)
-    cleaned = map(c -> (isletter(c) || isdigit(c) || c == '_') ? c : '_', String(name))
-    return "mantle_" * cleaned
-end
+icb_name(name::AbstractString) = "mantle_" * identifier(name)
 icb_name(name::AbstractString, i::Int) = icb_name(name) * "_" * string(i)
 
 # The two arguments on this backend whose slot binds an allocation rather than a
