@@ -20,7 +20,8 @@ is a fine way to *find* a bug and a terrible way to guard one.
 What is asserted, on every backend, is the pool's ledger: a `Mantle.Buffer` freed
 while a launch that reads it is still running stays handed out — nobody else can
 be given those bytes — until the device is past the launch, and then it comes
-back; one that nothing in flight names comes back at the first reclaim after the
+back, however many submissions after the free have finished first; one that
+nothing in flight names comes back at the first reclaim after the
 device is idle. The test read the Vulkan buffer's state machine (`ALIVE -> DEAD`,
 `holders`) for the same two facts. A backend array freed or dropped mid-flight is
 checked by the result the launch computes from it.
@@ -58,6 +59,11 @@ function spinsfor(ms)
         KA.synchronize(TESTBACKEND)
     end
     return Int32(clamp(round(Int, 1_000_000 * ms / (1000 * t)), 1, typemax(Int32)))
+end
+
+@kernel function bump!(x)
+    i = @index(Global)
+    @inbounds x[i] += 1f0
 end
 
 """Is `r` still handed out by its block — bytes the pool may give nobody else?"""
@@ -116,6 +122,41 @@ end
         @test !islive(r)
         # …and the launch read what it was given.
         @test all(==(5f0), Array(out))
+    end
+
+    @testset "a submission after the free does not stand for launches before it" begin
+        # The slow launch is followed by `k` small ones, the free, and a recorded
+        # plan's submission. A backend that batches launches commits the slow one
+        # on its own at some `k` — Metal.jl does at 32 operations — and then has no
+        # open batch left to put a signal behind it: the plan's submission was
+        # signalled past the still-running launch on Metal 4, and the region came
+        # back at once. Every `k` up to 40, so no backend's threshold is named.
+        g = Mantle.Graph(dev)
+        tmp = Mantle.Buffer(dev, zeros(Float32, n))
+        Mantle.dispatch!(g, bump!, (tmp,), n; name = "bump")
+        plan = Mantle.record!(Mantle.Plan(g))
+        Mantle.run!(plan)
+        small = KA.zeros(TESTBACKEND, Float32, n)
+        KA.synchronize(TESTBACKEND)
+        short = spinsfor(50)
+        early = Int[]
+        for k in 0:40
+            a = Mantle.Buffer(dev, fill(5f0, n))
+            out = Mantle.Buffer(dev, zeros(Float32, n))
+            r = Mantle.region(a.store)
+            spinread!(TESTBACKEND, 64)(Mantle.storage(out), Mantle.storage(a), short; ndrange = n)
+            for _ in 1:k
+                bump!(TESTBACKEND, 64)(small; ndrange = n)
+            end
+            Mantle.free!(a)
+            Mantle.run!(plan)
+            Mantle.reclaim!(sp, dev)
+            Mantle.reclaim!(sp, dev)
+            islive(r) || push!(early, k)
+            KA.synchronize(TESTBACKEND)
+            reclaimidle!(dev)
+        end
+        @test isempty(early)
     end
 
     @testset "nothing in flight names it: released at the first reclaim" begin
