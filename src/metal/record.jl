@@ -67,6 +67,59 @@ function Mantle.argbytes(d::MetalDevice, nbytes::Int)
 end
 
 """
+A device-sized dispatch's slot on this backend: its 256 bytes of the plan's argument
+memory, by offset.
+
+Words 1-3 are the grid core's prepare writes, the same three words every backend
+has, and what an ENCODED frame's indirect dispatch reads. A REPLAYED frame cannot
+read them: a command in an indirect command buffer has no indirect form. So the
+recorder also writes, at record, what the prepare needs to rewrite the command
+itself — the buffer's handle (words 5-6, zero on a queue that encodes), the
+command's zero-based index (word 7) and its threads per group (word 8) — and
+`writegroups!` does both.
+"""
+struct MetalIndirectSlot
+    store::MTL.MTLBuffer
+    offset::Int
+end
+
+Mantle.indirectslot(::MetalDevice, store::MTL.MTLBuffer, off::Int) =
+    MetalIndirectSlot(store, off)
+
+"""The slot as a prepare kernel holds it: its address."""
+struct ICBGridSlot
+    ptr::Core.LLVMPtr{UInt32,Metal.AS.Device}
+end
+
+Adapt.adapt_storage(::Metal.Adaptor, s::MetalIndirectSlot) =
+    ICBGridSlot(reinterpret(Core.LLVMPtr{UInt32,Metal.AS.Device},
+                            s.store.gpuAddress + UInt64(s.offset)))
+
+"""
+Inside core's prepare: the grid, and for a replayed recording the command itself.
+
+The command is rewritten here rather than read from the slot because it cannot be:
+a command in an indirect command buffer only dispatches the grid it holds. Measured
+on an M5, the rewrite keeps the pipeline and buffers encoded at record, and the
+command processor sees it from the next `execute` on — but not within the one that
+wrote it, which is why `emitpreparebarrier!` closes the segment.
+"""
+@inline function Mantle.writegroups!(s::ICBGridSlot, groups::UInt32)
+    p = s.ptr
+    unsafe_store!(p, groups, 1)
+    unsafe_store!(p, UInt32(1), 2)
+    unsafe_store!(p, UInt32(1), 3)
+    icb = unsafe_load(reinterpret(Core.LLVMPtr{UInt64,Metal.AS.Device}, p + 16))
+    if icb != UInt64(0)
+        Metal.concurrent_dispatch_threadgroups!(
+            reinterpret(Core.LLVMPtr{Nothing,Metal.AS.Device}, icb),
+            unsafe_load(p, 7), (groups, UInt32(1), UInt32(1)),
+            (unsafe_load(p, 8), UInt32(1), UInt32(1)))
+    end
+    return nothing
+end
+
+"""
 Retire a plan's argument memory: keep it alive until whatever may still be reading
 it has run.
 
@@ -129,6 +182,12 @@ struct MetalRecordedDispatch{A<:Tuple,R<:Tuple,G,T}
     name::String
     argoff::Int
     argsize::Int
+    # Core's indirect slot for a dispatch over a `DeviceRange` in a RECORDED plan,
+    # whose grid the device writes every run (`writegroups!`); zero for one whose
+    # grid is fixed at record, and for every dispatch of a walked plan.
+    indirect::Int
+    # The declared ndrange, which core's prepare reads the count resource out of.
+    ndrange::Any
 end
 
 """
@@ -156,12 +215,17 @@ function (d::MetalRecordedDispatch)()
 end
 
 Mantle.argsize(d::MetalRecordedDispatch) = d.argsize
-# Zero, and `devicesized` false, for a dispatch over a `DeviceRange` as much as for
-# one sized on the host: this backend records the range's CEILING and lets the
-# kernel's own bounds check discard the surplus threads, so there is no indirect
-# command for a prepare to write and no prepare to emit. See `recordedrange`.
-Mantle.indirectindex(::MetalRecordedDispatch) = 0
-Mantle.devicesized(::MetalRecordedDispatch) = false
+# A dispatch over a `DeviceRange` in a recorded plan is sized on the device: core's
+# prepare writes its grid into the slot `indirectslot` answered, and `writegroups!`
+# rewrites the recorded command from there. See `MetalIndirectSlot`.
+Mantle.indirectindex(d::MetalRecordedDispatch) = d.indirect
+Mantle.devicesized(d::MetalRecordedDispatch) = d.indirect != 0
+Mantle.workgroupsize(d::MetalRecordedDispatch) = UInt32(threadsx(d.nthreads))
+
+"""The threads per group along x, which is what a 1-D device count divides by."""
+threadsx(n::Integer) = n
+threadsx(t::Tuple) = first(t)
+threadsx(s::MTL.MTLSize) = s.width
 
 """
 An entry-point name Metal will take: the kernel's own name with everything that is
@@ -299,10 +363,10 @@ The ndrange a recorded dispatch is compiled and encoded for.
 
 A `DeviceRange` becomes its CEILING, which is core's `dispatchrange` and the same
 answer the Vulkan backend compiles against. Every kernel dispatched over one
-bounds-checks itself — that is a requirement of the range, repo-wide — so
-over-dispatching it is defined to be a no-op for the surplus threads. What Vulkan
-does on top of that, and this does not yet, is narrow the command to the count the
-device wrote; here the surplus threads exit on their own.
+bounds-checks itself — that is a requirement of the range, repo-wide. In a recorded
+plan that grid is only what the command starts with: the device narrows it to the
+count every run (`writegroups!`). A walked plan dispatches it as it is, and the
+surplus threads exit on their own.
 """
 recordedrange(nd) = Mantle.dispatchrange(nd)
 
@@ -318,14 +382,17 @@ pipeline. A frame does none of it.
 function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dispatch,
                                  argoff::Int, indirect::Int)
     dev = c.graph.dev
-    # A `DeviceRange` with no ceiling has no fixed size to record: the count is on
-    # the device and this backend cannot yet narrow a command from there, so
-    # recording it would mean dispatching `INDIRECT_CEILING` threads over a queue
-    # that might hold four. Core's interpreted launch reads the count on the host
-    # instead — one device sync per dispatch, which is what a plan asking for this
-    # already paid, and `norecordreason` refuses to record the plan.
-    d.ndrange isa Mantle.DeviceRange && d.ndrange.max === nothing &&
+    # A `DeviceRange` in a plan that will be RECORDED is sized on the device every
+    # run: core's prepare writes its grid and the recorded command is rewritten
+    # from it (`writegroups!`), so the command is compiled against the ceiling and
+    # narrowed to the count. A WALKED plan — one that draws — encodes per frame and
+    # has no recording to rewrite: it dispatches the ceiling and lets the kernel's
+    # own bounds check discard the surplus, and with no ceiling at all core's
+    # interpreted launch reads the count on the host.
+    walked = walkedpasses(c.graph.passes)
+    d.ndrange isa Mantle.DeviceRange && walked && d.ndrange.max === nothing &&
         return Mantle.bake(c, d)
+    indirect = walked ? 0 : indirect
     # Two more kinds of dispatch that are not a `@kernel` to record, both of
     # which core already knows how to run and this backend was walking straight
     # past into `kernelfor`. What came out was a `MethodError` naming the USER's
@@ -354,7 +421,8 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
         state = recorded_state(dev, kernel)
         recargs, nbytes = recorded_args((state, d.kernel, adapted...), argoff)
         return MetalRecordedDispatch(kernel, recargs, adapted, raw, state,
-                                     groups, threads, entry, argoff, nbytes)
+                                     groups, threads, entry, argoff, nbytes, indirect,
+                                     d.ndrange)
     end
     obj = Mantle.kernelfor(d.kernel, d.group, Mantle.backend(dev))
     isempty(fieldnames(typeof(obj.f))) ||
@@ -403,7 +471,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     return MetalRecordedDispatch(kernel, recargs, adapted, raw, state,
                                  length(KA.blocks(iterspace)),
                                  length(KA.workitems(iterspace)),
-                                 entry, argoff, nbytes)
+                                 entry, argoff, nbytes, indirect, d.ndrange)
 end
 
 # ── Segments, and the emitter that builds them ───────────────────────────────
@@ -477,11 +545,15 @@ struct MetalEncodedCommand
     # a gated segment, whose threadgroup count the device writes and the host never
     # learns; `-1` for one whose grid is fixed at record time.
     gridoff::Int
+    # Byte offset of a device-sized dispatch's slot in the argument memory, whose
+    # grid core's prepare writes; `-1` for every other command.
+    slotoff::Int
 end
 
 """The same command with its barrier bit set, since a frame cannot set one."""
 withbarrier(c::MetalEncodedCommand) =
-    MetalEncodedCommand(c.pipeline, c.table, c.groups, c.threads, true, c.gridoff)
+    MetalEncodedCommand(c.pipeline, c.table, c.groups, c.threads, true, c.gridoff,
+                        c.slotoff)
 
 """
 What `record!` walks a Metal plan with: one indirect command buffer, a cursor into
@@ -619,19 +691,19 @@ hold, and that is not a failure: core's answer to `openrecording === nothing` is
 walk the plan, which is what those plans always did. Everything ELSE that stops a
 recording throws instead — the caller asked for one and is entitled to know why.
 """
-walkedplan(pl::Mantle.Plan) =
-    any(pp -> !(pp.pass.kind === :compute || pp.pass.kind === :update), pl.passes)
+walkedplan(pl::Mantle.Plan) = walkedpasses(pp.pass for pp in pl.passes)
+
+"""Whether a plan of these passes is walked rather than recorded: it holds a pass
+that is neither compute nor update."""
+walkedpasses(passes) = any(p -> !(p.kind === :compute || p.kind === :update), passes)
 
 """Why a plan this backend would otherwise record cannot be, or `nothing`."""
 function norecordreason(pl::Mantle.Plan)
     for pp in pl.passes
         for d in pp.dispatches
             d isa MetalRecordedDispatch || d isa Mantle.Call ||
-                return "pass \"$(pp.pass.name)\" holds a " *
-                "dispatch over a `DeviceRange` with no `max`. Give the range a " *
-                "ceiling — `DeviceRange(count; max = capacity)` — so the command " *
-                "can be recorded against it; without one the count is only on the " *
-                "device and a recorded command cannot be narrowed to it yet."
+                return "pass \"$(pp.pass.name)\" holds a $(typeof(d)), which " *
+                "this backend compiled for an interpreted run and cannot record."
         end
     end
     return nothing
@@ -655,6 +727,8 @@ function planshape(pl::Mantle.Plan, passes::AbstractUnitRange = eachindex(pl.pas
     ndispatch = 0
     nwriters = 0
     ncalls = 0
+    nprepares = 0
+    prepbytes = 0
     prev = nothing
     for i in passes
         pp = pl.passes[i]
@@ -662,11 +736,22 @@ function planshape(pl::Mantle.Plan, passes::AbstractUnitRange = eachindex(pl.pas
         for d in pp.dispatches
             d isa Mantle.Call ? (ncalls += 1) : (ndispatch += 1)
         end
+        # A pass with device-sized dispatches opens with core's prepare, in a
+        # segment of its own (`emitkernel!`, `emitpreparebarrier!`), so whatever
+        # gate the pass before it had, this pass's gate needs a writer again.
+        if pp.indirect
+            nprepares += 1
+            nind = count(Mantle.devicesized, pp.dispatches)
+            # Kernel state and the gate, plus the three per-dispatch tuples at up
+            # to 48 bytes an entry, each argument on its own 256-byte boundary.
+            prepbytes += 2 * 256 + 3 * Mantle.argalign(48 * nind)
+            prev = nothing
+        end
         pred = pp.pass.predicate
         pred === nothing || samepredicate(pred, prev) || (nwriters += 1)
         prev = pred
     end
-    return ndispatch, nwriters, ncalls
+    return (; ndispatch, nwriters, ncalls, nprepares, prepbytes)
 end
 
 """
@@ -705,7 +790,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
         "record!: this device has no residency sets, and every buffer a recorded " *
         "command reaches is reached by address — without one nothing it reads is " *
         "resident. Run the plan without recording it."))
-    ndispatch, nwriters, ncalls = planshape(pl, passes)
+    (; ndispatch, nwriters, ncalls, nprepares, prepbytes) = planshape(pl, passes)
     # The WHOLE plan, not a piece: a graph that opens on a `when!` region gets an
     # empty head piece of its own (`emithead!` cannot live in a piece that might
     # not be submitted), and that piece is recorded like any other.
@@ -718,6 +803,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
     # count it declared is a driver error rather than a Julia one, and the first
     # symptom is a command that quietly does nothing.
     nwriters == 0 || (nslots = max(nslots, RANGE_WRITER_SLOTS))
+    nprepares == 0 || (nslots = max(nslots, PREPARE_SLOTS))
     nslots <= MAX_KERNEL_BUFFERS || throw(ArgumentError(
         "record!: a dispatch binds $(nslots) buffers and an indirect command may " *
         "bind $(MAX_KERNEL_BUFFERS). Pass fewer arguments, or group them in a struct."))
@@ -745,7 +831,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
         "write, and only the first is given the reset that clears it — so a later " *
         "gated piece would replay stale counts. Keep the gated passes in its first " *
         "$(first(passes) - 1), or no `when!` region before them."))
-    ncommands = ndispatch + nwriters + (head ? 1 : 0)
+    ncommands = ndispatch + nwriters + nprepares + (head ? 1 : 0)
     # `ray_tracing`, unconditionally: a command whose kernel traces — an inline
     # ray query against a hardware acceleration structure — is refused by a buffer
     # that did not declare it, and the refusal is a MISS rather than an error.
@@ -777,7 +863,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
     # One 256-byte slot per argument: the head's range reset takes three, and each
     # range writer its kernel state plus six. Sized generously and once — this is
     # record-time memory, not a frame's.
-    aux = MTL.MTLBuffer(d.dev, max(256 * (4 + 7 * nwriters), 256);
+    aux = MTL.MTLBuffer(d.dev, max(256 * (4 + 7 * nwriters) + prepbytes, 256);
                         storage = Metal.SharedStorage)
     Metal.make_persistently_resident!(aux)
     ranges = Metal.MtlVector{UInt32}(undef, max(2 * nwriters, 2))
@@ -806,6 +892,10 @@ maxslot(::Mantle.Call) = 0
 
 """Metal's own limit on how many buffers one command may bind."""
 const MAX_KERNEL_BUFFERS = 31
+
+"""How many buffer slots core's prepare binds: the kernel state, then its slots, its
+counts, their workgroup sizes and its gate."""
+const PREPARE_SLOTS = 6
 
 """
 How many buffer slots a range writer binds: the kernel state, then one for each
@@ -877,9 +967,28 @@ function Mantle.emitdispatch!(e::MetalRecorder, d::MetalRecordedDispatch,
         "record!: the plan has no argument memory, so a recorded command has " *
         "nowhere to bind its arguments from."))
     pack_recorded!(am.ptr, d.args, (d.state, d.kernel.f, d.adapted...), e.plan, am)
+    slotoff = d.indirect == 0 ? -1 : writeslot!(e, am, d)
     encode!(e, d.kernel.pipeline, d.args, am.store,
-            MTL.MTLSize(d.groups), MTL.MTLSize(d.nthreads))
+            MTL.MTLSize(d.groups), MTL.MTLSize(d.nthreads); slotoff)
     return nothing
+end
+
+"""
+What a device-sized dispatch's prepare needs to rewrite its command, into its slot;
+answers the slot's byte offset in the argument memory.
+
+The command is the next one `encode!` writes, whose zero-based index is the cursor
+before it advances. A queue that encodes its frames reads the grid words and has no
+command to rewrite, so it gets a null handle.
+"""
+function writeslot!(e::MetalRecorder, am, d::MetalRecordedDispatch)
+    s = am.indirect[d.indirect]::MetalIndirectSlot
+    p = am.ptr + s.offset
+    icb = encodes(e.dev.queue) ? UInt64(0) : reinterpret(UInt64, e.icb.gpuResourceID)
+    unsafe_store!(Ptr{UInt64}(p + 16), icb)
+    unsafe_store!(Ptr{UInt32}(p + 24), UInt32(e.cursor))
+    unsafe_store!(Ptr{UInt32}(p + 28), UInt32(threadsx(d.nthreads)))
+    return s.offset
 end
 
 """
@@ -924,7 +1033,7 @@ concurrently.
 """
 function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
                  args::Vector{RecordedArg}, store::MTL.MTLBuffer,
-                 groups::MTL.MTLSize, threads::MTL.MTLSize)
+                 groups::MTL.MTLSize, threads::MTL.MTLSize; slotoff::Int = -1)
     e.cursor += 1
     e.cursor <= e.ncommands || error("record!: the recording is longer than the " *
                                      "$(e.ncommands) commands it was sized for")
@@ -942,9 +1051,11 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
     # lets the table be built once.
     if encodes(e.dev.queue)
         # A command inside a gated segment takes its grid from memory, and the run
-        # it belongs to has one triple per command.
+        # it belongs to has one triple per command. A device-sized one takes its
+        # grid from its own slot instead, which the prepare zeroes for a discarded
+        # iteration, so it needs no triple.
         goff = -1
-        if e.slot >= 0
+        if e.slot >= 0 && slotoff < 0
             goff = 3 * e.gridcursor
             e.gridcursor += 1
             e.templhost[goff + 1] = UInt32(groups.width)
@@ -953,7 +1064,7 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
         end
         push!(e.encoded,
               MetalEncodedCommand(pipeline, argtable(e.dev, args, store), groups,
-                                  threads, e.barrier, goff))
+                                  threads, e.barrier, goff, slotoff))
     end
     # The bit, on BOTH generations. MTL4 does no automatic hazard tracking, which
     # made it look as though it must ignore a command's barrier bit too — it does
@@ -967,6 +1078,45 @@ function encode!(e::MetalRecorder, pipeline::MTL.MTLComputePipelineState,
         e.barrier = false
     end
     return cmd
+end
+
+"""
+    Mantle.emitkernel!(recorder, f, args...; ndrange, workgroup_size)
+
+Record one of core's own kernels — the prepare of a pass's device-sized dispatches —
+as the next command, its arguments in the recording's auxiliary memory like a range
+writer's.
+
+Into an UNGATED segment: core emits the prepare before the pass's predicate scope so
+that it also runs for a discarded iteration, writing zero groups, and a segment left
+gated by the pass before would discard it with that pass's work.
+"""
+function Mantle.emitkernel!(e::MetalRecorder, f, args...; ndrange, workgroup_size)
+    e.pred === nothing || closesegment!(e)
+    adapted = map(Metal.mtlconvert, args)
+    tt = Tuple{map(Core.Typeof, adapted)...}
+    kernel = Metal.mtlfunction(f, tt; name = icb_name(string(nameof(f))), indirect = true)
+    state = recorded_state(e.dev, kernel)
+    recargs, nbytes = recorded_args((state, f, adapted...), e.auxcursor)
+    e.auxcursor += Mantle.argalign(nbytes)
+    e.auxcursor <= Int(e.aux.length) || error(
+        "record!: the recording's auxiliary memory holds $(Int(e.aux.length)) bytes and " *
+        "its writers and prepares need $(e.auxcursor); `planshape` sized it short.")
+    pack_recorded!(e.auxptr, recargs, (state, f, adapted...))
+    threads = prod(workgroup_size)
+    encode!(e, kernel.pipeline, recargs, e.aux, MTL.MTLSize(cld(ndrange, threads)),
+            MTL.MTLSize(threads))
+    return nothing
+end
+
+"""
+After the prepare: the commands it rewrote are read from the NEXT `execute`, so the
+segment closes here, and the next command waits for the prepare's writes.
+"""
+function Mantle.emitpreparebarrier!(e::MetalRecorder)
+    closesegment!(e)
+    e.barrier = true
+    return nothing
 end
 
 # ── The walk ─────────────────────────────────────────────────────────────────

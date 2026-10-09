@@ -265,8 +265,8 @@ end
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, repeat_decide!, (count, src), 1; name = "decide")
     Mantle.repeat!(g, maxiters, count) do i
-        # With a ceiling, which a recording on every device can be narrowed from.
-        Mantle.dispatch!(g, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf; max = n);
+        # No ceiling: the device sizes the command every iteration.
+        Mantle.dispatch!(g, repeat_step_sized!, (x, nbuf), Mantle.DeviceRange(nbuf);
                          name = "step")
     end
     pl = Mantle.record!(Mantle.Plan(g))

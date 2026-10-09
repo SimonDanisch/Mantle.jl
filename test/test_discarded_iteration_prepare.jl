@@ -52,9 +52,9 @@ end
     trips = Mantle.GPURef(dev, Int32(1))          # the loop runs ONE of its two iterations
     g = Mantle.Graph(dev)
     Mantle.repeat!(g, 2, trips) do i
-        # A ceiling, as every device can record: the count is still read on the
-        # device, which is what the prepare is for.
-        Mantle.dispatch!(g, dip_bump!, (out, count), Mantle.DeviceRange(count; max = n);
+        # No ceiling: the count exists only on the device, and the prepare is the
+        # only thing that sizes the command from it.
+        Mantle.dispatch!(g, dip_bump!, (out, count), Mantle.DeviceRange(count);
                          group = 64, name = "bump")
     end
     pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))

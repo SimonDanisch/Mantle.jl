@@ -508,12 +508,28 @@ end
     n = UInt32(@inbounds sizes[1][1])
     ws = wss[1]
     groups = go ? (n + ws - UInt32(1)) ÷ ws : UInt32(0)
-    @inbounds begin
-        inds[1][1] = groups      # groupCountX, or the ray count of a trace
-        inds[1][2] = UInt32(1)
-        inds[1][3] = UInt32(1)
-    end
+    writegroups!(inds[1], groups)   # groupCountX, or the ray count of a trace
     multiprepare!(Base.tail(inds), Base.tail(sizes), Base.tail(wss), go)
+    return nothing
+end
+
+"""
+    writegroups!(slot, groups)
+
+Inside a prepare: give one device-sized dispatch its workgroup count.
+
+The slot is whatever the backend's [`indirectslot`](@ref) answered, adapted for the
+device. Three words is the indirect dispatch command every API reads, and that is the
+default; a backend whose recorded command cannot read an indirect buffer at all —
+Metal's indirect command buffers — answers with a slot of its own and rewrites the
+command from here as well.
+"""
+@inline function writegroups!(ind, groups::UInt32)
+    @inbounds begin
+        ind[1] = groups
+        ind[2] = UInt32(1)
+        ind[3] = UInt32(1)
+    end
     return nothing
 end
 

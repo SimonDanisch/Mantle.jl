@@ -799,7 +799,11 @@ function encodeplan!(s::MTL4Submission, rec)
         c.barrier && MTL.barrier!(enc)
         MTL.set_argument_table!(enc, c.table)
         MTL.set_function!(enc, c.pipeline)
-        if c.gridoff < 0
+        if c.slotoff >= 0
+            # A device-sized dispatch: its grid is the three words core's prepare
+            # wrote into its slot, before the barrier this command carries.
+            MTL.dispatch_threadgroups_indirect!(enc, rec.argstore, c.slotoff, c.threads)
+        elseif c.gridoff < 0
             MTL.dispatch_threadgroups!(enc, c.groups, c.threads)
         else
             # A gated dispatch. The count is four bytes per word into the grid

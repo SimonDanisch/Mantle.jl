@@ -888,7 +888,7 @@ const BACKEND_VOCABULARY = (
     # behaviour but counted twice in `test_mantle_owns_it.jl`'s 0.8 ratchet, which
     # walks this list and pushes one name per entry.
     :profiled!, :collect!,
-    :emitkernel!, :emitpreparebarrier!, :workgroupsize,
+    :emitkernel!, :emitpreparebarrier!, :workgroupsize, :indirectslot, :writegroups!,
     :storebytes!,
     :recordsplans, :recordable, :runscalls, :librarygemm, :native_gemm_available,
     :native_conv2d_dispatch!,
