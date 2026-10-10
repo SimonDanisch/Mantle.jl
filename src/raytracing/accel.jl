@@ -63,6 +63,21 @@ AdaptedAccel(hwtlas, triangles, offsets, empty, scene) =
 AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
     AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural, nothing)
 
+# The walk that holds a submission's memory stops at `hwtlas`. What a ray query
+# reads are the arrays exposed as the other fields, and the TLAS object is a cycle
+# on every backend: it caches its own adapted form (`static_tlas`), and on Vulkan
+# its channel holds the context, which holds the channel. For EVERY holder, so a
+# new one cannot fall through to the generic walker: Metal's `argmanaged` did, the
+# first time a hardware-RT plan was recorded there, and overflowed the stack.
+@inline function holdleaves!(holder, a::AdaptedAccel)
+    holdleaves!(holder, a.triangles)
+    holdleaves!(holder, a.offsets)
+    holdleaves!(holder, a.scene)
+    holdleaves!(holder, a.procedural)
+    holdleaves!(holder, a.instances)
+    return nothing
+end
+
 """
     hittriangle(accel::AdaptedAccel, inst_id, prim_idx) -> triangle
 

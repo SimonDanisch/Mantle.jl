@@ -329,6 +329,11 @@ function Adapt.adapt_structure(to, t::MetalHWTLAS)
     return t.static_tlas::AdaptedAccel
 end
 
+# Passed as itself, a TLAS is held through the adapted form a kernel is handed: its
+# own fields lead back to it through `static_tlas`, which the generic walker
+# would follow forever.
+Mantle.holdleaves!(holder, t::MetalHWTLAS) = Mantle.holdleaves!(holder, t.static_tlas)
+
 """
 Kernel form: drop `hwtlas` and take every array down to its device view.
 
@@ -476,6 +481,12 @@ function Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle,
     t.transforms_dirty = true
     return t
 end
+
+# Read back, not iterated: this backend keeps a batch's transforms on the host and
+# writes the instance descriptors from them at `sync!`, and a device array refuses
+# host indexing.
+Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transforms::MtlArray) =
+    Raycore.update_transforms!(t, handle, Array(transforms))
 
 Raycore.update_transform!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform) =
     Raycore.update_transforms!(t, handle, [transform])

@@ -2563,11 +2563,11 @@ end
 
 Submit the launches [`coopmat_gemm_launches`](@ref) decided on, now.
 
-`KA.get_backend(C)` and NOT `LavaBackend()`: an unpinned backend resolves its
-queue through `vk_context()`, so on a second device this would dispatch on
-whichever context happens to be global — the work lands on the wrong GPU and the
-buffer's own device never sees it. `get_backend` derives the context from the
-array's buffer, which has always carried it.
+`KA.get_backend(C)` and NOT a backend constructed here: one that does not carry
+its device resolves the queue globally, so on a second device this would dispatch
+on whichever device happens to be current — the work lands on the wrong GPU and
+the buffer's own device never sees it. `get_backend` derives the device from the
+array, which always carries it.
 """
 function coopmat_gemm!(C, A, B, M::Int, N::Int, K::Int; kw...)
     runlaunches!(KernelAbstractions.get_backend(C),
@@ -2665,7 +2665,7 @@ than taste:
     `SGEMM_MINTILES` it cannot, and the per-element kernel's much larger grid
     wins despite doing more work per output. But a tile is also computed *whole*
     whether or not the product fills it, so a shape far off the tile grid pays
-    for output it discards. `mul!(::LavaArray{T,1}, ...)` arrives here as `N = 1`
+    for output it discards. A matrix-vector `mul!` arrives here as `N = 1`
     and is the extreme: at `M = 2048` that is 32 tiles, enough to pass the count,
     while computing a 64-wide column for one useful column. `SGEMM_MAXWASTE`
     bounds the padded area against the real one.

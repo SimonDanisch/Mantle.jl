@@ -904,6 +904,9 @@ const BACKEND_VOCABULARY = (
     :native_conv2d_dispatch!,
     :native_gemm_dispatch!, :native_batched_gemm_dispatch!,
     :native_attention_dispatch!,
+    # Core's GEMM asks the backend how its arrays are laid out (`gemmstrides`) and
+    # for split-k scratch when the call is immediate (`splitscratch`).
+    :gemmstrides, :splitscratch,
     :kernelcompiles, :resetkernelcompiles!,
     :openrun, :closerun!, :abandonrun!, :abandonframe!, :emitinline!,
     # Submitting ONE baked piece, and giving one back that will never be
