@@ -768,6 +768,7 @@ foreachbackend(joinpath(@__DIR__, "test_indexbuffer.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_workgroup_limit.jl"))
 foreachbackend(joinpath(@__DIR__, "test_shared_index_division.jl"))
+foreachbackend(joinpath(@__DIR__, "test_shared_vector_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_subgroup_size_pinning.jl"))
 foreachbackend(joinpath(@__DIR__, "test_subgroup_shuffle.jl"))
 # Workgroup scope, and the two kernels built on it. The GEMM is not
