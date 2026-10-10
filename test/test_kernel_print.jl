@@ -5,12 +5,12 @@
 # Lava routes it to `NonSemantic.DebugPrintf` (`device/printf.jl`), Metal.jl to
 # `os_log` through `KI._print`. Both build the format from the argument types
 # when the kernel compiles (Lava throws for a type it has no specifier for), so
-# the scalar kinds `test/vulkan/test_lava_printf.jl` prints (32- and 64-bit
-# integers, Float32, Float64) are printed here.
+# the scalar kinds Lava's printf test prints (32- and 64-bit integers, Float32,
+# Float64) are printed here. That the format reaches the module is Lava's
+# `test/spirv/test_printf.jl`, on the SPIR-V.
 #
 # What is printed is not checked. Seeing it needs the backend's own channel —
-# on Vulkan the validation layer's debug-printf, which resets the device and is
-# why `test/vulkan/test_lava_printf.jl` keeps its live-output test opt-in — and
+# on Vulkan the validation layer's debug-printf, which resets the device — and
 # there is no portable way to read it back. What a caller does see is whether a
 # kernel with a print in it still compiles and still writes its result.
 

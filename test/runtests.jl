@@ -947,20 +947,14 @@ if _VULKAN_OK
         end
 
         # ── Tier 3: GPU Execution ──
+        # The compiler halves of the files that were here — hand-built SPIR-V
+        # modules, `@lava_printf` emission, source maps and compile errors — are
+        # in Lava's own suite, which needs no device.
         @testset "Tier 3: GPU Execution" begin
-            include(joinpath(VULKAN_TESTS, "test_handwritten_spirv.jl"))
-            include(joinpath(VULKAN_TESTS, "test_handwritten_rt.jl"))
-            # After test_handwritten_rt.jl: it reuses those shaders to prove a refit
-            # moved the acceleration structure, not merely the vertex buffer.
+            # Traces Lava's hand-built ray-tracing shaders to prove a refit moved
+            # the acceleration structure, not merely the vertex buffer.
             include(joinpath(VULKAN_TESTS, "test_blas_refit.jl"))
             include(joinpath(VULKAN_TESTS, "test_instance_masks.jl"))
-        end
-
-        # ── Tier 3c2: On-kernel printf (DebugPrintf SPIR-V emission) ──
-        # Only the spirv-val emission test runs here; the live-output test resets the
-        # device and is opt-in via LAVA_PRINTF_LIVE=1.
-        @testset "Tier 3c2: @lava_printf" begin
-            include(joinpath(VULKAN_TESTS, "test_lava_printf.jl"))
         end
 
         @testset "pipeline cache avoids driver compilation" begin
@@ -1059,10 +1053,6 @@ if _VULKAN_OK
         # round-trip it had to be consistent about exists any more. The property
         # that replaced it — every live region disjoint, in range and aligned — is
         # in `test/test_pool.jl`, and runs with no device at all.
-
-        @testset "source mapping" begin
-            include(joinpath(VULKAN_TESTS, "test_source_mapping.jl"))
-        end
 
             @testset "debug configuration" begin
                 include(joinpath(VULKAN_TESTS, "test_debug_config.jl"))

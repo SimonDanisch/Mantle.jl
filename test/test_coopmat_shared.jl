@@ -223,8 +223,8 @@ end
 
 # The SPIR-V emitter's rule behind that fix — packed size and Vulkan's 2x/4x
 # alignment for every vector width, `<2 x float>` and `<4 x float>` included — is
-# a host-only check of Lava internals and lives in
-# `test/vulkan/test_workgroup_vector_layout.jl`.
+# a host-only check of Lava internals and lives in Lava's
+# `test/test_workgroup_vector_layout.jl`.
 
 # The layout operand on a *store* into `@localmem`, which the load has taken
 # since the staged GEMM needed it and the store did not.

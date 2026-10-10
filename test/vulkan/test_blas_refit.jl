@@ -1,8 +1,8 @@
 # BLAS refit via MODE_UPDATE_KHR.
 #
-# Reuses the handwritten RT shaders from test_handwritten_rt.jl: a triangle in
-# the XY plane, rays starting at z=-1 pointing at +z, closest-hit writes RayTmax
-# into the payload. So the hit distance IS the triangle's z plus one, which
+# Reuses the hand-built RT shaders from Lava's `test/handbuilt_shaders.jl`
+# (validated in Lava's own suite): a triangle in the XY plane, rays starting at
+# z=-1 pointing at +z, closest-hit writes RayTmax into the payload. So the hit distance IS the triangle's z plus one, which
 # makes "did the acceleration structure actually move" a number rather than a
 # judgement call.
 #
@@ -25,10 +25,8 @@ function rt_dispatch!(bq, pipeline, tlas, push_bda, W, H)
     return nothing
 end
 
-# The shaders come from that file. Guarded so this stays runnable on its own
-# while `runtests.jl`, which already includes it, does not run its testsets twice.
-isdefined(@__MODULE__, :build_raygen_shader) ||
-    include(joinpath(@__DIR__, "test_handwritten_rt.jl"))
+# The shaders. That file defines the builders and runs nothing.
+include(joinpath(pkgdir(Lava), "test", "handbuilt_shaders.jl"))
 
 @testset "BLAS refit moves the acceleration structure" begin
     ctx = Mantle.vk_context()
