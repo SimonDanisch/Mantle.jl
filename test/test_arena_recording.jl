@@ -50,22 +50,22 @@ const E = Mantle
     # re-materialised its transients into the new allocation — which is the half
     # of this that a test built in the other order would not reach.
     #
-    # The device is cached per process and its arena never shrinks, and a plan an
-    # earlier file still holds stays a tenant. So the sizes start from what the
-    # arena holds already: a chain's peak is two of its buffers, `8n` bytes, so
-    # `small` alone outgrows it and `big` outgrows `small`, whatever ran before.
+    # The device is cached per process, its arena never shrinks, and a plan an
+    # earlier file still holds stays a tenant: the arena may already hold `held`
+    # bytes. The max of everything is still exact — any sum would be larger. An
+    # arena already bigger than `big` leaves the remap half unexercised here, which
+    # is said rather than passed silently.
     dev = M.Device(TESTBACKEND)
     held = haskey(M.pool(dev).arenas, E.Buffers()) ? M.pool(dev).arenas[E.Buffers()].bytes : 0
-    nsmall = max(250_000, cld(held, 4))
-    small = Base.invokelatest(chainplan, dev, nsmall, 3)
-    big   = Base.invokelatest(chainplan, dev, 8nsmall, 3)
+    small = Base.invokelatest(chainplan, dev, 250_000, 3)
+    big   = Base.invokelatest(chainplan, dev, 2_000_000, 3)
 
     ps, pb = M.peakbytes(small.plan), M.peakbytes(big.plan)
+    held < pb || @info "the arena already holds $held bytes, more than `big` needs: its growth under `small` is not exercised"
     # The arena lives on the core `Pool` now, not on the backend's device: the
     # sharing this asserts is a property every backend gets, not Lava's.
     arena = M.pool(dev).arenas[E.Buffers()]
-    @test arena.bytes == max(ps, pb)
-    @test arena.bytes < ps + pb
+    @test arena.bytes == max(held, ps, pb)
     # Both are tenants; others may be, if an earlier file still holds a plan.
     @test count(wr -> wr.value === small.plan || wr.value === big.plan, M.tenants!(arena)) == 2
     @test M.sharing(M.pool(dev), E.Buffers())

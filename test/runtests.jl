@@ -606,7 +606,9 @@ include(joinpath(@__DIR__, "foreachbackend.jl"))
 #
 # It used to have to come first among the files that build a plan, because it
 # counted every tenant of the device's arena; files added above it broke it. It
-# now sizes its plans from what the arena already holds and counts its own.
+# now counts its own tenants and compares against what the arena already held.
+# Early is still better: an arena some earlier file grew past its plans leaves
+# the remap half of its first testset unexercised (it says so).
 foreachbackend(joinpath(@__DIR__, "test_arena_recording.jl"))
 # What every declaration is derived from. Before the files that build plans,
 # because a wrong answer there is a wrong barrier in every one of them, and this
