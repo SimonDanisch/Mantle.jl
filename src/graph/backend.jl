@@ -934,7 +934,7 @@ const BACKEND_VOCABULARY = (
     :kernelinterpreter, :kakernelaccesssignature,
     :vertextouches, :fragmenttouches, :shadertouches,
     # ray tracing
-    :build_accel!, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
+    :build_accel!, :build_blas, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
 )

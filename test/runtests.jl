@@ -762,6 +762,17 @@ foreachbackend(joinpath(@__DIR__, "test_hwtlas_mesh_update.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_nonblocking_sync.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_stress.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_uaf_safety.jl"))
+# Instances a kernel writes (`Raycore.instance_buffer`, `Raycore.refit!`), per-ray
+# cull masks, and BLAS refit: the portable API that replaced Vulkan's instance
+# records and hardcoded 0xFF masks.
+foreachbackend(joinpath(@__DIR__, "test_hwtlas_instance_buffer.jl"))
+foreachbackend(joinpath(@__DIR__, "test_hwtlas_push_instances.jl"))
+foreachbackend(joinpath(@__DIR__, "test_hwtlas_refit.jl"))
+foreachbackend(joinpath(@__DIR__, "test_hwtlas_sync_batch.jl"))
+foreachbackend(joinpath(@__DIR__, "test_hwtlas_refit_stress.jl"))
+foreachbackend(joinpath(@__DIR__, "test_instance_writer_kernel.jl"))
+foreachbackend(joinpath(@__DIR__, "test_instance_masks.jl"))
+foreachbackend(joinpath(@__DIR__, "test_blas_refit.jl"))
 foreachbackend(joinpath(@__DIR__, "test_indexbuffer.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_workgroup_limit.jl"))
@@ -947,15 +958,10 @@ if _VULKAN_OK
         end
 
         # ── Tier 3: GPU Execution ──
-        # The compiler halves of the files that were here — hand-built SPIR-V
-        # modules, `@lava_printf` emission, source maps and compile errors — are
-        # in Lava's own suite, which needs no device.
-        @testset "Tier 3: GPU Execution" begin
-            # Traces Lava's hand-built ray-tracing shaders to prove a refit moved
-            # the acceleration structure, not merely the vertex buffer.
-            include(joinpath(VULKAN_TESTS, "test_blas_refit.jl"))
-            include(joinpath(VULKAN_TESTS, "test_instance_masks.jl"))
-        end
+        # Gone. The compiler halves of the files that were here — hand-built SPIR-V
+        # modules, `@lava_printf` emission, source maps and compile errors — are in
+        # Lava's own suite, which needs no device; BLAS refit and instance masks are
+        # portable (`test_blas_refit.jl`, `test_instance_masks.jl` in `test/`).
 
         @testset "pipeline cache avoids driver compilation" begin
             include(joinpath(VULKAN_TESTS, "test_pipeline_cache_no_compile.jl"))
@@ -1015,26 +1021,6 @@ if _VULKAN_OK
         # made it, not of a global flag that only describes the next one.
         @testset "pipeline executable properties per context" begin
             include(joinpath(VULKAN_TESTS, "test_pipeline_exec_ir.jl"))
-        end
-
-        @testset "hwtlas instance buffer" begin
-            include(joinpath(VULKAN_TESTS, "test_hwtlas_instance_buffer.jl"))
-        end
-
-        @testset "hwtlas push instances" begin
-            include(joinpath(VULKAN_TESTS, "test_hwtlas_push_instances.jl"))
-        end
-
-        @testset "hwtlas refit" begin
-            include(joinpath(VULKAN_TESTS, "test_hwtlas_refit.jl"))
-        end
-
-        @testset "grain instance writer" begin
-            include(joinpath(VULKAN_TESTS, "test_instance_writer_kernel.jl"))
-        end
-
-        @testset "hwtlas sync batch" begin
-            include(joinpath(VULKAN_TESTS, "test_hwtlas_sync_batch.jl"))
         end
 
         # `test_phase6_graphics.jl` was here, and it is deleted with the thing

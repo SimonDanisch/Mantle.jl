@@ -58,9 +58,9 @@ identity_transform() = Mat3x4f(1.0f0, 0.0f0, 0.0f0, 0.0f0,
 
 # ── Building transforms ───────────────────────────────────────────────────────
 #
-# From `src/vulkan/kernels/instance_writer.jl`, which packs these into instance
-# records. The packing is an ABI and stayed there; composing a rotation and a
-# scale into a 3x4 is arithmetic and is here.
+# What `write_grain_instances_kernel` (`raytracing/instances.jl`) composes an
+# instance transform from: a rotation and a scale into a 3x4 is arithmetic, not
+# any backend's.
 """
     quat_to_rot3x3(q::Vec4f) -> NTuple{9, Float32}
 

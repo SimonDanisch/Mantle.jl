@@ -303,23 +303,23 @@ Refitting keeps the tree the mesh was built with, so traversal quality decays as
 the geometry moves away from that pose. Callers animating a mesh should rebuild
 periodically rather than refit forever.
 
-Errors loudly on misuse.
+An `ArgumentError` on misuse, as on every backend (`Raycore.refit!`).
 """
 function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
                      vertices::Vector{NTuple{3,Float32}})
-    blas.allow_update || error(
+    blas.allow_update || throw(ArgumentError(
         "refit_blas!: BLAS was built with allow_update=false; cannot refit. " *
-        "Rebuild it via build_blas(...; allow_update=true).")
-    blas.update_scratch_size > 0 || error(
-        "refit_blas!: cached update_scratch_size is 0; the BLAS is not refit-capable.")
+        "Rebuild it via build_blas(...; allow_update=true)."))
+    blas.update_scratch_size > 0 || throw(ArgumentError(
+        "refit_blas!: cached update_scratch_size is 0; the BLAS is not refit-capable."))
     vertex_arr = blas.vertex_arr
-    vertex_arr === nothing && error(
-        "refit_blas!: no vertex buffer retained; the BLAS is not refit-capable.")
+    vertex_arr === nothing && throw(ArgumentError(
+        "refit_blas!: no vertex buffer retained; the BLAS is not refit-capable."))
     bytes = collect(reinterpret(UInt8, vertices))
-    length(bytes) == length(vertex_arr) || error(
+    length(bytes) == length(vertex_arr) || throw(ArgumentError(
         "refit_blas!: vertex count changed ($(length(bytes)) bytes vs " *
         "$(length(vertex_arr)) at build). MODE_UPDATE_KHR cannot change " *
-        "topology — rebuild the BLAS instead.")
+        "topology — rebuild the BLAS instead."))
 
     bq = ctx.bq
     dev = as_device(ctx)
@@ -371,6 +371,14 @@ function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
         mode=UInt32(1), src_as=blas.accel)   # MODE_UPDATE_KHR, in place
     return blas
 end
+
+# The portable spelling: a build of its own on the device's dispatch channel, the
+# one kernels and traces go to by default. Any 3-vectors of `Float32` (`Point3f`,
+# tuples) are accepted; the refit reads them as packed triples.
+Raycore.refit!(blas::LavaBLAS, vertices::AbstractVector) =
+    build_accel!(KA.get_backend(blas.storage).dispatch_bq) do ctx
+        refit_blas!(ctx, blas, NTuple{3,Float32}[Tuple(Float32.(v)) for v in vertices])
+    end
 
 """
     build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque=true) -> LavaBLAS
@@ -514,7 +522,7 @@ end
                n::Integer; allow_update::Bool=false) -> LavaTLAS
 
 Build a HWTLAS from a GPU-resident instance buffer. `instance_buf[1:n]` must
-be valid `VulkanInstanceRecord`s (typically written by `write_grain_instances_kernel`).
+be valid `VulkanInstanceRecord`s (`vkinstances_kernel!` in `hwtlas.jl` writes them).
 No CPU-side packing pass -- the buffer's device address is fed to the Vulkan
 build directly. When `allow_update=true`, the HWTLAS is buildable for in-place
 refit via `refit_tlas!`.

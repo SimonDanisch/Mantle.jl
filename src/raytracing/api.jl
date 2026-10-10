@@ -6,10 +6,14 @@
 # two are close enough that the verbs below are the same on both: build an
 # acceleration structure, refit it when geometry moves, trace against it.
 #
-# What is NOT here is the instance record. Its bytes are an ABI —
+# What is NOT here is the DRIVER's instance record. Its bytes are an ABI —
 # `VkAccelerationStructureInstanceKHR` is laid out differently from
-# `MTLAccelerationStructureInstanceDescriptor` — so each backend keeps its own,
-# and what they share is [`Mat3x4f`](@ref), the transform inside it.
+# `MTLAccelerationStructureInstanceDescriptor`, and one names its geometry by
+# device address where the other names it by index — so each backend keeps its
+# own. What a caller and a kernel see is `Raycore.InstanceRecord` (transform,
+# custom index, mask), one per instance of a batch; a backend writes its own
+# records from those, and from the geometry the batch was pushed with, whenever
+# it builds or refits (`raytracing/instances.jl` has the shared kernels).
 
 """
     build_accel!(ctx, geometry) -> HWTLAS
@@ -20,6 +24,26 @@ Build an acceleration structure over `geometry`.
 sequence of builds does not allocate one each.
 """
 function build_accel! end
+
+"""
+    build_blas(ctx, vertices, indices; opaque = true, allow_update = false) -> BLAS
+
+A bottom-level structure over triangles: `vertices` a `Vector{NTuple{3,Float32}}`,
+`indices` a `Vector{UInt32}` of zero-based vertex indices, three per triangle.
+
+`allow_update = true` builds it refittable, so `Raycore.refit!(blas, vertices)`
+can move its vertices later without a rebuild. Not the default: asking for refit
+lets a driver build a lower-quality tree, and a static mesh would pay for that in
+traversal for a capability it never uses.
+
+Registered in a top-level structure with `push!(tlas, blas, transform)`. Its hits
+carry no triangle record (`closest_hit` returns the empty triangle for them),
+because nothing but positions went into it; push a mesh for shading data.
+
+Declared here for the reason [`build_blas_aabb`](@ref) is: a caller spells the
+build the same way on every backend.
+"""
+function build_blas end
 
 """
     build_blas_aabb(ctx, aabbs; opaque = true) -> BLAS

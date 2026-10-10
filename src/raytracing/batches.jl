@@ -87,3 +87,32 @@ Base.getindex(bs::InstanceBatches, i::Integer) = bs.batches[i]
 
 """The instances across every batch, which is what a build consumes."""
 ninstances(bs::InstanceBatches) = sum(length, bs.batches; init = 0)
+
+"""
+    recordsof(batches, handle) -> device array of `Raycore.InstanceRecord`
+
+The record array of the batch `handle` names: what `Raycore.instance_buffer`
+answers on every backend. An `ArgumentError` for a handle that names none,
+because a kernel about to write records into nothing is a caller's mistake.
+"""
+function recordsof(bs::InstanceBatches, h::Raycore.TLASHandle)
+    b = batchof(bs, h)
+    b === nothing && throw(ArgumentError("instance_buffer: no batch for handle $h"))
+    return b.records
+end
+
+"""
+    sethidden!(batches, handle, hidden) -> Bool or nothing
+
+Mark the batch `handle` names hidden or shown. `nothing` when it names none,
+else whether that changed anything, which is when the structure needs a build.
+A hidden batch is built with mask 0, which no ray's mask matches
+(`Raycore.set_visible!`); its records keep their own masks for when it is shown.
+"""
+function sethidden!(bs::InstanceBatches, h::Raycore.TLASHandle, hidden::Bool)
+    b = batchof(bs, h)
+    b === nothing && return nothing
+    b.hidden == hidden && return false
+    b.hidden = hidden
+    return true
+end

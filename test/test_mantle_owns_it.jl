@@ -190,7 +190,8 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     # `build_blas_aabb` and `upload_texture_data!` joined the vocabulary 2026-10-09:
     # declared in core, answered by Vulkan and Metal, not by the ROCm extension,
     # which has no ray tracing or textures — the same as `build_accel!`.
-    :build_blas_aabb, :upload_texture_data!,
+    # `build_blas` (triangles) joined on 2026-10-10 for the same reason.
+    :build_blas_aabb, :build_blas, :upload_texture_data!,
     :build_accel!, :colorimage, :compile_draw, :currentimage,
     :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
     :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,

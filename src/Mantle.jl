@@ -256,6 +256,7 @@ include("raytracing/pipeline.jl")
 # reindex on delete. Portable; a backend supplies only the batch type.
 include("raytracing/batches.jl")
 include("raytracing/accel.jl")
+include("raytracing/instances.jl")
 include("raytracing/api.jl")
 
 # Building and running the graph. Last of the core includes: it names `Buffer`

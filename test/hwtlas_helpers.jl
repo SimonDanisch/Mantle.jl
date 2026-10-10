@@ -32,15 +32,27 @@ tlastranslation(dx, dy, dz) = SMatrix{4,4,Float32,16}(
 # triangle it landed on, in world space. The triangle is looked up through the
 # per-instance offset into the scene's flat triangle array and moved by the
 # instance's transform, so a wrong offset or a stale transform shows up here.
-@kernel function tlasprobe!(hits, ts, ids, centroids, @Const(origins), @Const(dirs), accel)
-    i = @index(Global)
+@inline function probeone!(hits, ts, ids, centroids, origins, dirs, accel, mask, i)
     ray = Raycore.Ray(o = origins[i], d = dirs[i], t_max = 1f30)
-    hit, tri, t, _, id = Raycore.closest_hit(accel, ray)
+    hit, tri, t, _, id = Raycore.closest_hit(accel, ray, mask)
     v = tri.vertices
     hits[i] = hit ? Int32(1) : Int32(0)
     ts[i] = hit ? t : -1f0
     ids[i] = hit ? id : UInt32(0)
     centroids[i] = (v[1] + v[2] + v[3]) / 3f0
+end
+
+# Every instance the default mask sees, which is every instance pushed without
+# one: the two-argument `closest_hit` is mask `0xff`.
+@kernel function tlasprobe!(hits, ts, ids, centroids, @Const(origins), @Const(dirs), accel)
+    i = @index(Global)
+    probeone!(hits, ts, ids, centroids, origins, dirs, accel, 0xff, i)
+end
+
+# The rays traced with cull mask `mask`: only instances sharing a bit with it.
+@kernel function tlasmaskprobe!(hits, ts, ids, centroids, @Const(origins), @Const(dirs), accel, mask)
+    i = @index(Global)
+    probeone!(hits, ts, ids, centroids, origins, dirs, accel, mask, i)
 end
 
 """
@@ -81,14 +93,20 @@ adapted(be, t::Mantle.HWTLAS) = Adapt.adapt(be, t)
 adapted(be, a::Mantle.AdaptedAccel) = a
 
 """
-    tlastrace!(probe, accel) -> probe
+    tlastrace!(probe, accel; mask = nothing) -> probe
 
 Launch the probe against `accel` (an HWTLAS or an `AdaptedAccel`) and return
-WITHOUT waiting for it. [`tlasresult`](@ref) waits and reads.
+WITHOUT waiting for it. [`tlasresult`](@ref) waits and reads. `mask` is the
+rays' cull mask; `nothing` traces with the two-argument `closest_hit`.
 """
-function tlastrace!(p::TLASProbe, accel)
-    tlasprobe!(p.backend)(p.hits, p.ts, p.ids, p.centroids, p.origins, p.dirs,
-                          adapted(p.backend, accel); ndrange = length(p))
+function tlastrace!(p::TLASProbe, accel; mask = nothing)
+    if mask === nothing
+        tlasprobe!(p.backend)(p.hits, p.ts, p.ids, p.centroids, p.origins, p.dirs,
+                              adapted(p.backend, accel); ndrange = length(p))
+    else
+        tlasmaskprobe!(p.backend)(p.hits, p.ts, p.ids, p.centroids, p.origins, p.dirs,
+                                  adapted(p.backend, accel), UInt32(mask); ndrange = length(p))
+    end
     return p
 end
 
@@ -106,9 +124,9 @@ function tlasresult(p::TLASProbe)
 end
 
 """Trace and read back, in one."""
-tlastrace(p::TLASProbe, accel) = tlasresult(tlastrace!(p, accel))
-tlastrace(be, accel, origins::AbstractVector, dirs::AbstractVector) =
-    tlastrace(TLASProbe(be, origins, dirs), accel)
+tlastrace(p::TLASProbe, accel; mask = nothing) = tlasresult(tlastrace!(p, accel; mask))
+tlastrace(be, accel, origins::AbstractVector, dirs::AbstractVector; mask = nothing) =
+    tlastrace(TLASProbe(be, origins, dirs), accel; mask)
 
 # ── The host reference ───────────────────────────────────────────────────────
 

@@ -110,7 +110,6 @@ include("raytracing/pipeline.jl")
 include("raytracing/shaders.jl")
 include("raytracing/raycore_compat.jl")
 include("raytracing/hwtlas.jl")
-include("kernels/instance_writer.jl")
 # `runtime/video_h265.jl` is not listed: `runtime/video.jl` includes it itself,
 # beside the `decodeprofile` hook it implements.
 

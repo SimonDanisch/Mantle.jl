@@ -10,6 +10,10 @@
 #
 # Plain-bits means LavaArray{VulkanInstanceRecord, 1} is a clean GPU buffer.
 # The two packed UInt32 fields combine the (24 + 8)-bit pairs Vulkan defines.
+#
+# Nothing outside this backend sees one: callers and kernels write portable
+# `Raycore.InstanceRecord`s, and `vkinstances_kernel!` (`hwtlas.jl`) writes these
+# from them at every build and refit.
 
 using StaticArrays: SMatrix
 
@@ -43,24 +47,6 @@ function VulkanInstanceRecord(transform::Mat3x4f, blas_address::UInt64;
     cim = (custom_index & 0x00FFFFFF) | (UInt32(mask) << 24)
     sof = (sbt_offset & 0x00FFFFFF) | (UInt32(flags) << 24)
     return VulkanInstanceRecord(transform, cim, sof, blas_address)
-end
-
-# Backward-compatibility constructor: NTuple{12, Float32} → Mat3x4f.
-# Existing GPU kernels (instance_writer.jl, narrow_phase.jl) build the
-# 12-float row-major payload as a tuple; reinterpret as Mat3x4f is free.
-function VulkanInstanceRecord(transform::NTuple{12, Float32}, blas_address::UInt64;
-                             custom_index::UInt32 = UInt32(0),
-                             mask::UInt8 = UInt8(0xff),
-                             sbt_offset::UInt32 = UInt32(0),
-                             flags::UInt8 = UInt8(0))
-    return VulkanInstanceRecord(Mat3x4f(transform), blas_address;
-                               custom_index, mask, sbt_offset, flags)
-end
-
-# Backward-compatibility for the packed-UInt32 form too (4-arg call).
-function VulkanInstanceRecord(transform::NTuple{12, Float32},
-                             cim::UInt32, sof::UInt32, blas_address::UInt64)
-    return VulkanInstanceRecord(Mat3x4f(transform), cim, sof, blas_address)
 end
 
 # Sanity checks at module load time. The `Mat3x4f` half of these lives beside

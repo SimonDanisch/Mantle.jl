@@ -13,10 +13,11 @@ GPU-adapted form of `VulkanTLAS`.  Carries the kernel-side data needed by
   * `triangles` — flat array of all BLAS triangles, concatenated.
   * `offsets`   — per-instance offset into `triangles`, indexed by `gl_InstanceID + 1`.
   * `empty`     — sentinel triangle returned on miss.
-  * `instances` — the TLAS's instance records, indexed by `gl_InstanceID + 1`,
-                  so a hit triangle can be moved from its BLAS into world
-                  space (see [`hittriangle`](@ref)); `nothing` where a backend
-                  has none, and then triangles come back as stored.
+  * `instances` — the TLAS's `Raycore.InstanceRecord`s, every batch's in build
+                  order, indexed by `gl_InstanceID + 1`, so a hit triangle can
+                  be moved from its BLAS into world space (see
+                  [`hittriangle`](@ref)); `nothing` where a backend has none,
+                  and then triangles come back as stored.
   * `hwtlas`    — CPU-side `VulkanTLAS` reference for callers that need it
                   (descriptor binding, sync, RT pipeline path); `nothing` in
                   the kernel-form produced by `Adapt.adapt`.
@@ -79,15 +80,29 @@ AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
 end
 
 """
+The per-instance triangle offset of an instance whose batch has no triangles: a
+pre-built bottom-level structure pushed without them. Its hits have nothing to
+look up, and [`hittriangle`](@ref) answers the miss sentinel for them instead of
+reading another batch's triangle (or past the end of the array).
+"""
+const NOTRIANGLES = typemax(UInt32)
+
+"""
     hittriangle(accel::AdaptedAccel, inst_id, prim_idx) -> triangle
 
 The triangle a hit landed on, in world space: looked up in the flat triangle
 array by instance and primitive index, then moved by its instance's transform.
 The BLAS stores triangles in object space, and everything downstream (normals,
 tangents, the side a shadow ray starts on) is computed against world-space rays.
+
+`accel.empty` for an instance of a batch with no triangles ([`NOTRIANGLES`](@ref)):
+the hit's distance, barycentrics and custom index are still right, there is just
+no triangle record to hand back.
 """
 @inline function hittriangle(accel::AdaptedAccel, inst_id::UInt32, prim_idx::UInt32)
-    @inbounds tri = accel.triangles[Int(accel.offsets[inst_id + UInt32(1)]) + Int(prim_idx) + 1]
+    @inbounds off = accel.offsets[inst_id + UInt32(1)]
+    off == NOTRIANGLES && return accel.empty
+    @inbounds tri = accel.triangles[Int(off) + Int(prim_idx) + 1]
     return toworld(accel.instances, inst_id, tri)
 end
 @inline toworld(::Nothing, inst_id, tri) = tri
