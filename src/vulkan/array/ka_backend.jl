@@ -60,6 +60,13 @@ LavaBackend() = LavaBackend(vk_context())
 LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
 LavaBackend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
 
+# The device it launches on; the two channels only when they differ.
+function Base.show(io::IO, b::LavaBackend)
+    print(io, "LavaBackend(", repr(b.dispatch_bq.channel.ctx.device_name))
+    b.upload_bq === b.dispatch_bq || print(io, ", uploads on ", b.upload_bq)
+    print(io, ")")
+end
+
 # The three Mantle verbs that dispatch on the BACKEND rather than on the context.
 #
 # Here and not in `runtime/device.jl` beside their `VkContext` methods: that file

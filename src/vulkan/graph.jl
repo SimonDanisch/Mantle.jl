@@ -35,6 +35,7 @@ struct LavaDevice <: Device
     pool::Pool          # the device owns it; nothing about it reaches the caller
 end
 LavaDevice(ctx, bq) = LavaDevice(ctx, bq, Pool())
+Base.show(io::IO, d::LavaDevice) = print(io, "LavaDevice(", repr(d.ctx.device_name), ")")
 pool(d::LavaDevice) = d.pool
 
 """

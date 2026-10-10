@@ -665,6 +665,13 @@ mutable struct VkContext
     end
 end
 
+# Compact, because the default walks the whole object graph: a context holds its
+# channels, which hold their queues, which hold the context. Printing one
+# backend kept a test runner busy for half an hour.
+Base.show(io::IO, ctx::VkContext) = print(io, "VkContext(", repr(ctx.device_name), ")")
+Base.show(io::IO, q::VulkanQueue{VkContext}) =
+    print(io, "VulkanQueue(", repr(q.ctx.device_name), ", family ", q.family_index, ")")
+
 """
     caps(ctx) -> DeviceCaps
 

@@ -153,6 +153,11 @@ mutable struct SubmitChannel{Q,R,T,P}
     thread::Int
 end
 
+# What it submits through and how much is in flight, not every outstanding
+# submission and every recording it holds.
+Base.show(io::IO, ch::SubmitChannel) =
+    print(io, "SubmitChannel(", ch.channel, ", ", length(ch.outstanding), " outstanding)")
+
 # Fully parameterised — a backend spells its channel type once, as an alias, and
 # calls it with the driver bundle. A partial application would bind the
 # parameters in the wrong order (`SubmitChannel{R,T,P}` sets Q, R and T).
