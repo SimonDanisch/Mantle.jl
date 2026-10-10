@@ -586,8 +586,8 @@ DRAIN, then empty. The validation callback writes into a ring
 own messages sitting in the ring, where the next
 `check_validation_errors!` picks them up and blames its own caller.
 
-Observed exactly that way: test_source_mapping.jl:699 asks for 40 GB
-deliberately, and the error surfaced 40 lines later at :739 as a
+Observed exactly that way: a test (then in test_source_mapping.jl) asked for
+40 GB deliberately, and the error surfaced 40 lines later as a
 `LavaError during flush!` on a FOUR-ELEMENT upload. An oversized
 allocation is the intended, handled outcome here, so its messages
 belong to it.
