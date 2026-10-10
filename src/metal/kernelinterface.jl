@@ -37,6 +37,11 @@ KI.max_work_group_size(k::KI.Kernel{MB, <:Function}) = KI.max_work_group_size(k.
 
 function KI.launch(k::KI.Kernel{MB, <:Function}, groups::Dims{3}, items::Dims{3},
                    args::Tuple; kwargs...)
+    # A `Buffer` or `GPURef` resolves to the array over its region, as `dispatch!`
+    # and the Vulkan launch resolve one. Without it a resource reached Metal.jl's
+    # compiler whole, as "passing non-bitstype argument", while the same operand
+    # ran on Vulkan. Top level only, as there.
+    args = map(storage, args)
     tt = Tuple{map(a -> Core.Typeof(KI.argconvert(k.backend, a)), args)...}
     KI.launch(KI.kernel_function(k.backend, k.kern, tt), groups, items, args; kwargs...)
 end

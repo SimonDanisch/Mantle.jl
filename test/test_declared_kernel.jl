@@ -293,3 +293,32 @@ end
     n = 40
     @test plangenerated(dev, n, 3) == Float32[3i for i in 1:n]
 end
+
+# A resource on the IMMEDIATE path: `KI.Kernel(backend, f)(args...)`, which is what
+# DNNKernels' tuning harness launches through. The Vulkan launch resolved a
+# `Buffer` to the array over its region, as `dispatch!` does; Metal's handed it to
+# Metal.jl's compiler whole, "passing non-bitstype argument", so every harness
+# test that uploaded with `toback` errored there. Asked of every backend that
+# launches a plain function immediately; one that cannot has no such method.
+function addone!(out, a, n::Int)
+    i = KI.get_global_id().x
+    i <= n || return
+    @inbounds out[i] = a[i] + 1.0f0
+    return
+end
+
+@testset "an immediate launch resolves a Buffer — $(nameof(typeof(BE)))" begin
+    dev = M.Device(BE)
+    kb = M.kibackend(dev)
+    hasmethod(KI.launch, Tuple{KI.Kernel{typeof(kb), typeof(addone!)},
+                               Dims{3}, Dims{3}, Tuple}) || return
+    n = 40
+    a = M.Buffer(dev, Float32, (n,))
+    copyto!(M.storage(a), Float32.(1:n))
+    out = M.Buffer(dev, Float32, (n,))
+    KI.Kernel(kb, addone!)(out, a, n; ndrange = n, workgroupsize = 32)
+    M.waitidle(dev)
+    @test Array(M.storage(out)) == Float32.(2:(n + 1))
+    M.free!(a)
+    M.free!(out)
+end
