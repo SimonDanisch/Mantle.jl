@@ -132,20 +132,11 @@ end
 # WRONG requirement, not when it is merely unmet. An unmet one is
 # `UNIMPLEMENTED_BACKEND_FUNCS` below.
 #
-# Two kinds of entry.
+# `staged_gemm_tile` was on this list as a build-global hook answered by whichever
+# backend tree had the staged GEMM. The kernels are core's now and so is the
+# answer, which the testset below pins.
 #
-# `staged_gemm_tile` is a BUILD-GLOBAL hook. It takes no device or backend
-# argument, so it is answered once per build, not once per device. `src/vulkan/`
-# and `src/metal/` are `@static include`d on `Sys.isapple()` and are therefore
-# mutually exclusive, which is the mechanism that makes a no-argument hook well
-# defined. It could in principle dispatch on a backend. It must not: its
-# consumers are `DNNKernels`' plan functions, which take a `DeviceCaps` and no
-# backend precisely so they can be asked about hardware this machine is not -- the
-# suite builds synthetic ones and asks the planner about them. Those vary the
-# DEVICE; the BUILD is fixed, and which tile Mantle emits kernels at is a property
-# of the build.
-#
-# `deviceslice` is the other kind of deliberate answer: a per-device verb that one
+# `deviceslice` is a deliberate answer: a per-device verb that one
 # backend must NOT implement. It is how `materialize!` wraps a transient's bytes in
 # the backend's array type, and its docstring (`phases.jl`) says a backend that
 # keeps the block instead implements no method. Vulkan keeps the block, because a
@@ -158,7 +149,7 @@ end
 # not mapped; it writes `upload!`, `download` and `devicecopy!` itself, through a
 # staging copy, and has no span to give.
 const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
-    :staged_gemm_tile, :deviceslice, :hostspan
+    :deviceslice, :hostspan
 ])
 
 # The 56 that are lonely TODAY, so the guard can fail on a 57th.
@@ -264,6 +255,40 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
         everywhere — delete them from the list" backends fixed
     @test isempty(new)
     @test isempty(fixed)
+end
+
+# ── 0.2b A no-argument method in core is not answered again by a backend ──────
+#
+# A backend tree is `include`d INTO `Mantle`, so a method it defines with core's
+# signature replaces core's, and precompilation refuses that outright. With no
+# arguments there is nothing for the two to dispatch apart on. It happened to
+# `staged_gemm_tile`: the GEMM kernels moved to core with their answer, and
+# Metal's `@static if !VK.HAS_LOADER` answer stayed behind, so Mantle stopped
+# precompiling on a Mac without a Vulkan loader and on no other machine. Read
+# from files for the same reason as 0.2: the clash only exists where Metal loads.
+#
+# Device overlays are not methods of the function, they are entries in a
+# compiler's method table, so `@device_override` and `@lava_device_override`
+# definitions are not counted.
+@testset "0.2b a no-argument method in core is not answered again by a backend" begin
+    # Indented too, unlike `definednames`: the one that clashed sat inside an
+    # `@static if`. So a definition is spelled out, `function NAME()` or
+    # `NAME() =`, and a bare `NAME()` on its own line is a call.
+    mac = raw"(?:@[\w.]+(?:\s*\([^\n]*\))?\s+)*"
+    pat = Regex("^\\s*(" * mac * raw")(?:function\s+(?:Mantle\.)?([A-Za-z_][\w!]*)\(\)|(?:Mantle\.)?([A-Za-z_][\w!]*)\(\)\s*=(?!=))", "m")
+    function nullary(paths)
+        out = Set{Symbol}()
+        for p in paths, m in eachmatch(pat, codeonly(read(p, String)))
+            occursin("device_override", m.captures[1]) && continue
+            push!(out, Symbol(something(m.captures[2], m.captures[3])))
+        end
+        return out
+    end
+    core, backend = sourcefiles()
+    twice = sort(collect(intersect(nullary(core), nullary(backend))); by = string)
+    isempty(twice) || @info "0.2b no-argument methods defined in core and in a backend tree" twice
+    @test isempty(twice)
+    @test :staged_gemm_tile in nullary(core)
 end
 
 # ── 0.3 A method in a backend touches the driver ─────────────────────────────

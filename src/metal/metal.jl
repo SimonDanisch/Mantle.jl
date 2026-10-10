@@ -80,21 +80,11 @@ Mantle.initbackend!(::MetalAPI) = register_backend!(; name = :metal, priority = 
     Metal.functional() ? Metal.MetalBackend() : nothing
 end
 
-# ── What this backend does not have ───────────────────────────────────────────
-#
-# Declared by core in `runtime/backendhooks.jl`, and answered here rather than
-# left undefined: a caller asking this is asking whether the feature EXISTS, and
-# a name that is missing cannot say no. See that file.
-# `simdgroup_matrix` is 8x8 and the staged GEMM is emitted at 16 — its `@nexprs`
-# unroll counts are literals derived from that extent, so it is not a parameter
-# this backend could pass a different value for. `nothing` and not `8`: the
-# question is which tile MANTLE has kernels at, and here the answer is none —
-# unless this build compiled the Vulkan tree as well (a Mac with a Vulkan loader,
-# for lavapipe), whose staged GEMM is then the build's answer. A device's caps
-# still decide whether it can use them: Metal's tile is 8 and lavapipe has none.
-@static if !VK.HAS_LOADER
-    staged_gemm_tile() = nothing
-end
+# `staged_gemm_tile` is not answered here. The staged GEMM is core's since the
+# kernels moved to `array/gemm.jl`, so every build has it at 16 and core says so;
+# a second answer here was a method overwrite, which fails precompilation on a
+# Mac without a Vulkan loader. Metal's devices still decline it by their caps:
+# `simdgroup_matrix` is 8x8, so `dev.tile == 16` is false.
 
 # The compile cache is Metal.jl's, which is where it belongs; this is the runtime
 # forwarding the question so a caller never has to name Metal — the same two lines

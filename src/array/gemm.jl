@@ -173,10 +173,10 @@ const GEMM_TILINGS = GemmTiling[
     (1, 1, 2, 4, 32, 8),    #  32 x  64, 8 warps — one tile per warp, widest reach
 ]
 
-# This backend's answer to `Mantle.staged_gemm_tile`, declared in
-# `runtime/backendhooks.jl`. Beside the table it is a claim about, so a build
-# that loses the table loses the claim with it, rather than beside the
-# `@static include` that decides whether either exists.
+# The answer to `Mantle.staged_gemm_tile`, declared in `runtime/backendhooks.jl`,
+# and the only one: this file is core, so every build has these kernels and no
+# backend may answer again. Beside the table it is a claim about, so a build
+# that loses the table loses the claim with it.
 staged_gemm_tile() = GEMM_TILE
 
 """
