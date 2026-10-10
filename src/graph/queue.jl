@@ -5,17 +5,20 @@
 #
 # Declared here because every backend answers them. Vulkan hands out real
 # `VkQueue`s from the family and falls back to sharing the primary queue when the
-# device runs out; Metal has one `MTLCommandQueue` per device and distinguishes
-# batches rather than queues.
+# device runs out; Metal hands out another `MTLCommandQueue` with Metal.jl's batch
+# over it, a `Metal.BatchedCommandQueue`, the same type as the device's own.
 
 """
-    allocate_batch_queue!(device) -> SubmitChannel
+    allocate_batch_queue!(device) -> channel
 
-Get a queue that records and submits independently of every other one.
+Get a channel that submits independently of every other one: on Vulkan a
+[`SubmitChannel`](@ref) over another `VkQueue`, on Metal another command queue.
 
 Callers that need their own submission order — a graphics queue that must not
-interleave with compute, a present queue — take one of these rather than
-sharing the device's primary queue. Give it back with
+interleave with compute, a present queue, a second stream of launches — take one
+of these rather than sharing the device's primary queue. `backend(channel)` is
+the KernelAbstractions backend that launches on it; a buffer used on two
+channels is ordered between them (`test_crossqueue_sync.jl`). Give it back with
 [`release_batch_queue!`](@ref).
 """
 function allocate_batch_queue! end
@@ -23,18 +26,13 @@ function allocate_batch_queue! end
 """
     supports_batch_queue(backend) -> Bool
 
-Can this backend hand out a [`SubmitChannel`](@ref)?
+Can this backend hand out a second submission channel
+([`allocate_batch_queue!`](@ref))?
 
-A SEPARATE question from [`supports_graphics`](@ref).
-A channel is a command-pool, fence and timeline-semaphore arrangement on
-Vulkan, and a backend can rasterise perfectly well without one: Metal
-compiles vertex and fragment programs and records draws on its own command
-queue, but has no command pool to lend and no fence to hand back.
-
-So a caller that needs to RECORD INTO a batch queue (RayMakie's overlay
-compositing is the one in tree) has to ask this, not `supports_graphics`.
-Answering only the second question sends it down a path whose first call is
-`allocate_batch_queue!`, which on Metal deliberately throws.
+A SEPARATE question from [`supports_graphics`](@ref): a channel is a stream of
+submissions, and rasterising needs none of its own. Vulkan and Metal both answer
+`true`; a backend that cannot refuses `allocate_batch_queue!` with an
+`ArgumentError` rather than handing back a stub.
 
 `false` by default: a backend that has one says so.
 """
@@ -45,9 +43,10 @@ supports_batch_queue(backend) = false
 supports_batch_queue(dev::Device) = supports_batch_queue(backend(dev))
 
 """
-    batchqueue(device) -> SubmitChannel
+    batchqueue(device) -> channel
 
-The queue `device` records and submits on.
+The queue `device` records and submits on: a [`SubmitChannel`](@ref) on Vulkan,
+Metal.jl's batch over the device's command queue on Metal.
 
 The portable spelling of what was `Mantle.vk_context().default_bq`: a global
 lookup, in the backend, from a package that is not supposed to know which backend

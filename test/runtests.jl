@@ -52,7 +52,7 @@ end
 # Nested, they record and the run continues; the summary at the bottom is still
 # one number and the process still exits non-zero. The `const`s inside are
 # `global` for it: a testset body is a local scope, and the included files name
-# `VULKAN_TESTS` and `_VULKAN_OK`.
+# `_VULKAN_OK`.
 @testset "Mantle.jl" begin
 
 # Relative to this checkout, not to the tree it was first written in: `dev/Mantle`
@@ -522,6 +522,8 @@ end
 #
 # Outside the driver gate on purpose: that they need no GPU is the assertion.
 include(joinpath(@__DIR__, "test_pool.jl"))
+# `DebugConfig`'s rules: core's, and a device is not needed to hold them.
+include(joinpath(@__DIR__, "test_debug_config.jl"))
 # The Vulkan half is gated inside on `_VULKAN_OK`.
 include(joinpath(@__DIR__, "test_basealignment.jl"))
 # Also outside the driver gate, and for a stronger reason than "needs no GPU":
@@ -654,7 +656,23 @@ foreachbackend(joinpath(@__DIR__, "test_narrow_phase_kernel.jl"))
 # every plan carries a finalizer, and the release happens on the
 # owning thread at the next `reclaim!`.
 foreachbackend(joinpath(@__DIR__, "test_dropped_resources.jl"))
-_VULKAN_OK && include(joinpath(@__DIR__, "vulkan", "test_indirect_prepare_ordering.jl"))
+# A device's life and its queues, on every backend (DECISIONS.md 5 and 6): how
+# many submissions a call makes, a second channel and the order between the two,
+# what `error()` in a kernel means, the pool's own trim policy, and a refused
+# allocation that is `nothing`.
+foreachbackend(joinpath(@__DIR__, "test_submission_count.jl"))
+foreachbackend(joinpath(@__DIR__, "test_crossqueue_sync.jl"))
+foreachbackend(joinpath(@__DIR__, "test_kernel_error.jl"))
+foreachbackend(joinpath(@__DIR__, "test_pool_trim_policy.jl"))
+foreachbackend(joinpath(@__DIR__, "test_tolerated_alloc_failure.jl"))
+# …and the parts that change the process, each in a process of its own: a device
+# reset, the exit hook, and validation, which Metal decides when a process starts.
+foreachbackend(joinpath(@__DIR__, "test_device_reset_finalizer.jl"))
+foreachbackend(joinpath(@__DIR__, "test_kernel_cache_reset.jl"))
+foreachbackend(joinpath(@__DIR__, "test_twodevice_shutdown.jl"))
+foreachbackend(joinpath(@__DIR__, "test_arena_memory_device_address.jl"))
+# An eager launch over a `DeviceRange` is ordered after what wrote its count.
+foreachbackend(joinpath(@__DIR__, "test_indirect_prepare_ordering.jl"))
 
 # Recording a plan that has already run: the recording is one
 # command buffer and belongs to no argument slot.
@@ -932,125 +950,5 @@ else
     @info "Mantle tests: no usable Metal device; skipping the Metal backend"
 end
 
-# ── the Vulkan backend ────────────────────────────────────────────────────────
-#
-# 128 files that were Lava's test suite until 2026-08-27, when the runtime moved
-# into `src/vulkan/`. Every one of them needs a device, a queue, a pool or a
-# `LavaArray` — which is exactly the rule that decided what moved. What stayed
-# with Lava runs on a machine with no Vulkan driver at all.
-#
-# The `mwe_*.jl` files beside them are standalone reproducers and are not driven
-# from here, the same as before: each one is run on its own while a bug is being
-# chased.
-global VULKAN_TESTS = joinpath(@__DIR__, "vulkan")
-
-if _VULKAN_OK
-@testset "Vulkan backend" begin
-        # The automatic trim, its rate limit and its GC budget: Vulkan's
-        # `pool_alloc` policy. Core's pool trims only when asked (`test_pool_trim.jl`).
-        @testset "pool trim policy" begin
-            include(joinpath(VULKAN_TESTS, "test_pool_trim_policy.jl"))
-        end
-
-        # ── Tier 3a: Workgroup barrier-skip fix (GPU; catches lavapipe deadlock) ──
-        @testset "Tier 3a: Barrier skip fix" begin
-            include(joinpath(VULKAN_TESTS, "test_barrier_skip.jl"))
-        end
-
-        # ── Tier 3: GPU Execution ──
-        # Gone. The compiler halves of the files that were here — hand-built SPIR-V
-        # modules, `@lava_printf` emission, source maps and compile errors — are in
-        # Lava's own suite, which needs no device; BLAS refit and instance masks are
-        # portable (`test_blas_refit.jl`, `test_instance_masks.jl` in `test/`).
-
-        @testset "pipeline cache avoids driver compilation" begin
-            include(joinpath(VULKAN_TESTS, "test_pipeline_cache_no_compile.jl"))
-        end
-
-        # Straight after the reset above, and before `test_static_workgroup.jl` —
-        # which is where this crashed, because that file calls `GC.gc()` explicitly
-        # and so ran whichever finalizer the reset had stranded.
-        @testset "a buffer may outlive a device reset" begin
-            include(joinpath(VULKAN_TESTS, "test_device_reset_finalizer.jl"))
-        end
-
-        # Two live devices in one process — the real GPU and lavapipe, which the
-        # loader enumerates together, so this needs no second card. Asserts both
-        # compute correctly AND that one kernel compiles twice: a shared pipeline
-        # can still give the right answer by luck. See the file for the five
-        # separate pieces of module-scope device state it found.
-        @testset "two devices in one process" begin
-            # Two devices computing side by side: `test_two_devices.jl`, on every
-            # backend. What stays here is the exit below.
-            # And that the process can then EXIT. A passing probe is not enough:
-            # the crash is in the shutdown finalizer sweep, after every summary
-            # has printed. Nothing inside this process can observe that, so the
-            # check
-            # is a subprocess and an exit code.
-            include(joinpath(VULKAN_TESTS, "test_twodevice_shutdown.jl"))
-        end
-
-        # What baking is FOR, and three things it silently was not: it executed
-        # the plan as it recorded it, it froze `Ref` arguments at capture, and it
-        # pinned one argument slot for life so the repack that fixed the second
-        # raced the device. All three are numbers a run produces, so both files
-        # assert on buffer contents rather than on bookkeeping.
-        # A latent fault in the arena allocator that only a second driver could
-        # show: the memory was not allocated for device addresses, and NVIDIA
-        # returns a usable address anyway. Asserted through the validation layer,
-        # which is the loader's and so reports it on every GPU.
-        @testset "arena memory is allocated for device addresses" begin
-            include(joinpath(VULKAN_TESTS, "test_arena_memory_device_address.jl"))
-        end
-
-        @testset "recording" begin
-
-            include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
-            # No open command buffer on the queue: every call closes and submits
-            # what it wrote, and a run is one submission.
-            include(joinpath(VULKAN_TESTS, "test_closed_command_buffers.jl"))
-        end
-
-        # A handled allocation failure must absorb its own validation messages, or it
-        # aborts whatever unrelated code calls check_validation_errors! next.
-        @testset "tolerated alloc failure" begin
-            include(joinpath(VULKAN_TESTS, "test_tolerated_alloc_failure.jl"))
-        end
-
-        # And what the driver says about a pipeline is asked of the context that
-        # made it, not of a global flag that only describes the next one.
-        @testset "pipeline executable properties per context" begin
-            include(joinpath(VULKAN_TESTS, "test_pipeline_exec_ir.jl"))
-        end
-
-        # `test_phase6_graphics.jl` was here, and it is deleted with the thing
-        # it tested: a static source check that `vk_draw!` did not hand-roll its
-        # dispatch barrier. `vk_draw!` is gone, and the property it asserted now
-        # holds structurally — every draw goes through `begin_pass!`, which is
-        # where the barrier lives.
-
-        # `test_pool_sizeclass.jl` was here, and it is deleted with the thing it
-        # tested. It checked that `size_class` was idempotent on its own output —
-        # `pool_alloc` looked a class up from the REQUEST and `return_to_pool!`
-        # looked it up again from the size handed out, so a chunk returning to the
-        # wrong list would be given to a caller who asked for more than it holds.
-        # `Mantle.carve!` splits at exactly the requested length and `release!`
-        # checks the block's own `live` ledger, so neither the rounding nor the
-        # round-trip it had to be consistent about exists any more. The property
-        # that replaced it — every live region disjoint, in range and aligned — is
-        # in `test/test_pool.jl`, and runs with no device at all.
-
-            @testset "debug configuration" begin
-                include(joinpath(VULKAN_TESTS, "test_debug_config.jl"))
-            end
-
-            include(joinpath(VULKAN_TESTS, "test_crossqueue_sync.jl"))
-
-            @testset "GPU-AV clean" begin
-                include(joinpath(VULKAN_TESTS, "test_gpuav_clean.jl"))
-            end
-end
-
-end  # if _VULKAN_OK
 
 end  # @testset "Mantle.jl"

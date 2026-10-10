@@ -71,6 +71,12 @@ than on the spot, so no caller has to know what is in flight.
 function allocate(pool::Pool, dev, kind, ::Type{T}, dims::NTuple{N,Int};
                   align::Int = 256, blocksize::Int = 64 << 20,
                   constraint = nothing) where {T,N}
+    # The pool's own policy, on every backend: hand dead capacity back, and past
+    # the soft cap collect before growing. See `PoolPolicy`.
+    autotrim!(pool, dev)
+    let cap = pool.policy.soft_cap
+        cap > 0 && reserved(pool) >= cap && autocollect!(() -> reclaim!(pool, dev), pool)
+    end
     r = acquire!(pool, dev, kind, nothing, prod(dims) * sizeof(T);
                  align, blocksize, constraint)
     return DeviceArray{T}(r, dims)

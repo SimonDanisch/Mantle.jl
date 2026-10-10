@@ -516,6 +516,26 @@ the kernels measured), and that is the trade until the codegen fault is fixed.
     dyn(args...; ndrange = ndrange, workgroupsize = W)
 end
 
+"""
+    launchindirect!(bq, obj, args, count, workgroupsize, tlas)
+
+Launch `obj` over the element count in the device array `count`, in one one-shot:
+the prepare that turns the count into group counts, its barrier, the dispatch.
+The count is held like an argument, because only the prepare names it.
+"""
+function launchindirect!(bq, obj, args, count::LavaArray, workgroupsize, tlas)
+    oneshot!(bq; tag = :launch) do e
+        owner = e.owner
+        holdleaves!(owner, obj.f)
+        holdleaves!(owner, args)
+        holdleaves!(owner, count)
+        adaptor = LavaAdaptor(owner)
+        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+        ka_launch_indirect!(e, obj, converted_args, count, workgroupsize, args, adaptor, tlas)
+    end
+    return nothing
+end
+
 function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=nothing)
     # `vk_context(obj.backend)`, not the global: a KA kernel carries the backend
     # it was built for, and that backend knows its device. This is the accessor
@@ -540,18 +560,13 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
     # hwtlas (kernel form has hwtlas=nothing).
     tlas = find_tlas_in_args(args)
 
-    # GPU-resident ndrange → indirect dispatch (no CPU readback)
-    if ndrange isa LavaArray
-        oneshot!(bq; tag = :launch) do e
-            owner = e.owner
-            holdleaves!(owner, obj.f)
-            holdleaves!(owner, args)
-            adaptor = LavaAdaptor(owner)
-            converted_args = map(a -> Adapt.adapt(adaptor, a), args)
-            ka_launch_indirect!(e, obj, converted_args, ndrange, workgroupsize, args, adaptor, tlas)
-        end
-        return nothing
-    end
+    # GPU-resident ndrange → indirect dispatch (no CPU readback). A `DeviceRange`
+    # is the portable spelling; its count is the array the prepare reads, and its
+    # ceiling bounds nothing here, since the device knows the count.
+    ndrange isa DeviceRange &&
+        return launchindirect!(bq, obj, args, storage(ndrange.count), workgroupsize, tlas)
+    ndrange isa LavaArray &&
+        return launchindirect!(bq, obj, args, ndrange, workgroupsize, tlas)
 
     # KA's launch_config / partition / mkcontext / blocks / workitems plus our
     # pad_to_3d add up to ~50% of per-record cost in tight loops, yet they only

@@ -344,6 +344,73 @@ end
 takeall!(ib::Inbox) = @atomicswap ib.head = nothing
 
 """
+    PoolPolicy()
+
+When a pool trims and collects BY ITSELF, without being asked: configuration, one
+per pool, read and changed as `pool(dev).policy.trim_threshold = …`.
+
+  * `trim_threshold`: bytes the pool may reserve before empty blocks are handed
+    back on their own ([`autotrim!`](@ref)). 1 GiB.
+  * `trim_min_interval`: seconds between two such trims. 5.
+  * `trim_full_gc_interval`: seconds between two FULL collections a trim may run
+    to find an empty block, when the incremental one found none. 30.
+  * `soft_cap`: reserved bytes past which an allocation collects before the pool
+    grows ([`autocollect!`](@ref)); `0` never does. 2 GiB.
+  * `gc_mingap`, `gc_full_mingap`: seconds between two such collections, and
+    between two full ones. 0.02 and 0.5.
+  * `gc_budget`: the share of wall time those collections may take. 0.05.
+
+The rest is when each last ran and what it cost, which is what the intervals and
+the budget are measured against.
+
+Two mechanisms because they answer two problems. Trimming hands device memory
+back and needs the queue drained, so it is rare and gated by elapsed time: it is
+what stops a finished workload from holding memory the rest of the machine needs
+(a 5-scene sweep on an iGPU sharing system RAM hit a driver timeout without it).
+Collecting before growth reuses what is dead and uncollected and touches no
+driver, so it can run on the allocation path: SAM 2's encoder ran to 16 136 MiB
+across 200 blocks with nothing asking the collector, and holds its working set
+with the cap.
+
+The defaults were Vulkan's `MemoryPolicy`, measured there. 2 GiB is where SAM 2's
+encoder stops caring (blocks / VRAM / p50 / min):
+
+    3.00 GiB   48   4615 MB   340.2   332.2
+    2.00 GiB   32   3541 MB   339.8   328.8     <- same speed, 1 GiB less
+    1.50 GiB   30   3407 MB   374.0   347.9     <- 10% slower for 134 MB
+    1.25 GiB   30   3407 MB   375.4   356.3
+
+The graph's own live set is 26 blocks, so a cap below ~30 leaves nothing to
+collect and every allocation past it pays for a collection and grows anyway. The
+5% budget is what RIFE at 1920x1152 needed: its steady state is 2094.6 MiB against
+the 2048 MiB cap, and spaced by `gc_mingap` alone six collections a run turned
+142 ms of work into a p50 of 519 ms with a spread out to 912.
+"""
+mutable struct PoolPolicy
+    trim_threshold::Int
+    trim_min_interval::Float64
+    trim_full_gc_interval::Float64
+    soft_cap::Int
+    gc_mingap::Float64
+    gc_full_mingap::Float64
+    gc_budget::Float64
+    last_trim::Float64
+    last_full_gc::Float64
+    gc_last::Float64
+    gc_full_last::Float64
+    # What the last collection cost, in seconds: the gap after it is this over
+    # `gc_budget`, which is what bounds the share of the clock collections take.
+    gc_lastcost::Float64
+    gc_seconds::Float64
+    gc_count::Int
+    # Set while a trim drains the queue: the drain may allocate, and that
+    # allocation must not start a second trim inside the first.
+    trimming::Bool
+end
+PoolPolicy() = PoolPolicy(1 << 30, 5.0, 30.0, 2 << 30, 0.02, 0.5, 0.05,
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, false)
+
+"""
 Blocks per arena kind, and the shared arena each kind is placed into.
 
 Growth ADDS a block; it never reallocates an existing one. That is the whole
@@ -399,9 +466,12 @@ struct Pool
     # says what is no longer wanted and the owning thread decides when.
     pendingplans::Inbox
     lock::ReentrantLock
+    # When this pool trims and collects by itself; see `PoolPolicy`.
+    policy::PoolPolicy
 end
 Pool() = Pool(Dict{Any,Vector{Block}}(), Dict{Any,Arena}(),
-              Inbox(), Region[], UInt64[], WeakRef[], Ref(0), Inbox(), ReentrantLock())
+              Inbox(), Region[], UInt64[], WeakRef[], Ref(0), Inbox(), ReentrantLock(),
+              PoolPolicy())
 
 """
     retireplan!(pool, pl)
@@ -583,6 +653,7 @@ constant because the right value is a device property, not a Mantle opinion.
 function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
                   align::Int = 256, blocksize::Int = 64 << 20, constraint = nothing,
                   maywait::Bool = true)
+    refuseretired(dev)
     bytes = max(bytes, 1)
     # `constraint` given means the caller knows more than these transients do —
     # an arena reconciling what its other tenants also need. Deriving it here
@@ -847,6 +918,109 @@ function makeroom!(pool::Pool, dev)
     supports_batch_queue(dev) && flush!(dev)
     reclaim!(pool, dev; wait = true)
     return trim!(pool, dev)
+end
+
+"""
+    autotrim!(pool, dev) -> Bool
+
+The trim a pool runs by itself, on an allocation: [`makeroom!`](@ref), but only
+when the pool holds more than `policy.trim_threshold`, at most every
+`policy.trim_min_interval` seconds, and only when something can come back. Says
+whether it ran. Refused while a plan holds a recording ([`movable`](@ref)): its
+command buffer names the blocks a trim would destroy.
+
+A region is returned to its block by a **finalizer**, so a block only becomes
+empty once those have run — and an incremental collection sweeps the young
+generation and leaves older objects, which a region that has survived a few
+frames is. So the incremental collection alone almost never found anything and
+the trim almost never fired: the pool ratcheted up to its transient high-water
+mark and stayed there. Measured on SAM 2.1: encode then 20 decodes reached
+2 096 MiB with two empty 64 MiB blocks no automatic path would return; a full
+collection and a trim handed back 128 MiB. So it escalates: the cheap collection
+first, and when that finds nothing, a full one — on its own, longer, timer
+(`policy.trim_full_gc_interval`), because a full collection is tens of
+milliseconds on a heap this size and a render loop must not pay it every five
+seconds.
+"""
+function autotrim!(pool::Pool, dev)
+    p = pool.policy
+    p.trimming && return false
+    reserved(pool) < p.trim_threshold && return false
+    now = time()
+    now - p.last_trim < p.trim_min_interval && return false
+    p.last_trim = now
+    GC.gc(false)
+    if !reclaimable(pool, dev)
+        now - p.last_full_gc < p.trim_full_gc_interval && return false
+        p.last_full_gc = now
+        GC.gc(true)
+        reclaimable(pool, dev) || return false
+    end
+    movable(pool) || return false
+    p.trimming = true
+    try
+        makeroom!(pool, dev)
+    finally
+        p.trimming = false
+    end
+    return true
+end
+
+"""
+    reclaimable(pool, dev) -> Bool
+
+Whether the automatic trim could hand anything back without waiting for the
+device: a block with nothing live in it once what the device is through with has
+been released ([`reclaim!`](@ref), which does not wait), or destroys the device's
+channel is holding for submissions to pass (a backend array dropped by the
+collector goes back through the channel that last named it).
+
+**This deliberately does not see the third case**, a buffer that a recording not
+yet submitted still holds: it stays retired until the hold is dropped, and only
+a flush gets there. Detecting it would make the automatic path flush whenever a
+recording is open, which for a render loop is a stall every
+`policy.trim_min_interval`. The explicit trim pays for that and this does not.
+"""
+function reclaimable(pool::Pool, dev)
+    reclaim!(pool, dev)
+    lock(pool.lock) do
+        any(b -> isempty(b.live), Iterators.flatten(values(pool.blocks)))
+    end && return true
+    return supports_batch_queue(dev) && holdsretired(batchqueue(dev))
+end
+
+"""
+    autocollect!(drain, pool) -> Bool
+
+A collection on the allocation path, run when the pool is past `policy.soft_cap`
+and about to grow: the memory a request needs is then far more likely dead and
+uncollected than in use. `drain()` gives back what the collection freed — a
+channel's destroys, the pool's retired regions — so the allocation after it can
+reuse the bytes. Says whether it ran.
+
+Spaced by `policy.gc_mingap`, or by what the LAST collection cost over
+`policy.gc_budget`, whichever is longer. The gap alone bounds how often and not
+what it costs: an incremental collection on a heap holding a couple of GiB of
+device arrays takes ~63 ms, so a 20 ms gap allowed three quarters of the clock
+in the allocator. A full collection joins it at most every `policy.gc_full_mingap`.
+"""
+function autocollect!(drain, pool::Pool)
+    p = pool.policy
+    now = time()
+    now - p.gc_last < max(p.gc_mingap, p.gc_lastcost / p.gc_budget) && return false
+    t0 = time_ns()
+    GC.gc(false)
+    drain()
+    if now - p.gc_full_last >= p.gc_full_mingap
+        GC.gc(true)
+        drain()
+        p.gc_full_last = now
+    end
+    p.gc_last = time()
+    p.gc_lastcost = (time_ns() - t0) / 1e9
+    p.gc_seconds += p.gc_lastcost
+    p.gc_count += 1
+    return true
 end
 
 """

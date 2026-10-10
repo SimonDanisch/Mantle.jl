@@ -97,8 +97,8 @@ const BDA_POISON = UInt64(0)
 #
 # Reading the counter alone is a live bug, not a nuance: it makes every threshold
 # here compare device pressure against a few megabytes of staging and conclude
-# there is nothing to do. `maybe_trim_pool!` did exactly that and declined to
-# trim a pool holding 1.3 GB.
+# there is nothing to do. The trim (`maybe_trim_pool!`, core's `autotrim!` now) did
+# exactly that and declined to trim a pool holding 1.3 GB.
 
 # `MemoryStats` moved to `coretypes.jl`, beside the `MemoryPolicy` field that
 # holds one.
@@ -212,91 +212,18 @@ Called from `vk_alloc` and `pool_alloc` before allocating.  `blocking=true`
 lowers the pressure threshold and inflates the rate budget — use it when the
 caller is about to do a heavy synchronous operation anyway.
 """
-# Absolute-capacity pool trim.
-#
-# `maybe_collect`'s pressure gate is a *ratio* against the device heap, which is
-# the wrong signal for holding on to dead pool blocks on an iGPU: 3 GB of empty
-# blocks is only ~20 % of a large shared heap, so the gate never trips — but that
-# 3 GB is system RAM the rest of the machine still needs, and the pool is only
-# handed back on an OOM retry. Long multi-scene runs therefore accumulate
-# gigabytes of blocks that nothing will ever reclaim.
-#
-# So trim on absolute dead capacity as well, rate-limited so a render loop can't
-# pay for it repeatedly. Blocks only become empty once the GC has run their
-# sub-allocations' finalizers, hence the collection before the scan.
-
-# A sub-allocation is returned to its block by a **finalizer**, so a block only
-# becomes empty once those have run — which is what the paragraph above says, and
-# what `GC.gc(false)` does not do. Julia's incremental collection sweeps the
-# young generation and leaves older objects, and a pool chunk that has survived a
-# few frames is exactly an older object. So the scan below almost always found
-# nothing and the trim almost never fired: the pool ratcheted up to its
-# transient high-water mark and stayed there for the life of the process.
-#
-# Measured on SAM 2.1: encode then 20 decodes reached 2 096 MiB live with two
-# empty 64 MiB blocks that no automatic path would return. A full collection
-# followed by `reclaim_empty_pool_blocks!` handed back 128 MiB.
-#
-# So escalate: try the cheap collection first, and if it finds no empty block,
-# pay for a full one — but on its own, longer, timer. A full GC is the expensive
-# part (tens of ms on a heap this size) and a render loop must not pay it every
-# five seconds; unbounded pool growth is the worse of the two, but not by so much
-# that it justifies a hitch per frame.
-
-"""
-    reclaimable(ctx) -> Bool
-
-Whether the *automatic* trim could return anything without flushing.
-
-Two things make a block empty. It may already be, or the release may be waiting
-on core's retired list: a sub-allocation's finalizer moves the buffer
-ALIVE → DEFERRED and retires it, and the `live` entry it holds is not given back
-until `reclaim!` runs inside `quiesce_before_reclaim!` — after the gate. So
-`any(b -> isempty(b.live), blocks)` on its own is a precondition the trim
-establishes, and gating on it alone means declining to look.
-
-**This deliberately does not see the third case**, which is a buffer a recording
-that has not been submitted still holds: `reclaim!` leaves it pending until the
-hold is dropped, and only the flush inside `quiesce_before_reclaim!` gets there.
-Detecting that would make the automatic path flush whenever a recording is open,
-which for a render loop is a stall every `trim_min_interval`.
-[`trim_gpu_pool!`](@ref) is the caller that wants it and pays for it explicitly.
-"""
-function reclaimable(ctx::VkContext)
-    p = mempolicy(ctx)
-    any(b -> isempty(b.live), poolblocks(ctx)) && return true
-    bq = ctx.default_bq
-    return lock(() -> !isempty(bq.pending), bq.pendinglock) || !isempty(bq.retiring)
-end
-
-function maybe_trim_pool!(ctx::VkContext)
-    p = mempolicy(ctx)
-    gpu_live_bytes(ctx) < p.trim_threshold && return
-    now = time()
-    now - p.last_trim < p.trim_min_interval && return
-    p.last_trim = now
-
-    GC.gc(false)
-    if !reclaimable(ctx)
-        # Nothing reclaimable *yet*; the finalizers may simply not have run.
-        now - p.last_full_gc < p.trim_full_gc_interval && return
-        p.last_full_gc = now
-        GC.gc(true)
-        reclaimable(ctx) || return
-    end
-    bq = ctx.default_bq
-    quiesce_before_reclaim!(bq) || return
-    n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
-    n_blocks > 0 && @debug "Lava: trimmed empty pool blocks" blocks=n_blocks MiB=(bytes_freed >> 20)
-    return
-end
+# Absolute-capacity pool trim: core's `autotrim!`, the pool's own policy on
+# every backend (`PoolPolicy` in `memory/pool.jl`, which has the measurements).
+# `maybe_collect`'s pressure gate is a *ratio* against the device heap, the wrong
+# signal for holding on to dead blocks on an iGPU, so the trim runs before it on
+# its own terms.
 
 """
     trim_gpu_pool!() -> (blocks, bytes)
 
 Hand every empty pool block back to the driver, now.
 
-The automatic path (`mempolicy(ctx).trim_threshold`) is rate-limited and only runs
+The automatic path (`autotrim!`, by `pool(dev).policy`) is rate-limited and only runs
 while something is allocating, so it is the wrong tool for "I have finished a
 batch of work and want the memory back" — and for measuring, where dead pool
 capacity otherwise counts as live and makes a VRAM figure depend on GC timing
@@ -312,7 +239,7 @@ Gating on it instead leaves the memory resident. On 60 unsynchronised dispatches
 that is 15 blocks and 964 MiB with 0 blocks empty; flushing first empties 15 of
 15 and hands back 960 MiB.
 
-The automatic path keeps the cheap gate; see [`reclaimable`](@ref). This one is
+The automatic path keeps the cheap gate; see `Mantle.reclaimable`. This one is
 the explicit "I have finished and want the memory back", so it pays the stall.
 """
 function trim_gpu_pool!(ctx::VkContext = vk_context())
@@ -331,7 +258,7 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
 
     # Runs before the ratio gate below: dead pool capacity has to be returned on
     # its own terms, not only when the heap ratio says we are in trouble.
-    maybe_trim_pool!(ctx)
+    autotrim!(spans(ctx), lavadevice(ctx))
 
     # Refresh device heap estimate every 10s.  The heap size itself doesn't
     # change, but on iGPUs with shared memory another process could shift what
@@ -976,17 +903,11 @@ takes the dedicated path, where the alignment is applied to a whole allocation.
 """
 const POOL_ALIGN = 256
 
-# Defaults live here, next to the policy they configure, rather than in eleven
-# module-level `Ref`s. `2 GiB` soft cap, trim above 1 GiB and no more than every
-# 5 s, a full GC no more than every 30 s, and at most 5% of wall time in
-# soft-cap collections — the same share `maybe_collect` gives the
-# pressure-driven path.
-MemoryPolicy() = MemoryPolicy(false, 2 * 1024^3, 1024 * 1024 * 1024,
-                              5.0, 30.0, 0.02, 0.5, 0.05, false,
-                              0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                              true, MemoryStats(),
+# Defaults live here, next to the policy they configure, rather than in
+# module-level `Ref`s. The trim and the soft cap are the pool's own policy now
+# (`PoolPolicy`, core's), which every backend's pool applies.
+MemoryPolicy() = MemoryPolicy(false, false, true, MemoryStats(),
                               Threads.Atomic{Int}(0), Set{VkManagedBuffer}(),
-                              Threads.Atomic{Int}(0),
                               Threads.Atomic{Bool}(false))
 
 """
@@ -1081,94 +1002,15 @@ function destroy_pool!(ctx::VkContext)
     return nothing
 end
 
-"""Collections run by the soft cap, and the seconds they cost."""
+"""Collections run by the soft cap, and the seconds they cost: the pool's
+policy's counters (`PoolPolicy`)."""
 pool_gc_stats(ctx::VkContext = vk_context()) =
-    (; count = mempolicy(ctx).gc_count[], seconds = mempolicy(ctx).gc_seconds)
+    (; count = spans(ctx).policy.gc_count, seconds = spans(ctx).policy.gc_seconds)
 
 function reset_pool_gc_stats!(ctx::VkContext = vk_context())
-    p = mempolicy(ctx)
-    p.gc_count[] = 0; p.gc_seconds = 0.0
+    p = spans(ctx).policy
+    p.gc_count = 0; p.gc_seconds = 0.0
     return
-end
-
-"""
-    mempolicy(ctx).soft_cap
-
-Pool footprint in bytes past which an allocation collects *before* committing
-another block. `0` disables it.
-
-This is the cheap half of keeping the pool small, and it is deliberately not
-the same mechanism as [`maybe_trim_pool!`]:
-
-  * here we run a **GC and reuse** — no queue drain, no Vulkan call, and the
-    memory comes back as free spans the caller immediately takes, so this
-    can afford to run on the allocation path;
-  * there we **destroy blocks** and hand the VkDeviceMemory back, which needs
-    `quiesce_before_reclaim!` and therefore stalls the GPU — so it is limited by
-    elapsed time and skipped entirely unless a block is actually empty.
-
-Preventing growth and releasing dead capacity are different problems: this one
-keeps a steady workload's footprint flat, that one is what stops a finished
-workload from holding memory the rest of the machine needs.
-
-Without a trigger here the only backstop is `maybe_collect`, whose pressure
-threshold is a fraction of the *device heap* — 0.75 x 20 GiB on this card. That
-is a fine OOM guard and a terrible footprint policy: SAM 2's encoder ran to a
-stable **16 136 MiB across 200 blocks**, none of it needed, simply because
-nothing asked the GC a question until 15 GiB. The same loop with this cap holds
-its working set instead. A GPU shared with an editor and a REPL is the normal
-case here, not a dedicated one.
-
-2 GiB is where SAM 2's encoder stops caring, measured (blocks / VRAM / p50 / min):
-
-    3.00 GiB   48   4615 MB   340.2   332.2
-    2.00 GiB   32   3541 MB   339.8   328.8     <- same speed, 1 GiB less
-    1.50 GiB   30   3407 MB   374.0   347.9     <- 10% slower for 134 MB
-    1.25 GiB   30   3407 MB   375.4   356.3
-
-The graph's own live set is 26 blocks, so a cap below ~30 leaves nothing to
-collect and every allocation past it pays for a collection and grows anyway.
-"""
-
-"""
-    collect_for_pool!(bq) -> Bool
-
-Try to turn dead LavaArrays back into free spans. Returns whether a collection
-actually ran, so the caller knows whether retrying is worthwhile.
-
-`drain!` after each collection is what makes this work at all: a
-buffer freed while the GPU still referenced it went to the deferred list rather
-than back to the pool, and until it is drained the memory is dead to everyone.
-"""
-function collect_for_pool!(bq::SubmitChannel{<:VulkanQueue})
-    p = mempolicy(ctxof(bq))
-    now = time()
-    # The gap is `gc_mingap`, or what the LAST collection cost divided by the
-    # share of wall time this is allowed to take, whichever is longer.
-    #
-    # `gc_mingap` alone bounds how OFTEN this runs and says nothing about what it
-    # costs, and the two are not related: an incremental collection on a heap
-    # holding a couple of GiB of GPU-backed arrays takes ~63 ms here, so a 20 ms
-    # gap permits spending three quarters of the clock inside the allocator.
-    # Measured on RIFE at 1920x1152, whose steady state is 2094.6 MiB against
-    # this cap's 2048 MiB default: six collections a run, 142 ms of work
-    # reported as a p50 of 519 ms and a spread out to 912, and the pool 2% over
-    # the cap the whole time so there was nothing to win. `maybe_collect` has had
-    # a wall-time budget (`max_gc_rate`) for the same reason.
-    now - p.gc_last < max(p.gc_mingap, p.gc_lastcost / p.gc_budget) && return false
-    t0 = time_ns()
-    GC.gc(false)
-    drain!(bq)
-    if now - p.gc_full_last >= p.gc_full_mingap
-        GC.gc(true)
-        drain!(bq)
-        p.gc_full_last = now
-    end
-    p.gc_last = time()
-    p.gc_lastcost = (time_ns() - t0) / 1e9
-    p.gc_seconds += p.gc_lastcost
-    Threads.atomic_add!(p.gc_count, 1)
-    return true
 end
 
 # Diagnostic: track allocation call sites during recording.
@@ -1260,9 +1102,12 @@ function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usa
     # Past the soft cap, ask the GC before committing another block: at that
     # point the memory this request needs is far more likely to be dead and
     # uncollected than genuinely in use. Under the cap this is not paid at all,
-    # and above it a collection runs at most every `gc_mingap` seconds.
-    if p.soft_cap > 0 && reserved(sp) >= p.soft_cap
-        collect_for_pool!(bq)
+    # and above it the pool's policy spaces the collections (`autocollect!`).
+    # `drain!` after each is what makes it work at all: a buffer freed while the
+    # GPU still referenced it went to the channel's retired list rather than back
+    # to the pool, and until it is drained the memory is dead to everyone.
+    let cap = sp.policy.soft_cap
+        cap > 0 && reserved(sp) >= cap && autocollect!(() -> drain!(bq), sp)
     end
 
     region = acquire_or_reclaim!(bq, sp, dev, nbytes, extra_usage)

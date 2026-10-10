@@ -119,6 +119,12 @@ to this device's queue: a graph on a second device hands out a backend that
 dispatches there, not on whichever device is the default."""
 backend(d::LavaDevice) = LavaBackend(d.bq, d.bq)
 
+"""The KernelAbstractions backend that launches on `bq`: a channel from
+`allocate_batch_queue!`, or the device's own. A buffer one channel wrote and
+another reads is ordered by core's `crosswaits!`, which the submission turns into
+a timeline-semaphore wait."""
+backend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
+
 """
 What this device can do.
 
@@ -134,6 +140,63 @@ h264decoder(dev::LavaDevice, paramnals::AbstractVector{UInt8}; kw...) =
 supports_float64(::LavaDevice) = true
 supports_int64_atomics(dev::LavaDevice) = supports_int64_atomics(dev.ctx)
 supports_hwtlas(dev::LavaDevice) = dev.ctx.ray_query_available
+
+# ── A device's life ───────────────────────────────────────────────────────────
+#
+# The portable verbs of `runtime/lifecycle.jl`, over what the context already
+# keeps: the validation ring, the submission counter, and the lost flag every
+# finalizer gates on.
+
+validating(dev::LavaDevice) = dev.ctx.validating
+
+function validationmessages!(dev::LavaDevice)
+    ctx = dev.ctx
+    drain_validation_messages!(ctx)
+    msgs = copy(ctx.validation.messages)
+    empty!(ctx.validation.messages)
+    return msgs
+end
+
+# Every `vkQueueSubmit2` on any of the context's queues: `submitlist!` counts.
+submissions(dev::LavaDevice) = dev.ctx.diag.flush_counter[]
+
+# The lost flag is retirement: see `mark_device_lost!` for why one flag means
+# both, and why `vk_free!` and every other finalizer gate on it.
+retire!(dev::LavaDevice) = mark_device_lost!(dev.ctx)
+retired(dev::LavaDevice) = device_lost(dev.ctx)
+
+"""
+    reset_device!(dev::LavaDevice; debug = dev.ctx.debug) -> LavaDevice
+
+Retire `dev` and build a device on the same physical device. The process default
+goes through the context-level `reset_device!`, which also installs the new one
+as the default; a device of the caller's own is retired the same way — its
+pipeline cache saved, its pool's blocks released, the lost flag set — and the
+new one is the caller's too.
+"""
+function reset_device!(dev::LavaDevice; debug::DebugConfig = dev.ctx.debug)
+    ctx = dev.ctx
+    # The same physical device, by its place in the enumeration: a new instance
+    # enumerates in the same order, and the index is what `select` reads.
+    select = findfirst(pd -> pd.vks == ctx.physical_device.vks,
+                       unwrap(VK.enumerate_physical_devices(ctx.instance)))
+    if VK_CONTEXT_REF[] === ctx
+        reset_device!(; select, debug)
+        return lavadevice(vk_context())
+    end
+    save_pipeline_cache!(ctx)
+    destroy_pool!(ctx)
+    mark_device_lost!(ctx)
+    return lavadevice(Base.invokelatest(VkContext; select, debug)::VkContext)
+end
+
+# A pool-free attempt: `try_vk_alloc` returns its refusal instead of throwing, and
+# discards the validation messages the refused `vkCreateBuffer` produced.
+function tryallocate(dev::LavaDevice, ::Type{T}, dims::Dims{N}) where {T,N}
+    buf = try_vk_alloc(dev.bq, max(prod(dims) * sizeof(T), 16))
+    buf isa AllocFailure && return nothing
+    return LavaArray{T,N}(GPUArrays.DataRef(vk_free!, buf), dims)
+end
 
 # ── window ────────────────────────────────────────────────────────────────────
 #
@@ -231,14 +294,14 @@ passed(d::LavaDevice, f) = passed(d.bq, f)
 Wait for the timeline to reach `f`.
 
 Nothing recorded is unsubmitted, so an `f > next_timeline` is a token nothing will
-ever signal, and waiting on it would hang in a foreign call: it is an error.
+ever signal, and waiting on it would hang in a foreign call: it declines, and
+core's `waitfor!` turns that into the error.
 """
 function waitfor(d::LavaDevice, f)
     passed(d, f) && return true
-    f > driver(d.bq).next_timeline && throw(LavaError("waitfor",
-        "asked to wait for timeline value $f, but the queue has only submitted up to $(driver(d.bq).next_timeline)",
-        "A token beyond the timeline covers work nothing submitted. Every closed command buffer is submitted when it is closed; a token comes from `submit!`."))
+    f > driver(d.bq).next_timeline && return false
     wait_timeline!(d.bq, UInt64(f))
+    checkexceptions!(d.ctx)
     return true
 end
 

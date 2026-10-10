@@ -120,6 +120,28 @@ of device memory races whatever wrote it.
 """
 awaitwrites(dev::Device) = KernelAbstractions.synchronize(backend(dev))
 
+"""
+An eager launch over a [`DeviceRange`](@ref):
+
+    kernel(args...; ndrange = DeviceRange(count; max))
+
+outside any graph, ordered after whatever wrote `count`. A backend that can
+dispatch indirectly does so in its own launch and never reaches this (Vulkan's
+`LavaBackend`: a prepare kernel writes the group counts on the device). This is
+every other KernelAbstractions backend, whose launch takes a grid on the host,
+and it follows the rule a walked plan follows (`bakedrange`): with a ceiling the
+grid is the ceiling, nothing waits, and the threads past the count are the
+kernel's own bounds check's, which `DeviceRange` requires of every kernel; without
+one the count is read, which waits for the launch that wrote it.
+
+A count of zero launches nothing, as an indirect dispatch of zero groups does.
+"""
+function KernelAbstractions.launch_config(kernel::KernelAbstractions.Kernel, r::DeviceRange,
+                                          workgroupsize)
+    n = r.max === nothing ? Int(first(Array(storage(r.count)))) : r.max
+    return KernelAbstractions.launch_config(kernel, (n,), workgroupsize)
+end
+
 # A count of zero launches nothing, which is what it means and what a recording
 # backend does with it — an indirect dispatch of zero workgroups is a no-op
 # there. Without this, KA gets an empty ndrange, and a wavefront round whose

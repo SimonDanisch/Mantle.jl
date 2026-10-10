@@ -55,8 +55,8 @@ posbuf_fragment(inputs) = inputs.tint
     # which is the safe direction for a capability.
     @test !Mantle.supports_geometry_stage(:something_that_is_not_a_backend)
     # A backend with no batch queue says so when asked for one, rather than
-    # handing back a stub that records nothing. The two questions came apart
-    # when Metal learned to draw: it rasterises and has no command pool.
+    # handing back a stub that records nothing. The two questions are separate:
+    # rasterising needs no second channel.
     Mantle.supports_batch_queue(TESTBACKEND) ||
         @test_throws ArgumentError Mantle.allocate_batch_queue!(TESTBACKEND)
 end

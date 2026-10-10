@@ -1,3 +1,16 @@
+# The driver's view of a pipeline (`pipeline_exec_stats`, `pipeline_exec_ir`):
+# what VK_KHR_pipeline_executable_properties reports — the driver's statistics and
+# its internal representations (RADV's ISA) — and that it answers for the context
+# it is asked about.
+#
+# Vulkan-only driver tooling with no Metal counterpart, so it is a script and not
+# part of Mantle's suite (decided 2026-10-10; DECISIONS.md, item 5). Run it with
+#
+#     julia --project=<env> <Mantle>/tools/pipeline_exec_ir.jl
+#
+# on a machine with a Vulkan device; it builds a second context of its own and
+# retires it, so it leaves the default device alone. What it checked as a test:
+
 """
 The driver's view of a pipeline (`pipeline_exec_stats`, `pipeline_exec_ir`)
 answers for the context it is asked about.

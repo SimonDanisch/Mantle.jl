@@ -138,42 +138,18 @@ end
 MemoryStats() = MemoryStats(0, 0.0, 0.0, 0.0, 0)
 
 mutable struct MemoryPolicy
-    # ── Policy. These were eleven module-level `Ref`s, which is the same mistake
-    # as the caches one level up: a second device would have been trimmed,
-    # capped and garbage-collected according to the first one's numbers. They are
-    # defaults, so they stay mutable — but they are this pool's defaults.
+    # ── Policy. These were module-level `Ref`s, which is the same mistake as the
+    # caches one level up: a second device would have been collected according
+    # to the first one's numbers. The trim threshold, the soft cap and the
+    # collection budget are not here: they are the pool's own policy, core's
+    # `PoolPolicy`, which every backend's pool applies.
     disabled::Bool
-    soft_cap::Int
-    trim_threshold::Int
-    trim_min_interval::Float64
-    trim_full_gc_interval::Float64
-    gc_mingap::Float64
-    gc_full_mingap::Float64
-    # Share of wall time a soft-cap collection may take. `gc_mingap` bounds how
-    # OFTEN it runs; this bounds what it COSTS, which on a heap of GPU-backed
-    # arrays is the half that matters — see `collect_for_pool!`. `1.0` is no
-    # bound at all.
-    gc_budget::Float64
     track_allocs::Bool
-
-    # ── Bookkeeping: when this pool last trimmed or collected, and how long it
-    # has spent doing it. Per device for the obvious reason — one device's
-    # collection must not suppress another's.
-    last_trim::Float64
-    last_full_gc::Float64
-    gc_last::Float64
-    gc_full_last::Float64
-    gc_seconds::Float64
-    # What the last soft-cap collection cost, in seconds. `collect_for_pool!`
-    # spaces itself by this and not only by `gc_mingap`: the gap says how often,
-    # and on a heap of GPU-backed arrays the cost is the half that matters.
-    gc_lastcost::Float64
     # Whether the pressure-driven `maybe_collect` runs at all, and the state it
     # rate-limits itself with. Both were module-level — `EAGER_GC` a `Ref{Bool}`
     # and `MEMORY_STATS` a `MemoryStats()` — which made a BACKEND read
     # process-global state to decide what to do while the context sat in its
-    # argument list. The comment at the top of this struct describes the same fix
-    # being made for eleven other `Ref`s; these were the twelfth and thirteenth.
+    # argument list.
     eager_gc::Bool
     stats::MemoryStats
 
@@ -184,16 +160,12 @@ mutable struct MemoryPolicy
     # double every byte.
     #
     # Per device, as everything here is: module-level, these were one number for
-    # two heaps, so the pressure ratio, the trim threshold and the OOM retry all
-    # read the SUM of both devices against ONE device's capacity, and a busy
-    # discrete GPU drove collection on an idle integrated one. Atomics because
-    # `destroy_buffer!` is reachable from a finalizer.
+    # two heaps, so the pressure ratio and the OOM retry read the SUM of both
+    # devices against ONE device's capacity, and a busy discrete GPU drove
+    # collection on an idle integrated one. Atomics because `destroy_buffer!` is
+    # reachable from a finalizer.
     live_bytes::Threads.Atomic{Int}
     live_buffers::Set{VkManagedBuffer}
-    # No rounding-waste counters: `Mantle.carve!` splits at exactly the
-    # requested length, so there is no size class to be bigger than the
-    # request. `pool_gc_stats` is the accounting there is.
-    gc_count::Threads.Atomic{Int}
     # Guards re-entry into reclamation through `flush!`'s own allocation path.
     # Per pool: one device quiescing must not make another's reclaim a no-op.
     reclaiming::Threads.Atomic{Bool}
@@ -362,123 +334,8 @@ const VAL_RING_SLOT_BYTES = 2048
 const MAX_VALIDATION_MESSAGES = 50
 const MAX_PRINTF_MESSAGES     = 4096
 
-"""
-    DebugConfig(; validation, gpu_av, gpu_av_safe, gpu_av_shaders,
-                  sync_val, best_practices, printf, pool_disabled)
-
-Every validation and instrumentation setting, chosen **at device construction**.
-
-    reset_device!(debug = DebugConfig(gpu_av = true))   # replace the default device
-    ctx = VkContext(debug = DebugConfig(gpu_av = true))         # or build a separate one
-
-**That is the whole API.** There is no `enable_gpu_av()`, no environment
-variable, and no way to switch any of this on after the fact — all of these are
-properties of the `VkInstance`, fixed by `vkCreateInstance`, so a setting applied
-to a device that already exists cannot take effect. There were five preset
-functions and seven `LAVA_*` variables; every one of them is deleted, because
-each was another way to reach a configuration slightly different from the one you
-asked for.
-
-The two recipes worth knowing:
-
-    DebugConfig(validation = true)                       # core spec checks, cheap
-    DebugConfig(gpu_av = true, pool_disabled = true)     # + shader OOB, sub-pool visible
-
-After the second, call [`verify_gpu_av`](@ref). "GPU-AV is enabled" and "GPU-AV
-is catching errors" are not the same thing on every driver, and a clean run under
-an instrument that never fired reads exactly like a clean run.
-
-**No environment variables.** They are read at instance creation, so setting one
-in a running session does nothing, and an instrumentation flag without
-`validation` gives a *clean run with the instrument switched off* — which reads
-exactly like "no fault found". Neither is representable here.
-
-## The two rules, enforced in the constructor rather than warned about
-
-`validation` is implied by everything else. GPU-AV, sync validation,
-best practices and debug printf are all features **of** the Khronos validation
-layer, so asking for one turns the layer on. Passing `validation = true` alone
-means core spec checks with no shader instrumentation, which is the cheap mode.
-
-`gpu_av` and `printf` are mutually exclusive and **throw** together: the layer
-instruments shaders for each and cannot do both. Preferring one and warning
-gives a clean run out of a disabled instrument.
-
-## Two settings that exist because GPU-AV crashes
-
-`gpu_av_safe` defaults to **true**, unlike everything else here. Khronos' own
-documentation: "Safe Mode will have GPU-AV try and prevent crashes, but will be
-much slower to validate, and when using Safe Mode, selective shader
-instrumentation is recommended to only instrument the shaders/pipelines causing
-issues." Lava shipped GPU-AV with neither for a long time, which is most of why
-reaching for it produced a SIGSEGV rather than a report.
-
-`gpu_av_shaders` names the kernels to instrument; empty means all of them, which
-on a ~99-kernel model is both very slow and the configuration most likely to fall
-over. Both need `VK_EXT_layer_settings` — `VkValidationFeaturesEXT` cannot
-express either.
-
-## `pool_disabled`, which is here because it is a debugging setting
-
-GPU-AV tracks buffer-device-address bounds **per `VkBuffer`**, and Lava's pool
-puts many `LavaArray`s into one shared 64 MiB block. So with the pool on, GPU-AV
-sees overruns past the whole block and is *blind to sub-pool overruns* — which
-are most of the bugs anyone turns it on to find. `pool_disabled = true` gives
-every array its own `VkBuffer`.
-
-Debug-only: allocation is much slower and the path is less exercised than the
-pooled one (the host-upload and flush-after-error paths may misbehave). It lives
-on this struct rather than as a separate `mempolicy(ctx).disabled = true` step because
-a second step is a second way to get it wrong, and it applies to the device being
-built.
-"""
-struct DebugConfig
-    validation::Bool
-    gpu_av::Bool
-    gpu_av_safe::Bool
-    gpu_av_shaders::Vector{String}
-    sync_val::Bool
-    best_practices::Bool
-    printf::Bool
-    pool_disabled::Bool
-
-    function DebugConfig(; validation::Bool = false,
-                           gpu_av::Bool = false,
-                           gpu_av_safe::Bool = true,
-                           gpu_av_shaders::AbstractVector{<:AbstractString} = String[],
-                           sync_val::Bool = false,
-                           best_practices::Bool = false,
-                           printf::Bool = false,
-                           pool_disabled::Bool = false)
-        if gpu_av && printf
-            throw(ArgumentError("""
-                DebugConfig: `gpu_av` and `printf` cannot both be on — the validation
-                layer instruments shaders for each and does not do both at once.
-                Pick one: `DebugConfig(gpu_av = true)` to hunt out-of-bounds accesses,
-                or `DebugConfig(printf = true)` to read `@lava_printf` output."""))
-        end
-        # Implied, not required: every feature below is a feature OF the layer,
-        # so asking for one without it is a half-configuration that reports a
-        # clean run from a disabled instrument.
-        validation |= gpu_av || sync_val || best_practices || printf
-        new(validation, gpu_av, gpu_av_safe, collect(String, gpu_av_shaders),
-            sync_val, best_practices, printf, pool_disabled)
-    end
-end
-
-"""
-    DebugConfig(c::DebugConfig; kw...) -> DebugConfig
-
-`c` with named settings replaced. The two rules above are re-checked, so a copy
-cannot reach a state the constructor refuses.
-"""
-DebugConfig(c::DebugConfig;
-            validation = c.validation, gpu_av = c.gpu_av,
-            gpu_av_safe = c.gpu_av_safe, gpu_av_shaders = c.gpu_av_shaders,
-            sync_val = c.sync_val, best_practices = c.best_practices,
-            printf = c.printf, pool_disabled = c.pool_disabled) =
-    DebugConfig(; validation, gpu_av, gpu_av_safe, gpu_av_shaders,
-                  sync_val, best_practices, printf, pool_disabled)
+# `DebugConfig` is core's: `runtime/lifecycle.jl`. What it does on this backend
+# is `VkContext`'s business, which reads every field at instance creation.
 
 """
     ValidationRingRaw

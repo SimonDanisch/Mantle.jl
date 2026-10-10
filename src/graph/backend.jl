@@ -558,10 +558,19 @@ Block until the device has finished the work `token` covers.
 
 Every token is out the moment it exists — `submit!` is the only way work
 reaches the device and it goes at once — so this is the wait and nothing else,
-and a token nothing will signal is an error rather than a submit.
+and a token nothing will signal is an error rather than a submit: an
+`ArgumentError`, on every backend. Metal waited for the device to go idle
+instead, which returns and reads as "done" for work that was never submitted.
+
+The decision is here and the backends' [`waitfor`](@ref) only answers it: it
+returns `false` for a token beyond what was submitted, which is what the pool
+needs from it too.
 """
 function waitfor!(dev, tok)
-    waitfor(dev, tok)
+    waitfor(dev, tok) || throw(ArgumentError(
+        "waitfor!: token $tok covers work nothing has submitted to this device. A " *
+        "token comes from a submission (`run!`, `fence`), and waiting for one " *
+        "beyond them would wait for ever."))
     return nothing
 end
 
@@ -802,6 +811,10 @@ const BACKEND_VOCABULARY = (
     :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :feed!, :decodemore!, :remaining, :build_blas_aabb, :upload_texture_data!,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
+    # A channel names its device. Core answers for its own `SubmitChannel`; a
+    # backend whose channel is a type of its driver package's (Metal.jl's
+    # `BatchedCommandQueue`) answers for that one, and gives it back to `reclaim!`.
+    :todevice, :reclaim!,
     :bestshape,
     :rawalloc, :rawfree, :constraintof, :mergeconstraints, :compatible, :materialize!,
     :alignment, :bufferusage, :extrausage, :imageusage, :devicearray, :deviceview,
@@ -840,6 +853,11 @@ const BACKEND_VOCABULARY = (
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
     :supports_rt_pipeline, :supports_procedural_traversal, :supports_hwtlas, :supports_float64, :supports_int64_atomics,
     :supportspredicate,                       # only whether fixed-size gated work can be discarded
+    # A device's life — `runtime/lifecycle.jl`: what its validation layer is
+    # doing and said, how many submissions it made, its retirement, and the
+    # allocation that answers `nothing` instead of throwing. `retire!` and
+    # `reset_device!` are listed with the queue and the pool below.
+    :debugenv, :validating, :validationmessages!, :submissions, :retired, :tryallocate,
     # the queue and its tokens
     :devices, :defaultdevice!,
     # Core's channel over a backend's queue: the backend constructs it around

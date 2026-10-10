@@ -15,7 +15,7 @@
 # way out, and it drains first.
 #
 # Only on a device that hands out a second queue at all (`supports_batch_queue`);
-# Metal has one submission channel per device and refuses to allocate another.
+# one that does not refuses to allocate it.
 # The Vulkan version also asserted the context's list of handed-out queues and
 # that a released hardware queue slot is reused; both are that backend's
 # bookkeeping, and what a user sees of them is what is asserted below: queues

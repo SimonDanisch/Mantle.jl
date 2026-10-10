@@ -76,7 +76,7 @@ a name that does not is a new definition rather than a method.
     soft-cap collection rather than anything about the work — the collection was
     spaced by how OFTEN it may run and not by what it costs, so a workload 2%
     over the cap paid ~63 ms of GC every 20 ms forever. Fixed in
-    `runtime/memory.jl` (`gc_budget`); the honest number is 141.
+    core's pool policy (`PoolPolicy.gc_budget`); the honest number is 141.
 
     Faster on two of the four, level on a third, and behind where
     cooperative-matrix attention carries the graph. All four agree with Lava on their outputs: the
@@ -393,6 +393,9 @@ after would credit the sync with retirements made while it was blocked.
 """
 function Mantle.waitfor(d::ROCmDevice, f)
     Mantle.passed(d, f) && return true
+    # A token no retirement has been handed: nothing will ever cover it, and
+    # core's `waitfor!` makes the refusal an error.
+    UInt64(f) > d.next && return false
     issued = d.next
     Mantle.waitidle(d)
     d.completed = max(d.completed, issued)

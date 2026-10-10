@@ -484,6 +484,17 @@ function retire!(ch::SubmitChannel, obj)
 end
 
 """
+    holdsretired(ch) -> Bool
+
+Whether `ch` holds destroys that are waiting for a submission to pass, which the
+automatic trim asks before it pays for a drain ([`reclaimable`](@ref)). A channel
+that is not core's — Metal's is Metal.jl's batch — has nothing retired onto it.
+"""
+holdsretired(ch::SubmitChannel) =
+    lock(() -> !isempty(ch.pending), ch.pendinglock) || !isempty(ch.retiring)
+holdsretired(ch) = false
+
+"""
     reclaim!(ch) -> Int
 
 Run the destroys that have become safe, and say how many.

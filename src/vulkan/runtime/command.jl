@@ -789,7 +789,7 @@ emitter's owner rather than being allocated per dispatch; see [`tlasset!`](@ref)
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
     hold!(e, pipeline)
     bindtlas!(e, pipeline, tlas)
-    push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
+    pushargs!(e, pipeline, argaddr)
     ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
     VK.cmd_dispatch(cmd, UInt32(groups[1]), UInt32(groups[2]), UInt32(groups[3]))
     maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
@@ -804,7 +804,7 @@ end
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
     hold!(e, pipeline)
     bindtlas!(e, pipeline, tlas)
-    push_constants_bda!(cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
+    pushargs!(e, pipeline, argaddr)
     mb = indirect.buf[]::VkManagedBuffer
     ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
     VK.cmd_dispatch_indirect(cmd, mb.buffer, UInt64(indirect.offset))
@@ -871,6 +871,49 @@ function push_constants!(cmd::VK.CommandBuffer, layout::VK.PipelineLayout,
         VK.cmd_push_constants(cmd, layout, stage_flags,
             UInt32(0), UInt32(length(push_data)), Ptr{Nothing}(pointer(push_data)))
     end
+end
+
+"""
+    pushargs!(emitter, pipeline, argaddr)
+
+A compute dispatch's push constants: the address of its argument block, and for a
+kernel that can throw (`push_constant_size == 16`, see Lava's
+`wrap_entry_for_vulkan!`) the address of the device's exception flag after it.
+"""
+@inline function pushargs!(e, pipeline::LavaComputePipeline, argaddr::UInt64)
+    if pipeline.push_constant_size == 16
+        ref = Ref((argaddr, e.ctx.exception_flag.address))
+        GC.@preserve ref begin
+            VK.cmd_push_constants(e.cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT,
+                UInt32(0), UInt32(16),
+                Ptr{Nothing}(Base.unsafe_convert(Ptr{NTuple{2,UInt64}}, ref)))
+        end
+    else
+        push_constants_bda!(e.cmd, pipeline.pipeline_layout, VK.SHADER_STAGE_COMPUTE_BIT, argaddr)
+    end
+    return nothing
+end
+
+"""
+    checkexceptions!(ctx)
+
+Throw if a kernel on `ctx` threw since the last check, and clear the flag so the
+next check starts clean. Called after a wait, so whatever raised it has finished.
+
+The invocation that threw stopped where it threw; the others ran to the end. What
+the kernel wrote is therefore what it would have written without the invocations
+that stopped, which is why this is an error and not a warning.
+"""
+function checkexceptions!(ctx::VkContext)
+    p = Ptr{UInt32}(ctx.exception_flag.mapped_ptr)
+    unsafe_load(p) == 0 && return nothing
+    unsafe_store!(p, UInt32(0))
+    throw(LavaError("kernel exception",
+        "a kernel threw an exception on $(ctx.device_name): an invocation reached an " *
+        "`error`, a `throw` or a failed bounds check, and stopped there. What that kernel " *
+        "wrote is missing that invocation's results.",
+        "Run the kernel on the host, or bisect it with `@lava_printf`, to find which " *
+        "invocation and which check."))
 end
 
 """
@@ -1205,7 +1248,7 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     # collector dropped since the last submission is held here until a drain, and
     # returning before it left those regions on loan until the NEXT launch. A
     # `waitidle` and a waiting `reclaim!` then gave back none of them.
-    target == UInt64(0) && (drain!(bq); return)
+    target == UInt64(0) && (drain!(bq); checkexceptions!(ctxof(bq)); return)
     budget = driver(bq).flush_timeout_ns
     quantum = budget == 0 ? typemax(UInt64) : min(budget, FLUSH_WAIT_QUANTUM_NS)
     waited = UInt64(0)
@@ -1287,7 +1330,10 @@ function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
         end
     end
     drain!(bq)
-    check_validation_errors!("flush!")
+    checkexceptions!(ctxof(bq))
+    # This channel's context, not the bound one: a second device's flush
+    # read the default device's validation messages and blamed itself for them.
+    check_validation_errors!("flush!", ctxof(bq))
     return
 end
 

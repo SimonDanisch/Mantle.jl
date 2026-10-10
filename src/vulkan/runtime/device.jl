@@ -497,6 +497,14 @@ mutable struct VkContext
     # the configuration without reconstructing it, and so `reset_device!` can
     # carry it across a recovery reset instead of silently disarming it.
     debug::DebugConfig
+    # Whether `VK_LAYER_KHRONOS_validation` is loaded on this instance: what
+    # `debug.validation` asked for, achieved or not. See `validating`.
+    validating::Bool
+    # The word a compute kernel raises when it throws (`LavaRuntime.signal_exception`
+    # in Lava), host-visible so a wait reads it without a copy. Its address is the
+    # second push-constant word of every kernel that can throw; `checkexceptions!`
+    # reads and clears it.
+    exception_flag::VkManagedBuffer
     # Driver version (used to key the on-disk VkPipelineCache file).
     driver_version::String
     # Persistent VkPipelineCache. Seeded from disk on init, passed to every
@@ -630,6 +638,8 @@ mutable struct VkContext
         ctx.video_decode_queue_family_index = video_decode_queue_family_index
         ctx.gpu_assisted = gpu_assisted
         ctx.debug = debug
+        # Set by `VkContext(; …)` once it knows whether the layer loaded.
+        ctx.validating = false
         ctx.driver_version = driver_version
         # Seed a persistent VkPipelineCache from disk (if any). The header is
         # validated against this physical device before the driver sees it —
@@ -1750,11 +1760,6 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         @warn "Vulkan validation layers not found. Install vulkan-validationlayers for GPU error diagnostics."
     end
 
-    # Clear validation messages accumulated during device creation.
-    # GPU-assisted validation emits harmless "adjusting settings" warnings during
-    # vkCreateDevice that would otherwise block the first shader compilation.
-    clear_validation_messages!()
-
     # Zero-alloc Vulkan function pointers for hot paths. Per device — see the
     # field's comment on `VkContext`; a global here crashed the first two-device
     # run. Kept in a local until the context exists, and assigned below.
@@ -1820,6 +1825,20 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # constructor has no access to the local. Per device — a module-global one
     # sent the first device's command buffers through the second device's driver.
     ctx.cmd_pipeline_barrier_fptr = cmd_barrier_fptr
+    ctx.validating = has_validation
+    flag = try_vk_alloc(ctx.default_bq, 16; unified = true)
+    flag isa AllocFailure && throw(LavaError("device initialization",
+        "could not allocate the 16-byte exception flag: $(flag.code) from $(flag.op)",
+        "The device has no host-visible memory left; this is not recoverable here."))
+    unsafe_store!(Ptr{UInt32}(flag.mapped_ptr), UInt32(0))
+    ctx.exception_flag = flag
+    # What device creation reported. GPU-assisted validation emits harmless
+    # "adjusting settings" warnings during vkCreateDevice that would otherwise
+    # block the first shader compilation. THIS context's: the no-argument form
+    # clears the bound one, which is another device or none, so a device built
+    # beside the default kept its creation messages and handed them to the
+    # first `validationmessages!` asked of it.
+    clear_validation_messages!(ctx)
     # The pool belongs to this context, so its debug setting is applied here
     # rather than by the caller: a separate `mempolicy(ctx).disabled =` line
     # after the reset is one a caller can forget, which leaves GPU-AV blind to

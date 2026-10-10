@@ -179,6 +179,10 @@ include("runtime/backendhooks.jl")  # declared here, answered in vulkan/ or meta
 include("runtime/format.jl")
 include("runtime/api.jl")
 include("memory/array.jl")    # names `Device` and `backend`, both from api.jl
+# A device's debugging configuration, submission count and end: declared here,
+# answered by each backend. After `memory/array.jl`: `trydevicearray` is
+# `devicearray`'s refusing sibling.
+include("runtime/lifecycle.jl")
 include("runtime/dispatch.jl")
 include("phases.jl")
 # The graph itself: one set of data structures, shared by every backend.
@@ -394,6 +398,8 @@ export pixelbytes
 export LoadOp, Clear, Keep, Discard
 export Device, Resource, Graph, Plan, Transient, Window, backend, screenshot
 export DeviceInfo, devices, defaultdevice!
+export DebugConfig, debugenv, validating, validationmessages!, submissions, retired,
+    trydevicearray
 export DeviceCaps, caps
 export MatrixShape, MatrixUse, MatrixA, MatrixB, Accumulator
 export CoopMatrix, AcceleratedMatrix, WorkgroupMatrix, matrixuse, matrixscope

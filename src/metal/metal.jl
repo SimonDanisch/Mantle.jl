@@ -39,10 +39,17 @@ using Metal: @device_override
 # through Metal.jl rather than as a dependency of its own.
 using GLFW
 using Metal.ObjectiveC: @objc, id
+# `MTLSetReportFailureBlock` is looked up in Metal.framework by name, and handed a
+# block that receives an `NSString` (`debug.jl`).
+import Libdl
+using Metal.ObjectiveC: @objcblock
+using Metal.ObjectiveC.Foundation: NSString, NSBlock
 const OCObject = Metal.ObjectiveC.Object
 const MTL = Metal.MTL
 
 include("device.jl")
+# What `DebugConfig` means here, and the validation layer's reports.
+include("debug.jl")
 include("memory.jl")
 include("caps.jl")
 include("kernelinterface.jl")
@@ -74,10 +81,22 @@ include("record.jl")
 
 # ── What this backend does once, at load ──────────────────────────────────────
 #
-# Declared by core in `graph/backend.jl`. No pipeline thread and no `atexit`
-# hook: neither half of Vulkan's has anything to reach for here.
-Mantle.initbackend!(::MetalAPI) = register_backend!(; name = :metal, priority = 90) do
-    Metal.functional() ? Metal.MetalBackend() : nothing
+# Declared by core in `graph/backend.jl`. No pipeline thread: Vulkan's builds
+# pipelines off the calling thread, and Metal.jl compiles where it is asked. One
+# `atexit` hook, Vulkan's other half: retire every device this process built,
+# before Julia's last finalizer pass, so nothing it holds is handed back through
+# a driver that may already be gone (`retire!` in `runtime/lifecycle.jl`).
+function Mantle.initbackend!(::MetalAPI)
+    register_backend!(; name = :metal, priority = 90) do
+        Metal.functional() ? Metal.MetalBackend() : nothing
+    end
+    atexit() do
+        for r in METAL.live
+            d = r.value
+            d isa MetalDevice && retire!(d)
+        end
+    end
+    return nothing
 end
 
 # `staged_gemm_tile` is not answered here. The staged GEMM is core's since the

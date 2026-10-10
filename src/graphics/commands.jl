@@ -60,17 +60,6 @@ Set the viewport rectangle for subsequent draws.
 function set_viewport! end
 
 """
-    reset_device!(device)
-
-Tear down and re-create the device's transient state.
-
-The recovery path after a device loss, and the reason it is API rather than
-internal: a caller that has just lost the device is the only one who knows
-whether re-creating it is the right response.
-"""
-function reset_device! end
-
-"""
     present_frame!(device, window)
 
 Show what was drawn, once the work behind it completes.
@@ -331,8 +320,8 @@ function use_bindings! end
 # already resolved rather than the `Pass`.
 #
 # The Vulkan backend does NOT go through these: it records whole frames onto its
-# own channel and has its own path in `src/vulkan/graph.jl`. These exist for
-# backends that have no submission channel — see `supports_batch_queue`.
+# own `SubmitChannel` and has its own path in `src/vulkan/graph.jl`. These exist
+# for backends that record a pass per draw rather than into such a channel.
 
 """
     compile_draw(device, pipeline, color_formats, depth_format, vert_args, frag_args;

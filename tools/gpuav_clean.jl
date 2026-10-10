@@ -1,31 +1,31 @@
-# GPU-AV regression test
+# GPU-AV regression check: a Hikari hardware ray-tracing render under the Vulkan
+# validation layer with GPU-assisted validation, and the layer's fault readback.
 #
-# Phase-I of the Hikari GPU stability investigation
-# (`docs/specs/2026-04-25-unaligned-bda-investigation.md`).
+# Vulkan-only tooling with no Metal counterpart, so it is a script and not part of
+# Mantle's suite (decided 2026-10-10; DECISIONS.md, item 5). What it checks:
 #
-# Runs a minimal Hikari HW RT render under the Vulkan validation layer with
-# GPU-assisted instrumentation enabled, then asserts that no validation
-# messages were captured.  This pins the unaligned-BDA-store fix in Lava's
-# SPIR-V emitter (`psb_needs_decomposition`): historically the emitter
-# returned false for `access_align <= 4` AND the byte-offset check used
-# `if offset > 0` which silently dropped negative offsets emitted by SROA's
-# end-relative pointer arithmetic.  Both gaps allowed `store i32 align 4`
-# to land on a 2-aligned BDA, which AMD tolerates but other vendors may
-# not — and which corrupts GPU memory state enough to trigger RADV GPUVM
-# faults after many Hikari renders.  See the investigation doc for the
-# full root-cause trace.
+#   1. A minimal Hikari HW RT render produces NO validation messages under GPU-AV.
+#      This pins the unaligned-BDA-store fix in Lava's SPIR-V emitter
+#      (`psb_needs_decomposition`): the emitter returned false for
+#      `access_align <= 4`, AND the byte-offset check used `if offset > 0`, which
+#      dropped the negative offsets SROA's end-relative pointer arithmetic emits.
+#      Both let `store i32 align 4` land on a 2-aligned BDA, which AMD tolerates and
+#      other vendors may not — and which corrupted GPU memory enough to trigger
+#      RADV GPUVM faults after many Hikari renders. Root cause in
+#      `docs/specs/2026-04-25-unaligned-bda-investigation.md`.
+#   2. GPU-AV's fault readback does not deadlock: `verify_gpu_av` drives a known
+#      out-of-bounds store twice and must get a report back each time.
 #
-# # Why this test is gated
+# How to run, on a machine with the Khronos validation layer (VK_LAYER_KHRONOS_validation)
+# and Hikari in the environment:
 #
-# GPU-AV slows compute dispatches by ~100x.  The test takes minutes per
-# render, so it's gated on `LAVA_TEST_GPU_AV=1` and excluded from the default
-# `runtests.jl` flow.  CI should run a dedicated job with that env var set.
-
+#     julia --project=<env> <Mantle>/tools/gpuav_clean.jl
+#
+# GPU-AV slows compute dispatches by ~100x, so the render takes minutes. Both
+# checks rebuild the device with GPU-AV; run it in a process of its own.
 using Test
 using Lava, Mantle
-if get(ENV, "LAVA_TEST_GPU_AV", "0") != "1"
-    @info "test_gpuav_clean: skipped (set LAVA_TEST_GPU_AV=1 to enable; see test header)"
-else
+begin
     using Hikari, Raycore, Adapt
     using GeometryBasics
     using GeometryBasics: normal_mesh, Tessellation, Sphere, Point3f, Point2f, Vec3f
