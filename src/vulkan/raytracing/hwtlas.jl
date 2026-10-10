@@ -605,15 +605,15 @@ Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
     update_transform!(hwtlas::VulkanTLAS, handle::TLASHandle, transform)
 
 Set every instance in `handle`'s batch to the same transform. Accepts
-`Mat3x4f` (canonical) or `Mat4f` (auto-converted). Returns true if the
-handle was valid.
+`Mat3x4f` (canonical) or `Mat4f` (auto-converted). An unknown handle is an
+`ArgumentError`, as on Metal and Raycore's own structure.
 """
 function Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat3x4f)
     batch = batchof(hwtlas.instances, handle)
-    batch === nothing && return false
+    batch === nothing && throw(ArgumentError("update_transform!: unknown handle $handle"))
     Raycore.update_transforms!(hwtlas, handle,
                                LavaArray(fill(transform, batch.n); bq = hwtlas.bq))
-    return true
+    return nothing
 end
 
 Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat4f) =

@@ -543,8 +543,12 @@ Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform
 Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transforms::MtlArray) =
     Raycore.update_transforms!(t, handle, Array(transforms))
 
-Raycore.update_transform!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform) =
-    Raycore.update_transforms!(t, handle, [transform])
+# Every instance of the batch, as on Vulkan and Raycore's own structure.
+function Raycore.update_transform!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform)
+    b = Mantle.batchof(t.instances, handle)
+    b === nothing && throw(ArgumentError("update_transform!: unknown handle $handle"))
+    return Raycore.update_transforms!(t, handle, fill(transform, b.n))
+end
 
 function Base.delete!(t::MetalHWTLAS, handle::Raycore.TLASHandle)
     Mantle.delete!(t.instances, handle) || return false

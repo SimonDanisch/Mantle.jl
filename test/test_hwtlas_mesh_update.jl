@@ -145,6 +145,28 @@ end
     @test isapprox(r2.t, expected_t(1.5); atol=0.1f0)
 end
 
+# One transform for every instance of a batch, the meaning `update_transform!` has
+# on every structure, Raycore's own included. Metal once refused a batch of more
+# than one, and Vulkan answered an unknown handle with `false` where the others
+# threw.
+@testset "HW HWTLAS — update_transform! moves every instance of a batch" begin
+    hwtlas = Mantle.HWTLAS{Tri}(TESTBACKEND)
+    handle = push!(hwtlas, sphere_mesh(16), [tlastranslation(-3, 0, 0), tlastranslation(3, 0, 0)])
+    Raycore.sync!(hwtlas)
+    # Down -z at x = -3, x = 3 and x = 10.
+    probe = TLASProbe(TESTBACKEND, [Point3f(-3, 0, 5), Point3f(3, 0, 5), Point3f(10, 0, 5)],
+                      fill(Vec3f(0, 0, -1), 3))
+    @test tlastrace(probe, hwtlas).hit == [true, true, false]
+
+    Raycore.update_transform!(hwtlas, handle, tlastranslation(10, 0, 0))
+    Raycore.sync!(hwtlas)
+    @test Raycore.n_instances(hwtlas) == 2
+    @test tlastrace(probe, hwtlas).hit == [false, false, true]
+
+    @test_throws ArgumentError Raycore.update_transform!(
+        hwtlas, Raycore.TLASHandle(typemax(UInt32)), tlastranslation(0, 0, 0))
+end
+
 # A refit must not flatten what `push!` wrote into each instance.
 #
 # Vulkan's `update_instance_records_kernel!` once REBUILT every record from
