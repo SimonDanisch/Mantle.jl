@@ -175,6 +175,14 @@ M.target_extent(s::ResizableSource) = s.extent
         # rather than covering the target.
         @test count(p -> ColorTypes.green(p) <= 0.5, img) == 4096 - RG_COVERED
 
+        # The same pixels read straight off the target after the run, without a
+        # `copy!` pass. On Vulkan this moves the image out of the layout its last
+        # pass left it in and back, so the run below doubles as the check that it
+        # was put back.
+        @test M.readback_target(plan, color) == img
+        # A target the plan never uses holds nothing to read.
+        @test_throws ArgumentError M.readback_target(plan, M.Transient.Image(M.Graph(RG_DEV), RGBA{N0f8}, (4, 4)))
+
         # Running the same plan again must give the same frame: a target that came
         # back at a different offset would render into someone else's bytes.
         M.run!(plan)

@@ -1371,6 +1371,45 @@ function emitcopy!(e::Emitter, ::Plan, pp::PassPlan)
     return nothing
 end
 
+"""
+Copy a placed render target to the host after a run.
+
+One submission of three commands: out of the layout of `rest` — the usage the
+plan left the target in — into `TRANSFER_SRC`, the copy into a host-cached
+`Readback` region, and back into `rest`, so the next run's first barrier finds the
+layout it expects. Both barriers are built from usage types, as the graph's own
+are, and the submission goes to the queue the plan ran on, so the first one orders
+the copy after the run.
+"""
+function readback_target(dev::LavaDevice, t::VulkanTransientImage{T}, rest::Type) where {T}
+    t.image === nothing &&
+        error("this target has not been placed yet; readback needs a compiled plan")
+    w, h = size(t)
+    nbytes = w * h * sizeof(T)
+    r = acquire!(pool(dev), dev, Readback(), nothing, max(nbytes, 16);
+                 align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
+    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
+    tosrc = ImageBarrier(t, Transition(0, rest, Type[rest], CopySrc))
+    back = ImageBarrier(t, Transition(0, CopySrc, Type[CopySrc], rest))
+    bq = batchqueue(dev)
+    tok = oneshot!(bq; tag = :readback) do e
+        emit_barrier!(e, tosrc)
+        region = VK.BufferImageCopy(
+            UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
+            VK.ImageSubresourceLayers(aspect(t), UInt32(0), UInt32(0), UInt32(1)),
+            VK.Offset3D(0, 0, 0), VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)))
+        VK.cmd_copy_image_to_buffer(e.cmd, target_image(t),
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
+        emit_barrier!(e, back)
+        hold!(e, mb)
+    end
+    waitfor!(bq, tok)
+    pixels = Matrix{T}(undef, w, h)
+    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
+    release!(r)
+    return pixels
+end
+
 # One begin/end per pass. The clear is pass configuration: a fresh draw!
 # per item transitions the target from UNDEFINED every time and discards
 # everything drawn before it.

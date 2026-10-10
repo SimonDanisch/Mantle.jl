@@ -121,13 +121,13 @@ arena shared to allow it would put every G-buffer in CPU-coherent memory to
 serve a path that runs in tests and screenshots.
 
 The row stride is tight — `width * sizeof(T)` — so the bytes come back as a
-`Matrix{T}` with no padding to strip.
+`Matrix{T}` with no padding to strip. The usage the plan left the target in does
+not matter here: a texture has no layout to move it out of.
 """
-function Mantle.readback_target(t::MetalTransientImage{T}) where {T}
+function Mantle.readback_target(dev::MetalDevice, t::MetalTransientImage{T}, ::Type) where {T}
     tex = t.image
     tex === nothing &&
         error("this target has not been placed yet; readback needs a compiled plan")
-    dev = Mantle.Device(MetalAPI())
     row = t.width * sizeof(T)
     buf = MTL.MTLBuffer(dev.dev, row * t.height; storage = Metal.SharedStorage)
     # Everything the frame recorded has to have run before these bytes mean

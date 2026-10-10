@@ -165,19 +165,57 @@ checkreadable(::Task) =
           "the frame that owns it has been presented")
 
 """
-    readback_target(target) -> Matrix
+    readback_target(plan, target) -> Matrix
 
-Read a render target the graph placed back to the host, as a `Matrix{T}` of its
-element type.
+Read a render target `plan` placed back to the host after a run, as a `Matrix{T}`
+of its element type.
 
 The counterpart to [`readback_framebuffer`](@ref) for a
 [`Transient.Image`](@ref): a framebuffer is a resource the CALLER made and can
 keep in host-visible memory, while a transient lives wherever the placer put it
 — on a backend that is device-only memory, so this goes through a copy.
 
-Synchronises, for the same reason the other two do.
+The plan is an argument because it is what knows what the target was last doing.
+Between runs a Vulkan image rests in the layout of its last usage, and the copy
+has to move it out of that layout and back into it; nothing on the image records
+which one it is.
+
+Synchronises, for the same reason the other two do. Inside a frame, a `copy!`
+pass into a [`Transient.Buffer`](@ref) is the way to read a target.
 """
-function readback_target end
+function readback_target(pl::Plan, t)
+    rest = restingusage(pl, t)
+    rest === nothing && throw(ArgumentError(
+        "readback_target: the plan never uses this target, so it holds nothing to read"))
+    return readback_target(pl.graph.dev, t, rest)
+end
+
+"""
+    readback_target(device, target, usage) -> Matrix
+
+The backend's half of [`readback_target`](@ref): copy `target` to the host, given
+`usage`, the usage the plan left it in.
+"""
+readback_target(dev::Device, t, ::Type) = throw(ArgumentError(
+    "readback_target: $(typeof(dev)) cannot read back a render target"))
+
+"""
+    restingusage(plan, r) -> Union{Type,Nothing}
+
+What `r` is left doing after a run of `plan`: the destination of the last
+transition the plan makes on it, in scheduled order. An image changes layout only
+through a transition, so this is the layout it rests in between runs. `nothing`
+when the plan never touches `r`.
+"""
+function restingusage(pl::Plan, r)
+    id = get(pl.graph.ids.ids, r, nothing)
+    id === nothing && return nothing
+    rest = nothing
+    for pp in pl.passes, t in pp.pre
+        t.resource == id && (rest = t.to)
+    end
+    return rest
+end
 
 """
     supports_graphics(backend) -> Bool
