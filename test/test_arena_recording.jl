@@ -49,9 +49,16 @@ const E = Mantle
     # remap it. A correct answer from `small` afterwards is `remap!` having
     # re-materialised its transients into the new allocation — which is the half
     # of this that a test built in the other order would not reach.
+    #
+    # The device is cached per process and its arena never shrinks, and a plan an
+    # earlier file still holds stays a tenant. So the sizes start from what the
+    # arena holds already: a chain's peak is two of its buffers, `8n` bytes, so
+    # `small` alone outgrows it and `big` outgrows `small`, whatever ran before.
     dev = M.Device(TESTBACKEND)
-    small = Base.invokelatest(chainplan, dev, 250_000, 3)
-    big   = Base.invokelatest(chainplan, dev, 2_000_000, 3)
+    held = haskey(M.pool(dev).arenas, E.Buffers()) ? M.pool(dev).arenas[E.Buffers()].bytes : 0
+    nsmall = max(250_000, cld(held, 4))
+    small = Base.invokelatest(chainplan, dev, nsmall, 3)
+    big   = Base.invokelatest(chainplan, dev, 8nsmall, 3)
 
     ps, pb = M.peakbytes(small.plan), M.peakbytes(big.plan)
     # The arena lives on the core `Pool` now, not on the backend's device: the
@@ -59,7 +66,8 @@ const E = Mantle
     arena = M.pool(dev).arenas[E.Buffers()]
     @test arena.bytes == max(ps, pb)
     @test arena.bytes < ps + pb
-    @test length(M.tenants!(arena)) == 2
+    # Both are tenants; others may be, if an earlier file still holds a plan.
+    @test count(wr -> wr.value === small.plan || wr.value === big.plan, M.tenants!(arena)) == 2
     @test M.sharing(M.pool(dev), E.Buffers())
 
     # Interleaved, a hundred times: two plans alternating on one arena, each
