@@ -51,11 +51,16 @@ end
 
 """Snapshot what the device's pool holds, once the collector and a reclaim have
 given back everything that was dropped: bytes taken from the device, regions on
-loan, and blocks."""
+loan, and blocks. The wait is what hands a collected array's region to the pool on
+a backend that defers the destroy to its queue — without it the count included
+arrays already collected, as many as the collector happened to leave pending, and
+the bound failed only inside the full suite (63 -> 143), as in
+`test_hwtlas_stress.jl`'s `snapshot_state`."""
 function snapshot_state_hw()
     dev = Mantle.Device(TESTBACKEND)
     p = Mantle.pool(dev)
     GC.gc(true); GC.gc(true)
+    Mantle.waitidle(dev)
     Mantle.reclaim!(p, dev; wait = true)
     blocks = collect(Iterators.flatten(values(p.blocks)))
     return (gpu_bytes = Mantle.reserved(p),
