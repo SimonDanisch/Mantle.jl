@@ -148,8 +148,13 @@ end
 # device memory the CPU addresses directly (Metal's `Shared` buffers). Vulkan's is
 # not mapped; it writes `upload!`, `download` and `devicecopy!` itself, through a
 # staging copy, and has no span to give.
+#
+# `feed!`, `decodemore!` and `remaining` (2026-10-10) take a decoder, and the only
+# way to get one is `h264decoder`, which core answers by refusing on a device with
+# no hardware video decode. A backend without a decoder has nothing these could be
+# called on, so answering them there would be dead code.
 const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
-    :deviceslice, :hostspan
+    :deviceslice, :hostspan, :feed!, :decodemore!, :remaining
 ])
 
 # The 56 that are lonely TODAY, so the guard can fail on a 57th.
