@@ -85,7 +85,12 @@ xshift(x) = Mat4f(1,0,0,0, 0,1,0,0, 0,0,1,0, x,0,0,1)
         Raycore.sync!(t)
         @test Raycore.n_instances(t) == 1
         b = Raycore.world_bound(t)
+        @test b isa Raycore.Bounds3
         @test all(b.p_min .< -0.9f0) && all(b.p_max .> 0.9f0)
+
+        # `wait_for_gpu!` returns the accel so it chains, as on Raycore's TLAS.
+        @test_nowarn Raycore.wait_for_gpu!(t)
+        @test Raycore.wait_for_gpu!(t) === t
 
         # `sync!` is the sole owner of the adapted form, and a second one with
         # nothing dirty must not rebuild.

@@ -448,17 +448,20 @@ end
 end
 
 @testset "HW HWTLAS — n_instances matches live batch count under churn" begin
+    # Batches of BLASes of different sizes pushed, deleted and moved in a random
+    # order, with a `sync!` only every fifth step, so each sync sees several
+    # mutations at once.
     rng = Random.MersenneTwister(0xCAFEBABE)
     hwtlas = Mantle.HWTLAS{Tri}(TESTBACKEND)
     handles = Raycore.TLASHandle[]
     sizes = Int[]
     expected = 0
-    for iter in 1:50
+    for iter in 1:80
         op = rand(rng, 1:3)
         if op == 1 && length(handles) < 12
             n = rand(rng, 1:5)
             xfs = [tlastranslation(Float32(2i + iter), 0f0, 0f0) for i in 1:n]
-            h = push!(hwtlas, unit_triangle_mesh(), xfs)
+            h = push!(hwtlas, sphere_mesh_n(rand(rng, [4, 6, 8])), xfs)
             push!(handles, h)
             push!(sizes, n)
             expected += n
@@ -468,14 +471,20 @@ end
             expected -= sizes[i]
             deleteat!(handles, i)
             deleteat!(sizes, i)
-        else
-            # No-op churn.
+        elseif op == 3 && length(handles) > 0
+            i = rand(rng, 1:length(handles))
+            Raycore.update_transform!(hwtlas, handles[i],
+                tlastranslation(Float32(rand(rng) * 6 - 3), 0f0, 0f0))
         end
         if iter % 5 == 0
             Raycore.sync!(hwtlas)
         end
         @test Raycore.n_instances(hwtlas) == expected
     end
+
+    Raycore.sync!(hwtlas)
+    @test Raycore.world_bound(hwtlas) isa Raycore.Bounds3
+    @test Raycore.wait_for_gpu!(hwtlas) === hwtlas
 end
 
 else
