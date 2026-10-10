@@ -89,6 +89,45 @@ function decode_h264_luma(annexb::AbstractVector{UInt8}; kw...)
 end
 
 """
+    h264decoder(dev, paramnals::AbstractVector{UInt8}; chroma = false) -> decoder
+
+A persistent H.264 decode session on `dev`, for a stream decoded a few frames at a
+time rather than in one call: [`feed!`](@ref) it an Annex-B chunk that starts at an
+IDR, [`decodemore!`](@ref) it up to `n` access units at a time — each call returns
+the frames that are safe to display, in display order — ask [`remaining`](@ref) how
+many it has not returned yet, and `close` it. `paramnals` is any chunk holding the
+stream's SPS and PPS. Only on a device that [`videodecodes`](@ref); everywhere else
+this refuses.
+"""
+h264decoder(dev, paramnals::AbstractVector{UInt8}; kw...) = throw(ArgumentError(
+    "h264decoder: this device has no hardware video decode; ask `videodecodes(device)` first"))
+
+"""
+    feed!(decoder, annexb) -> decoder
+
+Queue an Annex-B chunk, typically one GOP starting at an IDR, on a decoder from
+[`h264decoder`](@ref). Frames not yet returned from an earlier chunk come out first.
+"""
+function feed! end
+
+"""
+    decodemore!(decoder, n) -> Vector{(Y, UV)}
+
+Decode up to `n` access units of what was fed, and return every frame that is safe
+to display, in display order. B-frames decode before frames they display after, so
+some decoded frames are held back until the chunk runs out. Each call costs about
+`n` frames of decode time.
+"""
+function decodemore! end
+
+"""
+    remaining(decoder) -> Int
+
+How many frames of what was fed [`decodemore!`](@ref) has not returned yet.
+"""
+function remaining end
+
+"""
     supports_float64(dev) -> Bool
 
 Whether kernels and arrays on `dev` can hold `Float64` (and `ComplexF64`).

@@ -144,6 +144,9 @@ const C = Vk.VkCore
 import ..VideoImage, ..LavaArray, ..pool_offset,
        ..record_luma_copy!, ..record_chroma_copy!,
        ..oneshot!, ..waitfor!
+# The streaming verbs are core's (`runtime/backendhooks.jl`), so a caller holding a
+# device drives a decoder without naming this module.
+import ..feed!, ..decodemore!, ..remaining
 
 # `alloc_image_memory` cannot be, and the reason is include order rather than
 # anything about the name: it lives in `graphics/framebuffer.jl`, which comes
@@ -424,6 +427,24 @@ function video_profile(w)
 end
 
 """
+    bitstreamalignment(offset, size) -> Int
+
+The one alignment a decode session rounds every bitstream offset and range to: a
+multiple of both of the profile's requirements. The larger of the two, since both
+are powers of two — and refused, not rounded, if a device reports one that is not,
+because a misaligned range is a decode that produces nothing: no error, and without
+validation layers nothing in the log, just all-zero frames. Hardcoding 256 was that
+bug on AMD, whose H.264 profile asks for 4096.
+"""
+function bitstreamalignment(offset::Integer, size::Integer)
+    a = Int(max(offset, size, 1))
+    ispow2(a) && a % max(offset, 1) == 0 && a % max(size, 1) == 0 || error(
+        "video decode: bitstream alignments $offset (offset) and $size (size) are not " *
+        "powers of two, so no single alignment satisfies both")
+    return a
+end
+
+"""
     H264Decoder(ctx, paramnals; chroma=false)
 
 A PERSISTENT hardware H.264 decode session: the Vulkan video session, its parameter
@@ -650,12 +671,8 @@ function H264Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool=false)
         e0=C.VkExtent2D(0,0), cp=Ref(C.VkVideoCapabilitiesKHR(C.VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR,Ptr{Cvoid}(rp(dc)),UInt32(0),UInt64(0),UInt64(0),e0,e0,e0,UInt32(0),UInt32(0),C.VkExtensionProperties(ntuple(_->Cchar(0),256),UInt32(0))))
         GC.@preserve hc dc cp PIN vkchk(ccall(Vk.function_pointer(ctx.instance,"vkGetPhysicalDeviceVideoCapabilitiesKHR"),Int32,(Ptr{Cvoid},Ptr{Cvoid},Ptr{Cvoid}),ctx.physical_device.vks,Ptr{Cvoid}(pProf),pc(cp)), "vkGetPhysicalDeviceVideoCapabilitiesKHR")
         rHdr[]=cp[].stdHeaderVersion
-        # The bitstream buffer's offset AND range must each be a multiple of the
-        # profile's alignment. Hardcoding 256 happened to satisfy devices asking for
-        # <=256; this profile asks 4096 on AMD, and a misaligned range is a decode
-        # that silently produces nothing. Both are powers of two, so the larger of
-        # the two satisfies both.
-        BSALIGN = Int(max(cp[].minBitstreamBufferOffsetAlignment, cp[].minBitstreamBufferSizeAlignment, 1))
+        BSALIGN = bitstreamalignment(cp[].minBitstreamBufferOffsetAlignment,
+                                     cp[].minBitstreamBufferSizeAlignment)
         # `dc` was already being filled in and thrown away.  Its flags say
         # whether one image may serve as both DPB and decode target
         # (DPB_AND_OUTPUT_COINCIDE, 0x1) or whether they must be separate images

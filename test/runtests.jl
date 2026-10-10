@@ -518,7 +518,6 @@ import Vulkan
     end
 end
 
-
 # CPU-only, so they go first and fail fast.
 #
 # Outside the driver gate on purpose: that they need no GPU is the assertion.
@@ -570,7 +569,6 @@ include(joinpath(@__DIR__, "test_core_names_no_backend.jl"))
 # written before the refactor deletes anything, so each one fails today and
 # turns into an "Unexpectedly Pass" the moment its phase lands.
 include(joinpath(@__DIR__, "test_mantle_owns_it.jl"))
-
 
 include(joinpath(@__DIR__, "test_contact_record.jl"))
 include(joinpath(@__DIR__, "test_convex_shape.jl"))
@@ -943,39 +941,10 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_pool_trim_policy.jl"))
         end
 
-        # Source-and-bindings only, no device. First, so it is reported before
-        # anything that can take a device down with it — and because what it
-        # catches is a name that would otherwise throw far away from its cause.
-        @testset "Lava import completeness" begin
-        end
-
-
-
         # ── Tier 3a: Workgroup barrier-skip fix (GPU; catches lavapipe deadlock) ──
         @testset "Tier 3a: Barrier skip fix" begin
             include(joinpath(VULKAN_TESTS, "test_barrier_skip.jl"))
         end
-
-
-        # ── Tier 3a2: norm FTZ rescaling regression (GPU; Float64/ComplexF64) ──
-        @testset "Tier 3a2: norm FTZ rescaling" begin
-        end
-
-
-        # ── Tier 3a3: workgroup (shared) memory stress (GPU) ──
-        @testset "Tier 3a3: shared-memory stress" begin
-        end
-
-
-        # ── Tier 3a4: OpSelect-of-Workgroup-pointers type-dedup regression (GPU) ──
-        @testset "Tier 3a4: OpSelect Workgroup pointer dedup" begin
-        end
-
-
-        # ── Tier 3a5: constant lookup table indexed at runtime (GPU) ──
-        @testset "Tier 3a5: constant table storage class" begin
-        end
-
 
         # ── Tier 3: GPU Execution ──
         @testset "Tier 3: GPU Execution" begin
@@ -987,18 +956,6 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_instance_masks.jl"))
         end
 
-            @testset "Tier 3b: Struct Broadcast" begin
-            end
-
-            @testset "Narrow phase (CPU)" begin
-            end
-
-
-        # ── Tier 3c: Atomics & Batched Dispatch ──
-        @testset "Tier 3c: Atomics & Dispatch" begin
-        end
-
-
         # ── Tier 3c2: On-kernel printf (DebugPrintf SPIR-V emission) ──
         # Only the spirv-val emission test runs here; the live-output test resets the
         # device and is opt-in via LAVA_PRINTF_LIVE=1.
@@ -1006,79 +963,9 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_lava_printf.jl"))
         end
 
-
-        # ── Tier 3v: hardware H.264 video decode (skips without a video-decode queue) ──
-        @testset "Tier 3v: H.264 hardware decode" begin
-        end
-
-
-        @testset "video decode layout" begin
-            include(joinpath(VULKAN_TESTS, "test_video_decode_layout.jl"))
-        end
-
-
-        @testset "double-indirect MVector access" begin
-        end
-
-
-        @testset "Int32 CartesianIndex into Broadcasted" begin
-        end
-
-
-        @testset "workgroup size limit" begin
-        end
-
-
-        @testset "fastdiv index decomposition" begin
-        end
-
-
-        @testset "cooperative-matrix epilogue" begin
-        end
-
-
-        @testset "shared stores through a divided index" begin
-        end
-
-
-        @testset "staged GEMM" begin
-        end
-
-
-        @testset "scalar GEMM accumulator width" begin
-        end
-
-
-        # The scalar half of the same port: `mul!`'s fp32 path, which had no tiling
-        # at all and ran at 0.448 TFLOP/s where this reaches 4.301.
-        @testset "staged scalar GEMM" begin
-        end
-
-
-        @testset "whole-struct copy alignment" begin
-        end
-
-
-        @testset "systematic struct alignment" begin
-        end
-
-
-        @testset "vector loads and stores through a device pointer" begin
-        end
-
-
-        @testset "a float conversion keeps its rounding" begin
-        end
-
-
-        @testset "base alignment of a device array" begin
-        end
-
-
         @testset "pipeline cache avoids driver compilation" begin
             include(joinpath(VULKAN_TESTS, "test_pipeline_cache_no_compile.jl"))
         end
-
 
         # Straight after the reset above, and before `test_static_workgroup.jl` —
         # which is where this crashed, because that file calls `GC.gc()` explicitly
@@ -1086,47 +973,6 @@ if _VULKAN_OK
         @testset "a buffer may outlive a device reset" begin
             include(joinpath(VULKAN_TESTS, "test_device_reset_finalizer.jl"))
         end
-
-
-        @testset "static workgroup indexing" begin
-        end
-
-
-        # The one field the multi-device work rests on. Needs no second GPU: what it
-        # pins is that "this device" and "whichever is current" stay distinguishable.
-        @testset "a backend knows its device" begin
-        end
-
-
-        # Choosing a device: the listing, the selector vocabulary (name, index,
-        # predicate, ranking) and the default. No second card needed.
-        @testset "device selection" begin
-        end
-
-
-        # The whole point of backend independence, checked on two live devices:
-        # a graph, an array, a framebuffer and an Adapt asked of the SECOND
-        # device's backend land THERE, not on the default. Skips loudly without
-        # a software rasterizer.
-        @testset "a device is an explicit argument" begin
-        end
-
-
-        # The leak a full render on a non-default GPU hit that the isolated
-        # primitives did not: the HWTLAS mesh-push path allocated instance and
-        # triangle buffers on the process default. Builds one on lavapipe beside
-        # the real GPU and asserts every buffer stays there.
-        @testset "an HWTLAS built on a second device stays on it" begin
-        end
-
-
-        # The backend cannot allocate a device buffer without naming its device:
-        # a source scan forbidding the device-less `LavaArray` that reaches the
-        # process global. This is the structural guard the HWTLAS leak needed —
-        # fixing the sites by hand does not stop the next one being written.
-        @testset "no device-less allocation in the backend" begin
-        end
-
 
         # Two live devices in one process — the real GPU and lavapipe, which the
         # loader enumerates together, so this needs no second card. Asserts both
@@ -1144,7 +990,6 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_twodevice_shutdown.jl"))
         end
 
-
         # What baking is FOR, and three things it silently was not: it executed
         # the plan as it recorded it, it froze `Ref` arguments at capture, and it
         # pinned one argument slot for life so the repack that fixed the second
@@ -1158,7 +1003,6 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_arena_memory_device_address.jl"))
         end
 
-
         @testset "recording" begin
 
             include(joinpath(VULKAN_TESTS, "test_alloc_debug_log.jl"))
@@ -1167,100 +1011,16 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_closed_command_buffers.jl"))
         end
 
-        # What "wait for the GPU" has to mean when Mantle owns submission: a
-        # wait that ignores the batch the caller is still holding is not one.
-        @testset "waiting" begin
-        end
-
-        # A loop recorded once whose trip count the device decides. Also the
-        # regression test for `bufferusage` never having been called: a
-        # predicate buffer without `CONDITIONAL_RENDERING_BIT` is undefined, and
-        # the two drivers here disagreed — RADV answered correctly, NVIDIA hung.
-        @testset "repeat!" begin
-        end
-
-
-        # Catches an invalid module that the driver accepts and runs correctly, so it
-        # is invisible to every other test unless the device carries
-        # `DebugConfig(validation = true)`.
-        @testset "no OpBitcast on a logical pointer" begin
-        end
-
-
-        # Only meaningful on a device whose subgroup width is not fixed — on wave32
-        # hardware "requested" and "default" are the same number and nothing is proved.
-        @testset "pinned subgroup width" begin
-        end
-
-
-        # Both halves of the coopmat 32-lane pin: that it is not needed here, and
-        # that the refusal fires when it would be. The second half is unreachable on
-        # any device present, so it drives the capability cache instead.
-        @testset "coopmat 32-lane pin" begin
-            include(joinpath(VULKAN_TESTS, "test_coopmat_subgroup_pin.jl"))
-        end
-
-
         # A handled allocation failure must absorb its own validation messages, or it
         # aborts whatever unrelated code calls check_validation_errors! next.
         @testset "tolerated alloc failure" begin
             include(joinpath(VULKAN_TESTS, "test_tolerated_alloc_failure.jl"))
         end
 
-        # Past the driver's memory budget is out of memory, also where RADV would
-        # have moved buffers to system memory (which froze a desktop, 2026-10-06).
-        @testset "allocation budget" begin
-        end
-
-
         # And what the driver says about a pipeline is asked of the context that
         # made it, not of a global flag that only describes the next one.
         @testset "pipeline executable properties per context" begin
             include(joinpath(VULKAN_TESTS, "test_pipeline_exec_ir.jl"))
-        end
-
-
-        # `vk_context` had methods for three of AnyLavaArray's six wrappers.
-        @testset "vk_context through array wrappers" begin
-        end
-
-
-        # The buffer-lifetime case behind the intermittent flush hang. Asserted on
-        # the state machine, not by provoking the hang — see the file.
-        @testset "free during recording" begin
-        end
-
-
-        # ── Files registered late ──
-        #
-        # These existed in test/ but were never included here. That is not neutral:
-        # of the files found unregistered, three characterised bugs that had since been
-        # FIXED without anyone noticing, one exercised an API deleted three months
-        # earlier, one never waited on its own spawned task, and two had gone stale
-        # against a refactor. Registered so they cannot rot again.
-        #
-        # Still deliberately out: the heavy stress/CI entry points.
-        # (test_struct_alignment_systematic.jl was excluded here while the
-        # whole-struct-copy bug was open; that is fixed, and it is registered above.)
-        @testset "broadcast paths" begin
-        end
-
-        @testset "closest_hit via ray query" begin
-        end
-
-        @testset "coopmat shared memory" begin
-        end
-
-        @testset "batched coopmat GEMM" begin
-        end
-
-        @testset "AdaptedAccel via ray query" begin
-        end
-
-        @testset "hwtlas batch delete" begin
-        end
-
-        @testset "hwtlas batch triangles" begin
         end
 
         @testset "hwtlas instance buffer" begin
@@ -1275,42 +1035,12 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_hwtlas_refit.jl"))
         end
 
-        @testset "this backend's plain kernels guard their tails" begin
-        end
-
         @testset "grain instance writer" begin
             include(joinpath(VULKAN_TESTS, "test_instance_writer_kernel.jl"))
         end
 
         @testset "hwtlas sync batch" begin
             include(joinpath(VULKAN_TESTS, "test_hwtlas_sync_batch.jl"))
-        end
-
-        @testset "instance record" begin
-        end
-
-        @testset "permutedims" begin
-        end
-
-        @testset "what a submission holds" begin
-        end
-
-        @testset "index buffers" begin
-        end
-
-        @testset "pooled buffers alias by bytes, not by block" begin
-        end
-
-        @testset "phase 2 — error surfacing" begin
-        end
-
-        @testset "phase 3 — lifecycle" begin
-        end
-
-        @testset "phase 4 — single writer" begin
-        end
-
-        @testset "phase 5 — transfer path" begin
         end
 
         # `test_phase6_graphics.jl` was here, and it is deleted with the thing
@@ -1334,190 +1064,11 @@ if _VULKAN_OK
             include(joinpath(VULKAN_TESTS, "test_source_mapping.jl"))
         end
 
-        @testset "tlas allow_update" begin
-        end
-
-        @testset "tlas refit" begin
-        end
-
-        @testset "tlas refit integration" begin
-        end
-
-        @testset "trace cull mask" begin
-        end
-
-        @testset "typepun trunc/bitcast" begin
-        end
-
-            @testset "Tier 3d: SPIR-V Pattern Correctness & Stress" begin
-            end
-
-            @testset "Tier 3e: GPU Memory Safety" begin
-            end
-
-            @testset "Tier 3e2: BAR Memcpy Sync" begin
-            end
-
-            @testset "Tier 3e3: MultiTypeSet Surgical" begin
-            end
-
-            @testset "Tier 3f: Caching & Allocations" begin
-            end
-
-
-        # ── Tier 3h: Kernel cache ──
-        # SPIR-V kept with each `CodeInstance`: an edited kernel is launched with
-        # its new code, an unrelated definition compiles nothing.
-        @testset "Tier 3h: Kernel Cache" begin
-        end
-
-
-        # ── Tier 3g: Graphics Pipeline ──
-        @testset "Tier 3g: Graphics Pipeline" begin
-        end
-
-
-            @testset "Tier 4: GPUArrays TestSuite" begin
-            end
-
-            @testset "HW HWTLAS — stress + correctness" begin
-            end
-
-
-            @testset "HW HWTLAS — mesh update" begin
-            end
-
-
-            @testset "HW HWTLAS — UAF safety" begin
-            end
-
-
-            @testset "holdleaves! stops at a VulkanTLAS" begin
-            end
-
-
-            @testset "held buffer lifetime" begin
-            end
-
-
-            @testset "workgroup zero-init" begin
-            end
-
-
-            @testset "pool trim" begin
-            end
-
-
-            # Ported to the per-channel deferred-free list; it names
-            # `drain_deferred_frees!(bq)` and not the module-level lists.
-            @testset "rapid alloc/free" begin
-            end
-
-
-            @testset "Diagonal mul! disambiguation" begin
-            end
-
-
-            @testset "device capabilities" begin
-            end
-
-
             @testset "debug configuration" begin
                 include(joinpath(VULKAN_TESTS, "test_debug_config.jl"))
             end
 
-
-            @testset "batched 1D FFT" begin
-            end
-
-
-            @testset "batch-1 GEMV" begin
-            end
-
-            # Two kernels that differ in nothing an argument type can see. The
-            # `gemv` family above is what found this; see the file.
-            @testset "a launch plan is keyed on its kernel" begin
-            end
-
-
-            @testset "coopmat shape query" begin
-            end
-
-
-            @testset "coopmat GEMM subgroup guard" begin
-            end
-
-
-            @testset "subgroup shuffle family" begin
-            end
-
-
-
-
-            @testset "coopmat component-wise add" begin
-            end
-
-
-            @testset "coopmat through a phi cycle" begin
-            end
-
-
-
-
-
-
-            @testset "HW HWTLAS — nonblocking sync!" begin
-            end
-
-            @testset "argument memory isolation" begin
-            end
-
-            @testset "an indirect dispatch follows its own prepare" begin
-            end
             include(joinpath(VULKAN_TESTS, "test_crossqueue_sync.jl"))
-            # A recorded copy has to outlive the value that was copied FROM, even
-            # when nothing holds it. Its own file because no render test reaches it:
-            # only device→device from a temporary is affected.
-            @testset "copyto! from a dropped source" begin
-            end
-
-            # Who owns a queue from `allocate_batch_queue!`. A dropped one whose
-            # timeline semaphore is finalized while buffers still name it
-            # and the buffer finalizer's `vkGetSemaphoreCounterValue` then segfaulted
-            # inside the driver.
-            @testset "batch queue lifetime" begin
-            end
-
-            # A `transpose(::LavaArray)` destination is not a `LavaArray`, so it
-            # misses every `mapreducedim!` method written for one. Its own file because the
-            # assertions have to read the destination's parent storage, which is the
-            # only place `adjoint`'s conjugation is visible.
-            @testset "mapreducedim! into transposed destinations" begin
-            end
-
-            # Lava's GEMM kernels need a numeric element type; anything else belongs
-            # to `GPUArrays.generic_matmatmul!`. Its own file because it defines a
-            # struct at top level to be the non-numeric element type.
-            @testset "mul! with a non-numeric element type" begin
-            end
-
-            @testset "compute" begin
-            end
-
-            @testset "RT direct" begin
-            end
-
-            @testset "RT indirect + busy" begin
-            end
-
-            @testset "12 distinct kernels" begin
-            end
-
-            @testset "SoA workqueue" begin
-            end
-
-            @testset "VolPath shape" begin
-            end
 
             @testset "GPU-AV clean" begin
                 include(joinpath(VULKAN_TESTS, "test_gpuav_clean.jl"))

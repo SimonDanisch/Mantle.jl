@@ -34,6 +34,11 @@ end
 
 # `decode_h264_luma` is core's: it is this decode plus a download, and names no driver.
 
+# The streaming decoder for a caller holding the backend; the device's method is in
+# `graph.jl`, beside `videodecodes(::LavaDevice)`.
+h264decoder(b::LavaBackend, paramnals::AbstractVector{UInt8}; kw...) =
+    VideoDecode.H264Decoder(vk_context(b), paramnals; kw...)
+
 # ---- Profiling (kernel SPIR-V stats + per-dispatch GPU timing) ----
 
 # ---- Phase 2: Graphics ----

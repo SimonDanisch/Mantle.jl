@@ -129,6 +129,8 @@ that method.
 """
 caps(dev::LavaDevice) = caps(dev.ctx)
 videodecodes(dev::LavaDevice) = videodecodes(dev.ctx)
+h264decoder(dev::LavaDevice, paramnals::AbstractVector{UInt8}; kw...) =
+    VideoDecode.H264Decoder(dev.ctx, paramnals; kw...)
 supports_float64(::LavaDevice) = true
 supports_int64_atomics(dev::LavaDevice) = supports_int64_atomics(dev.ctx)
 supports_hwtlas(dev::LavaDevice) = dev.ctx.ray_query_available

@@ -410,8 +410,8 @@ function H265Decoder(ctx, paramnals::AbstractVector{UInt8}; chroma::Bool = false
         e0 = C.VkExtent2D(0, 0), cp = Ref(C.VkVideoCapabilitiesKHR(C.VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR, Ptr{Cvoid}(rp(dc)), UInt32(0), UInt64(0), UInt64(0), e0, e0, e0, UInt32(0), UInt32(0), C.VkExtensionProperties(ntuple(_ -> Cchar(0), 256), UInt32(0))))
         GC.@preserve hc dc cp PIN vkchk(ccall(Vk.function_pointer(ctx.instance, "vkGetPhysicalDeviceVideoCapabilitiesKHR"), Int32, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}), ctx.physical_device.vks, Ptr{Cvoid}(pProf), pc(cp)), "vkGetPhysicalDeviceVideoCapabilitiesKHR")
         rHdr[] = cp[].stdHeaderVersion
-        BSALIGN = Int(max(cp[].minBitstreamBufferOffsetAlignment,
-                          cp[].minBitstreamBufferSizeAlignment, 1))
+        BSALIGN = bitstreamalignment(cp[].minBitstreamBufferOffsetAlignment,
+                                     cp[].minBitstreamBufferSizeAlignment)
         # `dc` was filled in and thrown away here, exactly as it once was on the
         # H.264 side. Its flags say whether one image may serve as both DPB and
         # decode target (DPB_AND_OUTPUT_COINCIDE, 0x1) or whether the two must be

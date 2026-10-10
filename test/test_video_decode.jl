@@ -61,5 +61,26 @@ include(joinpath(@__DIR__, "testbackend.jl"))
         @test length(host) == nframes
         @test eltype(host[1]) == UInt8
         @test all(Array(frames[i]) == host[i] for i in 1:nframes)
+
+        # Chunking must not change a single pixel. A decoder submits a chunk of
+        # access units at a time, so the DPB crosses submit boundaries: one access
+        # unit writes a slot the next reads as a reference, and frames are reordered
+        # by (GOP, POC) afterwards. A boundary that dropped a reference, reused a
+        # decode target too early or lost a barrier makes one-at-a-time and
+        # all-at-once disagree.
+        dec = Mantle.h264decoder(dev, annexb)
+        got = Any[]
+        try
+            Mantle.feed!(dec, annexb)
+            while Mantle.remaining(dec) > 0
+                append!(got, Mantle.decodemore!(dec, 1))     # ONE access unit per call
+            end
+        finally
+            close(dec)
+        end
+        @test length(got) == nframes
+        @test all(Array(first(got[i])) == host[i] for i in 1:nframes)
     end
+    # Where there is no decoder, asking for one says so instead of failing later.
+    Mantle.videodecodes(dev) || @test_throws ArgumentError Mantle.h264decoder(dev, UInt8[])
 end

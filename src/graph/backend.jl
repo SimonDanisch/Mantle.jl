@@ -799,7 +799,7 @@ const BACKEND_VOCABULARY = (
     # which says why they are declarations rather than names a caller sniffs for
     # with `isdefined`. Listed here because this is the enumerated surface a
     # backend may add a method to, and they are two more of it.
-    :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :build_blas_aabb, :upload_texture_data!,
+    :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :build_blas_aabb, :upload_texture_data!,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
     :bestshape,
