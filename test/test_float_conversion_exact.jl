@@ -73,7 +73,7 @@ end
     finite = sort(filter(isfinite, Float64.(halves)))
     ties = Float32.((finite[1:end-1] .+ finite[2:end]) ./ 2)
     x = [Float32.(halves); ties; prevfloat.(ties); nextfloat.(ties);
-         65519.996f0, 65520f0, 65536f0, -65520f0, 2f0^-25, nextfloat(2f0^-25), 2f0^-26]
+         Float32[65519.996, 65520, 65536, -65520, 2.0^-25, nextfloat(2f0^-25), 2.0^-26]]
     n = length(x)
     out = Mantle.devicearray(TESTBACKEND, zeros(Float32, n))
     KI.@launch backend ndrange = n workgroupsize = 64 fce_widen_narrowed!(
