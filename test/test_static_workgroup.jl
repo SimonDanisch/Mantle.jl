@@ -11,15 +11,18 @@ ndrange are correct on `KA.CPU()`. `permutedims!` uses the typed spelling, so
 `ndrange = (72, 256, 8, 16)` with `wg = (32, 4, 1, 1)` left 2 064 384 of
 2 359 296 destination elements never written, with no error anywhere.
 
-The Vulkan backend guards the affected shapes (`WORKGROUP_FALLBACK` in
-`src/vulkan/array/ka_backend.jl` re-launches them through the dynamic path, at
-roughly 2x the cost of the static one) because NVIDIA's driver still decodes them
-wrong with the guard off — measured 2026-10-06 on an RTX 4000 Ada (595.99) and an
-RTX 3070 Laptop (595.91), the same `min(1, b3/b2)` law, while lavapipe and RADV
-run the same kernel exactly. This file asserts what a caller sees: every shape
-covers its whole ndrange, whatever the backend does to get there. Whether the
-guard can go is a question about one compiler and one driver, not about the
-portable behaviour, and is not asked here.
+Until 2026-10-12 the Vulkan backend guarded the affected shapes
+(`WORKGROUP_FALLBACK` re-launched them through the dynamic path, at roughly 2x
+the cost of the static one), because NVIDIA's driver decoded them wrong:
+measured 2026-10-06 on an RTX 4000 Ada (595.99) and an RTX 3070 Laptop (595.91),
+the same `min(1, b3/b2)` law, while lavapipe and RADV ran the same kernel
+exactly. The decode divides in 64 bits, and the fault was NVIDIA's 64-bit
+division, the same one `test_shared_index_division.jl` and
+`test_int32_cartesian_miscompile.jl` pin: with Lava's `lower_wide_divisions!`
+every shape here and in the trailing-unit section below covers its whole ndrange
+on the Ada with the guard off, and without the pass four of them still covered
+0.125, 0.5, 0.0625 and 0.5. So the guard is gone, and this file asserts what a
+caller sees: every shape covers its whole ndrange.
 
 The API rule still holds and is still worth following:
 

@@ -144,6 +144,26 @@ non-power-of-two `%` or `÷` — a division feeding a **global** address is fine
     layernorm.jl, ops.jl            yes       no     no: `red[t+1]`, `sh[lt]`
 
 Two are affected and both are fixed.
+
+## 2026-10-12: it is 64-bit division, and Lava no longer emits one
+
+On an RTX 4000 Ada (595.99), the same kernel with only the division's width
+changed:
+
+    division                        K=32    K=64   K=128   K=256
+    Int64  `idx ÷ 96`               3072     240     240     240
+    UInt64 `idx ÷ 96`               3072     240     240     240
+    Int32  `idx ÷ Int32(96)`        3072    3072    3072    3072
+    UInt32 `idx ÷ UInt32(96)`       3072    3072    3072    3072
+    Int64, multiply-high (no div)   3072    3072    3072    3072
+
+So the fault is NVIDIA's 64-bit division, by a constant divisor too.
+`test_int32_cartesian_miscompile.jl` is the same thing with runtime divisors.
+Lava's `lower_wide_divisions!` now emits no 64-bit division by a constant (a
+multiply-high sequence instead) and divides by a runtime value in 32 bits when
+both magnitudes fit; with it the plain `%`/`÷` form below keeps every store on
+NVIDIA. `test_integer_division.jl` checks the rewritten arithmetic against the
+host. `splitidx` stays: it is a 32-bit sequence, cheaper than the 64-bit one.
 """
 
 using Test, KernelAbstractions
@@ -228,22 +248,12 @@ end
             end
         end
 
-        # The plain `%` / `÷` form is what `splitidx` exists to avoid. Asserted as
-        # broken rather than deleted: if a driver update fixes it this turns into
-        # a failure, which is the signal that `splitidx` could be relaxed.
-        @testset "the plain division form still drops stores" begin
-            @test sid_survivors(backend, udiv, 32; TS) == total   # one trip is fine
-            # `broken` on NVIDIA, whose compiler this is (SETTLED above). It was
-            # promoted to `@test` on 2026-09-04 on RADV, which does not drop; on
-            # 2026-10-06 an RTX 4000 Ada (595.99) and an RTX 3070 Laptop (595.91)
-            # still keep 240-256 of 3072. An unexpected pass on NVIDIA fails, and
-            # that is the day `splitidx` could be relaxed there. The device's NAME,
-            # because what is marked is one vendor's known compiler fault, not a
-            # capability; nothing branches on it. Everywhere else — lavapipe
-            # included, which is the second-consumer result above — it must hold.
-            nvidia = occursin("nvidia", lowercase(Mantle.devicename(Mantle.Device(backend))))
-            for K in (64, 128, 256)
-                @test sid_survivors(backend, udiv, K; TS) == total broken = nvidia
+        # The plain `%` / `÷` form, which NVIDIA miscompiled while it was a 64-bit
+        # division (see the 2026-10-12 section above): every device, every trip
+        # count.
+        @testset "the plain division form keeps every store" begin
+            for K in (32, 64, 128, 256)
+                @test sid_survivors(backend, udiv, K; TS) == total
             end
         end
     end

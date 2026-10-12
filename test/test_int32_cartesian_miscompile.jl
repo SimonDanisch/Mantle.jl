@@ -87,6 +87,15 @@
 # Symptom when it regresses in the other direction: `Mantle.lava_broadcast_flat_*`
 # in `array/gpuarrays.jl` may go back to `cis[I % Int32]`.
 #
+# ── 2026-10-12: fixed in Lava ──
+#
+# The faulty instruction is NVIDIA's 64-bit division: `test_shared_index_division.jl`
+# shows the same kernel exact at Int32 and UInt32 and wrong at Int64 and UInt64.
+# Lava's `lower_wide_divisions!` now divides by a runtime value in 32 bits when
+# both magnitudes fit (and in 64 bits only past that), so `cis[I % Int32]`
+# reaches no 64-bit division at these sizes, and both tests below pass on the RTX
+# 4000 Ada (595.99).
+#
 # ── Why it is worth fixing rather than avoiding ──
 #
 # Narrowing this arithmetic is a real speedup — the same narrowing inside
@@ -99,15 +108,6 @@ using Test, KernelAbstractions
 using Mantle: FastDiv32, cart32
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KA = KernelAbstractions
-
-# The `@test_broken`s below were promoted on 2026-09-04 on RADV, which never had
-# this fault: the verdict above is NVIDIA's compiler, and on 2026-10-06 an RTX 4000
-# Ada (595.99) and an RTX 3070 Laptop (595.91) still produce the wrong answer. So
-# they are `broken` on NVIDIA and plain tests elsewhere; an unexpected pass on
-# NVIDIA fails, which is the signal the driver was fixed. The device name is the
-# one portable thing that says whose compiler this is; it marks a known driver
-# fault here and gates nothing.
-const I32C_NVIDIA = occursin("nvidia", lowercase(Mantle.devicename(Mantle.Device(TESTBACKEND))))
 
 # Four decompositions of the same linear index into the same `Broadcasted`. The
 # point of running all four is to separate the three things that could be at
@@ -150,9 +150,9 @@ end
             reshape(Array(out), sz)
         end
         @test run(:wide) ≈ want              # 64-bit through Base: correct
-        # Base's `CartesianIndices` under a narrow index, which the
-        # `@test_broken` announced correct on 2026-09-04 (RADV, this tree).
-        @test run(:narrowci) ≈ want broken = I32C_NVIDIA
+        # Base's `CartesianIndices` under a narrow index: wrong on NVIDIA while
+        # Lava emitted its 64-bit divisions.
+        @test run(:narrowci) ≈ want
         # The two that isolate it. `:handdiv` is 32-bit AND divides and is exact,
         # which rules out both the width and the division; `:magic` is the form
         # Lava's broadcast kernels actually use.
@@ -185,7 +185,8 @@ end
 
     h3 = reshape(collect(1f0:75f0), 5, 5, 3)
     A3 = KA.allocate(be, Float32, 5, 5, 3); copyto!(A3, h3)
-    # rank 3 + Extruded: the bug. Exact on RADV and lavapipe, still wrong on NVIDIA.
-    @test narrow(A3, h3, (5, 5, 3)) broken = I32C_NVIDIA
+    # rank 3 + Extruded: the bug, on NVIDIA, until Lava stopped emitting 64-bit
+    # division.
+    @test narrow(A3, h3, (5, 5, 3))
 end
 

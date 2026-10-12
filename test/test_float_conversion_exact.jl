@@ -12,6 +12,13 @@
 # only keeps the value from being stored straight back out. The comparison is
 # against the host doing the same arithmetic, with and without the rounding:
 # the device must be the first, and far from the second.
+#
+# NVIDIA folds the pair whatever the SPIR-V says (`NoContraction`,
+# `FPFastMathMode None` from float_controls2, rounding and denormal modes, a
+# bitcast round trip, a volatile variable: all measured on an RTX 4000 Ada,
+# 595.99). So Lava widens a value it just narrowed in integer operations on the
+# narrowed bits (`widen_narrowed_floats!`), on every device, and the second
+# testset checks that widening against the host for every half there is.
 
 using Test, Mantle, Random
 import KernelInterface as KI
@@ -41,17 +48,37 @@ end
     # The unrounded chain differs in about a quarter of the elements; the device
     # may differ from the rounded one only where it fuses the final multiply,
     # which it has no add to fuse with.
-    #
-    # `broken` on NVIDIA: its compiler folds the narrowing and the widening away
-    # despite `NoContraction` — on 2026-10-06 an RTX 4000 Ada (595.99) and an RTX
-    # 3070 Laptop (595.91) returned the UNROUNDED chain in every element. Mesa
-    # honours the decoration; NVIDIA would need something else (untried:
-    # `FPFastMathMode` from `VK_KHR_shader_float_controls2`). An unexpected pass on
-    # NVIDIA fails, which is the signal that something now holds the rounding.
-    #
-    # The device name is the one portable thing that says whose compiler this is;
-    # it marks a known driver fault here and gates nothing.
-    nvidia = occursin("nvidia", lowercase(Mantle.devicename(Mantle.Device(TESTBACKEND))))
-    @test count(got .!= unrounded) > n ÷ 10 broken = nvidia
-    @test got == rounded broken = nvidia
+    @test count(got .!= unrounded) > n ÷ 10
+    @test got == rounded
+end
+
+function fce_widen_narrowed!(out, x, n::Int32)
+    i = Int32(KI.get_global_id().x)
+    if i <= n
+        @inbounds out[i] = Float32(Float16(x[i]))
+    end
+    return nothing
+end
+
+@testset "a narrowed value widens exactly, every half" begin
+    backend = TESTBACKEND
+    halves = reinterpret.(Float16, UInt16(0):typemax(UInt16))
+    # Each half as a Float32, so the narrowing is exact and the widening alone is
+    # under test: zeros, subnormals, normals, infinities and NaNs of both signs.
+    x = Float32.(halves)
+    n = length(x)
+    out = Mantle.devicearray(TESTBACKEND, zeros(Float32, n))
+    KI.@launch backend ndrange = n workgroupsize = 64 fce_widen_narrowed!(
+        out, Mantle.devicearray(TESTBACKEND, x), Int32(n))
+    got = Array(out)
+    same(a, b) = isnan(a) ? isnan(b) : a === b
+    @test all(same.(x, got))
+    # And between them: values that round, in the subnormal range too.
+    rng = MersenneTwister(7)
+    y = [randn(rng, Float32, 1 << 14); ldexp.(rand(rng, Float32, 1 << 14), -14)]
+    m = length(y)
+    out2 = Mantle.devicearray(TESTBACKEND, zeros(Float32, m))
+    KI.@launch backend ndrange = m workgroupsize = 64 fce_widen_narrowed!(
+        out2, Mantle.devicearray(TESTBACKEND, y), Int32(m))
+    @test Array(out2) == Float32.(Float16.(y))
 end
