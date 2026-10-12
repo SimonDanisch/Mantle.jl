@@ -100,6 +100,31 @@ function fce_halfmul!(out, x, g, r::Float32, n::Int32)
     return nothing
 end
 
+function fce_mulstore!(out, a, b, n::Int32)
+    i = Int32(KI.get_global_id().x)
+    if i <= n
+        @inbounds out[i] = Float16(a[i] * b[i])
+    end
+    return nothing
+end
+
+# A product narrowed and stored: `a * b` rounded to Float32, then to Float16. RADV
+# fused the multiply into its conversion and rounded the exact product once (68
+# of 2^20 differed from this), with `NoContraction` on both instructions.
+@testset "a product narrowed and stored rounds twice, as Julia does" begin
+    backend = TESTBACKEND
+    rng = MersenneTwister(9)
+    n = 1 << 20
+    a = randn(rng, Float32, n); b = randn(rng, Float32, n)
+    out = Mantle.devicearray(TESTBACKEND, zeros(Float16, n))
+    KI.@launch backend ndrange = n workgroupsize = 64 fce_mulstore!(
+        out, Mantle.devicearray(TESTBACKEND, a), Mantle.devicearray(TESTBACKEND, b), Int32(n))
+    twice = Float16.(a .* b)
+    once = Float16.(Float64.(a) .* Float64.(b))
+    @test count(twice .!== once) > 10      # the inputs can tell the two apart
+    @test Array(out) == twice
+end
+
 # The shape that broke DNNKernels' fused norm + rotary on NVIDIA: the narrowed
 # value is not widened itself but multiplied in half precision first.
 @testset "a narrowed value multiplied in half keeps its rounding" begin
