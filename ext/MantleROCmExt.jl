@@ -251,18 +251,6 @@ Mantle.defaultdevice!(d::ROCmDevice) = (ROCM_DEVICE[] = d; adopt!(d))
 Mantle.Device(::AMDGPU.ROCBackend) = Mantle.Device(ROCmAPI())
 Mantle.pool(d::ROCmDevice) = d.pool
 Mantle.backend(::ROCmDevice) = AMDGPU.ROCBackend()
-# TWO backend objects, and they are different types. `AMDGPU.ROCBackend` is
-# KernelAbstractions', which is what a `@kernel` constructor takes;
-# `ROCInterface.ROCBackend` is the KernelInterface one, which is what
-# `kernel_function`, `argconvert` and `auto_launch_sizes` are defined on. Core
-# asks for the second by name instead of assuming `backend(dev)` answers both.
-Mantle.kibackend(::ROCmDevice) = AMDGPU.ROCInterface.ROCBackend()
-# Stated for BOTH backend objects above, because callers reach this through
-# either one. KernelInterface's `= true` default is declared on `KI.Backend`
-# and neither of these subtypes it, so without these a Float64 literal reaching
-# `DNNKernels.kernelnumber` threw `MethodError` and no graph could be built.
-KI.supports_float64(::AMDGPU.ROCBackend) = true
-KI.supports_float64(::AMDGPU.ROCInterface.ROCBackend) = true
 Mantle.accesscache(d::ROCmDevice) = d.accesses
 Mantle.devicebuffertype(::ROCmDevice, ::Type{T}, N::Int) where {T} =
     AMDGPU.Device.ROCDeviceArray{T,N,1}
@@ -635,8 +623,10 @@ function kicompile(c::Mantle.Compile{ROCmDevice}, dev::ROCmDevice, d::Mantle.Dis
     wg, ng = Mantle.ki_launch_extents(kern, ndt, wgin, ())
     # The tuples, not their products: see `ROCmCompiledDispatch`. This is the
     # geometry calling a `KI.Kernel` resolves before `KI.launch`, so a replay
-    # launches the shape an immediate call would.
-    return ROCmCompiledDispatch(kern.kern, nothing, args, d.args, wg, ng)
+    # launches the shape an immediate call would. `kern.kern` is AMDGPU's
+    # `ROCKernel`, the callable and the `HIPKernel` compiled from it; a plain
+    # function captures nothing, so the `HIPKernel` alone is what launches.
+    return ROCmCompiledDispatch(kern.kern.kernel, nothing, args, d.args, wg, ng)
 end
 
 """
@@ -660,10 +650,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{ROCmDevice}, d::Mantle.Dispat
     # hands back a `Mantle.Call`. Capturable here, unlike on a backend that
     # builds a command buffer — see the note above this function's neighbours.
     Mantle.iscall(d) && return Mantle.bake(c, d)
-    # KERNELINTERFACE next, for a kernel that is a plain function. Asked of
-    # `backend(dev)`, the KA backend, because that is what a `@kernel`
-    # constructor takes; `kicompile` then compiles against `ROCInterface`'s,
-    # which is the KI one and a different type.
+    # KERNELINTERFACE next, for a kernel that is a plain function.
     Mantle.buildskernel(d.kernel, Mantle.backend(dev)) || return kicompile(c, dev, d)
     obj = Mantle.kernelfor(d.kernel, d.group, Mantle.backend(dev))
     isempty(fieldnames(typeof(obj.f))) ||
@@ -720,7 +707,7 @@ function hipcompile(obj, args, ndrange, group, ctx, iterspace)
     kernel = AMDGPU.hipfunction(obj.f, tt)
     if KA.workgroupsize(obj) <: KA.DynamicSize && group === nothing
         (; groupsize) = AMDGPU.launch_configuration(kernel)
-        ws = AMDGPU.ROCKernels.threads_to_workgroupsize(groupsize, ndrange)
+        ws = KI.threads_to_workgroupsize(groupsize, ndrange)
         iterspace, _ = KA.partition(obj, ndrange, ws)
         ctx = KA.mkcontext(obj, ndrange, iterspace)
         tt2 = hiptypes(ctx, args)
