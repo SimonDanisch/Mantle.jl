@@ -499,7 +499,9 @@ end
         blit!(dev, OffscreenTarget(fb), orange; clear = true)
         px = Mantle.readback_framebuffer(fb)
         # Orange, named by channel: the colorant carries where blue sits in a
-        # `BGRA` attachment, so the test states the COLOUR.
-        @test all(==(BGRA{N0f8}(1, n8(0x80), 0, 1)), px)
+        # `BGRA` attachment, so the test states the COLOUR. Green is 0.5, which is
+        # 127.5 in eight bits, and Vulkan's float-to-normalized conversion may return
+        # either integer next to the value: NVIDIA writes 0x7f, RADV and Apple 0x80.
+        @test all(q -> q.r == 1 && abs(Int(reinterpret(q.g)) - 0x80) <= 1 && q.b == 0 && q.alpha == 1, px)
     end
 end

@@ -351,8 +351,9 @@ end
         @test ch3[:, 1] == ch3[:, end]
         # The blue channel is the fragment's own constant, so every covered pixel
         # has it — a check that the frame is the shader's and not something left
-        # over.
-        @test all(q -> q.b == n8(0x80), sub)
+        # over. 0.5, so 0x7f or 0x80: Vulkan's float-to-normalized conversion may
+        # return either integer next to 127.5, and NVIDIA and RADV differ.
+        @test all(q -> abs(Int(reinterpret(q.b)) - 0x80) <= 1, sub)
     end
 
     @testset "one primitive per input primitive" begin
@@ -366,9 +367,13 @@ end
         @test cov.n == 3 * 16 * 16
         # `tint = vertex index / 4`, so 0.25, 0.5 and 0.75 — as RED, which is what
         # the shader wrote. Where red SITS in the attachment is the colorant's
-        # business, not this assertion's.
-        @test cov.colours == [BGRA{N0f8}(n8(0x40), 0, 0, 1), BGRA{N0f8}(n8(0x80), 0, 0, 1),
-                              BGRA{N0f8}(n8(0xbf), 0, 0, 1)]
+        # business, not this assertion's. Within one step of 0x40, 0x80 and 0xbf:
+        # Vulkan's float-to-normalized conversion may return either integer next to
+        # 63.75, 127.5 and 191.25 (NVIDIA writes 0x7f for the middle one, RADV 0x80).
+        @test length(cov.colours) == 3
+        @test all(zip(cov.colours, (0x40, 0x80, 0xbf))) do (c, red)
+            abs(Int(reinterpret(c.r)) - red) <= 1 && c.g == 0 && c.b == 0 && c.alpha == 1
+        end
     end
 
     @testset "an indexed draw fetches its own vertex indices" begin

@@ -929,16 +929,20 @@ function materialize!(dev::LavaDevice, t::VulkanTransientImage{T}, slab, offset)
     t.view = image_view(dev.ctx, t.image, t.format, aspect(T))
 end
 
-"""`VK_KHR_maintenance3`'s `maxMemoryAllocationSize`. See `maxalloc`."""
+"""
+`VK_KHR_maintenance3`'s `maxMemoryAllocationSize`, and never more than the largest
+device-local heap. See `maxalloc`.
+
+NVIDIA answers `0xffff_ffff_ffff_ffff`, "no limit". One allocation still comes out
+of one heap, so the heap is the limit the driver did not state; answering
+`typemax(Int)` sized a 20 GB card's blocks as if it had no end.
+"""
 function maxalloc(dev::LavaDevice)
     props = VK.get_physical_device_properties_2(
         dev.ctx.physical_device, VK.PhysicalDeviceMaintenance3Properties)
     m3 = props.next::VK.PhysicalDeviceMaintenance3Properties
-    n = m3.max_memory_allocation_size
-    # NVIDIA answers 0xffff_ffff_ffff_ffff — "no limit" — which does not fit an
-    # `Int`, and `Int(n)` threw here on the first device that said it. That is
-    # the same thing core's default means, so say it the same way.
-    return n >= UInt64(typemax(Int)) ? typemax(Int) : Int(n)
+    heap = maximum(h -> h.device_local ? h.size : 0, probe_device_memory_budget(dev.ctx))
+    return Int(min(m3.max_memory_allocation_size, UInt64(heap)))
 end
 
 """

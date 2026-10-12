@@ -41,7 +41,10 @@ const KIND = Mantle.Persistent()
         # through anything that only checked for "positive".
         @test 0 < Mantle.maxalloc(d) < typemax(Int)
         @test 0 < Mantle.capacity(d) < typemax(Int)
-        @test Mantle.maxalloc(d) <= Mantle.capacity(d)
+        # One request is bounded by both. Neither is below the other on every device:
+        # the budget is what other processes left, and a driver with no allocation
+        # limit (NVIDIA) answers its heap, which a busy machine's budget is below.
+        @test Mantle.headroom(Mantle.Pool(), d, KIND) == min(Mantle.maxalloc(d), Mantle.capacity(d))
         @test Mantle.blocksize(d) > 0
     end
 
