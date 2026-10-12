@@ -87,17 +87,19 @@ end
 
 Base.length(p::TLASProbe) = length(p.hits)
 
-"""The adapted form a kernel takes: `Adapt.adapt` syncs an HWTLAS and hands back
-the `AdaptedAccel` it owns; an `AdaptedAccel` is traced as it is."""
-adapted(be, t::Mantle.HWTLAS) = Adapt.adapt(be, t)
-adapted(be, a::Mantle.AdaptedAccel) = a
+"""The adapted form a kernel takes: `Adapt.adapt` syncs a structure (an HWTLAS,
+or Raycore's software `TLAS`) and hands back the adapted form it owns; an adapted
+form is traced as it is."""
+adapted(be, t::Raycore.AbstractAccel) = Adapt.adapt(be, t)
+adapted(be, a::Raycore.AbstractAdaptedAccel) = a
 
 """
     tlastrace!(probe, accel; mask = nothing) -> probe
 
-Launch the probe against `accel` (an HWTLAS or an `AdaptedAccel`) and return
-WITHOUT waiting for it. [`tlasresult`](@ref) waits and reads. `mask` is the
-rays' cull mask; `nothing` traces with the two-argument `closest_hit`.
+Launch the probe against `accel` (an HWTLAS, a `Raycore.TLAS`, or an adapted
+form of either) and return WITHOUT waiting for it. [`tlasresult`](@ref) waits
+and reads. `mask` is the rays' cull mask; `nothing` traces with the two-argument
+`closest_hit`.
 """
 function tlastrace!(p::TLASProbe, accel; mask = nothing)
     if mask === nothing

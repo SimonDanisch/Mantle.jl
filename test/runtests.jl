@@ -788,6 +788,9 @@ foreachbackend(joinpath(@__DIR__, "test_hwtlas_push_instances.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_refit.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_sync_batch.jl"))
 foreachbackend(joinpath(@__DIR__, "test_hwtlas_refit_stress.jl"))
+# The software structure, `Raycore.TLAS`, returns the hit the hardware one does:
+# the same scene traced through both, before and after a kernel-written refit.
+foreachbackend(joinpath(@__DIR__, "test_tlas_same_hit.jl"))
 foreachbackend(joinpath(@__DIR__, "test_instance_writer_kernel.jl"))
 foreachbackend(joinpath(@__DIR__, "test_instance_masks.jl"))
 foreachbackend(joinpath(@__DIR__, "test_blas_refit.jl"))
