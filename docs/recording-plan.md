@@ -426,7 +426,8 @@ end
 - **Core uses it for** launch geometry (one calculation, today's
   `ki_launch_extents`), per-node cost estimates and the submission split.
 - `buildskernel`, `kisupported`, the three `compile_dispatch` bodies,
-  `get_or_build_iter_plan` at emit and `WORKGROUP_FALLBACK` go.
+  `get_or_build_iter_plan` at emit and `WORKGROUP_FALLBACK` go
+  (`WORKGROUP_FALLBACK` went 2026-10-12, with the NVIDIA fault it worked around).
 
 ### The graph and its plan
 

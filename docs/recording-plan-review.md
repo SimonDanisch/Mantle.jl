@@ -161,7 +161,8 @@ bindings (`bind_textures`, one descriptor pool per call) sit outside plans.
   `array/launch.jl`'s `ArrayLaunch` competes with the plan's `Op`/`lower`.
 - Eager device-sized dispatch `ka_launch_indirect!` (`vulkan/array/ka_backend.jl:924-997`)
   beside `DeviceRange`; the `WORKGROUP_FALLBACK` codegen workaround exists on
-  the eager path only.
+  the eager path only (deleted 2026-10-12: the fault was NVIDIA's 64-bit
+  division, which Lava no longer emits).
 - `LavaBackend` holds a dispatch queue and an upload queue
   (`ka_backend.jl:54-61`).
 

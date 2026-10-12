@@ -363,7 +363,9 @@ touched was green; what failed and what became of it:
   `test_static_workgroup.jl` (12 — "the failure law no longer fires" fires:
   coverage 0.125 of 1.0). Their headers attribute the fault to NVIDIA's
   compiler; whether the `WORKGROUP_FALLBACK` repair regressed is a Lava
-  question, to be bisected on its own.
+  question, to be bisected on its own. FIXED 2026-10-12: all three were NVIDIA's
+  64-bit integer division, which Lava no longer emits (`lower_wide_divisions!`);
+  `WORKGROUP_FALLBACK` is deleted.
 
 ## Multi-device: a device is an explicit argument (2026-09-08)
 
