@@ -117,3 +117,19 @@ end
         end
     end
 end
+
+# The default `show` walked a device's fields, and a Metal device's recorded
+# dispatches hold arrays that are freed by the time anyone prints it: `string(dev)`
+# threw "Attempt to use a freed reference" after the first freed plan.
+@testset "a device prints as its name after its work is freed" begin
+    dev = Mantle.Device(TESTBACKEND)
+    n = 64
+    out = Mantle.Buffer(dev, zeros(Int32, n))
+    cnt = Mantle.Buffer(dev, Int32[n])
+    g = Mantle.Graph(dev)
+    Mantle.dispatch!(g, di_bump!, (out, cnt), Mantle.DeviceRange(cnt); group = 64, name = "bump")
+    pl = Mantle.record!(Base.invokelatest(Mantle.Plan, g))
+    Mantle.run!(pl); Mantle.waitfor!(pl)
+    Mantle.free!(pl); Mantle.free!(out); Mantle.free!(cnt)
+    @test sprint(show, dev) == string(nameof(typeof(dev)), "(", repr(Mantle.devicename(dev)), ")")
+end

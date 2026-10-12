@@ -774,6 +774,10 @@ is `caps(device)` or one of the `supports_*` predicates.
 """
 function devicename end
 
+# A device prints as its type and name. The default `show` walks its fields, and
+# a Metal device's recorded dispatches hold arrays that may be freed by then.
+Base.show(io::IO, d::Device) = print(io, nameof(typeof(d)), "(", repr(devicename(d)), ")")
+
 """
     initbackend!(api)
 
