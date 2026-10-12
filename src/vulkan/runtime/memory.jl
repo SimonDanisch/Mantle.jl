@@ -1206,6 +1206,9 @@ end
 # the caller acquires, waits for, reads and releases. Both come from
 # `rawalloc(dev, ::Readback, …)`, pooled.
 
+"""Largest download read straight out of mapped BAR memory; see `copy_buffer!`."""
+const BAR_DIRECT_READ_BYTES = 4096
+
 """
     copy_buffer!(direction, managed, host_ptr, nbytes; offset=0)
 
@@ -1236,7 +1239,12 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     buf_offset = pool_offset(managed) + Int(offset)
 
     # BAR fast-path: host-visible mapped memory — direct memcpy, no staging.
-    if managed.mapped_ptr != Ptr{UInt8}(0)
+    # Not for a large DOWNLOAD: BAR memory is write-combined, so the host reads
+    # it uncached — 71 ms for a 25 MB 1080p RGB Float32 frame on Strix Halo,
+    # against 1.2 ms through HIP. A copy into the host-cached `Readback` kind
+    # below costs one submission, which only a few-word read cannot repay.
+    if managed.mapped_ptr != Ptr{UInt8}(0) &&
+       (direction === :upload || nbytes <= BAR_DIRECT_READ_BYTES)
         # `last_write` is stamped at submit, and every writer is submitted the
         # moment it is closed, so this sees every one of them.
         waitfor!(stampof(managed))
