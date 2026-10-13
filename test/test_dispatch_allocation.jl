@@ -62,16 +62,33 @@ const KA = KernelAbstractions
     run(50); KA.synchronize(backend)
 
     n = 500
-    # TWO windows, and the first is thrown away: what is being measured is the
-    # steady state of the dispatch path, and the first window after any warmup
-    # still compiles something — a collection inside it runs a finalizer, the
-    # finalizer retires a buffer, and the destroy path is inferred and compiled
-    # inside the count. Measured first-in-session: 674 B for the first window,
-    # 243 for every one after it, on identical code.
-    @allocated run(n); KA.synchronize(backend)
-    bytes = @allocated run(n)
-    KA.synchronize(backend)
-    per = bytes / n
+    # The fewest bytes of five windows: what is being measured is the steady
+    # state of the dispatch path, and two things put more than that into a single
+    # window.
+    #
+    # The first window after any warmup still compiles something — a collection
+    # inside it runs a finalizer, the finalizer retires a buffer, and the destroy
+    # path is inferred and compiled inside the count. Measured first-in-session:
+    # 674 B for the first window, 243 for every one after it, on identical code.
+    #
+    # And a window that sends the device further behind than any before it pays
+    # for the deeper queue: each submission in flight beyond the deepest so far
+    # gets a command buffer and its recording (`allocate_cmd`, `makerecording`,
+    # `OneShot`, `syncbuf!`, `emptyframe!`: about 720 bytes, Profile.Allocs), which
+    # are recycled from then on. The RTX 3070 laptop, reaching this test with its
+    # clocks down after the files before it, read 272, 565, 326, 488 and 256
+    # B/dispatch over five windows while the most submissions in flight went 22,
+    # 183, 225, 316 and 253: the windows that set a new depth paid, the one that
+    # stayed under it did not. With one window thrown away and the second kept,
+    # the full suite read 474 there.
+    #
+    # An allocating dispatch path pays in every window, so the minimum still sees
+    # it.
+    per = minimum(1:5) do _
+        bytes = @allocated run(n)
+        KA.synchronize(backend)
+        bytes / n
+    end
 
     # The ceiling is deliberately loose. It is a CLIFF detector: 781 -> 115 was
     # four separate inference failures, and any one of them coming back blows
