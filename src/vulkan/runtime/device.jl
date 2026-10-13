@@ -1137,6 +1137,12 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     elseif Sys.isapple()
         "VK_EXT_metal_surface" in ext_names && push!(inst_extensions, "VK_EXT_metal_surface")
     end
+    # A surface with no window system behind it: what GLFW's null platform
+    # (`JULIA_GLFW_PLATFORM=null`) makes its windows' surfaces from. That platform
+    # is how window code runs where no window can be mapped — a locked session
+    # spins `glfwShowWindow` for ever — and without this extension it fails at
+    # `CreateWindowSurface`: "Vulkan instance missing VK_EXT_headless_surface".
+    "VK_EXT_headless_surface" in ext_names && push!(inst_extensions, "VK_EXT_headless_surface")
 
     # Extended validation, all of it requiring VK_EXT_validation_features:
     #   gpu_av         → shader instrumentation (OOB descriptor access, ray query
