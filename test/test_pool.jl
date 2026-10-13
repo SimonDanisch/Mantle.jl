@@ -551,3 +551,58 @@ retire_from_finalizer!(p, d, r) = (finalizer(_ -> M.retire!(p, d, r), Ref(0)); n
     @test M.reclaim!(p, d) == 0          # it arrived, and was stamped
     @test p.retiring == [r]
 end
+
+# ── Out of memory is thrown only after the pressure steps ─────────────────────
+#
+# `docs/api.md`: an allocation beyond the budget throws only after the pool has
+# trimmed its empty blocks and collected. The pool's own growth skipped them and
+# threw on the first refusal: TRELLIS.2's shape decoder on a 7900 XTX, with 3.9 GB
+# of empty transient blocks left by earlier stages, lost its 1.7 GB arena to the
+# driver's budget. Here the budget is two blocks, one of them empty, and a request
+# of another kind has to grow: it fits only if the empty block goes back first.
+# Not a `Device`: nothing here batches, so `makeroom!` has no channel to flush.
+mutable struct BudgetDev
+    budget::Int
+    held::Int
+    freed::Vector{Int}
+end
+BudgetDev(budget) = BudgetDev(budget, 0, Int[])
+function M.rawalloc(d::BudgetDev, kind, bytes, c)
+    d.held + bytes > d.budget && throw(OutOfMemoryError())
+    d.held += bytes
+    return zeros(UInt8, bytes)
+end
+M.rawfree(d::BudgetDev, mem) = (d.held -= length(mem); push!(d.freed, length(mem)); nothing)
+M.deviceaddress(::BudgetDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
+M.constraintof(::BudgetDev, kind, ts) = kind
+M.compatible(::BudgetDev, a, b) = a === b
+M.bufferusage(::BudgetDev, ::Type) = nothing
+
+@testset "Pool: an out-of-memory trims empty blocks before it is final" begin
+    for grow in (:acquire, :reserve)
+        d, p = BudgetDev(8192), M.Pool()
+        spent = M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+        kept = M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+        M.release!(spent)                     # its block is empty, and still held
+        @test d.held == 8192
+        r = grow === :acquire ? M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096) :
+                                M.reserve!(p, d, :other, nothing, 4096; blocksize = 4096)
+        @test length(r) == 4096
+        @test d.freed == [4096]               # the empty block, and only it
+        @test d.held == 8192
+    end
+
+    # Genuinely full: the second refusal is the answer, and it is the device's.
+    d, p = BudgetDev(4096), M.Pool()
+    M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    @test_throws OutOfMemoryError M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096)
+
+    # Not where waiting is refused: that caller is mid-recording (see `carveorgrow!`).
+    d, p = BudgetDev(8192), M.Pool()
+    spent = M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
+    M.release!(spent)
+    @test_throws OutOfMemoryError M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096,
+                                             maywait = false)
+    @test isempty(d.freed)
+end

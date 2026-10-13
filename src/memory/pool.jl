@@ -659,6 +659,50 @@ function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
     # an arena reconciling what its other tenants also need. Deriving it here
     # would size the block for this plan alone.
     want = constraint === nothing ? constraintof(dev, basekind(kind), transients) : constraint
+    return underpressure(pool, dev, maywait) do
+        carveorgrow!(pool, dev, kind, bytes, align, blocksize, want, maywait)
+    end
+end
+
+"""
+    underpressure(f, pool, dev, maywait) -> f()
+
+`f()`, and when the device refuses it for lack of memory, the pressure steps and
+`f()` once more; a second refusal is final. See `docs/api.md`, "An allocation
+beyond the budget": out of memory is thrown only after them.
+
+The steps are [`makeroom!`](@ref): a full collection, so dropped buffers retire;
+what the device has finished with reclaimed; every empty block handed back.
+Measured on TRELLIS.2's shape decoder on a 7900 XTX that other processes held
+5.4 GB of: 15.3 GB of weights, 3.9 GB of transient blocks from earlier stages,
+and the driver's budget refused the 1.7 GB arena the plan needed with no trim
+ever tried — the pool grew straight into `rawalloc` and threw.
+
+OUTSIDE the pool's lock, which is why this wraps the locked part rather than
+sitting inside it: holding a `ReentrantLock` disables finalizers (Base's
+`_trylock`), so a collection under it retires nothing. Only where waiting is
+allowed — `makeroom!` waits, and the caller that says it may not is
+mid-recording (see `maywait` in [`carveorgrow!`](@ref)).
+"""
+function underpressure(f, pool::Pool, dev, maywait::Bool)
+    try
+        return f()
+    catch err
+        (maywait && isoutofmemory(err)) || rethrow()
+    end
+    makeroom!(pool, dev)
+    return f()
+end
+
+"""
+    carveorgrow!(pool, dev, kind, bytes, align, blocksize, want, maywait) -> Region
+
+[`acquire!`](@ref)'s attempt under the pool's lock: carve, reclaim and carve,
+wait and carve, then grow. An out-of-memory propagates; [`underpressure`](@ref)
+decides what it means.
+"""
+function carveorgrow!(pool::Pool, dev, kind, bytes::Int, align::Int, blocksize::Int,
+                      want, maywait::Bool)
     # Three attempts before the device is asked for anything, and the last two
     # are why `free!` can be deferred without a rebuild doubling peak memory.
     # Bytes a caller just gave back are RETIRED, not free: they are waiting on
@@ -1089,6 +1133,11 @@ cannot be a tenant before it is a plan.
 """
 function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
                   align::Int = REGION_ALIGN, blocksize::Int = 64 << 20)
+    refuseretired(dev)
+    # The pressure steps around the LOCKED part, not inside it — see
+    # `underpressure` — so the growth below is `carveorgrow!`, which leaves an
+    # out-of-memory to this, and not `acquire!`, which would try them under the lock.
+    underpressure(pool, dev, true) do
     lock(pool.lock) do
     a = arenaof(pool, kind)
     bytes = max(bytes, 1)
@@ -1131,8 +1180,7 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
                 "arena and leave that recording pointing at freed storage."))
         end
     end
-    fresh = acquire!(pool, dev, kind, transients, max(bytes, a.bytes);
-                     align, blocksize, constraint = want)
+    fresh = carveorgrow!(pool, dev, kind, max(bytes, a.bytes), align, blocksize, want, true)
     old = a.region
     a.region, a.bytes, a.constraint = fresh, max(bytes, a.bytes), want
     for wr in tenants!(a)
@@ -1148,6 +1196,7 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     old === nothing || basekind(kind) isa Images ||
         notify_move!(pool, deviceaddress(dev, old), deviceaddress(dev, fresh), length(old))
     return fresh
+    end
     end
 end
 

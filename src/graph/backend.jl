@@ -813,6 +813,8 @@ const BACKEND_VOCABULARY = (
     # with `isdefined`. Listed here because this is the enumerated surface a
     # backend may add a method to, and they are two more of it.
     :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :feed!, :decodemore!, :remaining, :build_blas_aabb, :upload_texture_data!,
+    # which of a backend's errors is the device out of memory (the pool's pressure steps)
+    :isoutofmemory,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,
     # A channel names its device. Core answers for its own `SubmitChannel`; a

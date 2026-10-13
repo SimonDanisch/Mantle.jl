@@ -1144,10 +1144,7 @@ function acquire_or_reclaim!(bq::SubmitChannel{<:VulkanQueue}, sp::Pool, dev,
                         align = POOL_ALIGN, blocksize = POOL_BLOCK_SIZE,
                         constraint = extra_usage)
     catch err
-        err isa VK.VulkanError || rethrow()
-        oom = err.code == VK.ERROR_OUT_OF_DEVICE_MEMORY ||
-              err.code == VK.ERROR_OUT_OF_HOST_MEMORY
-        oom || rethrow()
+        isoutofmemory(err) || rethrow()
     end
     # One escalation, in the order that costs least first: collect, drain, and
     # only then stall the queue to get pinned and in-flight buffers back.
@@ -1174,6 +1171,10 @@ function acquire_or_reclaim!(bq::SubmitChannel{<:VulkanQueue}, sp::Pool, dev,
             "gpu_memory_usage()."))
     end
 end
+
+"""The driver's two out-of-memory codes; `overbudget` throws the device one too."""
+isoutofmemory(err::VK.VulkanError) =
+    err.code == VK.ERROR_OUT_OF_DEVICE_MEMORY || err.code == VK.ERROR_OUT_OF_HOST_MEMORY
 
 """
     reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue}) -> (n_blocks::Int, bytes::Int)

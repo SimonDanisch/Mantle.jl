@@ -154,3 +154,16 @@ Vulkan device answers what its `shaderBufferInt64Atomics` feature says.
 `dev` is a device or the KernelAbstractions backend that stands for one.
 """
 supports_int64_atomics(dev) = false
+
+"""
+    isoutofmemory(err) -> Bool
+
+Whether `err` is a device refusing an allocation for lack of memory, as opposed
+to any other failure.
+
+The pool asks before it gives up on growing (see `acquire!`): an out-of-memory
+there is first a request to collect and trim, and anything else — a lost device,
+a bad usage flag — is the answer and propagates. Julia's `OutOfMemoryError` is
+what Metal's allocation throws; the Vulkan backend adds the driver's two codes.
+"""
+isoutofmemory(err) = err isa OutOfMemoryError
