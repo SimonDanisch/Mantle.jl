@@ -2456,6 +2456,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                        prefetch::Bool = true,
                        doublebuf::Bool = GEMM_DOUBLEBUF_DEFAULT,
                        vec4::Bool = GEMM_VEC4_DEFAULT,
+                       tensile::Bool = GEMM_TENSILE_DEFAULT,
                        tiling = nothing,
                        # A gather in place of the plain A read; see `apair`. Only
                        # `GEMM_STAGED_GATHER_KERNELS` understands one, so a loader
@@ -2469,6 +2470,11 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
     bias === nothing || blk_split[2] == 1 ||
         throw(ArgumentError("coopmat_gemm!: bias needs splitk == 1, got $(blk_split[2])"))
     blk, splitk = blk_split
+    # rocBLAS's kernel takes every product it accepts; see `gemm_tensile.jl`. A
+    # forced tiling, a loader or `staged = false` asks for another kernel by name.
+    tensile && staged && tiling === nothing && aload === nothing &&
+        tensile_gemm_ok(C, A, B, M, N, K, nbatch, splitk) &&
+        return [tensile_gemm_launch(C, A, B, bias, epilogue, M, N, K)]
     # The staged kernel masks nothing and does not split K, so it takes only the
     # shapes it divides exactly and only where the plan wants a single plane —
     # which includes all four of SAM 2's dominant `addmm` shapes, i.e. 72.7% of

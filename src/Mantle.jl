@@ -209,6 +209,7 @@ include("array/launch.jl")   # what a library routine IS, before it is submitted
 include("array/indexing.jl") # portable index decomposition and launch geometry
 include("array/gemv.jl")
 include("array/gemm.jl")
+include("array/gemm_tensile.jl") # rocBLAS's RDNA3 kernel, the default for aligned fp16 shapes
 include("array/gemm_cm2.jl")   # workgroup-scope matrices through tensor addressing
 include("array/fft.jl")
 

@@ -378,10 +378,12 @@ if hasstagedgemm()
                 B = Mantle.devicearray(TESTBACKEND, Float16.(reshape(0.2 .* cos.(range(0, 7, K * N)), K, N)))
                 C = KA.allocate(back, Float16, M, N)
 
-                fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = false)
+                # `tensile = false`: these shapes are the Tensile kernel's by default,
+                # and the two staged kernels are what is being compared.
+                fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = false, tensile = false)
                 KA.synchronize(back); wide = copy(Array(C))
 
-                fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = true)
+                fill!(C, Float16(0)); Mantle.coopmat_gemm!(C, A, B, M, N, K; narrow_ok = true, tensile = false)
                 KA.synchronize(back); narrow = copy(Array(C))
 
                 @test narrow == wide

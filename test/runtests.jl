@@ -721,6 +721,7 @@ foreachbackend(joinpath(@__DIR__, "test_coopmat_epilogue.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_fp16_accum.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_staged.jl"))
 foreachbackend(joinpath(@__DIR__, "test_gemm_staged_scalar.jl"))
+foreachbackend(joinpath(@__DIR__, "test_gemm_tensile.jl"))
 foreachbackend(joinpath(@__DIR__, "test_bar_memcpy_sync.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_coopmat_add.jl"))
