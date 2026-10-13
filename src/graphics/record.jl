@@ -309,8 +309,8 @@ function draw!(device, pipeline::Union{GraphicsPipeline, MeshPipeline},
     # a backend is handed a `Buffer` where its shader expects a device pointer, and
     # on Metal that is a "passing non-bitstype argument" at GPU compile time.
     # A plain value resolves to itself, so `Int32` and friends pass through.
-    args = map(a -> resolve(dev, a), args)
-    frag_args = map(a -> resolve(dev, a), frag_args)
+    args = argmap(a -> resolve(dev, a), args)
+    frag_args = argmap(a -> resolve(dev, a), frag_args)
     compiled = compile_draw(dev, pipeline, (blittarget(target),), depthtarget(target),
                             args, frag_args; bindings)
     pass!(dev, target; clear = clear_color, depth_clear) do p

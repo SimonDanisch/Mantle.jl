@@ -74,7 +74,7 @@ A rebindable cell holding what one draw re-reads each frame, resolved for
 """
 DrawBinding(dev, args::Tuple, count; indices = nothing, instances::Integer = 1,
             bindings = nothing) =
-    DrawBinding(map(a -> resolve(dev, a), args), count,
+    DrawBinding(argmap(a -> resolve(dev, a), args), count,
                 indices === nothing ? nothing : resolve(dev, indices), Int(instances),
                 bindings)
 
@@ -92,7 +92,7 @@ different kind of draw.
 function rebind!(b::DrawBinding{A,C,I,B}, dev, args::Tuple, count;
                  indices = nothing, instances::Integer = 1,
                  bindings = b.bindings) where {A,C,I,B}
-    b.args = convert(A, map(a -> resolve(dev, a), args))
+    b.args = convert(A, argmap(a -> resolve(dev, a), args))
     b.count = convert(C, count)
     b.indices = convert(I, indices === nothing ? nothing : resolve(dev, indices))
     b.instances = Int(instances)

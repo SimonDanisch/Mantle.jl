@@ -161,7 +161,7 @@ function preparekernel(owner::O, @nospecialize(f), args::Tuple,
     holdleaves!(owner, args)
     adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, f)
-    converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+    converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
 
     # Kernel ABI: kernel signature types are POST-adapt (LavaDeviceArray, not Ptr{T}).
     tt = Tuple{map(arg_sigtype, converted_args)...}

@@ -457,7 +457,7 @@ function launchindirect!(bq, obj, args, count::LavaArray, workgroupsize, tlas)
         holdleaves!(owner, args)
         holdleaves!(owner, count)
         adaptor = LavaAdaptor(owner)
-        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+        converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
         ka_launch_indirect!(e, obj, converted_args, count, workgroupsize, args, adaptor, tlas)
     end
     return nothing
@@ -589,7 +589,7 @@ end
     holdleaves!(owner, args)
     adaptor = LavaAdaptor(owner)
     converted_f = Adapt.adapt(adaptor, obj.f)
-    converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+    converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
     all_args = (converted_f, ka_ctx, converted_args...)
     ka_launch!(e, converted_f, all_args, block_dims, ws_3d, tlas)
 end

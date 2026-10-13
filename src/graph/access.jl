@@ -1215,7 +1215,7 @@ function kerneltouches(dev, kernel, args::Tuple, ndrange, group)
     # Walking its host fallback first reports whichever device intrinsic throws
     # during inference, hiding the actionable fact that this device has no KI
     # compiler at all.
-    kisupported(dev, kernel) || kikernel(kernel, dev, map(a -> resolve(dev, a), args))
+    kisupported(dev, kernel) || kikernel(kernel, dev, argmap(a -> resolve(dev, a), args))
     interp = kernelinterpreter(dev, kernel, Tuple{argT...})
     return accessof(interp, kernel, argT; cache = accesscache(dev))[2:end]
 end

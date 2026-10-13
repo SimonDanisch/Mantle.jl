@@ -256,7 +256,7 @@ vector for callers written against it.
 function pack_gfx_args_bda(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
     adaptor = LavaAdaptor(batch)
-    converted = map(a -> Adapt.adapt(adaptor, a), args)
+    converted = argmap(a -> Adapt.adapt(adaptor, a), args)
     byval_sizes = push_info.byval_llvm_sizes
     total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(byval_sizes)
     arg_buf = get_arg_buffer(batch, total_size)
@@ -274,7 +274,7 @@ function pack_gfx_args(batch::O, args, push_info::PushConstantInfo) where {O<:Cl
     # handles wrapper structs / Broadcasted / NamedTuple, so any nested
     # LavaArray gets both its pointer strip and its pin in the same pass.
     adaptor = LavaAdaptor(batch)
-    converted = map(a -> Adapt.adapt(adaptor, a), args)
+    converted = argmap(a -> Adapt.adapt(adaptor, a), args)
 
     # Use the same arg buffer packing as compute: inline byval structs into
     # the arg buffer with self-referencing BDA pointers.

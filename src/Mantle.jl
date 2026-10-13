@@ -484,7 +484,28 @@ four frames below the `dispatch!` that caused it.
 `rawargs` maps this over a dispatch's arguments and [`resolve`](@ref) defaults to
 it, so both the recording path and the launch path get the same answer.
 """
-storage(x::Tuple) = map(storage, x)
+storage(x::Tuple) = argmap(storage, x)
+
+"""
+    argmap(f, args::Tuple) -> Tuple
+
+`map` over an argument tuple, unrolled whatever its length.
+
+Base's `map(f, ::Tuple)` unrolls only up to 31 elements; from 32 on it fills a
+`Vector{Any}` and splats it back into a tuple. A RayMakie overlay stage takes 69
+arguments, and `rawargs`, `devargs` and `rebind!` each mapped them for every draw
+of every frame: 78 KB a call, about 290 MiB of a 5000-plot GUI frame.
+
+Generated as the literal `(f(args[1]), …, f(args[N]))` rather than
+`ntuple(i -> f(args[i]), Val(N))`: at 69 elements `ntuple`'s body is not inlined,
+so the closure — holding the whole argument tuple — was allocated on every call,
+and that alone was 230 MiB of the same frame.
+"""
+@generated function argmap(f::F, args::T) where {F, T<:Tuple}
+    # Inference may ask about an abstract tuple; a call never passes one.
+    isconcretetype(T) || return :(map(f, args))
+    return Expr(:tuple, (:(f(getfield(args, $i))) for i in 1:fieldcount(T))...)
+end
 
 """
     basealignment(x) -> Int

@@ -58,7 +58,7 @@ function trace_rays!(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipel
         holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
-        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+        converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
 
         all_args = (converted_raygen, converted_args...)
         inline_extra = compute_inline_extra_from_byval(byval_sizes)
@@ -148,7 +148,7 @@ function trace_rays_indirect!(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTra
         holdleaves!(owner, args)
         adaptor = LavaAdaptor(owner)
         converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
-        converted_args = map(a -> Adapt.adapt(adaptor, a), args)
+        converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
 
         all_args = (converted_raygen, converted_args...)
         inline_extra = compute_inline_extra_from_byval(byval_sizes)

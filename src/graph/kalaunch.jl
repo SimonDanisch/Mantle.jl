@@ -52,7 +52,7 @@ TYPE.
 
 A tuple of plain values resolves to itself, since `storage(x) = x`.
 """
-resolve(dev::Device, x::Tuple) = map(a -> resolve(dev, a), x)
+resolve(dev::Device, x::Tuple) = argmap(a -> resolve(dev, a), x)
 
 """
 One launch, resolved as far as a launch can be.
@@ -353,7 +353,7 @@ devicesized(::Call) = false
 function bake(c::Compile, d::Dispatch)
     dev = c.graph.dev
     be = backend(dev)
-    args = map(a -> resolve(dev, a), d.args)
+    args = argmap(a -> resolve(dev, a), d.args)
     # A call is compiled by resolving its arguments and nothing else — and
     # refused here, once, rather than by each backend, because whether a call
     # can run is one question with one answer per backend.
@@ -642,8 +642,8 @@ function compiledraw(c::Compile, p::Pass, d, argoff::Int)
     # What the COMPILE sees is the cell's contents at this moment, which is right
     # — its types are what the pipeline is built around, and `rebind!` cannot
     # change them.
-    vargs = map(a -> resolve(dev, a), drawargs(d.args))
-    fargs = map(a -> resolve(dev, a), d.frag_args)
+    vargs = argmap(a -> resolve(dev, a), drawargs(d.args))
+    fargs = argmap(a -> resolve(dev, a), d.frag_args)
     compiled = compile_draw(dev, d.shader, color_formats, depth_format, vargs, fargs;
                             bindings = d.bindings)
     indices = d.indices === nothing ? nothing : resolve(dev, d.indices)

@@ -1307,9 +1307,9 @@ end
 # nothing, and a shading kernel then compiles with ray query disabled and fails
 # in the emitter rather than at the call site.
 
-rawargs(args::Tuple) = map(storage, args)
+rawargs(args::Tuple) = argmap(storage, args)
 
-devargs(ad, raw::Tuple) = map(a -> Adapt.adapt(ad, a), raw)
+devargs(ad, raw::Tuple) = argmap(a -> Adapt.adapt(ad, a), raw)
 
 """The resource a usage ultimately names: a slice and a vertex binding both
 forward their storage to a parent, so neither has an identity of its own to test."""

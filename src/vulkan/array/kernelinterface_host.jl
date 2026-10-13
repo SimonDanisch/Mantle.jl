@@ -118,7 +118,7 @@ function KI.launch(k::KI.Kernel{LavaBackend}, groups::Dims{3}, items::Dims{3}, a
     # two ways depending on how it is run. `storage` is the identity on
     # anything that is already an array, so nothing else changes. Top level
     # only: a kernel that genuinely takes a tuple keeps it.
-    args = map(storage, args)
+    args = argmap(storage, args)
 
     bq = k.backend.dispatch_bq
     # `find_tlas_in_args` BEFORE Adapt, which strips the hwtlas — same ordering
@@ -135,7 +135,7 @@ function KI.launch(k::KI.Kernel{LavaBackend}, groups::Dims{3}, items::Dims{3}, a
         # kernel is a plain function with no such leading value, so it passes
         # `nothing` — zero-sized, hence dropped by both — to satisfy the same
         # contract.
-        all_args = (nothing, map(a -> Adapt.adapt(adaptor, a), args)...)
+        all_args = (nothing, argmap(a -> Adapt.adapt(adaptor, a), args)...)
         ka_launch!(e, k.kern, all_args, groups, items, tlas)
     end
     return nothing

@@ -41,7 +41,7 @@ function KI.launch(k::KI.Kernel{MB, <:Function}, groups::Dims{3}, items::Dims{3}
     # and the Vulkan launch resolve one. Without it a resource reached Metal.jl's
     # compiler whole, as "passing non-bitstype argument", while the same operand
     # ran on Vulkan. Top level only, as there.
-    args = map(storage, args)
+    args = argmap(storage, args)
     tt = Tuple{map(a -> Core.Typeof(KI.argconvert(k.backend, a)), args)...}
     KI.launch(KI.kernel_function(k.backend, k.kern, tt), groups, items, args; kwargs...)
 end

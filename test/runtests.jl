@@ -562,6 +562,8 @@ include(joinpath(@__DIR__, "test_texture_upload.jl"))
 # More stage arguments than Metal's 31-entry buffer table; RayMakie's mesh
 # shader has 51.
 include(joinpath(@__DIR__, "test_many_stage_args.jl"))
+# Mapping such an argument tuple allocates nothing, at any length.
+include(joinpath(@__DIR__, "test_argmap.jl"))
 # A varying spelled `NTuple{N,Float32}`, which Metal takes and Lava had no
 # method for.
 include(joinpath(@__DIR__, "test_tuple_varyings.jl"))
