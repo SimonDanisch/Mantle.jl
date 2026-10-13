@@ -187,5 +187,7 @@ function importhost(backend::LavaBackend, A::DenseArray{T,N}) where {T,N}
         A
         return
     end
+    # ambient-allocation-ok: a wrapper over `ref`, whose buffer was imported on
+    # `backend.dispatch_bq` and carries that context; nothing is allocated here.
     return LavaArray{T,N}(ref, size(A))
 end
