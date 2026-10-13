@@ -48,8 +48,16 @@ end
 # `rounds`. One measurement of each, one after the other, compares two different
 # clock states: inside the full suite the 8060S once timed `gemv!` at 25.9 us,
 # where it takes 9.9 us on its own, and an RTX 3070 laptop ramps its clock by an
-# order of magnitude within a testset.
-function interleaved(a, b, backend; rounds = 5)
+# order of magnitude within a testset. So both run back to back for `spin` seconds
+# first: that laptop's `(1280, 1280)` gemv took 358 us a call from idle and 20.7 us
+# after two seconds of calls, and inside the full suite the comparison below once
+# read 0.62 because the ramp landed between the two sides.
+function interleaved(a, b, backend; rounds = 5, spin = 0.5)
+    t0 = time()
+    while time() - t0 < spin
+        a(); b()
+    end
+    KA.synchronize(backend)
     ts = [(gputime(a, backend), gputime(b, backend)) for _ in 1:rounds]
     return minimum(first, ts), minimum(last, ts)
 end
