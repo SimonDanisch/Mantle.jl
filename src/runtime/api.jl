@@ -383,7 +383,9 @@ file, shared or private, and shared anonymous memory are refused (measured on an
 [`importablehost`](@ref), which is also what keeps the device reading it at full
 speed. Backends that cannot import throw; ask [`canimporthost`](@ref) first.
 """
-function importhost end
+importhost(backend, A::DenseArray) = throw(ArgumentError(
+    "importhost: $(nameof(typeof(backend))) cannot read host memory in place " *
+    "(canimporthost(backend) is false); upload it instead"))
 
 """
     importablehost(T, n) -> Vector{T}
