@@ -117,6 +117,7 @@ const KI = KernelInterface
 # the backend is the only caller of some — but they load anywhere, so they are
 # not what stood between this package and a driverless machine.
 import Serialization
+import Mmap
 import PrecompileTools
 # PrecompileTools' workload macros, re-exported because Hikari says
 # `Mantle.@setup_workload`. Nothing is added to `@compile_workload`: a kernel or

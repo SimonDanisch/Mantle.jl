@@ -364,6 +364,62 @@ which is not declaration order when the scheduler reorders.
 """
 function timings end
 
+"""
+    importhost(backend, A::DenseArray) -> device array
+
+A device array over `A`'s own memory, which the device then reads and writes in
+place: no device allocation and no copy. For data that already sits in host
+memory in the form a kernel reads, above all weights read from a file, where an
+upload would cost the time to copy them and a second resident copy.
+
+On a GPU that shares the host's memory this is the same memory either way. On a
+discrete one every access crosses the bus, so it suits data read once.
+
+`A` must stay alive and in place as long as the result is used, and on Vulkan
+must start and end on `minImportedHostPointerAlignment`, a page on every driver
+seen so far. RADV on amdgpu takes private ANONYMOUS memory only: an `mmap` of a
+file, shared or private, and shared anonymous memory are refused (measured on an
+8060S). So the way to hand it a file is to read the file into
+[`importablehost`](@ref), which is also what keeps the device reading it at full
+speed. Backends that cannot import throw; ask [`canimporthost`](@ref) first.
+"""
+function importhost end
+
+"""
+    importablehost(T, n) -> Vector{T}
+
+`n` elements of host memory for [`importhost`](@ref): private, anonymous and page
+aligned, and on Linux in transparent huge pages (`MADV_HUGEPAGE`).
+
+Huge pages are what keep an imported working set of gigabytes readable at all.
+The GPU's address translation runs out over it, and later the larger pages only
+postpone that: on an 8060S a Q4_K GEMV over 64 different 77 MB weights (4.9 GB)
+read 226 GB/s from device memory, 144 GB/s from imported 4 KiB pages and 219
+GB/s from imported huge pages, and over 240 of them (18.5 GB) 215 GB/s from
+device memory against 144 from imported huge pages. K2 Horizon 32B decoding
+from its weights in place took 2.26 s a token in 4 KiB pages, 0.19 s in huge
+pages and 0.105 s from device memory. So read in place what is small or read
+once, and copy the rest into the device's own memory (`copyto!` from the import
+is a device copy).
+"""
+function importablehost(::Type{T}, n::Integer) where {T}
+    a = Mmap.mmap(Vector{T}, n; shared = false)
+    @static if Sys.islinux()
+        MADV_HUGEPAGE = Cint(14)
+        r = ccall(:madvise, Cint, (Ptr{Cvoid}, Csize_t, Cint), a, sizeof(a), MADV_HUGEPAGE)
+        r == 0 || @warn("madvise(MADV_HUGEPAGE) failed (errno $(Libc.errno())): imported memory " *
+                        "is read in 4 KiB pages, at about two thirds of the bandwidth", maxlog = 1)
+    end
+    return a
+end
+
+"""
+    canimporthost(backend) -> Bool
+
+Whether [`importhost`](@ref) works on `backend`.
+"""
+canimporthost(backend) = false
+
 """How many frames a profiled plan keeps, and what `timings` takes the median
 over. Two seconds at 60 Hz, which is long enough to be stable and short enough to
 follow a change."""

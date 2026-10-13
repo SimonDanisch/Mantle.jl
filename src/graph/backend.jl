@@ -828,6 +828,8 @@ const BACKEND_VOCABULARY = (
     # inside it where no core type can see it.
     :basealignment,
     :upload!, :download, :devicecopy!, :hostspan, :deviceaddress, :patchable, :release!,
+    # host memory a device reads in place, `runtime/api.jl`
+    :importhost, :canimporthost,
     :indexbuffer,
     # The recording primitives a submission channel needs — 2.3. Core owns the
     # free list and when a recording may be reused; these are the driver half.

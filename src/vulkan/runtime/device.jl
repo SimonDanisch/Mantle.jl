@@ -482,6 +482,10 @@ mutable struct VkContext
     # `VulkanExternalImage` can export allocations as opaque fds for zero-copy
     # sharing with other APIs (OpenGL via GL_EXT_memory_object_fd).
     external_memory_available::Bool
+    # The alignment of host memory `importhost` can hand the device
+    # (`minImportedHostPointerAlignment` of VK_EXT_external_memory_host), or 0
+    # where the extension is not enabled.
+    host_import_alignment::Int
     # Whether VK_KHR_video_decode_queue + h264 are enabled (hardware decode into
     # Vulkan images). The decode queue + its family index are `nothing` when the
     # device has no video-decode support. No effect until a decode session is made.
@@ -655,6 +659,7 @@ mutable struct VkContext
         # barrier recorded before that point is skipped rather than jumping to
         # whatever the field happened to contain.
         ctx.cmd_pipeline_barrier_fptr = C_NULL
+        ctx.host_import_alignment = 0
         ctx.pipeline_cache = create_lava_pipeline_cache(
             device, lava_pipeline_cache_path(device_name, driver_version), physical_device)
         _register_pipeline_cache_atexit!()
@@ -1431,6 +1436,16 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         push!(extensions, "VK_KHR_external_memory")
         push!(extensions, "VK_KHR_external_memory_fd")
     end
+    # Host memory the device reads in place (`importhost`): weights mapped from
+    # a file, with no upload and no second copy. No effect until something is
+    # imported.
+    host_import_alignment = 0
+    if has_extension(phys_dev, "VK_EXT_external_memory_host")
+        has_external_memory || push!(extensions, "VK_KHR_external_memory")
+        push!(extensions, "VK_EXT_external_memory_host")
+        host_import_alignment = Int(VK.get_physical_device_properties_2(phys_dev,
+            VK.PhysicalDeviceExternalMemoryHostPropertiesEXT).next.min_imported_host_pointer_alignment)
+    end
     # Hardware video decode extensions (family already probed + queue requested above).
     if has_video_decode
         append!(extensions, ["VK_KHR_video_queue", "VK_KHR_video_decode_queue",
@@ -1832,6 +1847,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
     # constructor has no access to the local. Per device — a module-global one
     # sent the first device's command buffers through the second device's driver.
     ctx.cmd_pipeline_barrier_fptr = cmd_barrier_fptr
+    ctx.host_import_alignment = host_import_alignment
     ctx.validating = has_validation
     flag = try_vk_alloc(ctx.default_bq, 16; unified = true)
     flag isa AllocFailure && throw(LavaError("device initialization",

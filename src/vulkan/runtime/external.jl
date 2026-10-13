@@ -138,3 +138,54 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     end
     return img
 end
+
+# ── Host memory the device reads in place ────────────────────────────────────
+
+"""
+    importhost(bq, ptr, nbytes) -> VkManagedBuffer
+
+A buffer over `nbytes` of host memory at `ptr` (`VK_EXT_external_memory_host`):
+dedicated, outside the pool, and with `mapped_ptr` the memory itself. `ptr` and
+`nbytes` must be multiples of `ctx.host_import_alignment`. The memory must outlive
+the buffer; destroying the buffer leaves it alone.
+"""
+function importhost(bq::SubmitChannel{<:VulkanQueue}, ptr::Ptr, nbytes::Integer)
+    ctx = ctxof(bq)
+    align = ctx.host_import_alignment
+    align > 0 || error("this device was created without VK_EXT_external_memory_host")
+    UInt(ptr) % align == 0 && nbytes % align == 0 || throw(ArgumentError(
+        "importhost: $(nbytes) bytes at $(ptr) are not aligned to the device's $(align)"))
+    dev = ctx.device
+    htype = VK.EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT
+    hostprops = unwrap(VK.get_memory_host_pointer_properties_ext(dev, htype, Ptr{Cvoid}(ptr)))
+    usage = VK.BUFFER_USAGE_STORAGE_BUFFER_BIT | VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK.BUFFER_USAGE_TRANSFER_SRC_BIT | VK.BUFFER_USAGE_TRANSFER_DST_BIT
+    buf = VK.Buffer(dev, nbytes, usage, VK.SHARING_MODE_EXCLUSIVE, UInt32[];
+                    next = VK.ExternalMemoryBufferCreateInfo(; handle_types = htype))
+    reqs = VK.get_buffer_memory_requirements(dev, buf)
+    memtype = find_memory_type(ctx, reqs.memory_type_bits & hostprops.memory_type_bits,
+                               VK.MemoryPropertyFlag(0))
+    memory = VK.DeviceMemory(dev, nbytes, memtype;
+        next = VK.ImportMemoryHostPointerInfoEXT(htype, Ptr{Cvoid}(ptr);
+            next = VK.MemoryAllocateFlagsInfo(UInt32(0); flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)))
+    unwrap(VK.bind_buffer_memory(dev, buf, memory, 0))
+    address = VK.get_buffer_device_address(dev, VK.BufferDeviceAddressInfo(buf))
+    return VkManagedBuffer(buf, memory, address, Ptr{UInt8}(ptr), Int(nbytes), nothing,
+                           Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
+end
+
+canimporthost(backend::LavaBackend) = vk_context(backend).host_import_alignment > 0
+
+function importhost(backend::LavaBackend, A::DenseArray{T,N}) where {T,N}
+    managed = importhost(backend.dispatch_bq, pointer(A), sizeof(A))
+    # The release holds `A`, so the memory stays mapped while the array can be
+    # named, and waits for the device before the buffer goes: the destroy is
+    # deferred, and `A` may be unmapped as soon as the closure is collected.
+    ref = GPUArrays.DataRef(managed) do buf
+        KA.synchronize(backend)
+        vk_free!(buf)
+        A
+        return
+    end
+    return LavaArray{T,N}(ref, size(A))
+end
