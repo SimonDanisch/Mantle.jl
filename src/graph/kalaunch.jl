@@ -286,6 +286,24 @@ callgroup(::KernelAbstractions.Kernel{<:Any,<:KernelAbstractions.NDIteration.Sta
           group) = nothing
 callgroup(::KernelAbstractions.Kernel, group) = group
 
+"""
+    defaultgroup(ndrange, maxthreads; threads = 64) -> Dims
+
+The workgroup a kernel whose size is `DynamicSize` gets when its launch names
+none, on every backend: `threads` work-items (at most `maxthreads`, what the
+kernel can hold), filling the dimensions in order.
+
+Few and in order, because the waste is the last group of the first dimension:
+`(1024, 1)` over a 1080-wide image runs two groups per row with 1080 of 2048
+lanes busy, and the Metal recorder that chose it (the kernel's maximum along the
+first dimension) rendered a 1080x1920 editor frame in 2.03 ms against 1.27 ms for
+1920x1080, the same pixels; 64 gives 1.27 ms for both. Filling the second
+dimension too is what keeps a `(3, n)` range from running 3 of every 64 lanes,
+which the old Vulkan default (`min(prod(ndrange), 64)` along the first) did.
+"""
+defaultgroup(ndrange::Tuple, maxthreads::Integer; threads::Integer = 64) =
+    KI.threads_to_workgroupsize(min(threads, maxthreads), ndrange)
+
 # A `Launch` resolved its count at `bake`: a `DeviceRange` with a ceiling became
 # the ceiling, one without became a `DeferredRange`. Neither is sized on the
 # device the way a recording backend means it — see `PassPlan.indirect`.

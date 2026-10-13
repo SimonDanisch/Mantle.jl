@@ -19,9 +19,10 @@ an output and its call site did not.
 
 `name` is what the pass is called in a profile, and defaults to the kernel's own
 name. `group` is the workgroup size, worth giving for anything image-shaped: the
-default partitions an ndrange along its first axis, which for a 2-D range makes a
-workgroup one long row, and a pass that reads row-major and writes column-major
-then has one of the two uncoalesced: 1.06 ms against 0.12 ms at 1280x800.
+default ([`defaultgroup`](@ref)) fills the first axis first, which for a 2-D range
+makes a workgroup one row of 64, and a pass that reads row-major and writes
+column-major then has one of the two uncoalesced: 1.06 ms against 0.12 ms at
+1280x800.
 
 `ndrange` may be a [`DeviceRange`](@ref), for a count that only exists on the
 device; the dispatch is then ordered after whatever wrote that count.

@@ -451,11 +451,11 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
     adapted = (Metal.mtlconvert(ctx), args...)
     tt = Tuple{map(Core.Typeof, adapted)...}
     kernel = Metal.mtlfunction(obj.f, tt; name = entry, indirect = true)
-    # The same autotune `MetalKernels` does per launch, against the pipeline that
-    # will actually run: a kernel with a dynamic workgroup size is partitioned by
-    # what its own pipeline can hold, and the context is rebuilt for the partition.
+    # A kernel with a dynamic workgroup size gets core's default (`defaultgroup`),
+    # capped by what the pipeline that will actually run can hold, and the context
+    # is rebuilt for that partition.
     if KA.workgroupsize(obj) <: KA.DynamicSize && workgroupsize === nothing
-        ws = KI.threads_to_workgroupsize(kernel.maxthreads, ndrange)
+        ws = Mantle.defaultgroup(ndrange, kernel.maxthreads)
         iterspace, _ = KA.partition(obj, ndrange, ws)
         ctx = KA.mkcontext(obj, ndrange, iterspace)
         adapted = (Metal.mtlconvert(ctx), args...)

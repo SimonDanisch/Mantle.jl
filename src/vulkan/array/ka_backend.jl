@@ -289,19 +289,12 @@ function KA.launch_config(kernel::KA.Kernel{LavaBackend}, ndrange, workgroupsize
     end
 
     iterspace, dynamic = if KA.workgroupsize(kernel) <: KA.DynamicSize && workgroupsize === nothing
-        # Default workgroup size: 64 for 1D, capped to ndrange.
-        #
-        # `Val(length(ndrange))`, not a plain `Int`: the dynamic form goes through
-        # `Base._ntuple`, whose body is `1:n` with `n` unknown, so it records an
-        # edge on `Tuple{Colon, Int64, Any}`. Any package that adds a `(:)` method
-        # — `Unitful` adds `Colon(::Any, ::Quantity)` — then makes that edge stale,
-        # and every precompiled CodeInstance that inferred through it is thrown
-        # away when the image loads. That single edge accounts for 25 025 of
-        # Lava's 36 245 rejected CodeInstances when SAM 2's image loads after
-        # VideoEditor. `Val` makes the tuple length static and the range vanishes.
-        workgroupsize = ntuple(
-            i -> i == 1 ? min(prod(ndrange), 64) : 1,
-            Val(length(ndrange)))
+        # Core's default, the same on every backend (see `defaultgroup`). It walks
+        # the tuple recursively: no `ntuple` over a runtime length, whose `1:n`
+        # recorded an edge on `Tuple{Colon, Int64, Any}` that `Unitful`'s `(:)`
+        # method invalidated (25 025 of Lava's 36 245 rejected CodeInstances when
+        # SAM 2's image loaded after VideoEditor).
+        workgroupsize = Mantle.defaultgroup(ndrange, workgroup_limit(vk_context(kernel.backend)))
         KA.partition(kernel, ndrange, workgroupsize)
     else
         # Both spellings land here, and only one of them is in `workgroupsize`:

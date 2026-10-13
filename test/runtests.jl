@@ -798,6 +798,7 @@ foreachbackend(joinpath(@__DIR__, "test_blas_refit.jl"))
 foreachbackend(joinpath(@__DIR__, "test_indexbuffer.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_workgroup_limit.jl"))
+foreachbackend(joinpath(@__DIR__, "test_default_workgroup.jl"))
 foreachbackend(joinpath(@__DIR__, "test_shared_index_division.jl"))
 foreachbackend(joinpath(@__DIR__, "test_shared_vector_access.jl"))
 foreachbackend(joinpath(@__DIR__, "test_subgroup_size_pinning.jl"))
