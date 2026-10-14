@@ -127,9 +127,10 @@ backend(b::KernelAbstractions.Backend) = b
 """
     screenshot(window) -> Matrix
 
-The pixels currently on the window, as a matrix of its format's element type.
-Synchronises internally, and returns the image it acquired to the presentation
-engine rather than leaving it outstanding.
+The pixels on the window, as a matrix of its format's element type: an image a
+frame drew, which after a few frames of a still scene is the one shown (see
+[`readback_window`](@ref)). Synchronises internally, and returns the image it
+acquired to the presentation engine rather than leaving it outstanding.
 """
 function screenshot end
 

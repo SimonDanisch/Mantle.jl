@@ -316,6 +316,7 @@ function presentready!(e::Emitter, win::VulkanWindow)
         VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.AccessFlag(0))
+    win.holdsframe[win.current_image_idx + 1] = true
     # The swapchain and its images are named by this frame until it has passed.
     hold!(e, win)
     return nothing
@@ -336,6 +337,7 @@ function presentuntouched!(e::Emitter, win::VulkanWindow)
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
         VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK.AccessFlag(0), VK.AccessFlag(0))
+    win.holdsframe[win.current_image_idx + 1] = false
     hold!(e, win)
     return nothing
 end

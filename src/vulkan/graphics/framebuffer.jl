@@ -377,8 +377,8 @@ end
 """
     readback_window(win::VulkanWindow) -> Matrix{BGRA{N0f8}}
 
-Read back the current swapchain image to CPU memory.
-Must be called after rendering but BEFORE present_frame!.
+Read back an image of the window that a frame drew, BETWEEN frames (see the
+generic [`readback_window`](@ref)).
 
 A `(width, height)` matrix of `eltypeof(win.format)`, which for every swapchain
 format this backend picks is `BGRA{N0f8}` — the same element type the Metal
@@ -388,12 +388,6 @@ function readback_window(win::VulkanWindow)
     checkopen(win)
     ctx = win.ctx
     bq = ctx.default_bq
-    dev = ctx.device
-
-    w, h = size(win)
-    T = eltypeof(win.format)
-    bpp = pixelbytes(T)
-    nbytes = w * h * bpp
 
     # A presentable image may only be touched between acquire and present.
     # Transitioning one this call does not own is three separate errors from
@@ -408,8 +402,18 @@ function readback_window(win::VulkanWindow)
     # is `run!`'s and goes out with the present. Read back after the frame is
     # presented.
     checkreadable(win.acquirer)
-    acquire_next_image!(win)
-    image = win.images[win.current_image_idx + 1]
+    i = acquireframe!(win)
+    image = win.images[i]
+    # An image a frame drew was left in `PRESENT_SRC` by `presentready!`. The
+    # other case is a window no frame has drawn since its swapchain was built,
+    # whose image is in whatever layout it was created in, and `UNDEFINED` is
+    # the one transition valid from any of them.
+    from = win.holdsframe[i] ? VK.IMAGE_LAYOUT_PRESENT_SRC_KHR : VK.IMAGE_LAYOUT_UNDEFINED
+
+    # Read after `acquireframe!`, which may have rebuilt the swapchain.
+    w, h = size(win)
+    T = eltypeof(win.format)
+    nbytes = w * h * pixelbytes(T)
 
     # The caller's region: acquired here, read after the copy has passed, and
     # released here. `Readback`, host-cached: the host reads these bytes, and a
@@ -428,7 +432,7 @@ function readback_window(win::VulkanWindow)
         # is COLOR_ATTACHMENT_OUTPUT, never TOP_OF_PIPE: a barrier from
         # TOP_OF_PIPE would create no dependency with it.
         transition_image!(cmd, image,
-            VK.IMAGE_LAYOUT_PRESENT_SRC_KHR, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            from, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
             VK.AccessFlag(0), VK.ACCESS_TRANSFER_READ_BIT)
 
@@ -442,12 +446,13 @@ function readback_window(win::VulkanWindow)
         VK.cmd_copy_image_to_buffer(cmd, image,
             VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
 
-        # Back to COLOR_ATTACHMENT_OPTIMAL, which is what `presentready!` expects.
+        # Straight back to `PRESENT_SRC`, not through `presentready!`: reading an
+        # image does not draw it, so whether it holds a frame stays as it was.
         transition_image!(cmd, image,
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
             VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))
-        presentready!(e, win)
+        hold!(e, win)
     end
     # An acquire this function made is an acquire this function returns. Leaving
     # it outstanding is invisible once — the program usually closes the window
@@ -467,6 +472,39 @@ function readback_window(win::VulkanWindow)
     unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
     release!(r)
     return pixels
+end
+
+"""
+    acquireframe!(win; attempts = 4 * length(win.images)) -> Int
+
+Acquire an image a frame drew, for a readback, and return its 1-based index.
+
+Which image an acquire returns is the presentation engine's choice, and after a
+resize some of the new swapchain's images hold nothing until a frame lands in
+them. How many frames that takes is the driver's: three images in turn on X11,
+while Mesa's headless surface (GLFW's null platform) keeps five and hands them
+out as 0, 1, 0, 2, 0, 1, 0, 3, so six frames after a resize never touch image 3
+and a readback that took it returned only the clear colour. Such an image goes
+back to the presentation engine untouched and the next one is asked for.
+
+A window no frame has drawn since its swapchain was built has no such image, and
+takes the first one. `attempts` bounds the loop, because an engine that keeps
+returning images no frame drew is an error to report, not a wait.
+"""
+function acquireframe!(win::VulkanWindow; attempts::Int = 4 * length(win.images))
+    bq = win.ctx.default_bq
+    for _ in 1:attempts
+        # May rebuild the swapchain, which leaves no image holding a frame.
+        acquire_next_image!(win)
+        i = Int(win.current_image_idx) + 1
+        (win.holdsframe[i] || !any(win.holdsframe)) && return i
+        back = oneshot(bq) do e
+            presentuntouched!(e, win)
+        end
+        waitfor!(bq, submit_and_present!(bq, win, back))
+    end
+    error("readback_window: $attempts acquires returned no image a frame has drawn " *
+          "since the swapchain was built")
 end
 
 # ── Render Target Subtypes ──

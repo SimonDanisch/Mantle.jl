@@ -136,7 +136,9 @@ function readback_framebuffer end
 Read an image of `window` back to the host, BETWEEN frames: it acquires one,
 copies it and gives it back. Which image the platform hands out is its own
 choice, so it holds an earlier frame — after a few frames of a still scene,
-what is on the window. Inside a frame the image is the frame's, and the copy
+what is on the window. An image no frame has drawn since a resize holds no
+frame at all; the Vulkan backend hands such an image back and acquires again.
+Inside a frame the image is the frame's, and the copy
 would have to ride in a submission the frame owns; [`checkreadable`](@ref)
 refuses that.
 """

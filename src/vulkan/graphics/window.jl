@@ -36,6 +36,12 @@ mutable struct VulkanWindow <: Window
     current_frame::Int  # index into sync arrays (1-based, wraps)
     # Current frame state
     current_image_idx::UInt32
+    # Per swapchain image: whether a frame drew it, since the swapchain was
+    # built. Set by `presentready!`, cleared by `presentuntouched!` and by
+    # `create_swapchain!`. A readback acquires whichever image the presentation
+    # engine frees, and one no frame drew since a resize holds nothing:
+    # `readback_window` reads this to hand such an image back.
+    holdsframe::Vector{Bool}
     acquired::Bool
     # The task that acquired the image still in flight, for the message in
     # `acquire_next_image!`. Only ever read to report a bug.
@@ -98,7 +104,7 @@ function VulkanWindow(width::Integer, height::Integer;
         VK.Extent2D(width, height),
         VK.Semaphore[], VK.Semaphore[], VK.Fence[],
         1,  # current_frame
-        UInt32(0), false, nothing,
+        UInt32(0), Bool[], false, nothing,
         (Int(width), Int(height)),       # fb_size, corrected by create_swapchain!
         ctx,
     )
@@ -197,6 +203,7 @@ function create_swapchain!(win::VulkanWindow; vsync::Bool=true)
 
     win.swapchain = swapchain
     win.images = unwrap(VK.get_swapchain_images_khr(dev, swapchain))
+    win.holdsframe = fill(false, length(win.images))
 
     # Destroy what the old swapchain owned, now that the new one exists.
     # Reassigning the fields would leave these to finalizers, which run whenever
