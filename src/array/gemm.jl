@@ -467,7 +467,7 @@ Whisper's 1500 pads to 1536: 1.021.
 const GEMM_PAD_SLACK = 0.25
 
 """
-    gemm_padn(M, N, K; tile = GEMM_TILE, slack = GEMM_PAD_SLACK) -> Int
+    gemm_padn(M, N, K; tile = GEMM_TILE, slack = GEMM_PAD_SLACK, faster = 1/16) -> Int
 
 `N` rounded up to the width that lets a staged tiling take this shape, or to a
 plain multiple of `tile` when none can — or when getting there would cost more
@@ -485,22 +485,32 @@ multiple of 64 or 128 — so all 160 missed the staged kernel by 32 columns.
 
 Asks the same predicates `gemm_tiling` does, so the tiling it pads for is one
 `gemm_tiling` will accept; a divergence between the two would pad to a width
-nothing uses. It picks the **narrowest** applicable block rather than the first,
-because the first is chosen for speed and the choice here is about waste — a
-64-wide block that pads `N = 200` to 256 beats a 128-wide one that pads it to
-256 only by tying, and beats it outright at `N = 72`.
+nothing uses.
+
+Which block: the **fastest** (first in `GEMM_TILINGS`) whose padded width is
+within `faster` of the narrowest one. Narrowest alone was the rule, and it is
+right while the widths differ — a 64-wide block pads `N = 200` to 256 like a
+128-wide one and `N = 72` to 128 where the 128-wide one cannot help. Where they
+nearly tie it threw the speed away: FLUX.2-klein with a reference picture runs
+8966 tokens, which pads to 9024 on a 64-wide block and to 9088 on a 128-wide
+one, 0.7% apart, and the 64-wide width leaves only the 64 x 64, 4-warp tiling.
+On gfx1151/RADV its single-block projection (27648 x 3072 by the tokens) took
+104 ms there and 64 ms on the 128 x 128 tiling at 9088.
 """
 function gemm_padn(M::Int, N::Int, K::Int;
-                   tile::Int = GEMM_TILE, slack::Real = GEMM_PAD_SLACK)
+                   tile::Int = GEMM_TILE, slack::Real = GEMM_PAD_SLACK, faster::Real = 1 / 16)
     base = cld(N, tile) * tile
-    best = 0
+    # The padded width each applicable tiling needs, in the table's speed order.
+    widths = Int[]
     for c in GEMM_TILINGS
         M % gemm_bm(c) == 0 && K % gemm_bk(c) == 0 && !gemm_aliasing(c, K) || continue
         haskey(GEMM_STAGED_KERNELS, c) || continue
-        np = cld(N, gemm_bn(c)) * gemm_bn(c)
-        (best == 0 || np < best) && (best = np)
+        push!(widths, cld(N, gemm_bn(c)) * gemm_bn(c))
     end
-    best != 0 && best <= base * (1 + slack) ? best : base
+    isempty(widths) && return base
+    narrowest = minimum(widths)
+    narrowest <= base * (1 + slack) || return base
+    return first(w for w in widths if w <= narrowest * (1 + faster))
 end
 
 # The cooperative-matrix kernels here are written against a 32-lane subgroup: they

@@ -228,6 +228,14 @@ if hasstagedgemm()
                 @test Mantle.gemm_tiling(M, cld(1500, 16) * 16, K) === nothing
             end
 
+            # A near tie goes to the faster block. FLUX.2-klein with a reference
+            # picture: 8966 tokens pad to 9024 on a 64-wide block, which leaves only
+            # the 64 x 64 tiling, and to 9088 on the 128 x 128 one, 0.7% more work.
+            @test Mantle.gemm_padn(27648, 8966, 3072) == 9088
+            @test Mantle.gemm_tiling(27648, 9088, 3072) == first(Mantle.GEMM_TILINGS)
+            # ...and without the allowance the narrowest width wins, as it used to.
+            @test Mantle.gemm_padn(27648, 8966, 3072; faster = 0) == 9024
+
             # Already on a block: no padding at all, so a shape that was fast stays
             # fast and pays nothing.
             @test Mantle.gemm_padn(1280, 1536, 1280) == 1536
