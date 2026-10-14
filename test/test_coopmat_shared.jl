@@ -265,3 +265,23 @@ end
     end
 end
 
+# The same layout operand on a store to a global pointer, which is how
+# DNNKernels' `attn_flash_rows!` writes its tiles.
+@kernel cpu=false function coopmat_store_rowmajor_global!(out, @Const(inp))
+    m = AcceleratedMatrix{Float16,16,16,MatrixA}(pointer(inp), 1, 16)
+    copyto!(pointer(out), 1, 16, m, Val(true))
+end
+
+@testset "row-major cooperative-matrix store to global memory" begin
+    backend = TESTBACKEND
+    if !hasstagedgemm()
+        @info "skipping: no 16-wide cooperative matrices at a 32-lane subgroup on this device"
+    else
+        h = Float16.(reshape(1:256, 16, 16))
+        A = Mantle.devicearray(TESTBACKEND, vec(h))
+        out = Mantle.devicearray(TESTBACKEND, fill(Float16(-1), 256))
+        coopmat_store_rowmajor_global!(backend, 32)(out, A; ndrange = 32)
+        KernelAbstractions.synchronize(backend)
+        @test reshape(Array(out), 16, 16) == permutedims(h)
+    end
+end
