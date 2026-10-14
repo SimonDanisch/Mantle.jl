@@ -96,7 +96,11 @@ end
         makeanddrop(dev)
         push!(counts, settled(dev))
     end
-    @test allequal(counts[2:end])          # the pool does not grow, round over round
+    # The pool does not grow, round over round. Spelled as a chained comparison
+    # because `Test` prints its operands: `allequal(counts[2:end])` failed once in
+    # a full legion-boi suite (2026-10-13) and its log said nothing about whether
+    # the count climbed (a leak) or fell (an earlier file's late finalizer).
+    @test counts[2] == counts[3] == counts[4]
     before = counts[end]
     # NOT `alive > settled`: the ledger counts ENTRIES, and a region that is
     # returned and then re-acquired reuses its slot, so a live resource need not
