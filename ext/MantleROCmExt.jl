@@ -194,13 +194,35 @@ mutable struct ROCmDevice <: Mantle.Device
     accesses::Mantle.AccessCache
 end
 
-const HIPBLASLT_LIB = Libdl.find_library(["libhipblaslt.so.1", "libhipblaslt.so"])
+"""
+The hipBLASLt beside the HIP runtime AMDGPU.jl runs on, or `""`.
+
+Not a loader search, and not at precompile time. `Libdl.find_library` answered
+with whichever hipBLASLt the system had first, frozen into the package image:
+with `ROCM_PATH` naming another ROCm (PyTorch's 7.13 wheel, against the
+system's 6.4 on the laptop) that put a second ROCm, and its HIP runtime, into
+the process.
+"""
+function hipblaslt_library()
+    isempty(AMDGPU.libhip) && return ""
+    dir = dirname(AMDGPU.libhip)
+    for name in ("libhipblaslt.so.1", "libhipblaslt.so.0", "libhipblaslt.so")
+        path = joinpath(dir, name)
+        isfile(path) && return path
+    end
+    return ""
+end
+
+"""The `dlopen` handle of [`hipblaslt_library`](@ref), set in `__init__`; `C_NULL` without one."""
+const HIPBLASLT = Ref{Ptr{Cvoid}}(C_NULL)
+
+"""A hipBLASLt entry point, by name."""
+blaslt(sym::Symbol) = Libdl.dlsym(HIPBLASLT[], sym)
 
 function hipblaslt_handle()
-    isempty(HIPBLASLT_LIB) && return C_NULL
+    HIPBLASLT[] == C_NULL && return C_NULL
     h = Ref{Ptr{Cvoid}}(C_NULL)
-    status = ccall((:hipblasLtCreate, HIPBLASLT_LIB), Cint,
-                   (Ref{Ptr{Cvoid}},), h)
+    status = ccall(blaslt(:hipblasLtCreate), Cint, (Ref{Ptr{Cvoid}},), h)
     return status == 0 ? h[] : C_NULL
 end
 
@@ -741,6 +763,36 @@ with `false` it refuses to record at all.
 """
 Mantle.recordsplans(::ROCmDevice) = true
 
+# ── profiling ────────────────────────────────────────────────────────────────
+
+"""
+A plan built to be profiled is WALKED on every run rather than replayed from a
+`hipGraph`, as Metal walks the plans it cannot record: a replay runs no pass walk,
+so there is no pass to bracket, and `timings` reported `NaN` for every pass on
+this backend. Everything else records, as before.
+"""
+Mantle.recordable(::ROCmDevice, pl::Mantle.Plan) = Mantle.recordable(pl) && !pl.profile
+
+"""
+One pass of a profiled run between two timing HIP events on the device's stream,
+waited for, so `gpu_ns` is the pass's own GPU span. The wait serialises the run:
+a profiled frame is slower than a real one, and its passes are what is measured.
+"""
+function Mantle.profiled!(f, pl::Mantle.Plan{ROCmDevice}, e::Mantle.Immediate, i::Integer)
+    prof = pl.profiler
+    prof === nothing && return f()
+    d = pl.graph.dev
+    adopt!(d)
+    start = AMDGPU.HIP.HIPEvent(d.stream; timing = true)
+    t0 = time_ns()
+    r = f()
+    Mantle.sample!(prof.host_ns[i], Float64(time_ns() - t0))
+    stop = AMDGPU.HIP.HIPEvent(d.stream; timing = true)
+    AMDGPU.HIP.hipEventSynchronize(stop)
+    Mantle.sample!(prof.gpu_ns[i], AMDGPU.HIP.elapsed(start, stop) * 1e9)
+    return r
+end
+
 """
 `true`: a call runs here, and records.
 
@@ -784,23 +836,23 @@ function (call::HipBLASLtBias)(D, A, B, bias)
     dd = Ref{Ptr{Cvoid}}(C_NULL)
     try
         # HIPBLAS_COMPUTE_32F = 2, HIP_R_32F = 0, HIP_R_16F = 2.
-        ltcheck(ccall((:hipblasLtMatmulDescCreate, HIPBLASLT_LIB), Cint,
+        ltcheck(ccall(blaslt(:hipblasLtMatmulDescCreate), Cint,
                       (Ref{Ptr{Cvoid}}, Cint, Cint), desc, 2, 0), "descriptor creation")
         epilogue = Ref{UInt32}(4) # HIPBLASLT_EPILOGUE_BIAS
-        ltcheck(ccall((:hipblasLtMatmulDescSetAttribute, HIPBLASLT_LIB), Cint,
+        ltcheck(ccall(blaslt(:hipblasLtMatmulDescSetAttribute), Cint,
                       (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Csize_t),
                       desc[], 2, epilogue, sizeof(UInt32)), "bias epilogue")
         biasptr = Ref{Ptr{Cvoid}}(Ptr{Cvoid}(pointer(bias)))
-        ltcheck(ccall((:hipblasLtMatmulDescSetAttribute, HIPBLASLT_LIB), Cint,
+        ltcheck(ccall(blaslt(:hipblasLtMatmulDescSetAttribute), Cint,
                       (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Csize_t),
                       desc[], 3, biasptr, sizeof(Ptr{Cvoid})), "bias pointer")
         biastype = Ref{Int32}(2)
-        ltcheck(ccall((:hipblasLtMatmulDescSetAttribute, HIPBLASLT_LIB), Cint,
+        ltcheck(ccall(blaslt(:hipblasLtMatmulDescSetAttribute), Cint,
                       (Ptr{Cvoid}, Cint, Ptr{Cvoid}, Csize_t),
                       desc[], 4, biastype, sizeof(Int32)), "bias type")
         for (layout, rows, cols, ld) in
                 ((ad, M, K, M), (bd, K, N, K), (dd, M, N, M))
-            ltcheck(ccall((:hipblasLtMatrixLayoutCreate, HIPBLASLT_LIB), Cint,
+            ltcheck(ccall(blaslt(:hipblasLtMatrixLayoutCreate), Cint,
                           (Ref{Ptr{Cvoid}}, Cint, UInt64, UInt64, Int64),
                           layout, 2, rows, cols, ld), "matrix layout")
         end
@@ -808,7 +860,7 @@ function (call::HipBLASLtBias)(D, A, B, bias)
         alpha = Ref{Float32}(1)
         beta = Ref{Float32}(0)
         GC.@preserve D A B bias begin
-            ltcheck(ccall((:hipblasLtMatmul, HIPBLASLT_LIB), Cint,
+            ltcheck(ccall(blaslt(:hipblasLtMatmul), Cint,
                           (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid},
                            Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid},
                            Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Csize_t,
@@ -819,13 +871,167 @@ function (call::HipBLASLtBias)(D, A, B, bias)
         end
     finally
         for layout in (ad[], bd[], dd[])
-            layout == C_NULL || ccall((:hipblasLtMatrixLayoutDestroy, HIPBLASLT_LIB),
+            layout == C_NULL || ccall(blaslt(:hipblasLtMatrixLayoutDestroy),
                                       Cint, (Ptr{Cvoid},), layout)
         end
-        desc[] == C_NULL || ccall((:hipblasLtMatmulDescDestroy, HIPBLASLT_LIB),
+        desc[] == C_NULL || ccall(blaslt(:hipblasLtMatmulDescDestroy),
                                   Cint, (Ptr{Cvoid},), desc[])
     end
     return D
+end
+
+# ── MIOpen convolution ──────────────────────────────────────────────────────
+
+"""
+MIOpen's forward convolution as a pass member, with everything a capture cannot
+hold done outside it: the descriptors when the pass is declared, the workspace a
+graph transient of the size MIOpen asks for, and the algorithm search on the first
+execution — the warm-up `openrecording` gives every call before the capture opens.
+AMDGPU.jl's `MIOpen.convolution!` allocates its workspace on every call, which a
+recorded plan cannot replay.
+"""
+mutable struct MIOpenConv
+    xdesc::AMDGPU.MIOpen.TensorDescriptor
+    wdesc::AMDGPU.MIOpen.TensorDescriptor
+    ydesc::AMDGPU.MIOpen.TensorDescriptor
+    cdesc::AMDGPU.MIOpen.ConvolutionDescriptor
+    wsize::Int
+    algo::Union{Nothing,AMDGPU.MIOpen.miopenConvFwdAlgorithm_t}
+end
+
+Mantle.argument_usage(::Type{MIOpenConv}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.WRITE)
+
+function (c::MIOpenConv)(y, x, w, workspace)
+    (; handle) = AMDGPU.MIOpen.lib_state()
+    if c.algo === nothing
+        perf = AMDGPU.MIOpen.find_conv_algo(AMDGPU.MIOpen.miopenConvFwdAlgorithm_t;
+            handle, workspace, a = x, a_desc = c.xdesc, b = w, b_desc = c.wdesc,
+            conv_desc = c.cdesc, c = y, c_desc = c.ydesc)
+        c.algo = perf.fwd_algo
+    end
+    AMDGPU.MIOpen.miopenConvolutionForward(handle, Ref{Float32}(1f0), c.xdesc.handle, x,
+        c.wdesc.handle, w, c.cdesc.handle, c.algo, Ref{Float32}(0f0), c.ydesc.handle, y,
+        workspace, c.wsize)
+    return nothing
+end
+
+"""`out .= y`, converting: the wider result a convolution on narrower operands owes."""
+struct Widen end
+Mantle.argument_usage(::Type{Widen}, ::Type{<:Tuple{Any,Any}}) = (Mantle.WRITE, Mantle.READ)
+(::Widen)(out, y) = (out .= y; nothing)
+
+"""
+    denseoperands(xs...) -> Bool
+
+Whether every operand is a graph resource a library call can be handed, or absent.
+"""
+denseoperands(xs...) =
+    all(x -> x === nothing || x isa Union{Mantle.Buffer,Mantle.TransientBuffer,Mantle.ResourceView}, xs)
+
+"""A dense MIOpen descriptor for an array of size `dims`, in the reversed (WHCN) layout."""
+function miodesc(::Type{T}, dims::Dims{N}) where {T,N}
+    strides = cumprod((1, dims[1:end-1]...))
+    AMDGPU.MIOpen.TensorDescriptor(AMDGPU.MIOpen.miopen_data_type(T), N,
+                                   Int32[reverse(dims)...], Int32[reverse(strides)...])
+end
+
+"""
+The 2-D convolution through [`MIOpenConv`](@ref), for operands of one element type.
+A result of a wider type — `halfconvs`' fp16 operands into an fp32 result — is
+convolved into a transient of the operands' type and widened, which rounds the
+result to the operands' precision once more. The bias and the activation are left
+to the caller's passes.
+
+What it replaced is DNNKernels' im2col and cooperative-matrix GEMM: on the 8060S
+FLUX.2-klein's VAE decoder spent about 1.2 s of 1.6 s in them, where PyTorch's
+bf16 decode through MIOpen takes 0.95 s in all.
+"""
+function Mantle.native_conv2d_dispatch!(d::ROCmDevice, g, out, x, w; bias = nothing,
+                                        stride, pad, dilation, groups,
+                                        epilogue = identity, transposed = false, name)
+    transposed && return nothing
+    T = eltype(x)
+    (T === Float16 || T === Float32) && eltype(w) === T || return nothing
+    (eltype(out) === Float16 || eltype(out) === Float32) || return nothing
+    denseoperands(out, x, w) || return nothing
+    ndims(out) == ndims(x) == ndims(w) == 4 || return nothing
+    y = eltype(out) === T ? out : Mantle.Transient.Buffer(g, T, size(out))
+    xd, wd, yd = miodesc(T, size(x)), miodesc(T, size(w)), miodesc(T, size(out))
+    cdesc = AMDGPU.MIOpen.ConvolutionDescriptor(2; padding = pad, stride, dilation, groups)
+    adopt!(d)
+    wsize = Int(AMDGPU.MIOpen.get_workspace_size(AMDGPU.MIOpen.miopenConvFwdAlgorithm_t;
+        handle = AMDGPU.MIOpen.lib_state().handle, a_desc = xd, b_desc = wd,
+        conv_desc = cdesc, c_desc = yd))
+    workspace = Mantle.Transient.Buffer(g, UInt8, (max(wsize, 256),))
+    Mantle.dispatch!(g, MIOpenConv(xd, wd, yd, cdesc, wsize, nothing), (y, x, w, workspace); name)
+    y === out || Mantle.dispatch!(g, Widen(), (out, y); name = "$(name).widen")
+    return (; bias = false, epilogue = false)
+end
+
+# ── strided-batched GEMM ─────────────────────────────────────────────────────
+
+"""
+rocBLAS' strided-batched GEMM as a pass member: every plane of `C` is
+`α op(A) op(B)`, the first two axes the matrix and the rest the batch, and with a
+`coldiv` each column of the result is then divided by its value: the normalisation
+an unnormalised softmax leaves for the product after it.
+
+What it replaced is DNNKernels' scalar `attn_scores_b*`, which the three-pass
+attention falls back to when the backend offers no batched product. FLUX.2-klein's
+VAE runs its mid-block attention that way, one fp32 head of 512 over 15808
+positions, and its scores alone took 217 ms of the decoder's 1.6 s on the 8060S.
+"""
+struct RocBLASBatched{T}
+    ta::Char
+    tb::Char
+    alpha::T
+end
+
+Mantle.argument_usage(::Type{<:RocBLASBatched}, ::Type{<:Tuple{Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ)
+Mantle.argument_usage(::Type{<:RocBLASBatched}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
+    (Mantle.WRITE, Mantle.READ, Mantle.READ, Mantle.READ)
+
+"The matrix planes of `x`: its first two axes, and every trailing one as the batch."
+planes(x) = reshape(x, size(x, 1), size(x, 2), :)
+
+function (c::RocBLASBatched{T})(C, A, B) where {T}
+    AMDGPU.rocBLAS.gemm_strided_batched!(c.ta, c.tb, c.alpha, planes(A), planes(B), zero(T), planes(C))
+    return nothing
+end
+
+function (c::RocBLASBatched)(C, A, B, coldiv)
+    c(C, A, B)
+    P = planes(C)
+    P ./= reshape(coldiv, 1, size(P, 2), size(P, 3))
+    return nothing
+end
+
+"""
+The product through [`RocBLASBatched`](@ref) where AMDGPU.jl has rocBLAS' method
+for the element type, which is fp32 here: an fp16 attention takes DNNKernels'
+fused kernels long before it would reach this.
+
+Not with `B` transposed. That is the attention's second product, `v * scoresᵀ`,
+and rocBLAS' NT kernel for it is the slow one: FLUX.2-klein's VAE (512 x 15808,
+K = 15808, ROCm 7.13 on the 8060S) applied in 492 ms through rocBLAS and in 62 ms
+through DNNKernels' `attn_apply_b32!`, where the TN score product beats
+`attn_scores_b32!`, 104 to 134 against 151 ms.
+"""
+function Mantle.native_batched_gemm_dispatch!(d::ROCmDevice, g, out, A, B;
+                                               transpose_a = false, transpose_b = false,
+                                               alpha = 1, coldiv = nothing, name)
+    transpose_b && return false
+    T = eltype(out)
+    T === Float32 && eltype(A) === T && eltype(B) === T || return false
+    coldiv === nothing || eltype(coldiv) === T || return false
+    denseoperands(out, A, B, coldiv) || return false
+    batch(x) = prod(size(x)[3:end]; init = 1)
+    batch(out) == batch(A) == batch(B) || return false
+    call = RocBLASBatched(transpose_a ? 'T' : 'N', transpose_b ? 'T' : 'N', T(alpha))
+    Mantle.dispatch!(g, call, coldiv === nothing ? (out, A, B) : (out, A, B, coldiv); name)
+    return true
 end
 
 function Mantle.librarygemm(d::ROCmDevice, out, A, B, bias, epilogue)
@@ -870,6 +1076,8 @@ Such a plan needs `emitkernel!`, which this backend does not implement; see
 `supportspredicate` for the other half of the same gap.
 """
 function Mantle.openrecording(d::ROCmDevice, pl::Mantle.Plan, passes::AbstractUnitRange)
+    # A profiled plan is walked every run; see `Mantle.recordable` above.
+    pl.profile && return nothing
     checkresolved(d, pl)
     piece = view(pl.passes, passes)
     any(pp -> any(x -> x isa Mantle.Launch, pp.dispatches), piece) && throw(ArgumentError(
@@ -1253,6 +1461,15 @@ Mantle.caps(b::AMDGPU.ROCBackend) = Mantle.caps(Mantle.Device(b))
 # `defaultbackend()` keep answering with the platform's own backend. This one is
 # asked for by name: `Device(ROCmAPI())`.
 function __init__()
+    path = hipblaslt_library()
+    if !isempty(path)
+        lib = Libdl.dlopen(path; throw_error = false)
+        if lib === nothing
+            @warn "hipBLASLt at $path does not load; products with a bias run without it"
+        else
+            HIPBLASLT[] = lib
+        end
+    end
     register_backend!(; name = :rocm, priority = 50) do
         AMDGPU.functional() ? AMDGPU.ROCBackend() : nothing
     end
