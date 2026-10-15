@@ -11,20 +11,27 @@
 # rest (graphs, compile, record, run, ordering, memory, holds) and points here.
 #
 # Rulings this implements (Simon; decisions.md B2 and D, 2026-09-30; B3.2
-# and B3.7, 2026-10-02):
-# - Arrays are fixed until their first resize!; pointer and size reach
-#   recorded work through the array's cell. Only what a plan recorded by value
-#   recompiles it.
+# and B3.7, 2026-10-02; B4, 2026-10-14):
+# - Arrays are fixed until their first resize!, or resizable from creation
+#   with `capacity = n`, a reserve like sizehint! (B4.10); pointer and size
+#   reach recorded work through the array's cell. Only what a plan recorded by
+#   value recompiles it.
 # - Changes (resize!, setindex!, copyto!, copy!, TLAS changes) update the host
 #   view at the call and stay pending on the resource until the next
 #   submission that touches it, which applies them in front of its own work.
 # - "Kernel launch" means any launch of GPU work: traces count.
 # - TLAS (B3.2): builds use the exact count, storage has a doubling capacity
-#   that never halves, a plan's build or refit is an AccelCommand, Metal reads
-#   the count from a cell, Vulkan's indirect build is not used.
+#   that never halves, capped at the device's maxInstanceCount (B4.8), a
+#   plan's build or refit is an AccelCommand, Metal reads the count from a
+#   cell, Vulkan's indirect build is not used.
 # - GPURef of an array, attribute(a, i), the scene rectangle (B3.7).
-# Eviction and readers pending structure updates are proposals (plan, open
-# decision 16).
+# - B4: a when! flag is a Bool, one launch or draw per when! (B4.1); launch
+#   groups are values, Group(g, name) (B4.2); one array type, a view carries
+#   its own offset and dims (B4.5); read-only arrays (B4.6); a TLAS total past
+#   maxInstanceCount throws at the call (B4.8); a value GPURef is one slot in
+#   device memory (B4.9); length(a) and `capacity` follow Julia's array API
+#   (B4.10).
+# Eviction and readers pending structure updates are ruled (B3.9, B3.10).
 #
 # Facts this rests on (checked 2026-09-30/10-02):
 # - Inactive instance = BLAS reference 0; invisible, still counted in instance
@@ -98,8 +105,7 @@ pos[1:3] = newpoints                            # a store; lengths must match, a
 copyto!(pos, newdata)                           # a store
 copy!(pos, newdata)                             # Base.copy!: resized to length(newdata) (old contents not kept), then stored
 trim!(pos)                                      # (name open) unmaps a reserve's pages beyond the size; nothing else does
-length(pos)                                     # the host view
-devicesize(alive)                               # (name open) the length a kernel wrote: reads the cell back
+length(pos)                                     # the requested length: a number, nothing waits (B.3)
 
 # In a graph launches name the array, not a count.
 g = Graph(dev)
@@ -114,6 +120,9 @@ copy!(pos, rand(Point3f, 3000)); run!(g)        # the run applies the change and
 # reserve, and graphs size temporaries from it.
 alive = MantleArray(dev, Point3f, 0; capacity = 1_000_000)
 dispatch!(g, spawnkill!, (alive, lengthof(alive), pos), launchrange(pos))
+length(alive)                                   # the real length (B4.10): waits for the kernel that writes it and
+                                                #   reads the cell back; here, during the declaration of the graph
+                                                #   that writes it (no run has written it yet), it throws
 
 # ── Acceleration structures ───────────────────────────────────────────────────
 #
@@ -121,7 +130,8 @@ dispatch!(g, spawnkill!, (alive, lengthof(alive), pos), launchrange(pos))
 # hardware path where the device has it; `hardware = false` forces software.
 
 blas = BLAS(dev, vertices, faces)               # vertices::MantleArray{Point3f,1}, faces::MantleArray{TriangleFace{UInt32},1}
-tlas = TLAS(dev)                                # storage sized for 64 instances, doubling; builds use the exact count (B.8);
+tlas = TLAS(dev)                                # storage sized for 64 instances, doubling, capped at the device's
+                                                #   maxInstanceCount; builds use the exact count (B.8);
                                                 #   pends a Build of zero instances, so it is never traced unbuilt
 
 h  = push!(tlas, blas, transform)               # one instance (transform::Mat4f)
@@ -134,7 +144,8 @@ delete!(tlas, r1)                               # pending: its slot is freed, a 
 build!(tlas)                                    # pending: a full build, applied by the next use
 
 # Per-run work inside a graph: an operation like any other.
-build!(g, tlas)                                 # Build() every run: needed when a kernel decides counts
+build!(g, tlas)                                 # Build() every run; a kernel-written total does not need it:
+                                                #   refits stay legal (B.8)
 refit!(g, tlas)                                 # Update() every run; changes of the active set pend a build
 trace!(g, pipeline, tlas, (film, cam), (w, h))  # ray tracing pipeline
 dispatch!(g, shade!, (tlas, film), (w, h))      # ray queries in a compute kernel
@@ -153,7 +164,7 @@ color[] = MantleArray(dev, other_colors)                              # another 
 # ── Textures ──────────────────────────────────────────────────────────────────
 
 atlas = Texture2D(dev, RGBA{N0f8}, 1024, 1024)  # has an index in the device's texture table
-resize!(atlas, 2048, 2048)                      # a new image under a new index (B.9)
+resize!(atlas, 2048, 2048)                      # a new image under a new index, texels kept where the sizes overlap (B.9)
 
 # ══ B. Core internals ═════════════════════════════════════════════════════════
 
@@ -186,8 +197,10 @@ struct Released end                     # after the last hold (internals.jl sect
 # sparse buffer (64 KiB on AMD Windows and NVIDIA, measured above). One bind
 # costs 0.15-0.25 ms before the submission that uses the pages (measured
 # above), so a reserve maps at least twice what it had: an array growing by
-# one element per run binds O(log n) times.
-growth(dev, r::Region, need)    = need <= sizeof(r) ? Adopt() : outgrow(caps(dev), need, caps(dev).sparseresidency)
+# one element per run binds O(log n) times. An array created with
+# `capacity = n` (B4.10) is resizable from the start and placed at creation
+# for n elements: Committed storage, or a reserve where outgrow picks one.
+growth(dev, r::Region, need)   = need <= sizeof(r) ? Adopt() : outgrow(caps(dev), need, caps(dev).sparseresidency)
 growth(dev, s::Committed, need) = need <= sizeof(s.region) ? InPlace() : outgrow(caps(dev), need, caps(dev).sparseresidency)
 growth(dev, s::Reserve, need)   = need <= s.mapped ? InPlace() :
                                   need <= s.bytes  ? MapPages(s, min(s.bytes, max(need, 2 * s.mapped))) :
@@ -211,10 +224,20 @@ fitsreserve(c, need) = need <= reservelimit(c)
 mutable struct ArrayState
     storage::Union{Region,Reserve,Committed,Evicted,Released}   # as applied so far: only an applying submission
                                                  #   changes it (B.4); Evicted under pressure (internals.jl section 9)
-    dims::NTuple                                 # the requested dims (length(a)); the GPU's are in the cell
-    resizable::Bool                              # set by the first resize! call (B.7); never cleared
-    const lengthsource::Union{HostLength,DeviceLength}   # DeviceLength: created with capacity = n for a kernel-written length
-    const capacity::Int                          # only for DeviceLength; 0 otherwise
+    dims::NTuple                                 # the requested dims: length(a) for a host-set length, and what a
+                                                 #   call's checks use under the locks; the GPU's are in the cell. A
+                                                 #   kernel-written length is read from the cell (B4.10): length(a)
+                                                 #   waits for its writer, and throws during the declaration of the
+                                                 #   graph that writes it
+    resizable::Bool                              # set at creation when a capacity is given, else by the first
+                                                 #   resize! call (B.7); never cleared
+    lengthsource::Union{HostLength,DeviceLength} # DeviceLength from the first launch with lengthof(a) (B.7); never cleared
+    capacity::Int                                # the current reserve in elements: `capacity = n` at creation, like
+                                                 #   sizehint! for any array (B4.10), 0 without one; raised to what
+                                                 #   the new storage holds when growth moves it (commit!, B.5)
+    const source::Union{Nothing,AbstractArray}   # the caller's host array for `readonly = true` (B4.6), else nothing:
+                                                 #   isreadonly(st); Mantle's write methods throw at the call
+                                                 #   (checkwritable, B.5); a restore uploads from it (internals.jl section 9)
     const cell::Cell                             # address and dims
     const pool::Pool                             # its device's pool: device(st), pool(st), nextseq!(st)
     const sync::SyncState                   # protects everything here, and the pending changes; has `freed` (B.10)
@@ -232,19 +255,30 @@ end
 # snapshot it locked by is still current (B.4).
 #
 # Views (GPUArrays' derive) refer to this state with a static offset, dims and
-# strides. Shrinking never unmaps an array's pages (they go back when the array
-# is freed, or by trim!(a)), and no pressure step unmaps them, so a view never
-# reads unmapped memory unless trim! was called.
+# strides. A view is the same MantleArray type as its parent (B4.5, no role
+# parameter): the offset, dims and strides are the view's own fields (`a.view`,
+# `nothing` for a root array, whose size is the state's), and every check
+# whether an array is a view reads them. Shrinking never unmaps an array's
+# pages (they go back when the array is freed, or by trim!(a)), and no
+# pressure step unmaps them, so a view never reads unmapped memory unless
+# trim! was called.
+isview(a::MantleArray) = a.view !== nothing
+# The length a call checks under the locks: the requested one (`dims` above),
+# never the cell, since reading a kernel-written length back would wait under
+# a lock. A view's own dims are static.
+requestedlength(a::MantleArray) = isview(a) ? prod(a.view.dims) : prod(a.state.dims)
 
 # ── B.3 Changes: requests, scheduled ──────────────────────────────────────────
 
 # A change is a step in the ordered stream, like any operation (Simon: "it
 # should get scheduled"). The call only enqueues it: under the resource's
 # lock it appends the request, with a device-wide sequence number, to the
-# resource's pending list and updates what the host reports (length(a) is the
-# requested length: a number; nothing physical changes). Nothing of the
-# array is allocated, nothing is copied to the device, and it never starts
-# over; a store's only work is one copy of its data into an upload region
+# resource's pending list and updates what the host reports (length(a) of a
+# host-set length is the requested length: a number; nothing physical
+# changes). Nothing of the array is allocated, nothing is copied to the
+# device, and it never starts over for memory (a changed member snapshot only
+# makes it lock again, lockexpanded); a store's only work is one copy of its
+# data into an upload region
 # (below, B3.18). New storage, pages, the copy of the contents, the cell write and the
 # retirement of the old storage are done by the submission that applies the
 # change (B.4), in sequence order, after every earlier access.
@@ -526,10 +560,19 @@ end
 
 # ── B.5 resize! and stores ────────────────────────────────────────────────────
 
-Base.resize!(a::MantleArray, dims) = resize!(a, dims, a.role)
-Base.resize!(a, dims, ::Derived) = throw(ArgumentError("resize! of a view; resize its parent"))
 Base.resize!(a::MantleArray, n::Integer) = resize!(a, growlast(size(a), n))   # sets the last dimension
-Base.resize!(a::MantleArray{T,N,<:Device}, dims, ::Root) where {T,N} = resizeto!(a, dims, Keep())
+function Base.resize!(a::MantleArray{T,N,<:Device}, dims::Dims{N}) where {T,N}
+    isview(a) && throw(ArgumentError("resize! of a view; resize its parent"))   # the array's own fields (B.2)
+    resizeto!(a, dims, Keep())
+end
+
+# A read-only array (B4.6) throws at the call of each of Mantle's write
+# methods (resize!, stores, copyto!, copy!), before anything is acquired or
+# locked: the flag is set at creation and never changes. dispatch! throws the
+# same at the call, eager or declared, from the per-argument access it derives
+# at declaration (argument_usage).
+checkwritable(a::MantleArray) = isreadonly(a.state) &&
+    throw(ArgumentError("a write to a read-only array (created with readonly = true)"))
 
 # The request, and nothing else. The length change reaches the array's
 # readers in the same locked call (their structures get a pending Build; the
@@ -538,9 +581,11 @@ Base.resize!(a::MantleArray{T,N,<:Device}, dims, ::Root) where {T,N} = resizeto!
 # marked stale here (that depends only on the requested length, B.6); whether
 # the storage moves is decided when it is applied.
 function resizeto!(a::MantleArray, dims, contents)
+    checkwritable(a)                                  # B4.6
     st = a.state
     change!(((st, Write()),)) do
         usable(a)                                     # freed through the creator's handle: throws, under the lock
+        checkinstances(st, prod(dims))                # a TLAS total past maxInstanceCount throws (B4.8, B.8)
         keep = keepbytes(contents, st, dims)          # Keep: the smaller of the requested sizes so far and now
         st.dims = dims                                # what length(a) reports
         st.resizable = true
@@ -567,7 +612,8 @@ resizesteps(st, old, new::Committed, c) =
 resizesteps(st, ev::Evicted, new::RestoreStorage, c) =   # restored into storage of the requested size
     (Restore(st, ev.host, new.storage, min(c.keep, sizeof(ev.host))), CellWrite(st, address(new.storage), c.dims))
 # A move is a copy, a write of the array: applied, it waits for every earlier
-# access on any queue (B.4), and the old storage is retired with its token. A
+# access on any queue (B.4), and the old storage is retired with its token;
+# commit! raises the array's capacity to what the new storage holds (B.2). A
 # step whose storage no longer fits (prepared for a size another change
 # replaced) is Again. A move of storage a plan recorded by handle marks that
 # plan's parts for recording again (B.4, B.6).
@@ -585,9 +631,10 @@ resizesteps(st, ev::Evicted, new::RestoreStorage, c) =   # restored into storage
 # region like any store, and the applying submission scatters them (a copy
 # kernel in its prefix, in sequence like any step). The only wait a store
 # can make is acquiring its upload region under memory pressure (acquire!,
-# internals.jl section 9), before any lock.
+# internals.jl section 9), before any lock; it never waits for a run (B4.9).
 function Base.setindex!(a::MantleArray{T,N,<:Device}, data, r::AbstractRange) where {T,N}
     length(data) == length(r) || throw(DimensionMismatch("setindex! of $(length(data)) elements into $(length(r))"))
+    checkwritable(a)                                  # B4.6, before the region is acquired
     st = a.state
     span = parentbytes(a, r)
     up = acquireupload!(pool(st), length(span))       # host-visible system memory, before any lock
@@ -596,7 +643,7 @@ function Base.setindex!(a::MantleArray{T,N,<:Device}, data, r::AbstractRange) wh
     try
         change!(((st, Write()),)) do
             usable(a)                                 # freed through the creator's handle: throws, under the lock
-            checkbounds(a, r)                         # against the requested size
+            checkindex(Bool, 1:requestedlength(a), r) || throw(BoundsError(a, r))   # the requested length (B.2)
             Change[Store(nextseq!(st), st, up, span); (update(t, st) for t in st.readers)...]
         end
         ok = true
@@ -616,21 +663,25 @@ Base.copyto!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T} = (a[
 # copy! with a new length: the Resize (old contents not kept) and the Store,
 # one after the other in the sequence, pended in one locked call so nothing
 # can come between them.
-Base.copy!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T} = copy!(a, data, a.role)
 # The same length is a plain store: nothing about the array's size changes,
 # so no Resize, no `resizable`, and no stale mark for plans that launch
 # directly over it (RayMakie's setattribute! calls copy! on every update).
-function copy!(a, data, ::Root)
+# A view keeps its length (copyintoview!, below).
+function Base.copy!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T}
+    isview(a) && return copyintoview!(a, data)       # the array's own fields (B.2)
+    checkwritable(a)                                 # B4.6, before the region is acquired
     st = a.state
     n = length(data)
-    up = acquireupload!(pool(st), sizeof(eltype(a)) * n)   # before any lock (B3.18)
-    copyto!(hostview(up, eltype(a)), vec(data))      # the one copy
+    up = acquireupload!(pool(st), sizeof(T) * n)     # before any lock (B3.18)
+    copyto!(hostview(up, T), vec(data))              # the one copy
     ok = false
     try
         change!(((st, Write()),)) do
             usable(a)
             span = parentbytes(a, 1:n)
-            n == length(a) && return Change[Store(nextseq!(st), st, up, span); (update(t, st) for t in st.readers)...]
+            n == requestedlength(a) &&               # the requested length (B.2): no wait under the lock
+                return Change[Store(nextseq!(st), st, up, span); (update(t, st) for t in st.readers)...]
+            checkinstances(st, n)                    # a TLAS total past maxInstanceCount throws (B4.8, B.8)
             dims = (n,)
             st.dims = dims
             st.resizable = true
@@ -644,7 +695,7 @@ function copy!(a, data, ::Root)
     end
     return a
 end
-copy!(a, data, ::Derived) = length(a) == length(data) ? (a[1:length(data)] = data; a) :
+copyintoview!(a, data) = length(a) == length(data) ? (a[1:length(data)] = data; a) :   # setindex! checks readonly
     throw(ArgumentError("copy! of $(length(data)) elements into a view of $(length(a)); resize its parent"))
 
 # ── B.6 Dependents ────────────────────────────────────────────────────────────
@@ -670,8 +721,9 @@ end
 #   (c)), not a recompile; the stale flag is not set for them.
 # Marking stale sets the plan's stale flag and the graph's recompile flag,
 # through weak references; a collected plan or graph is skipped. Compile reads
-# the requested state: an array is resizable from its first resize! call (the
-# `resizable` flag, a host fact set at the call), whether or not the Resize
+# the requested state: an array is resizable from its creation with a
+# capacity or from its first resize! call (the `resizable` flag, a host fact
+# set at creation or at the call), whether or not the Resize
 # has been applied, so a plan compiled after the call launches over it
 # indirectly; a handle compile records is the storage applied so far, and a
 # pending move re-records it when applied.
@@ -696,7 +748,9 @@ end
 # here). The plan drops that hold when it retires (unregister!).
 # Registering adds the plan to the `namers` of every resource it names, with
 # its use from compile (internals.jl section 8; the members of the composites
-# it names reach it through their readers snapshots), and puts the resources
+# it names reach it through their readers snapshots). A value GPURef's slot is
+# such a resource like any other (B4.9): addnamer! names it, and a store into
+# it is ordered against the plan's runs like any store. It puts the resources
 # it reads or writes that another plan names, or that have eager accesses,
 # members included, into its own inbox: its first run waits for their other
 # users like any later run. The sync locks of the plans naming those
@@ -723,7 +777,6 @@ function register!(pl::Plan)
             foreach(((r, _),) -> shared(r, pl) && pushinbox!(pl, r), xs)
             foreach(d -> (d.state.dependents[WeakPlan(pl)] = d.dependence; holdhandletarget!(pl, d.state)), pl.depends)
             foreach(c -> push!(c.structure.commands, c), accelcommands(pl))   # marked by later changes (B.8)
-            foreach(r -> lock(() -> push!(r.plans, WeakPlan(pl)), r.lock), valuerefs(pl))   # entry marks (internals.jl section 7)
             Registered()
           end
         end
@@ -775,6 +828,10 @@ extents(s, r::LengthOf) = extents(s, r, fixedness(r.array.state), r.array.state.
 extents(s, r::LengthOf, ::Fixed, ::HostLength) = (depend!(s, r.array; direct = true); Direct(length(r.array)))
 extents(s, r::LengthOf, _, _) = Indirect(Bound(r.array))       # the head (or a prepare node) writes the command
 fixedness(st) = st.resizable ? Resizable() : Fixed()          # (a field typed by state in real code)
+# lengthof(a) among a launch's arguments makes a's length kernel-written: the
+# call (a declaration or an eager launch) sets lengthsource to DeviceLength
+# under a's lock and marks the plans that launch over a directly, like a
+# resize! (B.6); launches over a are indirect from then on (above).
 
 # Temporaries sized from an array: a size expression evaluated at compile.
 # Host length: twice the current length. Kernel-written length: the capacity.
@@ -783,13 +840,15 @@ MantleArray(dev::Device, T, s::SizedBy) = MantleArray(dev, T, s.f(sizing(s.array
 
 # An array created from data uploads now (B3.18): creation is not a change,
 # since no graph can name the array before it exists. The storage is
-# allocated, then the data is streamed from the caller's memory (or a mapped
-# file, MantleArray(path; mmap = true), B3.9) in chunks, each copied into an
-# upload region and written by one eager submission cut to the submission
+# allocated, then the data is streamed from the caller's memory (an mmapped
+# file is a plain Array the caller passes, B4.6) in chunks, each copied into
+# an upload region and written by one eager submission cut to the submission
 # budget, or written directly where the storage is host-visible. At most a
 # few chunks are in flight, so the host memory it needs is bounded by them,
 # not by the array. It returns once every chunk is submitted; the writes are
-# recorded on the array's sync state, so later uses wait for them.
+# recorded on the array's sync state, so later uses wait for them. With
+# `readonly = true` (B4.6) the state also keeps a reference to `data`, no copy,
+# which a restore after eviction uploads from.
 function MantleArray(dev::Device, data::AbstractArray{T,N}) where {T,N}
     a = MantleArray(dev, T, size(data)...)
     for chunk in uploadchunks(dev, sizeof(data))      # byte ranges sized from caps(dev) and the budget
@@ -806,7 +865,7 @@ sizing(a, ::DeviceLength) = a.state.capacity
 
 # Draws: vertex, index and instance counts are numbers or LengthOf
 # references; indirect draws from Bound slots unless the array is fixed, and
-# always inside a when! block (the count is multiplied by the flag;
+# always for a when! draw (the count is multiplied by the Bool flag, B4.1;
 # internals.jl section 2). A count of 0 draws nothing. Vertices are pulled by
 # address. An index buffer is bound by handle (a dependence with handle =
 # true; open decision 17).
@@ -1044,6 +1103,21 @@ built!(s, ::Update, c) = nothing
 # that touches the structure applies the Build (coalesced with any pending
 # Update into a Build), and the refit's command carries builtcount.
 
+# The instance limit (B4.8): a TLAS total past the device's maxInstanceCount
+# (caps(dev).maxinstances) throws at the call that raises it: push!, a resize!
+# or copy! of a source (B.5), a rebind of a source GPURef (B.8b). Checked
+# inside `apply`, under the TLAS's lock (change! locks an array's readers,
+# transitively through a GPURef), before anything is pended, so a throw
+# changes nothing. The total is the host view; the capacity doubles up to the
+# same limit (below).
+checkinstances(t::TLAS, total::Integer) = total <= caps(t.device).maxinstances ||
+    throw(ArgumentError("a TLAS total of $total instances is past the device's maxInstanceCount"))
+# A source (an array state or an array GPURef) about to hold n elements: every
+# TLAS over it, directly or through a GPURef, with its ranges over the source
+# counted at n.
+checkinstances(src::Union{ArrayState,ArrayBox}, n) =
+    foreach(t -> checkinstances(t, totalwith(t, src, n)), tlasreaders(src))
+
 # Changes, through change! (B.4): requests only. One locked call over the
 # TLAS (its range table and records share its record) and the range's
 # members: the member holds are taken under their locks (holdmember!, B.8b),
@@ -1055,7 +1129,6 @@ built!(s, ::Update, c) = nothing
 # upload region of one RangeEntry acquired before the lock (B3.18). A throw
 # drops the holds taken so far and the region.
 function Base.push!(t::TLAS, blas::BLAS, source::Union{MantleArray,ArrayBox}; scale = 1f0, rotation = nothing)
-    checkinstances(t, source)                        # a total past the device's maxInstanceCount throws here
     r = InstanceRange(blas, source, (scale, rotation))
     uses = ((t, Write()), ((m, Read()) for m in holdsof(r))...)   # the range's arrays, a GPURef, the BLAS
     up = acquireupload!(pool(t), sizeof(RangeEntry))
@@ -1063,6 +1136,8 @@ function Base.push!(t::TLAS, blas::BLAS, source::Union{MantleArray,ArrayBox}; sc
     ok = false
     try
         change!(uses) do
+            checkinstances(t, total(t) + instances(r))   # past maxInstanceCount: throws, nothing taken yet (B4.8);
+                                                         #   instances(r): its source's requested length
             for m in holdsof(r)                          # under each member's lock: the hold and the count together
                 holdmember!(m); push!(held, m)
             end
@@ -1117,8 +1192,10 @@ end
 # b's index array.
 
 # Capacity: storage and scratch for `capacity` instances, doubling until the
-# total fits, starting at 64; it does not shrink on its own, since builds and
-# refits carry the exact count and the capacity costs memory only (expected
+# total fits, starting at 64, capped at the device's maxInstanceCount (B4.8:
+# a total past it throws at the call that raises it, checkinstances above);
+# it does not shrink on its own, since builds and refits carry the exact
+# count and the capacity costs memory only (expected
 # from the API: the driver gets the count, not the capacity; not measured with
 # storage sized beyond the count, to confirm in phase 5). Growing, hardware: a
 # new AS object on a new pool Region (AS storage cannot be sparse) and new
@@ -1161,18 +1238,21 @@ capacitysteps(t::TLAS{Software}, g::Capacity) = softwaresteps(t, g)   # the five
 # ── B.8b GPURef of an array ───────────────────────────────────────────────────
 
 # GPURef(dev, a::MantleArray) (Simon, 2026-10-02): the GPURef for an array.
-# Like the GPURef for a value, a host-side box whose content the next run
-# sees; here the content is an array, replaceable between runs without
+# The GPURef for a value is one slot in device memory whose address every
+# plan and piece bakes, and `r[] = v` a scheduled Store into it (B4.9); the
+# GPURef for an array is a cell holding its target's cell index, and `r[] = b`
+# a scheduled Rebind, so the target is replaceable between runs without
 # recompiling. RayMakie's plot attributes are GPURefs of arrays, so a plot made
 # from a device array reads that array (zero-copy) and
 # update!(plot; positions = other) replaces it (recording-plan.md, Graphics).
 # A composite with one member: it holds its target (a composite hold), is
 # one of its target's readers, and has readers of its own (TLASes with a
 # range over it).
-abstract type GPURef end
-# The value form, ValueBox{T} <: GPURef, is internals.jl section 7: copied into
-# the run's entry, a scalar a kernel takes by value.
-mutable struct ArrayBox{T,N} <: GPURef
+abstract type GPURef{T} end                      # T: the value type of a ValueBox, the target type of an ArrayBox
+# The value form, ValueBox{T} <: GPURef{T}, is internals.jl section 7: one slot in
+# device memory whose address every plan and piece bakes; `r[] = v` is a
+# scheduled Store into it, applied like any store, and never waits (B4.9).
+mutable struct ArrayBox{T,N} <: GPURef{AbstractArray{T,N}}
     const device::Device                # device-only: its target is a device array
     target::MantleArray{T,N}            # host view (r[]), replaced under the lock at the call
     applied::MantleArray{T,N}           # what its cell points at: set when the Rebind's step commits, under
@@ -1221,10 +1301,8 @@ end
 discard!(r::ArrayBox) = retire!(pool(r), r.cell, ())   # a box that never held anything: its cell (and record)
 GPURef(dev::Device, v) = ValueBox(dev, v)
 # The box's cell holds a cell index, not a view's offset and strides, so its
-# target is a root array: a view throws.
-rootonly(a::MantleArray) = rootonly(a.role)
-rootonly(::Root) = nothing
-rootonly(::Derived) = throw(ArgumentError("a GPURef of an array targets a root array, not a view"))
+# target is a root array: a view throws (the array's own fields, B.2).
+rootonly(a::MantleArray) = isview(a) ? throw(ArgumentError("a GPURef of an array targets a root array, not a view")) : nothing
 
 # r[] = b: same element type and dimension count (the shader or kernel type is
 # unchanged, so nothing recompiles); b is a root device array. A request like
@@ -1245,11 +1323,12 @@ function Base.setindex!(r::ArrayBox{T,N}, b::MantleArray{T,N,<:Device}) where {T
     try
         change!(((r, Write()), (b.state, Read()))) do    # r brings its target
             usable(r)                                    # a freed GPURef throws
+            checkinstances(r, requestedlength(b))        # a TLAS total past maxInstanceCount throws (B4.8, B.8)
             holdmember!(b.state)
             held = true
             old = r.target
-            cs = Change[Rebind(nextseq!(r), r, b);
-                        (rebound(t, length(old), length(b)) for t in r.readers)...]   # Update, or Build + mark!
+            cs = Change[Rebind(nextseq!(r), r, b);       # requested lengths (B.2): no wait under the lock
+                        (rebound(t, requestedlength(old), requestedlength(b)) for t in r.readers)...]   # Update, or Build + mark!
             r.target = b                                 # what r[] reports
             r.members = MemberSet((b,))                  # a new snapshot
             addreader!(b, r)                             # the box follows its target
@@ -1301,8 +1380,8 @@ Base.getindex(r::ArrayBox) = r.target
 # texture's index is a value in its cell; shaders read it from their slots.
 # A texture written in place keeps its index. A regrown or replaced texture
 # gets a new, unused index, scheduled like any change: the applying
-# submission's prepare! creates the new image (texels kept where the sizes
-# overlap, decision pending), its descriptor is written into the unused index
+# submission's prepare! creates the new image (a copy step keeps the texels
+# where the sizes overlap, B4.8), its descriptor is written into the unused index
 # before the prefix (no pending command buffer uses that index,
 # descriptorsets.adoc:793-807), the cell write is a step, and the old index
 # and image are retired with that submission's token, then reused. A restored image (internals.jl
@@ -1326,7 +1405,8 @@ Base.getindex(r::ArrayBox) = r.target
 
 caps(dev)                    # facts, no policy: .sparseresidency, .sparsepage, .sparseaddressspace,
                              #   .accelbyaddress, .separatehostheap (eviction frees device memory),
-                             #   .display (drives a monitor), .inlinestore and .inlinealign (B.5);
+                             #   .display (drives a monitor), .inlinestore and .inlinealign (B.5),
+                             #   .maxinstances (maxInstanceCount, B.8; field names open, G3);
                              #   core's sparsethreshold, reservesize (B.1) and submission budget are
                              #   computed from them
 countsource(dev)             # CountRecorded() (Vulkan) | CountFromMemory() (Metal): where a TLAS build gets its count
@@ -1338,8 +1418,10 @@ accelsizes(dev, path, n)     # storage and scratch for n instances or a geometry
 placeaccel(dev, path, region)        # AS object on a pool Region
 acceladdress(dev, as)        # vkGetAccelerationStructureDeviceAddressKHR | gpuResourceID
 emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; the exact count (Vulkan, in an AccelCommand) or from a cell (Metal)
-emitstore!(b, dst, bytes)                       # a small store in a change prefix: vkCmdUpdateBuffer; Metal, CUDA,
-                                                #   HIP: an upload region prepare! acquired before the locks (B.3, B.4)
+emitstore!(b, dst, upload)                      # an inline store in a change prefix, from the store's upload region
+                                                #   (B.5): vkCmdUpdateBuffer within .inlinestore; Metal, CUDA, HIP:
+                                                #   inline limit 0, a copy from the store's upload region, acquired
+                                                #   at the call (B3.18)
 emitdraw!(b, node, cmd::CompiledDraw)           # inside beginrender!/endrender!; direct or indirect, as compile decided
 bindindices!(b, node, storage)                  # vkCmdBindIndexBuffer on the storage's buffer (open decision 17)
 tableentry!(dev, table, index, texture)         # a host write to an unused index (not a recorded command)
@@ -1408,11 +1490,11 @@ devicearg(dev, t::TLAS{Software}) = StaticTLAS(map(a -> devicearg(dev, a), field
 # legal).
 function declare!(g, vp::VolPath, scene)
     fill!(vp.active, Int32(1))
-    repeat!(g, vp.maxdepth ÷ 2; while_nonzero = vp.active) do i
-        trace!(g, vp.pipeline, scene.tlas, (vp.queue, vp.hits), launchrange(vp.queue))
-        dispatch!(g, shade!, (vp.hits, vp.queue, lengthof(vp.queue), vp.active, scene.materials, scene.tlas),
-                  launchrange(vp.queue))         # writes the queue's next length and active = length > 0
-    end
+    bounce = Group(g, "bounce")                  # a value; launches only (B4.2)
+    trace!(bounce, vp.pipeline, scene.tlas, (vp.queue, vp.hits), launchrange(vp.queue))
+    dispatch!(bounce, shade!, (vp.hits, vp.queue, lengthof(vp.queue), vp.active, scene.materials, scene.tlas),
+              launchrange(vp.queue))             # writes the queue's next length and active = length > 0
+    repeat!(bounce, vp.maxdepth ÷ 2; while_nonzero = vp.active)   # attaches the group; active is a count (B4.1)
 end
 # Gone: notify_scene_changed dropping the integrator's plans (Hikari
 # scene.jl:141-151, from nine scene mutators and on accel.dirty);
@@ -1432,7 +1514,7 @@ struct RenderObject
     pipeline::GraphicsPipeline                 # with the arguments' types: the pipeline key
     attributes::NamedTuple                     # name => GPURef of an array; created once with the plot
     owned::NamedTuple                          # name => the plot's own MantleArray (host data lands here)
-    visible::MantleArray{UInt32,1}             # the when! flag around its draw (a store: no recompile)
+    visible::MantleArray{Bool,1}               # the when! flag of its draw (B4.1; a store: no recompile)
     rect::MantleArray{Vec4f,1}                 # the scene's rectangle, shared by the scene's plots (one store
 end                                            #   per layout change), applied in the vertex stage
 
@@ -1444,7 +1526,7 @@ setattribute!(r::RenderObject, name, data::MantleArray) =                  # a d
     (r.attributes[name][] = data)
 setattribute!(r::RenderObject, name, value) =                              # one value
     setattribute!(r, name, [value])                                        # a one-element store (inline, B.3)
-setvisible!(r::RenderObject, v::Bool) = (r.visible[1:1] = [UInt32(v)])   # the head multiplies the draw's count by it
+setvisible!(r::RenderObject, v::Bool) = (r.visible[1:1] = [v])          # the head multiplies the draw's count by it
 
 # The frame graph, declared once per screen. Each plot is a piece of the
 # pass (decisions B3.17): inserting or deleting one compiles and records that
@@ -1457,10 +1539,8 @@ function declareframe!(g, screen)
 end
 insertplot!(screen, r::RenderObject) =                                    # Makie's insert!
     r.piece = insert!(screen.pass) do                                     # appended: the list order is the draw order
-        when!(screen.pass, r.visible) do
-            draw!(screen.pass, r.pipeline, (values(r.attributes)..., r.rect, screen.camera),
-                  launchrange(r.attributes.positions))                   # indirect: a GPURef of an array
-        end
+        when!(screen.pass, r.visible, r.pipeline, (values(r.attributes)..., r.rect, screen.camera),
+              launchrange(r.attributes.positions))                       # one when! draw (B4.1); indirect: a GPURef of an array
     end
 deleteplot!(screen, r::RenderObject) = delete!(screen.pass, r.piece)     # Makie's delete!
 
@@ -1516,6 +1596,6 @@ end
 # Per frame, steady state: pending changes applied at the start of the frame's
 # submission, the head (1.3-3.5 µs measured, v2_*.txt), indirect draws, a
 # refit or build only if one is pending, the trace. No recompile and no
-# re-record. The host waits only where a value GPURef in the entry changed
-# (the previous run must have finished, plan Run); per-frame values such as
-# the camera are one-element arrays written by stores, which never wait.
+# re-record. The host never waits for a run: value GPURef stores and
+# per-frame stores (the camera, a one-element array) are scheduled changes
+# (B4.9).

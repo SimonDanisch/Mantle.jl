@@ -58,8 +58,9 @@ total = sum(a)
 
 # ── Graphs: arrays on a graph declare ─────────────────────────────────────────
 
-# 10. An array on a graph declares: a call on it adds kernel nodes. By default
-#     its contents last only during a run.
+# 10. An array on a graph declares: a call on it adds kernel nodes. Its
+#     contents last only during a run; what must survive runs is a device
+#     array the graph names.
 g = Graph(dev)
 x = MantleArray(g, Float32, 1024)
 fill!(x, 0f0)                   # a node of g; nothing runs now
@@ -76,18 +77,20 @@ kvcache = MantleArray(dev, zeros(Float16, 64, 20, 32, 448))  # a transformer's k
 fill!(kvcache, 0f0)             # only dev arrays: runs now, once
 out = MantleArray(dev, Float32, 512)
 copyto!(out, y)                 # y lives on g: a copy kernel node; every run writes `out`
-prev = MantleArray(g, Float32, 512; persistent = true)       # kept between runs, used only by g
+prev = MantleArray(dev, Float32, 512)          # kept between runs: a device array g names
 prev .= 0.9f0 .* prev .+ 0.1f0 .* y
 
 # 13. A raw kernel in a graph: argument tuple plus an ndrange.
 dispatch!(g, scale!, (x, 2f0), 1024)
 
-# 14. Generic code that reads elements cannot run on graph arrays: no tracing.
+# 14. Code that reads elements throws at the read (B4.3); code that only
+#     launches (KA kernels, broadcasts, GPUArrays' generic code) declares into
+#     the graph.
 function myhelper!(v)
     for i in eachindex(v); v[i] = v[i]^2; end
     return v
 end
-myhelper!(x)                    # error: a graph array has no data at declaration
+myhelper!(x)                    # throws at the read v[i]: a graph array has no data at declaration
 x .= x .^ 2                     # broadcasting declares: one kernel node
 
 run!(g); Array(out)             # compiles, records, runs; reads the output
@@ -107,7 +110,7 @@ end
 #     exactly bias + gelu, so yd is written once. A graph that asks for nothing
 #     (RayMakie's) runs no rewrite.
 gd   = Graph(dev; rewrites = (FuseEpilogues(),))  # (names open)
-xd   = MantleArray(gd, Float32, 1024; hostwritten = true)
+xd   = MantleArray(dev, Float32, 1024)        # per-run host data: a device array written by stores (B4.9)
 yd   = MantleArray(gd, Float32, 512)
 bias = MantleArray(dev, zeros(Float32, 512))
 yout = MantleArray(dev, Float32, 512)
@@ -117,8 +120,8 @@ copyto!(yout, yd)
 xd[:] = rand(Float32, 1024); run!(gd)
 
 # 17. The same mul! selects per device: our kernel on Vulkan, an MLX kernel or
-#     an MPSGraph executable on Metal, CUTLASS or cuBLAS on CUDA. Inside a
-#     repeat! body only kernel candidates qualify.
+#     an MPSGraph executable on Metal, CUTLASS or cuBLAS on CUDA. In a Group
+#     and in a when! launch only kernel candidates qualify.
 
 # 18. Host work in the middle of a call: a host node, its writes declared.
 #     Mantle submits the work before it, waits, calls `align` on this thread,
@@ -130,7 +133,7 @@ xd[:] = rand(Float32, 1024); run!(gd)
 gh        = Graph(dev)
 durations = MantleArray(gh, Int32, 512)
 idx       = MantleArray(gh, Int32, 8192)
-phonemes  = MantleArray(gh, Float32, 512, 80; hostwritten = true)
+phonemes  = MantleArray(dev, Float32, 512, 80) # per-run host data: a device array written by stores (B4.9)
 predictdurations!(durations, phonemes)
 dispatch!(gh, HostCall(align), (durations, idx); writes = (idx,))
 frames = MantleArray(dev, Float32, 80, 8192)
@@ -140,36 +143,42 @@ phonemes[:] = embedphonemes("hello"); run!(gh)
 # ── One call, one graph ───────────────────────────────────────────────────────
 
 # 19. Exported modules are called like functions on graph arrays: all of them
-#     and the work between them are one graph. A loop with a fixed count has one
-#     body, compiled once; it launches GPU work only, and `i` is written into
-#     their argument slots before each iteration.
+#     and the work between them are one graph. A loop with a fixed count is a
+#     launch group, compiled once (B4.2): a value that holds GPU launches only,
+#     declared into it by passing the group to the functions that dispatch.
+#     Before each iteration the loop head writes the iteration index into the
+#     argument slots of the group's launches that take it. A group is not a
+#     location: allocations belong to the graph, not the group (B4.4), so the
+#     transformer's output and temporaries are gq's transients.
 textencoder, transformer, vae = loadqwen(dev)   # models with weights on dev (name open)
 gq     = Graph(dev)
-ids    = MantleArray(gq, Int32, 77; hostwritten = true)
+ids    = MantleArray(dev, Int32, 77)            # per-run host data: a device array written by stores (B4.9)
 noise  = MantleArray(dev, randn(Float16, 64, 64, 16))
 sigmas = MantleArray(dev, sigmaschedule(50))    # per-step constants
-h      = textencoder(ids)
+h      = textencoder(adapt(Mantle.Device(gq), ids))   # ids aliased into gq, so the call declares (B4.4)
 lat    = MantleArray(gq, Float16, 64, 64, 16)
 copyto!(lat, noise)
-repeat!(gq, 50) do i
-    v = transformer(lat, h, sigmas, i)
-    eulerstep!(lat, v, sigmas, i)
-end
+step   = Group(gq, "step")                      # a value; launches only
+i      = iteration(step)                        # the loop index the loop head writes (name open)
+v      = transformer(step, lat, h, sigmas, i)   # its launches go into step; v is gq's
+eulerstep!(step, lat, v, sigmas, i)
+repeat!(step, 50)                               # attaches the group: 50 iterations per run of gq
 image = MantleArray(dev, Float16, 1024, 1024, 3)
 copyto!(image, vae(lat))
-ids[:] = tokenize("a red bicycle")              # kept on the host until gq compiles
+ids[:] = tokenize("a red bicycle")              # a store; gq's first run applies it
 run!(gq)
 
-# 20. A loop the device ends: generate until a stop token.
+# 20. A loop the device ends: generate until a stop token. `running` is an
+#     integer count on the device (B4.1); the loop ends on the GPU once it is 0.
 gw2     = Graph(dev)
 tokens  = MantleArray(dev, Int32, 448)          # output: the host reads it after the run
 running = MantleArray(gw2, Int32, 1)
 logits  = MantleArray(gw2, Float32, 51865)
 fill!(running, Int32(1))
-repeat!(gw2, 448; while_nonzero = running) do i
-    decodestep!(logits, kvcache, tokens, i)
-    sampletoken!(tokens, running, logits, i)    # writes 0 into running at the stop token
-end
+dec     = Group(gw2, "decode")                  # a value; launches only
+decodestep!(dec, logits, kvcache, tokens, iteration(dec))
+sampletoken!(dec, tokens, running, logits, iteration(dec))   # writes 0 into running at the stop token
+repeat!(dec, 448; while_nonzero = running)
 
 # 21. A length only the device knows: a resizable array. The kernel that
 #     decides it writes it into the array's cell; a prepare kernel then writes
@@ -184,64 +193,65 @@ shade!(film, hits)              # launches over launchrange(hits): indirect, fro
 run!(gr0)
 
 gv    = Graph(dev)
-mel   = MantleArray(gv, Float32, 512, 8192; hostwritten = true)
+mel   = MantleArray(dev, Float32, 512, 8192)  # per-run host data: a device array written by stores (B4.9)
 audio = MantleArray(dev, Float32, 0; capacity = 8192 * 300)   # an output of unknown length
-vocoder!(audio, mel)
+vocoder!(audio, adapt(Mantle.Device(gv), mel))                 # mel aliased into gv, so the call declares (B4.4)
 mel[:] = melspectrogram("hello world")
-run!(gv); devicesize(audio)     # (name open) reads the cell back: waits for the write
+run!(gv); length(audio)         # waits for vocoder!'s write, reads the cell back (B4.10)
 
-# 22. Launches that run only when a flag is set, without recompiling.
+# 22. A launch that runs only when a flag is set, without recompiling. One
+#     launch per when!; the flag is a Bool on the device (a GPURef{Bool} or a
+#     one-element Bool array), enforced by the method's types: any other flag
+#     is a MethodError (B4.1).
 gm2   = Graph(dev)
 bank  = MantleArray(dev, Float32, 256, 4096)    # MatAnyone's memory, kept between calls
 feats = MantleArray(gm2, Float32, 256, 4096)
-frame = MantleArray(gm2, Float32, 3, 480, 854; hostwritten = true)
+frame = MantleArray(dev, Float32, 3, 480, 854)  # per-run host data: a device array written by stores (B4.9)
 encodeframe!(feats, frame)
-firstframe = GPURef(dev, Int32(1))
-when!(gm2, firstframe) do                       # launches only; runs where firstframe ≠ 0
-    initmemory!(bank, feats)
-end
+firstframe = GPURef(dev, true)
+when!(gm2, firstframe, initmemory_kernel!, (bank, feats), size(bank))   # one launch; runs where firstframe is true
 readmemory!(bank, feats)
 
 # ── Compile, record, run ──────────────────────────────────────────────────────
 
 # 23. The graph manages its plan: the first run! compiles (kernels, order,
 #     placement, queues, submissions) and records once; later runs only run.
-frame[:] = decodeframe("clip.mp4", 1); run!(gm2)   # compiles, records, runs initmemory!
-firstframe[] = Int32(0)                            # marks gm2's plan: its next run writes the entry
-frame[:] = decodeframe("clip.mp4", 2); run!(gm2)   # initmemory!'s count is written times 0: skipped on the GPU; same recording
+frame[:] = decodeframe("clip.mp4", 1); run!(gm2)   # compiles, records, runs initmemory_kernel!
+firstframe[] = false                               # a store into its slot, applied by gm2's next run; never waits
+frame[:] = decodeframe("clip.mp4", 2); run!(gm2)   # initmemory_kernel!'s count is written times false: skipped on the GPU; same recording
 
 # 24. Per-frame values: a value that changes every frame (a camera matrix) is a
 #     one-element device array written by a store. A store of up to 64 KiB is
-#     inline: its bytes stay on the host until the next submission that
-#     touches the array writes them in front of its own work (emitstore!), with
-#     no staging region and no host wait. A value GPURef is for a scalar a
-#     kernel takes by value: a store into it marks the plans whose entry holds
-#     it, and only a marked plan's run writes the entry, after waiting for its
-#     previous run; the head node then writes it where kernels read it.
+#     inline: the call copies its bytes into an upload region, and the next
+#     submission that touches the array writes them in front of its own work
+#     (emitstore!), with no host wait (B3.18). A value GPURef is for a scalar a
+#     kernel takes by value: one slot in device memory whose address every
+#     plan bakes; `r[] = v` is a scheduled store; it never waits and marks no
+#     plan (B4.9).
 gc       = Graph(dev)
 cam      = MantleArray(dev, [Mat4f(I)])         # a one-element array
 exposure = GPURef(dev, 1f0)                     # a scalar the kernel takes by value
 verts    = MantleArray(dev, rand(Point3f, 1000); capacity = 4096)   # resizable
 depth    = MantleArray(gc, Float32, 1920, 1080) # a transient: the calls declare into gc
 img2     = MantleArray(dev, RGBA{Float32}, 1920, 1080)   # output, shown after the run
-pts      = MantleArray(gc, Point3f, 64; hostwritten = true)
+pts      = MantleArray(dev, Point3f, 64)        # per-run host data: a device array written by stores (B4.9)
 rasterize!(depth, verts, cam)
 shade!(img2, depth, verts, pts, cam, exposure)
 pts[:] = rand(Point3f, 64)
 cam[1:1] = [lookat(Vec3f(0, 0, 5), Vec3f(0), Vec3f(0, 1, 0))]; run!(gc)
 cam[1:1] = [lookat(Vec3f(1, 0, 5), Vec3f(0), Vec3f(0, 1, 0))]; run!(gc)   # inline store, applied by this run; no host wait
-exposure[] = 1.5f0; run!(gc)    # marks gc's plan: this run waits for the previous one, then writes the entry
+exposure[] = 1.5f0; run!(gc)    # a store into the slot, applied by this run; no wait
 
-# 25. Per-run host data goes into the graph's entry: `pts[:] = data` waits for
-#     gc's previous run, then writes the entry; the head node copies it.
+# 25. `pts` is a device array gc names; `pts[:] = data` is a scheduled store
+#     applied by gc's next run; it never waits.
 pts[:] = rand(Point3f, 64)
 run!(gc)
 
-# 26. A store into a device array is pending: the data is copied now (kept on
-#     the host for a store of up to 64 KiB like this one, into staging memory
-#     for a larger one), and gc's next run applies it in front of its own work
+# 26. A store into a device array is pending: the data is copied now into an
+#     upload region (written inline up to 64 KiB, copied from the region
+#     beyond; B3.18), and gc's next run applies it in front of its own work
 #     (after the work still using verts). Per-frame values are one-element
-#     arrays written by a store (example 24) or hostwritten transients.
+#     arrays written by a store (example 24).
 verts[1:3] = [Point3f(0), Point3f(1), Point3f(2)]
 run!(gc)
 
@@ -261,8 +271,9 @@ run!(gc)
 #     compile. Nothing is measured and re-recorded.
 submissions(gq)
 
-# 29. Two graphs sharing an array: the second waits on the first's token, for
-#     that array only. No full barrier, no extra command buffer.
+# 29. Two graphs sharing an array: decode's run waits for encode's complete
+#     last run, found through that array (B3.15). No full barrier, no extra
+#     command buffer.
 features = MantleArray(dev, Float16, 256, 64, 64)
 encode = encodegraph(features); decode = decodegraph(features)
 run!(encode); run!(decode)      # decode reads what encode wrote
@@ -322,9 +333,9 @@ a3 = nothing; GC.gc()           # the finalizer retires R with token 7
 a4 = MantleArray(dev, Float32, 2^24)            # R if 7 has passed, other memory if not
 
 # 37. Most memory is the graph's and goes with the graph. Its transients are
-#     arena offsets: a run allocates and frees nothing. Its argument block,
-#     entry and recordings are released together once its last run has
-#     finished, and it stops counting toward the arena's size.
+#     arena offsets: a run allocates and frees nothing. Its argument block and
+#     recordings are released together once its last run has finished, and it
+#     stops counting toward the arena's size.
 free!(big)                      # or drop `big` and let the GC collect it
 run!(big)                       # error: the graph was freed
 
@@ -341,20 +352,21 @@ free!(e1); free!(d1)            # last hold gone: retired, released once both la
 #     after see the new one.
 kv = MantleArray(dev, Float16, 64, 20, 32, 448; capacity = 64 * 20 * 32 * 4096)
 resize!(kv, 896)                # (64, 20, 32, 896): pages mapped, a cell write
-resize!(kv, 8192)               # beyond the reserve: a move to a new reserve; only plans that recorded its handle recompile
+resize!(kv, 8192)               # beyond the capacity: a move; the parts that recorded its handle are recorded
+                                # again (open decision 17, ruled (c), B3.11); plans whose temporaries were sized
+                                # from its capacity recompile once (B4.10)
 
 # 40. Pressure: an allocation that would exceed the device's budget makes core
 #     release passed work, then, in order and retrying after each step: unmap
 #     idle graphs' pages, trim empty blocks, collect garbage so dropped arrays
-#     retire, wait for retiring storage oldest first, then (proposal, open
-#     decision 16) evict the least recently used idle resources and wait for
-#     their eviction copies, and only then throw OutOfDeviceMemory. It never
-#     flushes a queue.
+#     retire, wait for retiring storage oldest first, then (ruled B3.9) evict
+#     the least recently used idle resources and wait for their eviction
+#     copies, and only then throw OutOfDeviceMemory. It never flushes a queue.
 budget(dev)                     # VK_EXT_memory_budget on Vulkan, cuMemGetInfo on CUDA
 huge = MantleArray(dev, Float32, 2^31)          # may trigger the steps above
 
-# 40b. Eviction (proposal, open decision 16). Two models that each need 90% of
-#      the device, run one after the other with no host wait. Their transients
+# 40b. Eviction (ruled B3.9). Two models that each need 90% of the device,
+#      run one after the other with no host wait. Their transients
 #      share one arena part (the larger one's peak). When dnn_2's run cannot
 #      get memory, acquire!'s pressure steps end by evicting dnn_1's idle
 #      weights to host memory: no plan that names them is running, though
@@ -396,7 +408,7 @@ end
 
 # 43. One core TLAS for hardware and software ray tracing (resizing-and-
 #     raytracing.jl has the full API). Builds and refits are operations,
-#     ordered like everything else, never inside repeat! or a conditional.
+#     ordered like everything else, never in a Group or a when! launch.
 gt       = Graph(dev)
 tlas     = TLAS(dev)                            # hardware where the device has it
 vertices = MantleArray(dev, rand(Point3f, 300))
@@ -414,13 +426,14 @@ run!(gt)
 
 # 44. Particles move and change in number; gt is never recompiled. The same
 #     length: the refit picks the new positions up. A new length: copy! of
-#     parts (a resize that does not keep the old contents, then a store) grows
-#     the TLAS's instance capacity first if 801 instances exceed it, then locks
-#     parts and the TLAS together and pends a build with the exact count. The
-#     change marks the AccelCommand of gt's refit, so gt's next run applies the
-#     Build in front of its work and re-records only that small command buffer
-#     for the new count (Vulkan; Metal reads the count from a cell). Readers:
-#     proposal, open decision 16.
+#     parts (a resize that does not keep the old contents, then a store) locks
+#     parts and the TLAS, its reader (ruled B3.10), together and pends the
+#     stores and a Build with the exact count; the submission that applies the
+#     Build grows the TLAS's instance capacity if 801 instances exceed it
+#     (B3.13: the call never allocates). The change marks the AccelCommand of
+#     gt's refit, so gt's next run applies the Build in front of its work and
+#     re-records only that small command buffer for the new count (Vulkan;
+#     Metal reads the count from a cell).
 copy!(parts, rand(Point3f, 500)); run!(gt)
 copy!(parts, rand(Point3f, 800)); run!(gt)      # parts' first resize!: a small array, so a move into a pool
                                                 # region of twice the need; the range table reads its cell,
@@ -445,23 +458,22 @@ colors  = GPURef(dev, MantleArray(dev, [Vec4f(1, 0, 0, 1)]))     # one colour fo
 sizes   = GPURef(dev, MantleArray(dev, rand(Float32, 100_000) .* 4f0))   # one size per point
 camera  = MantleArray(dev, [Mat4f(I)])                              # a uniform: a one-element array
 rect    = MantleArray(dev, [Vec4f(0, 0, 1, 1)])                     # the scene's rectangle in the target
-visible = MantleArray(dev, UInt32[1])
+visible = MantleArray(dev, [true])                                  # the draw's flag: a one-element Bool array
 render!(gs, win2 => Clear((0f0, 0f0, 0f0, 1f0))) do p
-    when!(p, visible) do
-        draw!(p, scatterpipeline(), (pts, colors, sizes, camera, rect), launchrange(pts))
-    end
+    when!(p, visible, scatterpipeline(), (pts, colors, sizes, camera, rect), launchrange(pts))   # one draw (B4.1)
 end
 run!(gs)                                         # compiles: one pipeline
 copy!(colors[], rand(Vec4f, 100_000)); run!(gs)  # per-point colours: same pipeline, nothing recompiles
 camera[1:1] = [lookat(Vec3f(0, 0, 5), Vec3f(0), Vec3f(0, 1, 0))]  # a store, inline in the next submission
-visible[1:1] = UInt32[0]; run!(gs)               # hidden: the head writes the draw's count times 0; no new plan
+visible[1:1] = [false]; run!(gs)                 # hidden: the head writes the draw's count times false; no new plan
 pts[] = MantleArray(dev, rand(Point3f, 300_000)) # another device array: a rebind (a cell write), no copy
 run!(gs)                                         # draws 300 000 points; nothing recompiles
 
 # 44c. A simulation drawn without copies (recording-plan.md, "RayMakie on the
 #      core model"). The plot points at the simulation's device arrays.
-#      Readers are a proposal (open decision 16). The BLAS over lengths a kernel
-#      writes is built over the geometry capacity, with degenerate primitives
+#      Readers (ruled B3.10): a run that writes arrays pends the updates of the
+#      structures built from them. The BLAS over lengths a kernel writes is
+#      built over the geometry capacity, with degenerate primitives
 #      past the device length written by a prepare kernel, so a change of the
 #      vertices is an Update. Vulkan's update may not change which vertices
 #      form a triangle, so new faces from simulate! need a Build, or a BLAS

@@ -166,9 +166,14 @@ concept.
   `HostDevice`: CI and machines without a GPU test the real Vulkan path.
 - A device is the KernelAbstractions backend: `Device <: KA.Backend`,
   `KA.get_backend(a) = device(a)` for an array on a device.
-- **A graph is not a device.** Arrays declared into a graph live on its
-  `GraphDevice`. Methods that run work exist only for real device types, so an
-  operation without a graph method is a `MethodError`, never a silent eager run.
+- **A graph is not a device, but it is a KernelAbstractions backend** (B4.3).
+  Arrays declared into a graph live on its `GraphDevice` (`Mantle.Device(graph)`).
+  `KA.get_backend` of a graph array is the graph: a KA launch over graph arrays
+  declares a kernel node and `KA.allocate` gives a transient, so KA libraries and
+  GPUArrays' generic code run inside a graph. Host reads of contents throw at
+  declaration (there are none before a run). `adapt(Mantle.Device(graph), x)`
+  re-homes device arrays, or a struct of them, as zero-copy aliases the graph
+  names, so code that finds its target through its arrays declares into it (B4.4).
 
 "A backend" in this plan means the code for one device type (`src/vulkan`,
 `src/metal`, `ext/`); it is never a user-facing concept or type.
@@ -182,27 +187,28 @@ Deleted: `Backend` and the API tags (`VulkanAPI`, `MetalAPI`, `ROCmAPI`,
 
 ### Arrays
 
-`MantleArray{T,N,D} <: AbstractGPUArray{T,N}` is the one array type, for every
-location `D` (a device type or a `GraphDevice`). It replaces `LavaArray`, the
-non-owning `DeviceArray` handle, `Buffer`, `Transient`/`TransientBuffer` and
-`GPURef`'s array storage.
+`MantleArray{T,N,L} <: AbstractGPUArray{T,N}` is the one array type, for every
+location `L` (a device or a graph, per device type; B4.5). It replaces
+`LavaArray`, the non-owning `DeviceArray` handle, `Buffer`,
+`Transient`/`TransientBuffer` and `GPURef`'s array storage. A view is the same
+type with its own offset and dims (no role parameter); read-only, `Readback`
+memory and resizable are runtime properties of the resource, not types.
 
 | constructor | lives on | contents |
 |---|---|---|
 | `MantleArray(dev, T, dims...)` | a device | its own pool region; operations on it run now |
 | `MantleArray(location(a), …) do p … end` | where `a` lives | a temporary inside an operation: on a device a region retired with the call's token, on a graph a transient |
 | `MantleArray(g, T, dims...)` | the graph | a transient: contents exist only during a run; placed in the graph's arena |
-| `MantleArray(g, …; persistent = true)` | the graph | kept between runs and used only by this graph (the previous frame, a recurrent state); its own region |
-| `MantleArray(g, …; hostwritten = true)` | the graph | a transient the host supplies each run with `x[:] = data` |
+| `MantleArray(dev, host; readonly = true)` | a device | read-only (B4.6): keeps a reference to `host` (no copy), from which a restore after eviction uploads again; an mmapped `host` is a plain `Array`, whose pages the OS drops and re-reads, so the array can leave even RAM; a write throws at the call |
 | `MantleArray(dev, …; memory = Readback())` (name open) | a device | in host-readable memory: a graph writes it, `Array(out)` after the run is a wait and a memcpy |
 | `MantleArray(g, T, win)` | the graph | sized like a window; its length follows the window |
-| `MantleArray(g or dev, …; capacity = n)` | either | resizable from the start, with a reserve for `n` elements; needed when a kernel writes the length (no host `resize!` tells core how much to reserve) |
+| `MantleArray(g or dev, …; capacity = n)` | either | resizable from the start, with a reserve for `n` elements, like `sizehint!` (B4.10): growing past it moves the storage; needed when a kernel writes the length (no host `resize!` tells core how much to reserve) |
 
 - **Where contents live:** contents used only within one run are a transient;
-  contents only this graph uses again in a later run are persistent on the
-  graph; contents anything else uses (the host, eager code, another graph:
-  weights, outputs, a KV cache shared between calls) are a
-  `MantleArray(dev, …)`. Transients of a graph share its arena, and graphs
+  contents used again in a later run, by this graph or anything else (the
+  previous frame, a recurrent state, a film, weights, outputs, a KV cache shared
+  between calls, data the host supplies per run), are a `MantleArray(dev, …)` the
+  graph names (`persistent = true` and `hostwritten = true` are gone, B4.8, B4.9). Transients of a graph share its arena, and graphs
   that do not overlap share arenas: they cost the largest tenant, not the sum.
 - **Each array owns a cell**: its address and its size. The cell lives in
   the device's cell arena and is the only place those values are written; every
@@ -232,26 +238,36 @@ non-owning `DeviceArray` handle, `Buffer`, `Transient`/`TransientBuffer` and
   space a reserve gets, core computes from `caps(dev)` (the sparse page size,
   the device's sparse address space). Addresses and sizes reach recorded work
   through the cell. Only what a plan recorded by value recompiles it: a direct
-  count (the array was fixed at compile), a temporary sized for fewer
-  elements, a buffer handle in a command (after a move; open decision 17).
+  count (the array was fixed at compile) and a temporary sized for fewer
+  elements. A buffer handle in a command (after a move) re-records the parts
+  that recorded it; nothing recompiles (open decision 17, ruled (c), B3.11).
   Shrinking unmaps nothing, so a view never reads unmapped memory; neither
   does memory pressure. `trim!(a)` (name open) is the explicit call that
   unmaps a reserve's pages beyond the array's size; after it, a view past the
   size reads undefined values. Details and the pseudocode:
   `docs/resizing-and-raytracing.jl`.
-- **On a graph device** `getindex`, iteration and `KA.get_backend` throw, so
-  generic code raises an error instead of being traced. Broadcasting and Mantle's
-  methods declare. The one exception is `x[:] = data` on a `hostwritten` array.
-- **GPUArrays 11.5.14** requires `storage`, `copy`, `derive` and
-  `mapreducedim!` (`host/abstractarray.jl:106,320`, `host/construction.jl:164`,
-  `host/mapreduce.jl:8`), plus host copies and `Adapt`. It gives broadcast,
-  `map!`, `fill!`, `copyto!`, indexing with index arrays, `repeat`,
-  `adjoint`/`transpose`, `tril`/`triu`, a generic matmul, random numbers, all as
-  KA kernels on `get_backend(dest)`. It has no `accumulate!`, `sort!`, BLAS or FFT.
-- **Mantle's methods** on `MantleArray`: `mapreducedim!`, `accumulate!`,
-  `sort!`, `sortperm!`, `mul!`, `fft`, broadcast, `fill!`, `copyto!` and every
-  other function a graph needs (AcceleratedKernels' kernels launched through
-  `dispatch!`, so they work on graph arrays too). GPUArrays' generic code serves the rest, on devices only.
+- **On a graph device** `KA.get_backend` is the graph, so KA launches, broadcasting,
+  Mantle's methods and GPUArrays' generic code all declare (B4.3). `getindex`,
+  iteration and every other host read of contents throw at their line. Launch
+  sizes such code computes on the host are recorded per node; a resize of an array
+  behind one makes the next compile throw. What the host computes from its own
+  values (constants, a host random draw) becomes a constant of the plan, which
+  cannot be detected: values that change per run are `GPURef`s.
+- **Lengths** follow Julia's API (B4.10): `length(a)` is the real length; for a
+  length a kernel writes it waits for that kernel and reads it back, and during
+  the declaration of the graph that writes it, it throws. Launches use the length
+  on the device. Kernels are bounds-checked unless `@inbounds` (B4.7).
+- **GPUArrays 12.1** (in the environment) gives every `AbstractGPUArray`
+  broadcast, `map!`, `fill!`, `copyto!`, indexing with index arrays, `repeat`,
+  `adjoint`/`transpose`, `tril`/`triu`, a generic matmul, random numbers, and now
+  `mapreducedim!` (`host/mapreduce.jl:18`), `accumulate!`, `sort!` and `findall`
+  through AcceleratedKernels, all as KA kernels on `get_backend(dest)`. It
+  requires `storage`, `copy`, `derive`, host copies and `Adapt`. It has no BLAS
+  or FFT.
+- **Mantle's methods** on `MantleArray`: `mul!`, `fft` and the other operations
+  the selection table serves, plus whatever is faster than GPUArrays' generic
+  version; everything else is GPUArrays' generic code, on devices and, through
+  the graph backend, on graphs.
 - **Device side:** one conversion verb per device type, `devicearg(dev, a)`, to
   the type its compiler wants (`LavaDeviceArray`, `MtlDeviceArray`,
   `CuDeviceArray`, `ROCDeviceArray`). Views, reshapes and transposes resolve to
@@ -282,7 +298,7 @@ work, and Vulkan has no vendor array package.
 | image / texture | pool region, `Images` kind |
 | acceleration structure | pool region, `Accel` kind; build and refit scratch is the structure's own, sized for its capacity and replaced with it (not a graph transient: a capacity change after compile would outgrow it) |
 | `Window` | its swapchain or drawables, counted |
-| `GPURef` | a host value box, copied into the entry by the run of a plan a store marked; or the box of a device array (`GPURef(dev, a)`, an `ArrayBox`): a cell holding its target's cell index, rebound by `r[] = b` (Graphics) |
+| `GPURef` | a value box: ONE slot in device memory whose address every plan and piece bakes; `r[] = v` is a scheduled store into it, applied like any change and never waiting (B4.9); or the box of a device array (`GPURef(dev, a)`, an `ArrayBox`): a cell holding its target's cell index, rebound by `r[] = b` (Graphics) |
 
 Acceleration structures are declared with `TraceRead` by traces and ray-query
 dispatches, and with `TraceBuild` by builds and refits (both access kinds exist
@@ -307,12 +323,16 @@ resizeplanar!(x, img; mean, std)        # GPUFiltering's own method on MantleArr
 fill!(a, 0f0)                           # a = MantleArray(dev, …): runs now
 
 dispatch!(g, kernel, (a, b), ndrange)                        # a raw kernel
-when!(g, flag) do … end                                      # launches inside run only where flag ≠ 0 on the GPU
+when!(g, flag, kernel, (a, b), ndrange)                      # one launch, runs only where flag (a Bool on the GPU) is true
 dispatch!(g, HostCall(align), (durations, idx); writes = (idx,))
-repeat!(g, n) do i … end                                     # kernel launches only
-repeat!(g, maxiters; while_nonzero = flag) do i … end
+step = Group(g, "step")                                      # a value; launches only
+dispatch!(step, kernel, (a, b), ndrange)                     # declared into the group, anywhere
+repeat!(step, n)                                             # the group runs n times per run
+repeat!(step, maxiters; while_nonzero = queue.size)          # …until a count on the GPU is zero
 render!(g, attachments...) do p; draw!(p, shader, args, n); end
 trace!(g, pipeline, accel, args, ndrange)
+sim_g = adapt(Mantle.Device(g), sim)                         # zero-copy aliases g names (B4.4)
+step!(sim_g)                                                 # a KA library declares into g (B4.3)
 ```
 
 - **Selection is a call in the method.** `mul!` on MantleArrays asks the
@@ -326,8 +346,8 @@ trace!(g, pipeline, accel, args, ndrange)
   3. a closed library (cuBLAS, rocBLAS, hipBLASLt, an `MPSGraphExecutable`): a
      foreign node, whose access is declared by the method.
   A device type contributes candidates; measurement fills the table per device;
-  an unmeasured entry uses core's cost estimate. Inside a `repeat!` body or a
-  conditional only kernel candidates qualify, since a foreign node cannot run
+  an unmeasured entry uses core's cost estimate. In a `Group` and under `when!`
+  only kernel candidates qualify, since a foreign node cannot run
   under a condition the device decides. A library's workspace is a
   transient in a graph and a retired region when eager; libraries never
   allocate for themselves.
@@ -345,9 +365,16 @@ trace!(g, pipeline, accel, args, ndrange)
   Arguments from two graphs, or from two devices, are an error. So an output
   the host reads after a run is a device array the graph writes; the host
   reads it with `Array(out)`, an eager read ordered after the run.
-- **Control flow is launches only.** A `repeat!` body may launch kernels and
-  ray-tracing pipelines (`trace!`) and nothing else; a build, render pass,
-  image copy or host call inside it is refused at declaration. Builds are
+- **Control flow is launches only.** A `Group` (B4.2: a value, declared into
+  with `dispatch!(group, …)` anywhere, attached with `repeat!(group, n)`) holds
+  kernel launches and ray-tracing pipelines (`trace!`) and nothing else: the verbs
+  have methods for a `Group` only where they launch GPU work, so a build, render
+  pass, image copy or host node on one is a `MethodError`. A group is not a
+  location: arrays and allocations belong to the device or the graph (B4.4), so
+  library code that finds its target through its arrays declares into the graph.
+  There is no `do`-block body, which is what invited host code between
+  dispatches (Simon, 2026-10-14), and no mode state on the graph
+  (`g.inbody`/`g.inloop` go). Builds are
   explicit constructions (Simon, 2026-09-30); a render pass or image copy
   would need the image's layout to be the same on the way in and out of every
   iteration (today's `repeat!` docstring, `graph/build.jl`); a host call cuts
@@ -364,15 +391,16 @@ trace!(g, pipeline, accel, args, ndrange)
   node, so it is allowed; copy nodes (images, host transfers) are not. Before each
   iteration a loop-head kernel writes `i` into the argument slots of the body
   launches that take it; they do not read it from a buffer, which is what
-  they do today. Conditional execution is a block, `when!(g, flag) do … end`
-  (Simon, 2026-10-02): every launch declared inside is tagged with the flag;
-  launches only, like `repeat!`; blocks do not nest; a `when!` block may sit in
-  a `repeat!` body. The launches inside are indirect, and whoever writes their
-  launch commands multiplies the count by the flag (open decision 1).
-  Conditions exist in graphs only: an eager call runs. The
-  VideoEditor's `repeat!(g, 1; while_nonzero = gate)` idiom, which wraps one
-  to three kernels (`VideoEditor/src/gpugraph.jl`), becomes `when!`. A build or
-  copy that must be conditional is constructed explicitly by the application.
+  they do today. Conditional execution is one launch at a time,
+  `when!(g or group, flag, kernel, args, ndrange)` (B4.1, B4.2; replaces the block
+  form of B3.1): `flag` is a `GPURef{Bool}` or a one-element `Bool` array,
+  enforced by the method's argument types. The launch is indirect, and whoever
+  writes its launch command multiplies the count by the flag (open decision 1).
+  Several launches under one flag are several `when!`s. Conditions exist in graphs
+  only. The VideoEditor's `repeat!(g, 1; while_nonzero = gate)` idiom, which wraps
+  one to three kernels (`VideoEditor/src/gpugraph.jl`), becomes one `when!` per
+  kernel with a `Bool` gate. A build or copy that must be conditional is
+  constructed explicitly by the application.
 - **Host calls are nodes** (`HostCall(f)` with the arguments it writes). Mantle
   schedules them (Run, "Host nodes"); the user never splits a graph.
 - **Lengths decided on the GPU** use a resizable array. The kernel that decides
@@ -384,10 +412,11 @@ trace!(g, pipeline, accel, args, ndrange)
   and the dims slots of every launch over the array.
   `launchrange(a)` launches over the array's current length, indirectly once
   the array is resizable; it is the one name for this. Without a capacity
-  a device-decided length is refused at declaration. On the host, `size(a)` is
-  the host view; the length a kernel wrote is read with `devicesize(a)` (name
-  open), which reads the cell back and waits for that write. `Array(a)` copies
-  the cell and the data in one submission.
+  a device-decided length is refused at declaration. On the host, `length(a)` and
+  `size(a)` are the real length (B4.10): they wait for the kernel that writes it
+  and read the cell back, and throw during the declaration of the graph that
+  writes it. `devicesize` is not needed. `Array(a)` copies the cell and the data
+  in one submission.
 
 Today's `ArrayLaunch`/`runlaunches!`/`dispatchlaunches!`/`kilaunch!`
 (`array/launch.jl`) are the start of this: one description, launched eagerly or
@@ -450,15 +479,14 @@ What can change after the first run, and what each change costs:
 
 | change | made by | what happens |
 |---|---|---|
-| a `GPURef` value | `x[] = v` | marks the plans whose entry holds it; the next run of a marked plan copies it into its entry (waiting for its previous run) |
+| a `GPURef` value | `x[] = v` | pending: a store into its slot, applied like any store by the next submission that touches it; it never waits and marks no plan (B4.9) |
 | an array `GPURef`'s target | `r[] = b` | pending: a cell write of the `GPURef`; no recompile; its readers pend their update (a TLAS an Update, or a Build if the length changed); a plan that bound the old target's buffer by handle (an index buffer) records the parts that bound it again when the Rebind is applied; nothing recompiles (open decision 17, ruled (c)) |
-| a hostwritten transient's data | `x[:] = data` | copied into the entry (waits for the graph's previous run); kept on the host while the graph has no current plan, and written into the entry by the next compile |
 | a device array's contents | `a[r] = data`, `copyto!(a, data)`, `copy!(a, data)` (resizes a vector to `length(data)`, as Base's `copy!`, without copying the old contents) | pending: a small store (within the device type's inline limit, `caps(dev)`: 64 KiB at 4-byte offsets and sizes on Vulkan) is written inline by the submission that applies it (Run); a larger one is a copy from its upload region. Either way the call copied the data once into an upload region (B3.18) |
-| an array's size | `resize!(a, dims)` | pending: the first time, a cell write if the new size fits the storage, else a move with a copy into a reserve or a doubling pool region (Arrays); later, pages mapped in a reserve or a move to a doubled region, and a cell write; plans that recorded a direct count, a handle, or sized a temporary for fewer elements are marked stale at the call |
+| an array's size | `resize!(a, dims)` | pending: the first time, a cell write if the new size fits the storage, else a move with a copy into a reserve or a doubling pool region (Arrays); later, pages mapped in a reserve or a move to a doubled region, and a cell write; plans that recorded a direct count or sized a temporary for fewer elements are marked stale at the call; parts that recorded its handle are re-recorded when the move is applied (B3.11) |
 | a reserve's pages beyond the size | `trim!(a)` (name open) | pending: the pages unmapped, retired with the token of the submission that unmaps them |
-| a window's size | `resize!(win, w, h)` from the window's event | stored; the next run of each graph rendering to it creates the new swapchain generation with its window-sized images at the new size, queues the cell writes of window-sized arrays, and re-records the segments that draw into window-sized targets and the per-image present segments (Windows); beyond the window's capacity the graph recompiles at that run |
+| a window's size | `resize!(win, w, h)` from the window's event | stored; the next run of the graph presenting to it (B3.8) creates the new swapchain generation with its window-sized images at the new size, queues the cell writes of window-sized arrays, and re-records the segments that draw into window-sized targets and the per-image present segments (Windows); beyond the window's capacity the graph recompiles at that run |
 | an instance's transform or mask | `tlas[h] = t`, hiding an instance | pending: records rewritten, a refit (Update) with the count of the last build |
-| an acceleration structure's instance count | `push!`, `delete!`, a range's array length | pending: records rewritten, a build with the exact count; beyond the instance capacity new storage (capacity doubles); the change marks the `AccelCommand`s it alters, and plans re-record only those at their next run |
+| an acceleration structure's instance count | `push!`, `delete!`, a range's array length | pending: records rewritten, a build with the exact count; beyond the instance capacity new storage (capacity doubles, capped at the device's `maxInstanceCount`); the change marks the `AccelCommand`s it alters, and plans re-record only those at their next run. A total past `maxInstanceCount` (16 777 215 on every Vulkan GPU here) throws at the call that raises it: `push!`, a `resize!` or `copy!` of a source, rebinding a source (B4.8) |
 
 Nothing on this list is detected: each is done by the function that makes the
 change. A change is pending on the resource's sync state, in call order.
@@ -493,14 +521,14 @@ fixed sequence of steps, each a function applied to a `CompileState`:
 
 | step | produces |
 |---|---|
-| copy, head, `layout!` | the plan's own copies of the graph's nodes, a loop's body included (a recompile never touches an older plan's), the head node first, the entry and the `Bound` resources (below) |
+| copy, head, `layout!` | the plan's own copies of the graph's nodes, a loop's body included (a recompile never touches an older plan's), the head node first and the `Bound` resources (below) |
 | rewriters (only those the graph opted into) | the node list after optional rewrites, for example `FuseEpilogues`, `MergeRegions(attribute)` |
 | `dependencies!` | an edge "q before p" wherever two nodes conflict on a resource, reduced so each node lists only its direct predecessors (what a CUDA/HIP graph node takes); kept, not discarded as today |
 | `compile!(s, node)` for every node | the node's compiled data: a `Kernel` per kernel node, compiled draws and traces, library setup; one method per node type, a loop node's method compiles its body |
 | `costs!` | an estimated time per node from its `KernelInfo`, ndrange and declared bytes |
 | `schedule!` | node order and queue per node (Queues) |
 | `hostcuts!` | independent nodes moved across host nodes, adjacent host nodes merged, copy nodes (compiled here) to host-visible memory for device arrays a host node reads, none for an array already in `Readback` memory; before `liveness!`, since it changes the order |
-| `liveness!`, `place!` | transient placement in the plan's arena parts, stored in the plan; a hostwritten transient lives from the head on; arena parts shared with other graphs, host nodes or not |
+| `liveness!`, `place!` | transient placement in the plan's arena parts, stored in the plan; arena parts shared with other graphs, host nodes or not |
 | `sharing!` | edges between transients that share bytes (for CUDA/HIP graphs) |
 | `barriers!` | barriers and image layouts, keyed by memory (a transient by its arena bytes, so transients sharing bytes conflict), with state merged over both outcomes of every conditional launch |
 | `submissions!` | ordered segments, each with its queue, cut by the estimated budget, host nodes and present; waits between segments on different queues |
@@ -510,17 +538,17 @@ fixed sequence of steps, each a function applied to a `CompileState`:
 **The head and prepare nodes are nodes.** Compile puts a head node first, and
 one after each host node (Ordering); a
 launch that writes an array's length on the device is followed by a prepare
-node, added at declaration. The argument slots a plan holds for an array or a
-`GPURef` (address, size, launch commands, `ndrange` values, value) are a
-resource of the plan: the head and prepare nodes write them, launches read
+node, added at declaration. The argument slots a plan holds for an array or an
+array `GPURef` (address, size, launch commands, `ndrange` values) are a
+resource of the plan (a value `GPURef` is not among them: its slot is shared,
+and the plan bakes its address, B4.9): the head and prepare nodes write them, launches read
 them. So the head precedes every root, barriers follow the head, and the head's
-reads of cells and the entry and its writes of hostwritten data into the arena
-are in the access summary, all by the same rules as data.
+reads of cells are in the access summary, by the same rules as data.
 
 What compile decides about a node is stored in the node (`CompiledNode`): its
 queue, predecessors, barrier, compiled command, cost and argument slots. The
 plan holds only what spans nodes: segments, placement, the argument block, the
-cell copy table, the entry, recordings. A recompile runs the same steps and
+cell copy table, recordings. A recompile runs the same steps and
 builds a new plan; the old plan and its compiled nodes are retired by token.
 
 **Rewriters are opt-in and generic.** `Graph(dev; rewrites = (FuseEpilogues(),))`
@@ -581,7 +609,7 @@ decode, present). Core's policy:
 ### Ordering across graphs and queues
 
 Graphs share memory: transients of graphs that share an arena alias, and
-persistent resources are named by several graphs and eager code. Inside a
+device arrays and other shared resources are named by several graphs and eager code. Inside a
 graph the order is compiled and recorded once. Between graphs, and between
 graphs and the host, it is settled by two things, neither of which looks at
 every resource a run names (Simon, 2026-10-05, decisions.md B3.14):
@@ -615,16 +643,19 @@ every resource a run names (Simon, 2026-10-05, decisions.md B3.14):
   and of every plan that names a composite built from it; a run's write of a
   shared resource puts it into the inboxes of the other plans reading it.
   Registration puts the shared resources a plan uses into its own inbox, so
-  its first run waits like any later one. A run takes its inbox and handles
-  only what is in it: it applies their pending changes in front of its first
-  segment and waits for their other users. Its own accesses are recorded
+  its first run waits like any later one. Each stage of a run takes the
+  plan's inbox and handles only what is in it: it applies their pending
+  changes in front of its first segment and waits for their other users, so
+  a change made while the run is between stages reaches the later stages
+  (B4.9: per stage). Its own accesses are recorded
   nowhere but in its last-run tokens. A run's host time grows with the
   named resources its stages write (its outputs, mostly) and with its inbox, not with the number
   of resources it names.
 - **Who waits for what.** A run: its previous run (runs never overlap), the
   last runs of the other plans naming what a stage writes, and for its inbox
   resources their recorded accesses and the last runs of the other plans
-  writing them. What a stage found is kept for the run's later stages.
+  writing them. What a stage found is kept for the run's later stages, which
+  add only what arrived in the inbox since.
   Anything that is not a run, and the steps a run applies for pending
   changes (they write what they change): the recorded accesses of each
   resource, the last runs of the plans naming it where their use conflicts
@@ -722,7 +753,7 @@ every resource a run names (Simon, 2026-10-05, decisions.md B3.14):
 - **Lock order**, everywhere: graph lock, then the run's hold on its arena
   parts by part id (held across host functions, never across a record lock
   taken before it), then window lock, then plans' sync locks by plan id,
-  then sync states by resource id, then the channel lock. The pool lock, the inbox, a value `GPURef`'s lock,
+  then sync states by resource id, then the channel lock. The pool lock, the inbox,
   the texture and sampler tables' locks and a plan's `runend` lock are leaves
   (nothing else is taken inside them), never held across a GPU wait or a call
   that may run finalizers.
@@ -733,10 +764,9 @@ every resource a run names (Simon, 2026-10-05, decisions.md B3.14):
   step from running finalizers (Julia 1.12, `base/lock.jl:174`).
 - **Host waits and locks.** No sync-state, channel, pool or window lock is
   held while the host waits. The graph lock may be: a run waits under it for
-  another run holding a shared arena part, for its previous run before it
-  writes the entry, for a host node's inputs, for the swapchain acquire, and
-  in `acquire!`'s pressure steps; `x[:] = data` waits under it for the
-  graph's previous run.
+  another run holding a shared arena part, for a host node's inputs, for the
+  swapchain acquire, and in `acquire!`'s pressure steps. No store waits for a
+  run, value `GPURef`s included (B4.9).
 - **Host waits are GC-safe.** A blocking driver wait is a `@ccall gc_safe =
   true` (Julia 1.12, `base/c.jl:278-296`), so a thread waiting on the GPU does
   not hold up a GC another thread needs.
@@ -775,9 +805,10 @@ end
 
 - A segment is a list of parts submitted together: recordings written once by
   `record!`, and `AccelCommand`s (Acceleration structures). A run re-records
-  only the `AccelCommand`s a change marked and, per swapchain generation, the
-  segments that draw into window-sized targets and the per-image present
-  segments (Windows).
+  only the `AccelCommand`s a change marked; the parts that recorded the
+  handle of a moved array (B3.11); a new piece and the segment holding its
+  pass's list (B3.17); and, per swapchain generation, the segments that draw
+  into window-sized targets and the per-image present segments (Windows).
 - A submission is a segment of a run, an eager call, a host read or a
   pressure step; pending changes ride in the next of these. There
   is no one-shot type and no hold stack. Nothing a submission uses is kept
@@ -827,8 +858,9 @@ recording = finish(b)
 - `emitstore!` writes a store's bytes into `dst` inside the submission:
   `vkCmdUpdateBuffer` on Vulkan (at most 65536 bytes, offset and size
   multiples of 4, `refs/vkdocs/chapters/clears.adoc:800-805`; a store that
-  does not meet this goes through staging); on Metal, CUDA
-  and HIP the device type copies them into upload memory of that submission.
+  does not meet this is a copy from its upload region). Device types without
+  an inline store (Metal, CUDA, HIP) report a limit of 0, and their stores are
+  copies from the upload region acquired at the store's call (B3.18).
 - Record compiles nothing, allocates no device memory, uploads nothing, submits
   nothing and reads no mutable resource field; the argument block's contents
   come from `bindings!`.
@@ -848,26 +880,26 @@ run!(g::Graph) = lockgraph(g) do                # throws for a freed graph, on r
     while true
         applywindows!(g)                        # a window resize, marked by resize!(win)
         (g.plan === nothing || g.recompile) && recompile!(g)   # the first run; after a failed compile
-        done(run!(g.plan)) && return            # Again: nothing claimed; an arena range was unmapped, the window changed,
-    end                                         # the plan went stale, or (proposal) a resource it names was evicted after it looked
-end                                             # Skipped: a minimized window, nothing submitted
+        r = run!(g.plan)                        # Again: nothing claimed; an arena range was unmapped, the window changed,
+        done(r) && return r                     # the plan went stale, or a resource it names was evicted after it looked (B3.9)
+    end                                         # returns Submitted(), or Skipped() for a minimized window (B4.8)
+end
 ```
 
 An acquired swapchain image is owned by the window: a run that returns Again
 or throws before presenting gives it back, and the next run takes it there
 (internals.jl section 7).
 
-`run!(pl)` writes the entry (waiting for the previous run only if a store
-marked the plan), allocates what it may need before any sync-state lock
+`run!(pl)` allocates what it may need before any sync-state lock
 (unmapped arena pages, the swapchain image), then submits the first stage
 under the records' locks, and the later stages after their host nodes.
 
 - **Runs of one graph never overlap:** a run's first segment waits on the GPU
-  for the previous run's last token on each channel. The host waits for the
-  previous run only to write the entry. A run's other host waits (another
-  run holding a shared arena part, a host node's inputs, the swapchain
-  acquire, `acquire!`'s pressure steps) are under the graph lock and no other
-  (Ordering).
+  for the previous run's last token on each channel. The host never waits for
+  the previous run (B4.9). A run's host waits (another run holding a shared
+  arena part, a host node's inputs, the swapchain acquire, `acquire!`'s
+  pressure steps) are under the graph lock and the run's arena-part holds,
+  and no other lock (Ordering).
 
 - **The argument block** holds every dispatch's arguments, one allocation per
   plan, in host-visible device memory. Fields sit directly in the slots
@@ -875,30 +907,32 @@ under the records' locks, and the later stages after their host nodes.
   block is marked read-only to the kernels (`NonWritable`), which lets RADV use
   scalar loads. Both are changes to Lava's entry wrapper (phase 4). KA's
   `ndrange` values are slots too.
-- **The entry** is one small host-visible buffer per plan: the `GPURef` values
-  and the hostwritten transients' data of the next run. A host write into it
-  waits until the graph's previous run has finished: `x[:] = data` waits at
-  the call (not `run!`), and `run!` waits only for a plan that a store into a
-  value `GPURef` marked. One entry, no ring (Simon, 2026-09-30).
+- **Value `GPURef`s are slots** (B4.9; replaces the per-plan entry of B2.1). A
+  value `GPURef` is one slot in device memory; every plan and piece that uses it
+  bakes its address, and a launch reads the value through it (a one-element
+  buffer read costs what a true uniform costs: within 0.8% on NVIDIA, AMD and
+  the M5, `experiments/draw_bench/`). `r[] = v` is a scheduled store, applied by
+  the next submission that touches the slot; nothing waits for a run. Data the
+  host supplies per run is a device array the graph names, written by stores the
+  same way (`hostwritten = true` is gone).
 - **The head node** runs first in every run, unconditionally (Compile: it is a
   node with uses, so everything that reads what it writes is ordered after it,
-  on every queue; on CUDA/HIP it precedes every root). It applies the entry
-  (values into their slots, copies of hostwritten data into the arena), copies
+  on every queue; on CUDA/HIP it precedes every root). It copies
   every referenced array's cell (address, size) into the argument slots, and
   computes the launch command and `ndrange` values of every launch over a
   resizable array from the array's size and the kernel's group size, all from
-  the tables `bindings!` built. A plan that names no device array, `GPURef`,
-  hostwritten or resizable array has an empty head, which is not recorded.
+  the tables `bindings!` built. A plan that names no device array or resizable array has an empty head,
+  which is not recorded.
 - **Launch kernels never read cells.** A launch over a fixed-size array is
   direct, recorded once. A launch over a resizable array is indirect, from the
   command the head node (or a prepare kernel, for lengths decided during the
   run) wrote. The exceptions are Mantle's own: the head and prepare nodes, the
   TLAS offsets and records kernels (once per build), and kernels that write a
   length through `lengthof(a)`.
-- **`GPURef`** has two forms. The value form, `GPURef(dev, v)`, is a host value
-  box with its own lock: `x[] = v` sets it under the lock and marks the plans
-  whose entry holds it; only a marked plan's run copies it into the entry,
-  under the same lock, so a multi-word value is never torn. The array form,
+- **`GPURef`** has two forms. The value form, `GPURef(dev, v)`, is one slot in
+  device memory (above): `x[] = v` copies the value once at the call, like any
+  store, so a multi-word value is never torn, and the store is applied by the
+  next submission that touches the slot. The array form,
   `GPURef(dev, a)` (an `ArrayBox`, Graphics), is device-only: its target is a
   device array and a root array (a view throws); `r[] = b` is a pending cell
   write, and rebinding to the current target is a no-op.
@@ -941,15 +975,16 @@ function dispatch!(dev::Device, kernel, args, ndrange)
     k = kernel!(dev, kernel, argtypes(args))          # compilekernel: the device type's compiler cache
     ch = channel(dev, Main())
     packed = acquire!(pool(dev), Unified(), argumentbytes(k))   # fallible: before any lock
-    b = Builder(dev, ch)
     token = nothing
     try
-        token = lockexpanded(uses(k, args)) do recs, x   # internals.jl section 11; composites bring their members
-            foreach(usable, resources(args))              # freed through the creator's handle: throws, under the lock
-            packarguments!(packed, k, args)               # arguments from the host view
+        token = submitapplying(uses(k, args); ch) do after   # internals.jl section 11: pending changes in front,
+            foreach(usable, resources(args))          # freed through the creator's handle: throws, under the lock
+            checkwritable(kernel, args)               # a write touch on a read-only array throws (B4.6)
+            packarguments!(packed, k, args, after)    # each array's storage after the pending changes
             ext = launchextents(dev, k, resolve(ndrange, args))
+            b = Builder(dev, ch)
             emitdispatch!(b, nothing, CompiledDispatch(k, ext, packed), Deps((), ()))
-            first(submitwith!(ch, recs, expand(x, uses(k, args)), [finish(b)]))   # pending changes in front
+            [finish(b)]
         end
     finally
         retire!(pool(dev), packed, token === nothing ? () : (token,))   # after the call ran, or now after a throw
@@ -959,8 +994,9 @@ end
 
 - **Per launch:** a compiler-cache hit, a few commands from the device's free
   list (on CUDA and HIP the builder buffers the launch and issues it in
-  `finish`, after the change prefix), one submission. A `GPURef`
-  argument is packed with its value at the call. An array lent to vendor code
+  `finish`, after the change prefix), one submission. A value `GPURef`
+  argument is packed with its slot's address; a pending store into the slot is
+  applied in front of the launch by the same submission (B4.9). An array lent to vendor code
   (`withview`) or freed throws.
   The packed arguments and a multi-kernel operation's temporaries are regions
   retired with the call's token. No batching outside graphs, no cached one-op
@@ -1016,9 +1052,13 @@ device (they are `render!(dev, …)`).
   skips the whole run (nothing submitted, its changes stay pending) until the
   window has an extent again.
 - **One graph presents to a window** (Simon, 2026-10-05, decisions.md B3.8):
-  the graph that declares `render!` into it; a second graph declaring into
-  the same window throws at declaration. Other graphs render into `Image`s
-  this graph reads. So every acquire and present of a window happens under
+  any of its nodes may write the window (`render!`, a kernel, a copy); the first
+  graph declaring a write presents, and a second graph declaring one throws at
+  declaration (B4.8). Other graphs render into `Image`s this graph reads. The
+  binding ends when the graph is freed or collected or its render node is
+  removed; another graph may then present. An eager `render!` into a window
+  throws (it has no presenting graph and no run); eager rendering into images is
+  allowed. `run!` returns `Submitted()` or `Skipped()`, both public. So every acquire and present of a window happens under
   its graph's lock, in that graph's runs: no two acquires on one window, no
   other graph's run holding one of its images, no generation created under a
   running acquire. A graph presents to at most one window.
@@ -1150,8 +1190,8 @@ device (they are `render!(dev, …)`).
   builds follow the TLAS's count rules (an `AccelCommand` on Vulkan).
 - **A write reaches the structures built from it.** Host changes (a
   `resize!`, store or rebind of a source) must reach the structures over it
-  in any design, and do so through readers; the proposal (open decision 16)
-  is the run's part, the last sentences below, which replaces declaring
+  in any design, and do so through readers; ruled (B3.10) is also the run's
+  part, the last sentences below, which replaces declaring
   `refit!(g, t)` in every graph that writes a source. An array's readers are
   the composites built from it: a TLAS (a range
   over it), a BLAS (its geometry), an array `GPURef` (which forwards to its
@@ -1184,8 +1224,9 @@ device (they are `render!(dev, …)`).
 ### Graphics
 
 A frame of a recorded scene costs its submission. Updates are stores,
-resizes and rebinds; only adding or removing what is drawn recompiles, apart
-from the cases open decisions 15, 17 and 18 list.
+resizes and rebinds; adding or removing a plot is a piece of its pass (B3.17)
+and recompiles nothing. Still recompiling: kernels declared per plot, a new
+pass, and a new Hikari material type (open decision 18).
 
 - **Pipelines are values.** `GraphicsPipeline` (`Rasterizer`) and
   `MeshPipeline` hold the stages (`VertexShader`, `FragmentShader`,
@@ -1210,21 +1251,22 @@ from the cases open decisions 15, 17 and 18 list.
   forks the pipeline by argument type, lines and text expand values with
   `fill`, mesh switches at run time over dummy buffers). A value that changes
   every frame (a camera matrix) is a one-element array written by a store,
-  which is inline: its bytes stay on the host until the next submission that
-  touches the array writes them in its change prefix (`emitstore!`, Record),
-  with no staging region and no host wait. The value `GPURef` stays for the
-  scalars a kernel takes by value; a write to it waits for the previous run.
+  which is inline: the call copies its bytes into an upload region and the next
+  submission that touches the array writes them in its change prefix
+  (`emitstore!`, Record), with no host wait. A value `GPURef` is such a slot:
+  one slot in device memory whose address every plan and piece bakes; a write
+  to it is a scheduled store and never waits (B4.9).
 - **Render passes are nodes.** `render!(g, targets...) do p … end`; a target is
   `image => Clear(v)`, `Keep` or `Discard`, a depth image, or a window.
   `draw!(p, pipeline, args, count; instances, indices)`: counts are numbers or
   `launchrange`s (indirect over resizable arrays and array `GPURef`s); indices are
   a `MantleArray{UInt32}`, bound by handle (`bindindices!`), so a move of an
   index array marks the parts that recorded it, which are recorded again
-  before their next submission (open decision 17, ruled (c)). A draw inside
-  `when!(p, flag) do … end` is conditional: it is indirect, and the head (or a
-  prepare node after the kernel that writes the flag) writes its count
-  multiplied by the flag (open decision 1), so visibility is a store into the
-  flag. State
+  before their next submission (open decision 17, ruled (c)). A draw declared
+  with `when!(p, flag, pipeline, args, count)` is conditional: it is indirect,
+  and the head (or a prepare node after the kernel that writes the flag) writes
+  its count multiplied by the `Bool` flag (open decision 1, B4.1), so visibility
+  is a store into the flag. State
   the API records by value (render area, viewport, scissor) is fixed per
   recording: a scene's rectangle inside the target is one array per scene,
   shared by its plots, which the vertex stage applies (a remap to the
@@ -1249,7 +1291,8 @@ from the cases open decisions 15, 17 and 18 list.
   draw adds no dependency inside the graph. Each draw keeps its own pipeline,
   index buffer and argument layout: a large mesh draws as it would alone.
   Visibility stays a store into the draw's `when!` flag; a changed draw order
-  rewrites the list. A piece holds draws only; kernels per plot go into the
+  rewrites the list (`sort!(pass; by, lt, rev)`, B4.8). Value `GPURef`s a piece
+  reads are slots it bakes, like a plan (B4.9). A piece holds draws only; kernels per plot go into the
   graph with `insert!(g)` (B3.16, a recompile). Core Vulkan inherits no
   state into a secondary command buffer (`pipelines.adoc:131-133`), so each
   piece binds its pipelines and sets viewport and scissor itself; the pieces
@@ -1266,7 +1309,9 @@ from the cases open decisions 15, 17 and 18 list.
   `Texture2D` is an image with an index in the device-wide texture table
   (`resizing-and-raytracing.jl` B.9): an upload of the same size and type
   writes the image it has, a new size is a new image under a new index, a
-  store into the slot, never a recompile.
+  store into the slot, keeping the texels where the old and new sizes overlap
+  (one GPU copy, as `resize!` keeps an array's contents; B4.8), never a
+  recompile.
 - **Samplers are values** (filter, address mode, anisotropy) in a device-wide
   sampler table, created on first use; a shader takes a texture index and a
   sampler index. Texture and sampler table entries are host writes into an
@@ -1274,9 +1319,12 @@ from the cases open decisions 15, 17 and 18 list.
 - **Screenshots.** `Array(win)` (name open) makes the next run that presents
   to the window copy the image into `Readback` memory before presenting (a
   second recording of the per-image present segment, made on first use per
-  generation) and waits for that run. One behaviour on every device type
-  (today Vulkan's `readback_window` errors between acquire and present and
-  Metal's works only there).
+  generation) and waits for that run. It throws `ArgumentError` when the window
+  is minimized, when no graph presents to it, or from the presenting graph's own
+  host function, and a call already waiting is woken with that error when the
+  graph's next run is skipped or the graph is freed (B4.8). One behaviour on
+  every device type (today Vulkan's `readback_window` errors between acquire
+  and present and Metal's works only there).
 - **Goes:** the hand-recorded path (`pass!`, `PassRecorder`, `viewport!`, the
   immediate `draw!` and `blit!`, which become `render!(dev, …)`), the
   `begin_pass!` family, `DrawBinding`/`rebind!`, `SampledTexture`,
@@ -1314,10 +1362,10 @@ from the cases open decisions 15, 17 and 18 list.
   compare-and-swap that throws at zero, so a hold never goes from zero back to
   one. `run!` of a freed graph throws.
 - **The last hold.** Under the record's lock the pending changes are dropped
-  (staging retired, prepared storage released, deferred hold drops done), the
-  storage becomes `Released()`, the old storage is retired with the record's
-  last tokens, the resource leaves the eviction list (proposal, open decision
-  16) and its cell is released. Every holder type (`ArrayBox`, `TLAS`, `BLAS`,
+  (upload regions retired, prepared storage released, deferred hold drops
+  done), the storage becomes `Released()`, the old storage is retired with the
+  record's last tokens, the resource leaves the eviction list (B3.9) and its
+  cell is released. Every holder type (`ArrayBox`, `TLAS`, `BLAS`,
   a render object) has a finalizer that pushes its hold drops through the
   pool's inbox.
 - **Composite resources hold; they do not allocate.** A TLAS, a BLAS, a
@@ -1386,7 +1434,11 @@ from the cases open decisions 15, 17 and 18 list.
   allowed: the eviction copy waits for the last write through the access
   record (a read need not wait for reads), and the storage is retired with the
   tokens of every access in flight and the copy's. Arrays and images are
-  copied to host memory (the `Readback` kind) in a submission of their own;
+  copied to host memory (the `Readback` kind) in a submission of their own,
+  except a `readonly` array (B4.6), which keeps a reference to the host array it
+  was created from and restores from it, so its eviction copies nothing out (an
+  mmapped host array is a plain `Array` whose pages the OS drops and re-reads;
+  a host array or file changed afterwards is undefined);
   `acquire!` waits for those retirement tokens outside every lock, then sweeps
   and retries. So `run!(dnn_1); run!(dnn_2)` back to back works while
   `dnn_1`'s weights are still in use on the GPU.
@@ -1422,14 +1474,14 @@ from the cases open decisions 15, 17 and 18 list.
   idle arena pages, trim empty blocks, collect garbage (Julia 1.12 disables
   finalizers on a thread that holds a `ReentrantLock`, `base/lock.jl:174`, so
   `acquire!` is never called with one held; the graph lock is a semaphore),
-  wait for retiring storage oldest first while any is left, then (proposal,
-  open decision 16) evict the least recently used idle resources and wait for
+  wait for retiring storage oldest first while any is left, then (B3.9)
+  evict the least recently used idle resources and wait for
   their storage's retirement tokens (the accesses in flight and the eviction
   copies), and only then throw `OutOfDeviceMemory`. It
   submits nothing but the unmapping of idle pages and the eviction copies, and
   never flushes a queue. 58a05a9's `makeroom!` (called from placement, flushing a queue) folds into
   this. Reacting to other processes taking VRAM is open.
-- **Capacity means one thing:** the device's budget minus other processes'
+- **Budget means one thing:** the device's budget minus other processes'
   usage (today `headroom` and `arenaroom` count an arena's own region
   differently).
 - **Streamed weights** (open): a weight placed like a transient and uploaded by
@@ -1489,8 +1541,8 @@ macOS 27.0 SDK on the M5, Vulkan on the RX 7900 XTX and the RTX 4000 Ada.
 | recording | command buffer, SIMULTANEOUS_USE | compute ICB + render ICBs | `CUgraphExec`, built node by node | `hipGraphExec`, built node by node |
 | dependencies in a recording | barriers | ICB barrier bits, consumer barriers | graph edges | graph edges |
 | argument layout | flat slots, `NonWritable` (measured) | argument memory (not measured) | open: kernel parameters by value need a node-parameter update on change; a pointer to the block costs a load (decided by measurement in phase 10) | as CUDA |
-| cell copy / entry | head node (compute) | head kernel in the compute encoder | head node every root depends on | head node |
-| `repeat!` / conditional kernels | indirect counts: the loop head zeroes a body's, the head or a prepare node multiplies a `when!` block's by its flag (open decision 1) | device-written execution ranges | conditional WHILE / IF nodes | kernel-entry predication (no conditional nodes in HIP 7.1) |
+| cell copy | head node (compute) | head kernel in the compute encoder | head node every root depends on | head node |
+| `repeat!` / conditional kernels | indirect counts: the loop head zeroes a group's, the head or a prepare node multiplies a `when!` launch's by its flag (open decision 1) | device-written execution ranges | conditional WHILE / IF nodes | kernel-entry predication (no conditional nodes in HIP 7.1) |
 | library operations | our kernels | MLX kernels; MPSGraph as a foreign node | CUTLASS; cuDNN into our graph; cuBLAS as a foreign node | Composable Kernel; rocBLAS/hipBLASLt as foreign nodes |
 | sparse arena | sparse binding | placement-sparse buffer | `cuMemAddressReserve`/`cuMemCreate`/`cuMemMap` | `hipMemAddressReserve`/`hipMemCreate`/`hipMemMap` |
 | residency | implicit | one set per device on the queues, plus per plan for ICBs and pipelines | implicit | implicit |
@@ -1568,6 +1620,19 @@ Not measured: the flat layout through Lava's real entry wrapper (emulated with
 `Ptr` and `Int` arguments), the head node inside a real plan, Metal, CUDA,
 HIP.
 
+Graph against eager, measured 2026-10-14 on SAM 2's encoder
+(`experiments/eager-vs-graph/`; every arm bit-exact against the replay, with the
+outputs cleared to NaN before each as the negative control):
+
+| question | result | file |
+|---|---|---|
+| temporaries: the graph's placement against an eager allocator, from the real plan's sizes and accesses in declaration order (7900 XTX plan, 617 passes, 795 buffers) | graph 234 MiB; eager freeing at last use, no fragmentation 225 MiB (the lower bound); a best-fit caching allocator (PyTorch's shape, simulated) 372 MiB; nothing freed within the call, as Julia without reference counting gets until a GC, 5 660 MiB. Decoder: 16.1, 14.1, 18.0, 180 MiB | `memtrace.jl`, `results.txt` |
+| time per call on the RTX 4000 Ada, 712 dispatches, interleaved medians | replay of the recorded plan 95.2 ms; recorded again every call 103.2 ms (+8%); eager with buffers kept 112.6 ms (+18%, about 24 µs per launch in Lava's eager path); eager allocating every temporary per call 124.2 ms (+30%). The eager run written out as one generated function (every kernel looked up and every argument resolved once) is within 1 ms of the walked one, so the cost is the eager launch itself | `eagerwalk.jl`, `eagergen.jl`, `results.txt` |
+| exact barriers per buffer against automatic ones | within 1% three times (SAM 2, independent chains, the showcase; RADV only) | `bench/dnn.jl` header (stale code), `bench/independent.jl` |
+
+So a graph earns its place by replay (no per-call host work) and by placing
+temporaries (Julia cannot free at last use); barriers are not a reason.
+
 ## One call, one graph
 
 A graph exists so core can schedule, allocate and split a unit of work as a
@@ -1607,10 +1672,10 @@ composes into a caller's graph (Trellis2 uses it).
 4. **Resizable arrays** for lengths only the device knows.
 5. **State between calls lives in device arrays**: KV caches (resizable, or
    sparse where they grow large), MatAnyone's memory bank, Bonsai's positions.
-6. **Autoregressive generation** is one call with `repeat!(g, maxtokens;
-   while_nonzero = running)` where sampling runs on the device; where it does
-   not, one run per token with the host deciding between runs (a host node
-   cannot sit inside `repeat!`).
+6. **Autoregressive generation** is one call with a `Group` holding one token's
+   launches and `repeat!(group, maxtokens; while_nonzero = running)` where
+   sampling runs on the device; where it does not, one run per token with the
+   host deciding between runs (a host node has no method for a `Group`).
 7. **Host work inside a call is a host node**; trivial host work (an embedding
    lookup, a causal mask) is a missing device kernel.
 8. **Submissions are core's.**
@@ -1670,21 +1735,23 @@ that writes them marks it (readers: open decision 16, ruled B3.9/B3.10).
 - **The frame graph** is one per screen: the overlay render passes, Hikari's
   integrator for its traced scenes, the composite of traced films, the
   present. Shadow and ambient-occlusion passes run only when their inputs
-  changed, not every frame as today: their draws sit inside `when!(p, flag)`
-  with a `Keep` target, or their compute launches inside `when!(g, flag)`;
+  changed, not every frame as today: their draws are `when!` draws with a
+  `Keep` target, or their compute launches `when!` launches;
   the store that changed an input sets the flag, and a kernel at the end of
   the pass clears it.
 - **Hikari's integrator** is declared into the frame graph once, outside
-  any plot's `insert!` block, so adding or removing a plot recompiles the
-  frame graph's plan but keeps the integrator's declaration. Its film and
+  any plot's `insert!` block. A traced plot is a TLAS range and material
+  entries, pending structure changes, so adding or removing one recompiles
+  nothing and keeps the integrator's declaration; only a plot that declares
+  kernels of its own recompiles the plan. Its film and
   sample count are device arrays the screen holds (accumulation survives
   runs and recompiles; a viewport change is a scheduled `resize!`); its work
   queues are window-sized graph arrays (their contents matter only within a
   run), so a window resize within capacity re-records the window-sized
   segments (Windows). Scene changes never free it (`notify_scene_changed` and
-  `invalidate!` go). A new material type is a new hit group in the ray-tracing
-  pipeline and recompiles the frame graph, like a plot of a new kind (open
-  decision 18).
+  `invalidate!` go). A new Hikari material type is not a hit group: it is a
+  new specialization of the shade kernel (materials are a `MultiTypeSet`),
+  so the frame graph's plan recompiles (open decision 18).
 - **No host waits inside a frame.** `fill_aux_buffers!` and `postprocess!` lose
   their `waitidle`; host reads (`colorbuffer`) are graph copy nodes.
 - **Draw order** is the order of the pass's pieces: a plot moving in front of
@@ -1720,7 +1787,7 @@ SDK headers, MLX's source and measurements.
 |---|---|
 | kernel nodes | one compute ICB per segment; pipelines compiled with `supportIndirectCommandBuffers`; arguments in the plan's argument memory; a barrier bit where `barriers!` put one |
 | conditional kernels, loops | device-written execution ranges in plan memory |
-| render nodes | one render ICB per render node, executed inside the run's render encoder; per-draw state an indirect render command cannot hold (open item 7) is emitted directly in the run's encoder |
+| render nodes | one render ICB per piece (B3.17), executed in list order inside the run's render encoder; per-draw state an indirect render command cannot hold (open item 7) is emitted directly in the run's encoder |
 | copy nodes | blit commands in the run's command buffer |
 | library operations | MLX kernels as ordinary pipelines inside the compute ICB |
 | residency | the pool's blocks, reserves and acceleration structures in one `MTLResidencySet` per device, added to every Mantle queue (`MTL4CommandQueue.h:317-349`), so a BLAS reached only through a TLAS is resident; per plan only its ICBs, argument memory and pipelines |
@@ -1892,17 +1959,20 @@ In the order of "How we build it". The tests, red:
   last frame; a size beyond the window's capacity recompiles the graph once,
   at its next run.
 - `test_run_is_submit.jl`: in steady state, `run!` allocates no device memory,
-  compiles nothing, records nothing except the `AccelCommand`s a change marked
+  compiles nothing, records nothing except the `AccelCommand`s a change marked,
+  the parts that recorded a moved handle, a new piece with its pass's list,
   and the segments of a new swapchain generation, and submits each segment
   once.
 - `test_runs_never_overlap.jl` (rule 9): one graph whose kernels read, modify
-  and write a persistent array, run from two threads and with segments on two
+  and write a device array it names, run from two threads and with segments on two
   queues, 10 000 times with no host wait between runs; the result counts every
   run exactly once. Negative control: with the wait on the previous run's
   tokens removed it fails.
 - `test_resize_is_queued.jl`: `resize!` of an array used by two graphs, one of
-  them in flight, from another thread, directly and through a view: every run
-  sees either the old or the new size and address, never a mix; the old region
+  them in flight, from another thread, directly and through a view: every
+  stage sees either the old or the new size and address, never a mix (per
+  stage, B4.9; a run with host nodes may see the new state from a later stage
+  on); the old region
   is released only after the in-flight run; the first `resize!` of an array a
   recorded plan launches over directly recompiles that plan once, and later
   ones (pages in a reserve, moves of a doubling region) do not; a first
@@ -1932,12 +2002,14 @@ In the order of "How we build it". The tests, red:
 - `test_one_path.jl`: every eager entry (KA launch, broadcast, `fill!`,
   `copyto!`, `render!(dev, …)`, `trace!(dev, …)`, `fft`, `mul!`) reaches
   `compilekernel`, with one submission per kernel launch, on every device type.
-- `test_hostwritten.jl`: `x[:] = data` before the first run reaches the first
-  run.
+- `test_gpuref_slot.jl` (was `test_hostwritten.jl`; B4.9): `r[] = v` before the
+  first run reaches the first run; a store while a run is in flight reaches the
+  next submission that touches the slot and never waits; two plans and a piece
+  baking one slot all read the stored value.
 - `test_run_host_time.jl`: the real `run!`'s host time per run over plans
-  that name 100, 2 500, 25 000 and 50 000 sync states, measured against
-  the phase 3 target (within 3x of the model in Measurements; open decision
-  19); from phase 6 on, also with the records named through array `GPURef`s.
+  that name 100, 2 500, 25 000 and 50 000 sync states with nothing changed is
+  the same for all four (open decision 19, ruled); from phase 6 on, also with
+  the records named through array `GPURef`s.
 - `test_eviction.jl` (open decision 16, ruled B3.9/B3.10): two graphs that each need
   90% of the device run alternately, back to back with no host wait; weights
   evicted and restored before the run; results exact; zero recompiles;
@@ -1956,9 +2028,10 @@ In the order of "How we build it". The tests, red:
 Adds: `Kernel`/`KernelInfo`, `compilekernel`/`kernelinfo`, the per-device
 compile counter, node types with their origin, `compile!(s, node)`, the
 dependency graph kept and reduced with one hazard function shared with
-barriers, barrier merging for conditional kernels, conditional blocks
-(`when!(g, flag) do … end` on a device-side flag), `repeat!` bodies limited to kernels with hazards derived
-between iterations (instead of `emitloophead!`'s full barrier), the estimated
+barriers, barrier merging for conditional kernels, single conditional launches
+(`when!(g or group, flag, kernel, args, ndrange)` on a device-side `Bool` flag,
+B4.1), launch groups (`Group`, `repeat!(group, n)`, B4.2) limited to launches by
+their methods, with hazards derived between iterations (instead of `emitloophead!`'s full barrier), the estimated
 submission split, placement stored in the plan, `sharing!`, the per-segment
 access summary.
 
@@ -1985,7 +2058,7 @@ lock (storage `Released()`, the old storage retired with the record's last
 tokens; dropping pending changes and releasing the cell come with them in
 phase 4), graph finalizers, tenancy by id, sparse arenas with queued mapping (Vulkan), the
 pressure policy in `acquire!` with `makeroom!` folded in (its steps up to the
-wait for retiring storage; eviction, a proposal, is phase 4), one meaning of capacity,
+wait for retiring storage; eviction, B3.9, is phase 4), one meaning of budget,
 tables with free lists. Composites that hold and never allocate come in
 phase 5, with the TLAS and BLAS.
 
@@ -2035,11 +2108,10 @@ decision 19, ruled).
 
 Adds: Lava's entry wrapper with fields in the argument slots and the block
 marked `NonWritable`; the cell arena; each array's cell, shared by its views;
-the head node and prepare nodes with the plan's slots as a resource (entry
-application, cell copy table, launch commands); the one entry per plan with host
-writes waiting for the previous run; the value `GPURef` with its lock, a
-store marking the plans whose entry holds it; hostwritten data
-through `x[:] = data`, kept on the host while no current plan exists;
+the head node and prepare nodes with the plan's slots as a resource (cell copy
+table, launch commands); the value `GPURef` as one slot in device memory whose
+address plans and pieces bake, written by scheduled stores (B4.9; no per-plan
+entry, no host write waiting for a run, no hostwritten arrays);
 array state with storage kinds (pool region, reserve with pages mapped as it
 grows, committed region that doubles, evicted, released), the last hold
 dropping pending changes and releasing the cell, and the first
@@ -2053,8 +2125,7 @@ waiting on the first segment's token, inline stores within the `caps(dev)` limit
 and marking at the change; `LengthOf` and `SizedBy` resolved at compile;
 indirect launches only over resizable arrays; `lengthof(a)` for lengths a
 kernel writes (`resizing-and-raytracing.jl` B.1-B.7); eviction of idle
-resources under pressure with `Restore` on their next use (proposal, open
-decision 16; it needs the dependents and pending changes of this phase).
+resources under pressure with `Restore` on their next use (B3.9; it needs the dependents and pending changes of this phase).
 
 Deletes: the pointer-to-inline-copy argument layout in Lava's entry wrapper and
 Mantle's packer, the pushed patch table (`emitpatches!`, `Plan.patchtab`,
@@ -2065,8 +2136,7 @@ Rewrites `test/vulkan/test_recorded_move_patch.jl`
 (`test/metal/test_recorded_move_metal.jl` in phase 9).
 
 Green: `test_resize_is_queued.jl`, `test_host_node.jl` in full,
-`test_hostwritten.jl`, `test_eviction.jl` (once open decision 16 rules
-eviction in), the whole-plan benchmark within its noise of `plan_*.txt`.
+`test_gpuref_slot.jl`, `test_eviction.jl` (eviction is ruled in, B3.9), the whole-plan benchmark within its noise of `plan_*.txt`.
 
 ### 5. Acceleration structures and textures
 
@@ -2078,10 +2148,11 @@ only when marked; pending builds coalesced per structure, Updates with
 `builtcount`; BLAS storage with a doubling capacity, refits and builds into
 it under the same count rules (`AccelCommand`), `MoveAccel` beyond it;
 kernel-written counts built over the capacity (to be confirmed);
-a change that would make a running plan stale waiting for the run's end
-(throwing from the plan's own host function); composites that hold
-and never allocate, with finalizers on every holder type; readers (proposal,
-open decision 16): a structure's update pended by host changes and by
+a change that would make a running plan stale applied after the run's end,
+its submitter waiting, never the call (throwing from the plan's own host
+function); composites that hold
+and never allocate, with finalizers on every holder type; readers (B3.10):
+a structure's update pended by host changes and by
 runs that write its arrays; per-range data through the range table; BLASes
 shared by geometry; a `mask` per range entry for visibility.
 
@@ -2211,8 +2282,9 @@ Green: phase 0's tests on the workstation (CUDA) and the Bosgame (HIP).
   recompiles nothing; attributes as array `GPURef`s
   read with `attribute(a, i)`; `update!` as stores, resizes and rebinds; a
   dirty list instead of scene-tree walks; one scene-rectangle array per scene;
-  Hikari's integrator declared into the frame graph with window-sized film and
-  work queues, kept across scene changes; shadow and ambient-occlusion passes
+  Hikari's integrator declared into the frame graph, its film and sample count
+  device arrays the screen holds and its work queues window-sized graph arrays,
+  kept across scene changes; shadow and ambient-occlusion passes
   under `when!`; no `waitidle` in a frame; overlay compositing through the one
   path; its own fixes listed there.
 - **JuliaVision:** one graph per call ("One call, one graph"). DNNKernels'
@@ -2233,13 +2305,19 @@ from the results.
 ## Decisions
 
 1. **Mantle owns device memory**; vendor allocators are bypassed.
-2. **One array type**, `MantleArray{T,N,D} <: AbstractGPUArray{T,N}` on devices
-   and graph devices, with scoped zero-copy vendor views.
+2. **One array type**, `MantleArray{T,N,L} <: AbstractGPUArray{T,N}` on devices
+   and graph devices, with scoped zero-copy vendor views; a view is the same
+   type, and read-only, `Readback` memory and resizable are runtime properties
+   (B4.5). Lengths follow Julia's API (B4.10); kernels are bounds-checked unless
+   `@inbounds` (B4.7).
 3. **Devices, not backends.** `Device()` is a `LavaDevice` on GPU 0 (a
    `MetalDevice` on macOS); `CudaDevice`/`ROCmDevice` after `using CUDA`/
    `using AMDGPU`; lavapipe replaces `HostDevice`; one Julia object per hardware
    device. Loading stays by platform.
-4. **A graph is not a device**: graph arrays live on its `GraphDevice`.
+4. **A graph is not a device**: graph arrays live on its `GraphDevice`
+   (`Mantle.Device(graph)`). It is a KernelAbstractions backend: KA launches and
+   `KA.allocate` on graph arrays declare (B4.3); `adapt(Mantle.Device(graph), x)`
+   makes zero-copy aliases the graph names (B4.4).
 5. **Operations are methods** that launch kernels with `dispatch!(location(a),
    …)`; nothing is lowered at compile; selection is a call in the method, from a
    per-device table.
@@ -2253,8 +2331,9 @@ from the results.
    token per segment and channel.
 10. **Submission split from estimated cost**; no measurement-driven re-record.
 11. **Changes are queued** by the functions that make them; nothing is detected.
-12. **Runs of one graph never overlap**; one argument block and one entry per
-    plan; host writes into the entry wait for the previous run.
+12. **Runs of one graph never overlap**; one argument block per plan; value
+    `GPURef`s are slots written by scheduled stores, so no host write waits for
+    a run (B4.9, replacing B2.1's per-plan entry).
 13. **Each array owns a cell** (address, size), shared by its views; the head
     node copies cells into flat, read-only argument slots; kernels never read
     cells; arrays are fixed until their first `resize!`, which makes them
@@ -2262,9 +2341,11 @@ from the results.
     on a device with sparse residency moves into a reserve that grows by
     mapping pages, and any other into a pool region that doubles, each
     doubling a move; launches are indirect only over resizable arrays.
-14. **Control flow is launches only**: `repeat!` bodies and conditions hold
-    launches of GPU work (dispatches and traces); a condition is a `when!`
-    block (Simon, 2026-10-02).
+14. **Control flow is launches only**: a launch group is a value,
+    `Group(graph, name)`, declared into with `dispatch!(group, …)` anywhere and
+    attached with `repeat!(group, n)` (B4.2); a condition is one `when!` launch
+    or draw with a `Bool` flag (B4.1). Both hold GPU work only (dispatches and
+    traces; a `when!` also a draw), by which methods exist; no `do`-block bodies.
 15. **Sparse arenas that grow and shrink**; where sparse binding is missing, a
     graph compiled later gets a new arena part.
 16. **MTL4 is the only Metal target**; MLX's kernels inside the recording,
@@ -2281,17 +2362,23 @@ from the results.
 21. **One device registry** per process, the only process-level state
     (decisions.md B15 listed it as open; B2.5's one object per hardware device
     needs it).
+22. **Read-only inputs** (B4.6): `MantleArray(dev, host; readonly = true)` keeps a
+    reference to `host` for restores after eviction; an mmapped `host` is just an
+    `Array`; writes throw at the call from the per-argument access `dispatch!`
+    derives at declaration.
 
 ## Open decisions
 
-1. Ruled 2026-10-02: the block form, Decision 14. Today's `when!` takes a
-   host-read `Ref{Bool}` and goes in phase 1; the name is reused. The
-   mechanism, the same on every device type: the launches and draws inside a
-   `when!` block are indirect, and whoever writes their indirect commands
-   multiplies the count by the flag: the head for a flag the host writes, a
-   prepare node right after the kernel that writes a kernel-written flag.
+1. Ruled 2026-10-02 as a block (B3.1), changed 2026-10-14 (B4.1, B4.2): `when!`
+   takes ONE launch or draw with a `Bool` flag (`GPURef{Bool}` or a one-element
+   `Bool` array, enforced by the method's argument types); several under one
+   flag are several `when!`s. Today's `when!` takes a host-read `Ref{Bool}` and
+   goes in phase 1; the name is reused. The mechanism, the same on every device
+   type: a `when!` launch or draw is indirect, and whoever writes its indirect
+   command multiplies the count by the flag: the head for a flag the host writes,
+   a prepare node right after the kernel that writes a kernel-written flag.
    This is the mechanism `repeat!`'s loop head already uses (it zeroes the
-   body's counts). No conditional rendering is used, so the flag is never a
+   group's counts). No conditional rendering is used, so the flag is never a
    handle dependence (it may move like any array) and Metal needs nothing
    extra. A flag in `Readback` memory serves both sides: a kernel writes it,
    the prepare node reads it on the GPU, and the host reads it after the run
@@ -2312,7 +2399,7 @@ from the results.
 10. When a retired swapchain's images are free: a queue token covers the
     rendering but not the presentation; `VK_EXT_swapchain_maintenance1`'s
     present fences cover both where the driver has them.
-11. Whether a `repeat!` body is recorded once per iteration into one segment or
+11. Whether a repeated group (`repeat!(group, n)`) is recorded once per iteration into one segment or
     recorded once and submitted per iteration (today's way). Either way a loop
     whose iterations together exceed the submission budget is cut between
     iterations.
@@ -2328,15 +2415,16 @@ from the results.
     Options: (a) recompile; (b) a sorted draw list the GPU reads (multi-draw
     indirect); (c) a changed draw order re-records the render segment (no
     recompile), the same mechanism as 17(c). With pieces (B3.17), (c) is a
-    rewrite of the pass's list only; still open for per-frame sorting.
+    rewrite of the pass's list only: `sort!(pass; by, lt, rev)` (B4.8). Still
+    open for per-frame sorting.
 16. Ruled 2026-10-02 from the draw benchmarks (decisions.md B3.7): the
     `GPURef` of an array (zero-copy attribute rebinding), `attribute(a, i)` as
     `a[min(i, length(a))]` (1-based; the benchmark shader's 0-based form is
     `a[min(i, n-1)]`), the scene rectangle in the vertex stage with clip
     distances. Ruled 2026-10-05 (decisions.md B3.9, B3.10): eviction is
     automatic (Memory, "An idle resource can leave the device"; phase 4),
-    with input modes still to settle (a read-only array from a file or from
-    host data needs no copy out); a run that writes arrays pends the updates
+    its input mode ruled by B4.6 (`readonly = true` keeps a reference to the
+    host array, which a restore uploads from; nothing is copied out); a run that writes arrays pends the updates
     of the structures built from them (Acceleration structures; phase 5),
     implemented as efficiently and carefully as the rest of the core.
 17. Index buffers and other handle dependences. An index buffer is bound by
@@ -2363,16 +2451,18 @@ from the results.
     changes (colour as numbers or as colours, `Point2f` or `Point3f`, a
     material of another type) is a `delete!` and `insert!` of the plot in
     Makie already (Simon, 2026-10-05: rendered plots fix their types), so it
-    is a plot removed and added, which may recompile (B3.6). A new Hikari
+    is a plot removed and added: a piece deleted and inserted, no recompile
+    (B3.17). A new Hikari
     material type arrives the same way: Hikari keeps materials in a
     `MultiTypeSet`, one array per material type, whose GPU form is a tuple of
     typed arrays the shade kernel dispatches over (Raycore
     `multitypeset.jl:213-225`, Hikari `scene.jl:18-24`), so a new type is a
-    new kernel specialization. What is left: a change of a value that picks
+    new kernel specialization and recompiles the plan that declares the shade
+    kernel. What is left: a change of a value that picks
     another pipeline without changing a type, such as `transparency`. Options
     for those: (a) RayMakie treats the change as `delete!` + `insert!` of the
-    render object (a recompile); (b) both draws are recorded, each inside
-    `when!(p, flag)`, and the change is a store into the two flags (one more
+    render object (a recompile before pieces, B3.17); (b) both draws are
+    recorded, each as `when!(p, flag, pipeline, args, count)`, and the change is a store into the two flags (one more
     draw per plot with count 0: +14-34 ns per tiny draw on Vulkan, nothing on
     the M5, measured). Ruled 2026-10-05 (decisions.md B3.12): never a
     recompile; a GPU flag (`when!`, the count times the flag in the indirect
