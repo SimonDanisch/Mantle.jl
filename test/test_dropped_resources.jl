@@ -38,7 +38,15 @@ in the session may still be waiting for a collection, and its finalizer only
 retires — the region comes back at the `reclaim!` after that. A single
 before/after pair therefore measures this file plus whatever the previous one
 left, which is how the first version of this test read `before = 17` and
-`after = 7` and called the guarantee broken."""
+`after = 7` and called the guarantee broken.
+
+Each round submits the open batch first (`flush!`). A region dropped after the
+last submission is stamped with the value the OPEN batch will signal (`fence`),
+and `reclaim!(wait = true)` declines to wait for work nobody submitted, so
+without the flush that region comes back only when some other work submits. In
+a full suite that sometimes happens in the middle of a settle and sometimes not:
+the Ada's suite read `2 == 1 == 2` (2026-10-15), and a submission injected into
+one round reproduces it (experiments/bugfix/dropped/probe.jl)."""
 function settled(dev)
     onloan() = sum(b -> length(b.live),
                    Iterators.flatten(values(Mantle.pool(dev).blocks)); init = 0)
@@ -49,6 +57,7 @@ function settled(dev)
     best = typemax(Int)
     for _ in 1:8
         GC.gc(true)
+        Mantle.flush!(dev)
         Mantle.reclaim!(Mantle.pool(dev), dev; wait = true)
         best = min(best, onloan())
     end
