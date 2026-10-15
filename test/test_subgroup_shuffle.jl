@@ -5,9 +5,9 @@
 # Julia binding, so nothing could reach them; `OpGroupNonUniformRotateKHR` was not
 # declared at all. These tests pin down the semantics that a reduction built on
 # them depends on, and they check the *selector* convention: KernelInterface's
-# `shfl` takes an ABSOLUTE, 0-based lane, while `get_sub_group_local_id` is
-# 1-based like every KI index. The lane selector is not a Julia index, and the one
-# between them has to be subtracted in exactly one place.
+# `shfl` takes the 1-based lane `get_sub_group_local_id` returns (KernelInterface
+# 0.4; it was 0-based before). The selectors below are computed 0-based, as lane
+# arithmetic (xor, rotate) wants, and converted in exactly one place, `lane1`.
 #
 # Written against KernelInterface's portable spellings — `shfl` (absolute lane),
 # `shfl_down` and `sub_group_reduce_add` — so it runs on every backend. The xor,
@@ -27,8 +27,10 @@ include(joinpath(@__DIR__, "testbackend.jl"))
 
 const KA = KernelAbstractions
 
-# This lane's 0-based index — the selector `shfl` takes — and the sub-group width.
+# This lane's 0-based index, the sub-group width, and the 1-based lane `shfl`
+# takes for a 0-based selector.
 @inline sglane() = KI.get_sub_group_local_id(UInt32) - UInt32(1)
+@inline lane1(sel) = sel + UInt32(1)
 @inline sgwidth() = KI.get_sub_group_size(UInt32)
 
 @kernel function shufflekinds!(sz, lane, sh, sx, su, sd, rot)
@@ -38,13 +40,13 @@ const KA = KernelAbstractions
     v = Float32(l)
     sz[i] = S
     lane[i] = l
-    sh[i] = KI.shfl(v, UInt32(3))                          # absolute
-    sx[i] = KI.shfl(v, xor(l, UInt32(1)))                  # butterfly partner
+    sh[i] = KI.shfl(v, lane1(UInt32(3)))                          # absolute
+    sx[i] = KI.shfl(v, lane1(xor(l, UInt32(1))))                  # butterfly partner
     # Up by one. Lane 0 has no source; it reads itself so the selector stays a
     # valid lane (Metal requires one), and the test asserts nothing there.
-    su[i] = KI.shfl(v, max(l, UInt32(1)) - UInt32(1))
+    su[i] = KI.shfl(v, lane1(max(l, UInt32(1)) - UInt32(1)))
     sd[i] = KI.shfl_down(v, 1)                             # down by one
-    rot[i] = KI.shfl(v, (l + UInt32(1)) % S)               # rotate: wraps
+    rot[i] = KI.shfl(v, lane1((l + UInt32(1)) % S))               # rotate: wraps
 end
 
 # A butterfly reduction: log2(size) xor steps, no shared memory and no barrier.
@@ -58,7 +60,7 @@ end
     l = sglane()
     m = UInt32(1)
     while m < sgwidth()
-        acc += KI.shfl(acc, xor(l, m))
+        acc += KI.shfl(acc, lane1(xor(l, m)))
         m <<= 1
     end
     out[i] = acc
@@ -70,14 +72,14 @@ end
 @kernel function reverselanes!(out)
     i = @index(Global, Linear)
     l = sglane()
-    out[i] = KI.shfl(Float32(l), sgwidth() - UInt32(1) - l)
+    out[i] = KI.shfl(Float32(l), lane1(sgwidth() - UInt32(1) - l))
 end
 
 # One kernel per operation, at the element type of `out`, so every type a
 # backend lists can be run.
 @kernel function shfl_t!(out)
     i = @index(Global, Linear)
-    out[i] = KI.shfl(eltype(out)(sglane()), UInt32(2))
+    out[i] = KI.shfl(eltype(out)(sglane()), lane1(UInt32(2)))
 end
 
 @kernel function shfl_down_t!(out)

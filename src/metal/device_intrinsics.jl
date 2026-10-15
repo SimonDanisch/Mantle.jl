@@ -13,38 +13,14 @@
 # so removing these is what makes the two backends agree with the contract and
 # with each other.
 #
-# What REMAINS is what Metal.jl does not provide: `shfl` and
-# `sub_group_reduce_add`. Both are one Metal instruction and the rule for this
-# backend still holds -- a capability Metal has and Metal.jl does not wrap is a
-# gap to close there, not to work around here.
-
-# ── The shuffle family ────────────────────────────────────────────────────────
-#
-# `simd_shuffle_down` is Metal's, one instruction, for the four element types
-# `MTL_SHFL_TYPES` lists. Float64 is absent because Apple GPUs do not have it —
-# the divergence that made `KI_REDUCE_ADD_TYPES` a separate list from
-# `KI_SHFL_TYPES` in the first place.
-for T in (Float32, Float16, Int32, UInt32)
-    @eval @device_override @inline KI.shfl(val::$T, lane::Integer) =
-        Metal.simd_shuffle(val, lane + 1)
-end
-
-# ── The reduction ─────────────────────────────────────────────────────────────
-
-# `sub_group_reduce_add` is `Metal.simd_sum`: ONE instruction, not a butterfly.
-#
-# MSL has had `simd_sum` all along; Metal.jl simply had not wrapped it, so the
-# first version of this file was a log2(width) XOR-shuffle loop — five
-# instructions at width 32 to do what the hardware does in one. The fix belonged
-# upstream, and `air.simd_sum` and its `product`/`min`/`max`/`and`/`or`/`xor`
-# siblings are wrapped in `Metal/src/device/intrinsics/simd.jl` now.
-#
-# That is the rule for this backend generally: a capability Metal has and
-# Metal.jl does not wrap is a gap to close there, not to work around here.
-# Hardware ray tracing will need a great deal more of it.
-for T in (Float32, Float16, Int32, UInt32)
-    @eval @device_override @inline KI.sub_group_reduce_add(val::$T) = Metal.simd_sum(val)
-end
+# `shfl` and `sub_group_reduce_add` went the same way once Metal.jl implemented
+# KernelInterface 0.4 (JuliaGPU/Metal.jl#994, merged into our fork 2026-10-15):
+# Metal's `KI.shfl` takes the 1-based lane on its eight native types, and its
+# `sub_group_reduce_add` is `simd_sum` for any type. Our overrides for four of
+# those types were more specific than Metal's methods, so they would have
+# replaced them silently, without Metal's lane wrapping. The rule for this
+# backend stands: a capability Metal has and Metal.jl does not wrap is a gap to
+# close there, not to work around here.
 
 # ── The output pointer of a shader stage ─────────────────────────────────────
 
