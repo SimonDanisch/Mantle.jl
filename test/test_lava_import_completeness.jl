@@ -326,7 +326,13 @@ end
     # ran on a Mac: Mantle's (`src/metal/graphics.jl`) asks a PIPELINE what a stage
     # returns, Metal.jl's (`src/compiler/graphics.jl`) asks a compiler JOB. Neither
     # is exported, neither calls the other, and `src/metal/` names only its own.
-    known = [(:stage_output_type, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
+    #
+    # `link_kernel` against Metal, reviewed 2026-10-15 with the merge of Metal.jl's
+    # main (its `mtlfunction` / `link_kernel` split): Mantle's links a compiled Lava
+    # kernel into a Vulkan pipeline (`src/vulkan/runtime/launch.jl`, on a
+    # `VkContext`), Metal.jl's links a method instance in its compiler. Neither is
+    # exported and `src/metal/` calls neither.
+    known = [(:stage_output_type, :Metal), (:link_kernel, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Launch, :KernelAbstractions), (:Loop, :LLVM), (:_lower, :AcceleratedKernels),
              (:access, :LLVM), (:claim!, :Metal), (:disjoint, :LLVM),
              (:invalidate!, :LLVM), (:slice, :AcceleratedKernels),
