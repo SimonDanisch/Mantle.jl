@@ -103,6 +103,7 @@ Tests the plan's phase 0 list names since the review round.
 | P0.T26 | write RayMakie's compile-counter session as the plan describes it (Phase 0); green as P11.G2 | - | open | |
 | P0.T27 | check: launch kernels never read cells (only head, prepare, the TLAS offsets and records kernels and `lengthof` writers have a `CellRead` use), over every plan the suite compiles (api.md section 6, derived; not in the plan: confirm, G16) | - | open | |
 | P0.T28 | write `test_gpuref_slot.jl` (was P0.T15): `r[] = v` before the first run reaches it; a store during a run reaches the next submission that touches the slot and never waits; two plans and a piece baking one slot read the stored value (B4.9) | - | open | |
+| P0.T29 | write `test_view_barriers.jl` as the plan describes it (Phase 0): a write through an array and a read through a view, `reshape` or storage of it in one graph get a barrier; negative control: an object-keyed resource table (today's `Graph.ids`) | - | open | found porting GPUFiltering and Paperhawk, 2026-10-15: on Mantle 94c4258 a `Buffer`, `storage(b)` and a reshape are three resources and the plan has no barrier between the write and the read |
 
 ### Bugs to fix first, each with a regression test that fails before the fix
 
@@ -206,6 +207,7 @@ Tests the plan's phase 0 list names since the review round.
 | P1.A18 | `when!(g or group, flag, kernel, args, ndrange)` (was P1.A8): one launch; `flag` a `GPURef{Bool}` or one-element `Bool` array, enforced by the method's argument types; indirect, count × flag (B4.1, B4.2) | - | open | |
 | P1.A19 | `Group(graph, name)` (was P1.A9): a value, declared into with `dispatch!(group, …)` anywhere, attached with `repeat!(group, n; while_nonzero)`; launches only, by which methods exist for `Group`; not a location; no mode state on the graph; hazards between iterations derived from the group's accesses (B4.2, B4.4) | - | open | |
 | P1.A20 | `Plan.compiles`: how often the plan was compiled, beside `stale`, for debugging and tests (B4.9); proposed with it: a count of re-records | - | open | |
+| P1.A21 | a group size the caller gives (KA's `kernel(backend, workgroupsize)`, `dispatch!(…; group)`) is kept as given; `config(dev, f)` picks one only where none is given (plan, Kernels; the 2-D default is F32) | - | open | GPUFiltering launches 2-D image kernels with (16, 16) because the default for a 2-D range is one row of 64 |
 | P1.D26 | delete `workgroupsize` as a vocabulary hook (`KernelInfo`'s group size; api.md Appendix A) | 110 hits (KA's `workgroupsize` included), 31 files | open | |
 | P1.D27 | delete the `do`-block body forms of `repeat!` and `when!` (`repeat!(f, g, n…)`, `when!(f, g, …)`); `repeat!(g, kernel, args, ndrange; max, while_nonzero)` stays (B4.2) | 40 hits of `repeat!(…) do`/`repeat!(g…`, 11 files at f6e359a | open | |
 
@@ -603,6 +605,7 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P6.G1 | green: `test_one_path.jl` | - | open | |
 | P6.G2 | green: GPUArrays' TestSuite on every joined device type | - | open | |
+| P6.G3 | green: `test_view_barriers.jl` | - | open | |
 
 ### Added 2026-10-02 (graphics, eviction, composites)
 
@@ -620,6 +623,7 @@ Tests the plan's phase 0 list names since the review round.
 | P6.A20 | `readonly = true`: a reference to the host array for restores; writes throw at the call from the access `dispatch!` derives at declaration (B4.6) | - | open | |
 | P6.A21 | bounds-checked kernels unless `@inbounds`; verify that Lava reports a device-side bounds error rather than faulting (B4.7) | - | open | |
 | P6.A22 | `sort!(pass; by, lt, rev)` reorders a pass's pieces (B4.8) | - | open | |
+| P6.A23 | resource identity: a resource is the array's state, shared by its views, reshapes and storage, never the object; an argument that reaches device memory but is not a `MantleArray` (a vendor array, an array escaping `withview`, a raw backend array) throws at declaration (plan, Arrays; api.md section 7). Replaces `Graph.ids` keyed by object and `resourceleaves!` taking every device-array leaf | - | open | |
 | P6.A13 | (moved to P4.A16: the plan puts inline stores in phase 4) | - | n/a | moved |
 | P6.A14 | tessellation as stage types | - | open | |
 | P6.D40 | delete `pass!` (the hand-recorded path) | 22 hits, 9 files | open | |
@@ -939,7 +943,11 @@ Tests the plan's phase 0 list names since the review round.
 | P11.A15 | RayMakie: per-frame values (the camera matrix) as one-element arrays written by stores, inline from their upload region up to the `caps(dev)` limit (S4, B3.18) | - | open | |
 | P11.A16 | RayMakie: render objects' finalizers push their hold drops through the pool's inbox (S23) | - | open | |
 | P11.A17 | JuliaVision: load is a call: load-time transposes, `hoistconstants` and quantization become one load graph per model (plan, "What removes every split", item 10) | 37 hits of `hoistconstants`, 11 files (JuliaVision 2f0c3ed) | open | |
-| P11.D17 | GPUFiltering: its internal `synchronize` and readbacks go (plan, "What removes every split", item 2) | 22 hits of `synchronize`, 12 files (JuliaVision 2f0c3ed, `GPUFiltering/`) | open | |
+| P11.D17 | GPUFiltering: its internal `synchronize` and readbacks go (plan, "What removes every split", item 2) | 22 hits of `synchronize`, 12 files (JuliaVision 2f0c3ed, `GPUFiltering/`) | doing | the `synchronize` calls are gone (JuliaVision c2f859b; 3 hits left at 1018c51, all comments); readbacks remain in `goodfeatures` (`features.jl:86`) and `fitaffine`/`fithomography` (`flow.jl:117`, `:333`, fits on the CPU over the flow field), which need device reductions |
+| P11.D18 | GPUFiltering: `launch!(device, kernel, args, ndrange)` and the explicit device argument go once a KA launch over graph arrays declares a node (P6.A17); ops with temporaries keep two methods of one name, one allocating them (`MantleArray(location(out), …)`) and one taking them | 31 hits of `launch!(`, 12 files (JuliaVision 1018c51, `GPUFiltering/src`) | open | GPUFiltering depends on Mantle directly since 1018c51 |
+| P11.D19 | Paperhawk (github.com/SimonDanisch/Paperhawk.jl): `DeviceArrays` (`src/gpu.jl`) goes | not checked out here: count at its port | open | |
+| P11.D20 | `Mantle.storage(...)` calls go in Paperhawk, PPOCRRunner and UVDocRunner (`MantleArray` is the array; P6.D58 for `devicearray`) | 10 hits, 2 files in PPOCRRunner/UVDocRunner (JuliaVision 1018c51); Paperhawk: count at its port | open | |
+| P11.A18 | Paperhawk: one graph per call; its per-step plans (detector frame, spans, edges, thumbnail; page warp, cleanup, rotate, pack; preview tiles) become one graph each, and host readbacks after `run!` become `Readback` arrays or copy nodes (plan, Consumers) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -952,7 +960,7 @@ Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P12.G1 | Mantle, Hikari, RayMakie, VideoEditor, JuliaVision on Linux (Vulkan, CUDA, HIP) | - | open | |
+| P12.G1 | Mantle, Hikari, RayMakie, VideoEditor, JuliaVision and Paperhawk on Linux (Vulkan, CUDA, HIP); Paperhawk's suite is `Pkg.test()` in its root, with a display and the GPU | - | open | |
 | P12.G2 | Mantle, Hikari, RayMakie on the Mac | - | open | |
 | P12.A1 | a "State" section written from the results | - | open | |
 
@@ -999,3 +1007,4 @@ phase that needs it resolved.
 | F29 | Lava's eager launch costs about 24 µs per dispatch (SAM 2 encoder on the RTX 4000 Ada, `experiments/eager-vs-graph/`); eager stays a first-class path, so find where it goes | phase 1 | open | |
 | F30 | `insert!(g) do … end` and `render!(…) do p … end` keep `do`-block bodies; B4.2 removed them for launch groups only | before phase 6 | open | |
 | F31 | Lava d688952's RADV/ACO workaround (`foldedoffset.jl`, negative address constants kept off split loads) runs on every device: it costs ~9% of Qwen-Image's VAE decode on the RTX 4000 Ada (1.138 s without, 1.246-1.254 s with) and ~1% on the 7900; decide whether it becomes a per-device compile setting through `config(dev, f)` (F3) | phase 1 | open | A/B 2026-10-15, `experiments/bugfix/env-newest/BASELINE.md` |
+| F32 | the default group size `config(dev, f)` picks for 2-D and 3-D ranges: today one row of 64; measure a 2-D tile (16 x 16, as GPUFiltering passes) against it on the image kernels before choosing (P1.A21 keeps a caller's size either way) | phase 1 | open | not measured |

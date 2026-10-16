@@ -223,6 +223,18 @@ memory and resizable are runtime properties of the resource, not types.
   a freed parent makes its views unusable. A view has no hold and no finalizer
   of its own; `free!` and `resize!` on a view throw. Its argument slots carry a
   static offset and its own dims and strides.
+- **A resource is the array's state, not an object.** `dependencies!` and
+  `barriers!` see one resource for an array, its views and reshapes, however
+  many objects name it, so a write through one and a read through another are
+  ordered. An argument that reaches device memory but is not a `MantleArray` (a
+  vendor array, an array escaping `withview`, a raw backend array) throws at
+  declaration; it never becomes a resource of its own. Today (Mantle 94c4258)
+  `Graph.ids` keys resources by object (an `IdDict`) and `resourceleaves!` takes
+  every device-array leaf as its own resource; `storage(b)` and `reshape` build a
+  new `LavaArray` per call, so a `Buffer`, its storage and a reshape of it are
+  three resources and `barriers!` puts no barrier between a write through one and
+  a read through another (found porting GPUFiltering and Paperhawk, 2026-10-15;
+  `test_view_barriers.jl`).
 - **Every array is fixed until its first `resize!`** (Simon, 2026-09-30). A
   fixed array lives in a pool region and launches over it are direct. The
   first `resize!` call makes it resizable (a host fact: plans compiled after
@@ -448,6 +460,11 @@ end
   this call compiled, which is what core's per-device compile counter adds up.
   Core keeps no kernel cache and holds no lock other than the graph lock while
   a kernel compiles.
+- **A group size the caller gives is kept**: KA's `kernel(backend, workgroupsize)`
+  and `dispatch!(…; group)` launch with exactly that size; `config(dev, f)` picks
+  one only where none is given. Its default for 2-D and 3-D ranges is open:
+  today it is one row of 64, and GPUFiltering passes (16, 16) for images
+  because of that; whether a 2-D tile is faster has not been measured.
 - **`KernelInfo`** has no optional fields: registers, shared memory, group size
   limits and occupancy (from the API where it reports them, from the device's
   limits where it does not), and the instruction and memory-operation counts of
@@ -1666,7 +1683,16 @@ composes into a caller's graph (Trellis2 uses it).
    `recordedplan`'s hooks go.
 2. **Methods on `MantleArray`** for the work between modules: GPUFiltering,
    CFG and Euler steps, Hikari's `postprocess!`. GPUFiltering's internal
-   `synchronize` and readbacks go.
+   `synchronize` and readbacks go. State at JuliaVision 1018c51 (2026-10-15):
+   the `synchronize` calls are gone (c2f859b); every op is
+   `launch!(device, kernel, args, ndrange)` on a KA backend or a `Mantle.Graph`,
+   and GPUFiltering depends on Mantle directly; ops with temporaries have two
+   methods of one name, one allocating them (`KA.allocate` on the output's
+   backend, a transient on a graph) and one taking them. Readbacks remain in
+   `goodfeatures` (`features.jl`) and in `fitaffine`/`fithomography`
+   (`flow.jl`, fits on the CPU over the flow field), which need device
+   reductions. `launch!` and the explicit device argument go once a KA launch
+   over graph arrays declares a node (B4.3).
 3. **`repeat!` with one body** for diffusion steps, sweeps, prompt chunks
    (Trellis2 does this already).
 4. **Resizable arrays** for lengths only the device knows.
@@ -1989,6 +2015,13 @@ In the order of "How we build it". The tests, red:
   that reads then writes a shared array; results exact. Negative control: with
   graphs built with `ordering = Unordered()` (a keyword for tests only) it
   fails.
+- `test_view_barriers.jl`: in one graph a kernel writes an array and a later
+  kernel reads it through a view, a `reshape`, or the array's storage; the plan
+  has a barrier between the two and the result is right. Negative control: a
+  resource table keyed by object (today's `Graph.ids`), which finds three
+  resources and no barrier. Reproducer (Mantle 94c4258): `dispatch!(g, fillk!,
+  (b, 2f0), n)` then `dispatch!(g, addk!, (c, Mantle.storage(b)), n)`; the
+  recorded plan has no transition from the write of `b` to the read.
 - `test_memory_returns.jl`: compile and free a large graph beside a small one;
   reserved memory drops to the small one's need.
 - `test_host_node.jl`: a host node between kernels, reading and writing graph
@@ -2192,7 +2225,8 @@ and `native_*` entries listed under Operations, the names under Graphics,
 "Goes", except `Surface` and the `target_*` names, which go in phase 7 with
 the window code that replaces them.
 
-Green: `test_one_path.jl`, GPUArrays' TestSuite on every joined device type.
+Green: `test_one_path.jl`, `test_view_barriers.jl`, GPUArrays' TestSuite on
+every joined device type.
 
 ### 7. Windows and present
 
@@ -2289,7 +2323,12 @@ Green: phase 0's tests on the workstation (CUDA) and the Bosgame (HIP).
   path; its own fixes listed there.
 - **JuliaVision:** one graph per call ("One call, one graph"). DNNKernels'
   GEMM, attention and convolution as `mul!`, `conv!`, `attention!` on graph
-  arrays.
+  arrays. PPOCRRunner's and UVDocRunner's `Mantle.storage(...)` calls go.
+- **Paperhawk** (github.com/SimonDanisch/Paperhawk.jl): `DeviceArrays`
+  (`src/gpu.jl`) and every `Mantle.storage(...)` call go. Its per-step plans
+  (detector frame, spans, edges, thumbnail; page warp, cleanup, rotate, pack;
+  preview tiles) become one graph per call, and host readbacks after `run!`
+  become `Readback` arrays or copy nodes.
 - Comments contradicting Mantle are corrected in the commit that makes them
   wrong.
 
@@ -2298,8 +2337,9 @@ assertion; RayMakie's compile-counter session (phase 0) with zero compiles.
 
 ### 12. Full suites, once
 
-Mantle, Hikari, RayMakie, VideoEditor, JuliaVision on Linux (Vulkan, CUDA,
-HIP); Mantle, Hikari, RayMakie on the Mac. Then a "State" section is written
+Mantle, Hikari, RayMakie, VideoEditor, JuliaVision and Paperhawk on Linux
+(Vulkan, CUDA, HIP; Paperhawk's suite is `Pkg.test()` in its root and needs a
+display and the GPU); Mantle, Hikari, RayMakie on the Mac. Then a "State" section is written
 from the results.
 
 ## Decisions
