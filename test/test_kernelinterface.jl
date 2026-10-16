@@ -263,19 +263,24 @@ end
 
     @testset "shuffle and reduce type lists" begin
         # KI asks the backend which element types its shuffles cover, and the
-        # answer drives KI's own suite — so the lists must agree with each other
-        # and be what the backend generates, not a hopeful superset.
-        # `test_subgroup_shuffle.jl` runs every listed type on the device.
+        # answer drives KI's own suite, so it must be what the backend runs, not
+        # a hopeful superset. `test_subgroup_shuffle.jl` runs every type on the
+        # device.
         types = filter(T -> KI.supports_shuffle(backend, T),
                        [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
                         Float16, Float32, Float64])
         @test Float32 in types
-        @test Set(KI.shfl_types(backend)) == Set(types)
+        # A SUBSET since KernelInterface 0.4: `shfl_types` lists the types the
+        # backend shuffles natively, and `supports_shuffle` adds every other
+        # primitive type KI's fallbacks move as `UInt32` words. Metal shuffles
+        # eight types natively and Int64 through the fallback (2026-10-16).
+        @test issubset(KI.shfl_types(backend), types)
         @test Float32 in KI.sub_group_reduce_add_types(backend)
-        # A Float64 shuffle or sum is a Float64 computation: listed only where the
-        # device has Float64.
+        # A Float64 SUM is a Float64 computation: listed only where the device
+        # has Float64. A Float64 shuffle is not, KI 0.4 moves it as two words on
+        # any device, so `types` may hold Float64 where the device has none.
         if !KI.supports_float64(backend)
-            @test !(Float64 in types)
+            @test !(Float64 in KI.shfl_types(backend))
             @test !(Float64 in KI.sub_group_reduce_add_types(backend))
         end
     end

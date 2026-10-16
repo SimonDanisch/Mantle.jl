@@ -161,16 +161,22 @@ end
     # The type lists drive KI's own suite, so a type listed and not generated is
     # a kernel that fails to compile on first use. Every listed type runs here.
     @testset "every listed element type round-trips" begin
-        for T in KI.shfl_types(be)
+        # Every type `supports_shuffle` claims, the native ones and those KI 0.4
+        # moves as words (Int64 on Metal), except Float64 on a device without
+        # it: KI allows that shuffle only for values that are never computed
+        # with, and this kernel converts the lane to `T` on the device. Metal
+        # also refuses to allocate the array.
+        shuffled = filter(T -> KI.supports_shuffle(be, T) &&
+                               (T !== Float64 || KI.supports_float64(be)),
+                          [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+                           Float16, Float32, Float64])
+        for T in shuffled
             out = KA.zeros(be, T, N)
             shfl_t!(be, WG)(out; ndrange=N)
             KA.synchronize(be)
             @test all(==(T(2)), Array(out))
         end
-        downtypes = filter(T -> KI.supports_shuffle(be, T),
-                           [Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
-                            Float16, Float32, Float64])
-        for T in downtypes
+        for T in shuffled
             out = KA.zeros(be, T, N)
             shfl_down_t!(be, WG)(out; ndrange=N)
             KA.synchronize(be)
