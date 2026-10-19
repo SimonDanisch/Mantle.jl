@@ -474,10 +474,11 @@ when!(l::Union{GraphDevice,Group}, flag::Union{GPURef{Bool},MantleArray{Bool,1}}
 # FlagPrepare()) right after the kernel that writes it otherwise (compile
 # inserts it, section 4). No conditional rendering: the flag is read by
 # address like any argument, so it may move and is never a handle dependence,
-# and Metal, which has no conditional rendering, needs nothing else. CUDA and
-# HIP have no indirect launch; their
-# device types take the condition their own way (a conditional IF node; a
-# check at kernel entry on HIP), from the same flag (plan, device-type table).
+# and Metal, which has no conditional rendering, needs nothing else. The
+# meaning is the same on every device type (B5.2); CUDA and HIP reach it with
+# their own mechanism, from the same flag (phase 10, plan's device-type table):
+# CUDA can set a kernel node's grid from the device or use a conditional node,
+# HIP 7.1 has neither and checks the flag at kernel entry.
 
 # A host function inside a call is a node; Mantle schedules it (section 6).
 # No method for a Group (B4.2), and not a when! launch.
@@ -643,12 +644,17 @@ compile!(s, p::HeadNode) = (p.compiled = CompiledNode(); p.compiled.command = Co
 compile!(s, p::PrepareNode) = (p.compiled = CompiledNode(); p.compiled.command = CompiledDispatch(kernel!(s.device, prepare_kernel!, preparetypes(p)), 1, InBlock()))
 compile!(s, p::HostNode) = (p.compiled = CompiledNode(); p.compiled.command = CompiledHost(p.f, p.args))
 
-# Core keeps no kernel cache: the device type answers from its compiler's cache
-# and says whether this call compiled, for the per-device compile counter.
+# The `Kernel` lives at the kernel's CodeInstance (B5.11): `kernelfor` finds it
+# through `GPUCompiler.cached_results` (one per compiler configuration), with the
+# access per argument set at declaration (B5.10). compilekernel fills its code if
+# missing and its entry for `dev` (native handle and KernelInfo), each once under
+# the kernel's lock, and says whether this call compiled, for the per-device
+# compile counter. No other kernel table exists, in core or in a device type.
 function kernel!(dev, f, types)
-    native, compiled = compilekernel(dev, f, types, config(dev, f))
+    k = kernelfor(dev, f, types)                       # the Kernel at the CodeInstance; access already set
+    native, compiled = compilekernel(dev, k, config(dev, f))
     compiled && increment!(dev.compiles)
-    return Kernel(native, kernelinfo(dev, native))
+    return entry(k, dev)                               # the DeviceKernel: native and KernelInfo
 end
 
 # ── costs!: estimated, never measured-then-re-recorded ──
@@ -770,7 +776,7 @@ added!(c, p::PresentNode) = closesegment!(c)      # the present segment ends her
 # on the present channel; a BuildNode or HostNode in it that nothing in the
 # span depends on, and that depends on nothing in it, moves before the span;
 # one that cannot move is a compile error (a per-image recording holds no
-# AccelCommand, and the image cannot wait across a host function).
+# BuildRecording, and the image cannot wait across a host function).
 # A node moves out when it does not depend, directly or transitively, on the
 # first window write (judged per node in order, so a node depending only on
 # nodes that moved out moves too); everything else stays and goes on the
@@ -863,7 +869,7 @@ end
 # Record compiles nothing, allocates nothing, submits nothing, reads no mutable
 # resource field: everything it writes comes from the compiled nodes. A
 # segment is a list of parts submitted together: recordings, written here
-# once, and AccelCommands. A run re-records only the AccelCommands a change
+# once, and BuildRecordings. A run re-records only the BuildRecordings a change
 # marked (resizing-and-raytracing.jl B.8), the parts that recorded the handle
 # of an array that moved (an index buffer; decisions B3.11), a pass's list
 # after a piece insert, delete or sort! (B3.17, B4.8) and, per swapchain
@@ -872,11 +878,11 @@ end
 
 emitpart!(b, seg, pl, p::Node) = (emit!(b, pl, p); b)
 # A build or refit ends the part on every device type: it goes into an
-# AccelCommand, its own small command buffer that the first run records with
+# BuildRecording, its own small command buffer that the first run records with
 # the same builder verbs, and that a run records again only when a change
 # marked it (a new count, a MoveAccel; B.8). Its barrier is recorded with it.
 function emitpart!(b, seg, pl, p::BuildNode)
-    push!(seg.parts, Recording(finish(b), seg.channel), AccelCommand(p.structure, p.mode, deps(p), seg.channel))
+    push!(seg.parts, Recording(finish(b), seg.channel), BuildRecording(p.structure, p.mode, deps(p), seg.channel))
     return Builder(pl.device, seg.channel)
 end
 
@@ -907,7 +913,7 @@ end
 # each `h = insert!(p) do … end` on the pass adds one (a plot). A piece is
 # compiled and recorded on its own, so inserting or deleting one compiles and
 # records that piece and rewrites the pass's list (one part recorded again
-# before its next submission, as a marked AccelCommand); the plan is not
+# before its next submission, as a marked BuildRecording); the plan is not
 # recompiled and no other piece is recorded again. Each draw keeps its own
 # pipeline, index buffer and argument layout, so a large mesh draws exactly
 # as it would alone. Visibility stays a store into the draw's when! flag (the
@@ -1245,7 +1251,7 @@ end
 #
 # Each stage applies the pending changes of what it locks (B.4): before its
 # locks it prepares their storage (prepare!, B.4 step 1: storage, pages,
-# capacity, command objects for the AccelCommands it will record again, and
+# capacity, command objects for the BuildRecordings it will record again, and
 # restore storage for evicted resources when the plan is marked for restore;
 # a store's upload region was acquired at its call), then under them
 # submitwith! applies them. If what
@@ -1387,7 +1393,7 @@ function submitstage!(pl, stage, recs, items, rs)
         ownwaits = [waits[seg]; [s.token for s in seg.after]]
         # The parts' command buffers are taken only after the change prefix is
         # emitted (inside submitwith! for the first segment), so a marked
-        # AccelCommand is recorded again with the builtcount the prefix's
+        # BuildRecording is recorded again with the builtcount the prefix's
         # Build just set (B.8).
         if k == 1
             r = submitwith!(seg.channel, recs, rs.prepared, (), parts; self = pl, ownwaits, present,
@@ -1472,9 +1478,9 @@ readers(x) = ()                        # a structure, an image, an arena part: n
 
 commandbuffer(cmd, steps) = cmd                     # a finished command buffer (an eager call, submitnow!)
 commandbuffer(p::Recording, steps) = p.native
-commandbuffer(c::AccelCommand, steps) = current!(c, steps)   # from the state after `steps`, under the structure's lock (B.8)
+commandbuffer(c::BuildRecording, steps) = current!(c, steps)   # from the state after `steps`, under the structure's lock (B.8)
 submitted!(::Recording, token) = nothing
-submitted!(c::AccelCommand, token) = (c.lasttoken = token; built!(c.structure, c.recordedmode, c))   # a Build sets builtcount (B.8)
+submitted!(c::BuildRecording, token) = (c.lasttoken = token; built!(c.structure, c.recordedmode, c))   # a Build sets builtcount (B.8)
 
 # A run with host nodes is several submissions. Each stage starts with a head
 # node that copies the cells again, so a change made while a host function
@@ -1520,8 +1526,7 @@ syncstate(r::ValueBox) = r.sync
 # value is never torn, and a Store into the slot is pended through change!
 # (B.3's Store, the slot as its storage). The next submission that touches
 # the slot applies it in front of its own work (inline, emitstore!, within
-# the device type's limit). It never waits for a run, marks no plan, and
-# nothing recompiles.
+# the device type's limit). It marks no plan, and nothing recompiles.
 function Base.setindex!(r::ValueBox{T}, v) where {T}
     up = acquireupload!(pool(r.device), sizeof(T))    # host-visible system memory, before any lock
     hostview(up, T)[1] = convert(T, v)                # the one copy
@@ -1607,7 +1612,7 @@ end
 # at this size, the segments that draw into them (render areas and image
 # handles are recorded by value), and the per-image present segments. The
 # previous generation's are retired with its holds. recordwindows! also
-# registers the AccelCommands of those segments in their structures' command
+# registers the BuildRecordings of those segments in their structures' command
 # lists (each under its structure's lock, as register! does), so a change
 # marks them, and removes the retired generation's; and it sets the plan's
 # tenancy in the window part for this size, marking the part when it grew

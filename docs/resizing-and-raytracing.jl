@@ -22,7 +22,7 @@
 # - "Kernel launch" means any launch of GPU work: traces count.
 # - TLAS (B3.2): builds use the exact count, storage has a doubling capacity
 #   that never halves, capped at the device's maxInstanceCount (B4.8), a
-#   plan's build or refit is an AccelCommand, Metal reads the count from a
+#   plan's build or refit is a BuildRecording, Metal reads the count from a
 #   cell, Vulkan's indirect build is not used.
 # - GPURef of an array, attribute(a, i), the scene rectangle (B3.7).
 # - B4: a when! flag is a Bool, one launch or draw per when! (B4.1); launch
@@ -116,8 +116,10 @@ end
 run!(g)
 copy!(pos, rand(Point3f, 3000)); run!(g)        # the run applies the change and copies the new length
 
-# A length a kernel decides needs a capacity: no host call says how much to
-# reserve, and graphs size temporaries from it.
+# A length a kernel decides needs no capacity (B5.5): the kernel writes within
+# the array's current storage, bounds-checked unless @inbounds (B4.7).
+# `capacity = n` only reserves room up front, like sizehint!, so a kernel can
+# write that many without a resize.
 alive = MantleArray(dev, Point3f, 0; capacity = 1_000_000)
 dispatch!(g, spawnkill!, (alive, lengthof(alive), pos), launchrange(pos))
 length(alive)                                   # the real length (B4.10): waits for the kernel that writes it and
@@ -385,7 +387,7 @@ end
 #   - a move of storage a plan recorded by handle marks the parts of that plan
 #     that recorded it (open decision 17 (c): they are recorded again before
 #     they are next submitted, after the prefix that moved the storage, like
-#     a marked AccelCommand); nothing recompiles. A plan between its stages
+#     a marked BuildRecording); nothing recompiles. A plan between its stages
 #     gets the same: its later stage re-records, and the move, ordered after
 #     its earlier stages' accesses, has copied what they wrote;
 #   - a change the applying plan cannot follow mid-run (a direct launch over
@@ -419,10 +421,10 @@ pastfirst(pl::Plan) = between(pl)                    # set once stage 1 has subm
 
 # The full submit path, shared by all submitters (under the locks of
 # `records`, after step 1). The submitter's own work is recorded already:
-# `ownparts` are recorded parts and AccelCommands. The changes go into a small
+# `ownparts` are recorded parts and BuildRecordings. The changes go into a small
 # command buffer in front of it, in the same submission. Only after the
 # changes are emitted are the parts' command buffers taken: a marked
-# AccelCommand, or a part that recorded a handle a move just replaced, is
+# BuildRecording, or a part that recorded a handle a move just replaced, is
 # recorded again then (B.8, B.6). The changes' uses are added to the
 # submitter's: the submission waits for every earlier access the changes
 # conflict with, on any queue, and records the changes' writes as the
@@ -629,9 +631,8 @@ resizesteps(st, ev::Evicted, new::RestoreStorage, c) =   # restored into storage
 # applier does first (B.4 step 1). A store through a view with non-unit
 # strides is not one byte range: the packed elements go into the upload
 # region like any store, and the applying submission scatters them (a copy
-# kernel in its prefix, in sequence like any step). The only wait a store
-# can make is acquiring its upload region under memory pressure (acquire!,
-# internals.jl section 9), before any lock; it never waits for a run (B4.9).
+# kernel in its prefix, in sequence like any step). A store mutates the
+# array it names: no second copy of the array, no double buffering (B5.7).
 function Base.setindex!(a::MantleArray{T,N,<:Device}, data, r::AbstractRange) where {T,N}
     length(data) == length(r) || throw(DimensionMismatch("setindex! of $(length(data)) elements into $(length(r))"))
     checkwritable(a)                                  # B4.6, before the region is acquired
@@ -901,7 +902,7 @@ mutable struct TLAS{P} <: AccelStructure     # P: Hardware() or Software()
                                              #   set by push!/delete!, which mark!); then builds are over the capacity
     storage::AccelStorage                    # hardware: AS object on a pool Region; software: Raycore's arrays
     scratch::Region                          # build scratch for `capacity`, replaced with it (not a graph transient)
-    const commands::WeakSet{AccelCommand}    # plans' builds and refits of it, marked by changes (below)
+    const commands::WeakSet{BuildRecording}    # plans' builds and refits of it, marked by changes (below)
     const dependents::Dict{WeakPlan,Dependence}   # plans sized from its capacity (D.1's temporaries; B.6)
     const cell::Cell                         # AS address (Vulkan) or resource ID (Metal)
     const countcell::Cell                    # the total, written by the offsets kernel; read where the device reads counts from memory
@@ -1012,14 +1013,17 @@ buildcount!(t, ::Update) = t.builtcount
 buildcount(t::TLAS) = buildcount(t, countsource(t.device))
 buildcount(t::TLAS, ::CountFromMemory) = fromcell(t, t.totalsource)   # Metal
 fromcell(t, ::HostTotal) = FromCell(t.countcell)
-fromcell(t, ::DeviceTotal) = t.capacity      # built over the capacity on every device type, like Vulkan below
+fromcell(t, ::DeviceTotal) = FromCell(t.countcell)   # the offsets kernel's total, read by the device itself (B5.8)
 buildcount(t::TLAS, ::CountRecorded) = recordedtotal(t, t.totalsource)   # Vulkan, below
 recordedtotal(t, ::HostTotal) = total(t)          # the host view, exact, no padding
 recordedtotal(t, ::DeviceTotal) = t.capacity      # a kernel writes the total: built over the capacity
 buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geometry's capacity for a
                                        #   kernel-written length, below); a BLAS is never counted from memory
 # hostcount(FromCell(_)) is the host view total(t) too: what builtcount keeps.
-# A total a kernel writes has no host value. Such a TLAS (any device type) is
+# A total a kernel writes has no host value. Where the device reads the count
+# from memory (Metal) it builds with that total from countcell (B5.8; whether
+# a refit after the total changed is legal there is checked in phase 5, a
+# build where it is not). Where the count is recorded (Vulkan) such a TLAS is
 # built over `capacity`, with mask-0 records past the device total that
 # reference a valid BLAS (a reference of 0 would make them inactive): the
 # count stays the capacity and no record changes between active and
@@ -1027,15 +1031,15 @@ buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geo
 # padding measured in the header; the only padded case). A BLAS over arrays
 # whose length a kernel writes is built over the geometry's capacity
 # (maxVertex too, which an update must keep), with zero-area primitives past
-# the device length written by a prepare kernel in its AccelCommand (zero
+# the device length written by a prepare kernel in its BuildRecording (zero
 # area, not NaN: NaN would make them inactive). An update may change only
 # instance definitions, transforms and vertex positions
 # (chapters/accelstructures.adoc:159-170), so a run that writes a BLAS's
 # vertices pends an Update and one that writes its index array a Build.
 # (Both follow from B3.2; listed for confirmation in decisions.md.)
 
-# Graph operations. A plan's build or refit of a TLAS or BLAS is an
-# AccelCommand: its own small command buffer, submitted inside the segment's
+# Graph operations. A plan's build or refit of a TLAS or BLAS is a
+# BuildRecording: its own small command buffer, submitted inside the segment's
 # submission between the plan's command buffers. Its barrier (the node's,
 # from barriers!: a full memory barrier, since the members are not known at
 # compile; internals.jl section 4) is recorded with it, first. It records the
@@ -1052,7 +1056,7 @@ refit!(g::Graph, t::AccelStructure) = declare!(g, BuildNode(t, Update()))
 # node); a refit before any build of t is a Build. A kernel-written total
 # needs no build! per run: refits stay legal (above).
 
-mutable struct AccelCommand
+mutable struct BuildRecording
     const structure::AccelStructure
     const mode::Union{Build,Update}
     const deps::Deps                         # the build node's barrier, recorded with it (the one barrier call site)
@@ -1063,7 +1067,7 @@ mutable struct AccelCommand
     recordedcount::Int                       # what a Build recorded, for builtcount
     lasttoken::Union{Nothing,Token}          # its last submission; the replaced buffer is retired with it
 end
-AccelCommand(s, mode, deps, ch) = AccelCommand(s, mode, deps, ch, true, nothing, mode, 0, nothing)
+BuildRecording(s, mode, deps, ch) = BuildRecording(s, mode, deps, ch, true, nothing, mode, 0, nothing)
 mark!(t::AccelStructure) = foreach(c -> (c.marked = true), t.commands)   # under t's lock
 # Recorded again with the ordinary builder verbs: no verb of its own. It
 # records from the structure's state after the steps of the submission it
@@ -1071,10 +1075,10 @@ mark!(t::AccelStructure) = foreach(c -> (c.marked = true), t.commands)   # under
 # builtcount, with this submission's steps on top, before commit! makes them
 # the applied ones), never from the host view, which push! and delete! change
 # at their call. Under the structure's lock: every stage locks the SyncStates
-# of the structures its AccelCommands build (lockstage; a set fixed per
+# of the structures its BuildRecordings build (lockstage; a set fixed per
 # plan), so a concurrent push! cannot change `marked` or the slots while it
 # records.
-function current!(c::AccelCommand, steps)
+function current!(c::BuildRecording, steps)
     c.marked || return c.cmd
     old = c.cmd
     s = c.structure
@@ -1146,7 +1150,7 @@ function Base.push!(t::TLAS, blas::BLAS, source::Union{MantleArray,ArrayBox}; sc
             foreach(a -> addreader!(a, t), rangearrays(r))   # replaces each array's reader snapshot
             t.members = MemberSet(t)
             marktotal!(t)                                # plans sized from t's total (D.1; B.6)
-            mark!(t)                                     # its AccelCommands record a new count
+            mark!(t)                                     # its BuildRecordings record a new count
             Change[entrychanges(t, slot, entry(t, slot), up)...;   # Resize of the range table if the slot is new, the entry's Store
                    BuildAccel(nextseq!(t), t, Build())]
         end
@@ -1200,7 +1204,7 @@ end
 # storage sized beyond the count, to confirm in phase 5). Growing, hardware: a
 # new AS object on a new pool Region (AS storage cannot be sparse) and new
 # scratch, prepared by the applier (B.4 step 1); the old ones retired with the
-# applying token; the structure's AccelCommands are marked; traces and ray
+# applying token; the structure's BuildRecordings are marked; traces and ray
 # queries take the AS by address through the cell (with descriptors instead,
 # open decision 4, they would be handle dependents). Software: the five arrays
 # grow like any array (their Resize steps, B.5).
@@ -1209,7 +1213,7 @@ end
 # `capacity` entries and are rewritten by every build, so their move keeps no
 # contents.
 function capacitysteps(t::TLAS{Hardware}, g::Capacity)
-    mark!(t)                                         # AccelCommands record the new storage
+    mark!(t)                                         # BuildRecordings record the new storage
     (resizesteps(t.records.state, t.records.state.storage, g.records, Resize(0, t.records.state, (g.capacity,), 0))...,
      CellWrite(cellstate(t), acceladdress(t.device, g.as), ()),
      MoveAccel(t, t.storage, g.as, t.scratch, g.scratch))
@@ -1251,7 +1255,7 @@ capacitysteps(t::TLAS{Software}, g::Capacity) = softwaresteps(t, g)   # the five
 abstract type GPURef{T} end                      # T: the value type of a ValueBox, the target type of an ArrayBox
 # The value form, ValueBox{T} <: GPURef{T}, is internals.jl section 7: one slot in
 # device memory whose address every plan and piece bakes; `r[] = v` is a
-# scheduled Store into it, applied like any store, and never waits (B4.9).
+# scheduled Store into it, applied like any store (B4.9).
 mutable struct ArrayBox{T,N} <: GPURef{AbstractArray{T,N}}
     const device::Device                # device-only: its target is a device array
     target::MantleArray{T,N}            # host view (r[]), replaced under the lock at the call
@@ -1417,7 +1421,7 @@ instancerecordtype(dev)      # VkAccelerationStructureInstanceKHR | MTLIndirectA
 accelsizes(dev, path, n)     # storage and scratch for n instances or a geometry
 placeaccel(dev, path, region)        # AS object on a pool Region
 acceladdress(dev, as)        # vkGetAccelerationStructureDeviceAddressKHR | gpuResourceID
-emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; the exact count (Vulkan, in an AccelCommand) or from a cell (Metal)
+emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; the exact count (Vulkan, in a BuildRecording) or from a cell (Metal)
 emitstore!(b, dst, upload)                      # an inline store in a change prefix, from the store's upload region
                                                 #   (B.5): vkCmdUpdateBuffer within .inlinestore; Metal, CUDA, HIP:
                                                 #   inline limit 0, a copy from the store's upload region, acquired
@@ -1596,6 +1600,5 @@ end
 # Per frame, steady state: pending changes applied at the start of the frame's
 # submission, the head (1.3-3.5 µs measured, v2_*.txt), indirect draws, a
 # refit or build only if one is pending, the trace. No recompile and no
-# re-record. The host never waits for a run: value GPURef stores and
-# per-frame stores (the camera, a one-element array) are scheduled changes
-# (B4.9).
+# re-record. Value GPURef stores and per-frame stores (the camera, a
+# one-element array) are scheduled changes (B4.9).

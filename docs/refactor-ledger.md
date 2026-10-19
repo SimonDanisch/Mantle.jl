@@ -102,7 +102,7 @@ Tests the plan's phase 0 list names since the review round.
 | P0.T25 | write `test_composite_fuzz.jl` as the plan describes it (Phase 0); was P5.T1 | - | open | |
 | P0.T26 | write RayMakie's compile-counter session as the plan describes it (Phase 0); green as P11.G2 | - | open | |
 | P0.T27 | check: launch kernels never read cells (only head, prepare, the TLAS offsets and records kernels and `lengthof` writers have a `CellRead` use), over every plan the suite compiles (api.md section 6, derived; not in the plan: confirm, G16) | - | open | |
-| P0.T28 | write `test_gpuref_slot.jl` (was P0.T15): `r[] = v` before the first run reaches it; a store during a run reaches the next submission that touches the slot and never waits; two plans and a piece baking one slot read the stored value (B4.9) | - | open | |
+| P0.T28 | write `test_gpuref_slot.jl` (was P0.T15): `r[] = v` before the first run reaches it; a store during a run reaches the next submission that touches the slot; two plans and a piece baking one slot read the stored value (B4.9) | - | open | |
 | P0.T29 | write `test_view_barriers.jl` as the plan describes it (Phase 0): a write through an array and a read through a view, `reshape` or storage of it in one graph get a barrier; negative control: an object-keyed resource table (today's `Graph.ids`) | - | open | found porting GPUFiltering and Paperhawk, 2026-10-15: on Mantle 94c4258 a `Buffer`, `storage(b)` and a reshape are three resources and the plan has no barrier between the write and the read |
 
 ### Bugs to fix first, each with a regression test that fails before the fix
@@ -145,8 +145,8 @@ Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P1.A1 | `Kernel`/`KernelInfo` | - | open | |
-| P1.A2 | `compilekernel`/`kernelinfo` on every joined device type | - | open | |
+| P1.A1 | `Kernel`/`DeviceKernel`/`KernelInfo`: one `Mantle.Kernel` per kernel at its `CodeInstance` (`GPUCompiler.cached_results`), filled in stages under its own lock: access at declaration, code at compile, per device the native handle and `KernelInfo` (B5.11) | - | open | |
+| P1.A2 | `compilekernel(dev, kernel, config)`/`kernelinfo` on every joined device type, filling the `Kernel`; no device-type kernel cache (B5.11) | - | open | |
 | P1.A3 | the per-device compile counter | - | open | |
 | P1.A4 | node types with their origin | - | open | |
 | P1.A5 | `compile!(s, node)` | - | open | |
@@ -208,6 +208,7 @@ Tests the plan's phase 0 list names since the review round.
 | P1.A19 | `Group(graph, name)` (was P1.A9): a value, declared into with `dispatch!(group, …)` anywhere, attached with `repeat!(group, n; while_nonzero)`; launches only, by which methods exist for `Group`; not a location; no mode state on the graph; hazards between iterations derived from the group's accesses (B4.2, B4.4) | - | open | |
 | P1.A20 | `Plan.compiles`: how often the plan was compiled, beside `stale`, for debugging and tests (B4.9); proposed with it: a count of re-records | - | open | |
 | P1.A21 | a group size the caller gives (KA's `kernel(backend, workgroupsize)`, `dispatch!(…; group)`) is kept as given; `config(dev, f)` picks one only where none is given (plan, Kernels; the 2-D default is F32) | - | open | GPUFiltering launches 2-D image kernels with (16, 16) because the default for a 2-D range is one row of 64 |
+| P1.A22 | access per argument stored in the `Kernel` at declaration (B5.10, B5.11); `AccessCache`/`accesscache` go | 2 (`accesscache` in api.md Appendix A) | open | |
 | P1.D26 | delete `workgroupsize` as a vocabulary hook (`KernelInfo`'s group size; api.md Appendix A) | 110 hits (KA's `workgroupsize` included), 31 files | open | |
 | P1.D27 | delete the `do`-block body forms of `repeat!` and `when!` (`repeat!(f, g, n…)`, `when!(f, g, …)`); `repeat!(g, kernel, args, ndrange; max, while_nonzero)` stays (B4.2) | 40 hits of `repeat!(…) do`/`repeat!(g…`, 11 files at f6e359a | open | |
 
@@ -373,7 +374,7 @@ Tests the plan's phase 0 list names since the review round.
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P3.A12 | host waits only under the graph lock (S6): no sync-state, channel, pool or window lock is held while the host waits; the graph lock may be (shared arena parts, a host node's inputs, the swapchain acquire, `acquire!`'s pressure steps); no store waits for a run, value `GPURef`s included (B4.9) | - | open | |
-| P3.A13 | segments as lists of parts: recordings written once and `AccelCommand`s (S8; plan phase 3) | - | open | |
+| P3.A13 | segments as lists of parts: recordings written once and `BuildRecording`s (S8; plan phase 3) | - | open | |
 | P3.A14 | `lockgraph(g)` throws when the calling task holds an arena part of `g`'s plan; `holdparts!` throws when the task would wait for a part while holding one with a higher id (S25) | - | open | |
 | P3.A15 | `Token = (channel, value)`; core's `passed(::Token)`/`waitfor(::Token)` over the device-type verbs `passed(ch, value)`/`waitfor(ch, value)`; `fence(ch)` becomes a read of `SubmitChannel.next` (api.md 4.2) | 112 hits of `fence` (the word in prose included), 30 files | open | |
 | P3.A16 | measure the real `run!` against the model of "Measurements this plan rests on" (target: within 3x; open decision 19) | - | open | |
@@ -443,7 +444,7 @@ Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P4.A13 | eviction of idle resources under pressure (B3.9, input mode B4.6; was P2.A12): `Evicted` storage, `Restore` change, plans marked through dependents (every naming plan registers). Evictable (S22): no composite holds it, no handle dependent, no plan that names it running, not lent, nothing pending; accesses in flight allowed (the copy is ordered after them); `acquire!` waits for eviction copies outside every lock; only where `Readback` memory is a separate heap (`caps(dev)`), skipped on single-heap devices (Apple M5); acceleration structures not evicted; `restore!` of an already-evicted array with no prepared storage marks the plan for restore, then `Again` | - | open | |
+| P4.A13 | eviction of idle resources under pressure (B3.9, input mode B4.6; was P2.A12): `Evicted` storage, `Restore` change, plans marked through dependents (every naming plan registers). Evictable (S22): no composite holds it, no handle dependent, no plan that names it running, not lent, nothing pending; accesses in flight allowed (the copy is ordered after them); `acquire!` waits for eviction copies outside every lock; the same on every device type, unified-memory ones included (B5.4); acceleration structures not evicted; `restore!` of an already-evicted array with no prepared storage marks the plan for restore, then `Again` | - | open | |
 | P4.A14 | the first `resize!` (S5): in place when the new size fits the current storage (only a cell write); beyond it a large array on a device with sparse residency moves into a reserve, any other array into a pool region of twice the need (each later doubling a move) | - | open | |
 | P4.A15 | `trim!(a)` (name open, S2): unmaps a reserve's pages beyond the size, pending; pressure never does | 23 hits of `trim!` (today's `trim!(pool, dev)`), 12 files | open | |
 | P4.A16 | inline stores (S4; was P6.A13): the call copies the bytes into an upload region (B3.18); the applying submission writes them inline with `emitstore!(b, dst, upload)` up to the `caps(dev)` limit (Vulkan `vkCmdUpdateBuffer`, 64 KiB at 4-byte offsets and sizes), and a larger store is a copy from the upload region; no staging is allocated at apply. Today's core `emitstore!` (`graph/kalaunch.jl:816-823`, through `emitinline!`) gives the builder verb its name | 11 hits of `emitstore!`, 3 files | open | |
@@ -470,7 +471,7 @@ Tests the plan's phase 0 list names since the review round.
 | P4.A30 | `change!(apply, uses)`: the call only enqueues (requested size for `length(a)`; a store's data copied into an upload region acquired at the call, B3.18, the one allocation a call makes); no other allocation, no retry, never a wait for a run at the call (B3.13) | - | open | |
 | P4.A31 | the applying submission allocates before its locks (`prepare!`: storage or pages for a Resize, a structure's capacity, restore storage) and applies in sequence order (`submitwith!` with `stepsof`); Again if what it prepared no longer fits; every submitter on this path (`submitapplying`, run stages) | - | open | |
 | P4.A32 | `resizable` flag set by the first `resize!` call or by `capacity = n` at creation (B4.10) (compile launches indirectly from then on); handle dependents get their parts marked for re-recording when a move is applied (open decision 17 (c), B3.11; nothing recompiles, nothing waits) | - | open | |
-| P4.A33 | a value `GPURef` is one slot in device memory whose address plans and pieces bake; `r[] = v` a scheduled store, never waiting (was P4.A4, P4.A6, P4.A17; B4.9) | - | open | |
+| P4.A33 | a value `GPURef` is one slot in device memory whose address plans and pieces bake; `r[] = v` a scheduled store (was P4.A4, P4.A6, P4.A17; B4.9) | - | open | |
 | P4.A34 | `length(a)`/`size(a)` the real length; for a kernel-written length a wait and a read of the cell, a throw during the declaration of the graph that writes it; `resize!` beyond the capacity allowed, `capacity` like `sizehint!` (was P4.A22; B4.10) | - | open | |
 | P4.A35 | the last hold's phase-4 half (was P2.A16): pending changes dropped (their upload regions retired), the array off the eviction list (B3.9), the cell released | - | open | |
 | P4.T1 | benchmarks behind B3.11 before P4.A32: re-record cost at 100, 1 000 and 5 000 draws, and pulled indices against indexed draws, on NVIDIA, AMD and the M5 (`experiments/draw_bench/`) | - | open | |
@@ -485,7 +486,7 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P5.A1 | builds and refits as operations with `TraceRead`/`TraceBuild` declarations | - | open | |
 | P5.A2 | the core `TLAS` (hardware and software) with instance ranges and the device-side range table | - | open | |
-| P5.A3 | storage for a doubling capacity, builds and refits with the exact count; `AccelCommand` on Vulkan, count from a cell on Metal (Simon, 2026-10-02) | - | open | |
+| P5.A3 | storage for a doubling capacity, builds and refits with the exact count; `BuildRecording` on Vulkan, count from a cell on Metal (Simon, 2026-10-02) | - | open | |
 | P5.A4 | builds with all their uses | - | open | |
 | P5.A5 | the texture table | - | open | |
 | P5.A6 | (renumbered as P5.R1: a rename) | - | n/a | renumbered |
@@ -511,7 +512,7 @@ Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P5.A8 | BLAS storage sized from its geometry with a capacity that doubles (S3): a new topology a Build into it (a `MoveAccel` beyond the capacity, the new address through its cell), moved vertices with the same topology an Update; TLASes over a BLAS pend an Update when its address or contents change; counts by the TLAS rules (`AccelCommand`, `BuildAccel`) | - | open | |
+| P5.A8 | BLAS storage sized from its geometry with a capacity that doubles (S3): a new topology a Build into it (a `MoveAccel` beyond the capacity, the new address through its cell), moved vertices with the same topology an Update; TLASes over a BLAS pend an Update when its address or contents change; counts by the TLAS rules (`BuildRecording`, `BuildAccel`) | - | open | |
 | P5.A9 | readers (B3.10): structure updates pended by host changes and by runs that write their arrays (`pendupdate!`) | - | open | |
 | P5.A10 | per-range data (geometry arrays, material index) through the range table; no scene-wide concatenation | - | open | |
 | P5.A11 | BLASes shared by geometry arrays; a `mask` per range entry for visibility (hide = mask 0, a refit; `active = false` only for a deleted range, a Build; S19) | - | open | |
@@ -527,7 +528,7 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P5.R1 | rename the plan-internal `refit!` (`graph/build.jl`), which collides with the TLAS `refit!` (was P5.A6) | - | open | |
 | P5.A12 | composites hold and never allocate (was P2.A13): TLAS, BLAS, tables, render objects built from arrays, array `GPURef`s and accel storage; only holds and change commits retire; `TLAS` and `BLAS` finalizers push their hold drops through the pool's inbox (S23; `ArrayBox` in P6.A15, render objects in P11.A16) | - | open | |
-| P5.A13 | `AccelCommand`s marked by the change that alters what they recorded; the run re-records only marked ones; nothing compared at run (S20) | - | open | |
+| P5.A13 | `BuildRecording`s marked by the change that alters what they recorded; the run re-records only marked ones; nothing compared at run (S20) | - | open | |
 | P5.A14 | build coalescing per structure: any Build → Build, else Update; `builtcount` = the count of the last Build, used by every Update (S28) | n/a (`builtcount` 0 hits) | open | |
 | P5.A15 | kernel-written counts (S29, to be confirmed): a TLAS total built over the capacity with mask-0 records past the total (Vulkan); a BLAS length built over the geometry capacity with degenerate primitives past the length, so later changes are Updates | - | open | |
 | P5.A16 | a change that would make a running plan stale is applied after the run's end: the submitter that would apply it waits (`WaitFor`), never the call (B3.13); whether and for which changes this exception stays is open (review of 2026-10-14), throwing from the plan's own host function; no `except`; the records kernel writes mask 0 past the device total (S27, revised in the verification round) | - | open | |
@@ -795,7 +796,7 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P8.D37 | delete `HostAPI` (plan, Devices, "Deleted") | 0 hits: n/a once confirmed | open | |
 | P8.D38 | delete `defaultdevice!` (`Device()` and the registry; api.md Appendix A) | 18 hits, 9 files | open | |
-| P8.D39 | delete `use_frozen_kernels` (the device type's compiler cache, per device; api.md Appendix A) | 11 hits, 8 files | open | |
+| P8.D39 | delete `use_frozen_kernels` (the `Mantle.Kernel` at its `CodeInstance`, B5.11; api.md Appendix A) | 11 hits, 8 files | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -972,7 +973,7 @@ phase that needs it resolved.
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | F1 | G1 graphics resources and render state need a plan section (`api.md` section 10) | before phase 6 | n/a | the plan's "Graphics" section (2026-10-02); what stays open is F16 |
-| F2 | G2 per-argument access of kernels and shaders: plan line or ruling (proposal: part of `KernelInfo`) | before phase 1 | open | |
+| F2 | G2 per-argument access of kernels and shaders: plan line or ruling (proposal: part of `KernelInfo`) | before phase 1 | done | ruled 2026-10-19: decisions.md B5.10 (declaration-time inference, not `KernelInfo`) and B5.11 (stored in the `Kernel`); api.md section 10 G2 and Appendix A updated |
 | F3 | G3 device facts as fields of `caps(dev)`: field names for today's `supports_*`, `maxalloc`, the roofline inputs (throughput per element type, bandwidth, transfer queue, cross-queue cost) and `config(dev, f)` | before phases 1 and 8 | open | |
 | F4 | G4 profiling (open decision 13) | before phase 1 (the split may not use it) | open | |
 | F5 | G5 device wait-idle verb | before phase 3 | open | |
@@ -1008,3 +1009,6 @@ phase that needs it resolved.
 | F30 | `insert!(g) do … end` and `render!(…) do p … end` keep `do`-block bodies; B4.2 removed them for launch groups only | before phase 6 | open | |
 | F31 | Lava d688952's RADV/ACO workaround (`foldedoffset.jl`, negative address constants kept off split loads) runs on every device: it costs ~9% of Qwen-Image's VAE decode on the RTX 4000 Ada (1.138 s without, 1.246-1.254 s with) and ~1% on the 7900; decide whether it becomes a per-device compile setting through `config(dev, f)` (F3) | phase 1 | open | A/B 2026-10-15, `experiments/bugfix/env-newest/BASELINE.md` |
 | F32 | the default group size `config(dev, f)` picks for 2-D and 3-D ranges: today one row of 64; measure a 2-D tile (16 x 16, as GPUFiltering passes) against it on the image kernels before choosing (P1.A21 keeps a caller's size either way) | phase 1 | open | not measured |
+| F33 | Lava drops user atomic orderings: `demote_atomic_accesses!` (`Lava/src/compiler/target.jl`) makes every acquire/release load and store a plain one, and `fence` does not compile (`Unsupported LLVM instruction: FenceInst`); measured 2026-10-19 on the 7900 (`experiments/kernelforge/probe_lava_ordering.jl`). No kernel in the stack relies on it yet; all four desktop Vulkan devices report `vulkanMemoryModelDeviceScope` | phase 1 | open | fix: demote only `unordered`, emit `OpAtomicLoad`/`OpAtomicStore` and `OpMemoryBarrier`, a cross-workgroup message-passing test |
+| F34 | NVIDIA kernels in PTX inside Vulkan command buffers (`VK_NV_cuda_kernel_launch`, provisional): `cp.async` ran correctly on Vulkan device addresses on the RTX 4000 Ada (`experiments/interop/`); a separate CUDA context costs 80-175 µs per hand-off, HIP imports Vulkan memory but no semaphores (ROCm 7.2.1). Whether a PTX kernel node goes into the plan is open (Simon, 2026-10-16) | phase 10 | open | |
+| F35 | B5.1 (operations take the graph, groups only for repeated launches) leaves model-level loops open: examples.jl 19 (diffusion, `transformer(step, …)`) and 20 (decode until a stop token, `decodestep!(dec, …)`) pass a group into model functions | phase 0 | done | not a gap (Simon, 2026-10-19): B4.2 already answers it; what is repeated is what `dispatch!(group, …)` gets, so model code passes the group to its dispatches and a call without the group lands in the graph (decisions.md B5.1) |

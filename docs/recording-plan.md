@@ -49,8 +49,13 @@ speed of the fastest open implementation of each piece. Two consequences:
    Vulkan dedicated allocations) are bypassed.
 5. **No ambient state.** Every function takes its device, graph or channel.
    Nothing is found by task-local storage, a thread id or a "current" object.
-   The one process-level state is the device registry: `Device()` and
-   `devices()` return the same object for the same hardware device.
+   A call reaches a graph only through its arguments (graph arrays, the graph
+   device, `adapt(Mantle.Device(g), x)`); with device arrays it runs now on the
+   device. A global, task-local or scoped "current graph" (or group) that
+   assigns calls implicitly is a forbidden anti-pattern (Simon, 2026-10-19:
+   "RIESEN NOGO"). The one process-level state is the device registry:
+   `Device()` and `devices()` return the same object for the same hardware
+   device.
 6. **One path.** An operation on a device and the same operation on a graph run
    the same code; which of the two happens is decided by where the arrays live.
    There is no second implementation of any operation.
@@ -310,7 +315,7 @@ work, and Vulkan has no vendor array package.
 | image / texture | pool region, `Images` kind |
 | acceleration structure | pool region, `Accel` kind; build and refit scratch is the structure's own, sized for its capacity and replaced with it (not a graph transient: a capacity change after compile would outgrow it) |
 | `Window` | its swapchain or drawables, counted |
-| `GPURef` | a value box: ONE slot in device memory whose address every plan and piece bakes; `r[] = v` is a scheduled store into it, applied like any change and never waiting (B4.9); or the box of a device array (`GPURef(dev, a)`, an `ArrayBox`): a cell holding its target's cell index, rebound by `r[] = b` (Graphics) |
+| `GPURef` | a value box: ONE slot in device memory whose address every plan and piece bakes; `r[] = v` is a scheduled store into it, applied like any change (B4.9); or the box of a device array (`GPURef(dev, a)`, an `ArrayBox`): a cell holding its target's cell index, rebound by `r[] = b` (Graphics) |
 
 Acceleration structures are declared with `TraceRead` by traces and ray-query
 dispatches, and with `TraceBuild` by builds and refits (both access kinds exist
@@ -423,8 +428,9 @@ step!(sim_g)                                                 # a KA library decl
   Head and prepare kernels write the launch command, the KA `ndrange` values
   and the dims slots of every launch over the array.
   `launchrange(a)` launches over the array's current length, indirectly once
-  the array is resizable; it is the one name for this. Without a capacity
-  a device-decided length is refused at declaration. On the host, `length(a)` and
+  the array is resizable; it is the one name for this. A device-decided length
+  needs no `capacity` (B5.5): the kernel writes within the array's current
+  storage, bounds-checked unless `@inbounds` (B4.7). On the host, `length(a)` and
   `size(a)` are the real length (B4.10): they wait for the kernel that writes it
   and read the cell back, and throw during the declaration of the graph that
   writes it. `devicesize` is not needed. `Array(a)` copies the cell and the data
@@ -446,20 +452,41 @@ calls of `coopmat_gemm_dispatch!`.
 ### Kernels: `Mantle.Kernel`
 
 ```julia
-struct Kernel{N}
-    native::N          # VkPipeline | MTLComputePipelineState | CUfunction | hipFunction
+mutable struct Kernel{F}
+    f::F
+    access::Vector{Touch}                 # per argument, set at declaration (B5.10)
+    code::Union{Nothing,CompiledCode}     # SPIR-V | AIR | PTX, set at compile
+    devices::Vector{DeviceKernel}         # one per device it ran on, set at first use
+    lock::Base.Semaphore                  # each stage writes its field once under it
+end
+struct DeviceKernel{N}
+    device::Device                        # found by identity (===)
+    native::N                             # VkPipeline | MTLComputePipelineState | CUfunction | hipFunction
     info::KernelInfo
 end
 ```
 
-- **Device-type verbs:** `compilekernel(dev, f, argtypes, config) -> (native, compiled::Bool)`,
-  `kernelinfo(dev, native) -> KernelInfo`, and `config(dev, f)` (name open), the
-  launch configuration the device type picks for a kernel (workgroup size). The device type answers from its
-  compiler's own cache (Lava's, Metal.jl's, CUDA.jl's `cufunction`, AMDGPU's),
-  per device, keyed on the kernel body, thread-safe; `compiled` says whether
-  this call compiled, which is what core's per-device compile counter adds up.
-  Core keeps no kernel cache and holds no lock other than the graph lock while
-  a kernel compiles.
+- **Where it lives (B5.11):** attached to the kernel's `CodeInstance` through
+  `GPUCompiler.cached_results`, one per compiler configuration, the way CUDA.jl
+  keeps `CUDACompilerResults` with each context's `CuFunction` inside. Julia
+  invalidates it with the code (an edit, Revise) and keeps it in package
+  images; no native handle is added while generating output. Core and device
+  types keep no other kernel table, and nothing of it is global.
+- **Stages fill it in place:** the access per argument at declaration
+  (`argument_usage`: a declaration next to the function for a call with no
+  Julia body, else `kerneltouches`, the taint walk over the kernel's typed Julia
+  IR through the device type's interpreter); the code at compile; a
+  `DeviceKernel` at the first use on a device. Each is written once.
+- **Device-type verbs:** `compilekernel(dev, kernel, config) -> (native, compiled::Bool)`
+  fills the code if it is missing and the device's entry; `kernelinfo(dev, native) -> KernelInfo`;
+  and `config(dev, f)` (name open), the launch configuration the device type
+  picks for a kernel (workgroup size). `compiled` says whether this call
+  compiled, which is what core's per-device compile counter adds up. No lock
+  other than the graph lock and the kernel's own is held while a kernel compiles.
+- **No teardown per kernel.** A device's entries stay with the kernel; a reset
+  (`vk_reset_device!(debug = …)`) makes a new device object, and the old entries
+  are never found again (CUDA.jl does not reset devices at all: its
+  `device_reset!` is a deprecated no-op).
 - **A group size the caller gives is kept**: KA's `kernel(backend, workgroupsize)`
   and `dispatch!(…; group)` launch with exactly that size; `config(dev, f)` picks
   one only where none is given. Its default for 2-D and 3-D ranges is open:
@@ -471,7 +498,8 @@ end
   the compiled IR.
 - **Core uses it for** launch geometry (one calculation, today's
   `ki_launch_extents`), per-node cost estimates and the submission split.
-- `buildskernel`, `kisupported`, the three `compile_dispatch` bodies,
+- `AccessCache` and `accesscache` go into the `Kernel` (B5.11). `buildskernel`,
+  `kisupported`, the three `compile_dispatch` bodies,
   `get_or_build_iter_plan` at emit and `WORKGROUP_FALLBACK` go
   (`WORKGROUP_FALLBACK` went 2026-10-12, with the NVIDIA fault it worked around).
 
@@ -496,14 +524,14 @@ What can change after the first run, and what each change costs:
 
 | change | made by | what happens |
 |---|---|---|
-| a `GPURef` value | `x[] = v` | pending: a store into its slot, applied like any store by the next submission that touches it; it never waits and marks no plan (B4.9) |
+| a `GPURef` value | `x[] = v` | pending: a store into its slot, applied like any store by the next submission that touches it; it marks no plan (B4.9) |
 | an array `GPURef`'s target | `r[] = b` | pending: a cell write of the `GPURef`; no recompile; its readers pend their update (a TLAS an Update, or a Build if the length changed); a plan that bound the old target's buffer by handle (an index buffer) records the parts that bound it again when the Rebind is applied; nothing recompiles (open decision 17, ruled (c)) |
 | a device array's contents | `a[r] = data`, `copyto!(a, data)`, `copy!(a, data)` (resizes a vector to `length(data)`, as Base's `copy!`, without copying the old contents) | pending: a small store (within the device type's inline limit, `caps(dev)`: 64 KiB at 4-byte offsets and sizes on Vulkan) is written inline by the submission that applies it (Run); a larger one is a copy from its upload region. Either way the call copied the data once into an upload region (B3.18) |
 | an array's size | `resize!(a, dims)` | pending: the first time, a cell write if the new size fits the storage, else a move with a copy into a reserve or a doubling pool region (Arrays); later, pages mapped in a reserve or a move to a doubled region, and a cell write; plans that recorded a direct count or sized a temporary for fewer elements are marked stale at the call; parts that recorded its handle are re-recorded when the move is applied (B3.11) |
 | a reserve's pages beyond the size | `trim!(a)` (name open) | pending: the pages unmapped, retired with the token of the submission that unmaps them |
 | a window's size | `resize!(win, w, h)` from the window's event | stored; the next run of the graph presenting to it (B3.8) creates the new swapchain generation with its window-sized images at the new size, queues the cell writes of window-sized arrays, and re-records the segments that draw into window-sized targets and the per-image present segments (Windows); beyond the window's capacity the graph recompiles at that run |
 | an instance's transform or mask | `tlas[h] = t`, hiding an instance | pending: records rewritten, a refit (Update) with the count of the last build |
-| an acceleration structure's instance count | `push!`, `delete!`, a range's array length | pending: records rewritten, a build with the exact count; beyond the instance capacity new storage (capacity doubles, capped at the device's `maxInstanceCount`); the change marks the `AccelCommand`s it alters, and plans re-record only those at their next run. A total past `maxInstanceCount` (16 777 215 on every Vulkan GPU here) throws at the call that raises it: `push!`, a `resize!` or `copy!` of a source, rebinding a source (B4.8) |
+| an acceleration structure's instance count | `push!`, `delete!`, a range's array length | pending: records rewritten, a build with the exact count; beyond the instance capacity new storage (capacity doubles, capped at the device's `maxInstanceCount`); the change marks the `BuildRecording`s it alters, and plans re-record only those at their next run. A total past `maxInstanceCount` (16 777 215 on every Vulkan GPU here) throws at the call that raises it: `push!`, a `resize!` or `copy!` of a source, rebinding a source (B4.8) |
 
 Nothing on this list is detected: each is done by the function that makes the
 change. A change is pending on the resource's sync state, in call order.
@@ -690,8 +718,11 @@ every resource a run names (Simon, 2026-10-05, decisions.md B3.14):
   plan's sync lock. So a last run is never read while it is about to change.
   The snapshots that chose the locks are checked under them; a change only
   makes the stage lock again, never recompile. A run locks the sync states
-  of its inbox resources (and, in its first stage, its arena parts), nothing
-  else.
+  of its inbox resources and of what its stages write (and, in its first
+  stage, its arena parts), nothing else (B5.6). A change that marks a
+  `BuildRecording`, and an eviction, put the resource into the inbox of every
+  plan that names it, so a run never walks the resources it names to find
+  them.
 - **Tokens per segment.** Each segment of a run gets a token from the channel
   it runs on. Claiming a token and submitting it happen under the channel
   lock in one step, so submissions reach each queue in token order (a
@@ -821,8 +852,8 @@ end
 ```
 
 - A segment is a list of parts submitted together: recordings written once by
-  `record!`, and `AccelCommand`s (Acceleration structures). A run re-records
-  only the `AccelCommand`s a change marked; the parts that recorded the
+  `record!`, and `BuildRecording`s (Acceleration structures). A run re-records
+  only the `BuildRecording`s a change marked; the parts that recorded the
   handle of a moved array (B3.11); a new piece and the segment holding its
   pass's list (B3.17); and, per swapchain generation, the segments that draw
   into window-sized targets and the per-image present segments (Windows).
@@ -870,7 +901,7 @@ recording = finish(b)
   the command, so `vkCmdPipelineBarrier2` has one call site.
 - A builder is a value that never escapes the call that made it: `record!`, an
   eager call, the change prefix of a submission, or the re-recording of an
-  `AccelCommand` or of a window-sized segment. Command objects come from the
+  `BuildRecording` or of a window-sized segment. Command objects come from the
   device's free list.
 - `emitstore!` writes a store's bytes into `dst` inside the submission:
   `vkCmdUpdateBuffer` on Vulkan (at most 65536 bytes, offset and size
@@ -989,7 +1020,7 @@ and the same `dispatch!` as on a graph, and is submitted before it returns.
 
 ```julia
 function dispatch!(dev::Device, kernel, args, ndrange)
-    k = kernel!(dev, kernel, argtypes(args))          # compilekernel: the device type's compiler cache
+    k = kernel!(dev, kernel, argtypes(args))          # the Kernel at its CodeInstance (B5.11)
     ch = channel(dev, Main())
     packed = acquire!(pool(dev), Unified(), argumentbytes(k))   # fallible: before any lock
     token = nothing
@@ -1141,12 +1172,12 @@ device (they are `render!(dev, …)`).
   device-side range table names cells. Each build, an offsets kernel computes
   each range's first record from the lengths in the source cells (a prefix
   sum) and a records kernel writes all instance records; both read cells. On
-  every device type a plan's build or refit is an `AccelCommand`, its own
+  every device type a plan's build or refit is a `BuildRecording`, its own
   small command buffer inside the segment's submission, with its barrier
   recorded first (a full memory barrier: the members are not known at
   compile). Vulkan records the count into it; on Metal, which reads the count
   from a cell, it still records the structure's storage. The structure keeps
-  its `AccelCommand`s; a change that alters what one recorded (a new count, a
+  its `BuildRecording`s; a change that alters what one recorded (a new count, a
   `MoveAccel`, a Build that sets a new `builtcount`) marks it, and the run
   re-records only marked ones, after the submission's change prefix, so a
   refit takes the count the prefix's Build just set. A refit before any build
@@ -1155,7 +1186,7 @@ device (they are `render!(dev, …)`).
   Vulkan's indirect build is not used: RADV and NVIDIA
   lack it, and on AMD's Windows driver it is slower than the exact count
   (measured). Metal reads the count from a cell (`instanceCountBuffer`).
-  `AccelCommand` and `BuildAccel` apply to a TLAS and a BLAS alike.
+  `BuildRecording` and `BuildAccel` apply to a TLAS and a BLAS alike.
 - **Pending builds coalesce per structure.** The pending `BuildAccel` changes
   of one structure taken into one submission merge into a Build if any of
   them is a Build, else into an Update; a merged change takes the latest
@@ -1204,7 +1235,7 @@ device (they are `render!(dev, …)`).
   refit. A material: a store into the material table. None of these
   recompiles a plan or drops one (today Hikari's `notify_scene_changed` frees
   the integrator's plans on every material, light or structure change). BLAS
-  builds follow the TLAS's count rules (an `AccelCommand` on Vulkan).
+  builds follow the TLAS's count rules (a `BuildRecording`).
 - **A write reaches the structures built from it.** Host changes (a
   `resize!`, store or rebind of a source) must reach the structures over it
   in any design, and do so through readers; ruled (B3.10) is also the run's
@@ -1272,7 +1303,7 @@ pass, and a new Hikari material type (open decision 18).
   submission that touches the array writes them in its change prefix
   (`emitstore!`, Record), with no host wait. A value `GPURef` is such a slot:
   one slot in device memory whose address every plan and piece bakes; a write
-  to it is a scheduled store and never waits (B4.9).
+  to it is a scheduled store (B4.9).
 - **Render passes are nodes.** `render!(g, targets...) do p … end`; a target is
   `image => Clear(v)`, `Keep` or `Discard`, a depth image, or a window.
   `draw!(p, pipeline, args, count; instances, indices)`: counts are numbers or
@@ -1459,9 +1490,10 @@ pass, and a new Hikari material type (open decision 18).
   `acquire!` waits for those retirement tokens outside every lock, then sweeps
   and retries. So `run!(dnn_1); run!(dnn_2)` back to back works while
   `dnn_1`'s weights are still in use on the GPU.
-  Eviction acts only where readback memory is a different heap from device
-  memory (a `caps(dev)` field); on a device with one heap (the Apple M5) it
-  would free nothing and is skipped. Acceleration structures are not evicted.
+  Eviction works the same on every device type, unified-memory devices
+  included (the Apple M5, the Ryzen AI Max+ 395, NVIDIA's unified-memory chips;
+  B5.4): there a `readonly` array frees its memory like anywhere else.
+  Acceleration structures are not evicted.
   Under the resource's record lock it is marked evicted,
   and the plans that name it (all register in its dependents,
   `resizing-and-raytracing.jl` B.6) are marked for restore. An evicted resource keeps its
@@ -1509,9 +1541,9 @@ pass, and a new Hikari material type (open decision 18).
 No owning thread. Compile, record, run and free a graph on any thread; one
 graph's compile, record, run and free are serialised by the graph's lock.
 Declarations into one graph are serialized by the graph lock (a nested
-declaration of the same task reuses it). The compiler caches are the
-device types', per device, thread-safe (today Lava's `FROZEN_*` are process
-globals and `iterplans`/`launchplans` are unlocked). Scratch that eager
+declaration of the same task reuses it). Compiled kernels live in
+the `Mantle.Kernel` at the kernel's `CodeInstance`, each field written once under
+the kernel's lock (B5.11; today Lava's `iterplans`/`launchplans` are unlocked). Scratch that eager
 operations share today (`reduce_scratch`, `gemm_split_scratch`) becomes their
 temporaries.
 
@@ -1559,7 +1591,7 @@ macOS 27.0 SDK on the M5, Vulkan on the RX 7900 XTX and the RTX 4000 Ada.
 | dependencies in a recording | barriers | ICB barrier bits, consumer barriers | graph edges | graph edges |
 | argument layout | flat slots, `NonWritable` (measured) | argument memory (not measured) | open: kernel parameters by value need a node-parameter update on change; a pointer to the block costs a load (decided by measurement in phase 10) | as CUDA |
 | cell copy | head node (compute) | head kernel in the compute encoder | head node every root depends on | head node |
-| `repeat!` / conditional kernels | indirect counts: the loop head zeroes a group's, the head or a prepare node multiplies a `when!` launch's by its flag (open decision 1) | device-written execution ranges | conditional WHILE / IF nodes | kernel-entry predication (no conditional nodes in HIP 7.1) |
+| `repeat!` / conditional kernels (one meaning on every device type, B5.2; the mechanism per device type) | indirect counts: the loop head zeroes a group's, the head or a prepare node multiplies a `when!` launch's by its flag | device-written execution ranges | a kernel node whose grid the device sets, or conditional WHILE / IF nodes (chosen in phase 10) | kernel-entry predication (no conditional nodes in HIP 7.1) |
 | library operations | our kernels | MLX kernels; MPSGraph as a foreign node | CUTLASS; cuDNN into our graph; cuBLAS as a foreign node | Composable Kernel; rocBLAS/hipBLASLt as foreign nodes |
 | sparse arena | sparse binding | placement-sparse buffer | `cuMemAddressReserve`/`cuMemCreate`/`cuMemMap` | `hipMemAddressReserve`/`hipMemCreate`/`hipMemMap` |
 | residency | implicit | one set per device on the queues, plus per plan for ICBs and pipelines | implicit | implicit |
@@ -1985,7 +2017,7 @@ In the order of "How we build it". The tests, red:
   last frame; a size beyond the window's capacity recompiles the graph once,
   at its next run.
 - `test_run_is_submit.jl`: in steady state, `run!` allocates no device memory,
-  compiles nothing, records nothing except the `AccelCommand`s a change marked,
+  compiles nothing, records nothing except the `BuildRecording`s a change marked,
   the parts that recorded a moved handle, a new piece with its pass's list,
   and the segments of a new swapchain generation, and submits each segment
   once.
@@ -2037,7 +2069,7 @@ In the order of "How we build it". The tests, red:
   `compilekernel`, with one submission per kernel launch, on every device type.
 - `test_gpuref_slot.jl` (was `test_hostwritten.jl`; B4.9): `r[] = v` before the
   first run reaches the first run; a store while a run is in flight reaches the
-  next submission that touches the slot and never waits; two plans and a piece
+  next submission that touches the slot; two plans and a piece
   baking one slot all read the stored value.
 - `test_run_host_time.jl`: the real `run!`'s host time per run over plans
   that name 100, 2 500, 25 000 and 50 000 sync states with nothing changed is
@@ -2176,11 +2208,12 @@ Green: `test_resize_is_queued.jl`, `test_host_node.jl` in full,
 Adds: builds and refits as operations, `TraceRead`/`TraceBuild` declarations,
 the core `TLAS` (hardware and software) with instance ranges, a device-side
 range table and a doubling capacity, builds with all their uses, the texture
-table; `AccelCommand`s marked by the changes that alter them, re-recorded
+table; `BuildRecording`s marked by the changes that alter them, re-recorded
 only when marked; pending builds coalesced per structure, Updates with
 `builtcount`; BLAS storage with a doubling capacity, refits and builds into
-it under the same count rules (`AccelCommand`), `MoveAccel` beyond it;
-kernel-written counts built over the capacity (to be confirmed);
+it under the same count rules (`BuildRecording`), `MoveAccel` beyond it;
+kernel-written counts built over the capacity where the device records the
+count (Vulkan), from the cell where it reads it (Metal; B5.8);
 a change that would make a running plan stale applied after the run's end,
 its submitter waiting, never the call (throwing from the plan's own host
 function); composites that hold
@@ -2392,8 +2425,9 @@ from the results.
     `MPSGraphExecutable` only as a foreign node.
 17. **Per-image present segments** on Vulkan; a window resize is a mark the
     next run applies.
-18. **Kernels come from the device type's compiler cache**
-    (`compilekernel(dev, …)`); core keeps no kernel cache.
+18. **One `Mantle.Kernel` per kernel at its `CodeInstance`** (B5.11): the access
+    per argument at declaration, the code at compile, per device the native
+    handle and `KernelInfo`; no other kernel table, nothing global.
 19. **Eager work is one submission per launch**: no batching outside graphs, no
     cached one-op plans.
 20. **Holds and pressure:** one hold for the creator, one per naming graph

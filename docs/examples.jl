@@ -30,8 +30,8 @@ using CUDA                      # devices() now also lists CudaDevice(…)
 
 # ── Eager: arrays on a device run now ─────────────────────────────────────────
 
-# 5. Each launch runs now: the kernel from the device type's compiler cache,
-#    one submission. No batching.
+# 5. Each launch runs now: the kernel from its `Mantle.Kernel` at the code's
+#    CodeInstance (B5.11), one submission. No batching.
 a = MantleArray(dev, Float32, 1024)
 fill!(a, 1f0)
 b = a .* 2f0                    # b: a new MantleArray on dev
@@ -145,7 +145,11 @@ phonemes[:] = embedphonemes("hello"); run!(gh)
 # 19. Exported modules are called like functions on graph arrays: all of them
 #     and the work between them are one graph. A loop with a fixed count is a
 #     launch group, compiled once (B4.2): a value that holds GPU launches only,
-#     declared into it by passing the group to the functions that dispatch.
+#     declared into it by passing the group to the functions that dispatch:
+#     what gets the group is repeated. A call without it (a plain `mul!(C, A, B)`)
+#     is not repeated: on graph arrays it declares into their graph and runs once
+#     per run, on device arrays it runs now. Only the arguments decide; there is
+#     no "current graph" (plan rule 5; B4.2, B5.1).
 #     Before each iteration the loop head writes the iteration index into the
 #     argument slots of the group's launches that take it. A group is not a
 #     location: allocations belong to the graph, not the group (B4.4), so the
@@ -217,7 +221,7 @@ readmemory!(bank, feats)
 # 23. The graph manages its plan: the first run! compiles (kernels, order,
 #     placement, queues, submissions) and records once; later runs only run.
 frame[:] = decodeframe("clip.mp4", 1); run!(gm2)   # compiles, records, runs initmemory_kernel!
-firstframe[] = false                               # a store into its slot, applied by gm2's next run; never waits
+firstframe[] = false                               # a store into its slot, applied by gm2's next run
 frame[:] = decodeframe("clip.mp4", 2); run!(gm2)   # initmemory_kernel!'s count is written times false: skipped on the GPU; same recording
 
 # 24. Per-frame values: a value that changes every frame (a camera matrix) is a
@@ -226,7 +230,7 @@ frame[:] = decodeframe("clip.mp4", 2); run!(gm2)   # initmemory_kernel!'s count 
 #     submission that touches the array writes them in front of its own work
 #     (emitstore!), with no host wait (B3.18). A value GPURef is for a scalar a
 #     kernel takes by value: one slot in device memory whose address every
-#     plan bakes; `r[] = v` is a scheduled store; it never waits and marks no
+#     plan bakes; `r[] = v` is a scheduled store; it marks no
 #     plan (B4.9).
 gc       = Graph(dev)
 cam      = MantleArray(dev, [Mat4f(I)])         # a one-element array
@@ -243,7 +247,7 @@ cam[1:1] = [lookat(Vec3f(1, 0, 5), Vec3f(0), Vec3f(0, 1, 0))]; run!(gc)   # inli
 exposure[] = 1.5f0; run!(gc)    # a store into the slot, applied by this run; no wait
 
 # 25. `pts` is a device array gc names; `pts[:] = data` is a scheduled store
-#     applied by gc's next run; it never waits.
+#     applied by gc's next run.
 pts[:] = rand(Point3f, 64)
 run!(gc)
 
@@ -430,7 +434,7 @@ run!(gt)
 #     parts and the TLAS, its reader (ruled B3.10), together and pends the
 #     stores and a Build with the exact count; the submission that applies the
 #     Build grows the TLAS's instance capacity if 801 instances exceed it
-#     (B3.13: the call never allocates). The change marks the AccelCommand of
+#     (B3.13: the call never allocates). The change marks the BuildRecording of
 #     gt's refit, so gt's next run applies the Build in front of its work and
 #     re-records only that small command buffer for the new count (Vulkan;
 #     Metal reads the count from a cell).

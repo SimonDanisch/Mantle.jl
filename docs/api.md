@@ -126,11 +126,11 @@ host function of `g` it throws.
 | call | contract |
 |---|---|
 | `dispatch!(g or group or location, kernel, args::Tuple, ndrange; group, origin)` | The one launch verb. On a graph it adds a kernel node; on a `Group` a launch of that group (B4.2); on a device it compiles from the device type's cache and submits now, with what is pending on its arguments in front. A `group` size the caller gives (here, or KA's `kernel(backend, workgroupsize)`) is kept as given; `config(dev, f)` picks one only where none is given (its default for 2-D and 3-D ranges is open, ledger F32). |
-| `location(args...)` | The one graph among the arguments if any lives on one (its device arrays are then named by that graph), else the arguments' device. Arguments from two graphs or two devices throw. An argument that reaches device memory but is not a `MantleArray` (a vendor array, an array escaping `withview`, a raw backend array) throws: the resource of an argument is the array's state, shared by its views and reshapes, never the object (plan, Arrays). |
+| `location(args...)` | The one graph among the arguments if any lives on one (its device arrays are then named by that graph), else the arguments' device. The arguments are the only way a call reaches a graph: no global, task-local or scoped "current graph" exists (plan, rule 5). Arguments from two graphs or two devices throw. An argument that reaches device memory but is not a `MantleArray` (a vendor array, an array escaping `withview`, a raw backend array) throws: the resource of an argument is the array's state, shared by its views and reshapes, never the object (plan, Arrays). |
 | `dispatch!(g, HostCall(f), args; writes::Tuple)` | A host node. `f` runs on the calling thread of `run!`, between the stages before and after it, on host-visible arena memory. It may not use its own graph or a graph that shares an arena part with it (both throw: `lockgraph` throws when the calling task holds an arena part of that graph's plan). If `f` throws, the rest of the run is not submitted, the exception propagates, and an acquired swapchain image goes back to the window for the next run. Has no method for a `Group` and is not a `when!` launch. |
 | `group = Group(g, name)` | A value: launches declared into it with `dispatch!(group, …)`, `trace!(group, …)` and copy kernels, anywhere in the code (B4.2). Only launches: the verbs have methods for a `Group` only where they launch GPU work, so a host node, a build or a render pass on one is a `MethodError`. Not a location: arrays and allocations belong to the device or the graph (B4.4), so library code that finds its target through its arrays declares into the graph, not a group. Groups do not nest. |
 | `repeat!(group, n; while_nonzero = count)` | Attaches the group to its graph, to run `n` times per run; before each iteration a loop-head kernel writes the iteration index (`iteration(group)`, name open) into the slots of the launches that take it. `while_nonzero` is an integer count on the device (a queue's live size) that ends the loop on the GPU (B4.1). `repeat!(g, kernel, args, ndrange; max, while_nonzero)` is the form for a loop of one launch. |
-| `when!(g or group, flag, kernel, args, ndrange)` | One launch that runs only where `flag` is true on the GPU (B4.1). `flag` is a `GPURef{Bool}` or a one-element `Bool` array, enforced by the method's argument types: anything else is a `MethodError`. The launch is indirect, and whoever writes its indirect command multiplies the count by the flag: the head node for a flag the host writes, a prepare node after the kernel that writes it. No conditional rendering, the same on every device type; the flag is never a handle dependence (decisions.md, review round 2026-10-02). Several launches under one flag are several `when!`s. A `Readback` flag lets the host read it after the run. |
+| `when!(g or group, flag, kernel, args, ndrange)` | One launch that runs only where `flag` is true on the GPU (B4.1). `flag` is a `GPURef{Bool}` or a one-element `Bool` array, enforced by the method's argument types: anything else is a `MethodError`. The meaning is the same on every device type (B5.2); only the mechanism is the device type's verb. Vulkan and Metal launch indirect, and whoever writes the indirect command multiplies the count by the flag: the head node for a flag the host writes, a prepare node after the kernel that writes it. CUDA and HIP reach the same result their own way (phase 10: a kernel node whose grid the device sets, or a conditional node, on CUDA; a check at kernel entry on HIP 7.1). No conditional rendering; the flag is never a handle dependence (decisions.md, review round 2026-10-02). Several launches under one flag are several `when!`s. A `Readback` flag lets the host read it after the run. |
 | `trace!(g or group or dev, pipeline, accel, args, ndrange)` | A ray-tracing launch; allowed in a `Group` and as a `when!` launch: indirect, its count zeroed by the loop head when the loop ends and multiplied by the flag under `when!`. |
 | `copyto!(out, x)` with `x` on a graph | A copy kernel node (so allowed in a `Group`), recorded once and run every run; how the host reads a graph result. |
 
@@ -143,14 +143,14 @@ only kernel candidates qualify.
 | call | contract |
 |---|---|
 | `GPURef(dev, v)` | A value box: ONE slot in device memory holding `v`, whose address every plan and piece that uses it bakes (B4.9). Reading it costs what a true uniform costs (within 0.8% on NVIDIA, AMD and the M5, `experiments/draw_bench/`). `GPURef(dev, a::MantleArray)` is the array box (section 2.6b). |
-| `r[] = v` | A scheduled store into the slot, applied by the next submission that touches `r`, like any change (B3.13); it never waits and marks no plan. Replaces the per-run entry of B2.1. |
+| `r[] = v` | A scheduled store into the slot, applied by the next submission that touches `r`, like any change (B3.13); it marks no plan. Replaces the per-run entry of B2.1. |
 | per-run host data | A device array the graph names, written by stores (`x[r] = data`), scheduled like any change. Host-written graph arrays (`hostwritten = true`) are gone (B4.9). |
 
 ### 2.6 Acceleration structures and textures
 
 | call | contract |
 |---|---|
-| `BLAS(dev, vertices, faces)` | Storage on a pool region sized from its geometry with a capacity that doubles, like a TLAS. Vertices moved with the same topology: an Update (refit), pending. A new topology: a Build into its storage, pending (beyond the capacity a `MoveAccel`, the new address through its cell). TLASes over it pend an Update when its address or contents change. A geometry length a kernel writes: built over the geometry capacity with degenerate primitives past the length, so later changes are Updates. Its builds and refits are `BuildAccel` changes and, in a plan, `AccelCommand`s, like a TLAS's. Shared by every range over the same geometry arrays. A reader of those arrays: a run that writes them pends its update (open decision 16, ruled B3.9/B3.10). |
+| `BLAS(dev, vertices, faces)` | Storage on a pool region sized from its geometry with a capacity that doubles, like a TLAS. Vertices moved with the same topology: an Update (refit), pending. A new topology: a Build into its storage, pending (beyond the capacity a `MoveAccel`, the new address through its cell). TLASes over it pend an Update when its address or contents change. A geometry length a kernel writes: built over the geometry capacity with degenerate primitives past the length, so later changes are Updates. Its builds and refits are `BuildAccel` changes and, in a plan, `BuildRecording`s, like a TLAS's. Shared by every range over the same geometry arrays. A reader of those arrays: a run that writes them pends its update (open decision 16, ruled B3.9/B3.10). |
 | `TLAS(dev; hardware)` | One core type for hardware and software. `TLAS(dev)` picks the hardware path where the device has it; `hardware = false` forces software. Storage sized for a capacity starting at 64 that doubles; builds and refits carry the exact count. Pending changes to one structure coalesce: any Build makes a Build, else an Update; every Update uses `builtcount`, the count of the last Build. A total a kernel writes (any device type): built over the capacity with mask-0 records past the total that reference a valid BLAS. An Update before any Build is a Build. A new TLAS pends a Build of zero instances, so a trace before any `push!` reads a built, empty structure. |
 | `push!(tlas, blas, transform::Mat4f)` | One instance; returns a range handle. Pending: a range-table store and a Build. A total past the device's `maxInstanceCount` (16 777 215 on every Vulkan GPU here) throws at the call that raises it: `push!`, a `resize!` or `copy!` of a source, rebinding a source; the capacity is capped at the limit (B4.8). |
 | `push!(tlas, blas, transforms::MantleArray{Mat4f,1})` | One instance per element. |
@@ -158,7 +158,7 @@ only kernel candidates qualify.
 | `tlas[h] = t` | Pending: a store into the range's source and an Update (refit). |
 | `delete!(tlas, r)` | Pending: the range's entry inactive (`active = false`) and its slot freed, a Build; the range's BLAS and arrays released with the token of the build that deactivated it. |
 | `build!(tlas)` | Pending: a full build, applied by the next submission that touches `tlas`. |
-| `build!(g, tlas)`, `refit!(g, tlas)` | A build or refit every run. A TLAS whose total a kernel writes is built over its capacity (mask-0 records past the total), so a refit stays legal. A refit before any build is a Build. Not a launch: no method for a `Group`, not a `when!` launch. |
+| `build!(g, tlas)`, `refit!(g, tlas)` | A build or refit every run. A TLAS whose total a kernel writes holds exactly the instances below the total on every device type (B5.2, B5.8): where the device records the count (Vulkan) it is built over its capacity with mask-0 records past the total, so a refit stays legal; where the device reads the count from memory (Metal) it is built with the total from its cell. A refit before any build is a Build. Not a launch: no method for a `Group`, not a `when!` launch. |
 | `RayTracingPipeline(; raygen, closest_hit, miss, any_hit)` | A value; compiled through `compiletrace` from the device type's cache, keyed on its shaders and argument types. A new Hikari material type is not a hit group: materials are a `MultiTypeSet` whose GPU form is a tuple of typed arrays, so a new type is a new specialization of the shade kernel, and the plan that declares that kernel recompiles (open decision 18). |
 | `Texture2D(dev, T, w, h)` | An image with an index in the device-wide texture table. An upload of the same size and type writes the image it has. `resize!(tex, w, h)` or an upload of a new size: a new image under a new index and a store into the slot, keeping the texels where the old and new sizes overlap (one GPU copy, as `resize!` keeps an array's contents; B4.8); the old image retired with the token of the submission that applies the change. Never a recompile. |
 
@@ -224,7 +224,7 @@ Internal; listed because the verbs in section 4 receive or return them.
 | `Node` subtypes | `KernelNode`, `TraceNode`, `LoopNode`, `HostNode`, `HeadNode`, `PrepareNode`, `CopyNode`, `RenderNode`, `BuildNode`, `ForeignNode`, `RegionNode` (a run of nodes one region compiler compiles), `VideoDecodeNode`, `PresentNode` | plan (its own copies) | graph lock |
 | `CompiledNode` | queue, predecessors, barrier, command, cost, slots | node | graph lock |
 | `Origin` | the Julia call that launched a node | node | immutable |
-| `Kernel{N}`, `KernelInfo` | a native pipeline/function and what core needs about it | compiled node | immutable |
+| `Kernel`, `DeviceKernel`, `KernelInfo` | one kernel: its function, the access per argument (declaration), its code (compile), and per device the native handle and `KernelInfo` (first use; B5.11) | attached to the kernel's `CodeInstance` (`GPUCompiler.cached_results`), one per compiler configuration | the kernel's own lock; each field written once |
 | `Bound{R}` | a plan's argument slots for a resource | plan | node uses |
 | `MantleArray{T,N,L}` | location; the resource (state, runtime properties); a view's offset and dims (B4.5) | user | — |
 | `ArrayState` | storage, dims, length source, capacity, cell, sync state, holds, dependents, readers (open decision 16, ruled B3.9/B3.10); the freed mark is on the sync state only | shared by an array and its views | its sync state's lock |
@@ -236,13 +236,13 @@ Internal; listed because the verbs in section 4 receive or return them.
 | `Token` | `(channel, value)`: a value a channel signals. Core's `passed(t::Token)` and `waitfor(t::Token)` call the device-type verbs `passed(ch, value)` and `waitfor(ch, value)` (section 4.2) | accesses, `lastrun`, retirements | immutable |
 | `Change` subtypes | `Store` (the storage it writes, a byte range in the parent, its upload region acquired at the call, B3.18; written inline within the `caps(dev)` limit, else copied), `CellWrite`, `BindPages`, `MoveStorage`, `BuildAccel`, `MoveAccel`, `Restore` (open decision 16, ruled B3.9/B3.10), each with a device-wide sequence number | sync state | sync state lock |
 | `SubmitChannel{N,T}` | native queue + timeline, kind, lock, `next` (the last token handed out), outstanding submissions | device | its lock (submit, present, sparse binding, wait-idle) |
-| `Recording{N}` | one recorded part of a segment, written once. A segment is a list of parts: recordings and `AccelCommand`s | plan | — |
+| `Recording{N}` | one recorded part of a segment, written once. A segment is a list of parts: recordings and `BuildRecording`s | plan | — |
 | `Submission{T}` | a token and the command objects to recycle once it passed | channel | channel lock |
-| `Builder` | a device type's recording in progress; a value that never escapes the call that made it (`record!`, an eager call, a submission's change prefix, the re-recording of an `AccelCommand` or a window-sized segment) | stack | — |
+| `Builder` | a device type's recording in progress; a value that never escapes the call that made it (`record!`, an eager call, a submission's change prefix, the re-recording of a `BuildRecording` or a window-sized segment) | stack | — |
 | `Deps` | the predecessor nodes and the derived barrier of a node | compiled node | immutable |
 | `CompiledDispatch`, `CompiledTrace`, `CompiledCopy`, `CompiledBuild`, `CompiledRender`, `CompiledDraw`, `CompiledLibrary`, `CompiledLoop`, `CompiledHead` | what compile decided for one command | compiled node | immutable |
 | `TLAS{P}`, `BLAS`, `InstanceRange`, `RangeEntry` (`mask`, `active`), `MemberSet` | resizing-and-raytracing.jl B.8; `builtcount`, the count of the last Build, which every Update uses | user | the structure's sync state |
-| `AccelCommand` | a plan's TLAS or BLAS build or refit in its own command buffer, on every device type (Vulkan records the count, Metal the storage). A change that alters what it recorded, or a Build that sets a new `builtcount`, marks it; the run re-records the marked ones after the change prefix (nothing is detected at run) | segment parts | the structure's sync state, held by the run |
+| `BuildRecording` | a plan's TLAS or BLAS build or refit in its own command buffer, on every device type (Vulkan records the count, Metal the storage). A change that alters what it recorded, or a Build that sets a new `builtcount`, marks it; the run re-records the marked ones after the change prefix (nothing is detected at run) | segment parts | the structure's sync state, held by the run |
 | `Window`, swapchain generation | size, pending size, current generation with holds; the swapchain images acquired and not yet presented (the window is their one owner) | user | the window's lock |
 | `GPURef` | a value box (one slot in device memory, B4.9) or an array box (a reference to a root device array) | user | the slot's or the box's sync state |
 | texture table, sampler table | the device-wide descriptor tables, with free lists | device | the table's lock, a leaf (section 5) |
@@ -310,8 +310,8 @@ t.value)`. The last value handed out on a channel is core data
 
 | verb | called by, when | contract |
 |---|---|---|
-| `compilekernel(dev, f, argtypes, config) -> (native, compiled::Bool)` | `kernel!` at declaration (eager) and at compile, with no lock held other than the graph lock (compile runs under it) | From the device type's compiler cache, per device, keyed on the kernel body, thread-safe. `compiled` says whether this call compiled (core's per-device counter adds it up). |
-| `kernelinfo(dev, native) -> KernelInfo` | `kernel!` | No optional fields: registers, shared memory, group size limits and occupancy (from the API, else the device's limits), instruction and memory-operation counts of the compiled IR. (per-argument access: G2) |
+| `compilekernel(dev, kernel, config) -> (native, compiled::Bool)` | `kernel!` at declaration (eager) and at compile, with no lock held other than the graph lock (compile runs under it) and the kernel's own | Fills the kernel's code if it is missing and its entry for `dev` (B5.11); the `Kernel` is the only store, no device-type cache. `compiled` says whether this call compiled (core's per-device counter adds it up). |
+| `kernelinfo(dev, native) -> KernelInfo` | `kernel!` | No optional fields: registers, shared memory, group size limits and occupancy (from the API, else the device's limits), instruction and memory-operation counts of the compiled IR. Stored in the kernel's entry for the device (B5.11); the access per argument is not part of it (B5.10). |
 | `compiledraw(dev, pipeline, argtypes, formats)` | `compile!` of a render node | A pipeline from the device type's cache, keyed on the stage functions, `argtypes` (device side), the fixed state and the target `formats`; the same key gives the same pipeline. |
 | `compiletrace(dev, pipeline, argtypes)` | `compile!` of a trace node | A ray-tracing pipeline and its shader binding table layout from the device type's cache, keyed on the shaders and `argtypes`. |
 | `compilebindings(dev, s)` | `bindings!` | Descriptor objects for the layout core decided; nothing else. |
@@ -321,7 +321,7 @@ t.value)`. The last value handed out on a channel is core data
 
 | verb | contract |
 |---|---|
-| `Builder(dev, ch)` | Command objects from the device's free list. A value that never escapes the call that made it: `record!`, an eager call, a submission's change prefix, or the re-recording of an `AccelCommand` or a window-sized segment. |
+| `Builder(dev, ch)` | Command objects from the device's free list. A value that never escapes the call that made it: `record!`, an eager call, a submission's change prefix, or the re-recording of a `BuildRecording` or a window-sized segment. |
 | `emitdispatch!(b, node, cmd::CompiledDispatch, deps)` | The barrier in `deps`, then the launch, direct or indirect as compile decided (a `when!` launch is indirect; the flag is in its count, not in a condition). |
 | `emittrace!(b, node, cmd::CompiledTrace, deps)` | As `emitdispatch!`. |
 | `emitcopy!(b, node, cmd::CompiledCopy, deps)` | As `emitdispatch!`. Also a change's copy (`node = nothing`, `deps = Deps((), ())`): an upload region to storage, a cell copy, a move, a restore. |
@@ -384,8 +384,8 @@ nothing, submits nothing and reads no mutable resource field.
 | an arena part's holder | `holdparts!` at the start of a run | `releaseparts!` after its last stage | the arena's condition |
 | a window's size, swapchain generation and acquired images | `resize!(win)` / `applywindows!`; the run's acquire | holds of the window and of runs that acquired; an image goes back to the window when its run returns `Again` or throws | window lock |
 | a TLAS's or BLAS's slots, members, storage, scratch, capacity, `builtcount` | `push!`, `delete!`, `resize!` of a source, geometry changes | `free!(t)` | the structure's sync state (`change!`) |
-| an `AccelCommand`'s command buffer and its re-record mark | the run (marked ones); the change that alters what it recorded (the mark) | retired with its last token when replaced | the structure's sync state, held by the run |
-| compiled kernels and pipelines | the device type's compiler cache | the device type | the device type (thread-safe, per device) |
+| a `BuildRecording`'s command buffer and its re-record mark | the run (marked ones); the change that alters what it recorded (the mark) | retired with its last token when replaced | the structure's sync state, held by the run |
+| compiled kernels and pipelines | the `Kernel` at its `CodeInstance`: code at compile, a device's entry at its first use (B5.11) | Julia's code cache, with the code; a device's entries are never removed (a reset makes a new device object) | the kernel's own lock |
 | an array `GPURef`'s target | `GPURef(dev, a)`, `r[] = b` (a pending cell write of the box) | the old target's hold, with the token of the submission that applies the rebind | the box's sync state |
 | texture and sampler table entries | `Texture2D`, `Image` with an index, `Sampler` on first use (`tableentry!`, `samplerentry!`) | the image's last hold (the index back to the free list with its last tokens) | the table's lock (a leaf) |
 | an array's readers (open decision 16, ruled B3.9/B3.10) | the composites built from it: TLAS, BLAS, array `GPURef` (forwarding to its own readers), a screen (a redraw mark) | the reader's `delete!` or `free!` | an immutable snapshot, replaced under the array's lock and counted per reader |
@@ -453,7 +453,7 @@ a sync-state, channel, pool or window lock.
 | Changes are pending until the next use; every STAGE sees the old or the new state, never a mix (a run with host nodes is one submission per stage, so a change arriving between stages reaches the later ones; B4.9) | `test_resize_is_queued.jl` |
 | Runs of one graph never overlap (plan, rule 9): a run's first segment waits on the GPU for the previous run's last token on each channel | `test_runs_never_overlap.jl` (negative control: the wait removed) |
 | Record is pure | `test_record_is_pure.jl` |
-| A plan is recorded once; in steady state `run!` allocates, records and compiles nothing. Re-recorded are only the `AccelCommand`s a change marked; the parts that recorded the handle of a moved array (B3.11); a new piece and the segment holding its pass's list (B3.17); and, per swapchain generation, the segments drawing into window-sized targets and the per-image present segments | `test_recorded_once.jl`, `test_run_is_submit.jl` |
+| A plan is recorded once; in steady state `run!` allocates, records and compiles nothing. Re-recorded are only the `BuildRecording`s a change marked; the parts that recorded the handle of a moved array (B3.11); a new piece and the segment holding its pass's list (B3.17); and, per swapchain generation, the segments drawing into window-sized targets and the per-image present segments | `test_recorded_once.jl`, `test_run_is_submit.jl` |
 | A builder is a value | `test_builder_is_a_value.jl` |
 | Memory is released only after the tokens of its last uses passed | `test_lifetime.jl`, `test_memory_returns.jl` |
 | A write through an array and a read through a view, `reshape` or storage of it in one graph get a barrier: one resource per array state, not per object | `test_view_barriers.jl` (negative control: today's object-keyed `Graph.ids`, which finds three resources and no barrier) |
@@ -477,12 +477,12 @@ a sync-state, channel, pool or window lock.
 - Arguments from two graphs or two devices throw at `location`.
 - An argument that reaches device memory but is not a `MantleArray` (a vendor array, an array escaping `withview`, a raw backend array) throws at declaration instead of becoming a resource of its own.
 - A caller's group size (`dispatch!(…; group)`, KA's `workgroupsize`) is kept as given, also for 2-D and 3-D ranges.
-- A device-decided length without a capacity is refused at declaration.
+- A device-decided length needs no `capacity` (B5.5): the kernel writes within the array's current storage, bounds-checked unless `@inbounds` (B4.7).
 - `getindex`, iteration, `Array(x)` and every other host read of a graph array's contents throw; `KA.get_backend` and `KA.allocate` declare into the graph (B4.3).
 - A non-launch verb on a `Group` (build, render pass, image copy, host node) has no method; `when!` takes one launch with a `Bool` flag, anything else is a `MethodError`; groups do not nest.
 - A write to a `readonly` array throws at the call, eager or declared (B4.6).
 - `length(a)` of a kernel-written length during the declaration of the graph that writes it throws (B4.10).
-- `refit!(g, t)` for a TLAS whose total a kernel writes is legal: the structure is built over its capacity.
+- `refit!(g, t)` for a TLAS whose total a kernel writes is legal on every device type (B5.8): on Vulkan the structure is built over its capacity; whether Metal can refit after the total changed is checked in phase 5, and it builds where it cannot.
 - A store whose data length differs from the range throws `DimensionMismatch`.
 - A call on an array lent to vendor code throws.
 - `free!(a)` while graphs hold `a`: the graphs keep running; `a`'s handle throws.
@@ -494,7 +494,7 @@ a sync-state, channel, pool or window lock.
 - A change that would make a running plan stale (a length it launches over directly, a temporary it sized outgrown, a capacity change of a structure it sized temporaries from) is applied only after the run has submitted its last stage: the submitter that would apply it waits on the host, never the call (B3.13) (only a run past its first stage is waited for; no fairness: it may wait again if the plan's next run gets past its first stage first). From inside any run (any host function) it throws: it could wait in a cycle. No submitter applies it in between.
 - `r[] = b` with another element type or dimension count, or with a transient, a view, a freed or a lent array, throws (the argument type would change, or the box would hold a view's offset it cannot carry). `r[] = b` with `b` the current target is a no-op.
 - `copy!(a, data)` with a new length does not copy the old contents.
-- Eviction (open decision 16, ruled B3.9/B3.10): evictable is a resource no composite holds, with no handle dependent, that no running plan names, not lent, with nothing pending; accesses still in flight are allowed (the eviction copy waits for the last write; the storage is retired with the tokens of every access in flight and the copy's). A structure's own arrays are held by it and never evicted. Acceleration structures are not evicted. Eviction runs only where `Readback` memory is a different heap from device memory (`caps(dev)`); on a single-heap device (the Apple M5) the step is skipped. A host read of an evicted array reads the host copy; `free!` of an evicted resource frees the host copy; a plan that names an already-evicted array with no prepared storage is marked for restore and its run returns `Again`.
+- Eviction (open decision 16, ruled B3.9/B3.10): evictable is a resource no composite holds, with no handle dependent, that no running plan names, not lent, with nothing pending; accesses still in flight are allowed (the eviction copy waits for the last write; the storage is retired with the tokens of every access in flight and the copy's). A structure's own arrays are held by it and never evicted. Acceleration structures are not evicted. Eviction works the same on every device type, unified-memory devices included (the Apple M5, the Ryzen AI Max+ 395, NVIDIA's unified-memory chips; B5.4). A host read of an evicted array reads the host copy; `free!` of an evicted resource frees the host copy; a plan that names an already-evicted array with no prepared storage is marked for restore and its run returns `Again`.
 - A plot with zero elements keeps its render object; its draw count is zero.
 - A pipeline key change of a drawn plot (another shader, another attribute element type) is a `delete!` and `insert!` of the plot in Makie: a new piece, no recompile (B3.17). A new Hikari material type is a new specialization of the shade kernel the integrator declares: that plan recompiles (open decision 18).
 - An index array that moves (beyond its capacity) marks the parts that recorded its handle; they are recorded again before their next submission, nothing recompiles (open decision 17, ruled (c)).
@@ -553,16 +553,15 @@ names that point here are in Appendix A.
   hit groups (`set_anyhit_pipeline!`'s role; Hikari's material types are not
   hit groups, open decision 18), stencil, multisampling, blending modes beyond the four
   singletons.
-- **G2 Per-argument access of a kernel or shader** (phase 1): which arguments
-  a kernel reads and writes. `dependencies!` and `barriers!` need it
-  (`uses(p)` in internals.jl section 4); today device types analyse kernel IR
-  (`kerneltouches`, `shadertouches`, `vertextouches`, `fragmenttouches`,
-  `kernelinterpreter`, `kakernelaccesssignature`, `argument_usage`,
-  `intrinsic_usage`, `accesscache`). Proposal (not ruled): part of
-  `KernelInfo`, answered by `kernelinfo`, and by `compiledraw`/`compiletrace`
-  for shaders. Constraint (B4.6): the access must stay available at
-  declaration, before any compile, as `dispatch!` derives it today through
-  `argument_usage`, because a write to a `readonly` array throws at the call.
+- **G2 Per-argument access of a kernel or shader: ruled** (B5.10, B5.11). The
+  access is derived at declaration, before any compile: a declaration next to
+  the function for a call with no Julia body, else the taint walk over the
+  kernel's typed Julia IR through the device type's interpreter
+  (`argument_usage`, `kerneltouches`, `shadertouches`, `vertextouches`,
+  `fragmenttouches`, `kernelinterpreter`, `kakernelaccesssignature`,
+  `intrinsic_usage`). It is stored in the `Kernel` at its `CodeInstance`
+  (`accesscache` goes), not in `KernelInfo`. `dependencies!`, `barriers!` and
+  B4.6's read-only check read it.
 - **G3 Device facts as fields of `caps(dev)`** (phases 1 and 8): the field
   names and types. The plan says a device type reports facts and core
   decides, and names as `caps(dev)` facts `sparseresidency`,
@@ -627,7 +626,7 @@ names that point here are in Appendix A.
 189 names (`Immediate`, listed here before, is not in the vocabulary; ledger
 P7.D9 deletes it). Basis: **P** the plan says it (section named), **D**
 derived from the section named (to be confirmed in review), **G** a gap
-(section 10). Counts: 91 P, 71 D, 27 G.
+(section 10). Counts: 100 P, 71 D, 18 G.
 
 | name | fate | phase | basis |
 |---|---|---|---|
@@ -635,7 +634,7 @@ derived from the section named (to be confirmed in review), **G** a gap
 | `abandonrecording!` | goes: as abandonframe! | 3 | D: Record |
 | `abandonrun!` | goes: as abandonframe! | 3 | D: Record |
 | `access` | internal to the device type's barrier helper (how a barrier is expressed) | 3 | D: Record, Four device types |
-| `accesscache` | per-argument access of a kernel | 1 | G2 |
+| `accesscache` | goes: into the `Kernel` at its `CodeInstance` (B5.11) | 1 | P: Kernels (B5.10, B5.11) |
 | `acquire_next_image!` | becomes `acquirenext(sc)` (verb), called by core's acquireimage! | 7 | D: Windows and present |
 | `AdaptedAccel` | goes with Metal's HWTLAS bookkeeping | 5 | D: Acceleration structures (HWTLAS bookkeeping), phase 5 |
 | `alignment` | becomes part of `rawalloc`'s constraint | 2 | D: Memory |
@@ -644,7 +643,7 @@ derived from the section named (to be confirmed in review), **G** a gap
 | `argidentity` | goes: as argbytes | 4 | D: Run |
 | `argsize` | goes: as argbytes | 4 | D: Run |
 | `argtype` | goes: `devicearg(dev, a)` is the one conversion | 6 | D: Arrays (device side) |
-| `argument_usage` | per-argument access of a kernel | 1 | G2 |
+| `argument_usage` | stays: the access per argument at declaration (B5.10), stored in the `Kernel` (B5.11) | 1 | P: Kernels (B5.10, B5.11) |
 | `awaitwrites` | goes: eager calls wait per sync state, no KA synchronize | 3 | D: Eager work |
 | `backend` | goes | 8 | P: Devices (deleted) |
 | `basealignment` | core: part of the selection key | 6 | P: phase 6 |
@@ -709,7 +708,7 @@ derived from the section named (to be confirmed in review), **G** a gap
 | `fence` | core: the channel's `next` (the last token handed out), a field read, not a device verb | 3 | D: Core types (`SubmitChannel.next`) |
 | `finishrecording!` | goes: `finish(b)` | 3 | D: Record |
 | `flush!` | goes as a user-facing verb | 3 | P: Core types |
-| `fragmenttouches` | per-argument access of a shader | 1 | G2 |
+| `fragmenttouches` | stays: a shader stage's access at declaration (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
 | `Framebuffer` | goes: render targets are `Image`s and windows | 6 | D: Graphics |
 | `gpupasstime!` | profiling | - | G4 |
 | `hold!` | goes | 3 | P: Core types, phase 3 |
@@ -722,12 +721,12 @@ derived from the section named (to be confirmed in review), **G** a gap
 | `initbackend!` | goes: hooks take the device | 8 | P: What a device type implements |
 | `initial_state` | core: image layouts decided by barriers! | 7 | D: Compile (barriers!) |
 | `initial_usage` | core: as initial_state | 7 | D: Compile (barriers!) |
-| `intrinsic_usage` | per-argument access of a kernel | 1 | G2 |
+| `intrinsic_usage` | stays: part of the access walk at declaration (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
 | `isdevicearray` | goes: dispatch on MantleArray | 6 | D: Rules (dispatch) |
-| `kakernelaccesssignature` | per-argument access of a kernel | 1 | G2 |
+| `kakernelaccesssignature` | stays: the signature the access walk infers a KA kernel with (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
 | `kernelcompiles` | core: the per-device compile counter | 1 | D: Kernels, phase 1 (the per-device compile counter) |
-| `kernelinterpreter` | per-argument access of a kernel | 1 | G2 |
-| `kerneltouches` | per-argument access of a kernel | 1 | G2 |
+| `kernelinterpreter` | stays: the device type's interpreter the access walk and compile use (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
+| `kerneltouches` | stays: the access walk over the kernel's typed Julia IR (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
 | `kibackend` | goes | 8 | P: Devices (deleted) |
 | `layout` | internal to the device type's barrier helper (image layout of a use) | 3 | D: Four device types |
 | `librarygemm` | goes: selection table | 6 | P: Operations |
@@ -775,7 +774,7 @@ derived from the section named (to be confirmed in review), **G** a gap
 | `set_anyhit_pipeline!` | any-hit is a field of `RayTracingPipeline`; the SBT layout for many hit groups is open | 5 | G1 |
 | `set_viewport!` | goes: the begin_pass! family | 6 | P: Eager work (Goes) |
 | `setviewport!` | goes: the scene rectangle is a per-draw uniform | 6 | D: Graphics |
-| `shadertouches` | per-argument access of a shader | 1 | G2 |
+| `shadertouches` | stays: a shader's access at declaration (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
 | `staged_gemm_tile` | goes: selection table | 6 | P: Operations |
 | `stages` | internal to the device type's barrier helper (pipeline stages of a use) | 3 | D: Four device types |
 | `stampof` | goes | 3 | P: Ordering, phase 3 |
@@ -813,7 +812,7 @@ derived from the section named (to be confirmed in review), **G** a gap
 | `upload!` | goes: stores are pending changes (`Store`; inline ones written by `emitstore!`) | 4 | D: resizing-and-raytracing.jl B.3 |
 | `use_bindings!` | goes: bindings compiled with the plan (`compilebindings`), textures through the device-wide table; draw-binding code (`metal/graphics.jl:1524`, `vulkan/graphics/record.jl:169`) whose last caller is the walked draw in `execute!` | 7 | D: Graphics, Windows and present |
 | `use_frozen_kernels` | goes: the device type's compiler cache, per device | 8 | D: Threads, phase 8 (FROZEN_*) |
-| `vertextouches` | per-argument access of a shader | 1 | G2 |
+| `vertextouches` | stays: a shader stage's access at declaration (B5.10) | 1 | P: Kernels (B5.10, B5.11) |
 | `waitfor` | verb: `waitfor(ch, value)`, GC-safe; core's `waitfor(::Token)` calls it | 3 | P: Core types |
 | `waitfor!` | `waitfor!(::Stamp)` goes | 3 | P: Core types |
 | `waitidle` | device wait-idle | 3 | G5 |
