@@ -853,7 +853,7 @@ framebuffer!(::MTLm.MTLDevice) = framebuffer!(Device(MetalAPI()))
 function framebuffer!(d::MetalDevice)
     bq = batchqueue(d)
     # Compute was recorded since our last buffer. Theirs first, then ours.
-    bq.cmdbuf === nothing || Metal.flush!(bq)
+    Metal.has_open_batch(bq) && Metal.flush!(bq)
     return MTLm.MTLCommandBuffer(bq.queue)
 end
 
@@ -864,7 +864,7 @@ Through `Metal.submit_command_buffer`, which commits Metal.jl's open batch first
 claims the arrays the passes bound (`metal_buffer`) for this queue, so host reads of
 them wait for this buffer."""
 function commit!(cb::MTLm.MTLCommandBuffer)
-    Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb)
+    Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb, true)
     committed!(cb)
     return cb
 end
@@ -952,7 +952,7 @@ function Mantle.gpupasstime!(d::MetalDevice)
     # here, so the numbers describe the frame as it ran.
     # A managed wrapper with a reference of its own: the batch's buffer is borrowed,
     # and the batch gives its reference back when the flush below commits it.
-    open_cb = bq.cmdbuf
+    open_cb = bq.backend.cmdbuf
     open_cb === nothing || push!(COMMITTED, MTLm.retained(open_cb))
     Metal.flush!(bq)
     isempty(COMMITTED) && return 0.0
