@@ -1,0 +1,184 @@
+I found 45 problems across the six checks, all re-read against the source lines cited. Four matter most:
+
+- **Appendix A `capacity` has the wrong fate.** Today's `capacity` is the device memory budget, not an array's capacity.
+- **Appendix A has 190 rows but the vocabulary has 189 names.** `Immediate` is the extra row.
+- **The plan contradicts itself on a window resized beyond its capacity.** Some lines say it throws, others say the graph recompiles.
+- **Eviction and readers are listed as phase work but were never ruled.** B3.7 still calls them proposals.
+
+Beyond that, the ledger has one duplicated id, several overlapping or overstated items, and gaps against the plan and against Appendix A. No file was edited.
+
+Files: `/sim/Programmieren/VideoEdit/dev/Mantle/docs/{api.md, refactor-ledger.md, recording-plan.md, internals.jl, resizing-and-raytracing.jl, examples.jl}`.
+
+## 1. Section 4 verbs vs the pseudocode
+
+1. **`waitfor`/`passed` are called with a different arity.**
+   - api.md:254-255 has `passed(ch, token)` and `waitfor(ch, token)`.
+   - The pseudocode calls one-argument forms: internals.jl:794, 800, 833, 1000, 1292, 1303, and `all(passed, x.tokens)` at 1124.
+   - `values(pl.lastrun)` (internals.jl:701, 800, 833) throws away the channel, because `lastrun` is keyed by channel (716).
+   - Fix: define `Token = (channel, value)` (the name `Token` is already used at internals.jl:1021 and resizing-and-raytracing.jl:214). State in api.md 4.2 that core's `waitfor(::Token)` and `passed(::Token)` wrap the two-argument verbs.
+2. **A copy call has the wrong arity, and its neighbour is a verb api.md doesn't list.**
+   - internals.jl:1299 calls `emitcopy!(b, copyof(...))` with 2 arguments; api.md:291 has 4.
+   - internals.jl:1300 calls `emitcellcopy!(b, …)`, which is not in api.md 4.5.
+   - Fix: make both `emitcopy!(b, nothing, CompiledCopy, Deps((), ()))`.
+3. **The pseudocode asks the device questions api.md doesn't list.**
+   - `throughput(dev, T)`, `bandwidth(dev)` (internals.jl:411), `hastransfer(dev)` (423), `crossqueuecost(dev)` (425), `config(dev, f)` (403).
+   - None is a verb or a known `caps` field.
+   - Fix: add them as `caps(dev)` fields (or verbs), and add them to G3.
+4. **`fence(ch)` is never called, and api.md defines it as core data.** api.md:253 calls it "the last token handed out (the channel's `next`)", which is a core field (plan:621). Fix: drop it from section 4, or define what only the driver knows.
+5. **Verbs api.md lists that no pseudocode calls.**
+   - `samplerentry!` (api.md:327) and `imageformat` (api.md:328) appear in neither the plan nor any pseudocode. That breaks the forbidden move "a new vocabulary name without a line in this plan". Fix: add them to the plan's "What a device type implements" table, or remove them.
+   - `bindindices!` (api.md:294) appears only in resizing-and-raytracing.jl:716; the plan's Record list (plan:656-665) lacks it.
+   - `beginrender!`, `endrender!`, `emitlibrary!`, `compiledraw`, `compiletrace`, `placeimage`, `rawfree`, `recycle!`, `queuekinds` are in the plan but never called. internals.jl:589-603 has no `emit!` for `RenderNode`, `ForeignNode` or `BuildNode`. internals.jl:580 even calls `emit!(b, pl, p::BuildNode)`, which is not defined. Fix: add those `emit!` methods to internals.jl.
+6. **The plan's window "open" verb is missing.** plan:1110 lists "windows | open, acquire, present". api.md 4.7 (318-320) has no verb that creates the window or surface. Fix: add one (name open).
+7. **Minor:** plan:1105 names the last `submitnative!` argument `presents`; api.md:252 and internals.jl:945 say `present`.
+
+## 2. Section 2 (user API) vs the plan and examples.jl
+
+1. **Window resized beyond its capacity: the plan says both things.**
+   - "Throws": plan:424, plan:1517 (the `test_window_resize.jl` spec), examples.jl:453-454.
+   - "Recompiles at the next run": plan:837-838, internals.jl:840, 847.
+   - api.md:175 says recompile, while api.md:374 cites `test_window_resize.jl`, which pins "throws".
+   - Fix: needs Simon's ruling. I'd propose recompile, which 3 of the 5 places use, then fix plan:424, plan:1517 and examples.jl:453.
+2. **`capacity(a)` is in neither the plan nor examples.jl, and misreads the plan.**
+   - api.md:83: "The reserved element count (one meaning of capacity)".
+   - The plan's "Capacity means one thing" (plan:1084) is the device's budget.
+   - resizing-and-raytracing.jl:187 has `capacity` set "only for DeviceLength; 0 otherwise".
+   - Fix: drop the parenthetical, and align with B.2 or remove the row.
+3. **api.md 2.4 overstates draw counts and carries a stale marker.**
+   - api.md:115 says counts "are `launchrange`s"; plan:943 and api.md:160 say "numbers or `launchrange`s".
+   - The same row still says "(contract: phase 6, see section 10 G1)", although G1 now says this is specified.
+   - `render!` (115/159) and `Texture2D` (145/166) are each listed twice.
+   - Fix: delete the 2.4 `render!` row and merge the two `Texture2D` rows.
+4. **The `run!` waits list is incomplete.** api.md:97 says "Waits on the host only to write the entry… and while another graph's run holds a shared arena part". It leaves out:
+   - host-node waits (plan:744-746);
+   - the swapchain acquire, which "may block" (api.md:319);
+   - pressure waits in `acquire!` (internals.jl:999-1000).
+
+   It also says `run!` waits for "hostwritten data", but `x[:] = data` does that wait, not `run!` (internals.jl:799, 833).
+5. **`Window(...; vsync = false)` and "one default colour format and one vsync default" (api.md:174) have no source.** G9 (api.md:474-477) says these are open. Fix: mark them "(open, G9)".
+6. **The `TLAS` default differs.** api.md:136 has `TLAS(dev; hardware = true)`. resizing-and-raytracing.jl:108-109 says `TLAS(dev)` "picks the hardware path where the device has it; `hardware = false` forces software".
+7. **"Created with a capacity it never moves" is too strong.** api.md:160 says this of index arrays, but resizing-and-raytracing.jl:172-174 moves an array that grows past its reserve. Fix: "never moves within its capacity".
+8. **"No lock held" during compile is wrong.** api.md:277 says `compilekernel` runs with no lock held, but compile runs under the graph lock (plan:597-598, internals.jl:638). plan:396 says the same thing as api.md, so the plan contradicts itself too. Fix: "no lock other than the graph lock", in both files.
+9. **examples.jl contradicts the plan in three places.**
+   - examples.jl:383 uses `RTPipeline(dev, raygen, closesthit, miss)`. plan:924 and api.md:144 have a value with no device: `RayTracingPipeline(; raygen, closest_hit, miss)`.
+   - examples.jl:442-443 renders into `blur = MantleArray(gwin, …, win)` as a bare target. Render targets are `Image(g, T, win)` (plan:954-955), and colour targets need `=> Clear/Keep/Discard` (plan:942).
+   - examples.jl:353 uses `streamed = true`, which api.md lacks. Fix: add it to api.md 2.2 as "(open decision 6)".
+10. **`trim!(a)` (resizing-and-raytracing.jl:197) is missing from api.md.** Fix: add it as "(name open)", or remove it from the pseudocode.
+
+## 3. Sections 5-9 vs the pseudocode
+
+1. **The flags are atomics, not under the graph lock.**
+   - api.md:340 puts graph "flags" under the graph semaphore, and api.md:199 puts the `Plan` under the graph lock.
+   - In fact `recompile`, `windowchanged` and `freed` are atomics set without that lock: resizing-and-raytracing.jl:384, internals.jl:848 and 1238.
+   - The plan flags `stale`, `unmapped`, `restore` and `running` work the same way: internals.jl:674, 1047, 1171.
+   - Fix: list them as atomics, with their writers.
+2. **Two locks and one holder are missing.**
+   - The `GPURef` lock (a `ReentrantLock`, internals.jl:819, taken under the graph lock at 802) is not in the lock order (api.md:354). Fix: add it as a leaf.
+   - The texture and sampler tables have no owner or lock row in section 5.
+   - api.md:338's holders list omits array `GPURef`s (`addhold!` at resizing-and-raytracing.jl:647, 656).
+3. **Section 3 lists are incomplete.**
+   - The Change list (api.md:212) omits `Restore` (internals.jl:1084).
+   - The storage list (api.md:209) omits `Evicted`.
+   - The Node list (api.md:201) omits `RegionNode`, `VideoDecodeNode` and `PresentNode` (internals.jl:558, 422, 505).
+4. **Tests in section 6 that the plan never names:**
+   - the eviction test (api.md:377);
+   - the RayMakie compile-counter session (api.md:378);
+   - the "host time flat" test (api.md:379).
+
+   The composite fuzz test (api.md:376) appears only in the plan's prose (plan:1018-1021); no phase lists it as green.
+5. **Invariants with no test:**
+   - "Launch kernels never read cells" (api.md:375, "test: phase 4");
+   - "Nothing fallible between claiming a token and submitting" (api.md:380, a review rather than a test);
+   - Rule 9, "runs never overlap" (plan:68-69), has no row at all;
+   - the plan's other automated checks — driver calls in one place, no mutable globals, no probes, Aqua/JET (plan:1463-1471) — are not mapped to rows.
+6. **The out-of-memory corner case omits eviction.** api.md:396 lists the pressure steps without eviction, the final step at internals.jl:1005-1009 and plan:1080.
+7. **Section 8 breaks the plan's "exactly one function" rule (plan:1463-1467).**
+   - `vkQueueBindSparse` is assigned to two functions (api.md:415).
+   - Metal residency is assigned to four (api.md:425); it is also missing from `createreserve` and from the per-plan sets (plan:1351).
+   - Fix: a shared helper, as already done for the barrier.
+   - `vkCmdUpdateBuffer` (plan:938-939; ledger P6.A13) has no builder verb and no entry in section 8.
+8. **Pseudocode bug behind corner case api.md:386.**
+   - `free!(g)` from the graph's own host function first sets `freed` (internals.jl:1238); then `lockgraph` throws.
+   - The finalizer's `(@atomicswap g.freed = true) || release!(g)` (internals.jl:1250) then skips the release, so holds and the plan leak.
+   - Fix: check for re-entry before the swap, for example by doing the swap inside `lockgraph`.
+
+## 4. Section 10 gaps
+
+- **Still open as written:** G2, G3, G4, G5, G7, G10.
+- **G6 can be narrowed.** The recording lifecycle is now specified by `Builder`/`finish` plus retire-by-token (plan:478, 672-673; internals.jl:1245), and Metal's free list by plan:1336-1338. What stays open is the shape of `recycle!` on Vulkan, CUDA and HIP.
+- **G8 can be narrowed.** The key is specified (plan:300-301, plan:1679), and so are the measured-else-estimate rule and the per-device table (plan:309-310). Locking and when measurement runs stay open.
+- **G1 mixes in something that isn't graphics.** Device teardown (`reset_device!`) should move to its own gap.
+- **G11 has a phase conflict.** api.md:312 and :481 say phase 10, but plan:1681 adds scoped vendor views in phase 6 (ledger P6.A7; F11 says "before phase 10"). The plan and the two references need one phase.
+- **Gaps missing from section 10:**
+  - the roofline inputs (§1 item 3);
+  - the window open verb;
+  - a verb for inline stores;
+  - texture and sampler table locking;
+  - the contracts marked "(contract: phase N)" for `fence` and `placeimage`.
+
+## 5. Appendix A (all 189 names in the code checked against all 190 rows)
+
+- **`Immediate` (api.md:577) is not in `BACKEND_VOCABULARY`.**
+  - At 5c2d4c6, `src/graph/backend.jl:848-992` has 189 names (plan:1400 also says 189).
+  - Fix: remove the row, and change "190" to 189 at api.md:13 and api.md:486. `Immediate` is already deleted by ledger P7.D9.
+- **`capacity` (api.md:521) has the wrong fate.**
+  - The vocabulary entry is the device budget hook: `capacity(dev::LavaDevice)` (src/vulkan/graph.jl:107), Metal's `recommendedMaxWorkingSetSize`, `AMDGPU.free()`.
+  - Fix: "becomes `budget(dev)`", phase 2, basis "P: Memory, 'Capacity means one thing'".
+- **`transition_image!` (api.md:671) has the wrong phase and basis.** The plan names it under Graphics "Goes" (plan:977-978), which phase 6 deletes (plan:1692), and the ledger has P6.D50. Fix: phase 6, basis "P: Graphics".
+- **`compiledraw` (api.md:530) has the wrong phase.** It says phase 1, but `compile_draw` → `compiledraw` is phase 6 (api.md:529), and pipelines come from the device cache in phase 6 (plan:1682). Fix: phase 6.
+- **`Surface` and the four `target_*` names (api.md:657-662) say phase 7; the ledger says 6** (P6.D45-49). The root cause is that the plan assigns Graphics "Goes" to phase 6, but its window replacement arrives in phase 7. Fix: in the plan, move the window names to phase 7, then align the ledger.
+- **17 rows are labelled "P" for names the plan never mentions:** `AdaptedAccel`, `blittarget`, `colorimage`, `compile_draw`, `copy_target!`, `defaultdevice!`, `depthimage`, `deviceslice`, `deviceview`, `Framebuffer`, `makeimage`, `present_frame!`, `remakeimage!`, `setviewport!`, `use_bindings!`, `kernelcompiles`, `resetkernelcompiles!`. Fix: relabel as D. Family names such as `trace_*`, `draw_*_in_pass!` and `native_*` are correctly P.
+- **Other rows:**
+  - `currentimage` (api.md:533) has an ambiguous fate.
+  - `maxalloc` (api.md:597) says "part of `caps(dev)`", but api.md 4.1 and G3 don't list it as a field.
+  - `use_bindings!` (api.md:673) is draw-binding code (src/metal/graphics.jl:1524), so it belongs with phases 6/7, not phase 4.
+
+## 6. refactor-ledger.md vs the plan's phases
+
+- **Duplicated id:** P11.D12 is used at refactor-ledger.md:704 and again at :722. Renumber :722-725 as D13-D16.
+- **Overlapping items:**
+  - P1.D19 overlaps P1.D5 and P1.D6.
+  - P3.D51 overlaps P3.D2 and P3.D30.
+  - P8.D35 overlaps P6.D20 and P8.D18.
+  - P11.D7 overlaps P11.D14.
+- **Items that contradict or overstate the plan:**
+  - P11.D6, "Hikari: `fill_aux_buffers!` goes", contradicts plan:1772: they "become methods".
+  - P11.D3, P11.D4 and P11.D5 overstate plan:1769-1770, which removes only "`renderthread`'s Mantle branch", "`runowned`'s `WrongThread` discovery" and "`onthread` for Mantle renderers".
+  - P11.D11 says `runonce!` goes "as the plan says", but the plan only lists it as a pattern (plan:1236).
+  - P2.D3 deletes all of `reclaim!`; the plan deletes only `reclaim!(::SubmitChannel)`. A `reclaim!(p::Pool, dev)` also exists at memory/pool.jl:765.
+  - P3.D54 deletes `drain!`, but internals.jl:1120 uses `drain!(pool.inbox)`. Fix: write `drain!(::SubmitChannel)`.
+- **Wrong phase:**
+  - P11.D13 (RayMakie's `DrawBinding` use) belongs in phase 7, where plan:1709-1710 deletes `DrawBinding` "(RayMakie uses it)".
+  - P5.A6 is a rename, so its kind should be R.
+  - P2.A12 (eviction) needs the dependents and pending changes added in phase 4 (P4.A8, P4.A9).
+  - P2.A13 and P2.A15 need the core TLAS added in phase 5. This is a plan ordering problem (plan:1584-1587).
+- **Plan items with no ledger row:**
+  - `RecordingParts.batches` (plan:646);
+  - the queue-slot fields (plan:529);
+  - `use` (plan:376; at 5c2d4c6 only the export at Mantle.jl:452 and some comments remain);
+  - `HostAPI` (plan:173; 0 hits, so n/a);
+  - phase 3's measurement of the real `run!`, target within 3x (plan:1185-1186);
+  - the eager `mul!`/`norm` code (plan:797-798);
+  - Metal.jl's `BatchedCommandQueue` (plan:1338; 10 hits in src/metal);
+  - `submissions(g)` and `devicesize(a)`;
+  - Raycore's TLAS finalizer, `blas_array` and synchronize calls between build steps (resizing-and-raytracing.jl:759-762);
+  - GPUFiltering's `synchronize`/readbacks (plan:1247-1248);
+  - load graphs / `hoistconstants` (plan:1262-1263);
+  - the 54 Appendix A "goes/becomes/folds" names that have no delete item, including the 17 P-labelled ones listed in §5.
+- **Ledger items the plan doesn't support:**
+  - P0.D1 and P0.D2 (doc housekeeping);
+  - P2.T1, P6.T1, P11.G2, P11.G3 (tests the plan never names);
+  - P7.A10 (default colour format and vsync; G9 says open).
+- **Made stale by the 2026-10-02 rulings:**
+  - F15 lists the array `GPURef`, `attribute` and the scene rectangle as unruled, but B3.7 ruled them.
+  - F1 is stale because the plan now has a Graphics section; F9 should be narrowed to match G9.
+  - Eviction and readers stay proposals (decisions.md B3.7, plan open decision 16 at plan:1887-1888). So P2.A12, P2.T1 and P5.A9, and api.md's eviction/readers rows (api.md:351, 377, 399, 135), should be marked as needing that ruling.
+- **F12 count is wrong:** it says 56 D fates; Appendix A has 54.
+- **No stale wording found:** there is no TLAS padding or halving, no private arena parts, no `ArrayRef` and no `when` keyword in either file.
+- **Baseline counts check out:** 18 of them, re-run with the ledger's regex at 5c2d4c6 (`compile_dispatch`, `batchqueue`, `LavaArray`, `reclaim!`, `hold!`, `vk_context`, `default_bq`, and others), all match.
+
+## Pseudocode defects found along the way (they affect ledger item P0.A2)
+
+- resizing-and-raytracing.jl:622-625 says a geometry change is "a new BLAS… the TLASes pend a build". plan:881-884 says it is a build into the existing storage plus a TLAS refit.
+- resizing-and-raytracing.jl:540 calls `retire!(old, c.lasttoken)` with two arguments; elsewhere it is `retire!(pool, x, tokens)`.
+- `reservesize` and `sparsethreshold` (resizing-and-raytracing.jl:177-178) are core formulas that each device type would repeat, which goes against the plan's no-duplication rule (Rule 2). Better as `caps` fields that core computes from.

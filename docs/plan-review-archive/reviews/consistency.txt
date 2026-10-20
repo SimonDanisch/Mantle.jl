@@ -1,0 +1,188 @@
+I found 12 design contradictions, 14 name/signature mismatches and 16 stale-wording items. No file was edited. Paths are relative to `/sim/Programmieren/VideoEdit/dev/Mantle/docs/`. Short names: **plan** = recording-plan.md, **int** = internals.jl, **rr** = resizing-and-raytracing.jl, **ex** = examples.jl, **api** = api.md. I re-read every quoted line before listing it.
+
+## A. Design contradictions
+
+**A1. A window resized beyond its capacity: throws, or recompiles?** No ruling covers this.
+- Throws: plan:424 "beyond the window's capacity it throws"; plan:1517 (test) "a size beyond the window's capacity throws"; ex:453-454 "Beyond the window's capacity (the largest monitor's size) it throws."
+- Recompiles: plan:836-838 "a resize beyond it recompiles the graph at its next run"; api:175 "Beyond the capacity: the graph recompiles at its next run."; int:839-841 and int:847; rr:436-437 "a window larger than that recompiles the graph too."
+- Fix: most places, and all the pseudocode, say recompile. Change plan:424, the test at plan:1517 and ex:453-454 to "recompiles at its next run". If Simon prefers throwing, change the other four instead.
+
+**A2. What goes back under memory pressure.**
+- plan:1028-1029: "Under pressure, pages beyond an array's size, idle arena pages and acceleration structure storage beyond its count (compacted into smaller storage) go back."
+- plan:1586-1587 (phase 2) adds "compaction of acceleration-structure storage under pressure".
+- int:1175: "Resizable arrays' pages beyond their size are unmapped the same way (not shown)."
+- Against these:
+  - rr:195-197 (B.2): "Shrinking never unmaps an array's pages (they go back when the array is freed, or by trim!(a)), so a view never reads unmapped memory."
+  - int:64-65 says the same as B.2.
+  - rr:591-595: the TLAS capacity "does not shrink on its own". The brief says capacity only doubles.
+  - The pressure policy itself lists neither step: plan:1075-1080 and `acquire!` at int:993-1009.
+- Fix: delete both items from plan:1028-1029, delete the phase 2 item at plan:1586-1587, and delete int:1175. Keep B.2's rule. `trim!(a)` appears nowhere except rr:197, so add it to api 2.2 and to the plan.
+
+**A3. What a new BLAS topology does.**
+- rr:622-625: "a geometry change is a new BLAS (new address in its cell); the TLASes referencing it pend a build."
+- The rest say it is a build into existing storage plus a TLAS refit:
+  - plan:882-884: "A new topology: a BLAS build into its storage (new storage beyond its capacity, the address through its cell) and a TLAS refit".
+  - api:135: "a build into its storage (new storage beyond its capacity), pending; TLASes over it refit".
+  - ex:434: "pends blas2's update and tlas's refit".
+- Fix: rewrite the B.8 BLAS paragraph to match the plan (a BLAS capacity; `MoveAccel` beyond it; TLASes pend an Update).
+- Related: plan:888-889 and api:135 put BLAS builds in an `AccelCommand`. But `AccelCommand.tlas::TLAS` (rr:522) and `BuildAccel.target::TLAS` (rr:220) are typed for a TLAS only. Widen both.
+
+**A4. Per-frame values, and whether small stores are inline.**
+- plan:936-940: "A value that changes every frame (a camera matrix) is a one-element array written by a store; a store of up to 64 KiB is recorded inline … with no staging region. `GPURef` stays for the scalars a kernel takes by value." ex:411 and ex:421 follow this.
+- ex:233-234 says the opposite: "Per-frame values belong in a GPURef or a hostwritten transient." ex:212-215 and ex:223-224 use `cam = GPURef(dev, Mat4f(I))`, which ex:444 then draws with.
+- Inline versus staging:
+  - plan:736-738 "copy the data into staging memory at the call"
+  - api:77 "the data goes to staging memory at the call"
+  - B.3's `Store` has `staging::Region` (rr:206-208)
+  - B.5's `setindex!` always calls `stage!` (rr:349-356)
+  - rr:808 says "(inline, B.3)", but B.3 has no inline store.
+- Fix:
+  - Make the camera in ex 24 a one-element array written by a store, and fix ex:233-234.
+  - Add an inline `Store` variant with the 64 KiB threshold to B.3 and B.5.
+  - Qualify plan:736-738 and api:77.
+
+**A5. Where the first `resize!` puts an array.**
+- Always a reserve:
+  - plan:216-221: "The first `resize!` moves it into a reserve … so later growth keeps its handle and address".
+  - The changes table at plan:423 says the same.
+  - plan:1823-1825 (Decision 13): "which moves them into a reserve that grows by mapping pages".
+  - ex:238-241.
+  - api:76: "Later growth maps pages; the address stays."
+- But B.1 (rr:163-166, rr:171, rr:175) puts small arrays in a `Committed` region: "each doubling is a move". api:76 contradicts itself ("else a doubling pool region"). plan:1634-1635 (phase 4) also lists a "committed region that doubles".
+- Fix: in all the places above, say a reserve for large arrays and a doubling pool region for small ones, where each doubling is a move.
+
+**A6. Host waits while a lock is held.**
+- int:14-16: "No lock is held while waiting on the host for another run (section 8)."
+- Against this:
+  - `run!` holds the graph lock (int:633) while `holdparts!` waits on `part.cond` for another graph's run (int:680, int:744-761).
+  - `writeentry!` waits for the previous run (int:672, int:800).
+  - The hostwritten `setindex!` waits inside `lockgraph` (int:829-834).
+  - plan:590-592 orders the parts hold after the graph lock.
+  - Section 8 contains no such wait at all.
+- plan:705-706 "The host waits only to write the entry." contradicts plan:562-566 (another graph's run "waits on the host for the whole run") and api:97.
+- Fix: int:14-16 should say "no access-record, channel or pool lock; the graph lock is held (section 6)". plan:705-706 should add the shared-arena-part wait.
+
+**A7. Who can be a reader.**
+- rr:193: `const readers::WeakSet{TLAS}  # TLASes with a range over this array`.
+- But BLASes and screens are readers too: plan:890-892, plan:1307-1308, int:768-775 ("One method of pendupdate! per reader type"), api:135, ex:432, rr:834.
+- Fix: widen the type. Register the BLAS in B.8. Rename `pendbuild!` (rr:662) to `pendupdate!`.
+
+**A8. A recording is one segment, but segments now have several parts.**
+- plan:625 and api:214: `Recording{N}` is "one segment of a plan: written once".
+- int:584-587 and int:777-780: a segment is a list of parts, including `AccelCommand`s that the run re-records.
+- plan:672-673 says a builder never escapes "record! or the eager call". api:288 also lists the change prefix and `AccelCommand`.
+- plan:1518-1519 (`test_run_is_submit`) says a run "records … nothing". api:368 qualifies this for `AccelCommand`, and plan:1671 runs these tests with a TLAS rebuilt every run.
+- Fix: align plan:625, plan:672-673 and plan:1518-1519 with api.
+
+**A9. Re-recording window-sized render targets.**
+- plan:951-953: "a window-sized target's segments are recorded again with each swapchain generation"; plan:1702 says the same.
+- plan:424, plan:830-832 and `applywindows!` (int:866-867, `recordpresent!` only) re-record only the per-image present segments.
+- Fix: add the re-recording of window-sized-target segments to plan:424, plan:830-832 and `applywindows!`.
+
+**A10. Shadow and ambient-occlusion passes under `when!`.**
+- plan:1311-1313: "Shadow and ambient-occlusion passes run only when their inputs changed (`when!` on a flag …)".
+- But a render pass inside `when!(g, …)` throws: plan:347-350, int:285-286, api:390.
+- Fix: say "their draws inside `when!(p, flag)` with a `Keep` target, or their compute launches inside `when!(g, flag)`".
+
+**A11. Is `copyto!(out, x)` in a graph a copy kernel or a copy node?**
+- Copy kernel: plan:343-344 ("launches a copy kernel, so it is allowed"), int:239-241, api:113.
+- Copy node: plan:786-788 and api:117 ("A copy node recorded once").
+- This matters because copy nodes are refused inside `repeat!` and `when!`. Fix: call it a copy kernel node in plan:786-788 and api:117.
+
+**A12. Eviction and readers are described as decided, but they are still proposals.**
+- plan:1886-1888: "Still proposals: eviction … and readers pending structure updates" (decisions.md B3.7).
+- Yet they are written as decided design in:
+  - plan:1048-1072 and plan:1079-1080
+  - phase 2 at plan:1584-1585
+  - plan:890-896 and plan:1660-1661
+  - api:351, api:377, api:399
+  - ex 40b (ex:339-349)
+  - int:1005-1103
+- Fix: mark these "(proposal, D9/D10)". Also, decisions.md D9 still says "AS dropped and rebuilt", while the docs say acceleration structures are not evicted (plan:1056, int:1014).
+
+## B. Names, signatures, arities
+
+- **B1. `launchrange` vs `DeviceRange`: two names for one concept** (a forbidden move, plan:1454).
+  - B.7 defines `launchrange(a) = LengthOf(a)`, which resolves to direct or indirect (rr:409-414). api:84 and int:206 agree.
+  - But plan:363 says "`DeviceRange(a)` launches over the array's current length", and api:85 lists it.
+  - ex:98-99 says "launchrange (… fixed array, DeviceRange for a resizable one)", which is wrong. ex:182 and int:412 also use `DeviceRange`.
+  - Fix: drop `DeviceRange(a)`. Keep `DeviceRange(count; max)` in the delete list (plan:1646).
+- **B2. api.md section 4 has device-type verbs with no line in the plan.**
+  - api:16-18 and plan:1454-1455 forbid adding a vocabulary name without a line in the plan.
+  - Missing from recording-plan.md entirely: `createreserve`, `countsource`, `sparsethreshold`, `reservesize`, `instancerecordtype`, `acceladdress`, `bindindices!`, `tableentry!`, `samplerentry!`, `imageformat`.
+  - Fix: add them to the plan's table (plan:1100-1111). Add `bindindices!` to the builder verbs at plan:656-665.
+- **B3. Wrong builder-verb arity, and an unlisted verb.**
+  - int:1299: `emitcopy!(b, copyof(...))` has two arguments; everywhere else it has four (plan:660, api:291, int:1042).
+  - int:1300: `emitcellcopy!` is not in the vocabulary, so the vocabulary test would reject it.
+  - Fix: use the four-argument `emitcopy!(b, nothing, …, Deps((),()))` for both.
+- **B4. `GPURef` of an array on a graph.**
+  - "dev or g": rr:629, rr:647 and api:163 (which also allows "a persistent array of the same graph").
+  - Device only: int:813-815 `GPURef(dev, a)`, `ArrayBox.device::Device` (rr:639), and `location(r::GPURef) = r.device` (int:169).
+  - Fix: either restrict to a device, or make the field a location.
+- **B5. The `attribute(a, i)` formula.**
+  - plan:1885-1886 states the ruling as `a[min(i, n-1)]`.
+  - plan:929-930, api:162 ("1-based"), rr:133 and rr:791-792 say `a[min(i, length(a))]`.
+  - Fix: use `a[min(i, length(a))]` and note that the benchmark's 0-based form is `a[min(i, n-1)]` (plan:1193; decisions.md B3.7 also has the 0-based form).
+- **B6. Pressure-step lists without eviction.**
+  - ex:332-335 and api:396 end at "wait for retirements … then fail".
+  - int:991-992: "It submits nothing but the unmapping of idle arena pages".
+  - Against plan:1079-1081 (eviction step, "and the eviction copies"), int:1005-1009 and ex:340-342.
+- **B7.** api:212 lists the `Change` subtypes without `Restore`, which rr:225-227 defines and api:351 uses.
+- **B8. Who holds an array.**
+  - plan:997-1000 and Decision 20 (plan:1839-1840): the creator and each graph only.
+  - rr:190 and api:338 add TLAS ranges. An array `GPURef` also adds a hold (rr:647, rr:656).
+- **B9. `freed` is stored in two places.**
+  - `ArrayState.freed` (rr:191; api:207).
+  - `AccessRecord.freed` (int:155), which is the one used (`st.access.freed`, int:1215, int:1233; api:211).
+- **B10. Hiding an instance by mask 0, but no mask field.**
+  - "mask 0 … a refit": plan:885-886, plan:1662, api:151, rr:855.
+  - `RangeEntry` (rr:469-475) has no mask, only `active`. `delete!` uses `active` (rr:582), and rr:23-25 says flipping it needs a full build.
+- **B11. Which TLAS kernels read cells.**
+  - plan:730-732 and api:375 name only "the TLAS records kernel".
+  - rr:477-484 says the offsets kernel and the records kernel both read cells ("These two read cells directly").
+- **B12. Changes table at plan:425.**
+  - It puts `tlas[h] = t` under "a build with the exact count". plan:878-879 and api:140/151 say moving an instance is a refit.
+  - There is no row for an array `GPURef` rebind `r[] = b` (rr:650-665; plan:1279).
+- **B13. Example 45 and example 43.**
+  - Example 45 (ex:442-443) uses a `MantleArray` as a render target with no `Clear`/`Keep`. plan:941-942 and api:159 say targets are images (`Image(g, T, win)`) given as `image => Clear(v)`, `Keep` or `Discard`.
+  - ex:383 uses `RTPipeline(dev, raygen, closesthit, miss)`. api:144 and plan:924 have `RayTracingPipeline(; raygen, closest_hit, miss, any_hit)` as a value.
+- **B14. Smaller arity mismatches in the pseudocode.**
+  - `CompiledDispatch` takes 3 arguments at int:382 and int:397, but 4 at int:1270.
+  - `compiledbuild` takes 3 at rr:489, but 4 at rr:537 (`k...`).
+  - `retire!(old, c.lasttoken)` at rr:540 has 2 arguments; elsewhere it is `retire!(pool, x, tokens)` (int:1117, api:336).
+  - The verb is `waitfor(ch, token)` (plan:642, api:255), but int:794, 800, 833, 1000, 1292 and 1303 call it with one argument.
+  - plan:1105 names the last `submitnative!` argument `presents`; int:1342 and api:252 say `present`.
+  - The plan's eager sketch (plan:763-768) uses `kernel!(dev, kernel, args)`, `recordlaunch` and `uses(k, args)`. The section it cites (int section 11, int:1261-1275) uses `argtypes(args)`, `Builder` plus `emitdispatch!`, and `uses(k, args, nothing)`.
+  - rr:487 uses `t.kernels`, which the TLAS struct (rr:442-457) does not have.
+  - int:693-694 calls `done` on `Restored()`, which has no `done` method (int:643-645).
+
+## C. Stale wording and references
+
+1. `GPURef(dev, …)  # (name open)` at rr:129 and ex:408. B3.7 says "Not a new name".
+2. api:115 says "(contract: phase 6, see section 10 G1)", but api:159-161 and api:444 already give the contract.
+3. plan:357-358 says "through a one-element view of it (name open)". plan:732, plan:1639 and api:86 call it `lengthof(a)`.
+4. plan:1770 says the idiom "becomes conditional kernels"; plan:351-352 says it "becomes `when!`".
+5. plan:873-876 states TLAS-by-address and the texture table as fact; they are open decision 4 (plan:1857-1860, rr:45-46).
+6. plan:833-836 states that a swapchain generation is retired by tokens; open decision 10 (plan:1867-1869) says that is unresolved.
+7. A `GPURef` is described only as a value box at plan:266, plan:733-735 and api:222. It can now also hold an array (rr B.8b, api:163, api:350).
+8. int:16 points to "(section 8)"; the wait is in section 6. This is part of A6.
+9. rr:13 says "Rulings this implements (… 2026-09-30, … B2 and D)". The file now also implements B3.2 (TLAS) and B3.7 (`GPURef` of an array).
+10. int:8-9 lists the sections but leaves out selection, devices and vendor views (sections 3, 13, 14).
+11. plan:1302 runs `run!(sim)` with the comment "the next frame draws …".
+12. ex:126-127 says another graph waits "until gh's run is done". plan:562-565 says until its last stage is submitted, then on its tokens.
+13. api:160 says "created with a capacity it never moves", but a reserve moves beyond its bytes (rr:172-174).
+14. The comment at plan:693 lists only an unmapped arena range or a window change as reasons for `Again`. A stale plan (int:688) and an eviction after the run looked (plan:1065-1066) also cause it.
+15. plan:507 deletes the `Plan` field `stale`, but int:688, int:707 and rr:383 reuse `pl.stale` with a new meaning.
+16. plan:1188 says "for open decision 16", which is now ruled.
+
+## Checked and consistent
+
+- Every cross-reference resolves:
+  - B.8b exists (rr:627), so int:815 is valid.
+  - int sections 9, 11 and 14 match what points at them.
+  - Open decisions 4, 10, 15 and 16, Decision 14, and Metal items 5-7 all exist.
+- All numbered lists are in order.
+- None of these leftovers remain: a `when =` keyword, `mapsparse!`, `submitbinds!`, `createaccel`, `recordaccel`, `ArrayRef`, or private arena parts for host nodes.
+- The TLAS rules agree in every file: exact counts, padding only for a kernel-written total on Vulkan, Metal reads the count from a cell, Vulkan's indirect build is not used.
+- The two Julia citations, `base/lock.jl:28` and `:174`, are both correct for 1.12.7: line 28 is the docstring, line 174 is `GC.disable_finalizers()`.
+- The appendix counts in api.md are right: 109 P, 54 D, 27 G, 190 rows.

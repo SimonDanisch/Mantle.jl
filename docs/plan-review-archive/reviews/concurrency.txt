@@ -1,0 +1,154 @@
+# Mantle design review: concurrency, ordering and memory lifetime
+
+I found 18 real defects and 19 places where the pseudocode needs one more line. The worst are use-after-free through composites (findings 1–3), a refit that runs with a different instance count (4), deadlocks (5, 11), a GPU hang from a swapchain image owned twice (6), and a livelock (8). Nothing was edited.
+
+Files: **I** = `/sim/Programmieren/VideoEdit/dev/Mantle/docs/internals.jl`, **R** = `…/docs/resizing-and-raytracing.jl`, **P** = `…/docs/recording-plan.md`, **E** = `…/docs/examples.jl`. I re-read every finding against the code.
+
+## Real defects, worst first
+
+**1. Reads made through a composite are neither waited for nor recorded (use-after-free, races)**
+- **Code:** run waits and recorded accesses come only from the compiled summary: I:700 `waits = Dict(seg => [waitsfor(pl.summary[seg]); …])`, I:711-713. `lockexpanded` only adds member records to the lock set, one level deep (R:300-301). Only `BuildAccel` records member reads (R:229). R:296 says "their reads recorded", but nothing does.
+- **Scenario a:** E:428-435, and P:1305 claims the opposite. `simg` writes `vertices`. The frame plan names the array `GPURef`, not `vertices`. Its run gets no wait on the simulation's write, on any queue, and records no read, so the simulation's next write does not wait for the draw either.
+- **Scenario b:** G1's run R1 traces TLAS t (read recorded on t only). BLAS b sits in t and in t2. A vertex refit or new topology for b is pended. G2 traces t2 on another queue and applies b's change. `waitsfor(b Write)` finds no reads, so b is rebuilt while R1 traverses it. The old storage is retired with G2's token and freed under R1 → GPU use-after-free.
+- **Scenario c:** hit shaders read BLAS geometry "by cell" (P:897-899). An eager call applies `resize!(V)`'s `MoveStorage`. V's record has no trace reads, so the old V is freed while R1 still reads it.
+- **Fix:** pass `lockexpanded`'s snapshots to `f`. Expand the uses transitively (TLAS → BLAS → geometry, array `GPURef` → target) and use the expanded list in both `waitsfor` and `recordaccesses!`. An alternative that stays O(1) per frame: record a member's write on its holders' records, and have a member's move or retirement wait on its holders' last tokens.
+
+**2. Composite members get evicted and are never restored (use-after-free)**
+- **Code:** I:1026 `evictable(st) = !any(running, keys(st.dependents)) && allpassed(st.access) && …`. Dependents come only from `register!` (R:392-397). P:1056-1058 says geometry arrays may be evicted.
+- **Scenario:** the frame graph is idle while a DNN allocates. Array `GPURef` targets, TLAS sources, BLAS vertices, and `t.records`/`rangetable` (they share t's record, R:447-448) have no dependents, so they are evicted. No plan is marked for restore. The next head copies the old cell, and builds read the records' old address → released or reused memory.
+- **Fix:** `evictable` returns false for any state a composite holds (count composite holds separately).
+
+**3. Restoring an array whose plan recorded its buffer handle submits the old handle (use-after-free)**
+- **Code:** `restore!` (I:1079-1090) sets `st.storage = new` but never calls `markstale!`. The stale check (I:688) runs before `pendrestores!` (I:693). P:1067-1068 says such plans recompile.
+- **Scenario:** an evicted `when!` flag (E:413) or index buffer gets restored. The run then submits its recorded commands with the old buffer and offset, now reused by another resource.
+- **Fix:** in `restore!`, mark dependents whose `handle == true` stale, and re-check `pl.stale` right after `pendrestores!` (return Again). Or exclude handle-dependent arrays from eviction.
+
+**4. "Only the last BuildAccel is emitted" turns a pending Build into a refit with a different count**
+- **Code:** R:491 "only the last is emitted". `pendreaders!` pends an Update (I:769-775). The `AccelCommand` key uses `total(t)` (R:506, 530).
+- **Scenario, E:433-435 exactly:** `push!` pends a Build, `run!(simg)` pends an Update, `run!(gt)` emits only the Update. The refit then carries n+1 instances on a structure built with n, which R:23-26 forbids → undefined behaviour.
+- **BLAS variant:** E:429-434 has kernel-written geometry lengths, and `pendreaders!` pends an Update after every simulation run whatever the length did.
+- **Fix:** the emitted mode is Build if any taken change is a Build. Keep `t.builtcount`, set when a Build is emitted, and use it for every Update (both `emitchange!` and the `AccelCommand` key). Never read `total(t)` for a refit.
+
+**5. Readers and TLAS capacity are changed under the wrong lock (deadlock, data race, out-of-bounds GPU write)**
+- **Code:** `push!` runs under `pend!(t)`, which locks one record (R:236-237), yet changes `a.state.readers` and holds on arrays it does not lock (R:560-563). That contradicts its own comment at R:548-550. `applyhostview!` (R:325, R:587-589) and the array-`GPURef` rebind (R:662) pend on the TLAS while holding the array's lock. `pendreaders!` (I:775) iterates readers with no lock.
+- **Deadlock:** TLAS lock id 10, positions lock id 57. The frame's `lockexpanded` holds 10 and waits for 57. `copy!(positions, longer)` holds 57, then `applyhostview!` waits for 10.
+- **Out-of-bounds write, E:394:** 801 instances exceed capacity 512. `resize!` prepared only the array's own storage (R:321). The TLAS growth therefore either allocates under a record lock (forbidden, I:986) or does not happen, and the records kernel writes 801 entries into a 512-entry array.
+- **Data race:** `push!` inserting into a WeakSet while `pendreaders!` iterates it.
+- **Fix:**
+  - Give each array an immutable readers snapshot (like the members snapshot).
+  - `resize!`, stores and rebinds lock (array plus its readers) through `lockexpanded`, prepare reader capacity before the locks, and return Again if a total crossed a bound.
+  - `push!`/`delete!` lock the TLAS and the range's arrays in one call.
+
+**6. A swapchain image is owned twice after Again, and the WindowChanged marker gets stored as an image**
+- **Code:** I:720 `done(r) || return (r, image)` plus I:730 (in `finally`) `image === nothing || keepimage!(pl.window, image)`.
+- **Scenario:** on an Again in stage 1 the image is both carried and kept by the window. The retry presents it. The next frame's `takeimage!` returns it again and waits on a binary semaphore that has no signal pending → queue hang. The generation's hold is dropped twice, so the swapchain is retired while current.
+- **Second path:** at I:684 the WindowChanged marker is kept, and `takeimage!` (I:886-887) returns it forever → endless Again under the graph lock.
+- **Also:** if a later segment of the presenting stage throws, the already-presented image is kept.
+- **Fix:** one owner, the window. Return `(r, nothing)`, keep only real images (`image isa Image`), and clear `image` right after the present segment is submitted.
+
+**7. `finally` releases restore storage the run already consumed (use-after-free and double free)**
+- **Code:** I:729 `st.storage === new || release!(pool, new)`, evaluated after the locks are gone.
+- **Scenario:** stage 1 restores into newA. The host function calls `resize!` (allowed by P:558-562), so `st.storage` becomes newB. Stage 2's move reads newA and retires it at commit. `finally` then releases newA at once, while the GPU still copies from it, and it is retired a second time later.
+- **Fix:** record under the lock which prepared storages were consumed; `finally` releases only the others.
+
+**8. Livelock: a plan that names an array already evicted never gets its restore mark**
+- **Code:** I:341 initial flags `unmapped = true, running = false` (no restore flag). I:1059 `acquirerestored` is gated on `pl.restore`. I:1078 `restore!(pl, st, ::Evicted, ::Nothing) = Again()`.
+- **Scenario:** a new plan, or compile's own `acquire!` evicting what it names (then `register!` mismatches, I:656). `acquirerestored` returns nothing, `pendrestores!` returns Again, and `run!(g)` (I:636-641) loops forever holding the graph lock. The E:345-349 two-DNN case hits this.
+- **Fix:** `restore!(…, ::Evicted, ::Nothing) = (@atomic pl.restore = true; Again())`.
+
+**9. Release at the last hold races eviction and leaves pending changes behind (double free, leak)**
+- **Code:** I:1210-1211 reads `st.storage` outside the lock and sets no "released" marker. `evictable` ignores the hold count. B.10 (R:694-699) says pending changes are discarded at the last hold; `drophold!` does not do it.
+- **Scenarios:**
+  - A released state stays in the LRU list, idle and therefore first. It is "evicted", and its region, already reused by another array, is retired a second time.
+  - A concurrent eviction makes the release retire region R twice and leaks the host copy.
+  - A pending `MoveStorage` leaves the old storage leaked, and staging regions leak too.
+- **Fix:** under the record lock, drain the pending changes, swap in `st.storage = Released()`, retire what was swapped out, and drop the state from the LRU list. `evictablestorage(::Released) = false`.
+
+**10. `free!` of a lent array releases memory the vendor stream is using**
+- **Code:** I:1233 `dropcreator!` locks with `lent = true`. `withview` records the stream's work only at the block's end (I:1391-1396).
+- **Scenario:** `free!(xin)` from another thread during E:364-366 → retired with tokens that don't cover the stream → the vendor kernel writes freed memory.
+- **Fix:** `withview` takes a hold before lending and drops it at the end with the stream's token.
+
+**11. Deadlock: the graph lock is held while waiting for an arena part a host function holds**
+- **Code:** `holdparts!` waits while the graph lock is held (I:744-757). P:567-568 says such a call throws.
+- **Scenario:** G2's host function, holding part P, calls `run!(G1)`, `x[:] = data` or `free!(G1)`. Meanwhile T1 holds G1's lock and waits in `holdparts!` for P. The holder check (the throw) is never reached; the throw happens only when no other thread runs G1.
+- **Fix:** record held parts per task; `lockgraph(g)` throws before acquiring if the task holds a part of `g.plan` (fully safe version: any part at all).
+
+**12. `withview` lends an array with pending changes or evicted storage**
+- **Code:** I:1382-1387 never applies pending changes.
+- **Scenario:** `a[1:n] = data; withview(…)`: the vendor reads old data, then the pending store overwrites the vendor's results. A pending move gives an uncopied address; pending page binds give unbound pages.
+- **Fix:** apply pending changes and any restore first (`submitnow!`), then add that token to the stream's waits.
+
+**13. Two models that each need 90% of the device throw out-of-memory when run back to back**
+- **Code:** I:999-1010 waits only for retirements; I:1026 requires `allpassed`.
+- **Scenario:** E:347-348 `run!(dnn_1); run!(dnn_2)` with no host wait. dnn_1's weights are still in use on the GPU, so they cannot be evicted → `OutOfDeviceMemory`. This breaks B3.6 and the phase 2 test in `api.md` §6.
+- **Fix:** before throwing, wait outside every lock for the last tokens of the least recently used candidate that no running plan names, then retry the eviction.
+
+**14. Pending changes ride only in the stage's first segment; other segments do not wait for them**
+- **Code:** I:700 computes waits before anything is submitted; only k == 1 goes through `submitwith!` (I:710-714).
+- **Scenario:** a store into W is pending. Segment 2 is a transfer-queue copy of W inserted by `hostcuts!` (I:436-438). It reads no argument slot, so it has no path from the head. It copies W before the store lands, or reads unbound pages.
+- **Fix:** add segment 1's token to the waits of every later segment that touches a record whose changes were taken.
+
+**15. `except` applies a TLAS build but not its members' cell writes**
+- **Code:** I:707 `except = (@atomic pl.stale) ? dependencyrecords(pl) : ()`. The build uses the host-side total (R:489, 506); the records kernel reads lengths from cells.
+- **Scenario:** a source is resized during a host function and is a direct dependency of the plan. Stage 2 builds with the new count over records written for the old length → reads unwritten records, so likely device loss.
+- **Fix:** when a member's record is excepted, except the TLAS too. Also have the records kernel write inactive records up to the build count.
+
+**16. An array `GPURef` used as a range source: resizing its target never reaches the TLAS**
+- **Code:** R:560-561 assumes `a.state`; only a rebind pends a build (R:662). The D.3 meshscatter (R:850) passes a `GPURef`, and `setattribute!` (R:803-804) resizes the target.
+- **Scenario:** the target's readers are empty, so no build and no capacity growth → feeds findings 4 and 5.
+- **Fix:** register the TLAS on the `GPURef` and on its current target, and move the registration on rebind.
+
+**17. Stage 1 changes state whose records it did not lock**
+- **Code:** `pendrestores!` walks `named(pl)` for all stages (I:1068-1090), but only stage 1's records are locked (I:687). `bindunmapped!` needs the arena's record, which stage 1 may not hold.
+- **Fix:** stage 1 also locks `named(pl)` and the plan's arena parts.
+
+**18. Leaks on error paths**
+- `free!(g)` from g's own host function sets `freed` (I:1238) and then throws. The finalizer sees `freed` and skips (I:1250), so nothing is ever released. Fix: do the swap inside the lock.
+- Memory allocated before the lock is lost when the locked part throws (lent array, freed argument):
+  - eager packed arguments (I:1264)
+  - staging for host reads (I:1297) and stores (R:351)
+  - `resize!`'s prepared storage (R:321)
+  - `push!`'s grown capacity (R:556)
+  - the `GPURef` rebind's `addhold!` (R:656)
+  - a partial `acquirerestored` (I:682)
+
+  Fix: use run!'s consumed-flag pattern for all of them.
+- `push!` calls `addhold!` after `freeslot!` (R:558-563); a throw leaves the slot occupied with partial holds.
+
+**Low severity:**
+- The `AccelCommand` key uses `==` (R:534); a driver-reused handle would make it skip a needed re-record. Use `===`.
+- `pendreaders!` is outside `finally` (I:723), so a throw in a later stage loses reader updates. It also adds a second refit per run when the graph declares `refit!` itself.
+- `delete!` never removes the TLAS from the source's readers, causing spurious builds.
+- The re-entry check in `lockgraph` is per task: a host function that spawns a task which runs the same graph deadlocks.
+
+## Unspecified: each needs a line
+
+1. **`dropaftercommit!` (R:581, 661).** It must drop the hold only after the token has passed. Calling `drophold!` at commit would be a use-after-free (the last tokens miss composite reads; a BLAS shared by two TLASes is freed after one TLAS's token) and a deadlock (out-of-order record lock). It also must not be tied to a change that coalescing can drop.
+2. **Coalescing granularity.** It must be per target, not per record: t, `records` and `rangetable` share one record, so "the last CellWrite" per record would drop the records' cell write after a move.
+3. **`writeentry!(new, g.pending, g.plan)` (I:661).** `g.pending` must win over the old entry.
+4. **`seg.crossqueue` (I:700).** It must resolve to this run's tokens at submit time.
+5. **`refit!(g, t)`.** The `AccelCommand` emits only the build (R:537), but E:384 says the records are rewritten; the offsets and records kernels must be part of the node. A refit before any build is also unhandled.
+6. **Build scratch.** `t.scratch` (R:452) or a transient (P:849)? A transient placed at compile overflows after the capacity doubles.
+7. **Records/offsets kernels.** Their "fixed arguments" (R:477-478) go stale when `records` moves (R:607-609). Range-table growth is not shown.
+8. **Metal build (I:580).** It is recorded once with the acceleration-structure object; after a `MoveAccel` it builds into retired storage unless re-encoded.
+9. **Stores into a TLAS source** must pend a refit (P:891-892); the code (R:349-356) does not.
+10. **`push!`'s capacity re-check** must come before any mutation under the lock.
+11. **BLAS with kernel-written geometry lengths:** which count it records, and that a length change pends a Build, not an Update.
+12. **A restored texture** needs a new table index.
+13. **A host read of an evicted array (I:1101)** must hold the lock during the memcpy.
+14. **The pool's LRU list and `graphs(w)` must be weak**, otherwise no finalizer ever runs.
+15. **A carried image from an older swapchain generation:** which recording presents it.
+16. **Window beyond its capacity:** P:424 says it throws; P:837-838 and I:839-841 say it recompiles.
+17. **Minimized window:** the skip path (I:879-881) is not shown.
+18. **`acquireunmapped` (I:1178)** allocates the whole peak, not the missing pages, which can cause spurious eviction or out-of-memory.
+19. **Unmapping beyond an array's size under pressure** (I:1175, P:1027-1029) contradicts R:196-197 (views never read unmapped memory).
+
+## Lock order and what holds up
+
+The documented lock order is broken in three places:
+- array → TLAS in `applyhostview!` and the rebind (finding 5);
+- record → record if `dropaftercommit!` runs at commit (unspecified item 1);
+- part → graph lock from host functions (finding 11).
+
+These parts hold up as written: `bindunmapped!`/`unmapidle!` with the `running` flag, Again before any token is claimed, pages consumed under the lock, changes taken and committed under the same locks (no double application), retirement for accesses that are recorded, the `lastrun` waits, the value `GPURef` lock, and the hostwritten-entry wait.
