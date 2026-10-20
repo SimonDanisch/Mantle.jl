@@ -1,4 +1,4 @@
-# A device type for fault injection (catalogue FI-1..FI-10): it forwards
+# A device type for fault injection: it forwards
 # every device-type verb (docs/api.md section 4) to a real device and, on a
 # schedule the test sets, throws, blocks, or answers differently instead.
 # No globals and no probes in Mantle: the schedule is a field of the device

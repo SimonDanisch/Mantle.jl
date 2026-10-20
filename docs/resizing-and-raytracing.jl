@@ -10,30 +10,33 @@
 # application, dependents, and acceleration structures. internals.jl owns the
 # rest (graphs, compile, record, run, ordering, memory, holds) and points here.
 #
-# Rulings this implements (Simon; decisions.md B2 and D, 2026-09-30; B3.2
-# and B3.7, 2026-10-02; B4, 2026-10-14):
+# Rules:
 # - Arrays are fixed until their first resize!, or resizable from creation
-#   with `capacity = n`, a reserve like sizehint! (B4.10); pointer and size
-#   reach recorded work through the array's cell. Only what a plan recorded by
-#   value recompiles it.
+#   with `capacity = n`, a reserve like sizehint!. Pointer and size reach
+#   recorded work through the array's cell. Only what a plan recorded by value
+#   recompiles it.
 # - Changes (resize!, setindex!, copyto!, copy!, TLAS changes) update the host
 #   view at the call and stay pending on the resource until the next
 #   submission that touches it, which applies them in front of its own work.
 # - "Kernel launch" means any launch of GPU work: traces count.
-# - TLAS (B3.2): builds use the exact count, storage has a doubling capacity
-#   that never halves, capped at the device's maxInstanceCount (B4.8), a
-#   plan's build or refit is a BuildRecording, Metal reads the count from a
-#   cell, Vulkan's indirect build is not used.
-# - GPURef of an array, attribute(a, i), the scene rectangle (B3.7).
-# - B4: a when! flag is a Bool, one launch or draw per when! (B4.1); launch
-#   groups are values, Group(g, name) (B4.2); one array type, a view carries
-#   its own offset and dims (B4.5); read-only arrays (B4.6); a TLAS total past
-#   maxInstanceCount throws at the call (B4.8); a value GPURef is one slot in
-#   device memory (B4.9); length(a) and `capacity` follow Julia's array API
-#   (B4.10).
-# Eviction and readers pending structure updates are ruled (B3.9, B3.10).
+# - TLAS: builds use the exact count; storage has a doubling capacity that
+#   never halves, capped at the device's maxInstanceCount; a plan's build or
+#   refit is a BuildRecording; Metal reads the count from a cell; Vulkan's
+#   indirect build is not used.
+# - A TLAS total past maxInstanceCount throws at the call.
+# - A GPURef holds a value, never an array. attribute(a, i) reads one value or
+#   one per element (D.3). The scene rectangle is applied in the vertex stage (D.3).
+# - A when! flag is a Bool; one launch or draw per when!.
+# - Groups are values and places in the order: Group(g or group, name).
+# - One array type: a view carries its own offset and dims.
+# - Arrays can be read-only (`readonly = true`).
+# - A GPURef is one slot in device memory.
+# - length(a) and `capacity` follow Julia's array API.
+# - Arrays are evicted under pressure (internals.jl section 9).
+# - A run that writes an array pends the updates of the structures built from
+#   it (its readers, B.2).
 #
-# Facts this rests on (checked 2026-09-30/10-02):
+# Facts this rests on:
 # - Inactive instance = BLAS reference 0; invisible, still counted in instance
 #   ids; active <-> inactive needs a full build, not an update; an update may
 #   not change the instance count (vkdocs chapters/accelstructures.adoc:255-300,
@@ -47,8 +50,8 @@
 # - A build records the source and destination AS handles
 #   (accelstructures.adoc:764-769).
 # - accelerationStructureIndirectBuild: false on RADV 26.2.3 and NVIDIA 595.99,
-#   true on AMD's Windows driver 26.7.1 (vulkaninfo; the Windows value from a
-#   remote machine). Metal reads the instance count from a buffer:
+#   true on AMD's Windows driver 26.7.1 (vulkaninfo). Metal reads the
+#   instance count from a buffer:
 #   MTL4IndirectInstanceAccelerationStructureDescriptor.instanceCountBuffer /
 #   maxInstanceCount (MTL4AccelerationStructure.h:591-627, macOS SDK; Metal.jl
 #   lib/mtl/libmtl.jl:3591-3597). MTL4 queues take residency sets
@@ -57,19 +60,17 @@
 #   address space (a device-wide total, resources.adoc:103-112) 128 TiB RADV,
 #   1 TiB NVIDIA, about 128 TiB AMD Windows, 2 GiB lavapipe. Sparse pages are
 #   bound at VkMemoryRequirements::alignment granularity (sparsemem.adoc:203-206).
-#   Metal placement-sparse buffers validated on the M5 (2026-09-25).
+#   Metal placement-sparse buffers validated on the M5.
 # - Shaders can take a TLAS as a 64-bit address (OpConvertUToAccelerationStructureKHR,
 #   SPV_KHR_ray_query; mentioned in vkdocs proposals/VK_EXT_mutable_descriptor_type.adoc:121).
-#   Lava binds a descriptor today (Lava compiler/spirv/rayquery.jl:47,66-67);
-#   which one Mantle uses is open decision 4 in the plan.
+#   Lava binds a descriptor (Lava compiler/spirv/rayquery.jl:47,66-67).
+#   Which one Mantle uses is open.
 # - Descriptors may be written while a command buffer using the set is
 #   pending only if that buffer does not use them (descriptorsets.adoc:768-807).
 # - A kernel that reads a cell directly instead of its argument slot pays about
-#   195-220 ns per small dependent dispatch on RADV and NVIDIA (v2_*.txt:
-#   "headers read-only, indirect" minus "flat read-only, indirect").
-# Measured 2026-10-01 (experiments/tlas_sparse/: m1_lapwin.txt, m23_lapwin.txt,
-# bench_legionboi.txt; AMD Radeon 8060S, Windows driver 26.7.1, and RTX 3070
-# Laptop, NVIDIA 595.91.07; GPU timestamps, validation clean on small runs).
+#   195-220 ns per small dependent dispatch on RADV and NVIDIA.
+# Measured on an AMD Radeon 8060S (Windows driver 26.7.1) and an RTX 3070
+# Laptop (NVIDIA 595.91.07), GPU timestamps.
 # N active instances, capacity C, inactive past N, prefer-fast-trace:
 # - Build time grows with C. N=100000: exact 1.08 ms AMD / 0.74 ms NVIDIA;
 #   C=2N 1.41 / 0.84, C=4N 1.94 / 1.20, C=16N 5.41 / 3.42 ms. N=1, C=131072:
@@ -88,7 +89,7 @@
 # - One vkQueueSubmit costs 23.5-24 µs of host time on both: 1000 submissions
 #   of one 16-byte update take 24 ms; one submission of all 1000 updates
 #   completes after 152 µs AMD, 77 µs NVIDIA.
-# - Traversal (m4_*.txt; 1M ray queries, the same rays through an exact and a
+# - Traversal (1M ray queries, the same rays through an exact and a
 #   padded TLAS): padding costs nothing measurable, up to C=16N and N=100,
 #   C=131072 (padded/exact within -1.3%..+1.7% NVIDIA, -0.5%..+0.5% AMD).
 #   Every ray hits the same instance in both: no inactive instance is hit.
@@ -110,19 +111,17 @@ length(pos)                                     # the requested length: a number
 # In a graph launches name the array, not a count.
 g = Graph(dev)
 dispatch!(g, advect!, (pos, vel, dt), launchrange(pos))
-render!(g, target) do p
-    draw!(p, pointshader, (pos, colors, cam), launchrange(pos))
-end
+draw!(g, target, pointshader, (pos, colors, cam), launchrange(pos))
 run!(g)
 copy!(pos, rand(Point3f, 3000)); run!(g)        # the run applies the change and copies the new length
 
-# A length a kernel decides needs no capacity (B5.5): the kernel writes within
-# the array's current storage, bounds-checked unless @inbounds (B4.7).
+# A length a kernel decides needs no capacity: the kernel writes within the
+# array's current storage, bounds-checked unless @inbounds.
 # `capacity = n` only reserves room up front, like sizehint!, so a kernel can
 # write that many without a resize.
 alive = MantleArray(dev, Point3f, 0; capacity = 1_000_000)
 dispatch!(g, spawnkill!, (alive, lengthof(alive), pos), launchrange(pos))
-length(alive)                                   # the real length (B4.10): waits for the kernel that writes it and
+length(alive)                                   # the real length: waits for the kernel that writes it and
                                                 #   reads the cell back; here, during the declaration of the graph
                                                 #   that writes it (no run has written it yet), it throws
 
@@ -139,7 +138,7 @@ tlas = TLAS(dev)                                # storage sized for 64 instances
 h  = push!(tlas, blas, transform)               # one instance (transform::Mat4f)
 r1 = push!(tlas, blas, transforms)              # a range, one instance per element (transforms::MantleArray{Mat4f,1})
 r2 = push!(tlas, marker, positions;             # a range computed on the device from positions (meshscatter);
-           scale = sizes, rotation = rotations) #   positions may be an array GPURef; sizes, rotations: arrays or one value
+           scale = sizes, rotation = rotations) #   positions: an array; sizes, rotations: arrays or one value
 tlas[h] = newtransform                          # a store into the range's source: a refit
 visible!(tlas, r2, false)                       # (name open) mask 0 in the range's records: a refit
 delete!(tlas, r1)                               # pending: its slot is freed, a build follows
@@ -152,11 +151,12 @@ refit!(g, tlas)                                 # Update() every run; changes of
 trace!(g, pipeline, tlas, (film, cam), (w, h))  # ray tracing pipeline
 dispatch!(g, shade!, (tlas, film), (w, h))      # ray queries in a compute kernel
 
-# Drawn attributes: one argument type for one value and one per element.
-pos   = GPURef(dev, MantleArray(dev, points))
-color = GPURef(dev, MantleArray(dev, [RGBAf(1, 0, 0, 1)]))         # one value for every point
-copy!(color[], fill(RGBAf(0, 0, 1, 1), length(points)))              # now one per point: a resize and a store
-color[] = MantleArray(dev, other_colors)                              # another device array: a rebind, no copy
+# Drawn attributes: plain device arrays, mutated in place; one argument type
+# for one value and one per element.
+pos   = MantleArray(dev, points)
+color = MantleArray(dev, [RGBAf(1, 0, 0, 1)])                        # one value for every point
+copy!(color, fill(RGBAf(0, 0, 1, 1), length(points)))                # now one per point: a resize and a store
+# Another array object for an attribute is a new group of draws for the plot (D.3).
 # In a shader: attribute(color, i) == color[min(i, length(color))] (1-based)
 
 # Per-instance data in shaders: instanceCustomIndex is the range's slot (stable
@@ -165,7 +165,7 @@ color[] = MantleArray(dev, other_colors)                              # another 
 
 # ── Textures ──────────────────────────────────────────────────────────────────
 
-atlas = Texture2D(dev, RGBA{N0f8}, 1024, 1024)  # has an index in the device's texture table
+atlas = Image(dev, RGBA{N0f8}, 1024, 1024)      # its texture-table index is given on its first use by a shader
 resize!(atlas, 2048, 2048)                      # a new image under a new index, texels kept where the sizes overlap (B.9)
 
 # ══ B. Core internals ═════════════════════════════════════════════════════════
@@ -175,8 +175,8 @@ resize!(atlas, 2048, 2048)                      # a new image under a new index,
 struct Region                           # a pool region: fixed arrays, small resizable ones, AS storage
     block::Block; offset::Int; bytes::Int
 end
-mutable struct Reserve                  # address space with pages mapped as the array grows
-    const native::Any                   # sparse VkBuffer (SPARSE_BINDING|SPARSE_RESIDENCY),
+mutable struct Reserve{N}               # address space with pages mapped as the array grows
+    const native::N                     # sparse VkBuffer (SPARSE_BINDING|SPARSE_RESIDENCY),
                                         # placement-sparse MTLBuffer, cuMemAddressReserve/hipMemAddressReserve
     const bytes::Int
     mapped::Int                         # bytes with pages behind them (host view, B.4)
@@ -200,7 +200,7 @@ struct Released end                     # after the last hold (internals.jl sect
 # costs 0.15-0.25 ms before the submission that uses the pages (measured
 # above), so a reserve maps at least twice what it had: an array growing by
 # one element per run binds O(log n) times. An array created with
-# `capacity = n` (B4.10) is resizable from the start and placed at creation
+# `capacity = n` is resizable from the start and placed at creation
 # for n elements: Committed storage, or a reserve where outgrow picks one.
 growth(dev, r::Region, need)   = need <= sizeof(r) ? Adopt() : outgrow(caps(dev), need, caps(dev).sparseresidency)
 growth(dev, s::Committed, need) = need <= sizeof(s.region) ? InPlace() : outgrow(caps(dev), need, caps(dev).sparseresidency)
@@ -228,36 +228,35 @@ mutable struct ArrayState
                                                  #   changes it (B.4); Evicted under pressure (internals.jl section 9)
     dims::NTuple                                 # the requested dims: length(a) for a host-set length, and what a
                                                  #   call's checks use under the locks; the GPU's are in the cell. A
-                                                 #   kernel-written length is read from the cell (B4.10): length(a)
+                                                 #   kernel-written length is read from the cell: length(a)
                                                  #   waits for its writer, and throws during the declaration of the
                                                  #   graph that writes it
     resizable::Bool                              # set at creation when a capacity is given, else by the first
                                                  #   resize! call (B.7); never cleared
     lengthsource::Union{HostLength,DeviceLength} # DeviceLength from the first launch with lengthof(a) (B.7); never cleared
     capacity::Int                                # the current reserve in elements: `capacity = n` at creation, like
-                                                 #   sizehint! for any array (B4.10), 0 without one; raised to what
+                                                 #   sizehint! for any array, 0 without one; raised to what
                                                  #   the new storage holds when growth moves it (commit!, B.5)
-    const source::Union{Nothing,AbstractArray}   # the caller's host array for `readonly = true` (B4.6), else nothing:
+    const source::Union{Nothing,AbstractArray}   # the caller's host array for `readonly = true`, else nothing:
                                                  #   isreadonly(st); Mantle's write methods throw at the call
                                                  #   (checkwritable, B.5); a restore uploads from it (internals.jl section 9)
     const cell::Cell                             # address and dims
     const pool::Pool                             # its device's pool: device(st), pool(st), nextseq!(st)
     const sync::SyncState                   # protects everything here, and the pending changes; has `freed` (B.10)
     const holds::Threads.Atomic{Int}             # the creator, each graph naming it, each composite holding it
-    const composites::Threads.Atomic{Int}        # the holds of composites (a TLAS or BLAS range, an array GPURef)
+    const composites::Threads.Atomic{Int}        # the holds of composites (a TLAS or BLAS range)
     const dependents::Dict{WeakPlan,Dependence}  # every plan that names it (B.6)
     readers::ReaderSet                           # composites built from it (B.8); an immutable snapshot
 end
-# Readers (open decision 16, ruled B3.9/B3.10): the composites built from the array,
-# counted per reader (a TLAS with two ranges over it counts twice; delete!
-# removes one): a TLAS or BLAS, an array GPURef (which forwards to its own
-# readers), a screen (a redraw mark). The snapshot is replaced under the
+# Readers: the composites built from the array, counted per reader (a TLAS
+# with two ranges over it counts twice; delete! removes one): a TLAS or BLAS,
+# a screen (a redraw mark). The snapshot is replaced under the
 # array's lock, never changed in place, so a run iterates it without a lock
 # (internals.jl pendreaders!) and a change can check under its locks that the
 # snapshot it locked by is still current (B.4).
 #
 # Views (GPUArrays' derive) refer to this state with a static offset, dims and
-# strides. A view is the same MantleArray type as its parent (B4.5, no role
+# strides. A view is the same MantleArray type as its parent (no role
 # parameter): the offset, dims and strides are the view's own fields (`a.view`,
 # `nothing` for a root array, whose size is the state's), and every check
 # whether an array is a view reads them. Shrinking never unmaps an array's
@@ -272,25 +271,24 @@ requestedlength(a::MantleArray) = isview(a) ? prod(a.view.dims) : prod(a.state.d
 
 # ── B.3 Changes: requests, scheduled ──────────────────────────────────────────
 
-# A change is a step in the ordered stream, like any operation (Simon: "it
-# should get scheduled"). The call only enqueues it: under the resource's
-# lock it appends the request, with a device-wide sequence number, to the
-# resource's pending list and updates what the host reports (length(a) of a
-# host-set length is the requested length: a number; nothing physical
-# changes). Nothing of the array is allocated, nothing is copied to the
-# device, and it never starts over for memory (a changed member snapshot only
-# makes it lock again, lockexpanded); a store's only work is one copy of its
-# data into an upload region
-# (below, B3.18). New storage, pages, the copy of the contents, the cell write and the
+# A change is a step in the ordered stream, like any operation. The call only
+# enqueues it: under the resource's lock it appends the request, with a
+# device-wide sequence number, to the resource's pending list and updates
+# what the host reports (length(a) of a host-set length is the requested
+# length: a number; nothing physical changes). Nothing of the array is
+# allocated, nothing is copied to the device, and it never starts over for
+# memory (a changed member snapshot only makes it lock again, lockexpanded);
+# a store's only work is one copy of its data into an upload region (below).
+# New storage, pages, the copy of the contents, the cell write and the
 # retirement of the old storage are done by the submission that applies the
 # change (B.4), in sequence order, after every earlier access.
 abstract type Change end
 # a[r] = data, copyto!, copy!: the data is copied once, at the call, from the
 # caller's memory into an upload region: host-visible system memory acquired
-# for this store before the lock (Simon, 2026-10-05, B3.18). The region is not
-# the array's storage, so nothing about the array changes at the call; it is
-# retired with the token of the submission that applies the store (or with
-# none when a later store covering it replaces it, or the array is released).
+# for this store before the lock. The region is not the array's storage, so
+# nothing about the array changes at the call; it is retired with the token
+# of the submission that applies the store (or with none when a later store
+# covering it replaces it, or the array is released).
 # `span` is the byte range in the parent (through a view's static offset).
 # Which storage it lands in is decided when it is applied: the storage the
 # array has at that point of the sequence, so a store pended before a resize
@@ -304,9 +302,6 @@ end
 struct Resize <: Change
     seq::UInt64; target::ArrayState; dims::NTuple; keep::Int
 end
-struct Rebind <: Change                # r[] = b for an array GPURef: its cell gets b's cell index
-    seq::UInt64; target::ArrayBox; new::MantleArray
-end
 struct BuildAccel <: Change            # a TLAS or BLAS: Build() or Update(); the capacity is the applier's (B.8)
     seq::UInt64; target::AccelStructure; mode::Union{Build,Update}
 end
@@ -316,18 +311,13 @@ end
 # structure's new storage and scratch), Restore (an evicted array's host copy
 # back).
 uses(c::Change) = ((c.target, Write()),)
-# A Rebind reads its new target: the applying step waits for the target's
-# earlier writes (eager ones, such as its creation upload, and the last runs
-# of the plans writing it) and locks those plans (internals.jl lockstage,
-# expanded).
-uses(c::Rebind) = ((c.target, Write()), (c.new.state, Read()))
-uses(c::BuildAccel) = ((c.target, Write()), ((m, Read()) for m in allmembers(c.target))...)   # transitively: a GPURef's target too
+uses(c::BuildAccel) = ((c.target, Write()), ((m, Read()) for m in allmembers(c.target))...)   # transitively: a BLAS's geometry too
 
 # Pending changes coalesce per target, not per record (a TLAS, its records and
 # its range table share one record): a later Store covering an earlier one
 # into the same target, consecutive Resizes into one (the last dims, the
 # smallest keep), the BuildAccels of one structure into one (a Build if any of
-# them is a Build, else an Update; B.8), consecutive Rebinds into the last. A
+# them is a Build, else an Update; B.8). A
 # merged change takes the latest sequence number of those it merged, so it is
 # applied after everything pended before any of them. Nothing merges across a
 # change a running plan holds for after its run (takepending): a store pended
@@ -337,7 +327,7 @@ uses(c::BuildAccel) = ((c.target, Write()), ((m, Read()) for m in allmembers(c.t
 pendone!(c::Change) = coalesce!(syncstate(c.target).pending, c)   # under the target's lock
 nextseq!(x) = Threads.atomic_add!(device(x).changeseq, UInt64(1))   # x: anything on a device (an array state, a structure, a GPURef)
 
-# The one shape of every change: resize!, stores, rebinds, push! and delete!
+# The one shape of every change: resize!, stores, push! and delete!
 # on a structure. One locked call over `uses`, expanded to the readers of the
 # arrays it changes (their structures get pending builds in the same call)
 # and to the members of the composites it changes; `apply` checks what must
@@ -385,9 +375,9 @@ end
 # physical happens. Everything else about staleness is decided when the
 # change is applied:
 #   - a move of storage a plan recorded by handle marks the parts of that plan
-#     that recorded it (open decision 17 (c): they are recorded again before
-#     they are next submitted, after the prefix that moved the storage, like
-#     a marked BuildRecording); nothing recompiles. A plan between its stages
+#     that recorded it (they are recorded again before they are next
+#     submitted, after the prefix that moved the storage, like a marked
+#     BuildRecording); nothing recompiles. A plan between its stages
 #     gets the same: its later stage re-records, and the move, ordered after
 #     its earlier stages' accesses, has copied what they wrote;
 #   - a change the applying plan cannot follow mid-run (a direct launch over
@@ -481,8 +471,7 @@ bindnow!(ch, s::BindPages, binds) = s.bound === nothing &&
     push!(binds, (s.bound = sparsesubmit!(sparsechannel(ch), bindpages!, (s.reserve, s.pages), ((s.target, Write()),))))
 
 # Plans a change makes stale and that are between their stages (other than
-# `self`): the plans among the dependents (of the array, or of the GPURef for
-# plans that bound its target by handle, B.6) for which the change is one
+# `self`): the plans among the dependents of the array (B.6) for which the change is one
 # compile decided (stales(d, c)); handle dependences re-record instead (above).
 # `between` is set and cleared under the record locks a run takes (internals.jl
 # section 6): a plan not yet past its stage 1 sees the stale mark and starts
@@ -495,11 +484,8 @@ function waitingfor(cs, self)
     end
     isempty(w) ? nothing : WaitFor(unique(w))
 end
-alldependents(r::ArrayBox) = r.dependents
 alldependents(t::AccelStructure) = t.dependents  # plans sized from it (Raycore's build temporaries, D.1)
-alldependents(st::ArrayState) = Iterators.flatten((st.dependents, (e for r in st.readers for e in boundthrough(r))))
-boundthrough(r::ArrayBox) = r.dependents      # plans that bound its target by handle
-boundthrough(_) = ()                          # a TLAS, a BLAS, a screen
+alldependents(st::ArrayState) = st.dependents
 # Outside every lock. A task inside a host function of a running graph
 # throws before waiting on anything: it could wait for its own run. Not
 # detected: a task a host function starts and waits for; like two host
@@ -521,31 +507,29 @@ waitforruns(::Again) = nothing
 inhostfunction(task) = any(g -> (@atomic g.hostcaller) === task, livegraphs(REGISTRY))
 
 # Composite resources: a TLAS reaches its range sources and BLASes through
-# cells, a BLAS its geometry, an array GPURef its target, so no plan names
+# cells, a BLAS its geometry, so no plan names
 # the members. Every submitter locks with lockexpanded instead of locked: it
 # reads each composite's member snapshot (immutable, replaced on every change)
-# transitively (TLAS → BLASes and range arrays, BLAS → geometry, GPURef →
-# target), locks the union in id order, checks under the locks that every
+# transitively (TLAS → BLASes and range arrays, BLAS → geometry), locks the union in id order, checks under the locks that every
 # snapshot it read is still current (===), and starts over otherwise. A record
 # a composite owns brings the composite's members too: a TLAS's records and
 # range table share its record, so Array(t.records), which locks that record
 # and so takes t's pending build, has t's members locked as well (their
 # pending stores are applied first, and the build's reads of them are
 # recorded under their locks). A change (change!, readers = true) also
-# expands an array to its readers' snapshot, transitively (array → GPURef →
+# expands an array to its readers' snapshot, transitively (array → BLAS →
 # TLAS), since it pends their builds.
 # `f` gets the records and the expansion `x`; expand(x, uses) rewrites the
 # uses of composites, transitively:
 #   a read of a composite         → a read of it and of each member;
 #   a build or refit (BuildUse)   → a write of the structure, a read of each member;
-#   a write through an array GPURef → a read of the GPURef, a write of its target;
-#   AnyWrite / AnyMemory (compile's placeholders for unknown members) → dropped:
+#   AnyWrite (compile's placeholder for unknown members) → dropped:
 #     the expanded uses name the members.
 # Submitters that are not runs (eager calls, host reads, vendor views,
 # eviction copies, and the steps a run applies) wait for and record the
 # expanded list. Runs use neither: between graphs, a plan naming a composite
 # is among its members' namingplans (through their readers snapshots), so a
-# simulation step writing an array a frame draws through a GPURef waits for
+# simulation step writing an array a frame's TLAS is built from waits for
 # the frame's last run and puts the array into the frame's inbox, and the
 # frame's next run waits for the step (internals.jl section 8). Runs expand
 # only what their inbox names (internals.jl lockstage).
@@ -568,7 +552,7 @@ function Base.resize!(a::MantleArray{T,N,<:Device}, dims::Dims{N}) where {T,N}
     resizeto!(a, dims, Keep())
 end
 
-# A read-only array (B4.6) throws at the call of each of Mantle's write
+# A read-only array throws at the call of each of Mantle's write
 # methods (resize!, stores, copyto!, copy!), before anything is acquired or
 # locked: the flag is set at creation and never changes. dispatch! throws the
 # same at the call, eager or declared, from the per-argument access it derives
@@ -583,11 +567,11 @@ checkwritable(a::MantleArray) = isreadonly(a.state) &&
 # marked stale here (that depends only on the requested length, B.6); whether
 # the storage moves is decided when it is applied.
 function resizeto!(a::MantleArray, dims, contents)
-    checkwritable(a)                                  # B4.6
+    checkwritable(a)                                  # a read-only array throws
     st = a.state
     change!(((st, Write()),)) do
         usable(a)                                     # freed through the creator's handle: throws, under the lock
-        checkinstances(st, prod(dims))                # a TLAS total past maxInstanceCount throws (B4.8, B.8)
+        checkinstances(st, prod(dims))                # a TLAS total past maxInstanceCount throws (B.8)
         keep = keepbytes(contents, st, dims)          # Keep: the smaller of the requested sizes so far and now
         st.dims = dims                                # what length(a) reports
         st.resizable = true
@@ -632,16 +616,16 @@ resizesteps(st, ev::Evicted, new::RestoreStorage, c) =   # restored into storage
 # strides is not one byte range: the packed elements go into the upload
 # region like any store, and the applying submission scatters them (a copy
 # kernel in its prefix, in sequence like any step). A store mutates the
-# array it names: no second copy of the array, no double buffering (B5.7).
+# array it names: no second copy of the array, no double buffering.
 function Base.setindex!(a::MantleArray{T,N,<:Device}, data, r::AbstractRange) where {T,N}
     length(data) == length(r) || throw(DimensionMismatch("setindex! of $(length(data)) elements into $(length(r))"))
-    checkwritable(a)                                  # B4.6, before the region is acquired
+    checkwritable(a)                                  # a read-only array throws, before the region is acquired
     st = a.state
     span = parentbytes(a, r)
     up = acquireupload!(pool(st), length(span))       # host-visible system memory, before any lock
-    copyto!(hostview(up, T), vec(data))               # the one copy, from the caller's memory
     ok = false
     try
+        copyto!(hostview(up, T), vec(data))   # the one copy, from the caller's memory; a conversion error returns the region
         change!(((st, Write()),)) do
             usable(a)                                 # freed through the creator's handle: throws, under the lock
             checkindex(Bool, 1:requestedlength(a), r) || throw(BoundsError(a, r))   # the requested length (B.2)
@@ -670,19 +654,19 @@ Base.copyto!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T} = (a[
 # A view keeps its length (copyintoview!, below).
 function Base.copy!(a::MantleArray{T,1,<:Device}, data::AbstractVector) where {T}
     isview(a) && return copyintoview!(a, data)       # the array's own fields (B.2)
-    checkwritable(a)                                 # B4.6, before the region is acquired
+    checkwritable(a)                                 # a read-only array throws, before the region is acquired
     st = a.state
     n = length(data)
-    up = acquireupload!(pool(st), sizeof(T) * n)     # before any lock (B3.18)
-    copyto!(hostview(up, T), vec(data))              # the one copy
+    up = acquireupload!(pool(st), sizeof(T) * n)     # before any lock
     ok = false
     try
+        copyto!(hostview(up, T), vec(data))   # the one copy; a conversion error returns the region
         change!(((st, Write()),)) do
             usable(a)
             span = parentbytes(a, 1:n)
             n == requestedlength(a) &&               # the requested length (B.2): no wait under the lock
                 return Change[Store(nextseq!(st), st, up, span); (update(t, st) for t in st.readers)...]
-            checkinstances(st, n)                    # a TLAS total past maxInstanceCount throws (B4.8, B.8)
+            checkinstances(st, n)                    # a TLAS total past maxInstanceCount throws (B.8)
             dims = (n,)
             st.dims = dims
             st.resizable = true
@@ -708,7 +692,7 @@ copyintoview!(a, data) = length(a) == length(data) ? (a[1:length(data)] = data; 
 struct Dependence
     direct::Bool        # a direct launch or draw with its length (the array was fixed at compile)
     handle::Bool        # its buffer handle in a command: an index-buffer bind, a build input, a
-                        #   Vulkan buffer copy (open decision 17: re-record instead of recompile)
+                        #   Vulkan buffer copy (re-recorded instead of recompiled)
     sizedfor::Int       # a temporary or a selection sized for this many elements (typemax if none)
     compiled::Tuple     # the storage and length compile saw
 end
@@ -718,8 +702,8 @@ end
 #   elements and plans with a direct count (the first resize! of a fixed
 #   array, which compile launched over directly);
 #   when a move is applied (B.4): plans that recorded the storage's handle get
-#   the parts that recorded it marked for recording again (open decision 17
-#   (c)), not a recompile; the stale flag is not set for them.
+#   the parts that recorded it marked for recording again, not a recompile;
+#   the stale flag is not set for them.
 # Marking stale sets the plan's stale flag and the graph's recompile flag,
 # through weak references; a collected plan or graph is skipped. Compile reads
 # the requested state: an array is resizable from its creation with a
@@ -742,15 +726,12 @@ end
 # them under the same lock. A plan unregisters itself when it is retired
 # (recompile!, release!), under the same locks, so the tables do not grow and
 # a retired plan is never marked again.
-# A dependence's `state` is an array state or, for a target bound by handle
-# through an array GPURef, the GPURef: matches compares its current target
-# with the one compile resolved, and registering takes the plan's own hold on
-# that target (it cannot fail: the GPURef holds it, and its lock is held
-# here). The plan drops that hold when it retires (unregister!).
+# A dependence's `state` is an array state: matches compares it with what
+# compile resolved.
 # Registering adds the plan to the `namers` of every resource it names, with
 # its use from compile (internals.jl section 8; the members of the composites
-# it names reach it through their readers snapshots). A value GPURef's slot is
-# such a resource like any other (B4.9): addnamer! names it, and a store into
+# it names reach it through their readers snapshots). A GPURef's slot is
+# such a resource like any other: addnamer! names it, and a store into
 # it is ordered against the plan's runs like any store. It puts the resources
 # it reads or writes that another plan names, or that have eager accesses,
 # members included, into its own inbox: its first run waits for their other
@@ -776,7 +757,7 @@ function register!(pl::Plan)
             all(d -> matches(d.state, d.dependence.compiled), pl.depends) || return Again()   # stale: recompile
             foreach(((r, u),) -> addnamer!(syncstate(r), pl, u), nameduses(pl))   # direct names; snapshots replaced
             foreach(((r, _),) -> shared(r, pl) && pushinbox!(pl, r), xs)
-            foreach(d -> (d.state.dependents[WeakPlan(pl)] = d.dependence; holdhandletarget!(pl, d.state)), pl.depends)
+            foreach(d -> (d.state.dependents[WeakPlan(pl)] = d.dependence), pl.depends)
             foreach(c -> push!(c.structure.commands, c), accelcommands(pl))   # marked by later changes (B.8)
             Registered()
           end
@@ -790,8 +771,8 @@ retried(_) = false
 # Build pended before this plan existed reached only the plans naming it then.
 shared(r, pl) = any(q -> q !== pl, namingplans(r)) || !isempty(eageraccesses(syncstate(r))) ||
                 !isempty(syncstate(r).pending)
-# A change of a composite's members (push!, delete!, a rebind) changes no
-# plan. The member's readers snapshot is replaced at the call (B.8, B.8b), so
+# A change of a composite's members (push!, delete!) changes no
+# plan. The member's readers snapshot is replaced at the call (B.8), so
 # from then on the plans naming the composite are among the member's
 # namingplans: the member's writers lock them and wait for their last runs.
 # Those plans read the new member only after the step applying the
@@ -807,18 +788,7 @@ shared(r, pl) = any(q -> q !== pl, namingplans(r)) || !isempty(eageraccesses(syn
 # takepending): the call that pended it never waits. A plan that registers,
 # or starts running, after the change was pended finds its stale flag set
 # under the locks and recompiles first.
-#
-# A plan that binds a GPURef's target by handle (an index buffer through an
-# array GPURef) depends on the GPURef (its `dependents`, not the target's):
-# compile records the target it resolved, register! checks under the
-# GPURef's lock that it is still the target and takes the plan's hold on it,
-# held until the plan retires. A rebind between compile and register! makes
-# the plan compile again; a rebind applied after it marks the parts that
-# recorded the old target's buffer for recording again (open decision 17
-# (c)); the old target is never freed under a plan that recorded its buffer. Plans that bind an array
-# directly are not marked by a rebind of some GPURef that also points at it.
-holdhandletarget!(pl, r::ArrayBox) = addhold!(r.target.state)   # dropped by unregister!
-holdhandletarget!(pl, st) = nothing
+
 
 # ── B.7 Lengths at compile ────────────────────────────────────────────────────
 
@@ -839,16 +809,16 @@ fixedness(st) = st.resizable ? Resizable() : Fixed()          # (a field typed b
 MantleArray(l::GraphDevice, T, s::SizedBy) = transient(l, T, s)   # s = SizedBy(nblocks, a)
 MantleArray(dev::Device, T, s::SizedBy) = MantleArray(dev, T, s.f(sizing(s.array, s.array.state.lengthsource)))
 
-# An array created from data uploads now (B3.18): creation is not a change,
+# An array created from data uploads at the call: creation is not a change,
 # since no graph can name the array before it exists. The storage is
 # allocated, then the data is streamed from the caller's memory (an mmapped
-# file is a plain Array the caller passes, B4.6) in chunks, each copied into
+# file is a plain Array the caller passes) in chunks, each copied into
 # an upload region and written by one eager submission cut to the submission
 # budget, or written directly where the storage is host-visible. At most a
 # few chunks are in flight, so the host memory it needs is bounded by them,
 # not by the array. It returns once every chunk is submitted; the writes are
 # recorded on the array's sync state, so later uses wait for them. With
-# `readonly = true` (B4.6) the state also keeps a reference to `data`, no copy,
+# `readonly = true` the state also keeps a reference to `data`, no copy,
 # which a restore after eviction uploads from.
 function MantleArray(dev::Device, data::AbstractArray{T,N}) where {T,N}
     a = MantleArray(dev, T, size(data)...)
@@ -866,10 +836,10 @@ sizing(a, ::DeviceLength) = a.state.capacity
 
 # Draws: vertex, index and instance counts are numbers or LengthOf
 # references; indirect draws from Bound slots unless the array is fixed, and
-# always for a when! draw (the count is multiplied by the Bool flag, B4.1;
+# always for a when! draw (the count is multiplied by the Bool flag;
 # internals.jl section 2). A count of 0 draws nothing. Vertices are pulled by
 # address. An index buffer is bound by handle (a dependence with handle =
-# true; open decision 17).
+# true).
 
 # Graph arrays: resize! within the size the slot was placed for is a pending
 # cell write; beyond it the graph recompiles at its next run (graph lock).
@@ -919,11 +889,11 @@ members(t::TLAS) = t.members.resources
 
 struct InstanceRange
     blas::BLAS
-    source::Union{MantleArray,ArrayBox}      # transforms or positions; a single transform is a 1-element array
+    source::MantleArray                      # transforms or positions; a single transform is a 1-element array
     inputs::Tuple                            # scale, rotation: arrays or one value
 end
 # On the device a range names cells, not addresses: every array it reads has a
-# cell index (an array GPURef's cell holds its target's index). Slots are
+# cell index. Slots are
 # stable for a range's life: instanceCustomIndex is the slot, and shaders find
 # an instance's index within its range as InstanceId - offsets[slot].
 struct RangeEntry
@@ -1005,15 +975,14 @@ buildcount!(t, ::Update) = t.builtcount
 # indirect build reads it from memory but is not used, on any driver: RADV
 # 26.2.3 and NVIDIA 595 do not have it (accelerationStructureIndirectBuild =
 # false), and on AMD's Windows driver, which has it, it is slower than the
-# exact count because the driver builds for the maximum (N=100000: 1.08 ms
-# exact; 1.17, 1.25, 1.94 ms with maximum 2N, 4N, 16N; m1_lapwin.txt). Metal
-# reads it from a buffer (instanceCountBuffer). Storage sized for `capacity`
-# takes any count up to it
+# exact count because the driver builds for the maximum (measured in the
+# header). Metal reads it from a buffer (instanceCountBuffer). Storage sized
+# for `capacity` takes any count up to it
 # (vkdocs commonvalidity/build_acceleration_structure_nonindirect_common.adoc:13-17).
 buildcount(t::TLAS) = buildcount(t, countsource(t.device))
 buildcount(t::TLAS, ::CountFromMemory) = fromcell(t, t.totalsource)   # Metal
 fromcell(t, ::HostTotal) = FromCell(t.countcell)
-fromcell(t, ::DeviceTotal) = FromCell(t.countcell)   # the offsets kernel's total, read by the device itself (B5.8)
+fromcell(t, ::DeviceTotal) = FromCell(t.countcell)   # the offsets kernel's total, read by the device itself
 buildcount(t::TLAS, ::CountRecorded) = recordedtotal(t, t.totalsource)   # Vulkan, below
 recordedtotal(t, ::HostTotal) = total(t)          # the host view, exact, no padding
 recordedtotal(t, ::DeviceTotal) = t.capacity      # a kernel writes the total: built over the capacity
@@ -1021,9 +990,9 @@ buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geo
                                        #   kernel-written length, below); a BLAS is never counted from memory
 # hostcount(FromCell(_)) is the host view total(t) too: what builtcount keeps.
 # A total a kernel writes has no host value. Where the device reads the count
-# from memory (Metal) it builds with that total from countcell (B5.8; whether
-# a refit after the total changed is legal there is checked in phase 5, a
-# build where it is not). Where the count is recorded (Vulkan) such a TLAS is
+# from memory (Metal) it builds with that total from countcell (whether a
+# refit after the total changed is legal there is checked in phase 5, a build
+# where it is not). Where the count is recorded (Vulkan) such a TLAS is
 # built over `capacity`, with mask-0 records past the device total that
 # reference a valid BLAS (a reference of 0 would make them inactive): the
 # count stays the capacity and no record changes between active and
@@ -1036,7 +1005,6 @@ buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geo
 # instance definitions, transforms and vertex positions
 # (chapters/accelstructures.adoc:159-170), so a run that writes a BLAS's
 # vertices pends an Update and one that writes its index array a Build.
-# (Both follow from B3.2; listed for confirmation in decisions.md.)
 
 # Graph operations. A plan's build or refit of a TLAS or BLAS is a
 # BuildRecording: its own small command buffer, submitted inside the segment's
@@ -1056,13 +1024,13 @@ refit!(g::Graph, t::AccelStructure) = declare!(g, BuildNode(t, Update()))
 # node); a refit before any build of t is a Build. A kernel-written total
 # needs no build! per run: refits stay legal (above).
 
-mutable struct BuildRecording
+mutable struct BuildRecording{C}            # C: the device type's native command buffer
     const structure::AccelStructure
     const mode::Union{Build,Update}
     const deps::Deps                         # the build node's barrier, recorded with it (the one barrier call site)
     const channel::SubmitChannel
     marked::Bool                             # set by a change under the structure's lock; true until first recorded
-    cmd::Any                                 # native command buffer, or nothing
+    cmd::Union{Nothing,C}                    # the device type's native command buffer, or nothing
     recordedmode::Union{Build,Update}        # what it recorded: an Update before any Build records a Build
     recordedcount::Int                       # what a Build recorded, for builtcount
     lasttoken::Union{Nothing,Token}          # its last submission; the replaced buffer is retired with it
@@ -1107,40 +1075,50 @@ built!(s, ::Update, c) = nothing
 # that touches the structure applies the Build (coalesced with any pending
 # Update into a Build), and the refit's command carries builtcount.
 
-# The instance limit (B4.8): a TLAS total past the device's maxInstanceCount
+# The instance limit: a TLAS total past the device's maxInstanceCount
 # (caps(dev).maxinstances) throws at the call that raises it: push!, a resize!
-# or copy! of a source (B.5), a rebind of a source GPURef (B.8b). Checked
-# inside `apply`, under the TLAS's lock (change! locks an array's readers,
-# transitively through a GPURef), before anything is pended, so a throw
+# or copy! of a source (B.5). Checked
+# inside `apply`, under the TLAS's lock (change! locks an array's readers),
+# before anything is pended, so a throw
 # changes nothing. The total is the host view; the capacity doubles up to the
 # same limit (below).
 checkinstances(t::TLAS, total::Integer) = total <= caps(t.device).maxinstances ||
     throw(ArgumentError("a TLAS total of $total instances is past the device's maxInstanceCount"))
-# A source (an array state or an array GPURef) about to hold n elements: every
-# TLAS over it, directly or through a GPURef, with its ranges over the source
-# counted at n.
-checkinstances(src::Union{ArrayState,ArrayBox}, n) =
+# A source array about to hold n elements: every TLAS over it, with its
+# ranges over the source counted at n.
+checkinstances(src::ArrayState, n) =
     foreach(t -> checkinstances(t, totalwith(t, src, n)), tlasreaders(src))
+
+# A member's hold is taken under the member's record lock, inside the locked
+# call of the change that adds it (push!): the hold
+# and the composites count change together, so evictable, checked under the
+# same lock, never sees one without the other. A member evicted before it
+# became one is restored by the next submission that uses the composite (B.4
+# step 1 covers the composites' members), not here: the call allocates
+# nothing. Throws for a freed or released member (nothing changed yet: apply
+# calls it first).
+holdmember!(st::ArrayState) = (usable(st); addcompositehold!(st))   # internals.jl section 10
+holdmember!(x) = addhold!(x)        # a BLAS: never evicted
 
 # Changes, through change! (B.4): requests only. One locked call over the
 # TLAS (its range table and records share its record) and the range's
-# members: the member holds are taken under their locks (holdmember!, B.8b),
+# members: the member holds are taken under their locks (holdmember!, above),
 # the slot is assigned, the member snapshot and the arrays' reader snapshots
 # are replaced, and the range-table entry and a Build are pended. Nothing of
 # the TLAS is allocated: a new slot past the range table's size pends a Resize
 # of the table (an array like any other, its contents kept), and the capacity
 # a new total needs is the applier's (above). The entry's bytes go into an
-# upload region of one RangeEntry acquired before the lock (B3.18). A throw
+# upload region of one RangeEntry acquired before the lock. A throw
 # drops the holds taken so far and the region.
-function Base.push!(t::TLAS, blas::BLAS, source::Union{MantleArray,ArrayBox}; scale = 1f0, rotation = nothing)
+function Base.push!(t::TLAS, blas::BLAS, source::MantleArray; scale = 1f0, rotation = nothing)
     r = InstanceRange(blas, source, (scale, rotation))
-    uses = ((t, Write()), ((m, Read()) for m in holdsof(r))...)   # the range's arrays, a GPURef, the BLAS
+    uses = ((t, Write()), ((m, Read()) for m in holdsof(r))...)   # the range's arrays, the BLAS
     up = acquireupload!(pool(t), sizeof(RangeEntry))
     held = Any[]
     ok = false
     try
         change!(uses) do
-            checkinstances(t, total(t) + instances(r))   # past maxInstanceCount: throws, nothing taken yet (B4.8);
+            checkinstances(t, total(t) + instances(r))   # past maxInstanceCount: throws, nothing taken yet;
                                                          #   instances(r): its source's requested length
             for m in holdsof(r)                          # under each member's lock: the hold and the count together
                 holdmember!(m); push!(held, m)
@@ -1162,7 +1140,7 @@ function Base.push!(t::TLAS, blas::BLAS, source::Union{MantleArray,ArrayBox}; sc
 end
 
 function Base.delete!(t::TLAS, r::InstanceRange)
-    up = acquireupload!(pool(t), sizeof(RangeEntry))   # the inactive entry's bytes (B3.18)
+    up = acquireupload!(pool(t), sizeof(RangeEntry))   # the inactive entry's bytes
     ok = false
     try
         change!(((t, Write()), ((a, Read()) for a in rangearrays(r))...)) do
@@ -1187,8 +1165,7 @@ function Base.delete!(t::TLAS, r::InstanceRange)
     end
 end
 
-# A source's length changes (resize! of a positions array, or of a GPURef's
-# target, whose readers include the GPURef and so its TLASes): the Resize is
+# A source's length changes (resize! of a positions array): the Resize is
 # pended with the array's readers locked (change!, readers = true), and
 # lengthchange pends a Build on each reader TLAS and marks it; the capacity a
 # new total needs is allocated by the applier. A store into a source pends an
@@ -1196,17 +1173,17 @@ end
 # b's index array.
 
 # Capacity: storage and scratch for `capacity` instances, doubling until the
-# total fits, starting at 64, capped at the device's maxInstanceCount (B4.8:
-# a total past it throws at the call that raises it, checkinstances above);
-# it does not shrink on its own, since builds and refits carry the exact
-# count and the capacity costs memory only (expected
-# from the API: the driver gets the count, not the capacity; not measured with
-# storage sized beyond the count, to confirm in phase 5). Growing, hardware: a
-# new AS object on a new pool Region (AS storage cannot be sparse) and new
-# scratch, prepared by the applier (B.4 step 1); the old ones retired with the
-# applying token; the structure's BuildRecordings are marked; traces and ray
-# queries take the AS by address through the cell (with descriptors instead,
-# open decision 4, they would be handle dependents). Software: the five arrays
+# total fits, starting at 64, capped at the device's maxInstanceCount (a
+# total past it throws at the call that raises it, checkinstances above); it
+# does not shrink on its own, since builds and refits carry the exact count
+# and the capacity costs memory only (expected from the API: the driver gets
+# the count, not the capacity; not measured with storage sized beyond the
+# count, to confirm in phase 5). Growing, hardware: a new AS object on a new
+# pool Region (AS storage cannot be sparse) and new scratch, prepared by the
+# applier (B.4 step 1); the old ones retired with the applying token; the
+# structure's BuildRecordings are marked; traces and ray queries take the AS
+# by address through the cell (with descriptors instead, which is open, they
+# would be handle dependents). Software: the five arrays
 # grow like any array (their Resize steps, B.5).
 # The steps, emitted before the Build's own; commit! sets t.storage, t.scratch
 # and t.capacity when the submission is made. The instance records hold
@@ -1239,137 +1216,6 @@ capacitysteps(t::TLAS{Software}, g::Capacity) = softwaresteps(t, g)   # the five
 # (header). Shared between TLASes through its geometry: one BLAS per marker
 # mesh.
 
-# ── B.8b GPURef of an array ───────────────────────────────────────────────────
-
-# GPURef(dev, a::MantleArray) (Simon, 2026-10-02): the GPURef for an array.
-# The GPURef for a value is one slot in device memory whose address every
-# plan and piece bakes, and `r[] = v` a scheduled Store into it (B4.9); the
-# GPURef for an array is a cell holding its target's cell index, and `r[] = b`
-# a scheduled Rebind, so the target is replaceable between runs without
-# recompiling. RayMakie's plot attributes are GPURefs of arrays, so a plot made
-# from a device array reads that array (zero-copy) and
-# update!(plot; positions = other) replaces it (recording-plan.md, Graphics).
-# A composite with one member: it holds its target (a composite hold), is
-# one of its target's readers, and has readers of its own (TLASes with a
-# range over it).
-abstract type GPURef{T} end                      # T: the value type of a ValueBox, the target type of an ArrayBox
-# The value form, ValueBox{T} <: GPURef{T}, is internals.jl section 7: one slot in
-# device memory whose address every plan and piece bakes; `r[] = v` is a
-# scheduled Store into it, applied like any store (B4.9).
-mutable struct ArrayBox{T,N} <: GPURef{AbstractArray{T,N}}
-    const device::Device                # device-only: its target is a device array
-    target::MantleArray{T,N}            # host view (r[]), replaced under the lock at the call
-    applied::MantleArray{T,N}           # what its cell points at: set when the Rebind's step commits, under
-                                        #   the sync locks of the plans naming the box (the applier holds them);
-                                        #   a run resolves a write through the box to it (internals.jl section 8)
-    members::MemberSet                  # snapshot (target,), as a TLAS's (B.4 lockexpanded)
-    const cell::Cell                    # holds the target's cell index: the head reads through it
-    const sync::SyncState
-    const holds::Threads.Atomic{Int}
-    readers::ReaderSet                  # TLASes with a range over it; an immutable snapshot (B.2)
-    const dependents::Dict{WeakPlan,Dependence}   # plans that bound its target by handle (B.6)
-end
-
-# A member's hold is taken under the member's record lock, inside the locked
-# call of the change that adds it (push!, a rebind, GPURef itself): the hold
-# and the composites count change together, so evictable, checked under the
-# same lock, never sees one without the other. A member evicted before it
-# became one is restored by the next submission that uses the composite (B.4
-# step 1 covers the composites' members), not here: the call allocates
-# nothing. Throws for a freed or released member (nothing changed yet: apply
-# calls it first).
-holdmember!(st::ArrayState) = (usable(st); addcompositehold!(st))   # internals.jl section 10
-holdmember!(x) = addhold!(x)        # a BLAS or an array GPURef: never evicted
-
-# newbox creates the box (its cell and record): creating an object, like
-# creating an array; the cell write of its target is pended like a rebind.
-function GPURef(dev::Device, a::MantleArray{T,N,<:Device}) where {T,N}
-    rootonly(a)
-    r = newbox(dev, a)                  # its cell and record; no hold, no reader entry, no finalizer yet
-    held = false
-    ok = false
-    try
-        change!(((r, Write()), (a.state, Read()))) do
-            holdmember!(a.state)
-            held = true
-            addreader!(a, r)            # the box is one of its target's readers
-            (Rebind(nextseq!(r), r, a),)
-        end
-        finalizer(x -> push!(pool(x).inbox, DropHolds(x)), r)   # only now: it releases what the box holds
-        ok = true
-        return r
-    finally
-        ok || (held ? release!(r) : discard!(r))   # a throw: what the box took goes back, once (no finalizer yet)
-    end
-end
-discard!(r::ArrayBox) = retire!(pool(r), r.cell, ())   # a box that never held anything: its cell (and record)
-GPURef(dev::Device, v) = ValueBox(dev, v)
-# The box's cell holds a cell index, not a view's offset and strides, so its
-# target is a root array: a view throws (the array's own fields, B.2).
-rootonly(a::MantleArray) = isview(a) ? throw(ArgumentError("a GPURef of an array targets a root array, not a view")) : nothing
-
-# r[] = b: same element type and dimension count (the shader or kernel type is
-# unchanged, so nothing recompiles); b is a root device array. A request like
-# a store: r[] reports b at once; the submission that applies it writes r's
-# cell; runs submitted before still read the old target, whose hold drops once
-# the applying submission has passed. The box moves from old's readers to
-# b's; its own readers (TLASes) get an Update, or a Build if the length
-# differs (capacity, if needed, is the applier's). The parts of plans that
-# bound r's target by handle (an index buffer through the GPURef,
-# r.dependents) are marked for recording again when the Rebind is applied
-# (open decision 17 (c); B.4). Rebinding to the current target does nothing
-# (checked without the lock: a racing rebind decides either way).
-function Base.setindex!(r::ArrayBox{T,N}, b::MantleArray{T,N,<:Device}) where {T,N}
-    r.target === b && return r
-    rootonly(b)
-    held = false
-    ok = false
-    try
-        change!(((r, Write()), (b.state, Read()))) do    # r brings its target
-            usable(r)                                    # a freed GPURef throws
-            checkinstances(r, requestedlength(b))        # a TLAS total past maxInstanceCount throws (B4.8, B.8)
-            holdmember!(b.state)
-            held = true
-            old = r.target
-            cs = Change[Rebind(nextseq!(r), r, b);       # requested lengths (B.2): no wait under the lock
-                        (rebound(t, requestedlength(old), requestedlength(b)) for t in r.readers)...]   # Update, or Build + mark!
-            r.target = b                                 # what r[] reports
-            r.members = MemberSet((b,))                  # a new snapshot
-            addreader!(b, r)                             # the box follows its target
-            # The old target keeps the box as a reader, and its hold, until
-            # the submission applying the Rebind has passed (it writes the
-            # box, so it waited for every earlier reader; as delete!, B.8).
-            defer!(r.sync, tokens -> (dropafter!(old.state, tokens, st -> dropreader!(st, r));
-                                      dropafter!(old.state, tokens, dropcompositehold!)))
-            cs
-        end
-        ok = true
-    finally
-        ok || (held && dropcompositehold!(b.state))      # taken, then the change threw before it was pended
-    end
-    return r
-end
-stepsof(c::Rebind, p) = (CellWrite(cellstate(c.target), cellindex(c.new), ()), RecordAgain(c.target.dependents))
-committed!(c::Rebind) = (c.target.applied = c.new)   # by commit!, under the applier's locks
-# The box's last hold (its creator's free!, its finalizer, the last range or
-# plan holding it): under its lock, once the box's last accesses have passed,
-# it leaves its target's readers and the target's composite hold drops; its
-# cell and record go back with the same tokens.
-release!(r::ArrayBox) = locked((r.sync, r.target.state.sync); lent = true) do
-    tokens = lasttokens(r.sync, r)
-    dropall!(r.sync.pending); empty!(r.sync.pending)   # a CellWrite no submission took
-    foreach(d -> d(tokens), r.sync.deferred); empty!(r.sync.deferred)   # an earlier target's hold
-    dropafter!(r.target.state, tokens, st -> dropreader!(st, r))   # as a rebind
-    dropafter!(r.target.state, tokens, dropcompositehold!)
-    retire!(pool(r), r.cell, tokens)
-end
-Base.getindex(r::ArrayBox) = r.target
-
-# Launches and draws over an ArrayBox are always indirect (LengthOf(r) never
-# resolves to Direct: the target can change); its slots get address and dims
-# from the target's cell, read through r's cell by the head. Device side it is
-# the same type as the target's devicearg, so one pipeline serves both.
-
 # ── B.9 Residency and textures ────────────────────────────────────────────────
 
 # Metal: every pool block, reserve and acceleration structure is in one
@@ -1385,12 +1231,12 @@ Base.getindex(r::ArrayBox) = r.target
 # A texture written in place keeps its index. A regrown or replaced texture
 # gets a new, unused index, scheduled like any change: the applying
 # submission's prepare! creates the new image (a copy step keeps the texels
-# where the sizes overlap, B4.8), its descriptor is written into the unused index
+# where the sizes overlap), its descriptor is written into the unused index
 # before the prefix (no pending command buffer uses that index,
 # descriptorsets.adoc:793-807), the cell write is a step, and the old index
-# and image are retired with that submission's token, then reused. A restored image (internals.jl
-# section 9) gets a new index the same way. The table and its free list are
-# the device's, under the table's own lock (a leaf).
+# and image are retired with that submission's token, then reused. A restored
+# image (internals.jl section 9) gets a new index the same way. The table and
+# its free list are the device's, under the table's own lock (a leaf).
 
 # ── B.10 Free and leaks ───────────────────────────────────────────────────────
 
@@ -1402,15 +1248,15 @@ Base.getindex(r::ArrayBox) = r.target
 # with no tokens, prepared storage released), deferred hold drops are called
 # with the record's last tokens, the storage becomes Released(), the old
 # storage and the cell are retired with those tokens, and the state leaves
-# the eviction list. Every holder type (ArrayBox, TLAS, BLAS, a RenderObject)
+# the eviction list. Every holder type (TLAS, BLAS, a RenderObject)
 # has a finalizer that pushes its hold drops through the pool's inbox.
 
 # ══ C. What a device type implements ══════════════════════════════════════════
 
 caps(dev)                    # facts, no policy: .sparseresidency, .sparsepage, .sparseaddressspace,
-                             #   .accelbyaddress, .separatehostheap (eviction frees device memory),
+                             #   .accelbyaddress,
                              #   .display (drives a monitor), .inlinestore and .inlinealign (B.5),
-                             #   .maxinstances (maxInstanceCount, B.8; field names open, G3);
+                             #   .maxinstances (maxInstanceCount, B.8; field names open);
                              #   core's sparsethreshold, reservesize (B.1) and submission budget are
                              #   computed from them
 countsource(dev)             # CountRecorded() (Vulkan) | CountFromMemory() (Metal): where a TLAS build gets its count
@@ -1425,9 +1271,9 @@ emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; the exact cou
 emitstore!(b, dst, upload)                      # an inline store in a change prefix, from the store's upload region
                                                 #   (B.5): vkCmdUpdateBuffer within .inlinestore; Metal, CUDA, HIP:
                                                 #   inline limit 0, a copy from the store's upload region, acquired
-                                                #   at the call (B3.18)
+                                                #   at the call
 emitdraw!(b, node, cmd::CompiledDraw)           # inside beginrender!/endrender!; direct or indirect, as compile decided
-bindindices!(b, node, storage)                  # vkCmdBindIndexBuffer on the storage's buffer (open decision 17)
+bindindices!(b, node, storage)                  # vkCmdBindIndexBuffer on the storage's buffer
 tableentry!(dev, table, index, texture)         # a host write to an unused index (not a recorded command)
 
 # Software acceleration structures implement the same core calls with kernels
@@ -1466,87 +1312,105 @@ buildaccel!(l, t::TLAS{Software}, ::Update) = dispatch!(l, refitnodes!, (t.stora
 
 # Kernels get the TLAS as a struct of five device arrays; each has its own
 # entry in the head's cell table, at any nesting depth. Traversal of an empty
-# TLAS returns a miss (length(nodes) == 0 from the slot); today it reads
-# nodes[1] out of bounds (Raycore instanced-bvh.jl:1951-1956).
+# TLAS returns a miss (length(nodes) == 0 from the slot).
 devicearg(dev, t::TLAS{Software}) = StaticTLAS(map(a -> devicearg(dev, a), fields(t.storage))...)
 
-# Gone: Raycore's TLAS finalizer that finalize()s arrays a recording or
-# StaticTLAS still uses (instanced-bvh.jl:372, 400-411; holds replace it);
-# blas_array (device pointers stored in device memory, read only for
-# root_aabb); host readbacks and synchronize() between build steps.
+# Raycore's TLAS has no finalizer that finalize()s its arrays: holds keep them
+# alive while a recording or StaticTLAS uses them. There is no blas_array
+# (device pointers stored in device memory), and no host readback or
+# synchronize() between build steps.
 
 # ── D.2 Hikari ────────────────────────────────────────────────────────────────
 
 # The scene owns one TLAS. Scene changes are pending TLAS changes (from host
 # calls, or pended by runs of other graphs that write the TLAS's source arrays,
-# B.8; open decision 16, ruled B3.9/B3.10). The integrator is declared once into the
-# screen's frame graph (one graph per screen), outside any plot's insert!
-# block, and kept across scene and plot changes (a plot is a piece of the
-# raster pass and recompiles nothing, B3.17). Its film and sample count are device
-# arrays the screen holds, so accumulation survives runs and recompiles; its
-# work queues are window-sized graph arrays, so a window resize within the
-# capacity records the window's segments again (internals.jl section 7) and
-# declares nothing. It holds no build or refit node: the pending update is
-# applied by the first submission that touches the TLAS, so a frame with no
-# change does no acceleration-structure work. Only a scene whose transforms a
+# B.8). The integrator is declared once into the screen's frame graph (one
+# graph per screen), outside any plot's group, and kept across scene
+# and plot changes (a plot is a group of draws and recompiles nothing). Its film and sample count are device arrays the screen holds, so
+# accumulation survives runs and recompiles; its work queues are window-sized
+# graph arrays, so a window resize within the capacity records the window's
+# segments again (internals.jl section 7) and declares nothing. It holds no
+# build or refit node: the pending update is applied by the first submission
+# that touches the TLAS, so a frame with no change does no
+# acceleration-structure work. Only a scene whose transforms a
 # kernel of this graph writes declares refit!(g, scene.tlas); a kernel-written
 # count needs no build! per run (B.8: built over the capacity, refits stay
 # legal).
 function declare!(g, vp::VolPath, scene)
     fill!(vp.active, Int32(1))
-    bounce = Group(g, "bounce")                  # a value; launches only (B4.2)
+    bounce = Group(g, "bounce")                  # a value; its place in g's order is here
     trace!(bounce, vp.pipeline, scene.tlas, (vp.queue, vp.hits), launchrange(vp.queue))
     dispatch!(bounce, shade!, (vp.hits, vp.queue, lengthof(vp.queue), vp.active, scene.materials, scene.tlas),
               launchrange(vp.queue))             # writes the queue's next length and active = length > 0
-    repeat!(bounce, vp.maxdepth ÷ 2; while_nonzero = vp.active)   # attaches the group; active is a count (B4.1)
+    repeat!(bounce, vp.maxdepth ÷ 2; while_nonzero = vp.active)   # launches only; active is a count
 end
-# Gone: notify_scene_changed dropping the integrator's plans (Hikari
-# scene.jl:141-151, from nine scene mutators and on accel.dirty);
-# fill_aux_buffers!'s waitidle (hw-rt.jl:104). Raycore.sync! inside
-# Adapt.adapt_structure (Raycore instanced-bvh.jl:1117, Mantle
-# vulkan/raytracing/hwtlas.jl:243-244, metal/hwtlas.jl:325) goes too.
+# No scene change drops the integrator's plans (there is no
+# notify_scene_changed). fill_aux_buffers! does not wait for idle.
+# Adapt.adapt_structure (Raycore's, and Mantle's Vulkan and Metal TLAS) does
+# not call Raycore.sync!.
 
 # ── D.3 RayMakie ──────────────────────────────────────────────────────────────
 
-# A plot attribute is a GPURef of a MantleArray (B.8b): length 1 for one
+# A plot attribute is a MantleArray, mutated in place: length 1 for one
 # value, n for one per element. Shaders read attribute(a, i) =
-# a[min(i, length(a))] (name open), so both are one pipeline. A change that
-# alters a shader (an element type, a material type, transparency) is open
-# decision 18. A RenderObject holds its GPURefs and arrays; its finalizer drops
-# them through the pool's inbox.
-struct RenderObject
-    pipeline::GraphicsPipeline                 # with the arguments' types: the pipeline key
-    attributes::NamedTuple                     # name => GPURef of an array; created once with the plot
-    owned::NamedTuple                          # name => the plot's own MantleArray (host data lands here)
-    visible::MantleArray{Bool,1}               # the when! flag of its draw (B4.1; a store: no recompile)
-    rect::MantleArray{Vec4f,1}                 # the scene's rectangle, shared by the scene's plots (one store
+# a[min(i, length(a))] (name open), so both are one pipeline. An attribute
+# whose type changes is the plot deleted and inserted (a group of draws, no recompile);
+# a value that picks another pipeline (transparency) is a store into the flags
+# of one recorded when! draw per variant; a new Hikari material type recompiles
+# the plan that declares the shade kernel. A RenderObject holds its arrays;
+# its finalizer drops them through the pool's inbox.
+mutable struct RenderObject{A<:NamedTuple,O<:NamedTuple}
+    group::Union{Nothing,Group}                # its draws in the frame graph, while inserted
+    attributes::A                              # name => the MantleArray its draw reads
+    const pipeline::GraphicsPipeline           # with the arguments' types: the pipeline key
+    const owned::O                             # name => the plot's own MantleArray (host data lands here)
+    const visible::MantleArray{Bool,1}         # the when! flag of its draw (a store: no recompile)
+    const rect::MantleArray{Vec4f,1}           # the scene's rectangle, shared by the scene's plots (one store
 end                                            #   per layout change), applied in the vertex stage
 
 # update!(plot; …) calls this once per changed attribute (ComputePipeline's
 # changed set); everything is pending and lands in the next frame's submission.
-setattribute!(r::RenderObject, name, data::AbstractArray) =                # host data
-    (own = r.owned[name]; copy!(own, data); r.attributes[name][] === own || (r.attributes[name][] = own))
-setattribute!(r::RenderObject, name, data::MantleArray) =                  # a device array: zero copy
-    (r.attributes[name][] = data)
-setattribute!(r::RenderObject, name, value) =                              # one value
-    setattribute!(r, name, [value])                                        # a one-element store (inline, B.3)
+function setattribute!(screen, r::RenderObject, name, data::AbstractArray)   # host data
+    own = r.owned[name]
+    copy!(own, data)                                                       # a store; a resize if the length changed
+    r.attributes[name] === own || redeclare!(screen, r, name, own)
+end
+setattribute!(screen, r::RenderObject, name, data::MantleArray) =          # a device array: zero copy
+    r.attributes[name] === data || redeclare!(screen, r, name, data)
+setattribute!(screen, r::RenderObject, name, value) =                      # one value
+    setattribute!(screen, r, name, [value])                                # a one-element store (inline, B.3)
+# Another array object for an attribute: the plot's draws are declared again
+# over it, a new group of draws the next run records on its own; nothing
+# recompiles. The group goes to the end of the plots' order; where the order
+# matters, sort!(screen.plots; by) restores it (a list rewrite).
+function redeclare!(screen, r::RenderObject, name, a::MantleArray)
+    r.attributes = Base.setindex(r.attributes, a, name)
+    deleteplot!(screen, r)
+    insertplot!(screen, r)
+end
 setvisible!(r::RenderObject, v::Bool) = (r.visible[1:1] = [v])          # the head multiplies the draw's count by it
 
-# The frame graph, declared once per screen. Each plot is a piece of the
-# pass (decisions B3.17): inserting or deleting one compiles and records that
-# piece only and rewrites the pass's list; the plan is not recompiled, and
-# every other plot's recording stays. Each draw keeps its own pipeline and
+# The frame graph, declared once per screen. The plots' group starts with the
+# clears, so the render pass exists before the first plot. Each plot is a
+# group of draws in it: inserting or deleting one compiles and records that
+# group's draws only and rewrites the pass's list; the plan is not recompiled,
+# and every other plot's recording stays. Each draw keeps its own pipeline and
 # index buffer, so a large mesh draws as it would alone.
 function declareframe!(g, screen)
-    screen.pass = render!(g, screen.window => Clear(screen.background), screen.depth => Clear(1f0)) do p
-    end                                                                   # plots come as pieces
+    screen.plots = Group(g, "plots")                                      # the plots' place in the frame
+    clear!(screen.plots, screen.window, screen.background)                # the pass's load operations
+    clear!(screen.plots, screen.depth, 1f0)
 end
-insertplot!(screen, r::RenderObject) =                                    # Makie's insert!
-    r.piece = insert!(screen.pass) do                                     # appended: the list order is the draw order
-        when!(screen.pass, r.visible, r.pipeline, (values(r.attributes)..., r.rect, screen.camera),
-              launchrange(r.attributes.positions))                       # one when! draw (B4.1); indirect: a GPURef of an array
-    end
-deleteplot!(screen, r::RenderObject) = delete!(screen.pass, r.piece)     # Makie's delete!
+function insertplot!(screen, r::RenderObject)                             # Makie's insert!
+    r.group = Group(screen.plots, "plot")                                 # appended: the order is the draw order
+    when!(r.group, (screen.window, screen.depth), r.visible, r.pipeline,
+          (values(r.attributes)..., r.rect, screen.camera),
+          launchrange(r.attributes.positions))                           # one when! draw over the positions' length
+end
+function deleteplot!(screen, r::RenderObject)                             # Makie's delete!
+    delete!(screen.framegraph, r.group)
+    r.group = nothing
+end
 
 # The render loop: no walk over plots or render objects.
 function renderloop!(screen)
@@ -1554,30 +1418,26 @@ function renderloop!(screen)
         foreach(resolve!, takedirty!(screen))       # only plots whose inputs changed (their edges put them there)
         run!(screen.framegraph)                     # pending changes, head, recorded draws, present
         # A plot added or deleted (insertplot!, deleteplot!) is applied by
-        # this run before its stages: one piece compiled and recorded, the
-        # pass's list rewritten (internals.jl section 5, B3.17).
+        # this run before its stages: its group's draws compiled and recorded,
+        # the pass's list rewritten (internals.jl section 5).
     end
 end
 
-# A plot from a simulation's device arrays: mesh!(vertices, faces) makes the
-# array GPURefs point at them. Each run of the simulation writes them; the frame
-# draws over their current lengths. The frame's run reads them through the
-# GPURefs, so it waits for the simulation's write, and the simulation's next
+# A plot from a simulation's device arrays: mesh!(vertices, faces) makes its
+# draw read them. Each run of the simulation writes them; the frame draws
+# over their current lengths. The frame's run reads them, so it waits for
+# the simulation's write, and the simulation's next
 # write waits for the frame (B.4, lockexpanded). The screen is one of their
 # readers, so a run that writes them marks it for redraw (internals.jl
-# section 6; open decision 16, ruled B3.9/B3.10). Faces are an index buffer bound by
-# handle: open decision 17.
+# section 6). Faces are an index buffer bound by handle (B.6).
 
-# Glyph atlas: a Texture2D in the device table; a larger atlas gets a new
+# Glyph atlas: an Image with an index in the device's texture table; a larger atlas gets a new
 # index through its cell. Glyph UVs are stored in texels and normalized in the
 # shader by the atlas's size read at run time, so atlas growth touches no
-# text or scatter plot (today the UVs are normalized and the atlas width is a
-# compile-time constant, RayMakie overlay/scatter.jl:195, :426).
-# Today (RayMakie e6e1aa9b0, overlay_rendering.jl:234-256) a frame plan is
-# rebuilt when the set of plots, visibility, a pipeline or an argument type
-# changes, and frames are walked, not recorded (:398-402). Gone: the walked
-# frames, DrawBinding/rebind!, repacking argument memory on the host every
-# frame, frame_signature, the per-frame scene-tree walks.
+# text or scatter plot.
+# Frames are recorded, not walked: no DrawBinding/rebind!, no repacking of
+# argument memory on the host per frame, no frame_signature, no per-frame
+# scene-tree walk.
 
 # meshscatter (ray traced): one BLAS per marker mesh (shared through the
 # geometry arrays, held by every range that uses it), one instance range
@@ -1587,18 +1447,17 @@ function meshscatter_instances!(tlas, plot)
     push!(tlas, marker, plot.attributes.positions; scale = plot.attributes.markersize,
           rotation = plot.attributes.rotation)
 end
-# positions is the plot's array GPURef: the TLAS is its reader, and the
-# GPURef a reader of its target, so a change of the target reaches the TLAS
-# (B.8b). Moving particles, same count: a store into the target pends a TLAS
-# refit. A new count: the resize! pends a build with the exact count (storage
+# positions is the plot's array: the TLAS is its reader, so a change of it
+# reaches the TLAS (B.8). Moving particles, same count: a store into the
+# array pends a TLAS refit. A new count: the resize! pends a build with the exact count (storage
 # beyond the capacity is allocated by the submission that applies it, B.4);
 # the BLAS stays.
-# Another device array (update!(plot; positions = b)): a rebind, the TLAS
-# gets an Update, or a Build if the length differs. Hidden: mask 0 in the
+# Another device array (update!(plot; positions = b)): the range is deleted
+# and pushed again over b, a pending Build. Hidden: mask 0 in the
 # range's entry, a refit. A colour: a store into the material table.
 
 # Per frame, steady state: pending changes applied at the start of the frame's
-# submission, the head (1.3-3.5 µs measured, v2_*.txt), indirect draws, a
-# refit or build only if one is pending, the trace. No recompile and no
-# re-record. Value GPURef stores and per-frame stores (the camera, a
-# one-element array) are scheduled changes (B4.9).
+# submission, the head (1.3-3.5 µs measured), indirect draws, a refit or
+# build only if one is pending, the trace. No recompile and no re-record.
+# GPURef stores and per-frame stores (the camera, a one-element array)
+# are scheduled changes.

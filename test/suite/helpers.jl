@@ -7,7 +7,7 @@
 # hooks"; none of them is user API):
 #   Mantle.diagnostics(dev) -> Diagnostics   counters since the last reset:
 #       plancompiles, pipelinecompiles, kernelcompiles, records (recorded
-#       parts, AccelCommands and pieces included), submissions (per channel),
+#       parts, BuildRecordings and pieces included), submissions (per channel),
 #       allocations (acquire! calls), hostwaits
 #   Mantle.resetdiagnostics!(dev)
 #   Mantle.reserved(dev), Mantle.mapped(dev)  pool bytes
@@ -17,17 +17,17 @@
 #       (kind, target, seq, token) per step, in emission order
 #   Mantle.checklocks!(dev, on)               assert the lock order and that
 #       no sync-state, channel, pool or window lock is held in a host wait
-#                                             (catalogue FI-8)
 
 using Test, Mantle, Random
+import KernelInterface as KI        # kernels are plain functions over KI's intrinsics
 
 """The suite's settings: the one global, set by runsuite."""
 struct SuiteConfig
     phase::Base.RefValue{Int}
     long::Base.RefValue{Bool}
-    device::Base.RefValue{Any}
+    device::Base.RefValue{Union{Nothing,Mantle.Device}}
 end
-const SUITE = SuiteConfig(Ref(0), Ref(false), Ref{Any}(nothing))
+const SUITE = SuiteConfig(Ref(0), Ref(false), Ref{Union{Nothing,Mantle.Device}}(nothing))
 
 testdevice() = SUITE.device[]
 devicename(dev) = string(nameof(typeof(dev)))
@@ -40,10 +40,10 @@ const APIPHASE = 6
 """
     @case id phase [needs...] begin … end
 
-One catalogue case: a testset named by its catalogue id. Skipped when its
+One case: a testset named by its id. Skipped when its
 ledger phase is later than the suite's, when it is `:long` and long cases are
 off, or when the device lacks a capability in `needs` (`:rt`, `:sparse`,
-`:multiqueue`, `:window`, `:separateheap`, `:vendorview`, `:metal`,
+`:multiqueue`, `:window`, `:vendorview`, `:metal`,
 `:lavapipe`, `:graphics`).
 """
 macro case(id, phase, args...)
@@ -70,7 +70,6 @@ has(dev, ::Val{:graphics}) = caps(dev).graphics       # render passes and draws 
 has(dev, ::Val{:sparse}) = caps(dev).sparseresidency
 has(dev, ::Val{:multiqueue}) = length(Mantle.queuekinds(dev)) > 1
 has(dev, ::Val{:window}) = caps(dev).display
-has(dev, ::Val{:separateheap}) = caps(dev).separatehostheap
 has(dev, ::Val{:vendorview}) = dev isa Mantle.CudaDevice
 has(dev, ::Val{:metal}) = dev isa Mantle.MetalDevice
 has(dev, ::Val{:lavapipe}) = occursin("llvmpipe", lowercase(Mantle.name(dev)))
@@ -103,7 +102,7 @@ end
 """
 A kernel that keeps the GPU busy for about `ms` milliseconds and then writes
 `value` into `out[1]`: a submission that is reliably still in flight when the
-host does the next thing (catalogue FI-G, without spinning on a host flag,
+host does the next thing (without spinning on a host flag,
 which can hang a device). Calibrated once per device.
 """
 function slowwrite!(g_or_dev, out::MantleArray{Int32}, value::Integer; ms = 200)
@@ -118,7 +117,7 @@ function spinwrite_kernel!(out, value, iters)
     out[1] = value + (acc == Int32(-7) ? Int32(1) : Int32(0))
     return
 end
-const SPINS = Dict{Any,Int}()
+const SPINS = Dict{Mantle.Device,Int}()
 function calibratedspin(dev, ms)
     per_ms = get!(SPINS, dev) do
         out = MantleArray(dev, Int32, 1)
@@ -129,7 +128,7 @@ function calibratedspin(dev, ms)
 end
 
 """
-A host function that blocks until `letgo!(gate)` (catalogue FI-H): holds a
+A host function that blocks until `letgo!(gate)`: holds a
 run between two stages for as long as the test needs.
 """
 struct Gate

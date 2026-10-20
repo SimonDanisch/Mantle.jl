@@ -1,7 +1,7 @@
 """
 Core names nothing that only a backend defines.
 
-`mantle-owns-it.md` in one direction: a file outside `src/vulkan/` and
+The plan's first rule (`docs/recording-plan.md`, Rules) in one direction: a file outside `src/vulkan/` and
 `src/metal/` may not reach for a name the backend owns. Core calling into a
 backend is the violation that a green single-device suite cannot see, because
 on that machine the name resolves.

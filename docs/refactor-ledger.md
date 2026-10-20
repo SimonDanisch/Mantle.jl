@@ -16,13 +16,9 @@ by reading the plan and this ledger.
 - **Ids** are stable: `P<phase>.<kind><n>`, kinds A add, D delete, R rename,
   W rewrite a test, G green, T test, B bug, C comments, F found while working.
   New items are appended to their phase with the next free number. An item
-  that moves to another phase or merges into another keeps its row, with
-  status `n/a` and the id it went to; the new row says "(was …)".
-- **Marks:** eviction and readers are ruled (decisions.md B3.9, B3.10) and
-  carry those ids; "(not in the plan: confirm)"
-  for an item the plan does not list; "S<n>" for a fix of the review round
-  of 2026-10-02 (decisions.md, "Review round 2026-10-02", and the plan text
-  that carries it).
+  that moves to another phase or merges into another is removed here and
+  added there; an item the design no longer has is removed.
+- **Marks:** "(not in the plan: confirm)" for an item the plan does not list.
 - **A phase is done** when every item is `done` or `n/a`, its green tests
   pass on every joined device type, one real use ran (the editor opened and
   played, a RayMakie frame, a model call), an independent review of its diff
@@ -36,13 +32,13 @@ by reading the plan and this ledger.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P0.A1 | `docs/recording-plan.md` consistent with the rulings of 2026-09-30 and 2026-10-02 | written | doing | decisions.md B4.1-B4.10 (2026-10-14) folded in; the contradiction review of 2026-10-14 read all six docs against decisions.md, its open questions remain |
-| P0.A2 | `docs/internals.jl`, `docs/examples.jl`, `docs/resizing-and-raytracing.jl` consistent with the plan | written | doing | brought in line with decisions.md B4 after the contradiction review of 2026-10-14; the questions that review raised remain |
-| P0.A3 | `docs/api.md`: every type and verb with its contract, ownership, invariants, corner cases, driver entry points, allowlists, vocabulary fates | written 2026-10-02 | doing | decisions.md B4.1-B4.10 (2026-10-14) folded in; the contradiction review of 2026-10-14 read all six docs against decisions.md, its open questions remain |
-| P0.A4 | `docs/refactor-ledger.md` (this file) | written 2026-10-02 | open | |
-| P0.D1 | delete `docs/design.md`, `docs/submission-refactor.md`, `docs/backend-independence.md`, `docs/mantle-owns-it.md`, `docs/dispatch-api.md`; repoint the 9 references in `src/` and `test/` to the plan; move the two contents that only they hold (`vulkan/runtime/command.jl:404`'s measurement, `test/runtests.jl:73`'s clone note) into a comment or the plan (not in the plan: confirm) | 5 files tracked | open | |
-| P0.D2 | move `docs/recording-plan-review.md` to `experiments/plan-review/` (not in the plan: confirm) | untracked | open | |
-| P0.A5 | the docs committed (Simon's approval) | untracked | done | 034ae50 (the plan, api.md, internals, the suite) |
+| P0.A1 | `docs/recording-plan.md`: the target state only | written | doing | its open questions remain (plan, "Open decisions") |
+| P0.A2 | `docs/internals.jl`, `docs/examples.jl`, `docs/resizing-and-raytracing.jl` consistent with the plan | written | doing | |
+| P0.A3 | `docs/api.md`: every type and verb with its contract, ownership, invariants, corner cases, driver entry points, allowlists, vocabulary fates | written | doing | |
+| P0.A4 | `docs/refactor-ledger.md` (this file) | written | open | |
+| P0.D1 | delete `docs/design.md`, `docs/submission-refactor.md`, `docs/backend-independence.md`, `docs/mantle-owns-it.md`, `docs/dispatch-api.md`; repoint the 9 references in `src/` and `test/` to the plan; move the two contents that only they hold (`vulkan/runtime/command.jl:404`'s measurement, `test/runtests.jl:73`'s clone note) into a comment or the plan (not in the plan: confirm) | 5 files tracked | done | deleted; their references in src/ and test/ point to recording-plan.md and api.md |
+| P0.D2 | remove the review material (`docs/recording-plan-review.md`, `experiments/plan-review/`) | - | done | removed; the five docs above are the only design docs |
+| P0.A5 | the docs committed | - | done | 034ae50 (the plan, api.md, internals, the suite) |
 
 ### Comments
 
@@ -72,7 +68,7 @@ Every comment and docstring checked against the code and the plan (plan,
 | P0.T2 | write `test_builder_is_a_value.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T3 | write `test_record_is_pure.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T4 | write `test_recorded_once.jl` as the plan describes it (Phase 0) | - | open | |
-| P0.T5 | write `test_window_resize.jl` as the plan describes it (Phase 0): beyond the capacity the graph recompiles once, at its next run (S1; it no longer throws) | - | open | |
+| P0.T5 | write `test_window_resize.jl` as the plan describes it (Phase 0): beyond the capacity the graph recompiles once, at its next run (it no longer throws) | - | open | |
 | P0.T6 | write `test_run_is_submit.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T7 | write `test_resize_is_queued.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T8 | write `test_device_is_an_argument.jl` as the plan describes it (Phase 0) | - | open | |
@@ -82,7 +78,6 @@ Every comment and docstring checked against the code and the plan (plan,
 | P0.T12 | write `test_memory_returns.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T13 | write `test_host_node.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T14 | write `test_one_path.jl` as the plan describes it (Phase 0) | - | open | |
-| P0.T15 | write `test_hostwritten.jl` as the plan describes it (Phase 0) | - | n/a | went to P0.T28: hostwritten graph arrays are gone (decisions.md B4.9) |
 | P0.T16 | check: vocabulary frozen to `api.md` section 4, over `src/vulkan`, `src/metal`, `ext/`, with arity (replaces `test/vulkan/test_backend_vocabulary.jl`); starts `@test_broken` with the violations listed | - | open | |
 | P0.T17 | check: driver calls in one place (`api.md` section 8); starts `@test_broken` with the violations listed | - | open | |
 | P0.T18 | check: no mutable globals outside `api.md` section 9; starts `@test_broken` with the violations listed | - | open | |
@@ -90,40 +85,37 @@ Every comment and docstring checked against the code and the plan (plan,
 | P0.T20 | check: Aqua and JET on core; starts `@test_broken` with the violations listed | - | open | |
 | P0.T21 | check: two devices open for the whole suite; starts `@test_broken` with the violations listed | - | open | |
 
-#### Added 2026-10-02 (review round 5)
-
-Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P0.T22 | write `test_runs_never_overlap.jl` as the plan describes it (Phase 0; rule 9), with its negative control | - | open | |
-| P0.T23 | write `test_run_host_time.jl` as the plan describes it (Phase 0): 100, 2 500, 25 000 and 50 000 named records, array `GPURef`s included, against the phase 3 target (open decision 19) | - | open | |
-| P0.T24 | write `test_eviction.jl` as the plan describes it (Phase 0) (B3.9); was P2.T1 | - | open | |
-| P0.T25 | write `test_composite_fuzz.jl` as the plan describes it (Phase 0); was P5.T1 | - | open | |
+| P0.T23 | write `test_run_host_time.jl` as the plan describes it (Phase 0): 100, 2 500, 25 000 and 50 000 named records, against the phase 3 target | - | open | |
+| P0.T24 | write `test_eviction.jl` as the plan describes it (Phase 0) | - | open | |
+| P0.T25 | write `test_composite_fuzz.jl` as the plan describes it (Phase 0) | - | open | |
 | P0.T26 | write RayMakie's compile-counter session as the plan describes it (Phase 0); green as P11.G2 | - | open | |
 | P0.T27 | check: launch kernels never read cells (only head, prepare, the TLAS offsets and records kernels and `lengthof` writers have a `CellRead` use), over every plan the suite compiles (api.md section 6, derived; not in the plan: confirm, G16) | - | open | |
-| P0.T28 | write `test_gpuref_slot.jl` (was P0.T15): `r[] = v` before the first run reaches it; a store during a run reaches the next submission that touches the slot; two plans and a piece baking one slot read the stored value (B4.9) | - | open | |
-| P0.T29 | write `test_view_barriers.jl` as the plan describes it (Phase 0): a write through an array and a read through a view, `reshape` or storage of it in one graph get a barrier; negative control: an object-keyed resource table (today's `Graph.ids`) | - | open | found porting GPUFiltering and Paperhawk, 2026-10-15: on Mantle 94c4258 a `Buffer`, `storage(b)` and a reshape are three resources and the plan has no barrier between the write and the read |
+| P0.T28 | write `test_gpuref_slot.jl`: `r[] = v` before the first run reaches it; a store during a run reaches the next submission that touches the slot; two plans and a group of draws baking one slot read the stored value | - | open | |
+| P0.T29 | write `test_view_barriers.jl` as the plan describes it (Phase 0): a write through an array and a read through a view, `reshape` or storage of it in one graph get a barrier; negative control: an object-keyed resource table (today's `Graph.ids`) | - | open | found porting GPUFiltering and Paperhawk,: on Mantle 94c4258 a `Buffer`, `storage(b)` and a reshape are three resources and the plan has no barrier between the write and the read |
 
 ### Bugs to fix first, each with a regression test that fails before the fix
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P0.B1 | `flush_stall_report` reads fields core's `Submission` does not have (`vulkan/runtime/command.jl`) | locations at 90e582f in the plan | open | |
-| P0.B2 | `gemm_cm2!`/`gemm_cm2_sg!` called as kernel factories (`vulkan/array/gemm_cm2.jl`) | locations at 90e582f in the plan | open | |
-| P0.B3 | a conditional region can drop a barrier (`graph/build.jl` docstring, `sync/transition.jl` rule) | locations at 90e582f in the plan | open | |
-| P0.B4 | Metal waits call `Metal.synchronize()` (task's queue, not the device's): `waitfor`/`waitidle`, `upload_texture_data!`, `readback_framebuffer`, `metal/hwtlas.jl`, `metal/record.jl` | locations at 90e582f in the plan | open | |
-| P0.B5 | walked Metal plans keep compile-time arrays with `patchable = true` and no move listener (`metal/record.jl`) | locations at 90e582f in the plan | open | |
-| P0.B6 | readback and copy leave images in TRANSFER_SRC before a render pass that loads them (`vulkan/graphics/`) | locations at 90e582f in the plan | open | |
-| P0.B7 | validation checks read `VK_CONTEXT_REF[]` inside functions that hold a context | locations at 90e582f in the plan | open | |
-| P0.B8 | arena regrowth dereferences tenant weak references without a `nothing` check (`memory/pool.jl`) | locations at 90e582f in the plan | open | |
-| P0.B9 | `append!` on a `LavaArray` view ignores the view's offset (`vulkan/array/gpuarrays.jl`) | locations at 90e582f in the plan | open | |
-| P0.B10 | unlocked `live_buffers` delete from a finalizer | locations at 90e582f in the plan | open | |
-| P0.B11 | H.265 bitstream alignment | locations at 90e582f in the plan | open | |
-| P0.B12 | the two disagreeing texture format tables | locations at 90e582f in the plan | open | |
-| P0.B13 | `Ref` without `GC.@preserve` and UserID vs `instance_id` in `metal/trace.jl` | locations at 90e582f in the plan | open | |
-| P0.B14 | device features enabled without querying them | locations at 90e582f in the plan | open | |
-| P0.B15 | regression test for `destroy_pool!` calling `empty!` on an `Inbox` (fixed in 2c7dc14) | locations at 90e582f in the plan | open | |
+| P0.B1 | `flush_stall_report` reads fields core's `Submission` does not have (`vulkan/runtime/command.jl`) | - | open | |
+| P0.B2 | `gemm_cm2!`/`gemm_cm2_sg!` called as kernel factories (`vulkan/array/gemm_cm2.jl`) | - | open | |
+| P0.B3 | a conditional region can drop a barrier (`graph/build.jl` docstring, `sync/transition.jl` rule) | - | open | |
+| P0.B4 | Metal waits call `Metal.synchronize` (task's queue, not the device's): `waitfor`/`waitidle`, `upload_texture_data!`, `readback_framebuffer`, `metal/hwtlas.jl`, `metal/record.jl` | - | open | |
+| P0.B5 | walked Metal plans keep compile-time arrays with `patchable = true` and no move listener (`metal/record.jl`) | - | open | |
+| P0.B6 | readback and copy leave images in TRANSFER_SRC before a render pass that loads them (`vulkan/graphics/`) | - | open | |
+| P0.B7 | validation checks read `VK_CONTEXT_REF[]` inside functions that hold a context | - | open | |
+| P0.B8 | arena regrowth dereferences tenant weak references without a `nothing` check (`memory/pool.jl`) | - | open | |
+| P0.B9 | `append!` on a `LavaArray` view ignores the view's offset (`vulkan/array/gpuarrays.jl`) | - | open | |
+| P0.B10 | unlocked `live_buffers` delete from a finalizer | - | open | |
+| P0.B11 | H.265 bitstream alignment | - | open | |
+| P0.B12 | the two disagreeing texture format tables | - | open | |
+| P0.B13 | `Ref` without `GC.@preserve` and UserID vs `instance_id` in `metal/trace.jl` | - | open | |
+| P0.B14 | device features enabled without querying them | - | open | |
+| P0.B15 | regression test for `destroy_pool!` calling `empty!` on an `Inbox` (fixed in 2c7dc14) | - | open | |
 
 ### Baseline
 
@@ -131,7 +123,7 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P0.A6 | whole-plan benchmark (`experiments/header_indirection/plan_*.txt` shape) on the joined devices | - | open | |
 | P0.A7 | each suite's model calls timed (JuliaVision runners, Hikari, RayMakie, VideoEditor) | - | open | |
-| P0.A8 | the new-API suite `test/suite/` (cases from experiments/plan-review/catalogue-core.md and catalogue-resize-rt.md, each with its catalogue id and ledger phase; later phases skipped) and its test hooks in Mantle: `diagnostics`/`resetdiagnostics!` (plan, pipeline and kernel compiles, records, submissions per channel, allocations, host waits), `reserved`, `mapped`, `liveuploads`, `livecells`, `pendingof`, `steplog!`/`steplog`, `checklocks!`; `Window` and `Swapchain` parameterized by their device's type and `inner(x)` (so the suite's `FaultDevice` intercepts window verbs); `caps(dev).graphics`; `FaultDevice` in the suite | - | open | |
+| P0.A8 | the new-API suite `test/suite/` (each case with its ledger phase; later phases skipped) and its test hooks in Mantle: `diagnostics`/`resetdiagnostics!` (plan, pipeline and kernel compiles, records, submissions per channel, allocations, host waits), `reserved`, `mapped`, `liveuploads`, `livecells`, `pendingof`, `steplog!`/`steplog`, `checklocks!`; `Window` and `Swapchain` parameterized by their device's type and `inner(x)` (so the suite's `FaultDevice` intercepts window verbs); `caps(dev).graphics`; `FaultDevice` in the suite | - | open | |
 | P0.A9 | before/after benchmarks through the consumers' unchanged APIs (`/sim/Programmieren/VideoEdit/benchmarks/`: Makie on GLMakie, RayMakie raster and traced; SAM 2, QwenImage, TRELLIS; VideoEditor; RayDemo `run_benchmarks.jl`); baseline environment `VideoEdit-baseline` kept on each worker; the comparison alternates both environments in fresh processes, with an A/A pair as the noise floor | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
@@ -145,15 +137,13 @@ Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P1.A1 | `Kernel`/`DeviceKernel`/`KernelInfo`: one `Mantle.Kernel` per kernel at its `CodeInstance` (`GPUCompiler.cached_results`), filled in stages under its own lock: access at declaration, code at compile, per device the native handle and `KernelInfo` (B5.11) | - | open | |
-| P1.A2 | `compilekernel(dev, kernel, config)`/`kernelinfo` on every joined device type, filling the `Kernel`; no device-type kernel cache (B5.11) | - | open | |
+| P1.A1 | `Kernel`/`DeviceKernel`/`KernelInfo`: one `Mantle.Kernel` per kernel at its `CodeInstance` (`GPUCompiler.cached_results`), filled in stages under its own lock: access at declaration, code at compile, per device the native handle and `KernelInfo` | - | open | |
+| P1.A2 | `compilekernel(dev, kernel, config)`/`kernelinfo` on every joined device type, filling the `Kernel`; no device-type kernel cache | - | open | |
 | P1.A3 | the per-device compile counter | - | open | |
 | P1.A4 | node types with their origin | - | open | |
 | P1.A5 | `compile!(s, node)` | - | open | |
 | P1.A6 | the dependency graph kept and reduced, one hazard function shared with barriers | - | open | |
 | P1.A7 | barrier merging for conditional kernels | - | open | |
-| P1.A8 | `when!(g, flag) do … end` on a device-side flag (Simon, 2026-10-02), as count × flag (S13): the launches in the block are indirect, and whoever writes their indirect commands multiplies the count by the flag (the head for a host-written flag, a prepare node after the kernel for a kernel-written one; both nodes are phase 4's, P4.A3), like `repeat!`'s loop head; no conditional rendering, the same on Metal; the flag is never a handle dependence | - | n/a | went to P1.A18: one launch per `when!`, `Bool` flag (decisions.md B4.1, decisions.md B4.2) |
-| P1.A9 | `repeat!` bodies limited to launches, hazards derived between iterations | - | n/a | went to P1.A19: launch groups as values (decisions.md B4.2) |
 | P1.A10 | the estimated submission split (`costs!`, `submissions!`; the budget is core's, from `caps(dev)` facts: P1.A15) | - | open | |
 | P1.A11 | placement stored in the plan | - | open | |
 | P1.A12 | `sharing!` | - | open | |
@@ -166,7 +156,7 @@ Tests the plan's phase 0 list names since the review round.
 | P1.D2 | delete `buildskernel` | 16 hits, 8 files | open | |
 | P1.D3 | delete `kisupported` | 9 hits, 5 files | open | |
 | P1.D4 | delete `get_or_build_iter_plan` | 7 hits, 4 files | open | |
-| P1.D5 | delete the host-read `when!`: `hostcond` (`Pass.hostcond`) and `RecordingParts.conds`; the name `when!` is reused (Simon, 2026-10-02). Includes the former P1.D19 | 8 hits of `hostcond`, 3 files; 33 hits of `when!` (name reused) | open | |
+| P1.D5 | delete the host-read `when!`: `hostcond` (`Pass.hostcond`) and `RecordingParts.conds`; the name `when!` is reused . Includes the former P1.D19 | 8 hits of `hostcond`, 3 files; 33 hits of `when!` (name reused) | open | |
 | P1.D6 | delete `batchconds` (`RecordingParts.batchconds`, the host-read `when!`'s batching). Includes the former P1.D19 | 4 hits, 1 files | open | |
 | P1.D7 | delete `measure!` | 4 hits, 2 files | open | |
 | P1.D8 | delete `measuring` | 21 hits, 11 files | open | |
@@ -180,7 +170,6 @@ Tests the plan's phase 0 list names since the review round.
 | P1.D16 | delete `emitloophead!` | 10 hits, 4 files | open | |
 | P1.D17 | delete `Pass.kind::Symbol` | - | open | |
 | P1.D18 | delete the `Plan` fields `partition`, `stale` (as the re-record trigger) and `profiler` as the split's input | - | open | |
-| P1.D19 | (merged into P1.D5 and P1.D6, review round 5) | - | n/a | merged |
 | P1.D20 | delete the default query pool on every Vulkan plan and `timestamps` as a device hook for the split | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
@@ -191,26 +180,24 @@ Tests the plan's phase 0 list names since the review round.
 | P1.G1 | green: `test_record_is_pure.jl` for compiles | - | open | |
 | P1.G2 | green: `test_recorded_once.jl` (SAM 2 encoder and decoder recorded once each; today twice, `census_radv.txt`) | - | open | |
 
-### Added 2026-10-02 (review round 5)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P1.A14 | `caps(dev)` facts for `costs!` and `schedule!`: throughput per element type, memory bandwidth, transfer queue presence, cross-queue cost; the kernel compile configuration `config(dev, f)` (api.md 4.1, G3) | - | open | |
-| P1.A15 | the submission budget as core's function of `caps(dev)` facts (job timeout, whether the device drives a display); `submissionbudget` is no longer a device-type hook (S15) | 8 hits of `submissionbudget`, 5 files | open | |
+| P1.A15 | the submission budget as core's function of `caps(dev)` facts (job timeout, whether the device drives a display); `submissionbudget` is no longer a device-type hook | 8 hits of `submissionbudget`, 5 files | open | |
 | P1.A16 | `submissions(g)`: segments and cuts, including those host nodes cause (plan, "The graph and its plan") | n/a (no definition at 5c2d4c6; the word occurs 49 times in prose) | open | |
-| P1.D21 | delete `supportspredicate` (no conditional execution: S13) | 13 hits, 8 files | open | |
+| P1.D21 | delete `supportspredicate` (no conditional execution) | 13 hits, 8 files | open | |
 | P1.D22 | delete conditional rendering (`vkCmdBeginConditionalRenderingEXT`, today for `repeat!`'s per-iteration flags, `vulkan/graph.jl:158, 1327`; the plan: "Mantle uses it for nothing") | 2 hits of `vkCmdBeginConditionalRenderingEXT`, 2 files; 1 of `cmd_begin_conditional_rendering_ext` | open | |
 | P1.D23 | delete `callgroup` (launch geometry is one core calculation from `KernelInfo`; api.md Appendix A) | 21 hits, 10 files | open | |
 | P1.D24 | delete `materialize!` (transients placed by `place!`; api.md Appendix A) | 16 hits, 9 files | open | |
 | P1.D25 | delete `passbarriers` (`barriers!` is core's; api.md Appendix A) | 11 hits, 8 files | open | |
-| P1.A17 | graphs stay across structure changes (B3.16): declaring into a compiled graph and `delete!(g, h)` of an `insert!(g) do … end` handle (names open) mark the plan; `run!(g)` recompiles from the graph's nodes, retires the old plan, drops the holds of resources no node names after its last run; declarations take the graph lock (nested ones reuse it); holds counted per top-level node; test: add and remove a node block on a running graph, the graph's device arrays keep their contents, no hold leaks | - | open | |
-| P1.A18 | `when!(g or group, flag, kernel, args, ndrange)` (was P1.A8): one launch; `flag` a `GPURef{Bool}` or one-element `Bool` array, enforced by the method's argument types; indirect, count × flag (B4.1, B4.2) | - | open | |
-| P1.A19 | `Group(graph, name)` (was P1.A9): a value, declared into with `dispatch!(group, …)` anywhere, attached with `repeat!(group, n; while_nonzero)`; launches only, by which methods exist for `Group`; not a location; no mode state on the graph; hazards between iterations derived from the group's accesses (B4.2, B4.4) | - | open | |
-| P1.A20 | `Plan.compiles`: how often the plan was compiled, beside `stale`, for debugging and tests (B4.9); proposed with it: a count of re-records | - | open | |
+| P1.A17 | graphs stay across structure changes: declaring into a compiled graph and `delete!(g, group)` mark the plan, except groups of draws (P6.A16); `run!(g)` recompiles from the graph's nodes, retires the old plan, drops the holds of resources no node names after its last run; declarations take the graph lock (nested ones reuse it); holds counted per node; test: add and delete a group of launches on a running graph, the graph's device arrays keep their contents, no hold leaks | - | open | |
+| P1.A18 | `when!(g or group, flag, kernel, args, ndrange)`: one launch; `flag` a `GPURef{Bool}` or one-element `Bool` array, enforced by the method's argument types; indirect, count × flag | - | open | |
+| P1.A19 | `Group(g or group, name)`: a value and a place in its parent's order, declared into with `dispatch!`, `trace!`, `clear!`, `draw!`, `when!` and `Group` anywhere; GPU work only, by which methods exist for `Group`; `repeat!(group, n; while_nonzero)` over launches only (a draw, a clear or a group in a repeated group throws); `delete!(g, group)`; `sort!(group; by, lt, rev)`; not an owner; no mode state on the graph; compile flattens groups (a repeated one into a `LoopNode`); hazards between iterations derived from the group's accesses | - | open | |
+| P1.A20 | `Plan.compiles`: how often the plan was compiled, beside `stale`, for debugging and tests; proposed with it: a count of re-records | - | open | |
 | P1.A21 | a group size the caller gives (KA's `kernel(backend, workgroupsize)`, `dispatch!(…; group)`) is kept as given; `config(dev, f)` picks one only where none is given (plan, Kernels; the 2-D default is F32) | - | open | GPUFiltering launches 2-D image kernels with (16, 16) because the default for a 2-D range is one row of 64 |
-| P1.A22 | access per argument stored in the `Kernel` at declaration (B5.10, B5.11); `AccessCache`/`accesscache` go | 2 (`accesscache` in api.md Appendix A) | open | |
+| P1.A22 | access per argument stored in the `Kernel` at declaration; `AccessCache`/`accesscache` go | 2 (`accesscache` in api.md Appendix A) | open | |
 | P1.D26 | delete `workgroupsize` as a vocabulary hook (`KernelInfo`'s group size; api.md Appendix A) | 110 hits (KA's `workgroupsize` included), 31 files | open | |
-| P1.D27 | delete the `do`-block body forms of `repeat!` and `when!` (`repeat!(f, g, n…)`, `when!(f, g, …)`); `repeat!(g, kernel, args, ndrange; max, while_nonzero)` stays (B4.2) | 40 hits of `repeat!(…) do`/`repeat!(g…`, 11 files at f6e359a | open | |
+| P1.D27 | delete the `do`-block body forms of `repeat!` and `when!` (`repeat!(f, g, n…)`, `when!(f, g, …)`); `repeat!(g, kernel, args, ndrange; max, while_nonzero)` stays | 40 hits of `repeat!(…) do`/`repeat!(g…`, 11 files at f6e359a | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -232,7 +219,7 @@ Tests the plan's phase 0 list names since the review round.
 | P2.A7 | graph finalizers | - | open | |
 | P2.A8 | tenancy by id | - | open | |
 | P2.A9 | sparse arenas with queued mapping (Vulkan; `bindpages!`/`unbindpages!` through `sparsesubmit!`) | - | open | |
-| P2.A10 | the pressure policy in `acquire!` with `makeroom!` folded in: unmap idle arena pages, trim empty blocks, collect garbage, wait for retiring storage, then throw `OutOfDeviceMemory` (S18; the eviction step is P4.A13). Pressure never unmaps pages beyond an array's size and never compacts acceleration-structure storage (S2) | - | open | |
+| P2.A10 | the pressure policy in `acquire!` with `makeroom!` folded in: unmap idle arena pages, trim empty blocks, collect garbage, wait for retiring storage, then throw `OutOfDeviceMemory` (the eviction step is P4.A13). Pressure never unmaps pages beyond an array's size and never compacts acceleration-structure storage | - | open | |
 | P2.A11 | one meaning of capacity (`budget(dev)`) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
@@ -258,22 +245,14 @@ Tests the plan's phase 0 list names since the review round.
 | P2.G1 | green: `test_lifetime.jl` | - | open | |
 | P2.G2 | green: `test_memory_returns.jl` | - | open | |
 
-### Added 2026-10-02 (graphics, eviction, composites)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P2.A12 | (moved to P4.A13: eviction needs phase 4's dependents and pending changes) | - | n/a | moved |
-| P2.A13 | (moved to P5.A12: composites come with the TLAS and BLAS) | - | n/a | moved |
 | P2.A14 | tables with free lists (material, medium, light, texture) | - | open | |
-| P2.A15 | (removed: pressure never compacts acceleration-structure storage, S2; the plan's phase 2 no longer lists it) | - | n/a | contradicts S2 |
-| P2.T1 | (moved: written as P0.T24, green as P4.G3) | - | n/a | moved |
-
-### Added 2026-10-02 (review round 5)
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P2.A16 | the last hold under the array's record lock (S23): storage swapped for `Released()`, the old storage retired with the last tokens; dropping pending changes, the eviction list and the cell went to P4.A35 (they come in phase 4) | n/a (`Released` 0 hits) | open | |
-| P2.R1 | the vocabulary's `capacity(dev)` (the device budget hook, `vulkan/graph.jl:107`; Metal's `recommendedMaxWorkingSetSize`; `AMDGPU.free()`) becomes `budget(dev)` (api.md Appendix A) | 92 hits of `capacity` (prose and `capacity = n` included), 32 files | open | |
+| P2.A16 | the last hold under the array's record lock: storage swapped for `Released`, the old storage retired with the last tokens; dropping pending changes, the eviction list and the cell are P4.A35 (phase 4) | n/a (`Released` 0 hits) | open | |
+| P2.R1 | the vocabulary's `capacity(dev)` (the device budget hook, `vulkan/graph.jl:107`; Metal's `recommendedMaxWorkingSetSize`; `AMDGPU.free`) becomes `budget(dev)` (api.md Appendix A) | 92 hits of `capacity` (prose and `capacity = n` included), 32 files | open | |
 | P2.R2 | `maxalloc(dev)` becomes a `caps(dev)` field, the largest single allocation (api.md 4.1, G3) | 22 hits, 10 files | open | |
 | P2.D16 | delete `alignment` as a vocabulary hook (part of `rawalloc`'s constraint; api.md Appendix A) | 100 hits (the word in prose included), 38 files | open | |
 | P2.D17 | delete `bufferusage` (the memory kind's usage constraint; api.md Appendix A) | 15 hits, 9 files | open | |
@@ -300,7 +279,7 @@ Tests the plan's phase 0 list names since the review round.
 | P3.A7 | GC-safe host waits | - | open | |
 | P3.A8 | the graph lock as a non-reentrant `Base.Semaphore(1)` | - | open | |
 | P3.A9 | host nodes with `hostcuts!` and host-visible placement of their arguments | - | open | |
-| P3.A10 | arena parts held by a run until its last stage is submitted (`holdparts!`, Simon 2026-10-02) | - | open | |
+| P3.A10 | arena parts held by a run until its last stage is submitted (`holdparts!`) | - | open | |
 | P3.A11 | one head per stage | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
@@ -355,7 +334,6 @@ Tests the plan's phase 0 list names since the review round.
 | P3.D48 | delete `supports_batch_queue` (Metal's uses stay until phase 9) | 15 hits, 9 files | open | |
 | P3.D49 | delete `release_batch_queue!` (Metal's uses stay until phase 9) | 26 hits, 9 files | open | |
 | P3.D50 | delete the channel's hold stack (`SubmitChannel.holds`), `spare`, `thread` | - | open | |
-| P3.D51 | (merged into P3.D2 and P3.D30, review round 5) | - | n/a | merged |
 | P3.D52 | delete `LavaBackend`'s upload queue and `external.jl`'s direct use of `compute_queue` | 7 hits of `compute_queue` | open | |
 | P3.D53 | delete the head barrier | - | open | |
 | P3.D54 | delete `drain!(::SubmitChannel)` (core's `drain!(pool.inbox)` stays, internals.jl) and `flush!` as user-facing verbs; `acquire!(::SubmitChannel)`, `release!(::SubmitChannel, r)`, `waitfor!(::Stamp)` | 60 hits of `drain!` (all methods), 16 files | open | |
@@ -369,16 +347,14 @@ Tests the plan's phase 0 list names since the review round.
 | P3.W5 | rewrite `test/vulkan/test_holdleaves_stops_at_tlas.jl` | exists | open | |
 | P3.G1 | green: `test_interleaved_recording.jl`, `test_builder_is_a_value.jl`, `test_run_is_submit.jl` (headless), `test_crossplan_order.jl`, `test_any_thread.jl`, `test_host_node.jl` without its resize part | - | open | |
 
-### Added 2026-10-02 (review round 5)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P3.A12 | host waits only under the graph lock (S6): no sync-state, channel, pool or window lock is held while the host waits; the graph lock may be (shared arena parts, a host node's inputs, the swapchain acquire, `acquire!`'s pressure steps); no store waits for a run, value `GPURef`s included (B4.9) | - | open | |
-| P3.A13 | segments as lists of parts: recordings written once and `BuildRecording`s (S8; plan phase 3) | - | open | |
-| P3.A14 | `lockgraph(g)` throws when the calling task holds an arena part of `g`'s plan; `holdparts!` throws when the task would wait for a part while holding one with a higher id (S25) | - | open | |
+| P3.A12 | host waits only under the graph lock: no sync-state, channel, pool or window lock is held while the host waits; the graph lock may be (shared arena parts, a host node's inputs, the swapchain acquire, `acquire!`'s pressure steps); no store waits for a run, value `GPURef`s included | - | open | |
+| P3.A13 | segments as lists of parts: recordings written once and `BuildRecording`s (plan phase 3) | - | open | |
+| P3.A14 | `lockgraph(g)` throws when the calling task holds an arena part of `g`'s plan; `holdparts!` throws when the task would wait for a part while holding one with a higher id | - | open | |
 | P3.A15 | `Token = (channel, value)`; core's `passed(::Token)`/`waitfor(::Token)` over the device-type verbs `passed(ch, value)`/`waitfor(ch, value)`; `fence(ch)` becomes a read of `SubmitChannel.next` (api.md 4.2) | 112 hits of `fence` (the word in prose included), 30 files | open | |
 | P3.A16 | measure the real `run!` against the model of "Measurements this plan rests on" (target: within 3x; open decision 19) | - | open | |
-| P3.G2 | green: `test_runs_never_overlap.jl`; `test_run_host_time.jl`: the same host time per run for every number of named resources (open decision 19, ruled B3.15; was P11.G3) | - | open | |
+| P3.G2 | green: `test_runs_never_overlap.jl`; `test_run_host_time.jl`: the same host time per run for every number of named resources | - | open | |
 | P3.D55 | delete the queue-slot fields (`QueueSlots` and `VulkanQueue.slots`, `vulkan/runtime/device.jl:154, 200`; plan, Queues) | 4 hits of `QueueSlots`, 1 file | open | |
 | P3.D56 | delete `RecordingParts.batches` (plan, Core types) | 21 hits of `RecordingParts`, 9 files | open | |
 | P3.D57 | delete `abandonframe!`, `abandonrecording!`, `abandonrun!` (the recording lifecycle is `Builder`/`finish` and the free list; api.md Appendix A) | 9 + 9 + 12 hits, 5 + 5 + 4 files | open | |
@@ -389,15 +365,13 @@ Tests the plan's phase 0 list names since the review round.
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 
-### Added 2026-10-05 (rulings B3.13, B3.14)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P3.A20 | `AccessRecord` → `SyncState`: per shared resource only the accesses of what is not a run (eager calls, host reads, vendor views, eviction copies, sparse binding, applied change steps), the last tokens of retired plans, pending changes, lent/freed (B3.14) | - | open | |
-| P3.A21 | between graphs through the resource (B3.15): `namers` per `SyncState` (plans with their use, replaced at `register!`/`unregister!`; composite members reach them through readers); a stage writing a shared resource waits for the other namers' complete last runs and fills the readers' inboxes; a stage waits for the writers' last runs of its inbox resources; waits kept for the run's later stages; `register!` seeds the plan's inbox, only re-locks (never recompiles) when plans change meanwhile; `unregister!` adds its last-run tokens to `retired` (composite members included); `delete!`/rebind/box release drop the reader after the applying submission passed | - | open | |
-| P3.A22 | inbox per plan: pending a change or recording a non-run access pushes the resource into the inboxes of the plans naming it (and naming composites built from it); a stage locks only its inbox resources (expanded to the members their pending builds read), its arena parts (stage 1), and the sync locks of itself, the plans sharing what it writes and the plans naming its inbox resources; no per-resource walk at run (B3.14, B3.15) | - | open | |
+| P3.A20 | `AccessRecord` → `SyncState`: per shared resource only the accesses of what is not a run (eager calls, host reads, vendor views, eviction copies, sparse binding, applied change steps), the last tokens of retired plans, pending changes, lent/freed | - | open | |
+| P3.A21 | between graphs through the resource: `namers` per `SyncState` (plans with their use, replaced at `register!`/`unregister!`; composite members reach them through readers); a stage writing a shared resource waits for the other namers' complete last runs and fills the readers' inboxes; a stage waits for the writers' last runs of its inbox resources; waits kept for the run's later stages; `register!` seeds the plan's inbox, only re-locks (never recompiles) when plans change meanwhile; `unregister!` adds its last-run tokens to `retired` (composite members included); `delete!` drops the reader after the applying submission passed | - | open | |
+| P3.A22 | inbox per plan: pending a change or recording a non-run access pushes the resource into the inboxes of the plans naming it (and naming composites built from it); a stage locks only its inbox resources (expanded to the members their pending builds read), its arena parts (stage 1), and the sync locks of itself, the plans sharing what it writes and the plans naming its inbox resources; no per-resource walk at run | - | open | |
 | P3.A23 | plan sync lock in the lock order (after the window lock, before sync states); eager calls, evictions and storage release take the sync locks of the plans naming what they touch (`lockresources`) | - | open | |
-| P3.A24 | "old or new, never mixed" holds per STAGE: a change arriving between a run's stages goes into the next submission (B4.9) | - | open | |
+| P3.A24 | "old or new, never mixed" holds per STAGE: a change arriving between a run's stages goes into the next submission | - | open | |
 | P3.G90 | gate: the phase's green tests pass on every joined device type | - | open | |
 | P3.G91 | gate: one real use ran (editor opened and played, a RayMakie frame, a model call) | - | open | |
 | P3.G92 | gate: independent review of the phase's diff against plan, api.md, ledger: no forbidden move | - | open | |
@@ -410,9 +384,6 @@ Tests the plan's phase 0 list names since the review round.
 | P4.A1 | Lava's entry wrapper: fields in the argument slots, block marked `NonWritable` | - | open | |
 | P4.A2 | the cell arena; each array's cell, shared by its views | - | open | |
 | P4.A3 | head and prepare nodes with the plan's slots as a resource | - | open | |
-| P4.A4 | one entry per plan, host writes wait for the previous run | - | n/a | went to P4.A33: no per-plan entry, value `GPURef`s are slots (decisions.md B4.9) |
-| P4.A5 | `GPURef` with its lock | - | n/a | went to P4.A33: a value `GPURef` is a slot with a sync state, no lock of its own (decisions.md B4.9); the array box's sync state is P6's |
-| P4.A6 | hostwritten data through `x[:] = data`, kept on the host while no current plan exists | - | n/a | went to P4.A33: hostwritten graph arrays are gone (decisions.md B4.9) |
 | P4.A7 | array state with storage kinds (`Region`, `Reserve`, `Committed`, `Evicted`, `Released`) and the first `resize!` (P4.A14) | - | open | |
 | P4.A8 | pending changes on sync states with a device-wide sequence (`change!`, `pendone!`, `submitwith!`, `lockexpanded`) | - | open | |
 | P4.A9 | dependents with registration after compile and marking at the change | - | open | |
@@ -432,49 +403,44 @@ Tests the plan's phase 0 list names since the review round.
 | P4.D8 | delete `unlisten_moves!` | 3 hits, 2 files | open | |
 | P4.D9 | delete the pointer-to-inline-copy argument layout (Lava's entry wrapper and Mantle's packer) | - | open | |
 | P4.D10 | delete `graph/packing.jl`'s patch half and Vulkan's `Recording.patches` | - | open | |
-| P4.D11 | delete `DeviceRange(count; max)`; the one-argument `DeviceRange(a)` is dropped too, `launchrange(a)` is the one name (S14) | 64 hits of `DeviceRange` (both forms), 18 files | open | |
+| P4.D11 | delete `DeviceRange(count; max)`; the one-argument `DeviceRange(a)` is dropped too, `launchrange(a)` is the one name | 64 hits of `DeviceRange` (both forms), 18 files | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P4.W1 | rewrite `test/vulkan/test_recorded_move_patch.jl` (the Metal one in phase 9) | exists | open | |
-| P4.G1 | green: `test_resize_is_queued.jl`, `test_host_node.jl` in full, `test_gpuref_slot.jl` (was `test_hostwritten.jl`, B4.9) | - | open | |
+| P4.G1 | green: `test_resize_is_queued.jl`, `test_host_node.jl` in full, `test_gpuref_slot.jl` | - | open | |
 | P4.G2 | green: the whole-plan benchmark within its noise of `plan_*.txt` | - | open | |
-
-### Added 2026-10-02 (review round 5)
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P4.A13 | eviction of idle resources under pressure (B3.9, input mode B4.6; was P2.A12): `Evicted` storage, `Restore` change, plans marked through dependents (every naming plan registers). Evictable (S22): no composite holds it, no handle dependent, no plan that names it running, not lent, nothing pending; accesses in flight allowed (the copy is ordered after them); `acquire!` waits for eviction copies outside every lock; the same on every device type, unified-memory ones included (B5.4); acceleration structures not evicted; `restore!` of an already-evicted array with no prepared storage marks the plan for restore, then `Again` | - | open | |
-| P4.A14 | the first `resize!` (S5): in place when the new size fits the current storage (only a cell write); beyond it a large array on a device with sparse residency moves into a reserve, any other array into a pool region of twice the need (each later doubling a move) | - | open | |
-| P4.A15 | `trim!(a)` (name open, S2): unmaps a reserve's pages beyond the size, pending; pressure never does | 23 hits of `trim!` (today's `trim!(pool, dev)`), 12 files | open | |
-| P4.A16 | inline stores (S4; was P6.A13): the call copies the bytes into an upload region (B3.18); the applying submission writes them inline with `emitstore!(b, dst, upload)` up to the `caps(dev)` limit (Vulkan `vkCmdUpdateBuffer`, 64 KiB at 4-byte offsets and sizes), and a larger store is a copy from the upload region; no staging is allocated at apply. Today's core `emitstore!` (`graph/kalaunch.jl:816-823`, through `emitinline!`) gives the builder verb its name | 11 hits of `emitstore!`, 3 files | open | |
-| P4.A17 | a value `GPURef` store marks the plans whose entry holds it (`entrychanged`); only marked plans write the entry and wait (S30) | n/a (0 hits) | n/a | went to P4.A33: no entry to mark (decisions.md B4.9) |
-| P4.A18 | later segments of a stage that touch records whose changes were taken wait on the first segment's token (S26) | - | open | |
-| P4.A19 | `lockexpanded` expands composite reads transitively (TLAS → BLASes and range arrays, BLAS → geometry, array `GPURef` → target); the run's waits and recorded accesses use the expanded uses (S21; each composite's method in P5.A18 and P6.A8) | - | open | |
-| P4.A20 | `copy!(a, data)` with a new length does not copy the old contents (S31) | - | open | |
-| P4.A21 | `reservesize` and `sparsethreshold` as core functions of `caps(dev)` fields (sparse page size, sparse address space), not device verbs (S15) | n/a (0 hits each) | open | |
-| P4.A22 | `devicesize(a)` (name open): the length a kernel wrote, read back (plan, Operations) | n/a (0 hits) | n/a | went to P4.A34: `length(a)` is the real length (decisions.md B4.10) |
-| P4.G3 | green: `test_eviction.jl` (plan phase 4; B3.9; was P2.T1) | - | open | |
+| P4.A13 | eviction of idle resources under pressure: `Evicted` storage, `Restore` change, plans marked through dependents (every naming plan registers). Evictable: no composite holds it, no handle dependent, no plan that names it running, not lent, nothing pending; accesses in flight allowed (the copy is ordered after them); the copy goes to pageable host memory (`HostCopy`), so the OS may compress or swap it; restores upload through upload regions; `acquire!` waits for eviction copies outside every lock; the same on every device type, unified-memory ones included; acceleration structures not evicted; `restore!` of an already-evicted array with no prepared storage marks the plan for restore, then `Again` | - | open | |
+| P4.A14 | the first `resize!`: in place when the new size fits the current storage (only a cell write); beyond it a large array on a device with sparse residency moves into a reserve, any other array into a pool region of twice the need (each later doubling a move) | - | open | |
+| P4.A15 | `trim!(a)` (name open): unmaps a reserve's pages beyond the size, pending; pressure never does | 23 hits of `trim!` (today's `trim!(pool, dev)`), 12 files | open | |
+| P4.A16 | inline stores: the call copies the bytes into an upload region; the applying submission writes them inline with `emitstore!(b, dst, upload)` up to the `caps(dev)` limit (Vulkan `vkCmdUpdateBuffer`, 64 KiB at 4-byte offsets and sizes), and a larger store is a copy from the upload region; no staging is allocated at apply. Today's core `emitstore!` (`graph/kalaunch.jl:816-823`, through `emitinline!`) gives the builder verb its name | 11 hits of `emitstore!`, 3 files | open | |
+| P4.A18 | later segments of a stage that touch records whose changes were taken wait on the first segment's token | - | open | |
+| P4.A19 | `lockexpanded` expands composite reads transitively (TLAS → BLASes and range arrays, BLAS → geometry); the run's waits and recorded accesses use the expanded uses (each composite's method in P5.A18) | - | open | |
+| P4.A20 | `copy!(a, data)` with a new length does not copy the old contents | - | open | |
+| P4.A21 | `reservesize` and `sparsethreshold` as core functions of `caps(dev)` fields (sparse page size, sparse address space), not device verbs | n/a (0 hits each) | open | |
+| P4.G3 | green: `test_eviction.jl` (plan phase 4) | - | open | |
 | P4.D12 | delete `argbytes`, `argidentity`, `argsize` (core's `bindings!` lays out the argument block; api.md Appendix A) | 19 + 7 + 22 hits, 5 + 5 + 8 files | open | |
 | P4.D13 | delete `passedas` (argument layout is core's; api.md Appendix A) | 21 hits, 5 files | open | |
 | P4.D14 | delete `indirectindex`, `indirectslot` (launch commands are slots core lays out; api.md Appendix A) | 13 + 7 hits, 7 + 3 files | open | |
 | P4.D15 | delete `devicesized` (`LengthOf` resolved at compile; api.md Appendix A) | 15 hits, 7 files | open | |
 | P4.D16 | delete `patchable` (with the pushed patch mechanism; api.md Appendix A) | 16 hits, 6 files | open | |
 | P4.D17 | delete `storebytes!` and `upload!` (stores are pending changes; api.md Appendix A) | 10 + 44 hits, 4 + 20 files | open | |
-| P4.D18 | delete `hostwritten` graph arrays (B4.9) | 64 hits, 14 files at f6e359a | open | |
-| P4.D19 | delete `persistent = true` on graph arrays (B4.8) | 1 hit, 1 file at f6e359a | open | |
-
-### Added 2026-10-05 (ruling B3.13: changes are scheduled)
+| P4.D18 | delete `hostwritten` graph arrays | 64 hits, 14 files at f6e359a | open | |
+| P4.D19 | delete `persistent = true` on graph arrays | 1 hit, 1 file at f6e359a | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P4.A30 | `change!(apply, uses)`: the call only enqueues (requested size for `length(a)`; a store's data copied into an upload region acquired at the call, B3.18, the one allocation a call makes); no other allocation, no retry, never a wait for a run at the call (B3.13) | - | open | |
+| P4.A30 | `change!(apply, uses)`: the call only enqueues (requested size for `length(a)`; a store's data copied into an upload region acquired at the call, the one allocation a call makes); no other allocation, no retry, never a wait for a run at the call | - | open | |
 | P4.A31 | the applying submission allocates before its locks (`prepare!`: storage or pages for a Resize, a structure's capacity, restore storage) and applies in sequence order (`submitwith!` with `stepsof`); Again if what it prepared no longer fits; every submitter on this path (`submitapplying`, run stages) | - | open | |
-| P4.A32 | `resizable` flag set by the first `resize!` call or by `capacity = n` at creation (B4.10) (compile launches indirectly from then on); handle dependents get their parts marked for re-recording when a move is applied (open decision 17 (c), B3.11; nothing recompiles, nothing waits) | - | open | |
-| P4.A33 | a value `GPURef` is one slot in device memory whose address plans and pieces bake; `r[] = v` a scheduled store (was P4.A4, P4.A6, P4.A17; B4.9) | - | open | |
-| P4.A34 | `length(a)`/`size(a)` the real length; for a kernel-written length a wait and a read of the cell, a throw during the declaration of the graph that writes it; `resize!` beyond the capacity allowed, `capacity` like `sizehint!` (was P4.A22; B4.10) | - | open | |
-| P4.A35 | the last hold's phase-4 half (was P2.A16): pending changes dropped (their upload regions retired), the array off the eviction list (B3.9), the cell released | - | open | |
-| P4.T1 | benchmarks behind B3.11 before P4.A32: re-record cost at 100, 1 000 and 5 000 draws, and pulled indices against indexed draws, on NVIDIA, AMD and the M5 (`experiments/draw_bench/`) | - | open | |
+| P4.A32 | `resizable` flag set by the first `resize!` call or by `capacity = n` at creation (compile launches indirectly from then on); handle dependents get their parts marked for re-recording when a move is applied (open decision 17 (c),; nothing recompiles, nothing waits) | - | open | |
+| P4.A33 | a `GPURef` is one slot in device memory whose address plans and groups of draws bake; `r[] = v` a scheduled store | - | open | |
+| P4.A34 | `length(a)`/`size(a)` the real length; for a kernel-written length a wait and a read of the cell, a throw during the declaration of the graph that writes it; `resize!` beyond the capacity allowed, `capacity` like `sizehint!` | - | open | |
+| P4.A35 | the last hold's phase-4 half: pending changes dropped (their upload regions retired), the array off the eviction list, the cell released | - | open | |
+| P4.T1 | benchmarks before P4.A32: re-record cost at 100, 1 000 and 5 000 draws, and pulled indices against indexed draws, on NVIDIA, AMD and the M5 (`experiments/draw_bench/`) | - | open | |
+| P4.T2 | measure on Linux (NVIDIA, RADV) and the M5 (plan, open decision 14): whether `Readback` memory and Metal shared buffers are pinned; whether a device type can write a page-aligned host allocation directly (Vulkan `VK_EXT_external_memory_host`, Metal no-copy buffers) or needs a staging copy; how much physical memory evicting a writable array frees once the OS compresses or swaps the copy | - | open | |
 | P4.G90 | gate: the phase's green tests pass on every joined device type | - | open | |
 | P4.G91 | gate: one real use ran (editor opened and played, a RayMakie frame, a model call) | - | open | |
 | P4.G92 | gate: independent review of the phase's diff against plan, api.md, ledger: no forbidden move | - | open | |
@@ -486,10 +452,9 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P5.A1 | builds and refits as operations with `TraceRead`/`TraceBuild` declarations | - | open | |
 | P5.A2 | the core `TLAS` (hardware and software) with instance ranges and the device-side range table | - | open | |
-| P5.A3 | storage for a doubling capacity, builds and refits with the exact count; `BuildRecording` on Vulkan, count from a cell on Metal (Simon, 2026-10-02) | - | open | |
+| P5.A3 | storage for a doubling capacity, builds and refits with the exact count; `BuildRecording` on Vulkan, count from a cell on Metal | - | open | |
 | P5.A4 | builds with all their uses | - | open | |
 | P5.A5 | the texture table | - | open | |
-| P5.A6 | (renumbered as P5.R1: a rename) | - | n/a | renumbered |
 | P5.A7 | measure: a build with count N into storage sized for C costs the same as exact (expected, not measured; `experiments/tlas_sparse/`) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
@@ -508,38 +473,33 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P5.G1 | green: phase 3's tests with a ray-traced graph whose TLAS is rebuilt every run | - | open | |
 
-### Added 2026-10-02 (graphics, eviction, composites)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P5.A8 | BLAS storage sized from its geometry with a capacity that doubles (S3): a new topology a Build into it (a `MoveAccel` beyond the capacity, the new address through its cell), moved vertices with the same topology an Update; TLASes over a BLAS pend an Update when its address or contents change; counts by the TLAS rules (`BuildRecording`, `BuildAccel`) | - | open | |
-| P5.A9 | readers (B3.10): structure updates pended by host changes and by runs that write their arrays (`pendupdate!`) | - | open | |
+| P5.A8 | BLAS storage sized from its geometry with a capacity that doubles: a new topology a Build into it (a `MoveAccel` beyond the capacity, the new address through its cell), moved vertices with the same topology an Update; TLASes over a BLAS pend an Update when its address or contents change; counts by the TLAS rules (`BuildRecording`, `BuildAccel`) | - | open | |
+| P5.A9 | readers: structure updates pended by host changes and by runs that write their arrays (`pendupdate!`) | - | open | |
 | P5.A10 | per-range data (geometry arrays, material index) through the range table; no scene-wide concatenation | - | open | |
-| P5.A11 | BLASes shared by geometry arrays; a `mask` per range entry for visibility (hide = mask 0, a refit; `active = false` only for a deleted range, a Build; S19) | - | open | |
+| P5.A11 | BLASes shared by geometry arrays; a `mask` per range entry for visibility (hide = mask 0, a refit; `active = false` only for a deleted range, a Build) | - | open | |
 | P5.D10 | delete the host triangle concatenation: `tri_gpu` | 32 hits, 9 files | open | |
 | P5.D11 | delete `off_gpu` | 34 hits, 10 files | open | |
 | P5.D12 | delete `triangle_data` | 19 hits, 6 files | open | |
 | P5.D13 | delete `HardwareAccel` | 32 hits, 5 files | open | |
-| P5.T1 | (moved: written as P0.T25, green as P5.G2) | - | n/a | moved |
-
-### Added 2026-10-02 (review round 5)
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P5.R1 | rename the plan-internal `refit!` (`graph/build.jl`), which collides with the TLAS `refit!` (was P5.A6) | - | open | |
-| P5.A12 | composites hold and never allocate (was P2.A13): TLAS, BLAS, tables, render objects built from arrays, array `GPURef`s and accel storage; only holds and change commits retire; `TLAS` and `BLAS` finalizers push their hold drops through the pool's inbox (S23; `ArrayBox` in P6.A15, render objects in P11.A16) | - | open | |
-| P5.A13 | `BuildRecording`s marked by the change that alters what they recorded; the run re-records only marked ones; nothing compared at run (S20) | - | open | |
-| P5.A14 | build coalescing per structure: any Build → Build, else Update; `builtcount` = the count of the last Build, used by every Update (S28) | n/a (`builtcount` 0 hits) | open | |
-| P5.A15 | kernel-written counts (S29, to be confirmed): a TLAS total built over the capacity with mask-0 records past the total (Vulkan); a BLAS length built over the geometry capacity with degenerate primitives past the length, so later changes are Updates | - | open | |
-| P5.A16 | a change that would make a running plan stale is applied after the run's end: the submitter that would apply it waits (`WaitFor`), never the call (B3.13); whether and for which changes this exception stays is open (review of 2026-10-14), throwing from the plan's own host function; no `except`; the records kernel writes mask 0 past the device total (S27, revised in the verification round) | - | open | |
-| P5.A17 | reader snapshots (B3.10; S7): an array's readers are an immutable snapshot replaced under its lock and counted per reader; changes to an array with readers lock it with its readers and pend the readers' builds; the submission that applies them prepares reader capacity before its locks (B3.13); a run pends `pendupdate!(reader, array)` after each stage | - | open | |
-| P5.A18 | `lockexpanded` methods for the TLAS (BLASes, range arrays) and the BLAS (geometry); the mechanism is P4.A19 (S21) | - | open | |
-| P5.A19 | a TLAS total past the device's `maxInstanceCount` throws at the call that raises it (`push!`, a source's `resize!`/`copy!`, a rebind); capacity capped at it (B4.8) | - | open | |
-| P5.A20 | `resize!` of a texture keeps the texels where the old and new sizes overlap (B4.8) | - | open | |
-| P5.G2 | green: `test_composite_fuzz.jl` (plan phase 5; was P5.T1) | - | open | |
+| P5.R1 | rename the plan-internal `refit!` (`graph/build.jl`), which collides with the TLAS `refit!` | - | open | |
+| P5.A12 | composites hold and never allocate: TLAS, BLAS, tables, render objects built from arrays and accel storage; only holds and change commits retire; `TLAS` and `BLAS` finalizers push their hold drops through the pool's inbox (render objects in P11.A16) | - | open | |
+| P5.A13 | `BuildRecording`s marked by the change that alters what they recorded; the run re-records only marked ones; nothing compared at run | - | open | |
+| P5.A14 | build coalescing per structure: any Build → Build, else Update; `builtcount` = the count of the last Build, used by every Update | n/a (`builtcount` 0 hits) | open | |
+| P5.A15 | kernel-written counts (to be confirmed): a TLAS total built over the capacity with mask-0 records past the total (Vulkan); a BLAS length built over the geometry capacity with degenerate primitives past the length, so later changes are Updates | - | open | |
+| P5.A16 | a change that would make a running plan stale is applied after the run's end: the submitter that would apply it waits (`WaitFor`), never the call; whether and for which changes this exception stays is open, throwing from the plan's own host function; no `except`; the records kernel writes mask 0 past the device total | - | open | |
+| P5.A17 | reader snapshots: an array's readers are an immutable snapshot replaced under its lock and counted per reader; changes to an array with readers lock it with its readers and pend the readers' builds; the submission that applies them prepares reader capacity before its locks; a run pends `pendupdate!(reader, array)` after each stage | - | open | |
+| P5.A18 | `lockexpanded` methods for the TLAS (BLASes, range arrays) and the BLAS (geometry); the mechanism is P4.A19 | - | open | |
+| P5.A19 | a TLAS total past the device's `maxInstanceCount` throws at the call that raises it (`push!`, a source's `resize!`/`copy!`); capacity capped at it | - | open | |
+| P5.A20 | `resize!` of a texture keeps the texels where the old and new sizes overlap | - | open | |
+| P5.G2 | green: `test_composite_fuzz.jl` (plan phase 5) | - | open | |
 | P5.D14 | delete `AdaptedAccel` (with Metal's HWTLAS bookkeeping; api.md Appendix A) | 82 hits, 16 files | open | |
 | P5.D15 | delete `remakeimage!` (a new size is a new image under a new index; api.md Appendix A) | 9 hits, 6 files | open | |
-| P5.D16 | Raycore: delete the TLAS finalizer that finalizes arrays a recording and `StaticTLAS` still use (`instanced-bvh.jl:372, 400-411`), `blas_array`, and host readbacks and `synchronize()` between build steps (`resizing-and-raytracing.jl` D.1) | - (Raycore `sd/with-texture`, tree 9accd25) | open | |
+| P5.D16 | Raycore: delete the TLAS finalizer that finalizes arrays a recording and `StaticTLAS` still use (`instanced-bvh.jl:372, 400-411`), `blas_array`, and host readbacks and `synchronize` between build steps (`resizing-and-raytracing.jl` D.1) | - (Raycore `sd/with-texture`, tree 9accd25) | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -558,7 +518,7 @@ Tests the plan's phase 0 list names since the review round.
 | P6.A4 | the selection table (the Vulkan GEMM/GEMV selection out of `vulkan/array/gemm.jl`, `basealignment` in the key) | - | open | |
 | P6.A5 | optional rewriters | - | open | |
 | P6.A6 | `devicearg` | - | open | |
-| P6.A7 | scoped vendor views: core's `withview` and the foreign channel (G11; each device type's constructor with its phase, P9.A9, P10.A7); `withview` takes a hold, applies pending changes and restores first (the stream waits on that submission) and drops the hold at the end with the stream's token (S24) | - | open | |
+| P6.A7 | scoped vendor views: core's `withview` and the foreign channel (G11; each device type's constructor with its phase, P9.A9, P10.A7); `withview` takes a hold, applies pending changes and restores first (the stream waits on that submission) and drops the hold at the end with the stream's token | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -608,46 +568,34 @@ Tests the plan's phase 0 list names since the review round.
 | P6.G2 | green: GPUArrays' TestSuite on every joined device type | - | open | |
 | P6.G3 | green: `test_view_barriers.jl` | - | open | |
 
-### Added 2026-10-02 (graphics, eviction, composites)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P6.A8 | array `GPURef` (rebind pending, holds, indirect launches, readers): device-only, the target a root device array (a view throws), rebinding to the current target a no-op (S16); `r[] = b` a pending cell write of the box, its reader TLASes pend an Update, a Build if the length changed (S19); its `lockexpanded` method (P4.A19) | - | open | |
-| P6.A9 | `attribute(a, i) = a[min(i, length(a))]` (1-based; the benchmark's 0-based form `a[min(i, n-1)]`, S17): one argument type for a value and per-element attributes | - | open | |
+| P6.A9 | `attribute(a, i) = a[min(i, length(a))]` (1-based; the benchmark's 0-based form `a[min(i, n-1)]`): one argument type for a value and per-element attributes | - | open | |
 | P6.A10 | graphics and ray-tracing pipelines from the device type's cache under one key (`compiledraw`, `compiletrace`); `npipelines` counts pipelines on every device type | - | open | |
 | P6.A11 | images as resources (`Image`, stores, copies, `Array(img)`), one format table per device type (`imageformat`), the sampler table (`samplerentry!`) | - | open | |
-| P6.A12 | `render!`/`draw!` as nodes; index arrays through `bindindices!`; `when!` draws, one per call with a `Bool` flag (B4.1) (indirect, the count multiplied by the flag, S13); the scene rectangle as one array per scene applied in the vertex stage (S32) | - | open | |
-| P6.A16 | render passes as lists of pieces (B3.17): `render!` returns the pass; `insert!(p) do … end` / `delete!(p, h)` applied by the next run (`updatepieces!`: compile and record the piece, its argument region and cell-copy entries, its registration; the list part re-recorded); the head's cell-copy table a resizable array launched indirectly; a fixed barrier at every pass start; device-type verbs `recordpiece`, `emitpieces!` (Vulkan secondaries with dynamic rendering, Metal ICB per piece); gate: insert/delete time per plot at 100, 1 000, 5 000 plots does not grow with the count, a visibility change records nothing, a large mesh's draw time equal to a pass with only that mesh | - | open | |
-| P6.A17 | KernelAbstractions on graph arrays declares: `KA.get_backend` is the graph, `KA.allocate` a transient; host reads of contents throw at their line; launch sizes recorded per node, a resize behind one throws at the next compile (B4.3) | - | open | |
-| P6.A18 | `adapt(Mantle.Device(graph), x)`: zero-copy aliases the graph names, with a hold; `adapt(Mantle.Device(), x)` uploads (B4.4) | - | open | |
-| P6.A19 | `MantleArray{T,N,L}`: a view is the same type (no role parameter); read-only, `Readback` memory and resizable are runtime properties of the resource (B4.5) | - | open | |
-| P6.A20 | `readonly = true`: a reference to the host array for restores; writes throw at the call from the access `dispatch!` derives at declaration (B4.6) | - | open | |
-| P6.A21 | bounds-checked kernels unless `@inbounds`; verify that Lava reports a device-side bounds error rather than faulting (B4.7) | - | open | |
-| P6.A22 | `sort!(pass; by, lt, rev)` reorders a pass's pieces (B4.8) | - | open | |
+| P6.A12 | `clear!`/`draw!`/`when!` on a graph or group as nodes into a target (window, image, or tuple); compile forms the render passes (`formpasses!`: clears and draws into the same targets with no reader between them; load operations from clears, store operations from liveness); index arrays through `bindindices!`; `when!` draws, one per call with a `Bool` flag (indirect, the count multiplied by the flag); eager `draw!(dev, …)` as its own pass; the scene rectangle as one array per scene applied in the vertex stage | - | open | |
+| P6.A16 | groups of draws as pieces: a group whose nodes are draws into one pass is compiled and recorded on its own; a new one at a place inside a pass with its targets, draws declared into one, its `delete!` and a `sort!` of such groups are applied by the next run (`applychanges!`/`updatepieces!`: compile and record the piece, its argument region and cell-copy entries, its registration; the list part re-recorded), any other change recompiles; the head's cell-copy table a resizable array launched indirectly; a fixed barrier at every pass start; device-type verbs `recordpiece`, `emitpieces!` (Vulkan secondaries with dynamic rendering, Metal ICB per piece); gate: insert/delete time per plot at 100, 1 000, 5 000 plots does not grow with the count, a visibility change records nothing, a large mesh's draw time equal to a pass with only that mesh | - | open | |
+| P6.A17 | KernelAbstractions on graph arrays declares: `KA.get_backend` is the graph, `KA.allocate` a transient; host reads of contents throw at their line; launch sizes recorded per node, a resize behind one throws at the next compile | - | open | |
+| P6.A18 | `adapt(Mantle.Device(graph), x)`: zero-copy aliases the graph names, with a hold; `adapt(Mantle.Device, x)` uploads | - | open | |
+| P6.A19 | `MantleArray{T,N,L}`: a view is the same type (no role parameter); read-only, unified memory (`unified = true`) and resizable are runtime properties of the resource | - | open | |
+| P6.A20 | `readonly = true`: a reference to the host array for restores; writes throw at the call from the access `dispatch!` derives at declaration | - | open | |
+| P6.A21 | bounds-checked kernels unless `@inbounds`; verify that Lava reports a device-side bounds error rather than faulting | - | open | |
+| P6.A22 | `sort!(group; by, lt, rev)` reorders the groups in a group; for groups of draws a rewrite of the pass's list | - | open | |
 | P6.A23 | resource identity: a resource is the array's state, shared by its views, reshapes and storage, never the object; an argument that reaches device memory but is not a `MantleArray` (a vendor array, an array escaping `withview`, a raw backend array) throws at declaration (plan, Arrays; api.md section 7). Replaces `Graph.ids` keyed by object and `resourceleaves!` taking every device-array leaf | - | open | |
-| P6.A13 | (moved to P4.A16: the plan puts inline stores in phase 4) | - | n/a | moved |
 | P6.A14 | tessellation as stage types | - | open | |
 | P6.D40 | delete `pass!` (the hand-recorded path) | 22 hits, 9 files | open | |
 | P6.D41 | delete `PassRecorder` | 10 hits, 2 files | open | |
 | P6.D42 | delete `viewport!` | 10 hits, 3 files | open | |
-| P6.D43 | delete `blit!` as an eager call (becomes `render!(dev, …)`) | 14 hits, 9 files | open | |
+| P6.D43 | delete `blit!` as an eager call (becomes an eager `draw!(dev, …)`) | 14 hits, 9 files | open | |
 | P6.D44 | delete `SampledTexture` | 16 hits, 7 files | open | |
-| P6.D45 | (moved to P7.D16: `Surface` goes in phase 7 with the window code that replaces it) | - | n/a | moved |
-| P6.D46 | (moved to P7.D17) | - | n/a | moved |
-| P6.D47 | (moved to P7.D18) | - | n/a | moved |
-| P6.D48 | (moved to P7.D19) | - | n/a | moved |
-| P6.D49 | (moved to P7.D20) | - | n/a | moved |
 | P6.D50 | delete `transition_image!` | 17 hits, 9 files | open | |
 | P6.D51 | delete `readback_framebuffer` | 35 hits, 8 files | open | |
 | P6.D52 | delete `readback_target` | 21 hits, 4 files | open | |
 | P6.D53 | delete `Attr` with a stored stride | 13 hits, 4 files | open | |
-| P6.T1 | test: value ↔ per-element switch, rebind and visibility on one screen: one pipeline, zero recompiles, pixels match a fresh render (not in the plan: confirm) | - | open | |
-
-### Added 2026-10-02 (review round 5)
+| P6.T1 | test: value ↔ per-element switch, another array object for an attribute (a new group of draws) and visibility on one screen: one pipeline, zero recompiles, pixels match a fresh render (not in the plan: confirm) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P6.A15 | `ArrayBox` (the array `GPURef`) finalizer pushing its hold drop through the pool's inbox (S23) | - | open | |
 | P6.R1 | `compile_draw` becomes `compiledraw(dev, pipeline, argtypes, formats)` (api.md Appendix A) | 35 hits, 13 files | open | |
 | P6.R2 | `makeimage` becomes `placeimage` behind `Image(dev, T, dims...)` (api.md Appendix A) | 7 hits, 5 files | open | |
 | P6.D54 | delete the eager `mul!`/`norm` code in `vulkan/array/` (their kernels become candidates; plan, Eager work, "Goes") | - | open | |
@@ -678,7 +626,7 @@ Tests the plan's phase 0 list names since the review round.
 | P7.A4 | per-image present segments | - | open | |
 | P7.A5 | present in `submitnative!` | - | open | |
 | P7.A6 | `resize!(win, …)` as a mark the next run applies | - | open | |
-| P7.A7 | window capacity and window-sized arrays and images placed at it (a sparse arena part where the device has sparse residency, mapped per generation for its size); a resize beyond the capacity recompiles the graph at its next run (S1, S9) | - | open | |
+| P7.A7 | window capacity and window-sized arrays and images placed at it (a sparse arena part where the device has sparse residency, mapped per generation for its size); a resize beyond the capacity recompiles the graph at its next run | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -702,30 +650,25 @@ Tests the plan's phase 0 list names since the review round.
 | P7.W2 | rewrite `test/vulkan/test_recordable_plans.jl` | exists | open | |
 | P7.G1 | green: `test_window_resize.jl`, `test_run_is_submit.jl` for a windowed graph with overlays | - | open | |
 
-### Added 2026-10-02 (graphics, eviction, composites)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P7.A8 | window-sized segments recorded per swapchain generation | - | open | |
 | P7.A9 | screenshots: `Array(win)` through a second recording of the present segment | - | open | |
-| P7.A10 | (removed: the default colour format and the `vsync` default are open, api.md G9; F9) | - | n/a | open question, not an item |
 | P7.D14 | delete `readback_window` | 20 hits, 10 files | open | |
-
-### Added 2026-10-02 (review round 5)
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P7.A11 | window-sized images recreated per swapchain generation at the actual size on the same arena memory (S9; the segments drawing into them are P7.A8) | - | open | |
-| P7.A12 | the swapchain image has one owner, the window: an image of a run that returns `Again` or throws goes back to it (`keepimage!`); only real images are kept (S33) | n/a (`keepimage!` 0 hits) | open | |
+| P7.A11 | window-sized images recreated per swapchain generation at the actual size on the same arena memory (the segments drawing into them are P7.A8) | - | open | |
+| P7.A12 | the swapchain image has one owner, the window: an image of a run that returns `Again` or throws goes back to it (`keepimage!`); only real images are kept | n/a (`keepimage!` 0 hits) | open | |
 | P7.A13 | the window open verb (name open, G13; the plan's "windows: open, acquire, present") | - | open | |
-| P7.A14 | windows (B4.8): any node of the presenting graph writes the window and the first graph declaring a write presents, a second throws; the binding ends at `free!`, collection or the render node's removal; eager `render!` into a window throws; `Array(win)` throws when minimized, unpresented or from the graph's own host function, and wakes a waiting call with the error; `run!` returns `Submitted()`/`Skipped()` | - | open | |
+| P7.A14 | windows: any node of the presenting graph writes the window and the first graph declaring a write presents, a second throws; the binding ends at `free!`, collection or the removal of the nodes writing the window; an eager draw into a window throws; `Array(win)` throws when minimized, unpresented or from the graph's own host function, and wakes a waiting call with the error; `run!` returns `Submitted`/`Skipped` | - | open | |
 | P7.R1 | `acquire_next_image!` becomes `acquirenext(sc)` (api.md Appendix A) | 32 hits, 12 files | open | |
 | P7.R2 | `screenshot` becomes `Array(win)` (name open) | 17 hits, 8 files | open | |
-| P7.D15 | RayMakie: delete `DrawBinding` use (was P11.D14, numbered P11.D13 before the renumbering; the plan deletes `DrawBinding` in phase 7, "RayMakie uses it") | 6 hits, 2 files (RayMakie e6e1aa9b0) | open | |
-| P7.D16 | delete `Surface` (was P6.D45) | 18 hits, 8 files | open | |
-| P7.D17 | delete `target_view` (was P6.D46) | 24 hits, 11 files | open | |
-| P7.D18 | delete `target_image` (was P6.D47) | 15 hits, 7 files | open | |
-| P7.D19 | delete `target_extent` (was P6.D48) | 36 hits, 13 files | open | |
+| P7.D15 | RayMakie: delete `DrawBinding` use | 6 hits, 2 files (RayMakie e6e1aa9b0) | open | |
+| P7.D16 | delete `Surface` | 18 hits, 8 files | open | |
+| P7.D17 | delete `target_view` | 24 hits, 11 files | open | |
+| P7.D18 | delete `target_image` | 15 hits, 7 files | open | |
+| P7.D19 | delete `target_extent` | 36 hits, 13 files | open | |
 | P7.D20 | delete `target_format` (was P6.D49; the format comes from `imageformat(dev, T)`) | 18 hits, 9 files | open | |
 | P7.D21 | delete `beginframe!` (acquire and present are part of `run!`; api.md Appendix A) | 14 hits, 9 files | open | |
 | P7.D22 | delete `present_frame!` (present is part of `submitnative!`) | 23 hits, 12 files | open | |
@@ -759,7 +702,7 @@ Tests the plan's phase 0 list names since the review round.
 | P8.D8 | delete `LIVE_CONTEXTS` | 4 hits, 1 files | open | |
 | P8.D9 | delete `LAYER_SETTING_STORAGE` | 3 hits, 1 files | open | |
 | P8.D10 | delete `PIPELINE_NO_COMPILE` | 16 hits, 3 files | open | |
-| P8.D11 | delete `WORKGROUP_FALLBACK` | 15 hits, 2 files | done | the fault was NVIDIA's 64-bit division; Lava's `lower_wide_divisions!` removes it (2026-10-12); Mantle 28a58dc, `test_static_workgroup.jl` |
+| P8.D11 | delete `WORKGROUP_FALLBACK` | 15 hits, 2 files | done | the fault was NVIDIA's 64-bit division; Lava's `lower_wide_divisions!` removes it; Mantle 28a58dc, `test_static_workgroup.jl` |
 | P8.D12 | delete `KERNEL_RECORDERS` | 5 hits, 1 files | open | |
 | P8.D13 | delete `BACKEND_PROBES` | 7 hits, 1 files | open | |
 | P8.D14 | delete `COMMITTED` | 10 hits, 2 files | open | |
@@ -783,20 +726,18 @@ Tests the plan's phase 0 list names since the review round.
 | P8.D32 | delete `BACKEND_VOCABULARY` | 17 hits, 7 files | open | |
 | P8.D33 | delete `HostDevice` and `src/host/` | 0 hits (removed in 5c2d4c6): n/a once confirmed | open | |
 | P8.D34 | delete `FROZEN_*` as process globals; lock or remove `iterplans`/`launchplans` | 6 + 12 hits | open | |
-| P8.D35 | delete graphics constructors keyed on a KA backend; hooks without a device argument other than `staged_gemm_tile()` (P6.D20) and `initbackend!()` (P8.D18) | - | open | |
+| P8.D35 | delete graphics constructors keyed on a KA backend; hooks without a device argument other than `staged_gemm_tile` (P6.D20) and `initbackend!` (P8.D18) | - | open | |
 | P8.D36 | delete `Device(::KA.Backend)`, `caps(::KA.Backend)`, `Device(api; select)`, `backend(dev)` | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P8.G1 | green: `test_device_is_an_argument.jl`, `test_any_thread.jl` | - | open | |
 
-### Added 2026-10-02 (review round 5)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
 | P8.D37 | delete `HostAPI` (plan, Devices, "Deleted") | 0 hits: n/a once confirmed | open | |
-| P8.D38 | delete `defaultdevice!` (`Device()` and the registry; api.md Appendix A) | 18 hits, 9 files | open | |
-| P8.D39 | delete `use_frozen_kernels` (the `Mantle.Kernel` at its `CodeInstance`, B5.11; api.md Appendix A) | 11 hits, 8 files | open | |
+| P8.D38 | delete `defaultdevice!` (`Device` and the registry; api.md Appendix A) | 18 hits, 9 files | open | |
+| P8.D39 | delete `use_frozen_kernels` (the `Mantle.Kernel` at its `CodeInstance`; api.md Appendix A) | 11 hits, 8 files | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -841,11 +782,9 @@ Tests the plan's phase 0 list names since the review round.
 | P9.W1 | rewrite `test/metal/test_recorded_move_metal.jl` | exists | open | |
 | P9.G1 | green: phase 0's tests on the MacBook worker; SAM 2.1's frame no slower than today; RayDemo's crown matching today's image | - | open | |
 
-### Added 2026-10-02 (review round 5)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P9.A7 | stores on Metal: inline limit 0 in `caps(dev)`, every store a copy from its upload region (S4, B3.18) | - | open | |
+| P9.A7 | stores on Metal: inline limit 0 in `caps(dev)`, every store a copy from its upload region | - | open | |
 | P9.A8 | one residency helper used by `rawalloc`, `rawfree`, `createreserve`, `bindpages!`, `unbindpages!` and the per-plan sets (api.md section 8) | - | open | |
 | P9.A9 | `MtlArray` vendor view constructor (G11; core's `withview` is P6.A7) | - | open | |
 | P9.D18 | delete Mantle's use of Metal.jl's `BatchedCommandQueue` (`metal/device.jl:82, 93`; plan, Metal, "Channels") | 10 hits, 2 files | open | |
@@ -880,11 +819,9 @@ Tests the plan's phase 0 list names since the review round.
 |---|---|---|---|---|
 | P10.G1 | green: phase 0's tests on the workstation (CUDA) and the Bosgame (HIP) | - | open | |
 
-### Added 2026-10-02 (review round 5)
-
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P10.A6 | stores on CUDA and HIP: inline limit 0 in `caps(dev)`, every store a copy from its upload region (S4, B3.18) | - | open | |
+| P10.A6 | stores on CUDA and HIP: inline limit 0 in `caps(dev)`, every store a copy from its upload region | - | open | |
 | P10.A7 | `CuArray` and `ROCArray` vendor view constructors (G11; core's `withview` is P6.A7) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
@@ -909,7 +846,7 @@ Tests the plan's phase 0 list names since the review round.
 | P11.D9 | JuliaVision: `planfor` goes (as the plan says for it) | 47 hits, 25 files (JuliaVision 2f0c3ed) | open | |
 | P11.D10 | JuliaVision: `recordedplan` goes (as the plan says for it) | 14 hits, 7 files (JuliaVision 2f0c3ed) | open | |
 | P11.D11 | JuliaVision: helper work run as its own plan or through `runonce!` becomes part of the call's graph (the plan lists `runonce!` as a pattern, "Where JuliaVision is today", not as a named delete) | 61 hits of `runonce!`, 18 files (JuliaVision 2f0c3ed) | open | |
-| P11.D12 | VideoEditor: the `repeat!(g, 1; while_nonzero = gate)` idiom becomes one `when!` per kernel with a `Bool` gate (B4.1) | 9 hits of `while_nonzero` | open | |
+| P11.D12 | VideoEditor: the `repeat!(g, 1; while_nonzero = gate)` idiom becomes one `when!` per kernel with a `Bool` gate | 9 hits of `while_nonzero` | open | |
 | P11.A1 | VideoEditor: the engine's device passed everywhere | - | open | |
 | P11.A2 | Hikari: `fill_aux_buffers!` and `postprocess!` become methods; builds and refits are operations; one `VolPath` rendered by one task at a time through its graph's lock | - | open | |
 | P11.A3 | RayMakie: frame graphs recorded; overlay compositing through the one path | - | open | |
@@ -917,38 +854,31 @@ Tests the plan's phase 0 list names since the review round.
 | P11.A5 | comments contradicting Mantle corrected in the commit that makes them wrong | - | open | |
 | P11.G1 | green: each consumer suite with two devices open; each runner's per-call assertion (one run per call, no bytes copied outside the graph, host waits only for outputs and at host nodes) | - | open | |
 
-### Added 2026-10-02 (RayMakie on the core model)
-
 | id | item | baseline | status | evidence |
 |---|---|---|---|---|
-| P11.A6 | RayMakie: frame graph recorded once; adding or removing a plot recompiles nothing (a piece, B3.17), a pipeline change is a piece delete and insert; recompiled only for kernels declared per plot, a new pass, a new Hikari material type (open decision 18) | - | open | |
-| P11.A7 | RayMakie: attributes as array `GPURef`s; `update!` as stores, resizes and rebinds; zero elements keeps the render object | - | open | |
+| P11.A6 | RayMakie: frame graph recorded once; adding or removing a plot recompiles nothing (a group of draws), a pipeline change is a group delete and a new group; recompiled only for kernels declared per plot, a new pass, a new Hikari material type (open decision 18) | - | open | |
+| P11.A7 | RayMakie: attributes as `MantleArray`s mutated in place; `update!` as stores and resizes, another array object as a new group of draws; zero elements keeps the render object | - | open | |
 | P11.A8 | RayMakie: a dirty list put by ComputePipeline edges instead of scene-tree walks | `poll_all_plots` 10 hits, `for_each_atomic_plot` 11 hits | open | |
 | P11.A9 | RayMakie: the screen as a reader of its plots' arrays (redraw marks from runs that write them) | - | open | |
 | P11.A10 | RayMakie: shadow and AO passes only when their inputs changed (under `when!`, plan phase 11) | - | open | |
 | P11.A11 | RayMakie: grid lines from the camera on the GPU; lines' indices stored; `visible` for traced plots; the missing dependencies (image camera, stroke and glow colours, colormaps) | - | open | |
-| P11.D13 | RayMakie: delete `frame_signature` (numbered P11.D12 before the review round, a duplicate id) | 6 hits, 2 files (RayMakie e6e1aa9b0) | open | |
-| P11.D14 | (moved to P7.D15: the plan deletes `DrawBinding` in phase 7) | - | n/a | moved |
-| P11.D15 | (merged into P11.D7, review round 5) | - | n/a | merged |
+| P11.D13 | RayMakie: delete `frame_signature` | 6 hits, 2 files (RayMakie e6e1aa9b0) | open | |
 | P11.D16 | Hikari and RayMakie: no `waitidle` inside a frame | 7 hits in Hikari, 5 in RayMakie | open | |
-| P11.G2 | green: RayMakie's compile-counter session (written as P0.T26; attribute changes, value ↔ per-element, rebinds, visibility, camera, layout, resizes within capacity, TLAS moves and counts): zero compiles (plan phase 11) | - | open | |
-| P11.G3 | (moved to P3.G2: `test_run_host_time.jl` is green in phase 3; flat in the number of named resources, open decision 19, ruled B3.15) | - | n/a | moved |
-
-### Added 2026-10-02 (review round 5)
+| P11.G2 | green: RayMakie's compile-counter session (written as P0.T26; attribute changes, value ↔ per-element, another array for an attribute, visibility, camera, layout, resizes within capacity, TLAS moves and counts): zero compiles (plan phase 11) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P11.A12 | RayMakie: plots are pieces of the frame graph's pass (`insert!(p) do … end`/`delete!(p, h)`, names open, B3.17); Hikari's integrator declared into the frame graph once, outside the plots' pieces; film and sample count are device arrays the screen holds (survive plot changes and recompiles), work queues window-sized graph arrays (S32 corrected by B3.16 and B3.17) | - | open | |
-| P11.A13 | RayMakie: one scene-rectangle array per scene, shared by its plots (S32) | - | open | |
-| P11.A14 | RayMakie: glyph UVs in texels, normalized in the shader, so atlas growth rewrites no UV (S32) | - | open | |
-| P11.A15 | RayMakie: per-frame values (the camera matrix) as one-element arrays written by stores, inline from their upload region up to the `caps(dev)` limit (S4, B3.18) | - | open | |
-| P11.A16 | RayMakie: render objects' finalizers push their hold drops through the pool's inbox (S23) | - | open | |
+| P11.A12 | RayMakie: one group per screen for its plots, starting with the clears, and one group of draws per plot in it (`Group(screen.plots, name)`, `delete!(g, group)`); Hikari's integrator declared into the frame graph once, outside the plots' groups; film and sample count are device arrays the screen holds (survive plot changes and recompiles), work queues window-sized graph arrays | - | open | |
+| P11.A13 | RayMakie: one scene-rectangle array per scene, shared by its plots | - | open | |
+| P11.A14 | RayMakie: glyph UVs in texels, normalized in the shader, so atlas growth rewrites no UV | - | open | |
+| P11.A15 | RayMakie: per-frame values (the camera matrix) as one-element arrays written by stores, inline from their upload region up to the `caps(dev)` limit | - | open | |
+| P11.A16 | RayMakie: render objects' finalizers push their hold drops through the pool's inbox | - | open | |
 | P11.A17 | JuliaVision: load is a call: load-time transposes, `hoistconstants` and quantization become one load graph per model (plan, "What removes every split", item 10) | 37 hits of `hoistconstants`, 11 files (JuliaVision 2f0c3ed) | open | |
 | P11.D17 | GPUFiltering: its internal `synchronize` and readbacks go (plan, "What removes every split", item 2) | 22 hits of `synchronize`, 12 files (JuliaVision 2f0c3ed, `GPUFiltering/`) | doing | the `synchronize` calls are gone (JuliaVision c2f859b; 3 hits left at 1018c51, all comments); readbacks remain in `goodfeatures` (`features.jl:86`) and `fitaffine`/`fithomography` (`flow.jl:117`, `:333`, fits on the CPU over the flow field), which need device reductions |
 | P11.D18 | GPUFiltering: `launch!(device, kernel, args, ndrange)` and the explicit device argument go once a KA launch over graph arrays declares a node (P6.A17); ops with temporaries keep two methods of one name, one allocating them (`MantleArray(location(out), …)`) and one taking them | 31 hits of `launch!(`, 12 files (JuliaVision 1018c51, `GPUFiltering/src`) | open | GPUFiltering depends on Mantle directly since 1018c51 |
 | P11.D19 | Paperhawk (github.com/SimonDanisch/Paperhawk.jl): `DeviceArrays` (`src/gpu.jl`) goes | not checked out here: count at its port | open | |
 | P11.D20 | `Mantle.storage(...)` calls go in Paperhawk, PPOCRRunner and UVDocRunner (`MantleArray` is the array; P6.D58 for `devicearray`) | 10 hits, 2 files in PPOCRRunner/UVDocRunner (JuliaVision 1018c51); Paperhawk: count at its port | open | |
-| P11.A18 | Paperhawk: one graph per call; its per-step plans (detector frame, spans, edges, thumbnail; page warp, cleanup, rotate, pack; preview tiles) become one graph each, and host readbacks after `run!` become `Readback` arrays or copy nodes (plan, Consumers) | - | open | |
+| P11.A18 | Paperhawk: one graph per call; its per-step plans (detector frame, spans, edges, thumbnail; page warp, cleanup, rotate, pack; preview tiles) become one graph each, and host readbacks after `run!` become device arrays the host reads after the run, or copy nodes (plan, Consumers) | - | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
@@ -961,7 +891,7 @@ Tests the plan's phase 0 list names since the review round.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P12.G1 | Mantle, Hikari, RayMakie, VideoEditor, JuliaVision and Paperhawk on Linux (Vulkan, CUDA, HIP); Paperhawk's suite is `Pkg.test()` in its root, with a display and the GPU | - | open | |
+| P12.G1 | Mantle, Hikari, RayMakie, VideoEditor, JuliaVision and Paperhawk on Linux (Vulkan, CUDA, HIP); Paperhawk's suite is `Pkg.test` in its root, with a display and the GPU | - | open | |
 | P12.G2 | Mantle, Hikari, RayMakie on the Mac | - | open | |
 | P12.A1 | a "State" section written from the results | - | open | |
 
@@ -972,43 +902,33 @@ phase that needs it resolved.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| F1 | G1 graphics resources and render state need a plan section (`api.md` section 10) | before phase 6 | n/a | the plan's "Graphics" section (2026-10-02); what stays open is F16 |
-| F2 | G2 per-argument access of kernels and shaders: plan line or ruling (proposal: part of `KernelInfo`) | before phase 1 | done | ruled 2026-10-19: decisions.md B5.10 (declaration-time inference, not `KernelInfo`) and B5.11 (stored in the `Kernel`); api.md section 10 G2 and Appendix A updated |
-| F3 | G3 device facts as fields of `caps(dev)`: field names for today's `supports_*`, `maxalloc`, the roofline inputs (throughput per element type, bandwidth, transfer queue, cross-queue cost) and `config(dev, f)` | before phases 1 and 8 | open | |
-| F4 | G4 profiling (open decision 13) | before phase 1 (the split may not use it) | open | |
-| F5 | G5 device wait-idle verb | before phase 3 | open | |
-| F6 | G6 `recycle!` on Vulkan, CUDA and HIP (the recording lifecycle and Metal's free list are specified) | before phase 3 | open | |
-| F7 | G7 copies between devices (open decision 7) | before phase 6 | open | |
-| F8 | G8 the selection table: locking and when measurement runs (key, per-device table and the measured-else-estimate rule are specified) | before phase 6 | open | |
-| F9 | G9 window API: GLFW hints, the default colour space and format, the `vsync` default (was P7.A10) | before phase 7 | open | |
-| F10 | G10 counted driver objects: verb names | before phase 2 | open | |
-| F11 | G11 vendor views: core's `withview` and the foreign channel in phase 6 (the plan's phase list); each device type's constructor with its phase (9, 10) | before phase 6 | open | |
-| F12 | 71 vocabulary fates marked D in `api.md` Appendix A (after the review round's relabels: 91 P, 71 D, 27 G of 189): confirm in review | phase 0 | open | |
-| F13 | open decisions 2-13 of the plan: ruled at the start of the phase that needs each | per phase | open | |
-| F14 | open decision 15: per-frame draw order changes (transparency sorting); a changed order is `sort!(pass; by, lt, rev)`, a rewrite of the piece list (decisions.md B4.8) | before phase 7 | open | |
-| F15 | open decision 16: rule eviction (decisions.md D9) and readers after runs (D10); the array `GPURef`, `attribute` and the per-draw scene rectangle were ruled in B3.7 | before phases 4, 5 | n/a | ruled: eviction automatic (B3.9), readers (B3.10), read-only inputs (B4.6) |
-| F16 | G1 rest: SBT layout for procedural hit groups (Hikari's material types are shade-kernel specializations, not hit groups), stencil, multisampling, blend modes | before phase 6 | open | |
-| F17 | bugs the 2026-10-02 survey found, to triage into the bug list: Metal `npipelines` counts draws; a resource-valued draw count has no Metal method; `trace!` has no Metal compile path; Vulkan walked plans rewrite argument memory while a frame may be in flight; the Vulkan pipeline cache key holds only whether a descriptor layout exists and misses `tess_eval`; Vulkan `vsync` lost on resize; a hand-recorded window frame may lose its contents | phase 0 | open | |
-
-### Added 2026-10-02 (review round 5)
+| F2 | per-argument access of kernels and shaders | before phase 1 | done | declaration-time inference, stored in the `Kernel`; api.md section 10 and Appendix A |
+| F3 | device facts as fields of `caps(dev)`: field names for today's `supports_*`, `maxalloc`, the roofline inputs (throughput per element type, bandwidth, transfer queue, cross-queue cost) and `config(dev, f)` | before phases 1 and 8 | open | |
+| F4 | profiling (open decision 13) | before phase 1 (the split may not use it) | open | |
+| F5 | device wait-idle verb | before phase 3 | open | |
+| F6 | `recycle!` on Vulkan, CUDA and HIP (the recording lifecycle and Metal's free list are specified) | before phase 3 | open | |
+| F7 | copies between devices (open decision 7) | before phase 6 | open | |
+| F8 | the selection table: locking and when measurement runs (key, per-device table and the measured-else-estimate rule are specified) | before phase 6 | open | |
+| F9 | window API: GLFW hints, the default colour space and format, the `vsync` default | before phase 7 | open | |
+| F10 | counted driver objects: verb names | before phase 2 | open | |
+| F11 | vendor views: core's `withview` and the foreign channel in phase 6 (the plan's phase list); each device type's constructor with its phase (9, 10) | before phase 6 | open | |
+| F12 | the vocabulary fates in `api.md` Appendix A: confirm in review | phase 0 | open | |
+| F13 | open decisions 2-13 of the plan: decided at the start of the phase that needs each | per phase | open | |
+| F14 | open decision 15: per-frame draw order changes (transparency sorting); a changed order is `sort!(group; by, lt, rev)`, a rewrite of the pass's list | before phase 7 | open | |
+| F16 | rest: SBT layout for procedural hit groups (Hikari's material types are shade-kernel specializations, not hit groups), stencil, multisampling, blend modes | before phase 6 | open | |
+| F17 | bugs the survey found, to triage into the bug list: Metal `npipelines` counts draws; a resource-valued draw count has no Metal method; `trace!` has no Metal compile path; Vulkan walked plans rewrite argument memory while a frame may be in flight; the Vulkan pipeline cache key holds only whether a descriptor layout exists and misses `tess_eval`; Vulkan `vsync` lost on resize; a hand-recorded window frame may lose its contents | phase 0 | open | |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| F18 | G12 device teardown for debugging (`reset_device!`, declared and never implemented) | before phase 8 | open | |
-| F19 | G13 the window open verb: name and signature | before phase 7 | open | |
-| F20 | G14 texture and sampler table locking (`api.md` gives each a leaf lock, derived); table indices retired by token or not; a restored texture's new index | before phase 5 | open | |
-| F21 | G15 contracts still marked "(contract: phase N)": `placeimage`'s arguments, `recycle!` | before phases 2 and 3 | open | |
-| F22 | G16 launch kernels never read cells: a test (P0.T27 proposes a check) | before phase 4 | open | |
-| F23 | open decision 17: index buffers and other handle dependences (decisions.md D11) | before phase 6 | n/a | ruled 2026-10-05 (B3.11): (c) re-record; its benchmarks are P4.T1 |
-| F24 | open decision 18: RayMakie updates that change a shader (decisions.md D12) | before phase 11 | n/a | ruled 2026-10-05 (B3.12): value changes never compile (GPU flag, `when!`); type changes are delete! + insert! (a piece, B3.17) |
-| F25 | open decision 19: run host time, the lock loop measured against the phase 3 target or a per-plan inbox (decisions.md D13) | phase 3 | n/a | ruled 2026-10-05 (B3.14, B3.15): per-plan inbox, flat host time; tested by P3.G2 |
-| F26 | the review round's choices applied and open to veto (decisions.md, "Review round 2026-10-02"): S1, S5, S16, S22, S25, S29, S31, S32 | phase 0 | open | S13 settled by B4.1 |
-| F27 | `docs/internals.jl`, `docs/examples.jl`, `docs/resizing-and-raytracing.jl` still describe `when!` blocks, `repeat!` bodies, the per-plan entry, hostwritten and persistent graph arrays; bring them in line with decisions.md B4 (P0.A2) | phase 0 | doing | fixed with P0.A2 |
-| F28 | the baseline column counts names at 5c2d4c6, 133 commits before the frozen head f6e359a; recount (rows added 2026-10-14 already count at f6e359a) | phase 0 | open | |
+| F18 | device teardown for debugging (`reset_device!`, declared and never implemented) | before phase 8 | open | |
+| F19 | the window open verb: name and signature | before phase 7 | open | |
+| F20 | texture and sampler table locking (`api.md` gives each a leaf lock, derived); table indices retired by token or not; a restored texture's new index | before phase 5 | open | |
+| F21 | contracts still marked "(contract: phase N)": `placeimage`'s arguments, `recycle!` | before phases 2 and 3 | open | |
+| F22 | launch kernels never read cells: a test (P0.T27 proposes a check) | before phase 4 | open | |
+| F28 | the baseline column counts names at 5c2d4c6, 133 commits before the frozen head f6e359a; recount (rows added already count at f6e359a) | phase 0 | open | |
 | F29 | Lava's eager launch costs about 24 µs per dispatch (SAM 2 encoder on the RTX 4000 Ada, `experiments/eager-vs-graph/`); eager stays a first-class path, so find where it goes | phase 1 | open | |
-| F30 | `insert!(g) do … end` and `render!(…) do p … end` keep `do`-block bodies; B4.2 removed them for launch groups only | before phase 6 | open | |
-| F31 | Lava d688952's RADV/ACO workaround (`foldedoffset.jl`, negative address constants kept off split loads) runs on every device: it costs ~9% of Qwen-Image's VAE decode on the RTX 4000 Ada (1.138 s without, 1.246-1.254 s with) and ~1% on the 7900; decide whether it becomes a per-device compile setting through `config(dev, f)` (F3) | phase 1 | open | A/B 2026-10-15, `experiments/bugfix/env-newest/BASELINE.md` |
+| F31 | Lava d688952's RADV/ACO workaround (`foldedoffset.jl`, negative address constants kept off split loads) runs on every device: it costs ~9% of Qwen-Image's VAE decode on the RTX 4000 Ada (1.138 s without, 1.246-1.254 s with) and ~1% on the 7900; decide whether it becomes a per-device compile setting through `config(dev, f)` (F3) | phase 1 | open | A/B, `experiments/bugfix/env-newest/BASELINE.md` |
 | F32 | the default group size `config(dev, f)` picks for 2-D and 3-D ranges: today one row of 64; measure a 2-D tile (16 x 16, as GPUFiltering passes) against it on the image kernels before choosing (P1.A21 keeps a caller's size either way) | phase 1 | open | not measured |
-| F33 | Lava drops user atomic orderings: `demote_atomic_accesses!` (`Lava/src/compiler/target.jl`) makes every acquire/release load and store a plain one, and `fence` does not compile (`Unsupported LLVM instruction: FenceInst`); measured 2026-10-19 on the 7900 (`experiments/kernelforge/probe_lava_ordering.jl`). No kernel in the stack relies on it yet; all four desktop Vulkan devices report `vulkanMemoryModelDeviceScope` | phase 1 | open | fix: demote only `unordered`, emit `OpAtomicLoad`/`OpAtomicStore` and `OpMemoryBarrier`, a cross-workgroup message-passing test |
-| F34 | NVIDIA kernels in PTX inside Vulkan command buffers (`VK_NV_cuda_kernel_launch`, provisional): `cp.async` ran correctly on Vulkan device addresses on the RTX 4000 Ada (`experiments/interop/`); a separate CUDA context costs 80-175 µs per hand-off, HIP imports Vulkan memory but no semaphores (ROCm 7.2.1). Whether a PTX kernel node goes into the plan is open (Simon, 2026-10-16) | phase 10 | open | |
-| F35 | B5.1 (operations take the graph, groups only for repeated launches) leaves model-level loops open: examples.jl 19 (diffusion, `transformer(step, …)`) and 20 (decode until a stop token, `decodestep!(dec, …)`) pass a group into model functions | phase 0 | done | not a gap (Simon, 2026-10-19): B4.2 already answers it; what is repeated is what `dispatch!(group, …)` gets, so model code passes the group to its dispatches and a call without the group lands in the graph (decisions.md B5.1) |
+| F33 | Lava drops user atomic orderings: `demote_atomic_accesses!` (`Lava/src/compiler/target.jl`) makes every acquire/release load and store a plain one, and `fence` does not compile (`Unsupported LLVM instruction: FenceInst`); measured on the 7900 (`experiments/kernelforge/probe_lava_ordering.jl`). No kernel in the stack relies on it yet; all four desktop Vulkan devices report `vulkanMemoryModelDeviceScope` | phase 1 | open | fix: demote only `unordered`, emit `OpAtomicLoad`/`OpAtomicStore` and `OpMemoryBarrier`, a cross-workgroup message-passing test |
+| F34 | NVIDIA kernels in PTX inside Vulkan command buffers (`VK_NV_cuda_kernel_launch`, provisional): `cp.async` ran correctly on Vulkan device addresses on the RTX 4000 Ada (`experiments/interop/`); a separate CUDA context costs 80-175 µs per hand-off, HIP imports Vulkan memory but no semaphores (ROCm 7.2.1). Whether a PTX kernel node goes into the plan is open | phase 10 | open | |
+| F35 | (operations take the graph, groups only for repeated launches) leaves model-level loops open: examples.jl 19 (diffusion, `transformer(step, …)`) and 20 (decode until a stop token, `decodestep!(dec, …)`) pass a group into model functions | phase 0 | done | not a gap: already answers it; what is repeated is what `dispatch!(group, …)` gets, so model code passes the group to its dispatches and a call without the group lands in the graph |

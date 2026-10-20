@@ -1,85 +1,84 @@
-# Changes during runs: between stages, WaitFor, inrun (catalogue-resize-rt.md,
-# table J: RN). A change made while a host function runs is applied in front
-# of the run's next stage, unless the plan cannot follow it mid-run (a length
-# it launches over directly, a temporary sized for fewer elements, a capacity
-# it sized temporaries from): then the plan's own later stages leave it for
-# after the run, any other submitter waits on the plan's runend (WaitFor), and
-# a submitter inside a host function throws (api.md section 7;
-# recording-plan.md, "A run with host nodes is one submission per stage";
+# Changes during runs: between stages, WaitFor, inrun. A change made while a
+# host function runs is applied in front of the run's next stage, unless the
+# plan cannot follow it mid-run (a length it launches over directly, a
+# temporary sized for fewer elements, a capacity it sized temporaries from):
+# then the plan's own later stages leave it for after the run, any other
+# submitter waits on the plan's runend (WaitFor), and a submitter inside a
+# host function throws (api.md section 7; recording-plan.md, Ordering across
+# graphs and queues, "A run with host nodes is one submission per stage";
 # resizing-and-raytracing.jl B.4, takepending, waitforruns; internals.jl
 # section 6).
 #
-# Doc keys as in the catalogue: PLAN recording-plan.md, RR
-# resizing-and-raytracing.jl, API api.md, INT internals.jl, DEC decisions.md.
 # A run is held between its stages by a host node that blocks on a Gate
-# (helpers.jl, FI-H); stage 1 writes t, the host node reads and writes it, and
+# (helpers.jl); stage 1 writes t, the host node reads and writes it, and
 # stage 2 reads it, so compile cannot move either kernel across the cut.
 # Eager writes are dispatch!(dev, …) over launchrange(a): resolved when the
 # call is submitted, after any wait.
 
-using KernelAbstractions: @kernel, @index
 import GeometryBasics, LinearAlgebra, ColorTypes, FixedPointNumbers
 
-@kernel function rn_copy!(dst, src)
-    i = @index(Global)
+function rn_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing   # ndrange is rounded up to whole work-groups
     @inbounds dst[i] = src[i]
+    return nothing
 end
 
-@kernel function rn_fill!(a, v)
-    i = @index(Global)
+function rn_fill!(a, v)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     @inbounds a[i] = v
+    return nothing
 end
 
-@kernel function rn_add!(dst, a, b)
-    i = @index(Global)
+function rn_add!(dst, a, b)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(a), length(b)) || return nothing
     @inbounds dst[i] = a[i] + b[i]
+    return nothing
 end
 
 # Stage 1: dst[i] = src[i], and t[1] = 0 for the host node.
-@kernel function rn_copyfirst!(dst, src, t)
-    i = @index(Global)
+function rn_copyfirst!(dst, src, t)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     @inbounds dst[i] = src[i]
     if i == 1
         @inbounds t[1] = Int32(0)
     end
+    return nothing
 end
 
 # Stage 2: dst[i] = src[i] + t[1].
-@kernel function rn_copythen!(dst, src, t)
-    i = @index(Global)
+function rn_copythen!(dst, src, t)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     @inbounds dst[i] = src[i] + t[1]
+    return nothing
 end
 
-@kernel function rn_writefirst!(dst, t, v)   # stage 1: dst[i] = v, t[1] = 0
-    i = @index(Global)
-    @inbounds dst[i] = v
-    if i == 1
-        @inbounds t[1] = Int32(0)
-    end
-end
-
-@kernel function rn_writethen!(dst, t, v)    # stage 2: dst[i] = v + t[1]
-    i = @index(Global)
-    @inbounds dst[i] = v + t[1]
-end
-
-@kernel function rn_indices!(idx, t)         # stage 1: idx[i] = i - 1, t[1] = 0
-    i = @index(Global)
+function rn_indices!(idx, t)                 # stage 1: idx[i] = i - 1, t[1] = 0
+    i = KI.get_global_id().x
+    i <= length(idx) || return nothing
     @inbounds idx[i] = UInt32(i - 1)
     if i == 1
         @inbounds t[1] = Int32(0)
     end
+    return nothing
 end
 
-@kernel function rn_rescale!(m, t)           # m[i] *= t[1] + 1 (t[1] = 0: unchanged), a write of m after reading t
-    i = @index(Global)
+function rn_rescale!(m, t)                   # m[i] *= t[1] + 1 (t[1] = 0: unchanged), a write of m after reading t
+    i = KI.get_global_id().x
+    i <= length(m) || return nothing
     @inbounds m[i] = m[i] * (Float32(t[1]) + 1f0)
+    return nothing
 end
 
 # A point per vertex. The shader convention (vertex_index(), a NamedTuple with
 # `position`, the fragment taking the draw's arguments) is the one of
-# test/test_headless_rebindable_draw.jl, a guess for the new API (api.md G1).
-# Both read t, so the draw comes after the host node that writes it.
+# test/test_headless_rebindable_draw.jl; api.md 2.6b does not specify the
+# stage signatures. Both read t, so the draw comes after the host node that
+# writes it.
 rn_pointvertex(t) = (position = GeometryBasics.Vec4f(0f0, 0f0, 0f0, 1f0 + Float32(t[1])),)
 rn_pointfragment(inputs, t) = GeometryBasics.Vec4f(1f0, 1f0, 1f0, 1f0 + Float32(t[1]))
 rn_points() = Mantle.Rasterizer(; vertex = Mantle.VertexShader(rn_pointvertex),
@@ -160,8 +159,8 @@ end
 
 # ── J. Changes during runs: between stages, WaitFor, inrun ──
 
-# INT:1321-1324, PLAN:660-664: stage 2 launches indirectly over resizable a; between the stages a[1:4] = x: stage 1 saw the old data, stage 2's prefix applies x.
-@case "RN-01" 4 begin   # pending decision 7: one state per stage
+# internals.jl section 6, recording-plan.md, Ordering across graphs and queues (a run with host nodes is one submission per stage): stage 2 launches indirectly over resizable a; between the stages a[1:4] = x: stage 1 saw the old data, stage 2's prefix applies x.
+@case "RN-01" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, 16); resize!(a, n); copyto!(a, Int32.(1:n))   # resizable: launches over it are indirect
     out1, out2 = MantleArray(dev, Int32, n), MantleArray(dev, Int32, n)
@@ -175,7 +174,7 @@ end
     @test Array(out2) == [-1, -2, -3, -4, 5:n...]
 end
 
-# RR:343-347: stage 2 launches directly over fixed a; between the stages resize!(a, 2n): stage 2 uses n and the old storage, the Resize is still pending after the run, and the next run recompiles once and covers 2n.
+# resizing-and-raytracing.jl B.4 (takepending): stage 2 launches directly over fixed a; between the stages resize!(a, 2n): stage 2 uses n and the old storage, the Resize is still pending after the run, and the next run recompiles once and covers 2n.
 @case "RN-02" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -195,8 +194,8 @@ end
     @test Array(out2) == 1:2n
 end
 
-# RR:345-347: as RN-02, with a[3:4] = z pended before the resize and a[1:2] = y after it: stage 2 sees z, not y; the next run sees y.
-@case "RN-03" 4 begin   # pending decision 7: one state per stage
+# resizing-and-raytracing.jl B.4 (takepending: every later change on the held target stays held): as RN-02, with a[3:4] = z pended before the resize and a[1:2] = y after it: stage 2 sees z, not y; the next run sees y.
+@case "RN-03" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
     out1, out2 = MantleArray(dev, fill(Int32(-1), 2n)), MantleArray(dev, fill(Int32(-1), 2n))
@@ -212,7 +211,7 @@ end
     @test Array(out2)[1:4] == [-1, -2, -3, -4]
 end
 
-# RR:347-349, API:487: as RN-02, plus thread C's eager fill of a: C waits on g's runend until g submits its last stage, then the Resize and the fill are applied; the fill covers 2n.
+# resizing-and-raytracing.jl B.4 (WaitFor), api.md section 7: as RN-02, plus thread C's eager fill of a: C waits on g's runend until g submits its last stage, then the Resize and the fill are applied; the fill covers 2n.
 @case "RN-04" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -231,7 +230,7 @@ end
     @test Array(a) == fill(Int32(1), 2n)
 end
 
-# RR:349-350,449-451: as RN-04, but the eager call comes from g's own host function (after its resize): ArgumentError at once, no wait; the run completes on n elements; the Resize stays pending.
+# resizing-and-raytracing.jl B.4 (waitforruns throws inside a host function): as RN-04, but the eager call comes from g's own host function (after its resize): ArgumentError at once, no wait; the run completes on n elements; the Resize stays pending.
 @case "RN-05" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -248,7 +247,7 @@ end
     @test only(Mantle.pendingof(a)) isa Mantle.Resize
 end
 
-# RR:442-451: g2's host function calls Array(a) while a has a change held for g (g between its stages): ArgumentError.
+# resizing-and-raytracing.jl B.4 (waitforruns): g2's host function calls Array(a) while a has a change held for g (g between its stages): ArgumentError.
 @case "RN-06" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -265,7 +264,7 @@ end
     rn_finish(gate, running)
 end
 
-# INT:996-998,1151-1152, RR:450,460, API:487: thread C runs plain g2 (no host node), which needs a's Resize that g holds: C waits for g's last stage, then runs without a throw (ambiguity A2, pinned to api.md:487).
+# internals.jl section 6, resizing-and-raytracing.jl B.4, api.md section 7: thread C runs plain g2 (no host node), which needs a's Resize that g holds: C waits for g's last stage, then runs without a throw.
 @case "RN-07" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -284,7 +283,7 @@ end
     @test Array(out) == 1:2n
 end
 
-# RR:444-446: g's host function resizes a, starts a task that calls Array(a) and waits for it: an undetected deadlock (the task waits for g's runend), bounded here by a 5 s wait in the host function.
+# resizing-and-raytracing.jl B.4 (inhostfunction: a task a host function starts and waits for is not detected): g's host function resizes a, starts a task that calls Array(a) and waits for it: an undetected deadlock (the task waits for g's runend), bounded here by a 5 s wait in the host function.
 @case "RN-08" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -299,7 +298,7 @@ end
     @test length(withtimeout(() -> fetch(reader[]), 30)) == 2n
 end
 
-# INT:1132-1134: a one-stage plan in flight (500 ms); thread C makes 1 000 resizes of a it launches over directly, each with an eager write: C never waits; the next run recompiles and covers the last length.
+# api.md section 7 (only a run past its first stage is waited for), resizing-and-raytracing.jl B.4: a one-stage plan in flight (500 ms); thread C makes 1 000 resizes of a it launches over directly, each with an eager write: C never waits; the next run recompiles and covers the last length.
 @case "RN-09" 4 begin
     dev = testdevice(); n = 64
     a, out, busy = MantleArray(dev, Int32.(1:n)), MantleArray(dev, Int32, n + 1000), MantleArray(dev, Int32[0])
@@ -321,7 +320,7 @@ end
     @test Array(out) == fill(Int32(1000), n + 1000)
 end
 
-# INT:1132-1133: g's run waits in holdparts! (h's run holds the shared arena part between its stages); a resize stales g and an eager write applies it: the eager call does not wait; g then sees its stale flag and recompiles.
+# resizing-and-raytracing.jl B.4 (a plan not yet past its stage 1 sees the stale mark and starts over), internals.jl section 6 (holdparts!): g's run waits in holdparts! (h's run holds the shared arena part between its stages); a resize stales g and an eager write applies it: the eager call does not wait; g then sees its stale flag and recompiles.
 @case "RN-10" 4 begin
     dev = testdevice(); n = 64
     a, out = MantleArray(dev, Int32.(1:n)), MantleArray(dev, fill(Int32(-1), 2n))
@@ -346,7 +345,7 @@ end
     @test Array(out) == fill(Int32(5), 2n)
 end
 
-# INT:1157-1158: thread C waits (WaitFor) for g's runend; g's host function throws: endbetween! wakes C, C applies the Resize and its fill; g's next run recompiles and is exact.
+# internals.jl section 6 (endbetween! on a throw between stages): thread C waits (WaitFor) for g's runend; g's host function throws: endbetween! wakes C, C applies the Resize and its fill; g's next run recompiles and is exact.
 @case "RN-11" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))
@@ -373,7 +372,7 @@ end
     @test Array(out2) == fill(Int32(3), 2n)
 end
 
-# RR:340-342, PLAN:666-670: stage 2 draws with idx bound by handle; between the stages resize!(idx) past its storage: stage 2's prefix moves idx (keeping what stage 1 wrote) and re-records the parts that recorded its handle; no recompile.
+# resizing-and-raytracing.jl B.4 (a move re-records the parts that recorded the handle), api.md section 7: stage 2 draws with idx bound by handle; between the stages resize!(idx) past its storage: stage 2's prefix moves idx (keeping what stage 1 wrote) and re-records the parts that recorded its handle; no recompile.
 @case "RN-12" 6 begin
     dev = testdevice(); n = 64
     idx = MantleArray(dev, UInt32, n)
@@ -381,9 +380,9 @@ end
     g = Graph(dev); t = MantleArray(g, Int32, 1)
     dispatch!(g, rn_indices!, (idx, t), n)
     dispatch!(g, blockinghost(gate), (t,); writes = (t,))
-    render!(g, rn_target(g) => Clear((0f0, 0f0, 0f0, 1f0))) do p
-        draw!(p, rn_points(), (t,), n; indices = idx)
-    end
+    target = rn_target(g)
+    clear!(g, target, (0f0, 0f0, 0f0, 1f0))
+    draw!(g, target, rn_points(), (t,), n; indices = idx)
     rn_through!(g, gate); Mantle.waitidle(dev)
     Mantle.resetdiagnostics!(dev)
     running = rn_start(g, gate)
@@ -395,7 +394,7 @@ end
     @test Array(idx)[1:n] == UInt32.(0:n-1)
 end
 
-# RR:346, API:487: stage 2 copies into a temporary sized at compile for 2n (SizedBy, n = length(a)); between the stages resize!(a, 3n): held for g, another submitter (an eager fill) waits for g's last stage, the next run recompiles.
+# resizing-and-raytracing.jl B.4, api.md section 7: stage 2 copies into a temporary sized at compile for 2n (SizedBy, n = length(a)); between the stages resize!(a, 3n): held for g, another submitter (an eager fill) waits for g's last stage, the next run recompiles.
 @case "RN-13" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, 2n); resize!(a, n); copyto!(a, Int32.(1:n))   # resizable, n elements
@@ -421,7 +420,7 @@ end
     @test Array(out2) == fill(Int32(2), 3n)
 end
 
-# API:487, RR:438: stage 2 builds a software TLAS (temporaries sized from its capacity, 64); between the stages a push! past the capacity: held for g, another graph refitting the TLAS waits, g's next run recompiles.
+# api.md section 7 (a capacity change of a structure it sized temporaries from), resizing-and-raytracing.jl B.4, B.8: stage 2 builds a software TLAS (temporaries sized from its capacity, 64); between the stages a push! past the capacity: held for g, another graph refitting the TLAS waits, g's next run recompiles.
 @case "RN-14" 5 begin
     dev = testdevice()
     tl = TLAS(dev; hardware = false)
@@ -447,31 +446,8 @@ end
     @test d.plancompiles == 1
 end
 
-# RR:437-441,714-721: stage 2 draws with indices through array GPURef r (its target bound by handle); between the stages r[] = b: stage 2's parts are re-recorded with b; no wait, no recompile.
-@case "RN-15" 6 begin
-    dev = testdevice(); n = 64
-    idx, other = MantleArray(dev, UInt32.(0:n-1)), MantleArray(dev, UInt32.(n-1:-1:0))
-    r = GPURef(dev, idx)
-    gate = Gate()
-    g = Graph(dev); t = MantleArray(g, Int32, 1)
-    dispatch!(g, rn_fill!, (t, Int32(0)), 1)
-    dispatch!(g, blockinghost(gate), (t,); writes = (t,))
-    render!(g, rn_target(g) => Clear((0f0, 0f0, 0f0, 1f0))) do p
-        draw!(p, rn_points(), (t,), n; indices = r)
-    end
-    rn_through!(g, gate); Mantle.waitidle(dev)
-    Mantle.resetdiagnostics!(dev)
-    running = rn_start(g, gate)
-    @test (@elapsed (r[] = other)) < 0.01
-    rn_finish(gate, running)
-    d = Mantle.diagnostics(dev)
-    @test d.plancompiles == 0
-    @test d.records >= 1
-    @test r[] === other
-end
-
-# DEC:225-243, PLAN:594-601: plan Q reads a and is between its stages; plan P (thread C) writes a: P waits for Q's last run on the GPU, not on the host; Q's stage 2 then finds a in its inbox and sees P's write.
-@case "RN-17" 3 begin   # pending decision 7: one state per stage
+# recording-plan.md, Ordering across graphs and queues; internals.jl section 8: plan Q reads a and is between its stages; plan P (thread C) writes a: P waits for Q's last run on the GPU, not on the host; Q's stage 2 then finds a in its inbox and sees P's write.
+@case "RN-17" 3 begin
     dev = testdevice()
     a, out1, out2 = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32, 2), MantleArray(dev, Int32, 2)
     gate = Gate()
@@ -487,24 +463,7 @@ end
     @test Array(out2) == [7, 1]
 end
 
-# API:452 vs INT:1321-1324: g writes through array GPURef r in both stages; between the stages r[] = b: stage 1 wrote a, stage 2 writes b (ambiguity A8).
-@case "RN-18" 6 begin   # pending decision 7: one state per stage
-    dev = testdevice(); n = 64
-    a, b = MantleArray(dev, zeros(Int32, n)), MantleArray(dev, zeros(Int32, n))
-    r = GPURef(dev, a)
-    gate = Gate()
-    g = Graph(dev); t = MantleArray(g, Int32, 1)
-    dispatch!(g, rn_writefirst!, (r, t, Int32(1)), n)
-    dispatch!(g, blockinghost(gate), (t,); writes = (t,))
-    dispatch!(g, rn_writethen!, (r, t, Int32(2)), n)
-    running = rn_start(g, gate)
-    r[] = b
-    rn_finish(gate, running)
-    @test Array(a) == fill(Int32(1), n)
-    @test Array(b) == fill(Int32(2), n)
-end
-
-# API:421-433: four tasks: two run graphs with host nodes that share w and an arena part, one stores zeros into w, one makes eager calls reading x and w; 10^4 rounds each, watchdog: no deadlock, exact.
+# api.md section 5 (lock order): four tasks: two run graphs with host nodes that share w and an arena part, one stores zeros into w, one makes eager calls reading x and w; 10^4 rounds each, watchdog: no deadlock, exact.
 @case "RN-19" 4 :long begin
     dev = testdevice(); n = 1024; rounds = 10^4
     w, x, y, v = (MantleArray(dev, zeros(Int32, n)) for _ in 1:4)
@@ -519,7 +478,7 @@ end
     @test Array(w) == zeros(Int32, n)
 end
 
-# RR:449-455: thread C waits on g's runend; thread D pends a store and a resize on a and runs an unrelated graph: D never blocks; afterwards C's fill covers the last length.
+# resizing-and-raytracing.jl B.4 (waitforruns): thread C waits on g's runend; thread D pends a store and a resize on a and runs an unrelated graph: D never blocks; afterwards C's fill covers the last length.
 @case "RN-20" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32.(1:n))

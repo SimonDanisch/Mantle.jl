@@ -1,11 +1,12 @@
-# Coalescing and sequence numbers (catalogue-resize-rt.md, table H).
-#
-# References: api.md; RR = docs/resizing-and-raytracing.jl; PLAN =
-# docs/recording-plan.md (line numbers of 2026-10-05).
+# Coalescing and sequence numbers: resizing-and-raytracing.jl B.3 (pending
+# changes coalesce per target; nextseq!), B.8 (BuildAccel changes of one
+# structure); api.md 2.2 (`a[r] = data`: a later store covering an earlier
+# pending one replaces it).
 # What this file assumes of the test hooks (helpers.jl):
-#   Mantle.pendingof(x)  the Change objects (Store, Resize, Rebind, BuildAccel)
-#                        pending on x, in sequence order, with RR B.3's fields
-#                        (a BuildAccel's `mode` is Build() or Update()).
+#   Mantle.pendingof(x)  the Change objects (Store, Resize, BuildAccel)
+#                        pending on x, in sequence order, with the fields of
+#                        resizing-and-raytracing.jl B.3 (a BuildAccel's `mode`
+#                        is Build() or Update()).
 #   Mantle.steplog(dev)  entries with `kind` (the step's name as a Symbol:
 #                        :InlineStore, :StagedStore, :CellWrite, :BuildAccel,
 #                        ...), `target` (the root resource the user holds),
@@ -13,16 +14,12 @@
 # "Released" is read from memory(dev).cells: every array owns one cell, given
 # back at its last hold.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Mat4f, Point3f, TriangleFace
 
-@kernel function co_copy!(dst, src)
-    i = @index(Global)
-    dst[i] = src[i]
-end
-
-@kernel function co_sumfirst!(out, a1, a2, a3, a4, a5, a6, a7, a8)
+function co_sumfirst!(out, a1, a2, a3, a4, a5, a6, a7, a8)
+    KI.get_global_id().x == 1 || return nothing             # one work item
     out[1] = a1[1] + a2[1] + a3[1] + a4[1] + a5[1] + a6[1] + a7[1] + a8[1]
+    return nothing
 end
 
 const CO_STOREKINDS = (:InlineStore, :StagedStore)
@@ -71,17 +68,9 @@ function buildgraph(dev, t)
     return g
 end
 
-"""A graph that copies `n` elements of what `r` points at into `out`; compiled and run once."""
-function readgraph(dev, out, r, n)
-    g = Graph(dev)
-    dispatch!(g, co_copy!, (out, r), n)
-    run!(g)
-    return g
-end
-
 # ── H. Coalescing and sequence numbers ──
 
-# CO-01 api.md:82, RR:256-257,292: a[1:4] = x then a[1:8] = y: one Store (y); x's upload region is retired at the second call, with no tokens.
+# CO-01 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.3: a[1:4] = x then a[1:8] = y: one Store (y); x's upload region is retired at the second call, with no tokens.
 @case "CO-01" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 16))
@@ -97,7 +86,7 @@ end
     free!(a)
 end
 
-# CO-02 RR:292: a[1:4] = x then a[3:6] = y overlap without covering: two Stores in order, giving [x1, x2, y1..y4].
+# CO-02 resizing-and-raytracing.jl B.3: a[1:4] = x then a[3:6] = y overlap without covering: two Stores in order, giving [x1, x2, y1..y4].
 @case "CO-02" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 16))
@@ -109,7 +98,7 @@ end
     free!(a)
 end
 
-# CO-03 RR:258,292: view(a, 3:6)[1:4] = y then a[1:8] = z: spans compare in parent bytes, so the second covers the first: one Store.
+# CO-03 resizing-and-raytracing.jl B.3 (span): view(a, 3:6)[1:4] = y then a[1:8] = z: spans compare in parent bytes, so the second covers the first: one Store.
 @case "CO-03" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 16))
@@ -121,7 +110,7 @@ end
     free!(a)
 end
 
-# CO-04 RR:293-294,544: resize!(a, 10), resize!(a, 5), resize!(a, 20) on 100 elements: one Resize to (20,) keeping 5 elements.
+# CO-04 resizing-and-raytracing.jl B.3, B.5: resize!(a, 10), resize!(a, 5), resize!(a, 20) on 100 elements: one Resize to (20,) keeping 5 elements.
 @case "CO-04" 4 begin
     dev = testdevice()
     x = testdata(Float32, 100)
@@ -137,7 +126,7 @@ end
     free!(a)
 end
 
-# CO-05 RR:293-294: resize!(a, 10), a[1:3] = x, resize!(a, 2): Resizes do not merge across the Store: three changes; the result is [x1, x2].
+# CO-05 resizing-and-raytracing.jl B.3: resize!(a, 10), a[1:3] = x, resize!(a, 2): Resizes do not merge across the Store: three changes; the result is [x1, x2].
 @case "CO-05" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 100))
@@ -150,7 +139,7 @@ end
     free!(a)
 end
 
-# CO-06 RR:294-296, PLAN:459-460: before any submission push! (Build), tlas[h] = m and visible!(t, h, false) (each a Store and an Update): one Build pending, emitted after both stores (that the build sees m and mask 0 needs a trace: tlas area).
+# CO-06 resizing-and-raytracing.jl B.3, B.8; recording-plan.md, Acceleration structures and textures (pending builds coalesce per structure): before any submission push! (Build), tlas[h] = m and visible!(t, h, false) (each a Store and an Update): one Build pending, emitted after both stores (that the build sees m and mask 0 needs a trace: tlas area).
 @case "CO-06" 5 :rt begin
     dev = testdevice()
     blas = triangleblas(dev)
@@ -168,7 +157,7 @@ end
     free!(g); foreach(free!, (t, blas))
 end
 
-# CO-07 RR:292-296: tlas[h] = m1 then tlas[h] = m2: one source Store (m2) and one Update.
+# CO-07 resizing-and-raytracing.jl B.3: tlas[h] = m1 then tlas[h] = m2: one source Store (m2) and one Update.
 @case "CO-07" 5 :rt begin
     dev = testdevice()
     blas = triangleblas(dev)
@@ -184,50 +173,7 @@ end
     free!(g); foreach(free!, (t, blas))
 end
 
-# CO-08 RR:294-296,1250-1260, api.md:180: r[] = b then r[] = c: one Rebind (c), one cell write when applied; after it, freeing the creators releases a and b.
-@case "CO-08" 6 begin
-    dev = testdevice()
-    a, b, c = (MantleArray(dev, testdata(Float32, 16; seed)) for seed in 1:3)
-    out = MantleArray(dev, Float32, 16)
-    r = GPURef(dev, a)
-    g = readgraph(dev, out, r, 16)
-    r[] = b
-    r[] = c
-    @test pendingkinds(r) == [:Rebind]
-    @test only(Mantle.pendingof(r)).new === c
-    _, log = stepsduring(() -> run!(g), dev)
-    @test count(==(:CellWrite), stepkinds(log, r)) == 1
-    @test Array(out) == Array(c)
-    cells = memory(dev).cells
-    free!(a); free!(b)
-    @test memory(dev).cells == cells - 2
-    free!(g); free!(r); foreach(free!, (c, out))
-end
-
-# CO-09 RR:294-296,1238-1260, api.md:180: r[] = b then r[] = a, `a` the applied target: one Rebind (a); after it b is released by free!(b), while `a` stays held by r past free!(a).
-@case "CO-09" 6 begin
-    dev = testdevice()
-    xa = testdata(Float32, 16)
-    a, b = MantleArray(dev, xa), MantleArray(dev, testdata(Float32, 16; seed = 2))
-    out = MantleArray(dev, Float32, 16)
-    r = GPURef(dev, a)
-    g = readgraph(dev, out, r, 16)
-    r[] = b
-    r[] = a
-    @test pendingkinds(r) == [:Rebind]
-    @test only(Mantle.pendingof(r)).new === a
-    run!(g)
-    cells = memory(dev).cells
-    free!(b)
-    @test memory(dev).cells == cells - 1
-    free!(a)
-    run!(g)
-    @test Array(out) == xa
-    @test memory(dev).cells == cells - 1
-    free!(g); free!(r); free!(out)
-end
-
-# CO-10 RR:294-296: a store into src1 (Update), copy! of src2 to a new length (Build), a store into src1 again: one merged Build with the last sequence number, emitted after the src1 store.
+# CO-10 resizing-and-raytracing.jl B.3: a store into src1 (Update), copy! of src2 to a new length (Build), a store into src1 again: one merged Build with the last sequence number, emitted after the src1 store.
 @case "CO-10" 5 :rt begin
     dev = testdevice()
     blas = triangleblas(dev)
@@ -247,7 +193,7 @@ end
     free!(g); foreach(free!, (t, blas, src1, src2))
 end
 
-# CO-11 RR:296-300,1095-1102: delete!(t, r1), push!, delete!(t, r2) before any submission: both deferred hold drops are kept; r1's and r2's sources are released only after the applying run.
+# CO-11 resizing-and-raytracing.jl B.3 (deferred hold drops), B.8 (delete!): delete!(t, r1), push!, delete!(t, r2) before any submission: both deferred hold drops are kept; r1's and r2's sources are released only after the applying run.
 @case "CO-11" 5 :rt begin
     dev = testdevice()
     blas = triangleblas(dev)
@@ -267,7 +213,7 @@ end
     free!(g); foreach(free!, (t, blas))
 end
 
-# CO-12 RR:302 (nextseq!: a device-wide atomic), PLAN:59-71: 8 threads store 10^4 times each into their own array; the sequence numbers are unique, and one eager kernel over all of them emits the steps sorted by them.
+# CO-12 resizing-and-raytracing.jl B.3 (nextseq!: a device-wide atomic), recording-plan.md rule 8: 8 threads store 10^4 times each into their own array; the sequence numbers are unique, and one eager kernel over all of them emits the steps sorted by them.
 @case "CO-12" 4 :long begin
     dev = testdevice()
     n = 10^4

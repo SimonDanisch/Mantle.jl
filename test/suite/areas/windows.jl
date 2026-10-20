@@ -1,24 +1,25 @@
-# Windows and present (catalogue-core.md, table 15; api.md 2.7; recording-plan.md,
-# "Windows and present"; internals.jl section 7; decisions.md B3.8; ledger
-# phase 7).
+# Windows and present (api.md 2.7; recording-plan.md, "Windows and present";
+# internals.jl section 7; plan, Phases, 7).
 #
 # resize!(win, w, h) is called the way the window's resize event calls it; the
 # cases assume the surface takes the requested extent (the native window's
-# size is the window open verb's, G13). A zero extent is what the event reports
-# for a minimized window.
+# size is the window open verb's, api.md 10). A zero extent is what the event
+# reports for a minimized window.
+#
+# A graph writes the window with clear! and draw! into it (api.md 2.6b):
+# compile forms the render passes, there is no pass object.
 #
 # Array(win) returns once a run presenting to the window has copied its image,
 # so windowimage runs the graph until it does. The readback is a `w × h`
 # matrix, first index x, of a colour type with fields r, g, b (the format is
-# open, G9); the cases use colour components 0 and 1, which an sRGB swapchain
-# stores unchanged.
+# open, api.md 10, Window defaults); the cases use colour components 0 and 1,
+# which an sRGB swapchain stores unchanged.
 #
 # The cases that count or fault window verbs (acquirenext, createswapchain,
 # surfacesize) go through FaultDevice. api.md 4.7 gives those verbs a window or
 # a swapchain as first argument, not the device: FaultDevice's forwarding has
 # to reach them for these cases to count anything.
 
-using KernelAbstractions: @kernel, @index, @Const
 using GeometryBasics: Vec3f, Vec4f, Point3f, Mat4f, TriangleFace
 using ColorTypes: RGBA
 using FixedPointNumbers: N0f8
@@ -27,7 +28,7 @@ const BLACK = Vec3f(0, 0, 0)
 const RED = Vec3f(1, 0, 0)
 const GREEN = Vec3f(0, 1, 0)
 const BLUE = Vec3f(0, 0, 1)
-const BACKGROUND = Clear((0f0, 0f0, 0f0, 1f0))
+const BACKGROUND = (0f0, 0f0, 0f0, 1f0)   # the clear value: clear!(l, target, BACKGROUND)
 
 opaque(c::Vec3f) = Vec4f(c[1], c[2], c[3], 1)
 
@@ -62,22 +63,29 @@ rectpipeline(blend = Mantle.Opaque()) =
                fragment = Mantle.FragmentShader(rects_fragment), topology = TriangleList(),
                blend, cull = Mantle.NoCull(), depth = Mantle.DepthOff())
 
-"""Draws `rects` in `colours` into pass `p`: inside render!'s block or an insert!(p) block."""
-drawrects!(p, rects, colours; blend = Mantle.Opaque()) =
-    draw!(p, rectpipeline(blend), (rects, colours), 6; instances = launchrange(rects))
+"""
+    drawrects!(l, target, rects, colours; blend)
+
+One draw of `rects` in `colours` into `target`, declared into `l` (a graph or a
+group; on a device it runs now, as its own pass).
+"""
+drawrects!(l, target, rects, colours; blend = Mantle.Opaque()) =
+    draw!(l, target, rectpipeline(blend), (rects, colours), 6; instances = launchrange(rects))
 
 """
-A graph presenting to `win`: `before(g)` declares its work before the window
-pass, which draws stripe `k` of `n` in `colour`. Returns the graph, the pass and
-the pass's arrays (stores into them change the next frame).
+A graph presenting to `win`: `before(g)` declares its work first, then a clear
+of the window and one draw of stripe `k` of `n` in `colour` (one render pass,
+formed by compile). Returns the graph and the draw's arrays (stores into them
+change the next frame).
 """
 function presenting(win, dev; k = 1, n = 1, colour = GREEN, before = g -> nothing)
     g = Graph(dev)
     before(g)
     rects = MantleArray(dev, [stripe(k, n)])
     colours = MantleArray(dev, [opaque(colour)])
-    p = render!(p -> drawrects!(p, rects, colours), g, win => BACKGROUND)
-    return (; g, p, rects, colours)
+    clear!(g, win, BACKGROUND)
+    drawrects!(g, win, rects, colours)
+    return (; g, rects, colours)
 end
 
 """A graph that presents to `win` once and is then garbage."""
@@ -135,43 +143,59 @@ function layeredwindow(dev, capacity)
     layer = Image(g, RGBA{N0f8}, win)
     rects = MantleArray(dev, [stripe(1, 1)])
     colours = MantleArray(dev, [opaque(GREEN)])
-    render!(p -> drawrects!(p, rects, colours), g, layer => BACKGROUND)
-    render!(p -> drawrects!(p, rects, colours), g, win => BACKGROUND)
+    clear!(g, layer, BACKGROUND)
+    drawrects!(g, layer, rects, colours)
+    clear!(g, win, BACKGROUND)
+    drawrects!(g, win, rects, colours)
     return (; g, win)
 end
 
-@kernel function win_setone!(a)
+"""a[1] = 1, by one work-item (the ndrange of 1 is rounded up to a whole work-group)."""
+function win_setone!(a)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds a[1] = one(eltype(a))
+    return nothing
 end
 
-@kernel function win_lengthout!(out, @Const(a))
+"""out[1] = length(a), by one work-item."""
+function win_lengthout!(out, a)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = Int32(length(a))
+    return nothing
 end
 
-@kernel function win_clear!(w)
-    I = @index(Global, Cartesian)
-    @inbounds w[I] = zero(eltype(w))
+"""w[x, y] = 0 over the whole of `w`."""
+function win_clear!(w)
+    x = KI.get_global_id().x
+    y = KI.get_global_id().y
+    x <= size(w, 1) && y <= size(w, 2) || return nothing
+    @inbounds w[x, y] = zero(eltype(w))
+    return nothing
 end
 
 # Copies src[1] into dst[1] after about `iters` dependent steps: a write that
-# lands late (the chain of helpers.jl's slowwrite!).
-@kernel function win_slowcopy!(dst, @Const(src), iters)
+# lands late (the chain of helpers.jl's slowwrite!). One work-item.
+function win_slowcopy!(dst, src, iters)
+    KI.get_global_id().x == 1 || return nothing
     acc = Int32(0)
     for i in Int32(1):iters
         acc = acc * Int32(1103515245) + i
     end
     @inbounds dst[1] = acc == Int32(-7) ? zero(eltype(dst)) : src[1]
+    return nothing
 end
 
-# Reads the depth image and writes a transform scaled by it.
-@kernel function win_depthscale!(transforms, @Const(depth))
+# Reads the depth image and writes a transform scaled by it. One work-item.
+function win_depthscale!(transforms, depth)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds d = depth[1, 1]
     @inbounds transforms[1] = Mat4f(d, 0, 0, 0, 0, d, 0, 0, 0, 0, d, 0, 0, 0, 0, 1)
+    return nothing
 end
 
-# ── 15. Windows and present (WIN) ──
+# ── Windows and present (WIN) ──
 
-# api.md:190, decisions.md:185-192. g1 presents to win; g2 declaring render! into win throws at declaration; g2 is unchanged.
+# api.md 2.7; plan, Windows and present (one graph presents to a window). g1 presents to win; g2 declaring a clear or a draw into win throws at declaration; g2 is unchanged.
 @case "WIN-01" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
@@ -181,36 +205,38 @@ end
     x = MantleArray(dev, Int32, 1)
     dispatch!(g2, win_setone!, (x,), 1)
     run!(g2)
-    @test_throws ArgumentError render!(p -> drawrects!(p, s.rects, s.colours), g2, win => BACKGROUND)
+    @test_throws ArgumentError clear!(g2, win, BACKGROUND)
+    @test_throws ArgumentError drawrects!(g2, win, s.rects, s.colours)
     _, d = counted(() -> run!(g2))
     @test d.plancompiles == 0
     @test Array(x) == Int32[1]
     @test iscolour(stripepixel(windowimage(s.g, win), 1, 1), GREEN)
 end
 
-# recording-plan.md:1022-1023 (ambiguity 13). One graph declaring render! into a second window throws at declaration.
-@case "WIN-02" 7 :graphics :window begin   # pending decision 4
+# plan, Windows and present (a graph presents to at most one window). One graph declaring a clear or a draw into a second window throws at declaration.
+@case "WIN-02" 7 :graphics :window begin
     dev = testdevice()
     win1, win2 = Window(dev, 64, 64), Window(dev, 64, 64)
     s = presenting(win1, dev)
-    @test_throws ArgumentError render!(p -> drawrects!(p, s.rects, s.colours), s.g, win2 => BACKGROUND)
+    @test_throws ArgumentError clear!(s.g, win2, BACKGROUND)
+    @test_throws ArgumentError drawrects!(s.g, win2, s.rects, s.colours)
     @test iscolour(stripepixel(windowimage(s.g, win1), 1, 1), GREEN)
     s2 = presenting(win2, dev; colour = BLUE)       # win2 is still free
     @test iscolour(stripepixel(windowimage(s2.g, win2), 1, 1), BLUE)
 end
 
-# examples.jl:490 vs decisions.md:185 (ambiguity 13). A kernel of the presenting graph may write the window; one of another graph throws at declaration.
-@case "WIN-03" 7 :graphics :window begin   # pending decision 4
+# api.md 2.7 (any node of the presenting graph may write the window). A kernel of the presenting graph may write the window; one of another graph throws at declaration.
+@case "WIN-03" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
     s = presenting(win, dev)
-    dispatch!(s.g, win_clear!, (win,), (64, 64))    # after the pass: clears what it drew
+    dispatch!(s.g, win_clear!, (win,), (64, 64))    # after the draw: clears what it drew
     g2 = Graph(dev)
     @test_throws ArgumentError dispatch!(g2, win_clear!, (win,), (64, 64))
     @test iscolour(stripepixel(windowimage(s.g, win), 1, 1), BLACK)
 end
 
-# api.md:191, recording-plan.md:1031-1059. resize! on the event thread while a run is on the GPU; the next run: the new size, no device-wide wait, no plan compile.
+# api.md 2.7 (resize!); plan, Windows and present. resize! on the event thread while a run is on the GPU; the next run: the new size, no device-wide wait, no plan compile.
 @case "WIN-04" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64; capacity = (128, 128))
@@ -231,7 +257,7 @@ end
     @test iscolour(stripepixel(A, 1, 1), GREEN)
 end
 
-# api.md:191. resize!(win) makes no driver call, submission, allocation, record or compile on the event thread.
+# api.md 2.7 (resize!). resize!(win) makes no driver call, submission, allocation, record or compile on the event thread.
 @case "WIN-05" 7 :graphics :window begin
     fd = FaultDevice(testdevice())
     win = Window(fd, 64, 64; capacity = (128, 128))
@@ -246,7 +272,7 @@ end
     @test d.plancompiles == 0
 end
 
-# api.md:191, decisions.md:442-444. A resize beyond the capacity never throws; the next run compiles the plan once.
+# api.md 2.7 (resize!), 7. A resize beyond the capacity never throws; the next run compiles the plan once.
 @case "WIN-06" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64; capacity = (128, 128))
@@ -264,8 +290,8 @@ end
     @test iscolour(stripepixel(A, 1, 1), GREEN)
 end
 
-# api.md:483. Minimized: run! returns Skipped(), submits nothing, the store stays pending; after the restore it is applied.
-@case "WIN-07" 7 :graphics :window begin   # pending decision 4
+# api.md 7 (a window with a zero extent). Minimized: run! returns Skipped(), submits nothing, the store stays pending; after the restore it is applied.
+@case "WIN-07" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
     s = presenting(win, dev)
@@ -282,7 +308,7 @@ end
     @test iscolour(stripepixel(windowimage(s.g, win), 1, 1), BLUE)
 end
 
-# api.md:483. OUT_OF_DATE [FI-3]: a resize to surfacesize, a new generation, retried and presented by the same run!.
+# api.md 7. OUT_OF_DATE: a resize to surfacesize, a new generation, retried and presented by the same run!.
 @case "WIN-08" 7 :graphics :window begin
     onvulkan(testdevice()) do dev
         fd = FaultDevice(dev)
@@ -299,7 +325,7 @@ end
     end
 end
 
-# api.md:483. SUBOPTIMAL [FI-3]: presented, the window marked, the next run makes a new generation.
+# api.md 7. SUBOPTIMAL: presented, the window marked, the next run makes a new generation.
 @case "WIN-09" 7 :graphics :window begin
     # Not testable with faultdevice.jl: an Answer replaces the acquirenext call,
     # so it cannot return SUBOPTIMAL with an image the driver really acquired,
@@ -308,7 +334,7 @@ end
     @test_skip "WIN-09 needs a forwarding fault"
 end
 
-# internals.jl:1475-1486 (1519-1556 today) [FI-7]. A resize while a run is held in its acquire: the run returns, the next run has the new size, no plan compile.
+# internals.jl section 7 (acquireimage!, applywindows!). A resize while a run is held in its acquire: the run returns, the next run has the new size, no plan compile.
 @case "WIN-10" 7 :graphics :window begin
     fd = FaultDevice(testdevice())
     win = Window(fd, 64, 64; capacity = (128, 128))
@@ -327,7 +353,7 @@ end
     @test size(windowimage(s.g, win)) == (96, 80)
 end
 
-# api.md:192, 485. A host function throws after the acquire, before the window pass: the image goes back to the window; the next run presents it without acquiring.
+# api.md 2.7 (an acquired swapchain image), 7. A host function throws after the acquire, before the window is drawn: the image goes back to the window; the next run presents it without acquiring.
 @case "WIN-11" 7 :graphics :window begin
     fd = FaultDevice(testdevice())
     win = Window(fd, 64, 64)
@@ -345,7 +371,7 @@ end
     @test calls(fd, :acquirenext) == acquires + 2
 end
 
-# internals.jl:1461 (1479-1481, 1515 today). An image kept after a throw, then a resize: the kept image goes with its generation; the next run acquires from the new one.
+# internals.jl section 7 (newgeneration!, keepimage!). An image kept after a throw, then a resize: the kept image goes with its generation; the next run acquires from the new one.
 @case "WIN-12" 7 :graphics :window begin
     fd = FaultDevice(testdevice())
     win = Window(fd, 64, 64; capacity = (128, 128))
@@ -362,7 +388,7 @@ end
     @test size(windowimage(s.g, win)) == (96, 80)
 end
 
-# recording-plan.md:1023-1029. 1 000 runs, every other one meeting OUT_OF_DATE (Again): every real acquire is presented; memory at its baseline.
+# plan, Windows and present (one owner for an acquired image). 1 000 runs, every other one meeting OUT_OF_DATE (Again): every real acquire is presented; memory at its baseline.
 @case "WIN-13" 7 :graphics :window :long begin
     onvulkan(testdevice()) do dev
         fd = FaultDevice(dev)
@@ -381,7 +407,7 @@ end
     end
 end
 
-# api.md:184, recording-plan.md:1273-1278. Array(win) from another thread during frames: the image of one frame presented after the call.
+# api.md 2.6b (Array(win)); plan, Graphics (screenshots). Array(win) from another thread during frames: the image of one frame presented after the call.
 @case "WIN-14" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 128, 64)
@@ -405,8 +431,8 @@ end
     @test all(>(10), drawn)
 end
 
-# api.md:184 (ambiguity 14). Array(win) while minimized, or after free! of the presenting graph, throws.
-@case "WIN-15" 7 :graphics :window begin   # pending decision 4
+# api.md 2.6b (Array(win)). Array(win) while minimized, or after free! of the presenting graph, throws.
+@case "WIN-15" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
     s = presenting(win, dev)
@@ -421,15 +447,15 @@ end
     @test thrownwithin(() -> Array(other), 10) isa ArgumentError
 end
 
-# api.md:184 (ambiguity 14). Array(win) from a host function of the presenting graph throws instead of waiting for its own run.
-@case "WIN-16" 7 :graphics :window begin   # pending decision 4
+# api.md 2.6b (Array(win)). Array(win) from a host function of the presenting graph throws instead of waiting for its own run.
+@case "WIN-16" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
     s = presenting(win, dev; before = g -> hostnode!(g, _ -> (Array(win); nothing)))
     @test thrownwithin(() -> run!(s.g), 30) isa ArgumentError
 end
 
-# api.md:75. MantleArray(g, T, win) across resizes: its device length follows the window; no plan compile within the capacity.
+# api.md 2.2 (MantleArray(g, T, win)), 2.7. MantleArray(g, T, win) across resizes: its device length follows the window; no plan compile within the capacity.
 @case "WIN-17" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64; capacity = (128, 128))
@@ -445,7 +471,7 @@ end
     end
 end
 
-# recording-plan.md:1050-1054. A small window with a large capacity on a sparse device: the window part maps pages for the size, not the capacity.
+# plan, Windows and present (the window part is sparse where possible). A small window with a large capacity on a sparse device: the window part maps pages for the size, not the capacity.
 @case "WIN-18" 7 :graphics :sparse :window begin
     dev = testdevice()
     capacity = (2048, 2048)
@@ -461,7 +487,7 @@ end
     @test grown < capbytes
 end
 
-# recording-plan.md:1053-1054. Without sparse residency the capacity is mapped, and the window works.
+# plan, Windows and present. Without sparse residency the capacity is mapped, and the window works.
 @case "WIN-19" 7 :graphics :window begin
     dev = testdevice()
     if has(dev, :sparse)
@@ -476,7 +502,7 @@ end
     end
 end
 
-# recording-plan.md:993-1001. Steady state: nothing recorded per frame (per-image segments once per generation); one submission per frame, the pass writing the swapchain image (no copy).
+# plan, Windows and present (Vulkan). Steady state: nothing recorded per frame (per-image segments once per generation); one submission per frame, the draw writing the swapchain image (no copy).
 @case "WIN-20" 7 :graphics :window begin
     onvulkan(testdevice()) do dev
         win = Window(dev, 64, 64)
@@ -488,7 +514,7 @@ end
     end
 end
 
-# internals.jl:1453-1455 (1483, 1508 today). createswapchain throws [FI-5]: run! throws, the window mark is restored; the next run makes the generation.
+# internals.jl section 7 (applywindows!: a throw restores the mark). createswapchain throws: run! throws, the window mark is restored; the next run makes the generation.
 @case "WIN-21" 7 :graphics :window begin
     fd = FaultDevice(testdevice())
     win = Window(fd, 64, 64; capacity = (128, 128))
@@ -503,7 +529,7 @@ end
     @test size(windowimage(s.g, win)) == (96, 80)
 end
 
-# recording-plan.md:1019. g1 renders image I late; the presenting g2 reads I: g2 waits for g1 (namers).
+# plan, Windows and present (other graphs render into Images this graph reads); internals.jl section 8. g1 draws into image I late; the presenting g2 reads I: g2 waits for g1 (namers).
 @case "WIN-22" 7 :graphics :window begin
     dev = testdevice()
     shared = Image(dev, RGBA{N0f8}, 32, 32)
@@ -512,7 +538,8 @@ end
     full = MantleArray(dev, [stripe(1, 1)])
     g1 = Graph(dev)
     dispatch!(g1, win_slowcopy!, (x, src, Int32(calibratedspin(dev, 200))), 1)
-    render!(p -> drawrects!(p, full, x), g1, shared => BACKGROUND)
+    clear!(g1, shared, BACKGROUND)
+    drawrects!(g1, shared, full, x)
     win = Window(dev, 64, 64)
     out = MantleArray(dev, RGBA{N0f8}, 32, 32)
     s2 = presenting(win, dev; before = g -> readimage!(g, shared, out))
@@ -523,7 +550,7 @@ end
     @test all(px -> iscolour(px, BLUE), Array(out))
 end
 
-# recording-plan.md:1061. A window opened on the main thread; its graph runs on a worker thread.
+# plan, Windows and present (GLFW calls on the main thread; recording and submission anywhere). A window opened on the main thread; its graph runs on a worker thread.
 @case "WIN-23" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)                        # this task: the main thread
@@ -539,8 +566,8 @@ end
     end
 end
 
-# internals.jl:1407-1413 (ambiguity 13). The presenting graph freed, or collected: another graph may then render into the window.
-@case "WIN-24" 7 :graphics :window begin   # pending decision 4
+# api.md 2.7; internals.jl section 7 (one graph presents to a window). The presenting graph freed, or collected: another graph may then draw into the window.
+@case "WIN-24" 7 :graphics :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
     s = presenting(win, dev)
@@ -555,7 +582,7 @@ end
     @test iscolour(stripepixel(windowimage(s3.g, other), 1, 1), BLUE)
 end
 
-# recording-plan.md:1046-1049 (open decision 10). 20 resizes, each retiring a swapchain: memory back at its baseline (validation runs with the suite's layers).
+# plan, Windows and present (a generation is retired with the tokens of its last run; when its images are free is still open). 20 resizes, each retiring a swapchain: memory back at its baseline (validation runs with the suite's layers).
 @case "WIN-25" 7 :graphics :window begin
     onvulkan(testdevice()) do dev
         win = Window(dev, 64, 64; capacity = (128, 128))
@@ -572,7 +599,7 @@ end
     end
 end
 
-# internals.jl:1409-1414 (1463-1470 today). 100 resize events between two runs: one new generation, at the last size.
+# internals.jl section 7 (resize!, applywindows!). 100 resize events between two runs: one new generation, at the last size.
 @case "WIN-26" 7 :graphics :window begin
     fd = FaultDevice(testdevice())
     win = Window(fd, 64, 64; capacity = (256, 256))
@@ -586,7 +613,7 @@ end
     @test size(windowimage(s.g, win)) == (164, 114)
 end
 
-# api.md:190. Window-sized arrays are placed at the capacity: explicit (resizes up to it compile nothing, past it once) and default (the largest monitor's size).
+# api.md 2.7 (Window: capacity). Window-sized arrays are placed at the capacity: explicit (resizes up to it compile nothing, past it once) and default (the largest monitor's size).
 @case "WIN-27" 7 :graphics :window begin
     dev = testdevice()
     out = MantleArray(dev, Int32, 1)
@@ -610,7 +637,7 @@ end
     @test Array(out) == Int32[640 * 480]
 end
 
-# recording-plan.md:1002-1003. Metal: a new drawable per frame; each frame shows what it drew.
+# plan, Windows and present (Metal). Metal: a new drawable per frame; each frame shows what it drew.
 @case "WIN-28" 7 :graphics :metal :window begin
     dev = testdevice()
     win = Window(dev, 128, 64)
@@ -621,7 +648,7 @@ end
     end
 end
 
-# internals.jl:688-698 (684-705 today; ambiguity 27). A build between two window passes: independent of the first, it moves before the present span; depending on it, run! throws.
+# internals.jl section 4 (submissions!, presentspan!). A build declared between two draws into the window: independent of them, it moves before the present span; depending on the first draw, run! throws.
 @case "WIN-29" 7 :graphics :rt :window begin
     dev = testdevice()
     blas = BLAS(dev, MantleArray(dev, [Point3f(0, 0, 0), Point3f(1, 0, 0), Point3f(0, 1, 0)]),
@@ -632,23 +659,26 @@ end
     push!(tlas, blas, MantleArray(dev, [one(Mat4f)]))
     win = Window(dev, 64, 64)
     g = Graph(dev)
-    render!(p -> drawrects!(p, left, green), g, win => BACKGROUND)
+    clear!(g, win, BACKGROUND)
+    drawrects!(g, win, left, green)
     build!(g, tlas)
-    render!(p -> drawrects!(p, right, green), g, win => Keep)
+    drawrects!(g, win, right, green)                 # no clear before it: keeps what the first draw wrote
     @test run!(g) isa Mantle.Submitted
     A = windowimage(g, win)
     @test iscolour(stripepixel(A, 1, 2), GREEN)
     @test iscolour(stripepixel(A, 2, 2), GREEN)
-    # The build reads transforms a kernel writes from the depth the first window pass wrote.
+    # The build reads transforms a kernel writes from the depth the pass of the first window draw wrote.
     transforms = MantleArray(dev, [one(Mat4f)])
     tlas2 = TLAS(dev)
     push!(tlas2, blas, transforms)
     win2 = Window(dev, 64, 64)
     g2 = Graph(dev)
     depth = Image(g2, Float32, win2)
-    render!(p -> drawrects!(p, left, green), g2, win2 => BACKGROUND, depth => Clear(1f0))
+    clear!(g2, win2, BACKGROUND)
+    clear!(g2, depth, 1f0)
+    drawrects!(g2, (win2, depth), left, green)
     dispatch!(g2, win_depthscale!, (transforms, depth), 1)
     build!(g2, tlas2)
-    render!(p -> drawrects!(p, right, green), g2, win2 => Keep)
+    drawrects!(g2, win2, right, green)
     @test_throws ArgumentError run!(g2)              # a compile error, raised by the first run!
 end

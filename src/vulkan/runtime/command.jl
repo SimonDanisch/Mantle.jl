@@ -401,8 +401,7 @@ recording that way, and `submit!(bq, closed...)` is the only way two closed
 buffers ever share a submission.
 
 What it costs is a `vkBeginCommandBuffer`/`vkEndCommandBuffer` pair and a
-`vkQueueSubmit2` per call, measured in `docs/submission-refactor.md` and
-accepted: how many ad hoc launches are batched efficiently is a question for a
+`vkQueueSubmit2` per call, accepted: how many ad hoc launches are batched efficiently is a question for a
 graph built to hold them, not for the queue to answer with a buffer and a
 threshold.
 """

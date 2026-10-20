@@ -1,7 +1,7 @@
-# Host nodes and stages (catalogue-core.md, table 7: HOST). Contracts:
-# api.md 2.4 (HostCall), 5 and 7; recording-plan.md "Host nodes" and
-# "Ordering across graphs and queues"; internals.jl section 4 (hostcuts!,
-# submissions!) and section 6 (run!, lockgraph, holdparts!, runhost!).
+# Host nodes and stages. Contracts: api.md 2.4 (HostCall), 5 and 7;
+# recording-plan.md, Run ("Host nodes") and "Ordering across graphs and
+# queues"; internals.jl section 4 (hostcuts!, submissions!) and section 6
+# (run!, lockgraph, holdparts!, runhost!).
 #
 # Arena parts in these cases: graphs on one device share the device-memory
 # arena part by default (plan, Memory: separate parts only for graphs core
@@ -9,7 +9,6 @@
 # in that part; one a host node reads or writes lives in the host-visible
 # part. `hostdevicepart!` gives a graph a tenancy in the device-memory part.
 
-import KernelInterface as KI
 
 """a[i] = i."""
 function host_iota!(a)
@@ -37,6 +36,7 @@ end
 
 """c[1] += 1, one thread."""
 function host_increment!(c)
+    KI.get_global_id().x == 1 || return     # ndrange is rounded up to whole work-groups
     @inbounds c[1] += one(eltype(c))
     return
 end
@@ -89,7 +89,7 @@ stagecount(g) = length(Mantle.submissions(g))
 
 # ── 7. Host nodes and stages (HOST) ──
 
-# A:128, P:914-919: K1 writes src, HostCall(f) writes reverse(src) into idx, K2 copies idx into a device array: exact; f runs on run!'s task; 2 stages, one submission each.
+# api.md 2.4 (HostCall); plan, Run ("Host nodes"): K1 writes src, HostCall(f) writes reverse(src) into idx, K2 copies idx into a device array: exact; f runs on run!'s task; 2 stages, one submission each.
 @case "HOST-01" 3 begin
     dev = testdevice(); n = 256
     g = Graph(dev)
@@ -109,7 +109,7 @@ stagecount(g) = length(Mantle.submissions(g))
     @test Array(out) == Int32.(n:-1:1)
 end
 
-# P:500, I:584-588: K1, H1, a kernel that depends on neither host node, H2, K2: hostcuts! moves the kernel across and merges H1 and H2 into one cut (2 stages, one host wait per run); H1 runs before H2; exact.
+# plan, Run ("Host nodes"); internals.jl section 4 (hostcuts!): K1, H1, a kernel that depends on neither host node, H2, K2: hostcuts! moves the kernel across and merges H1 and H2 into one cut (2 stages, one host wait per run); H1 runs before H2; exact.
 @case "HOST-02" 3 begin
     dev = testdevice(); n = 128
     g = Graph(dev)
@@ -134,7 +134,7 @@ end
     @test d.hostwaits == 1
 end
 
-# I:1328-1331: a slow kernel (about 300 ms) in stage 1 writes 42; the host function after it reads 42, in every run.
+# internals.jl section 6 (runhost!): a slow kernel (about 300 ms) in stage 1 writes 42; the host function after it reads 42, in every run.
 @case "HOST-03" 3 begin
     dev = testdevice()
     g = Graph(dev)
@@ -149,7 +149,7 @@ end
     end
 end
 
-# A:128, P:920-922: the host function throws: the exception comes out of run!, stage 2 is not submitted, no arena part stays held (a graph sharing the device part runs), and the next run is exact.
+# api.md 2.4 (HostCall); plan, Run ("Host nodes"): the host function throws: the exception comes out of run!, stage 2 is not submitted, no arena part stays held (a graph sharing the device part runs), and the next run is exact.
 @case "HOST-04" 3 begin
     dev = testdevice(); n = 64
     fail = Ref(false)
@@ -177,7 +177,7 @@ end
     @test Array(devout) == Int32.(1:n)
 end
 
-# A:473: the host function of g calls run!(g): it throws (the graph lock is not reentrant), no deadlock.
+# api.md section 7: the host function of g calls run!(g): it throws (the graph lock is not reentrant), no deadlock.
 @case "HOST-05" 3 begin
     dev = testdevice()
     g = Graph(dev)
@@ -187,7 +187,7 @@ end
     @test thrown(() -> run!(g)) isa ArgumentError
 end
 
-# A:473, I:994: the host function of g runs g2, which shares g's device arena part (both compiled): lockgraph(g2) throws; g2 stays usable.
+# api.md section 7; internals.jl section 6 (lockgraph): the host function of g runs g2, which shares g's device arena part (both compiled): lockgraph(g2) throws; g2 stays usable.
 @case "HOST-06" 3 begin
     dev = testdevice(); n = 64
     g2 = Graph(dev)
@@ -204,7 +204,7 @@ end
     @test Array(out2) == Int32.(1:n)
 end
 
-# P:694-695: the host function of g runs g3, which has no transients and so no arena part to share: allowed; both graphs exact.
+# plan, "Ordering across graphs and queues" ("Host waits and locks"): the host function of g runs g3, which has no transients and so no arena part to share: allowed; both graphs exact.
 @case "HOST-07" 3 begin
     dev = testdevice(); n = 64
     count = MantleArray(dev, Int32, 1)
@@ -222,8 +222,8 @@ end
     @test Array(count) == Int32[2]
 end
 
-# A:437, I:1268-1289: the host function of g (holding the device part) runs g4, never compiled, which will use the same part: lockgraph passes (g4 has no plan yet), holdparts! would wait for a part of equal id the task holds itself and throws; afterwards no part is held.
-# The catalogue's form (part 5 held, part 3 held by T2's run) needs part ids, which no hook shows; this is the equal-id case api.md 5 pins ("higher or equal", ambiguity 10).
+# api.md section 5 (checks that keep the order); internals.jl section 6 (holdparts!): the host function of g (holding the device part) runs g4, never compiled, which will use the same part: lockgraph passes (g4 has no plan yet), holdparts! would wait for a part of equal id the task holds itself and throws; afterwards no part is held.
+# Part ids are not visible through the suite's hooks, so the case uses the equal-id case api.md section 5 states ("higher or equal").
 @case "HOST-08" 3 begin
     dev = testdevice(); n = 64
     g4 = Graph(dev)
@@ -242,7 +242,7 @@ end
     @test Array(out4) == Int32.(1:n)
 end
 
-# P:662-664: the host function stores into the device array src (src[1:n] = 2t); stage 2 copies src: it sees the store.
+# api.md 2.2 (a[r] = data) and section 6 (a change made while a host function runs reaches the later stages): the host function stores into the device array src (src[1:n] = 2t); stage 2 copies src: it sees the store.
 @case "HOST-09" 4 begin
     dev = testdevice(); n = 128
     src = MantleArray(dev, Int32, n)
@@ -258,7 +258,7 @@ end
     @test Array(src) == Int32.(2:2:2n)
 end
 
-# P:671-675, R:343-351: the host function resizes a, which stage 2 launches over directly: the call only enqueues (size(a) is the new one, a change pending), stage 2 launches over the old size, and the next run recompiles once and covers the new size.
+# api.md 2.2 (resize!: scheduled) and section 6; resizing-and-raytracing.jl B.3: the host function resizes a, which stage 2 launches over directly: the call only enqueues (size(a) is the new one, a change pending), stage 2 launches over the old size, and the next run recompiles once and covers the new size.
 @case "HOST-10" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -280,7 +280,7 @@ end
     @test sum(Array(marks)) == 2n
 end
 
-# D:500-505, R:449-451: the host function resizes a (which stage 2 launches over directly) and then makes an eager call on a: applying the resize would stale its own running plan, so the eager call throws (inside a host function), and run! with it; the next run recompiles and is exact.
+# api.md section 7 (a change that would make a running plan stale, from inside any run, throws); resizing-and-raytracing.jl B.4: the host function resizes a (which stage 2 launches over directly) and then makes an eager call on a: applying the resize would stale its own running plan, so the eager call throws (inside a host function), and run! with it; the next run recompiles and is exact.
 @case "HOST-11" 5 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -297,7 +297,7 @@ end
     @test sum(Array(marks)) == 2n
 end
 
-# P:1921-1928: while g's host function blocks, T2 runs g2 (shares g's device part) and T3 resizes b, which g's stage 2 reads over launchrange(b): resize! returns at once, g2 waits until g has submitted its last stage, and all results are exact.
+# api.md section 7 (a change that would make a running plan stale waits for the run's last stage); plan, "Ordering across graphs and queues": while g's host function blocks, T2 runs g2 (shares g's device part) and T3 resizes b, which g's stage 2 reads over launchrange(b): resize! returns at once, g2 waits until g has submitted its last stage, and all results are exact.
 @case "HOST-12" 4 begin
     dev = testdevice(); n = 64
     data = testdata(Int32, n)
@@ -331,7 +331,7 @@ end
     @test length(b) == 2n
 end
 
-# P:1044-1045, I:660-667: K1 writes the window and c, a host node reads c, K2 writes the window from the host node's output, then the present: the host node sits between the first write of the swapchain image and its present and cannot be moved out, a compile error raised by the first run! (ambiguity 27). The window's device-side element type is open (G9): the kernel writes zero texels.
+# plan, "Windows and present"; internals.jl section 4 (submissions!, hostinpresent): K1 writes the window and c, a host node reads c, K2 writes the window from the host node's output, then the present: the host node sits between the first write of the swapchain image and its present and cannot be moved out, a compile error raised by the first run!. The window's device-side element type is open (api.md section 10, window defaults): the kernel writes zero texels.
 @case "HOST-13" 7 :window begin
     dev = testdevice()
     win = Window(dev, 64, 64)
@@ -347,20 +347,18 @@ end
     @test_throws ArgumentError run!(g)
 end
 
-# A:128: a HostCall inside a repeat! body and inside a when! block throws at declaration; neither leaves a node behind (the graph runs exact afterwards, the host functions never ran).
+# api.md 2.4 (HostCall: no method for a Group, not a when! launch) and section 7: a HostCall declared into a repeated group and one under a when! flag are each a MethodError; neither leaves a node behind (the graph runs exact afterwards, the host functions never ran).
 @case "HOST-14" 1 begin
     dev = testdevice(); n = 16
     g = Graph(dev)
     t = MantleArray(g, Int32, n)
     out = MantleArray(dev, Int32, n)
-    flag = MantleArray(dev, Int32[1])
+    flag = MantleArray(dev, [true])
     calls = Ref(0)
-    @test_throws ArgumentError repeat!(g, 3) do i
-        dispatch!(g, HostCall(x -> (calls[] += 1)), (t,); writes = ())
-    end
-    @test_throws ArgumentError when!(g, flag) do
-        dispatch!(g, HostCall(x -> (calls[] += 1)), (t,); writes = ())
-    end
+    loop = Group(g, "loop")
+    repeat!(loop, 3)
+    @test_throws MethodError dispatch!(loop, HostCall(x -> (calls[] += 1)), (t,); writes = ())
+    @test_throws MethodError when!(g, flag, HostCall(x -> (calls[] += 1)), (t,); writes = ())
     dispatch!(g, host_iota!, (t,), n)
     dispatch!(g, host_add!, (out, t, Int32(0)), n)
     run!(g)
@@ -368,7 +366,7 @@ end
     @test calls[] == 0
 end
 
-# I:648: a graph whose first node is a host node, and one whose last node is one: both run, and the head of the stage after the cut binds the device array w (exact, over two runs each).
+# internals.jl section 4 (compile: a HeadNode after each host node): a graph whose first node is a host node, and one whose last node is one: both run, and the head of the stage after the cut binds the device array w (exact, over two runs each).
 @case "HOST-15" 3 begin
     dev = testdevice(); n = 64
     w = MantleArray(dev, Int32.(1:n))
@@ -392,27 +390,27 @@ end
     end
 end
 
-# I:589-591: the host function reads a device array in normal memory (copied into host-visible memory before the cut) and one in Readback memory (read in place, no copy); it sees the data in both. The copy shows in peakbytes: its host-visible target is a transient, and the Readback graph has no transient at all.
+# plan, Run ("Host nodes"); internals.jl section 4 (hostcuts!): the host function reads a device array in device memory (copied into host-visible memory before the cut) and one in unified memory (read in place, no copy); it sees the data in both. The copy shows in peakbytes: its host-visible target is a transient, and the unified graph has no transient at all.
 @case "HOST-16" 3 begin
     dev = testdevice(); n = 1024
     plain = MantleArray(dev, Int32, n)
-    rb = MantleArray(dev, Int32, n; memory = Mantle.Readback())
+    um = MantleArray(dev, Int32, n; unified = true)
     seen = Dict{Symbol,Vector{Int32}}()
     gn = Graph(dev)
     dispatch!(gn, host_iota!, (plain,), n)
     dispatch!(gn, HostCall(v -> (seen[:plain] = copy(v))), (plain,); writes = ())
     gr = Graph(dev)
-    dispatch!(gr, host_iota!, (rb,), n)
-    dispatch!(gr, HostCall(v -> (seen[:readback] = copy(v))), (rb,); writes = ())
+    dispatch!(gr, host_iota!, (um,), n)
+    dispatch!(gr, HostCall(v -> (seen[:unified] = copy(v))), (um,); writes = ())
     run!(gn)
     run!(gr)
     @test seen[:plain] == Int32.(1:n)
-    @test seen[:readback] == Int32.(1:n)
+    @test seen[:unified] == Int32.(1:n)
     @test Mantle.peakbytes(gn) >= sizeof(Int32) * n
     @test Mantle.peakbytes(gr) == 0
 end
 
-# P:1925-1928: g's host function runs g2 while T3's run of g2 holds g2's lock and waits for the device part g's run holds, and T2 waits for g2's lock: lockgraph throws for the host function at once; nobody deadlocks; g2's runs complete afterwards.
+# api.md section 5 (lockgraph throws when the calling task holds an arena part of that graph's plan); plan, "Ordering across graphs and queues": g's host function runs g2 while T3's run of g2 holds g2's lock and waits for the device part g's run holds, and T2 waits for g2's lock: lockgraph throws for the host function at once; nobody deadlocks; g2's runs complete afterwards.
 @case "HOST-17" 3 begin
     dev = testdevice(); n = 64
     g2 = Graph(dev)
@@ -440,7 +438,7 @@ end
     @test Array(out2) == Int32.(1:n)
 end
 
-# P:925-926, I:986-990: the host function starts a task that runs g and waits for it. The inner run! waits for g's lock, which the outer run holds: an unbounded wait would deadlock, undetected by Mantle. The host function waits 2 s only; the inner run completes after the outer one.
+# plan, Run ("Host nodes": host functions that run each other can deadlock, which Mantle does not detect): the host function starts a task that runs g and waits for it. The inner run! waits for g's lock, which the outer run holds: an unbounded wait would deadlock, undetected by Mantle. The host function waits 2 s only; the inner run completes after the outer one.
 @case "HOST-18" 3 begin
     dev = testdevice(); n = 64
     inner = Ref{Any}(nothing)
@@ -461,7 +459,7 @@ end
     @test Array(out) == Int32.(1:n)
 end
 
-# P:1353-1355: on a device with sparse residency, the host function's transients (4 MiB each, many sparse pages) are one contiguous view each: unit stride, every element readable and writable.
+# plan, Memory ("Arenas grow and shrink": a host node's arguments live in a host-visible arena part that is not sparse): on a device with sparse residency, the host function's transients (4 MiB each) are one contiguous view each: unit stride, every element readable and writable.
 @case "HOST-19" 3 :sparse begin
     dev = testdevice(); n = 2^20
     g = Graph(dev)
@@ -477,7 +475,7 @@ end
     @test Array(out) == Int32.(2:n+1)
 end
 
-# A:128: the host function writes u, which its `writes` does not list (ambiguity 25): undefined contents, not detected: run! neither throws nor refuses, and returns Submitted.
+# api.md 2.4 (HostCall; writes): the host function writes u, which its `writes` does not list: undefined contents, not detected: run! neither throws nor refuses, and returns Submitted.
 @case "HOST-20" 3 begin
     dev = testdevice(); n = 64
     g = Graph(dev)
@@ -491,7 +489,7 @@ end
     @test run!(g) isa Mantle.Submitted
 end
 
-# P:926-927: K1, H1, K2, H2, K3, each reading what the one before wrote: 3 stages, so 3 submissions and 2 host waits per run (one GPU-to-host round trip per cut); exact.
+# plan, Run ("Host nodes": one GPU-to-host round trip per cut): K1, H1, K2, H2, K3, each reading what the one before wrote: 3 stages, so 3 submissions and 2 host waits per run (one GPU-to-host round trip per cut); exact.
 @case "HOST-21" 3 begin
     dev = testdevice(); n = 64
     g = Graph(dev)

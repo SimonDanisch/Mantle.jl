@@ -1,32 +1,36 @@
-# Fixed vs resizable arrays, staleness, register! (catalogue-resize-rt.md,
-# table F).
+# Fixed vs resizable arrays, staleness, register!: api.md 2.2 (resize!,
+# launchrange); resizing-and-raytracing.jl B.6 (dependents, register!) and
+# B.7 (lengths at compile).
 #
-# References: api.md; RR = docs/resizing-and-raytracing.jl; PLAN =
-# docs/recording-plan.md (line numbers of 2026-10-05).
 # Test hooks as in resize.jl: Mantle.pendingof(x) gives Change objects in
 # sequence order; Mantle.steplog(dev) entries have `kind` (a Symbol),
 # `target` (the root resource), `seq` and `token`.
 # Whether a launch compiled direct or indirect has no test hook; it shows in
 # its consequence: a direct launch over `a` makes the first resize! of `a`
-# recompile the plan once (RR:664-667), an indirect one never does.
-# The catalogue's FI-R (a pause between record! and register!) is a Block on
-# the device verb `compilebindings`: compile has decided the layout (every
-# node's extents and dependences), recording and register! follow.
+# recompile the plan once (resizing-and-raytracing.jl B.6), an indirect one
+# never does.
+# A pause between compile and register! is a Block on the device verb
+# `compilebindings`: compile has decided the layout (every node's extents and
+# dependences), recording and register! follow.
 
-using KernelAbstractions: @kernel, @index
-
-@kernel function fx_copy!(dst, src)
-    i = @index(Global)
+function fx_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing   # ndrange is rounded up to whole work-groups
     dst[i] = src[i]
+    return nothing
 end
 
-@kernel function fx_mark!(marks, a)
-    i = @index(Global)
+function fx_mark!(marks, a)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     marks[i] = Int32(1)
+    return nothing
 end
 
-@kernel function fx_readfirst!(out, a)
+function fx_readfirst!(out, a)
+    KI.get_global_id().x == 1 || return nothing
     out[1] = a[1]
+    return nothing
 end
 
 """The kinds of the changes pending on `x`, in sequence order."""
@@ -62,7 +66,7 @@ end
 """An eager call reading `a[1]` into `s`: a submission that touches `a`, so it applies what is pending on it."""
 applypending!(s, a) = dispatch!(location(s, a), fx_readfirst!, (s, a), 1)
 
-"""An element count whose growth by 16x stays below the sparse threshold (4 sparse pages; RR:202)."""
+"""An element count whose growth by 16x stays below the sparse threshold (4 sparse pages; resizing-and-raytracing.jl B.1, sparsethreshold)."""
 smallcount(dev) = max(16, caps(dev).sparsepage ÷ 64)
 
 """Blocks the next call of `verb` on `fd`; returns the call count before it and the channel that lets it go."""
@@ -78,7 +82,7 @@ entered(fd, verb, n; timeout = 30) = timedwait(() -> calls(fd, verb) > n, timeou
 
 # ── F. Fixed vs resizable arrays, staleness, register! ──
 
-# FX-01 api.md:89, RR:775: a launch over launchrange of a fresh array and of one created from data compiles direct: the first resize! (a shrink) recompiles the plan once.
+# FX-01 api.md 2.2 (launchrange), resizing-and-raytracing.jl B.7: a launch over launchrange of a fresh array and of one created from data compiles direct: the first resize! (a shrink) recompiles the plan once.
 @case "FX-01" 4 begin
     dev = testdevice()
     n = 1000
@@ -95,7 +99,7 @@ entered(fd, verb, n; timeout = 30) = timedwait(() -> calls(fd, verb) > n, timeou
     free!(marks)
 end
 
-# FX-02 RR:670-677,775-776: resize! called and not yet applied, then a new graph compiles: its launch is indirect (later growth recompiles nothing) and its first run applies the Resize.
+# FX-02 resizing-and-raytracing.jl B.6 (compile reads the requested state), B.7: resize! called and not yet applied, then a new graph compiles: its launch is indirect (later growth recompiles nothing) and its first run applies the Resize.
 @case "FX-02" 4 begin
     dev = testdevice()
     n = 1000
@@ -116,7 +120,7 @@ end
     free!(g); foreach(free!, (a, marks))
 end
 
-# FX-03 api.md:80, RR:346-349,664-667: a recorded plan launches directly over fixed `a`; resize!(a, n+1) submits and compiles nothing at the call; the next run! recompiles once and launches n+1 items, the one after compiles nothing.
+# FX-03 api.md 2.2 (resize!), resizing-and-raytracing.jl B.4, B.6: a recorded plan launches directly over fixed `a`; resize!(a, n+1) submits and compiles nothing at the call; the next run! recompiles once and launches n+1 items, the one after compiles nothing.
 @case "FX-03" 4 begin
     dev = testdevice()
     n = 1000
@@ -133,7 +137,7 @@ end
     free!(g); foreach(free!, (a, marks))
 end
 
-# FX-04 api.md:78, RR:779-782,800-802: a plan with a temporary SizedBy(identity, a) (2·length(a) at compile) over resizable `a`: resizes to 2n and to n÷2 recompile nothing and the results are exact.
+# FX-04 api.md 2.2 (SizedBy), resizing-and-raytracing.jl B.7: a plan with a temporary SizedBy(identity, a) (2·length(a) at compile) over resizable `a`: resizes to 2n and to n÷2 recompile nothing and the results are exact.
 @case "FX-04" 4 begin
     dev = testdevice()
     n = 1024
@@ -155,7 +159,7 @@ end
     free!(g); foreach(free!, (a, out))
 end
 
-# FX-05 RR:779-782,800: the same plan, `a` grown to 2n+1: the temporary is outgrown, the plan recompiles once and the result is exact.
+# FX-05 resizing-and-raytracing.jl B.7 (SizedBy): the same plan, `a` grown to 2n+1: the temporary is outgrown, the plan recompiles once and the result is exact.
 @case "FX-05" 4 begin
     dev = testdevice()
     n = 1024
@@ -175,7 +179,7 @@ end
     free!(g); foreach(free!, (a, out))
 end
 
-# FX-07 RR:684-691,721: an eager call moves `a` between compile and register! (held in compilebindings): register! returns Again, the plan compiles again, and the run is exact.
+# FX-07 resizing-and-raytracing.jl B.6 (register!): an eager call moves `a` between compile and register! (held in compilebindings): register! returns Again, the plan compiles again, and the run is exact.
 @case "FX-07" 4 begin
     fd = FaultDevice(testdevice())
     n = smallcount(testdevice())
@@ -197,7 +201,7 @@ end
     free!(g); foreach(free!, (a, s, out))
 end
 
-# FX-08 RR:705-712,748-755: a resize! that changes the length a plan launches over directly lands between compile and register!: the plan compiles again before its first submission and launches n+1 items.
+# FX-08 resizing-and-raytracing.jl B.6 (register!, the stale flag): a resize! that changes the length a plan launches over directly lands between compile and register!: the plan compiles again before its first submission and launches n+1 items.
 @case "FX-08" 4 begin
     fd = FaultDevice(testdevice())
     n = 1000
@@ -217,7 +221,7 @@ end
     free!(g); foreach(free!, (a, marks))
 end
 
-# FX-09 RR:684-691,705-711 (unregister!; the dependents table has no test hook, its leak would show with the plans' memory): 1000 recompiles of a graph naming `a` leave memory and live cells as after the first compile.
+# FX-09 resizing-and-raytracing.jl B.6 (unregister!; the dependents table has no test hook, its leak would show with the plans' memory), api.md 2.3 (delete! of a group marks the plan): 1000 recompiles of a graph naming `a` (a group of one launch declared and deleted 500 times) leave memory and live cells as after the first compile.
 @case "FX-09" 4 :long begin
     dev = testdevice()
     n = 1024
@@ -229,9 +233,8 @@ end
     m = memory(dev)
     _, d = counted(dev) do
         for _ in 1:500
-            h = insert!(g) do
-                dispatch!(g, fx_copy!, (out2, a), n)
-            end
+            h = Group(g, "copy2")
+            dispatch!(h, fx_copy!, (out2, a), n)
             run!(g)
             delete!(g, h)
             run!(g)
@@ -246,51 +249,30 @@ end
     free!(g); foreach(free!, (a, out1, out2))
 end
 
-# FX-10 api.md:180, RR:1285-1288: a launch over launchrange(r), r a GPURef of a fixed array, is indirect: rebinding to another length and the target's first resize! recompile nothing.
-@case "FX-10" 6 begin
-    dev = testdevice()
-    a, b = MantleArray(dev, Float32, 10), MantleArray(dev, Float32, 1000)
-    r = GPURef(dev, a)
-    marks = MantleArray(dev, Int32, 1000)
-    fill!(marks, Int32(0))
-    g = markgraph(dev, marks, r)
-    @test launchcount(marks) == 10
-    r[] = b
-    @test markedrun!(g, marks, dev).plancompiles == 0
-    @test launchcount(marks) == 1000
-    r[] = a
-    resize!(a, 20)
-    @test markedrun!(g, marks, dev).plancompiles == 0
-    @test launchcount(marks) == 20
-    free!(g); free!(r); foreach(free!, (a, b, marks))
-end
-
-# FX-11 api.md:130,178, RR:807-810: a launch over fixed `a` inside when!(g, flag) is indirect (count × flag): toggling the flag is a store, and neither it nor a resize! of `a` recompiles.
+# FX-11 api.md 2.4 (when!), resizing-and-raytracing.jl B.7: a launch over fixed `a` under when!(g, flag, …) is indirect (count × flag): toggling the flag is a store, and neither it nor a resize! of `a` recompiles.
 @case "FX-11" 4 begin
     dev = testdevice()
     n = 1000
     a = MantleArray(dev, testdata(Float32, n))
-    flag = MantleArray(dev, Int32[1])
+    flag = MantleArray(dev, [true])
     marks = MantleArray(dev, Int32, n)
     fill!(marks, Int32(0))
     g = Graph(dev)
-    when!(g, flag) do
-        dispatch!(g, fx_mark!, (marks, a), launchrange(a))
-    end
+    when!(g, flag, fx_mark!, (marks, a), launchrange(a))
     run!(g)
     @test launchcount(marks) == n
-    flag[1:1] = Int32[0]
+    flag[1:1] = [false]
     @test pendingkinds(flag) == [:Store]
     @test markedrun!(g, marks, dev).plancompiles == 0
     @test launchcount(marks) == 0
-    flag[1:1] = Int32[1]
+    flag[1:1] = [true]
     resize!(a, n ÷ 2)
     @test markedrun!(g, marks, dev).plancompiles == 0
     @test launchcount(marks) == n ÷ 2
     free!(g); foreach(free!, (a, flag, marks))
 end
 
-# FX-12 RR:215,775-777: resized back to its original length, `a` stays resizable: a graph compiled then launches indirectly, so a later resize! recompiles nothing.
+# FX-12 resizing-and-raytracing.jl B.2 (`resizable` is never cleared), B.7: resized back to its original length, `a` stays resizable: a graph compiled then launches indirectly, so a later resize! recompiles nothing.
 @case "FX-12" 4 begin
     dev = testdevice()
     n = 1000

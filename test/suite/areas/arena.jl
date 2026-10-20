@@ -1,14 +1,13 @@
-# Arena parts (catalogue-core.md, table 8: ARENA). Contracts: recording-plan.md
+# Arena parts. Contracts: recording-plan.md
 # "Arrays" (where contents live) and "Memory" (arenas grow and shrink, idle
 # graphs hold address space); internals.jl section 6 (holdparts!) and
 # section 9 (unmapidle!, acquireunmapped!, bindunmapped!).
 #
-# Memory pressure is forced through FaultDevice's `budget` answer [FI-9]: a
+# Memory pressure is forced through FaultDevice's `budget` answer: a
 # FaultDevice has its own pool, so its arenas hold only the case's graphs.
 # Graphs on one device share the device-memory arena part by default (plan,
 # Memory). Byte figures come from memory() and the pool hooks.
 
-import KernelInterface as KI
 
 """a[i] = i."""
 function arena_iota!(a)
@@ -59,7 +58,7 @@ end
 """`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
 withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
-"""Lowers `fd`'s budget to `bytes` from its next `budget` call on [FI-9]."""
+"""Lowers `fd`'s budget to `bytes` from its next `budget` call on."""
 lowerbudget!(fd, bytes) = inject!(fd, :budget, Answer(calls(fd, :budget) + 1, bytes))
 
 """Waits for `t` (a watchdog fails the test after `timeout` s) and returns what it threw, or `nothing`."""
@@ -83,9 +82,9 @@ end
 freeresult!(a::MantleArray) = free!(a)
 freeresult!(_) = nothing
 
-# ── 8. Arena parts (ARENA) ──
+# ── Arena parts (ARENA) ──
 
-# P:201-206: two graphs that do not run at the same time, peaks 32 MiB and 16 MiB: the second adds less than half its own peak to reserved (the shared part costs the largest tenant, not the sum).
+# recording-plan.md "Arrays" (where contents live: graphs that do not overlap share arenas), examples.jl 32: two graphs that do not run at the same time, peaks 32 MiB and 16 MiB: the second adds less than half its own peak to reserved (the shared part costs the largest tenant, not the sum).
 @case "ARENA-01" 2 begin
     dev = testdevice()
     big, outb = peakgraph(dev, 2^23)
@@ -100,7 +99,7 @@ freeresult!(_) = nothing
     @test Array(outs) == Int32.(1:16)
 end
 
-# P:1919-1920: a small graph (4 MiB peak) runs, then a big one (64 MiB); free!(big): reserved drops back to the small graph's figure (within 2 MiB of argument blocks and recordings), and the small graph still runs.
+# api.md 5 (an arena's tenants: free!(g) untenants), recording-plan.md "Memory" (arenas grow and shrink): a small graph (4 MiB peak) runs, then a big one (64 MiB); free!(big): reserved drops back to the small graph's figure (within 2 MiB of argument blocks and recordings), and the small graph still runs.
 @case "ARENA-02" 2 begin
     dev = testdevice()
     small, outs = peakgraph(dev, 2^20)
@@ -118,7 +117,7 @@ end
     @test Array(outs) == Int32.(1:16)
 end
 
-# P:1359-1373, I:1930-1942: the budget lowered to what is reserved [FI-9]; a 24 MiB allocation unmaps the 32 MiB of pages only the idle graph g uses; g's next run (its plan marked) binds them again before it submits, and is exact.
+# recording-plan.md "Memory" (an idle graph holds address space, not memory), internals.jl section 9 (unmapidle!, acquireunmapped!, bindunmapped!): the budget lowered to what is reserved; a 24 MiB allocation unmaps the 32 MiB of pages only the idle graph g uses; g's next run (its plan marked) binds them again before it submits, and is exact.
 # Assumes no pool block keeps 24 MiB free beside g's pages, so the allocation needs a new block and meets the budget.
 @case "ARENA-03" 2 :sparse begin
     fd = FaultDevice(testdevice())
@@ -137,7 +136,7 @@ end
     @test Mantle.mapped(fd) >= 2^25
 end
 
-# I:1933: pressure (budget lowered to what is reserved [FI-9]) while g's host function runs: the running plan's pages stay mapped (the allocation gets no room from them: OutOfDeviceMemory, or room from elsewhere), and stage 2 reads stage 1's 32 MiB transient exactly.
+# internals.jl section 9 (unmapidle!: a run in progress keeps its pages): pressure (budget lowered to what is reserved) while g's host function runs: the running plan's pages stay mapped (the allocation gets no room from them: OutOfDeviceMemory, or room from elsewhere), and stage 2 reads stage 1's 32 MiB transient exactly.
 @case "ARENA-04" 3 :sparse begin
     fd = FaultDevice(testdevice()); n = 2^23
     gate = Gate()
@@ -161,7 +160,7 @@ end
     @test Array(out) == Int32.(1:16)
 end
 
-# I:1990-2004: g's run allocates its unmapped pages before its locks while another task's allocations keep forcing pressure (budget lowered [FI-9]), so the gap g binds can widen in between (Again, then a retry). The interleaving cannot be forced through the hooks: 2000 runs against a task that allocates and frees 12 MiB in a loop. Every run that gets memory is exact (an OutOfDeviceMemory is an allowed outcome when both need memory at once); after both stop and g is freed, mapped is back at the baseline (no stray pages).
+# internals.jl section 9 (acquireunmapped!, bindunmapped!: the gap is checked under the lock): g's run allocates its unmapped pages before its locks while another task's allocations keep forcing pressure (budget lowered), so the gap g binds can widen in between (Again, then a retry). The interleaving cannot be forced through the hooks: 2000 runs against a task that allocates and frees 12 MiB in a loop. Every run that gets memory is exact (an OutOfDeviceMemory is an allowed outcome when both need memory at once); after both stop and g is freed, mapped is back at the baseline (no stray pages).
 @case "ARENA-05" 2 :sparse :long begin
     fd = FaultDevice(testdevice())
     base = memory(fd)
@@ -182,7 +181,7 @@ end
     @test memory(fd).mapped == base.mapped
 end
 
-# P:1356-1358: caps report no sparse residency [FI-10]; a graph compiled after the first needs more than the first part holds: it gets a new part (reserved grows by its need) and the first graph's addresses stay (its next run neither recompiles nor records, and is exact).
+# recording-plan.md "Memory" (where sparse binding is missing, a graph compiled later that needs more gets a new arena part; existing parts never move): caps report no sparse residency (a caps override); a graph compiled after the first needs more than the first part holds: it gets a new part (reserved grows by its need) and the first graph's addresses stay (its next run neither recompiles nor records, and is exact).
 @case "ARENA-06" 2 begin
     inner = testdevice()
     fd = FaultDevice(inner)
@@ -202,17 +201,16 @@ end
     @test Array(outb) == Int32.(1:16)
 end
 
-# I:1059-1065: 50 recompiles that switch g between a plan with a 64 MiB transient (an insert! block) and one without: each old plan's tenancy is dropped where the new plan has none. Tenancy has no hook; its consequence is checked: after free!(g), reserved and mapped are back at the baseline.
+# internals.jl section 6 (the old plan after a recompile: its tenancy dropped in the arena parts the new plan does not use): 50 recompiles that switch g between a plan with a 64 MiB transient (a group) and one without: each old plan's tenancy is dropped where the new plan has none. Tenancy has no hook; its consequence is checked: after free!(g), reserved and mapped are back at the baseline.
 @case "ARENA-07" 2 :sparse :long begin
     dev = testdevice(); n = 2^24
     base = memory(dev)
     g, out = peakgraph(dev, 2^16)
     for _ in 1:50
-        h = insert!(g) do
-            t = MantleArray(g, Int32, n)
-            dispatch!(g, arena_iota!, (t,), n)
-            dispatch!(g, arena_add!, (out, t, Int32(1)), 16)
-        end
+        h = Group(g, "big")
+        t = MantleArray(g, Int32, n)
+        dispatch!(h, arena_iota!, (t,), n)
+        dispatch!(h, arena_add!, (out, t, Int32(1)), 16)
         run!(g)
         @test Array(out) == Int32.(2:17)
         delete!(g, h)
@@ -225,7 +223,7 @@ end
     @test m.mapped <= base.mapped
 end
 
-# A:382: g1 and g2 share the device part, each run 10 000 times on its own thread; g1 holds the part across a host node between its kernels. Every run adds its transient (all 1 in g1, all 2 in g2) into its own device accumulator, so a transient another run clobbered shows in the sums; no deadlock.
+# api.md 5 (an arena part's holder: holdparts! at the start of a run, releaseparts! after its last stage), internals.jl section 6 (holdparts!): g1 and g2 share the device part, each run 10 000 times on its own thread; g1 holds the part across a host node between its kernels. Every run adds its transient (all 1 in g1, all 2 in g2) into its own device accumulator, so a transient another run clobbered shows in the sums; no deadlock.
 @case "ARENA-08" 3 :long begin
     dev = testdevice(); n = 4096; runs = 10_000
     acc1 = MantleArray(dev, Int32, n)

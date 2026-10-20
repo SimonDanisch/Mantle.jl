@@ -801,7 +801,7 @@ function initbackend! end
 # not here. Adding a name is a design decision made in this file; a backend that
 # quietly grows a `record!`, a `run!` or an `execute!` of its own fails the
 # suite. The names below marked with a step are the ones
-# `docs/backend-independence.md` deletes; a step is done when its names are
+# `docs/api.md`, Appendix A replaces; a step is done when its names are
 # gone from this list and the test still passes.
 const BACKEND_VOCABULARY = (
     # what a backend does once, at load

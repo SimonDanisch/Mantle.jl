@@ -13,7 +13,7 @@
 # `hasmethod` in `compile_dispatch`, the same question as `kifunction`,
 # and core's own `bake` did not ask at all, so the backend a graph fell back to
 # was the one that could not run the kernel. Three copies of a decision about
-# what a dispatch MEANS is the shape of thing `docs/mantle-owns-it.md` is about:
+# what a dispatch MEANS is what the plan's first rule (`docs/recording-plan.md`, Rules) forbids:
 # the backends deliver verbs, they do not each decide what a kernel is.
 #
 # Portable, via `foreachbackend`, and that matters more here than usual. Every

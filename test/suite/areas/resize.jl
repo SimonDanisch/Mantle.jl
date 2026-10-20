@@ -1,10 +1,10 @@
-# resize! and storage growth (catalogue-resize-rt.md, table B).
-#
-# References: api.md; RR = docs/resizing-and-raytracing.jl; PLAN =
-# docs/recording-plan.md; INT = docs/internals.jl (line numbers of 2026-10-05).
+# resize! and storage growth: api.md 2.2 (resize!, trim!, capacity);
+# resizing-and-raytracing.jl B.1 (storage), B.3-B.5 (changes, applying,
+# resize!), B.7 (lengths at compile); recording-plan.md, Arrays.
 # What this file assumes of the test hooks (helpers.jl):
-#   Mantle.pendingof(x)  the Change objects (Store, Resize, Rebind, BuildAccel)
-#                        pending on x, in sequence order, with RR B.3's fields.
+#   Mantle.pendingof(x)  the Change objects (Store, Resize, BuildAccel)
+#                        pending on x, in sequence order, with the fields of
+#                        resizing-and-raytracing.jl B.3.
 #   Mantle.steplog(dev)  entries with `kind` (the step's name as a Symbol:
 #                        :Becomes, :CellWrite, :MoveStorage, :BindPages,
 #                        :UnbindPages, :Restore, :InlineStore, :StagedStore),
@@ -13,38 +13,48 @@
 # A case marked VAL relies on validation layers and GPU-AV being on in the
 # suite's device configuration.
 
-using KernelAbstractions: @kernel, @index
-
-@kernel function rz_copy!(dst, src)
-    i = @index(Global)
+function rz_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing   # ndrange is rounded up to whole work-groups
     dst[i] = src[i]
+    return nothing
 end
 
-@kernel function rz_mark!(marks, a)
-    i = @index(Global)
+function rz_mark!(marks, a)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     marks[i] = Int32(1)
+    return nothing
 end
 
 # Copies after reading `gate`, which slowwrite! writes: the copy waits for the spin.
-@kernel function rz_copyafter!(dst, src, gate)
-    i = @index(Global)
+function rz_copyafter!(dst, src, gate)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     if gate[1] != Int32(-7)
         dst[i] = src[i]
     end
+    return nothing
 end
 
-@kernel function rz_readfirst!(out, a)
+function rz_readfirst!(out, a)
+    KI.get_global_id().x == 1 || return nothing
     out[1] = a[1]
+    return nothing
 end
 
-@kernel function rz_writelast!(a)
-    i = @index(Global)
+function rz_writelast!(a)
+    i = KI.get_global_id().x
+    i <= 4 || return nothing
     a[length(a) - 4 + i] = Float32(i)
+    return nothing
 end
 
-@kernel function rz_readlast!(out, a)
-    i = @index(Global)
+function rz_readlast!(out, a)
+    i = KI.get_global_id().x
+    i <= 4 || return nothing
     out[i] = a[length(a) - 4 + i]
+    return nothing
 end
 
 """The kinds of the changes pending on `x`, in sequence order."""
@@ -69,13 +79,13 @@ launchcount(marks) = count(==(Int32(1)), Array(marks))
 """An eager call reading `a[1]` into `s`: a submission that touches `a`, so it applies what is pending on it."""
 applypending!(s, a) = dispatch!(location(s, a), rz_readfirst!, (s, a), 1)
 
-"""An element count whose growth by 16x stays below the sparse threshold (4 sparse pages; RR:202)."""
+"""An element count whose growth by 16x stays below the sparse threshold (4 sparse pages; resizing-and-raytracing.jl B.1, sparsethreshold)."""
 smallcount(dev) = max(16, caps(dev).sparsepage ÷ 64)
 
 """The Float32 elements of `pages` sparse pages."""
 pagecount(dev, pages) = pages * caps(dev).sparsepage ÷ sizeof(Float32)
 
-"""The step a store of `bytes` at byte `offset` becomes (api.md:82): inline within the device type's limit and alignment, else staged."""
+"""The step a store of `bytes` at byte `offset` becomes (api.md 2.2, `a[r] = data`): inline within the device type's limit and alignment, else staged."""
 storekind(dev, offset, bytes) = (c = caps(dev);
     bytes <= c.inlinestore && offset % c.inlinealign == 0 && bytes % c.inlinealign == 0 ? :InlineStore : :StagedStore)
 
@@ -96,7 +106,7 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
 
 # ── B. resize! and storage growth ──
 
-# RZ-01 api.md:80, RR:190,560: fixed region of 1000; resize!(a, 500); the next submission adopts the region (Becomes, CellWrite), no move; a[1:500] intact.
+# RZ-01 api.md 2.2 (resize!), resizing-and-raytracing.jl B.1, B.5: fixed region of 1000; resize!(a, 500); the next submission adopts the region (Becomes, CellWrite), no move; a[1:500] intact.
 @case "RZ-01" 4 begin
     dev = testdevice()
     x = testdata(Float32, 1000)
@@ -110,7 +120,7 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
     foreach(free!, (a, out))
 end
 
-# RZ-02 api.md:80, RR:540-548,560,775: a recorded plan launches directly over fixed `a`; resize!(a, length(a)) adopts the storage and recompiles that plan once; later growth recompiles nothing.
+# RZ-02 api.md 2.2 (resize!), resizing-and-raytracing.jl B.5, B.6, B.7: a recorded plan launches directly over fixed `a`; resize!(a, length(a)) adopts the storage and recompiles that plan once; later growth recompiles nothing.
 @case "RZ-02" 4 begin
     dev = testdevice()
     n = 1000
@@ -134,7 +144,7 @@ end
     free!(g); foreach(free!, (a, out, marks))
 end
 
-# RZ-03 api.md:80, RR:196-198,565: small fixed `a` grows to 3n: one move into a pool region of 2·need, applied by one submission; growth up to 6n writes only the cell, 6n+1 moves again.
+# RZ-03 api.md 2.2 (resize!), resizing-and-raytracing.jl B.1, B.5: small fixed `a` grows to 3n: one move into a pool region of 2·need, applied by one submission; growth up to 6n writes only the cell, 6n+1 moves again.
 @case "RZ-03" 4 begin
     dev = testdevice()
     n = smallcount(dev)
@@ -155,7 +165,7 @@ end
     free!(a)
 end
 
-# RZ-04 api.md:80, RR:196,203,561-564: a fixed array of 4 sparse pages grows to 2n: pages bound on the sparse queue before the move into a reserve of 4·need; growth to 4·need moves nothing.
+# RZ-04 api.md 2.2 (resize!), resizing-and-raytracing.jl B.1, B.5: a fixed array of 4 sparse pages grows to 2n: pages bound on the sparse queue before the move into a reserve of 4·need; growth to 4·need moves nothing.
 @case "RZ-04" 4 :sparse begin
     dev = testdevice()
     n = pagecount(dev, 4)
@@ -174,7 +184,7 @@ end
     free!(a)
 end
 
-# RZ-05 RR:192: a reserve-backed array shrunk and grown back within its mapped pages: only a cell write, no bind, no move.
+# RZ-05 resizing-and-raytracing.jl B.1 (growth): a reserve-backed array shrunk and grown back within its mapped pages: only a cell write, no bind, no move.
 @case "RZ-05" 4 :sparse begin
     dev = testdevice()
     n = pagecount(dev, 4)
@@ -189,7 +199,7 @@ end
     free!(a)
 end
 
-# RZ-06 RR:186-189,192-193: a reserve-backed array grows by one element before each of 10^5 runs: O(log) page binds, no move (same address), no recompile.
+# RZ-06 resizing-and-raytracing.jl B.1 (a reserve maps at least twice what it had): a reserve-backed array grows by one element before each of 10^5 runs: O(log) page binds, no move (same address), no recompile.
 @case "RZ-06" 4 :sparse :long begin
     dev = testdevice()
     n0 = pagecount(dev, 4) + 1
@@ -217,7 +227,7 @@ end
     free!(g); foreach(free!, (a, s, marks))
 end
 
-# RZ-07 RR:194: a reserve outgrown: one move into a new reserve (address changes once), contents kept.
+# RZ-07 resizing-and-raytracing.jl B.1 (growth): a reserve outgrown: one move into a new reserve (address changes once), contents kept.
 @case "RZ-07" 4 :sparse begin
     dev = testdevice()
     n = pagecount(dev, 4)
@@ -234,7 +244,7 @@ end
     free!(a)
 end
 
-# RZ-08 RR:191,198: caps report no sparse residency: every growth past the storage moves into 2·need, growth within it only writes the cell, no page binds, for small and large arrays.
+# RZ-08 resizing-and-raytracing.jl B.1 (outgrow without sparse residency): caps report no sparse residency: every growth past the storage moves into 2·need, growth within it only writes the cell, no page binds, for small and large arrays.
 @case "RZ-08" 4 begin
     fd = FaultDevice(testdevice())
     inject!(fd, :caps, Answer(1, withcaps(caps(testdevice()); sparseresidency = false)))
@@ -254,7 +264,7 @@ end
     end
 end
 
-# RZ-09 RR:196,202: needs of 4·sparsepage-1 and 4·sparsepage bytes: the first moves into a pool region, the second into a reserve.
+# RZ-09 resizing-and-raytracing.jl B.1 (sparsethreshold): needs of 4·sparsepage-1 and 4·sparsepage bytes: the first moves into a pool region, the second into a reserve.
 @case "RZ-09" 4 :sparse begin
     dev = testdevice()
     page = caps(dev).sparsepage
@@ -268,7 +278,7 @@ end
     foreach(free!, (a, b))
 end
 
-# RZ-10 RR:203-206: on lavapipe (2 GiB of sparse address space) an array grown past the reserve limit gets storage of at least its need: its last elements are written and read back, no device fault.
+# RZ-10 resizing-and-raytracing.jl B.1 (reservelimit, fitsreserve): on lavapipe (2 GiB of sparse address space) an array grown past the reserve limit gets storage of at least its need: its last elements are written and read back, no device fault.
 @case "RZ-10" 4 :lavapipe :long begin
     dev = testdevice()
     a = MantleArray(dev, Float32[1, 2, 3, 4])
@@ -282,7 +292,7 @@ end
     foreach(free!, (a, tail, head))
 end
 
-# RZ-11 api.md:80-81, RR:235-237: a reserve with 64 MiB mapped shrinks to one element: nothing is unmapped, and a view taken before reads the old values (VAL: validation clean).
+# RZ-11 api.md 2.2 (resize!, trim!), resizing-and-raytracing.jl B.2: a reserve with 64 MiB mapped shrinks to one element: nothing is unmapped, and a view taken before reads the old values (VAL: validation clean).
 @case "RZ-11" 4 :sparse begin
     dev = testdevice()
     x = testdata(Float32, 10^6)
@@ -300,7 +310,7 @@ end
     foreach(free!, (a, s, out))
 end
 
-# RZ-12 api.md:81, RR:100,235-236: trim!(a) stays pending until the next submission that touches `a`, which unmaps the pages past the size; growing again binds pages and keeps a[1].
+# RZ-12 api.md 2.2 (trim!), resizing-and-raytracing.jl A (Arrays) and B.2: trim!(a) stays pending until the next submission that touches `a`, which unmaps the pages past the size; growing again binds pages and keeps a[1].
 @case "RZ-12" 4 :sparse begin
     dev = testdevice()
     a, s = MantleArray(dev, Float32, 16), MantleArray(dev, Float32, 1)
@@ -322,7 +332,7 @@ end
     foreach(free!, (a, s))
 end
 
-# RZ-13 api.md:81,486: with a small budget, pages past an array's size stay mapped under pressure; an allocation nothing else can make room for throws OutOfDeviceMemory.
+# RZ-13 api.md 2.2 (trim!) and section 7 (OutOfDeviceMemory): with a small budget, pages past an array's size stay mapped under pressure; an allocation nothing else can make room for throws OutOfDeviceMemory.
 @case "RZ-13" 4 :sparse begin
     fd = FaultDevice(testdevice())
     a, s = MantleArray(fd, Float32, 16), MantleArray(fd, Float32, 1)
@@ -338,7 +348,7 @@ end
     foreach(free!, (a, s))
 end
 
-# RZ-14 api.md:80, PLAN:484-486: resize!(a, 7) of a 4×5 array sets the last dimension: (4, 7), the first 20 elements kept as linear memory.
+# RZ-14 api.md 2.2 (resize!), recording-plan.md, The graph and its plan: resize!(a, 7) of a 4×5 array sets the last dimension: (4, 7), the first 20 elements kept as linear memory.
 @case "RZ-14" 4 begin
     dev = testdevice()
     x = testdata(Float32, 20)
@@ -351,7 +361,7 @@ end
     free!(a)
 end
 
-# RZ-15 api.md:80,471, RR:530: resize! of a view or of a reshape throws ArgumentError; nothing pends, the length is unchanged.
+# RZ-15 api.md 2.2 (resize!) and section 7, resizing-and-raytracing.jl B.5: resize! of a view or of a reshape throws ArgumentError; nothing pends, the length is unchanged.
 @case "RZ-15" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 100))
@@ -362,7 +372,7 @@ end
     free!(a)
 end
 
-# RZ-16 api.md:79, RR:543: resize! after free!(a) throws ArgumentError under the lock; nothing pends, the length is unchanged.
+# RZ-16 api.md 2.2 (free!), resizing-and-raytracing.jl B.5: resize! after free!(a) throws ArgumentError under the lock; nothing pends, the length is unchanged.
 @case "RZ-16" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 100))
@@ -372,7 +382,7 @@ end
     @test length(a) == 100
 end
 
-# RZ-17 api.md:206,481, INT:1780: while `a` is lent through withview, resize! and a store throw; after the block both succeed.
+# RZ-17 api.md 2.9 and section 7, internals.jl section 14: while `a` is lent through withview, resize! and a store throw; after the block both succeed.
 @case "RZ-17" 6 :vendorview begin
     dev = testdevice()
     cuda = cudamodule()
@@ -388,7 +398,7 @@ end
     free!(a)
 end
 
-# RZ-18 api.md:80, RR:814-815: a graph array placed for n: resizes to n÷2 and n are cell writes with no recompile; n+1 recompiles once at the next run!, never a throw.
+# RZ-18 api.md 2.2 (resize!), resizing-and-raytracing.jl B.7 (graph arrays): a graph array placed for n: resizes to n÷2 and n are cell writes with no recompile; n+1 recompiles once at the next run!, never a throw.
 @case "RZ-18" 4 begin
     dev = testdevice()
     n = 1024
@@ -408,7 +418,7 @@ end
     free!(g); free!(marks)
 end
 
-# RZ-19 api.md:80, RR:810: resize!(a, 0): a launch over launchrange(a) does no work (VAL: validation clean); grown back to n with a store, a run reads exactly the stored data.
+# RZ-19 api.md 2.2 (resize!), resizing-and-raytracing.jl B.7: resize!(a, 0): a launch over launchrange(a) does no work (VAL: validation clean); grown back to n with a store, a run reads exactly the stored data.
 @case "RZ-19" 4 begin
     dev = testdevice()
     n = 1000
@@ -430,7 +440,7 @@ end
     free!(g); foreach(free!, (a, marks, out))
 end
 
-# RZ-20 RR:290-300,557 (storageat): a pool-region `a` of n: resize!(a, 2n), a[1:1] = x, resize!(a, 8n), one submission: move, store, move in sequence; a[1] == x, a[2:n] old.
+# RZ-20 resizing-and-raytracing.jl B.3, B.5 (storageat): a pool-region `a` of n: resize!(a, 2n), a[1:1] = x, resize!(a, 8n), one submission: move, store, move in sequence; a[1] == x, a[2:n] old.
 @case "RZ-20" 4 begin
     dev = testdevice()
     n = smallcount(dev)
@@ -449,7 +459,7 @@ end
     foreach(free!, (a, s))
 end
 
-# RZ-21 RR:290-296: resize!(a, 10) then resize!(a, 1000) on 100 elements: one Resize to (1000,) keeping 10 elements; a[1:10] old.
+# RZ-21 resizing-and-raytracing.jl B.3 (coalescing): resize!(a, 10) then resize!(a, 1000) on 100 elements: one Resize to (1000,) keeping 10 elements; a[1:10] old.
 @case "RZ-21" 4 begin
     dev = testdevice()
     x = testdata(Float32, 100)
@@ -466,7 +476,7 @@ end
     free!(a)
 end
 
-# RZ-22 RR:395-397,569-571: graph A reads `a` and is in flight; an eager resize! and fill! move `a`: the move waits for A, and A's storage is not reused before A's token.
+# RZ-22 resizing-and-raytracing.jl B.4, B.5: graph A reads `a` and is in flight; an eager resize! and fill! move `a`: the move waits for A, and A's storage is not reused before A's token.
 @case "RZ-22" 4 :multiqueue begin
     dev = testdevice()
     n = smallcount(dev)
@@ -483,8 +493,8 @@ end
     free!(g); foreach(free!, others); foreach(free!, (a, out))
 end
 
-# RZ-23 api.md:490, RR:195,567-568: `a` evicted under a small budget, then resize!(a, 2n): the next submission restores it into storage of 2n and writes the cell, no separate move.
-@case "RZ-23" 4 :separateheap begin
+# RZ-23 api.md section 7 (eviction), resizing-and-raytracing.jl B.1 (growth of an evicted array), B.5: `a` evicted under a small budget, then resize!(a, 2n): the next submission restores it into storage of 2n and writes the cell, no separate move.
+@case "RZ-23" 4 begin
     fd = FaultDevice(testdevice())
     n = 2^24
     bytes = sizeof(Float32) * n

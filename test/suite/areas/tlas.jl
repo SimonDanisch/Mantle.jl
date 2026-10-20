@@ -1,8 +1,8 @@
-# TLAS (catalogue-resize-rt.md, table L).
+# TLAS.
 #
-# References: API = docs/api.md; RR = docs/resizing-and-raytracing.jl (line
-# numbers of 2026-10-05); VK-BC/VK-DC = vkdocs chapters/commonvalidity/
-# build_acceleration_structure_{common,device_common}.adoc.
+# References name sections of the design docs (api.md, recording-plan.md as
+# "plan", resizing-and-raytracing.jl). VK-BC/VK-DC = vkdocs
+# chapters/commonvalidity/build_acceleration_structure_{common,device_common}.adoc.
 #
 # Ray tracing is checked with one ray-query kernel (rt_hits!): one ray per
 # instance, along +z through the instance's position, writing
@@ -21,16 +21,17 @@
 #       Update(). Mantle.steplog(dev): entries with `kind` (:InlineStore,
 #       :StagedStore, :CellWrite, :MoveStorage, :BindPages, :MoveAccel,
 #       :BuildAccel), `target` (the resource the user holds), `seq`, `token`.
-#   t.capacity, t.builtcount  the fields api.md section 3 and RR B.8 list.
-#   caps(dev).maxinstancecount  the device's maxInstanceCount (G3: names open).
+#   t.capacity, t.builtcount  the fields api.md section 3 and
+#       resizing-and-raytracing.jl B.8 list.
+#   caps(dev).maxinstances  the device's maxInstanceCount (resizing-and-raytracing.jl
+#       C; field names open, api.md 10).
 # "Released" is read from memory(dev).cells: an array, BLAS or TLAS gives its
 # cell back at its last hold. Validation-layer and GPU-AV expectations are
 # comments marked VAL: the suite has no hook that reads validation messages.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Point3f, Vec3f, Vec, Mat4f, TriangleFace
 
-# ── Ray-tracing helpers, the same in tlas.jl, blas.jl, gpuref.jl and hikari_patterns.jl ──
+# ── Ray-tracing helpers, the same in tlas.jl, blas.jl and hikari_patterns.jl ──
 
 const TRIANGLEVERTICES = (Point3f(-0.4, -0.4, 0), Point3f(0.4, -0.4, 0), Point3f(0, 0.4, 0), Point3f(0, -0.2, 0))
 const TRIANGLEFACE = TriangleFace{UInt32}(1, 2, 3)   # covers the origin
@@ -62,11 +63,13 @@ rayorigins(dev, positions) = MantleArray(dev, [p - Vec3f(0, 0, 1) for p in posit
 readygate(dev) = MantleArray(dev, Int32[0])
 
 """Ray i from origins[i] along +z: (instanceCustomIndex, InstanceId - rangeoffset) of the closest hit, or NOHIT."""
-@kernel function rt_hits!(out, t, origins, gate)
-    i = @index(Global)
+function rt_hits!(out, t, origins, gate)
+    i = KI.get_global_id().x
+    i <= length(out) || return nothing      # ndrange is rounded up to whole work-groups
     q = Mantle.rayquery(t, origins[i], Vec3f(0, 0, 1))
     out[i] = q.hit & (gate[1] != Int32(-1)) ?
              InstanceHit(q.customindex, q.instanceid - Mantle.rangeoffset(t, q.customindex)) : NOHIT
+    return nothing
 end
 
 """The hits of rays through `positions`, by one eager launch (which applies what is pending on `t`)."""
@@ -119,18 +122,21 @@ const TL_STOREKINDS = (:InlineStore, :StagedStore)
 withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 """The first `n` grid positions into `alive`, and `n` as its length (a length a kernel writes)."""
-@kernel function tl_spawn!(alive, len, n)
-    i = @index(Global)
+function tl_spawn!(alive, len, n)
+    i = KI.get_global_id().x
     if i <= n
         @inbounds alive[i] = Point3f((i - 1) % 256, (i - 1) ÷ 256, 0)
         i == 1 && (len[] = n)
     end
+    return nothing
 end
 
 """positions[i] = (i - 1, y, 0): a row of instances at height y."""
-@kernel function tl_row!(positions, y)
-    i = @index(Global)
+function tl_row!(positions, y)
+    i = KI.get_global_id().x
+    i <= length(positions) || return nothing
     positions[i] = Point3f(i - 1, y, 0)
+    return nothing
 end
 
 """Rays through rows of 8 instances (x = 0:7) at the given heights."""
@@ -140,9 +146,9 @@ rowpixels(heights) = [Point3f(x, y, 0) for y in heights for x in 0:7]
 tl_raygen(counter) = (@inbounds counter[1] += one(eltype(counter)); nothing)
 tl_noop(counter) = nothing
 
-# ── L. TLAS ──
+# ── TLAS ──
 
-# API:151, RR:124-125: a new TLAS pends a zero-instance Build. An eager ray query and an eager trace over a new TLAS.
+# api.md 2.6, resizing-and-raytracing.jl A: a new TLAS pends a zero-instance Build. An eager ray query and an eager trace over a new TLAS.
 @case "TL-01" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev)
@@ -157,7 +163,7 @@ tl_noop(counter) = nothing
     # VAL: clean (the query and the trace read a built, empty structure)
 end
 
-# RR:124-125, RR:735-738 (A1): a pending zero-instance Build reaches a plan registered after it. A new TLAS; a graph tracing it compiles and runs, nothing else touches it.
+# resizing-and-raytracing.jl A and B.6 (register!, shared): a pending zero-instance Build reaches a plan registered after it. A new TLAS; a graph tracing it compiles and runs, nothing else touches it.
 @case "TL-02" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev)
@@ -170,7 +176,7 @@ end
     # VAL: clean (the trace never reads an unbuilt structure)
 end
 
-# RR:1119-1139, API:151: capacity starts at 64 and doubles; outgrowing it, the applier emits MoveAccel before the Build and marks the AccelCommands. 64 instances, then a 65th.
+# resizing-and-raytracing.jl B.8, api.md 2.6: capacity starts at 64 and doubles; outgrowing it, the applier emits MoveAccel before the Build and marks the BuildRecordings. 64 instances, then a 65th.
 @case "TL-03" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -188,13 +194,13 @@ end
     @test :MoveAccel in k && findfirst(==(:MoveAccel), k) < findlast(==(:BuildAccel), k)
     @test t.capacity == 128
     @test d.plancompiles == 0
-    @test d.records >= 1                                   # the refit's AccelCommand, marked by the move
+    @test d.records >= 1                                   # the refit's BuildRecording, marked by the move
     hits = Array(out)
     @test isonerange(hits[1:64]) && isonerange(hits[65:65]) && hits[65][1] != hits[1][1]
     # VAL: GPU-AV clean (the old AS and scratch are retired with the applying token)
 end
 
-# RR:1119-1123: the capacity never halves; the build carries the exact count. Grow to 10^5 instances, then delete! every range.
+# resizing-and-raytracing.jl B.8: the capacity never halves; the build carries the exact count. Grow to 10^5 instances, then delete! every range.
 @case "TL-04" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -214,7 +220,7 @@ end
     @test memory(dev).cells < kept.cells                   # released with free!(t)
 end
 
-# RR:22, RR:953-958, DEC B3.2: a build's count is the host total, never the capacity. 3 instances, then 65, then a refit.
+# resizing-and-raytracing.jl header and B.8: a build's count is the host total, never the capacity. 3 instances, then 65, then a refit.
 @case "TL-05" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -230,7 +236,7 @@ end
     @test t.builtcount == 65
 end
 
-# RR:954-956 (Metal reads the count from countcell): builtcount is the host total on Metal too. 3 instances, then 65.
+# resizing-and-raytracing.jl B.8 (Metal reads the count from countcell): builtcount is the host total on Metal too. 3 instances, then 65.
 @case "TL-06" 9 :metal :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -244,7 +250,7 @@ end
     # countcell is internal: its value is not read through the suite's hooks
 end
 
-# API:155, RR:131: tlas[h] = m is a store into the range's source and an Update carrying builtcount. One instance moved.
+# api.md 2.6, resizing-and-raytracing.jl A and B.8: tlas[h] = m is a store into the range's source and an Update carrying builtcount. One instance moved.
 @case "TL-07" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -260,7 +266,7 @@ end
     @test t.builtcount == 1
 end
 
-# API:166, RR:132, RR:874: hiding a range is mask 0 in its records, a refit. Three ranges; visible!(t, r2, false), then true.
+# api.md 2.6, resizing-and-raytracing.jl A and B.8 (RangeEntry.mask): hiding a range is mask 0 in its records, a refit. Three ranges; visible!(t, r2, false), then true.
 @case "TL-08" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -276,7 +282,7 @@ end
     @test queryhits(dev, t, instancegrid(12)) == before
 end
 
-# API:156, RR:1085-1102: delete! deactivates the range's entry and pends a Build; its holds drop after the applying token. Three ranges; delete!(t, r1).
+# api.md 2.6, resizing-and-raytracing.jl B.8 (delete!): delete! deactivates the range's entry and pends a Build; its holds drop after the applying token. Three ranges; delete!(t, r1).
 @case "TL-09" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev)
@@ -294,7 +300,7 @@ end
     @test memory(dev).cells < pending.cells                # released after the Build's token
 end
 
-# RR:832, RR:865-868, API:162-164: a deleted range's slot is reused; slots of other ranges are stable. Delete r1 of three, then push! a new range.
+# resizing-and-raytracing.jl B.8 (TLAS slots, InstanceRange), api.md 2.6: a deleted range's slot is reused; slots of other ranges are stable. Delete r1 of three, then push! a new range.
 @case "TL-10" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -309,7 +315,7 @@ end
     @test isonerange(after[13:18]) && after[13][1] == before[1][1]   # instanceCustomIndex is r1's slot
 end
 
-# RR:978-988: build!(g, t) is an AccelCommand recorded once; nothing marks it while the count stays. 100 runs, constant count.
+# resizing-and-raytracing.jl B.8 (BuildRecording): build!(g, t) is a BuildRecording recorded once; nothing marks it while the count stays. 100 runs, constant count.
 @case "TL-11" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -321,10 +327,10 @@ end
     _, d = counted(() -> foreach(_ -> run!(g), 1:100))
     @test d.records == 0 && d.plancompiles == 0
     @test t.builtcount == 16 && isonerange(Array(out))
-    # One Build per run is the AccelCommand's own; the step log shows prefix steps only.
+    # One Build per run is the BuildRecording's own; the step log shows prefix steps only.
 end
 
-# RR:897-903, RR:1037-1045, PLAN:1090-1093: a push! pends a prefix Build; the marked refit is recorded again after it with the new builtcount. refit!(g, t); push! between runs.
+# resizing-and-raytracing.jl B.8 (current!), plan, Acceleration structures and textures: a push! pends a prefix Build; the marked refit is recorded again after it with the new builtcount. refit!(g, t); push! between runs.
 @case "TL-12" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -344,9 +350,9 @@ end
 end
 
 # TL-13 (TL-12 with the mark! in buildcount! removed, a validation error expected) is not
-# written: the suite has no hook that removes a mark! (FI-W) and none that reads validation messages.
+# written: the suite has no hook that removes a mark! and none that reads validation messages.
 
-# RR:932-933, RR:1018-1024, API:158: a refit of a structure never built is a Build; later refits are Updates. refit!(g, t) compiled while builtcount is -1.
+# resizing-and-raytracing.jl B.8 (effectivemode), api.md 2.6: a refit of a structure never built is a Build; later refits are Updates. refit!(g, t) compiled while builtcount is -1.
 @case "TL-14" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -366,7 +372,7 @@ end
     @test hits[1] == NOHIT && isonerange(hits[2:2])
 end
 
-# RR:984-988, RR:1039: a Build that sets a new builtcount marks every command of the structure. Graph A builds t with a changing count; graph B refits t.
+# resizing-and-raytracing.jl B.8 (buildcount!, built!): a Build that sets a new builtcount marks every command of the structure. Graph A builds t with a changing count; graph B refits t.
 @case "TL-15" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -391,7 +397,7 @@ end
     @test isonerange(hits[1:4]) && all(k -> isonerange(hits[k:k]), 5:8)
 end
 
-# VK-BC:113-120 (VUID-03667): every build sets ALLOW_UPDATE, so a refit after any of them is valid. Refits after a prefix Build, an AccelCommand Build and a capacity growth.
+# VK-BC:113-120 (VUID-03667): every build sets ALLOW_UPDATE, so a refit after any of them is valid. Refits after a prefix Build, a BuildRecording Build and a capacity growth.
 @case "TL-16" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -401,7 +407,7 @@ end
     @test buildmode.(pendingbuilds(t)) == [:Update]
     hits, log = stepsduring(() -> queryhits(dev, t, [Point3f(1, 0, 0)]), dev)
     @test accelbuilds(log, t) == 1 && isonerange(hits)
-    g = Graph(dev); build!(g, t); run!(g)                  # built by an AccelCommand
+    g = Graph(dev); build!(g, t); run!(g)                  # built by a BuildRecording
     t[h] = translation(2, 0, 0)
     @test buildmode.(pendingbuilds(t)) == [:Update]
     @test isonerange(queryhits(dev, t, [Point3f(2, 0, 0)]))
@@ -429,10 +435,10 @@ end
     # VAL: VUID-12258, VUID-12259 (scratch size) clean
 end
 
-# VK-BC:278-283 (VUID-03801), RR:1058, A12: a total past maxInstanceCount throws at push!, never a build or a sizes query past it. maxInstanceCount 1000; 1000 instances, then 500 more.
-@case "TL-18" 5 :rt begin   # pending decision 12
+# VK-BC:278-283 (VUID-03801), resizing-and-raytracing.jl B.8 (checkinstances), api.md 2.6: a total past maxInstanceCount throws at push!, never a build or a sizes query past it. maxInstanceCount 1000; 1000 instances, then 500 more.
+@case "TL-18" 5 :rt begin
     dev = FaultDevice(testdevice())
-    inject!(dev, :caps, Answer(1, withcaps(caps(dev.inner); maxinstancecount = 1000)))
+    inject!(dev, :caps, Answer(1, withcaps(caps(dev.inner); maxinstances = 1000)))
     t = TLAS(dev); b = ownedblas(dev)
     push!(t, b, MantleArray(dev, instancegrid(1000)))
     @test isonerange(queryhits(dev, t, instancegrid(1000)))
@@ -444,7 +450,7 @@ end
     @test isonerange(queryhits(dev, t, instancegrid(1000))) && t.builtcount == 1000
 end
 
-# RR:38-39, RR:207, RR:1124-1127: acceleration-structure storage is never a reserve (VUID-03615). t grows past the sparse threshold.
+# resizing-and-raytracing.jl header (facts), B.1 and B.8: acceleration-structure storage is never a reserve (VUID-03615). t grows past the sparse threshold.
 @case "TL-19" 5 :rt :sparse begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -459,7 +465,7 @@ end
     @test count(==(:MoveAccel), stepkinds(log, t)) == 3    # 64 → 32768 → 65536 → 131072
 end
 
-# RR:954-968, API:151, API:479: a total a kernel writes is built over the capacity with mask-0 records past it; refits stay legal. The kernel writes 10, 50, 3; refit! only.
+# resizing-and-raytracing.jl B.8, api.md 2.6 and 7: a total a kernel writes is built over the capacity with mask-0 records past it; refits stay legal. The kernel writes 10, 50, 3; refit! only.
 @case "TL-20" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -480,7 +486,7 @@ end
     # VAL: the records past the total reference a valid BLAS; each refit is valid (VUID-03758)
 end
 
-# RR:840-842, RR:958: deleting the kernel-written range returns to a host total: a Build with the exact count. TL-20's TLAS plus a host range; delete! the kernel-written one.
+# resizing-and-raytracing.jl B.8 (totalsource, recordedtotal): deleting the kernel-written range returns to a host total: a Build with the exact count. TL-20's TLAS plus a host range; delete! the kernel-written one.
 @case "TL-21" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -499,7 +505,7 @@ end
     @test t.builtcount == 5 && isonerange(hits)
 end
 
-# RR:540-549, RR:1111-1117: resize! of a source pends a Build on its TLAS in the same call; the capacity is the applier's. A source of 10 resized to 100.
+# resizing-and-raytracing.jl B.5 (resizeto!) and B.8: resize! of a source pends a Build on its TLAS in the same call; the capacity is the applier's. A source of 10 resized to 100.
 @case "TL-22" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -514,24 +520,25 @@ end
     @test t.capacity == 128 && t.builtcount == 100
 end
 
-# RR:1234-1235, RR:1251-1252, API:180: a rebind of a range's array GPURef pends an Update, a Build if the length changed. Rebind to the same length, then to another.
+# api.md 2.6, resizing-and-raytracing.jl B.3 and D.3: another array for a range is delete!(t, r) and push! over the new array; the two Builds coalesce into one pending Build, whatever the new length. Another array of the same length, then one of another length.
 @case "TL-23" 6 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
-    r = GPURef(dev, MantleArray(dev, instancegrid(8)))
-    push!(t, b, r)
+    r = push!(t, b, MantleArray(dev, instancegrid(8)))
     queryhits(dev, t, instancegrid(1))
-    r[] = MantleArray(dev, instancegrid(8; from = 8))
-    @test buildmode.(pendingbuilds(t)) == [:Update]
+    delete!(t, r)
+    r = push!(t, b, MantleArray(dev, instancegrid(8; from = 8)))
+    @test buildmode.(pendingbuilds(t)) == [:Build]
     hits = queryhits(dev, t, instancegrid(16))
     @test allmissed(hits[1:8]) && isonerange(hits[9:16])
-    r[] = MantleArray(dev, instancegrid(12; from = 16))
+    delete!(t, r)
+    push!(t, b, MantleArray(dev, instancegrid(12; from = 16)))
     @test buildmode.(pendingbuilds(t)) == [:Build]
     hits = queryhits(dev, t, instancegrid(28))
     @test allmissed(hits[1:16]) && isonerange(hits[17:28])
 end
 
-# RR:1055-1056, RR:1189-1197: push! with a freed member throws; holds taken so far drop; no slot is used. A freed BLAS, a freed source, a freed GPURef.
+# resizing-and-raytracing.jl B.8 (push!, holdmember!): push! with a freed member throws; holds taken so far drop; no slot is used. A freed BLAS, a freed source.
 @case "TL-24" 6 :rt begin
     dev = testdevice()
     b = ownedblas(dev); src = MantleArray(dev, instancegrid(4))
@@ -546,16 +553,14 @@ end
     @test_throws ArgumentError push!(t, dead, held)
     gone = MantleArray(dev, instancegrid(4)); free!(gone)
     @test_throws ArgumentError push!(t, b, gone)
-    target = MantleArray(dev, instancegrid(4)); r = GPURef(dev, target); free!(r)
-    @test_throws ArgumentError push!(t, b, r)
     @test length(Mantle.pendingof(t)) == pending
-    free!(held); free!(target)
+    free!(held)
     @test memory(dev).cells == base.cells                  # no hold taken by a failed push! survives it
     push!(t, b, src)
     @test queryhits(dev, t, instancegrid(1))[1][1] == firstslot
 end
 
-# RR:1060-1071, RR:1095-1102: a range's holds and reader entries go with its delete!. push!(t, blas, pos; scale = pos), then delete!.
+# resizing-and-raytracing.jl B.8 (push!, delete!): a range's holds and reader entries go with its delete!. push!(t, blas, pos; scale = pos), then delete!.
 @case "TL-25" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev)
@@ -572,7 +577,7 @@ end
     @test memory(dev).cells == base.cells
 end
 
-# RR:818-823, RR:1223-1227 (A22, contract open): a range entry names a cell, which carries no view offset; the suite takes GPURef's rule, a view throws. push! with a view as source.
+# resizing-and-raytracing.jl B.8 (RangeEntry; contract open): a range entry names a cell, which carries no view offset; the docs do not decide a view as a source, the suite expects a throw. push! with a view as source.
 @case "TL-26" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -582,7 +587,7 @@ end
     @test length(Mantle.pendingof(t)) == pending
 end
 
-# RR:1090 (A23): delete! of a range not in t throws (the error type is the suite's choice); t unchanged. delete! twice; delete! a range of another TLAS.
+# resizing-and-raytracing.jl B.8 (delete!, findslot): delete! of a range not in t throws (the error type is the suite's choice); t unchanged. delete! twice; delete! a range of another TLAS.
 @case "TL-27" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); t2 = TLAS(dev); b = ownedblas(dev)
@@ -597,7 +602,7 @@ end
     @test queryhits(dev, t, instancegrid(8)) == before
 end
 
-# RR:1095-1102, API:156: members of a deleted range are released after the applying Build's token, never under a trace in flight. delete!, free!(blas), free!(src) while a trace runs.
+# resizing-and-raytracing.jl B.8 (delete!), api.md 2.6: members of a deleted range are released after the applying Build's token, never under a trace in flight. delete!, free!(blas), free!(src) while a trace runs.
 @case "TL-28" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev)
@@ -621,7 +626,7 @@ end
     # VAL: GPU-AV clean: the in-flight query never reads the released BLAS or source
 end
 
-# RR:1124-1127, RR:1141-1143: the old AS is retired with the token of the submission that replaced it, after the traces in flight. A trace in flight; push! past the capacity; another graph's run.
+# resizing-and-raytracing.jl B.8 (capacity, MoveAccel): the old AS is retired with the token of the submission that replaced it, after the traces in flight. A trace in flight; push! past the capacity; another graph's run.
 @case "TL-29" 5 :rt :multiqueue begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -643,7 +648,7 @@ end
     # one queue the case is the single-queue form of the same contract.
 end
 
-# RR:302-309, RR:1111-1117: push! and a source's resize from two threads; the build count is the sum of the current lengths, no deadlock. 10^4 iterations with runs.
+# resizing-and-raytracing.jl B.3 (change!) and B.8: push! and a source's resize from two threads; the build count is the sum of the current lengths, no deadlock. 10^4 iterations with runs.
 @case "TL-30" 5 :rt :long begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -667,7 +672,7 @@ end
     @test t.builtcount == 8 + length(a)
 end
 
-# RR:434-439, RR:1155-1158: a TLAS Update pended by a BLAS change waits for the BLAS write applied by another submission. The BLAS rebuilt through another TLAS; then a trace of t.
+# resizing-and-raytracing.jl B.4 and B.8 (BLAS): a TLAS Update pended by a BLAS change waits for the BLAS write applied by another submission. The BLAS rebuilt through another TLAS; then a trace of t.
 @case "TL-31" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -683,7 +688,7 @@ end
     # VAL: synchronization validation clean (t's Update waits for the BLAS write)
 end
 
-# RR:1052-1054, RR:1119-1129: new slots grow the range table by Resize steps; nothing recompiles or waits. 1000 one-instance ranges pushed between runs.
+# resizing-and-raytracing.jl B.8 (push!, capacity): new slots grow the range table by Resize steps; nothing recompiles or waits. 1000 one-instance ranges pushed between runs.
 @case "TL-32" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -698,7 +703,7 @@ end
     @test all(h -> h[1] != NOINSTANCE && h[2] == 1, hits) && allunique(h[1] for h in hits)
 end
 
-# RR:865-868, RR:878-886: the records kernel reads a source through its cell. A range source moved by a resize past its storage.
+# resizing-and-raytracing.jl B.8 (RangeEntry, records kernels): the records kernel reads a source through its cell. A range source moved by a resize past its storage.
 @case "TL-33" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -711,7 +716,7 @@ end
     @test isonerange(hits)
 end
 
-# RR:1403-1405, API:455: a frame with nothing pending does no acceleration-structure step and re-records nothing. A graph with refit!(g, t), run with no change.
+# resizing-and-raytracing.jl D.2 and D.3, api.md 6: a frame with nothing pending does no acceleration-structure step and re-records nothing. A graph with refit!(g, t), run with no change.
 @case "TL-34" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -724,7 +729,7 @@ end
     @test isempty(stepkinds(log, t)) && d.records == 0
 end
 
-# API:408-416, RR:1394-1396: a run that writes a source pends its TLAS's Update; a graph tracing t applies it after that write. Graph S writes the source each run; graph F traces.
+# api.md 5, resizing-and-raytracing.jl D.3, plan, Acceleration structures and textures: a run that writes a source pends its TLAS's Update; a graph tracing t applies it after that write. Graph S writes the source each run; graph F traces.
 @case "TL-35" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -746,7 +751,7 @@ end
     end
 end
 
-# API:411-412 (pendupdate! after a stage), RR:992-993: a run that writes a source and refits t leaves no Update pending. One graph writes the source and has refit!(g, t).
+# api.md 5 (pendupdate! after a stage), resizing-and-raytracing.jl B.8: a run that writes a source and refits t leaves no Update pending. One graph writes the source and has refit!(g, t).
 @case "TL-36" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -767,7 +772,7 @@ end
     end
 end
 
-# RR:1381-1384, API:151: traversal of an empty software TLAS returns a miss. A software TLAS with no instances, queried.
+# resizing-and-raytracing.jl D.1, api.md 2.6: traversal of an empty software TLAS returns a miss. A software TLAS with no instances, queried.
 @case "TL-37" 5 begin
     dev = testdevice()
     t = TLAS(dev; hardware = false)
@@ -775,7 +780,7 @@ end
     # VAL: GPU-AV clean: no node is read out of bounds
 end
 
-# RR:1155-1158, API:150: TLASes over a BLAS pend an Update when its contents change. Two TLASes over one BLAS; the BLAS rebuilt.
+# resizing-and-raytracing.jl B.8 (BLAS), api.md 2.6: TLASes over a BLAS pend an Update when its contents change. Two TLASes over one BLAS; the BLAS rebuilt.
 @case "TL-38" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -789,7 +794,7 @@ end
     @test allmissed(queryhits(dev, t1, instancegrid(4))) && allmissed(queryhits(dev, t2, instancegrid(4)))
 end
 
-# RR:1119-1123, RR:897-899: capacity doubles until the total fits, in one step; pending builds coalesce into one. 300 instances before the first submission.
+# resizing-and-raytracing.jl B.3 and B.8: capacity doubles until the total fits, in one step; pending builds coalesce into one. 300 instances before the first submission.
 @case "TL-39" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -800,7 +805,7 @@ end
     @test t.capacity == 512 && isonerange(hits)
 end
 
-# RR:1018-1034, RR:1135: a MoveAccel marks the AccelCommands; a plan's refit in the same submission is recorded after the prefix with the new handle. refit!(g, t); growth past capacity.
+# resizing-and-raytracing.jl B.8 (BuildRecording, capacitysteps): a MoveAccel marks the BuildRecordings; a plan's refit in the same submission is recorded after the prefix with the new handle. refit!(g, t); growth past capacity.
 @case "TL-40" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
@@ -818,7 +823,7 @@ end
     # VAL: clean (the refit records the new AS handle, accelstructures.adoc:764-769)
 end
 
-# RR:327-344, RR:889-895: capacity prepared before the locks no longer fits: Again, prepared again. A push! past the prepared capacity lands between prepare! and the locks (FI-P: placeaccel blocked).
+# resizing-and-raytracing.jl B.4 and B.8 (buildsteps): capacity prepared before the locks no longer fits: Again, prepared again. A push! past the prepared capacity lands between prepare! and the locks (placeaccel blocked).
 @case "TL-41" 5 :rt begin
     dev = FaultDevice(testdevice())
     t = TLAS(dev); b = ownedblas(dev)
@@ -838,7 +843,7 @@ end
     @test isonerange(hits[1:64]) && isonerange(hits[65:65]) && isonerange(hits[66:265])
 end
 
-# RR:1294-1296: a BLAS reached only through a TLAS is resident (Metal's device-wide residency set). The BLAS's creator handle freed; t traced.
+# resizing-and-raytracing.jl B.9: a BLAS reached only through a TLAS is resident (Metal's device-wide residency set). The BLAS's creator handle freed; t traced.
 @case "TL-42" 9 :metal :rt begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)

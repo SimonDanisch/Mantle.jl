@@ -1,16 +1,14 @@
-# Run semantics (catalogue-core.md, table 9: RUN). Contracts: api.md 2.3
-# (run!), 4.2 (submitnative!), 5 and 7; recording-plan.md "Run" and
-# "Ordering across graphs and queues"; internals.jl section 6 (run!(g),
-# run!(pl), lockstage, submitstage!); resizing-and-raytracing.jl B.4
-# (takepending, waitforruns).
+# Run semantics (RUN). Contracts: api.md 2.3 (run!), 4.2 (submitnative!), 5
+# and 7; recording-plan.md "Run" and "Ordering across graphs and queues";
+# internals.jl section 6 (run!(g), run!(pl), lockstage, submitstage!);
+# resizing-and-raytracing.jl B.4 (takepending, waitforruns).
 #
-# Queues and segments are core's decisions; cases that need two queues or
-# many segments set the caps facts core decides from through FaultDevice
-# [FI-10]: crossqueuecost 0 puts independent branches on a second compute
-# queue, a bandwidth of 1 byte/s makes every kernel's estimate exceed the
-# submission budget (one segment per kernel).
+# Queues and segments are decided by core; cases that need two queues or
+# many segments set the caps facts core decides from through FaultDevice:
+# crossqueuecost 0 puts independent branches on a second compute queue, a
+# bandwidth of 1 byte/s makes every kernel's estimate exceed the submission
+# budget (one segment per kernel).
 
-import KernelInterface as KI
 
 """a[i] = i."""
 function run_iota!(a)
@@ -82,7 +80,7 @@ end
 """`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
 withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
-"""A FaultDevice over the suite's device whose caps report the fields in `kw` instead [FI-10]."""
+"""A FaultDevice over the suite's device whose caps report the fields in `kw` instead."""
 function capsdevice(; kw...)
     inner = testdevice()
     fd = FaultDevice(inner)
@@ -115,11 +113,10 @@ function runbytes(g, k)
     end
 end
 
-# ── 9. Run semantics (RUN) ──
+# ── Run semantics (RUN) ──
 
-# A:453, P:1895-1899: a graph that reads, increments and writes two device counters in two independent branches on two queues (crossqueuecost 0 [FI-10]), run 10 000 times from each of 2 threads with no host wait: both counters count every run. Negative control: the plan's test-only `ordering = Unordered()` keyword (test_crossplan_order.jl), assumed to drop the wait on the previous run too: the counts come out short.
-# The counter is a device array, not a persistent graph array.
-# pending decision 1
+# api.md 6 (test_runs_never_overlap.jl), plan, Run: a graph that reads, increments and writes two device counters in two independent branches on two queues (crossqueuecost 0), run 10 000 times from each of 2 threads with no host wait: both counters count every run. Negative control: the plan's test-only `ordering = Unordered()` keyword (test_crossplan_order.jl), assumed to drop the wait on the previous run too: the counts come out short.
+# The counters are device arrays the graph names.
 @case "RUN-01" 3 :multiqueue :long begin
     fd = capsdevice(; crossqueuecost = 0.0); runs = 10_000
     a = MantleArray(fd, Int32, 1)
@@ -144,7 +141,7 @@ end
     @test only(Array(a)) + only(Array(b)) < 4runs
 end
 
-# A:455, P:1891-1894: in steady state (after two runs), ten runs allocate nothing, compile nothing, record nothing, and submit once each (the graph is one segment).
+# api.md 6 (test_recorded_once.jl, test_run_is_submit.jl), plan, phase 0: in steady state (after two runs), ten runs allocate nothing, compile nothing, record nothing, and submit once each (the graph is one segment).
 @case "RUN-02" 3 begin
     dev = testdevice(); n = 1024
     g, out = twokernels(dev, n)
@@ -161,7 +158,7 @@ end
     @test Array(out) == Int32.(1:n)
 end
 
-# P:863-868: with nothing marked (no GPURef stored, nothing pending), two runs of a graph with a 400 ms kernel return while the GPU still works, with no host wait (the second does not wait for the first on the host).
+# plan, Run (runs of one graph never overlap; the host never waits for the previous run): with nothing marked (no GPURef stored, nothing pending), two runs of a graph with a 400 ms kernel return while the GPU still works, with no host wait (the second does not wait for the first on the host).
 @case "RUN-03" 3 begin
     dev = testdevice()
     g = Graph(dev)
@@ -176,7 +173,7 @@ end
     @test Array(out) == Int32[7]
 end
 
-# R:705-712: T2 makes the first resize! of a, which g launches over directly, while T1 calls run!(g): the run either finds its plan stale (Again) and recompiles inside run!, covering the new size, or runs the old plan and the next run recompiles; exact either way, one recompile in total. 20 races.
+# resizing-and-raytracing.jl B.6, internals.jl section 6 (run!(g)): T2 makes the first resize! of a, which g launches over directly, while T1 calls run!(g): the run either finds its plan stale (Again) and recompiles inside run!, covering the new size, or runs the old plan and the next run recompiles; exact either way, one recompile in total. 20 races.
 @case "RUN-04" 4 begin
     dev = testdevice(); n = 64
     for _ in 1:20
@@ -202,13 +199,12 @@ end
     end
 end
 
-# I:1015-1021: before one run!, the window is resized, the plan is made stale (first resize! of a, which it launches over directly) and its arena pages are unmapped (budget lowered [FI-9], an allocation): run! converges and returns Submitted after one recompile, exact.
+# internals.jl section 6 (run!(g): applywindows!, recompile!, Again): before one run!, the window is resized, the plan is made stale (first resize! of a, which it launches over directly) and its arena pages are unmapped (budget lowered through FaultDevice, an allocation): run! converges and returns Submitted after one recompile, exact.
 @case "RUN-05" 7 :window :sparse begin
     fd = FaultDevice(testdevice()); n = 64
     win = Window(fd, 64, 64)
     g = Graph(fd)
-    render!(g, win => Clear((0f0, 0f0, 0f0, 1f0))) do p
-    end
+    clear!(g, win, (0f0, 0f0, 0f0, 1f0))
     a = MantleArray(fd, Int32, n)
     marks = MantleArray(fd, Int32, 4n)
     dispatch!(g, run_mark!, (marks, a), launchrange(a))
@@ -234,7 +230,7 @@ end
     @test Array(out) == Int32.(1:16)
 end
 
-# P:712-715: the next rawalloc throws [FI-2] while a run's prepare! allocates for a pending resize! of a beyond its storage: the error comes out of run! before any token is claimed (no hook shows tokens; later host waits all return); with rawalloc working again, the next run applies the resize and is exact, a's contents kept.
+# plan, Ordering (nothing can fail between claiming tokens and submitting): the next rawalloc throws (FaultDevice) while a run's prepare! allocates for a pending resize! of a beyond its storage: the error comes out of run! before any token is claimed (no hook shows tokens; later host waits all return); with rawalloc working again, the next run applies the resize and is exact, a's contents kept.
 @case "RUN-06" 4 begin
     fd = FaultDevice(testdevice()); n = 64
     data = testdata(Int32, n)
@@ -255,7 +251,7 @@ end
     @test length(a) == 2^26
 end
 
-# P:712-715, A:281: submitnative! throws at g's next submission [FI-6]: the error comes out of run!; every lock and the arena part are released: another task's eager call on g's output, a graph sharing the part, and g's next run all finish, exact.
+# plan, Ordering (nothing can fail between claiming tokens and submitting), api.md 4.2 (submitnative!): submitnative! throws at g's next submission (FaultDevice): the error comes out of run!; every lock and the arena part are released: another task's eager call on g's output, a graph sharing the part, and g's next run all finish, exact.
 @case "RUN-07" 3 begin
     fd = FaultDevice(testdevice()); n = 64
     g, out = twokernels(fd, n)
@@ -270,7 +266,7 @@ end
     @test Array(out2) == Int32.(1:n)
 end
 
-# P:928-930: a stale plan (first resize! of a, which g launches over directly) is recompiled and retried inside run!, never thrown. With a window (phase 7, a device with a display), a window resized from another task during 50 runs is applied and retried inside run!: every run returns Submitted. OUT_OF_DATE itself comes from the driver and has no FaultDevice verb (acquirenext takes the swapchain); the resize race takes the same retry path (the window changed, Again).
+# plan, Run (failure of a run: retried by run! itself): a stale plan (first resize! of a, which g launches over directly) is recompiled and retried inside run!, never thrown. With a window (phase 7, a device with a display), a window resized from another task during 50 runs is applied and retried inside run!: every run returns Submitted. OUT_OF_DATE itself comes from the driver and has no FaultDevice verb (acquirenext takes the swapchain); the resize race takes the same retry path (the window changed, Again).
 @case "RUN-08" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -285,8 +281,7 @@ end
     if SUITE.phase[] >= 7 && has(dev, :window)
         win = Window(dev, 64, 64)
         gw = Graph(dev)
-        render!(gw, win => Clear((0f0, 0f0, 0f0, 1f0))) do p
-        end
+        clear!(gw, win, (0f0, 0f0, 0f0, 1f0))
         run!(gw)
         resizer = Threads.@spawn for k in 1:50
             resize!(win, 64 + k, 64 + k)
@@ -298,7 +293,7 @@ end
     end
 end
 
-# A:101: run!(g) from a task that holds an arena part of g's plan (the host function of h, which shares g's device part) throws.
+# api.md 2.3 (run!), 7: run!(g) from a task that holds an arena part of g's plan (the host function of h, which shares g's device part) throws.
 @case "RUN-09" 3 begin
     dev = testdevice(); n = 64
     g, out = twokernels(dev, n)
@@ -310,7 +305,7 @@ end
     @test thrown(() -> run!(h)) isa ArgumentError
 end
 
-# P:1884-1885: an encoder and a decoder graph (SAM 2's shape: several kernels each, a device array between them), 20 runs each: every plan is recorded in its first run only. SAM 2 itself runs in the dnn_patterns area.
+# plan, phase 0 (test_recorded_once.jl): an encoder and a decoder graph (SAM 2's shape: several kernels each, a device array between them), 20 runs each: every plan is recorded in its first run only. SAM 2 itself runs in the dnn_patterns area.
 @case "RUN-10" 1 begin
     dev = testdevice(); n = 4096
     feats = MantleArray(dev, Int32, n)
@@ -330,7 +325,7 @@ end
     @test Array(out) == Int32.(4:n+3)
 end
 
-# D:498-499: two independent branches on two queues (crossqueuecost 0 [FI-10]) both read w; a store into w before each run is applied in the first segment's change prefix, and the segment on the other queue waits for that segment's token: both branches see the new data in each of 100 runs.
+# internals.jl section 6 (submitstage!: a later segment that touches what the change prefix wrote waits on the first segment's token): two independent branches on two queues (crossqueuecost 0) both read w; a store into w before each run is applied in the first segment's change prefix, and the segment on the other queue waits for that segment's token: both branches see the new data in each of 100 runs.
 @case "RUN-11" 4 :multiqueue begin
     fd = capsdevice(; crossqueuecost = 0.0); n = 4096
     w = MantleArray(fd, Int32, n)
@@ -357,7 +352,7 @@ end
     @test wrong == 0
 end
 
-# P:645-651: two threads each store into w and run g (branches on two queues, crossqueuecost 0 [FI-10]) 200 times: per channel, the tokens of the applied change steps never go back in emission order (claim and submit in one step under the channel lock); results exact. "Validation clean" has no hook in this suite; the validation-layer runs check it.
+# plan, Ordering (tokens per segment): two threads each store into w and run g (branches on two queues, crossqueuecost 0) 200 times: per channel, the tokens of the applied change steps never go back in emission order (claim and submit in one step under the channel lock); results exact. "Validation clean" has no hook in this suite; the validation-layer runs check it.
 @case "RUN-12" 4 :multiqueue begin
     fd = capsdevice(; crossqueuecost = 0.0); n = 1024
     data = Int32.(1:n)
@@ -384,7 +379,7 @@ end
     @test Array(outb) == data .+ Int32(2)
 end
 
-# P:676-685: g is between its stages (blocked in its host function) and launches over a directly; T2 resizes a and fills it eagerly: the fill waits until g has submitted its last stage, then applies the resize; g's stage 2 used the old size; g's next run recompiles once and covers the new size.
+# plan, Ordering (a run with host nodes: a change the plan cannot follow mid-run), resizing-and-raytracing.jl B.4: g is between its stages (blocked in its host function) and launches over a directly; T2 resizes a and fills it eagerly: the fill waits until g has submitted its last stage, then applies the resize; g's stage 2 used the old size; g's next run recompiles once and covers the new size.
 @case "RUN-13" 5 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -413,7 +408,7 @@ end
     @test sum(Array(marks)) == 2n
 end
 
-# P:679-680: as RUN-13 with a single-stage g (a 400 ms kernel beside the launch over a), in flight: g is never between stages, so the eager fill after resize!(a) makes no host wait (it waits for g's tokens on the GPU); g's run used the old size.
+# plan, Ordering (a plan with one stage is never waited for): as RUN-13 with a single-stage g (a 400 ms kernel beside the launch over a), in flight: g is never between stages, so the eager fill after resize!(a) makes no host wait (it waits for g's tokens on the GPU); g's run used the old size.
 @case "RUN-14" 5 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -433,7 +428,7 @@ end
     @test Array(a) == fill(Int32(5), 2n)
 end
 
-# P:684-685: g (two stages around a no-op host node, a launch over a directly) runs in a tight loop on T1 while T2 resizes a and fills it eagerly: T2 proceeds once g's current run has submitted its last stage, since g's next run recompiles to an indirect launch the change no longer stales. No fairness is promised; the bound this case holds T2 to is 30 s, and the time taken is logged.
+# plan, Ordering (no fairness), resizing-and-raytracing.jl B.4 (waitforruns): g (two stages around a no-op host node, a launch over a directly) runs in a tight loop on T1 while T2 resizes a and fills it eagerly: T2 proceeds once g's current run has submitted its last stage, since g's next run recompiles to an indirect launch the change does not stale. No fairness is promised; the bound this case holds T2 to is 30 s, and the time taken is logged.
 @case "RUN-15" 5 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -457,7 +452,7 @@ end
     @info "RUN-15: resize! and fill! behind a tight run loop took $(round(took[]; digits = 3)) s"
 end
 
-# R:460 vs A:487 (ambiguity 9): an eager call inside an insert!(g) block (a declaration, not a run) whose change would stale g2, which is between its stages: it waits until g2 has submitted its last stage, then proceeds. The current internals agree with api.md: a declaration holding a graph lock is not inside a run (R:481-485).
+# resizing-and-raytracing.jl B.4 (inhostfunction: only a task running a host function is inside a run; a declaration is not), api.md 7: a task that declares into g (a group) and then makes an eager call whose change would stale g2, which is between its stages: the call waits until g2 has submitted its last stage, then proceeds (no throw: the task is in no host function).
 @case "RUN-16" 5 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -474,7 +469,8 @@ end
     t2 = Threads.@spawn run!(g2)
     waitentered(gate)
     resize!(a, 2n)
-    t1 = Threads.@spawn insert!(g) do
+    t1 = Threads.@spawn begin
+        Group(g, "late")             # a declaration into g: the graph lock is held for the call only
         fill!(a, Int32(5))
     end
     sleep(0.5)
@@ -486,7 +482,7 @@ end
     @test Array(a) == fill(Int32(5), 2n)
 end
 
-# P:712-715: no allocation between claiming tokens and submitting (submitnative!, bindpages!). No hook counts allocations inside a verb; the closest observable: with a bandwidth of 1 byte/s [FI-10] every kernel is its own segment, and 200 steady-state runs of an 8-segment graph allocate no more Julia memory than those of a 1-segment graph (the per-segment path, submitnative! included, allocates nothing).
+# plan, Ordering (nothing can fail between claiming tokens and submitting), api.md 4.2: no allocation between claiming tokens and submitting (submitnative!, bindpages!). No hook counts allocations inside a verb; the closest observable: with a bandwidth of 1 byte/s every kernel is its own segment, and 200 steady-state runs of an 8-segment graph allocate no more Julia memory than those of a 1-segment graph (the per-segment path, submitnative! included, allocates nothing).
 @case "RUN-17" 3 begin
     fd = capsdevice(; bandwidth = 1.0); n = 256
     g1, out1 = chaingraph(fd, n, 1)

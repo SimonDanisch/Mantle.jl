@@ -1,34 +1,38 @@
-# Eager calls: operations on device arrays run now (catalogue-core.md, table
-# 18: EAGER). Contracts: api.md:126, 451, 481; recording-plan.md "Eager work"
-# (933-982); internals.jl section 11 (2181-2210). Line numbers of 2026-10-05.
+# Eager calls: operations on device arrays run now (EAGER). Contracts:
+# api.md 2.2, 6 (test_one_path.jl) and 7; recording-plan.md "Eager work";
+# internals.jl section 11.
 #
 # Assumed of the hooks: Mantle.steplog entries have `kind` (a Symbol),
 # `target` (the root array) and `token`. Device side, lengthof(a) arrives as
 # a one-element integer array (`len[1] = n`).
 
-using KernelAbstractions: @kernel, @index
 using LinearAlgebra: mul!
 
-@kernel function ea_scale!(x, s)
-    i = @index(Global)
+function ea_scale!(x, s)
+    i = KI.get_global_id().x
+    i <= length(x) || return nothing      # ndrange is rounded up to whole work-groups
     x[i] *= s
+    return nothing
 end
 
 # a[i] = i for i <= n, and n as a's length; launched over the capacity.
-@kernel function ea_writelength!(a, len, n)
-    i = @index(Global)
+function ea_writelength!(a, len, n)
+    i = KI.get_global_id().x
     if i <= n
         a[i] = Int32(i)
     end
     if i == 1
         len[1] = n
     end
+    return nothing
 end
 
-# marks[i] = 1 for each work item the launch has.
-@kernel function ea_mark!(marks, a)
-    i = @index(Global)
+# marks[i] = 1 for every i the launch over `a` reaches: the launch's extent.
+function ea_mark!(marks, a)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     marks[i] = Int32(1)
+    return nothing
 end
 
 """`f()` and the prefix steps applied while it ran (the step log restarted around it)."""
@@ -44,15 +48,15 @@ end
 """The CUDA module; loaded wherever a CudaDevice exists."""
 cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b64840ba"), "CUDA"))
 
-# ── 18. Eager calls (EAGER) ──
+# ── Eager calls (EAGER) ──
 
-# api.md:451, recording-plan.md:959-971: a KA launch, dispatch!, broadcast, fill!, copyto!, mul!, fft and render!(dev) on device arrays: every launch goes through compilekernel and is one submission (trace!(dev) is left to the ray-tracing areas).
+# api.md 6 (test_one_path.jl), plan, Eager work (every eager entry is this path): a KernelInterface launch, dispatch!, broadcast, fill!, copyto!, mul!, fft and clear!(dev) on device arrays and an image: every launch goes through compilekernel and is one submission, the clear one submission (trace!(dev) is left to the ray-tracing areas).
 @case "EAGER-01" 6 begin
     d = FaultDevice(testdevice())
     x = testdata(Float32, 1024)
     a, b = MantleArray(d, x), MantleArray(d, Float32, 1024)
     singles = (() -> fill!(b, 1f0), () -> (b .= a .* 2f0), () -> copyto!(b, a),
-               () -> ea_scale!(d)(b, 2f0; ndrange = 1024), () -> dispatch!(d, ea_scale!, (b, 2f0), 1024))
+               () -> (KI.@kernel d ndrange = 1024 ea_scale!(b, 2f0)), () -> dispatch!(d, ea_scale!, (b, 2f0), 1024))
     for op in singles
         k = calls(d, :compilekernel)
         _, diag = counted(op, d)
@@ -72,12 +76,12 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
     end
     @test Array(C) ≈ Array(A) * Array(B)
     img = Image(d, Float32, 16, 16)
-    _, diag = counted(() -> render!(p -> nothing, d, img => Clear(1f0)), d)
+    _, diag = counted(() -> clear!(d, img, 1f0), d)
     @test submitcount(diag) == 1
     @test all(==(1f0), Array(img))
 end
 
-# recording-plan.md:964-966: 100 eager calls are 100 submissions; no plan is compiled or cached for them.
+# plan, Eager work (no batching outside graphs, no cached one-op plans): 100 eager calls are 100 submissions; no plan is compiled or cached for them.
 @case "EAGER-02" 3 begin
     dev = testdevice()
     a = MantleArray(dev, zeros(Int32, 1024))
@@ -91,7 +95,7 @@ end
     @test Array(a) == fill(Int32(100), 1024)
 end
 
-# internals.jl:2185-2195: a pending resize and store on an argument are applied in front of the launch, in its one submission.
+# internals.jl section 11 (dispatch!(dev, …): pending changes applied in front of the launch by the same submission): a pending resize and store on an argument are applied in front of the launch, in its one submission.
 @case "EAGER-03" 4 begin
     dev = testdevice()
     x, y = testdata(Int32, 1024), testdata(Int32, 1024; seed = 2)
@@ -107,7 +111,7 @@ end
     @test Array(a) == [x; y] .+ Int32(1)
 end
 
-# internals.jl:2190-2203: an eager call that throws under its locks (a freed argument) retires its packed argument region at once: 100 such calls leave memory at the baseline.
+# internals.jl section 11 (the packed arguments retired now after a throw): an eager call that throws under its locks (a freed argument) retires its packed argument region at once: 100 such calls leave memory at the baseline.
 @case "EAGER-04" 3 begin
     dev = testdevice()
     a, b = MantleArray(dev, Int32, 1024), MantleArray(dev, Int32, 1024)
@@ -123,7 +127,7 @@ end
     @test memory(dev) == base
 end
 
-# api.md:481, recording-plan.md:962-963: an eager call on an array lent to withview throws; after the block it runs.
+# api.md 2.9, 7, plan, Eager work: an eager call on an array lent to withview throws; after the block it runs.
 @case "EAGER-05" 10 :vendorview begin
     dev = testdevice()
     cuda = cudamodule()
@@ -137,7 +141,7 @@ end
     @test Array(a) == fill(Int32(1), 1024)
 end
 
-# internals.jl:2196, resizing-and-raytracing.jl:804-805: an eager launch over a length a kernel wrote is indirect from the cell: 1000 work items, not the capacity of 4096.
+# internals.jl section 11, resizing-and-raytracing.jl B.7 (a kernel-written length launches indirect), api.md 2.2 (length(a) of a kernel-written length waits and reads the cell): an eager launch over a length a kernel wrote reaches 1000 elements, not the capacity of 4096; length(a) is 1000.
 @case "EAGER-06" 4 begin
     dev = testdevice()
     a = MantleArray(dev, Int32, 0; capacity = 4096)
@@ -145,11 +149,11 @@ end
     dispatch!(dev, ea_writelength!, (a, lengthof(a), Int32(1000)), 4096)
     dispatch!(dev, ea_mark!, (marks, a), launchrange(a))
     @test count(==(Int32(1)), Array(marks)) == 1000
-    @test devicesize(a) == 1000
+    @test length(a) == 1000
     @test Array(a) == Int32.(1:1000)
 end
 
-# api.md:126: an eager call returns once submitted, before the GPU finishes: a launch of about 1 s returns within 0.5 s, and a host read then sees its result.
+# plan, Eager work (submitted before it returns), api.md 2.2 (operations on a device array run now): an eager call returns once submitted, before the GPU finishes: a launch of about 1 s returns within 0.5 s, and a host read then sees its result.
 @case "EAGER-07" 3 begin
     dev = testdevice()
     out = MantleArray(dev, Int32, 1)

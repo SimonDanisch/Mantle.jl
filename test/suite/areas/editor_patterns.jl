@@ -1,15 +1,13 @@
 # Consumer patterns of the video editor, written against Mantle alone: frame
 # graphs sharing device arrays, per-frame values as one-element stores, a DNN
-# beside the frame, resolution changes, double buffering through an array
-# GPURef, readback, and the steady-state frame (recording-plan.md Ordering,
-# Run, Memory; api.md 2.2-2.6b; examples.jl 24-33).
+# beside the frame, resolution changes, double buffering through one `when!`
+# launch per buffer, host reads of device arrays the frame graph writes, and
+# the steady-state frame (recording-plan.md Ordering, Run, Memory; api.md
+# 2.2-2.6b; examples.jl 22-33).
 #
 # Pixels are Int32, so every result compares exactly with a host model.
 # Phase: the latest ledger phase among the contracts a case relies on: stores
-# and resize! are phase 4, the array GPURef phase 6 (the suite runs nothing
-# before APIPHASE).
-
-using KernelAbstractions: @kernel, @index
+# and resize! are phase 4 (the suite runs nothing before APIPHASE).
 
 const ED_W = 64
 const ED_H = 48
@@ -30,59 +28,77 @@ paintedcanvas(w, h, t) = [Int32(3x + 5y + t) for x in 1:w, y in 1:h]
 """The gain of frame `f`: a per-frame value the editor stores."""
 framegain(f) = Int32(f % 3 + 1)
 
-@kernel function ed_decode!(frame, findex)
-    x, y = @index(Global, NTuple)
+function ed_decode!(frame, findex)
+    x = KI.get_global_id().x
+    y = KI.get_global_id().y
+    (x <= size(frame, 1) && y <= size(frame, 2)) || return nothing   # ndrange is rounded up to whole work-groups
     @inbounds frame[x, y] = (Int32(3x + 5y) + Int32(7) * findex[1]) % Int32(256)
+    return nothing
 end
 
-@kernel function ed_grade!(out, frame, gain)
-    i = @index(Global)
+function ed_grade!(out, frame, gain)
+    i = KI.get_global_id().x
+    i <= length(out) || return nothing
     @inbounds out[i] = frame[i] * gain[1] + Int32(1)
+    return nothing
 end
 
-@kernel function ed_preview!(preview, img)
-    x, y = @index(Global, NTuple)
+function ed_preview!(preview, img)
+    x = KI.get_global_id().x
+    y = KI.get_global_id().y
+    (x <= size(preview, 1) && y <= size(preview, 2)) || return nothing
     @inbounds preview[x, y] = img[2x-1, 2y-1] + img[2x, 2y-1] + img[2x-1, 2y] + img[2x, 2y]
+    return nothing
 end
 
 # One work item: the frame's checksum into its slot of `sums`.
-@kernel function ed_checksum!(sums, img, findex)
+function ed_checksum!(sums, img, findex)
+    KI.get_global_id().x == 1 || return nothing
     s = Int32(0)
     for i in 1:length(img)
         @inbounds s += img[i]
     end
     @inbounds sums[findex[1]] = s
+    return nothing
 end
 
 # Over the canvas's current length; the width from the device-side dims, so
 # it follows a resize! without a recompile.
-@kernel function ed_paint!(canvas, t)
-    i = @index(Global)
+function ed_paint!(canvas, t)
+    i = KI.get_global_id().x
+    i <= length(canvas) || return nothing
     w = size(canvas, 1)
     x = (i - 1) % w + 1
     y = (i - 1) ÷ w + 1
     @inbounds canvas[i] = Int32(3x + 5y) + t[1]
+    return nothing
 end
 
-@kernel function ed_alpha!(alpha, canvas)
-    i = @index(Global)
+function ed_alpha!(alpha, canvas)
+    i = KI.get_global_id().x
+    i <= length(alpha) || return nothing
     @inbounds alpha[i] = canvas[i] % Int32(2)
+    return nothing
 end
 
-@kernel function ed_copy!(dst, src)
-    i = @index(Global)
+function ed_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = src[i]
+    return nothing
 end
 
-@kernel function ed_scale!(y, x, s)
-    i = @index(Global)
+function ed_scale!(y, x, s)
+    i = KI.get_global_id().x
+    i <= length(y) || return nothing
     @inbounds y[i] = x[i] * s
+    return nothing
 end
 
 """
 A matte network as one graph with a host node between its stages
-(`output = 3 * (2 * input)`); `kw` goes to `Graph` (open decision 12:
-`priority`, keyword and values open).
+(`output = 3 * (2 * input)`); `kw` goes to `Graph` (`priority`: keyword and
+values open, api.md 2.3).
 """
 function mattegraph(dev, input, output, host; kw...)
     g = Graph(dev; kw...)
@@ -93,7 +109,7 @@ function mattegraph(dev, input, output, host; kw...)
     return g
 end
 
-"""The editor's frame: paints `canvas` (an array or an array GPURef) at the time in `t`."""
+"""The editor's frame: paints `canvas` at the time in `t`."""
 function paintgraph(dev, canvas, t; kw...)
     g = Graph(dev; kw...)
     dispatch!(g, ed_paint!, (canvas, t), launchrange(canvas))
@@ -140,8 +156,9 @@ end
 end
 
 # ED-02: a DNN graph with a host node beside the frame graph, on separate
-# arena parts (examples.jl 33; plan, Ordering "Arenas"; open decision 12: core
-# decides parts from the graphs' priorities). While the DNN's run is held in
+# arena parts (examples.jl 33; plan, Ordering across graphs and queues,
+# "Arenas": core decides parts from the graphs' priorities, whose keyword is
+# open). While the DNN's run is held in
 # its host function, holding its arena parts, frames still run and are
 # correct, and wait for nothing on the host. The DNN's result is exact after
 # its host function returns.
@@ -149,9 +166,9 @@ end
     dev = testdevice()
     input, output = MantleArray(dev, collect(Int32, 1:4096)), MantleArray(dev, Int32, 4096)
     gate = Gate()
-    matte = mattegraph(dev, input, output, blockinghost(gate); priority = 0)   # open decision 12
+    matte = mattegraph(dev, input, output, blockinghost(gate); priority = 0)   # keyword open
     canvas, t = MantleArray(dev, Int32, ED_W, ED_H), MantleArray(dev, Int32[0])
-    frame = paintgraph(dev, canvas, t; priority = 1)                          # open decision 12
+    frame = paintgraph(dev, canvas, t; priority = 1)                          # keyword open
     run!(frame)
     letgo!(gate)
     run!(matte)                                      # compiles with the gate open
@@ -199,8 +216,8 @@ end
     foreach(free!, (matte, frame))
 end
 
-# ED-04: a resolution change: resize! of the canvas arrays (api.md 2.2;
-# B3.13). The call changes the host view only: nothing is allocated and the
+# ED-04: a resolution change: resize! of the canvas arrays (api.md 2.2,
+# resize!). The call changes the host view only: nothing is allocated and the
 # change stays pending until the next frame applies it. The next frame is
 # correct at the new size. The first resize! recompiles once (the plan
 # launched over the fixed arrays directly); later ones, smaller, larger and
@@ -230,22 +247,27 @@ end
     free!(g)
 end
 
-# ED-05: double buffering through an array GPURef (api.md 2.6b): each frame
-# rebinds the box to the buffer it draws into (a pending cell write, no copy)
-# while the other buffer keeps the previous frame. No recompile, no host wait;
-# both buffers exact. Then per frame with reads: the shown buffer holds the
+# ED-05: double buffering through one `when!` launch per buffer (api.md 2.4
+# when!; resizing-and-raytracing.jl D.3: one recorded when! per variant, the
+# choice a store into the flags): each frame stores the two one-element Bool
+# flags so that only the launch into the buffer it draws into runs, while the
+# other buffer keeps the previous frame. No recompile, no host wait; both
+# buffers exact. Then per frame with reads: the shown buffer holds the
 # previous frame while the drawn one holds this frame.
 @case "ED-05" 6 begin
     dev = testdevice()
     front, back = MantleArray(dev, Int32, ED_W, ED_H), MantleArray(dev, Int32, ED_W, ED_H)
-    target = GPURef(dev, front)
+    intofront, intoback = MantleArray(dev, [true]), MantleArray(dev, [false])
     t = MantleArray(dev, Int32[0])
-    g = paintgraph(dev, target, t)
+    g = Graph(dev)
+    when!(g, intofront, ed_paint!, (front, t), launchrange(front))
+    when!(g, intoback, ed_paint!, (back, t), launchrange(back))
     buffers(f) = isodd(f) ? (front, back) : (back, front)
+    drawinto!(f) = (intofront[1:1] = [isodd(f)]; intoback[1:1] = [iseven(f)])   # stores: no plan marked
     run!(g)
     _, d = counted() do
         for f in 1:ED_FRAMES
-            target[] = first(buffers(f))
+            drawinto!(f)
             t[1:1] = Int32[f]
             run!(g)
         end
@@ -256,25 +278,23 @@ end
     @test Array(last(buffers(ED_FRAMES))) == paintedcanvas(ED_W, ED_H, ED_FRAMES - 1)
     for f in ED_FRAMES+1:ED_FRAMES+8
         drawn, shown = buffers(f)
-        target[] = drawn
-        @test target[] === drawn
+        drawinto!(f)
         t[1:1] = Int32[f]
         run!(g)
         @test Array(shown) == paintedcanvas(ED_W, ED_H, f - 1)
         @test Array(drawn) == paintedcanvas(ED_W, ED_H, f)
     end
     free!(g)
-    free!(target)
 end
 
 # ED-06: the canvas read back every frame (api.md 2.2 Array and
 # copyto!(host, a): its own submission, one wait, a memcpy), and a copy the
-# frame graph writes into Readback memory (name open), whose read is a wait
-# and a memcpy with no submission.
+# frame graph writes into a unified array (api.md 2.2, `unified = true`),
+# whose read after the run is a wait and a memcpy with no submission.
 @case "ED-06" 4 begin
     dev = testdevice()
     canvas = MantleArray(dev, Int32, ED_W, ED_H)
-    shown = MantleArray(dev, Int32, ED_W, ED_H; memory = Mantle.Readback())
+    shown = MantleArray(dev, Int32, ED_W, ED_H; unified = true)
     t = MantleArray(dev, Int32[0])
     host = Matrix{Int32}(undef, ED_W, ED_H)
     g = Graph(dev)

@@ -1,20 +1,24 @@
-# Devices, the registry and caps (catalogue-core.md, table 1). Process-level
-# cases (the registry exists once per process) start a fresh Julia in this
+# Devices, the registry and caps (DEV). Contracts: api.md 2.1, 4.1 and 10;
+# recording-plan.md "Devices"; internals.jl section 13. Process-level cases
+# (the registry exists once per process) start a fresh Julia in this
 # environment and carry the `:lavapipe` need, so they run once per suite, on
 # the lavapipe pass.
 
-using KernelAbstractions: @kernel, @index, @Const
 import KernelAbstractions as KA
 using LinearAlgebra: triu!
 
-@kernel function dev_add!(dst, @Const(src), v)
-    i = @index(Global)
+function dev_add!(dst, src, v)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing    # ndrange is rounded up to whole work-groups
     @inbounds dst[i] = src[i] + v
+    return nothing
 end
 
-@kernel function dev_fill!(a, v)
-    i = @index(Global)
+function dev_fill!(a, v)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     @inbounds a[i] = v
+    return nothing
 end
 
 """Standard output of `code` run by a fresh Julia process in this environment, with `env` set."""
@@ -53,9 +57,9 @@ end
 checkinline(c, ::Mantle.LavaDevice) = @test (c.inlinestore, c.inlinealign) == (65536, 4)
 checkinline(c, ::Mantle.Device) = @test c.inlinestore >= 0
 
-# ── 1. Devices and caps (DEV) ──
+# ── Devices and caps (DEV) ──
 
-# A:55, P:152-156: Device() twice, then from 8 threads at once: the same object every time.
+# api.md 2.1 (Device() returns the same object on every call), plan, Devices (one object per hardware device): Device() twice, then from 8 threads at once: the same object every time.
 @case "DEV-01" 8 begin
     d = Device()
     @test Device() === d
@@ -64,7 +68,8 @@ checkinline(c, ::Mantle.Device) = @test c.inlinestore >= 0
     @test count(x -> x === d, devices()) == 1       # one object, so one pool
 end
 
-# A:56, I:2232-2236: devices() in a fresh process lists every device once and
+# api.md 2.1 (devices(): driver objects are created on first use), internals.jl
+# section 13: devices() in a fresh process lists every device once and
 # opens none. The registry's driver-object creation is not a verb FaultDevice
 # can count; the case reads the pool hook instead (no device has a block yet).
 @case "DEV-02" 8 :lavapipe begin
@@ -78,8 +83,9 @@ end
     @test out == ["true", "true", "true"]
 end
 
-# A:55, P:147: lavapipe enumerated first (Mesa's device-select layer, lavapipe's
-# vendor id 0x10005); Device() is still a GPU.
+# api.md 2.1 (Device(): GPU 0, never a CPU driver), plan, Devices: lavapipe
+# enumerated first (Mesa's device-select layer, lavapipe's vendor id 0x10005);
+# Device() is still a GPU.
 @case "DEV-03" 8 :lavapipe begin
     @test any(d -> !has(d, :lavapipe), devices())  # a GPU exists to be the default
     firstname, defaultname = split(freshjulia(
@@ -89,7 +95,8 @@ end
     @test !islavapipe(defaultname)
 end
 
-# A:59, P:160-166: `using Lavapipe_jll` before and after the first Device() in
+# api.md 2.1 (`using Lavapipe_jll` must happen before the first Device()),
+# plan, Devices: `using Lavapipe_jll` before and after the first Device() in
 # fresh processes. Needs Lavapipe_jll in the main environment. Loaded late it
 # changes nothing (the listing equals a process without it) and does not crash
 # (a crash fails `read`).
@@ -100,8 +107,9 @@ end
     @test late == freshjulia("using Mantle; " * listed)
 end
 
-# A:57: one GPU through LavaDevice and CudaDevice: two devices, two pools;
-# mixing their arrays throws at location. Pairs the two by name.
+# api.md 2.1 (one GPU through two drivers is two devices with two pools), 2.4
+# (location): one GPU through LavaDevice and CudaDevice: two devices, two
+# pools; mixing their arrays throws at location. Pairs the two by name.
 @case "DEV-05" 10 :vendorview begin
     cu = testdevice()
     lv = only(filter(d -> d !== cu && Mantle.name(d) == Mantle.name(cu), devices()))
@@ -114,26 +122,34 @@ end
     free!(large)
 end
 
-# A:58, I:206: KA.get_backend on a device array is its device; on a graph array it throws.
+# api.md 2.1, 2.2, plan, Devices, internals.jl section 2: KA.get_backend on a device array is its device; on a graph array it is the graph's device, Mantle.Device(g).
 @case "DEV-06" 6 begin
     dev = testdevice()
     @test KA.get_backend(MantleArray(dev, Float32, 16)) === dev
-    @test_throws Exception KA.get_backend(MantleArray(Graph(dev), Float32, 16))
+    g = Graph(dev)
+    @test KA.get_backend(MantleArray(g, Float32, 16)) === Mantle.Device(g)
 end
 
-# P:169-171: an operation with only a device method (GPUArrays' generic triu!)
-# on a graph array throws and submits nothing. The plan says MethodError;
-# GPUArrays' method reaches KA.get_backend first, which throws its own error,
-# so any exception is accepted.
+# api.md 2.2 (GPUArrays' generic code serves the rest, on devices and graphs
+# alike), plan, Arrays (tril/triu as KA kernels on get_backend(dest)):
+# GPUArrays' generic triu! on a graph array declares a kernel node into the
+# graph and submits nothing; the run computes it.
 @case "DEV-07" 6 begin
     dev = testdevice()
-    x = MantleArray(Graph(dev), Float32, 8, 8)
-    _, d = counted(() -> @test_throws(Exception, triu!(x)))
+    g = Graph(dev)
+    x = MantleArray(g, Float32, 8, 8)
+    out = MantleArray(dev, Float32, 8, 8)
+    fill!(x, 1f0)
+    _, d = counted(() -> triu!(x))
     @test submitcount(d) == 0
+    copyto!(out, x)
+    run!(g)
+    @test Array(out) == triu!(ones(Float32, 8, 8))
 end
 
-# A:450, E:510-513: a broadcast across two devices, and a graph on one device
-# given an array of the other: ArgumentError, the graph unchanged.
+# api.md 2.4 (location: arguments from two devices throw), 7, examples.jl
+# "Threads and devices": a broadcast across two devices, and a graph on one
+# device given an array of the other: ArgumentError, the graph unchanged.
 @case "DEV-08" 6 :lavapipe begin
     dev = testdevice()
     other = first(d for d in devices() if d !== dev)
@@ -150,22 +166,25 @@ end
     @test Array(out) == fill(2f0, 16)               # the refused broadcast left no node
 end
 
-# A:262: caps(dev) is immutable and has the fields api.md 4.1 and helpers.jl
-# name (field names open, G3); Vulkan reports inlinestore 65536, inlinealign 4.
+# api.md 4.1 (caps), 10 (field names open): caps(dev) is immutable and has
+# the fields api.md 4.1 and helpers.jl name; Vulkan reports inlinestore 65536,
+# inlinealign 4.
 @case "DEV-09" 8 begin
     dev = testdevice()
     c = caps(dev)
     @test !ismutable(c)
     @test c == caps(dev)
-    for f in (:sparseresidency, :accelbyaddress, :raytracing, :display, :separatehostheap,
+    for f in (:sparseresidency, :accelbyaddress, :raytracing, :display,
               :throughput, :bandwidth, :transfer, :crossqueuecost, :inlinestore, :inlinealign)
         @test f in propertynames(c)
     end
     checkinline(c, dev)
 end
 
-# A:253-254: lavapipe has no sparse residency and no RT; arrays that would move
-# into a reserve, arena transients and a TLAS work without a "not supported".
+# api.md 4 (a verb never throws to signal "not supported"; capabilities are
+# answered by caps), 2.2 (resize!): lavapipe has no sparse residency and no RT;
+# arrays that would move into a reserve, arena transients and a TLAS work
+# without a "not supported".
 @case "DEV-10" 4 :lavapipe begin
     dev = testdevice()
     @test !caps(dev).sparseresidency
@@ -185,15 +204,16 @@ end
     @test TLAS(dev) isa TLAS                        # the software path
 end
 
-# A:269-275, P:540-545: the same estimated work with caps.display true and
-# false [FI-10]: the display device gets the smaller budget, so more segments;
+# api.md 4.1 (caps: whether the device drives a display), plan, "Submission
+# split: estimated": the same estimated work with caps.display true and false
+# (FaultDevice): the display device gets the smaller budget, so more segments;
 # the results are the same.
 @case "DEV-11" 1 begin
     c = caps(testdevice())
     headless, shown = FaultDevice(testdevice()), FaultDevice(testdevice())
     inject!(headless, :caps, Answer(1, withcaps(c; display = false)))
     inject!(shown, :caps, Answer(1, withcaps(c; display = true)))
-    gh, outh, k = costlychain(headless, 0.3)        # three times today's 0.1 s budget
+    gh, outh, k = costlychain(headless, 0.3)        # about 0.3 s of estimated work
     gs, outs, _ = costlychain(shown, 0.3)
     run!(gh); run!(gs)
     @test segmentcount(gs) > segmentcount(gh)

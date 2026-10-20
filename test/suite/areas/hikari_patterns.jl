@@ -1,8 +1,6 @@
-# Hikari's patterns (catalogue-resize-rt.md, table P), written against
-# Mantle's API only, in the shapes of resizing-and-raytracing.jl D.2.
-#
-# References: API = docs/api.md; RR = docs/resizing-and-raytracing.jl (line
-# numbers of 2026-10-05).
+# Hikari's patterns, written against Mantle's API only, in the shapes of
+# resizing-and-raytracing.jl D.2. Contracts: api.md 2.3-2.6b; recording-plan.md
+# "RayMakie on the core model" and phase 11 (Consumers).
 #
 # The scene (hikariscene) is D.2's: one TLAS, a material table, and the
 # screen's film, accumulation and sample count, which are device arrays so
@@ -19,10 +17,9 @@
 #       :BuildAccel, capacity steps :MoveAccel).
 # Validation-layer expectations are comments marked VAL.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Point3f, Vec3f, Mat4f, TriangleFace
 
-# ── Ray-tracing helpers, a subset of those in tlas.jl, blas.jl and gpuref.jl ──
+# ── Ray-tracing helpers, a subset of those in tlas.jl and blas.jl ──
 
 const TRIANGLEVERTICES = (Point3f(-0.4, -0.4, 0), Point3f(0.4, -0.4, 0), Point3f(0, 0.4, 0), Point3f(0, -0.2, 0))
 const TRIANGLEFACE = TriangleFace{UInt32}(1, 2, 3)   # covers the origin
@@ -86,47 +83,55 @@ brightness(::Val{M}) where {M} = Float32(M)
 One sample per pixel: film[i] = brightness(material) * materials[1] on a hit,
 0 on a miss; accum adds it; thread 1 counts the sample.
 """
-@kernel function hk_shade!(film, accum, samples, t, origins, materials, material, gate)
-    i = @index(Global)
+function hk_shade!(film, accum, samples, t, origins, materials, material, gate)
+    i = KI.get_global_id().x
+    i <= length(film) || return nothing      # ndrange is rounded up to whole work-groups
     q = Mantle.rayquery(t, origins[i], Vec3f(0, 0, 1))
     c = q.hit & (gate[1] != Int32(-1)) ? brightness(material) * materials[1] : 0f0
     film[i] = c
     accum[i] += c
     i == 1 && (samples[1] += Int32(1))
+    return nothing
 end
 
-"""Declares the integrator of scene `s` into `g` (D.2's declare!, reduced to one launch)."""
+"""Declares the integrator of scene `s` into `g`, a graph or a group (D.2's declare!, reduced to one launch)."""
 integrate!(g, dev, s; material = Val(1), gate = readygate(dev)) =
     dispatch!(g, hk_shade!, (s.film, s.accum, s.samples, s.tlas, s.origins, s.materials, material, gate),
               length(s.film))
 
 """The first `n` grid positions into `alive`, and `n` as its length (a particle count a kernel writes)."""
-@kernel function hk_spawn!(alive, len, n)
-    i = @index(Global)
+function hk_spawn!(alive, len, n)
+    i = KI.get_global_id().x
     if i <= n
         @inbounds alive[i] = Point3f((i - 1) % 256, (i - 1) ÷ 256, 0)
         i == 1 && (len[] = n)
     end
+    return nothing
 end
 
 """positions[i] = (i - 1, y, 0): a simulation step moving a row of instances to height y."""
-@kernel function hk_row!(positions, y)
-    i = @index(Global)
+function hk_row!(positions, y)
+    i = KI.get_global_id().x
+    i <= length(positions) || return nothing
     positions[i] = Point3f(i - 1, y, 0)
+    return nothing
 end
 
 """One window pixel (x, y): film[x + w(y - 1)] = 1 where its ray hits, else 0; w is the queue's width."""
-@kernel function hk_windowshade!(film, queue, t)
-    x, y = @index(Global, NTuple)
+function hk_windowshade!(film, queue, t)
+    x = KI.get_global_id().x
+    y = KI.get_global_id().y
+    (x <= size(queue, 1) && y <= size(queue, 2)) || return nothing
     w = size(queue, 1)
     q = Mantle.rayquery(t, Point3f(x - 1, y - 1, -1), Vec3f(0, 0, 1))
     i = x + w * (y - 1)
     i <= length(film) && (film[i] = q.hit ? 1f0 : 0f0)
+    return nothing
 end
 
 """The work queue's items and length, the loop flag and the bounce count, set for a new frame."""
-@kernel function hk_seed!(queue, len, active, bounces, n)
-    i = @index(Global)
+function hk_seed!(queue, len, active, bounces, n)
+    i = KI.get_global_id().x
     if i <= n
         @inbounds queue[i] = UInt32(i)
         if i == 1
@@ -135,15 +140,17 @@ end
             bounces[1] = Int32(0)
         end
     end
+    return nothing
 end
 
 """
 D.2's shade!, reduced: a ray per queue item; thread 1 halves the queue's
 length, sets active = (length > 0) and counts the bounce.
 """
-@kernel function hk_bounce!(queue, len, active, bounces, t)
-    i = @index(Global)
+function hk_bounce!(queue, len, active, bounces, t)
+    i = KI.get_global_id().x
     n = length(queue)
+    i <= n || return nothing
     q = Mantle.rayquery(t, Point3f(queue[i] % 8, 0, -1), Vec3f(0, 0, 1))
     queue[i] = q.hit ? queue[i] : UInt32(0)
     if i == 1
@@ -151,6 +158,7 @@ length, sets active = (length > 0) and counts the bounce.
         active[1] = Int32(n ÷ 2 > 0)
         bounces[1] += Int32(1)
     end
+    return nothing
 end
 
 """Ray-generation shader of HK-08's trace: the queue is read by the shade launch."""
@@ -159,7 +167,7 @@ hk_noop(queue) = nothing
 
 # ── P. Hikari (D.2) ──
 
-# RR:1394-1405, DEC B3.16: scene changes are pending TLAS changes and stores; the integrator is declared once and compiles nothing for them. Between frames: push! a mesh, delete! an object, store a material value.
+# resizing-and-raytracing.jl D.2, B.8: scene changes are pending TLAS changes and stores; the integrator is declared once and compiles nothing for them. Between frames: push! a mesh, delete! an object, store a material value.
 @case "HK-01" 5 :rt begin
     dev = testdevice()
     s = hikariscene(dev, instancegrid(12))
@@ -178,7 +186,7 @@ hk_noop(queue) = nothing
     @test Array(s.film) == [fill(2f0, 4); zeros(Float32, 4); fill(2f0, 4)]
 end
 
-# RR:1403-1405: a frame with no change does no acceleration-structure work. 100 frames with no change.
+# resizing-and-raytracing.jl D.2: a frame with no change does no acceleration-structure work. 100 frames with no change.
 @case "HK-02" 5 :rt begin
     dev = testdevice()
     s = hikariscene(dev, instancegrid(16))
@@ -192,29 +200,26 @@ end
     @test Array(s.samples) == [101]
 end
 
-# RR:1398-1400, API:107-113: film and sample count are device arrays the screen holds; a recompile (a new material type) keeps their contents. Three frames, the integrator replaced, one frame.
+# resizing-and-raytracing.jl D.2; api.md 2.3, 2.6 (RayTracingPipeline): film and sample count are device arrays the screen holds; a recompile (a new material type) keeps their contents. Three frames, the integrator's group deleted and the integrator declared into a new group, one frame.
 @case "HK-03" 5 :rt begin
     dev = testdevice()
     s = hikariscene(dev, instancegrid(8))
     push!(s.tlas, ownedblas(dev), MantleArray(dev, instancegrid(4)))
     g = Graph(dev)
-    h = insert!(g) do
-        integrate!(g, dev, s)
-    end
+    h = Group(g, "integrator")
+    integrate!(h, dev, s)
     foreach(_ -> run!(g), 1:3)
     accum = Array(s.accum)
     @test Array(s.samples) == [3] && accum == [fill(3f0, 4); zeros(Float32, 4)]
-    delete!(g, h)
-    insert!(g) do
-        integrate!(g, dev, s; material = Val(2))           # a new material type: a new argument type
-    end
+    delete!(g, h)                                          # a group of launches: marks the plan
+    integrate!(Group(g, "integrator"), dev, s; material = Val(2))   # a new material type: a new argument type
     _, d = counted(() -> run!(g))
     @test d.plancompiles == 1
     @test Array(s.samples) == [4]
     @test Array(s.accum) == accum .+ [fill(2f0, 4); zeros(Float32, 4)]
 end
 
-# RR:1400-1403, API:191 (A20, film size open): a window resize within the capacity records the window's segments again; nothing is declared or compiled. The film is made resizable before the plan compiles, so its size is never recorded.
+# resizing-and-raytracing.jl D.2; api.md 2.7 (resize!(win)): a window resize within the capacity records the window's segments again; nothing is declared or compiled. The film is made resizable before the plan compiles, so its size is never recorded.
 @case "HK-04" 7 :rt :window :graphics begin
     dev = testdevice()
     win = Window(dev, 64, 32; capacity = (128, 64))
@@ -225,8 +230,7 @@ end
     g = Graph(dev)
     queue = MantleArray(g, UInt32, win)                    # a window-sized work queue (D.2)
     dispatch!(g, hk_windowshade!, (film, queue, t), launchrange(queue))
-    render!(g, win => Clear((0f0, 0f0, 0f0, 1f0))) do p
-    end
+    clear!(g, win, (0f0, 0f0, 0f0, 1f0))                   # g writes the window: g presents to it
     run!(g)
     resize!(win, 96, 48)
     resize!(film, 96 * 48)
@@ -236,7 +240,7 @@ end
     @test length(pixels) == 96 * 48 && pixels[1] == 1f0 && count(==(1f0), pixels) == 1
 end
 
-# RR:1405-1406, API:411-412: transforms a kernel of the frame graph writes are refit by its refit! node: one Update a frame, none pended. The graph moves a row and refits.
+# resizing-and-raytracing.jl D.2; api.md 2.6 (refit!(g, tlas)): transforms a kernel of the frame graph writes are refit by its refit! node: one Update a frame, none pended. The graph moves a row and refits.
 @case "HK-05" 5 :rt begin
     dev = testdevice()
     s = hikariscene(dev, rowpixels(0:2:6))
@@ -257,7 +261,7 @@ end
     end
 end
 
-# RR:1406-1408, RR:954-968: a particle count a kernel writes is built over the capacity once; then refits only. The count changes over frames.
+# resizing-and-raytracing.jl D.2, B.8: a particle count a kernel writes is built over the capacity once; then refits only. The count changes over frames.
 @case "HK-06" 5 :rt begin
     dev = testdevice()
     s = hikariscene(dev, instancegrid(256))
@@ -279,7 +283,7 @@ end
     end
 end
 
-# RR:1394-1396, API:408-416: a simulation run writing positions pends the TLAS's Update; the frame applies it after that write, and the simulation's next write waits for the frame. The frame's refit reads the positions after a slow kernel.
+# resizing-and-raytracing.jl D.2, B.4, B.8; api.md 2.6: a simulation run writing positions pends the TLAS's Update; the frame applies it after that write, and the simulation's next write waits for the frame. The frame's refit reads the positions after a slow kernel.
 @case "HK-07" 5 :rt begin
     dev = testdevice()
     s = hikariscene(dev, rowpixels(0:2:8))
@@ -305,7 +309,7 @@ end
     end
 end
 
-# RR:1409-1416, API:129-131: a loop around a trace whose queue length a kernel writes ends on the GPU when the length is 0; the remaining traces have count 0. repeat! with while_nonzero over trace! and shade.
+# resizing-and-raytracing.jl D.2 (declare!); api.md 2.3, 2.4 (repeat!, trace!): a loop around a trace whose queue length a kernel writes ends on the GPU when the length is 0; the remaining traces have count 0. A repeated group holding trace! and shade, with while_nonzero.
 @case "HK-08" 5 :rt begin
     dev = testdevice()
     t = TLAS(dev)
@@ -315,10 +319,10 @@ end
     queue = MantleArray(g, UInt32, 0; capacity = 64)       # a work queue whose length a kernel writes
     active = MantleArray(dev, Int32, 1); bounces = MantleArray(dev, Int32, 1)
     dispatch!(g, hk_seed!, (queue, lengthof(queue), active, bounces, Int32(64)), 64)
-    repeat!(g, 10; while_nonzero = active) do i
-        trace!(g, pipeline, t, (queue,), launchrange(queue))
-        dispatch!(g, hk_bounce!, (queue, lengthof(queue), active, bounces, t), launchrange(queue))
-    end
+    bounce = Group(g, "bounce")                            # its place in g's order: after the seed
+    trace!(bounce, pipeline, t, (queue,), launchrange(queue))
+    dispatch!(bounce, hk_bounce!, (queue, lengthof(queue), active, bounces, t), launchrange(queue))
+    repeat!(bounce, 10; while_nonzero = active)
     for _ in 1:2
         run!(g)
         @test Array(bounces) == [7]                        # 64, 32, 16, 8, 4, 2, 1 items; then 0 and the loop ends
@@ -326,7 +330,7 @@ end
     # VAL: clean; the traces and launches after the loop ended have count 0
 end
 
-# RR:124-125, RR:1381-1384: an empty scene renders: every ray misses, on the hardware and the software TLAS.
+# resizing-and-raytracing.jl A (Acceleration structures), D.1; api.md 2.6 (TLAS): an empty scene renders: every ray misses, on the hardware and the software TLAS.
 @case "HK-09" 5 begin
     dev = testdevice()
     for tlas in (TLAS(dev), TLAS(dev; hardware = false))

@@ -1,38 +1,44 @@
-# Applying changes: prepare!, submitwith!, Again (catalogue-resize-rt.md,
-# table I).
+# Applying changes: prepare!, submitwith!, Again (resizing-and-raytracing.jl
+# B.4; api.md section 5, ownership and locks; internals.jl section 9,
+# acquire!).
 #
-# References: api.md; RR = docs/resizing-and-raytracing.jl; PLAN =
-# docs/recording-plan.md; INT = docs/internals.jl (line numbers of 2026-10-05).
 # Test hooks as in resize.jl: Mantle.pendingof(x) gives Change objects in
 # sequence order; Mantle.steplog(dev) entries have `kind` (a Symbol),
 # `target` (the root resource), `seq` and `token`.
-# The catalogue's FI-P (a pause between prepare! and the locks) is a Block on
-# the device verb `createreserve`: prepare! calls it before any lock, and
-# outside the pool lock, for a growth into a reserve (so these cases need
-# sparse residency). FI-A is a Throw on the same verb.
+# A pause between prepare! and the locks is a Block on the device verb
+# `createreserve`: prepare! calls it before any lock, and outside the pool
+# lock, for a growth into a reserve (so these cases need sparse residency).
+# A failed allocation in prepare! is a Throw on the same verb.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Mat4f, Point3f, TriangleFace
 
-@kernel function ap_copy!(dst, src)
-    i = @index(Global)
+function ap_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing   # ndrange is rounded up to whole work-groups
     dst[i] = src[i]
+    return nothing
 end
 
-@kernel function ap_readfirst!(out, a)
+function ap_readfirst!(out, a)
+    KI.get_global_id().x == 1 || return nothing
     out[1] = a[1]
+    return nothing
 end
 
-@kernel function ap_copyfirst!(out, a, i)
+function ap_copyfirst!(out, a, i)
+    KI.get_global_id().x == 1 || return nothing
     out[i] = a[1]
+    return nothing
 end
 
 # Copies after reading `gate`, which slowwrite! writes: the copy waits for the spin.
-@kernel function ap_copyafter!(dst, src, gate)
-    i = @index(Global)
+function ap_copyafter!(dst, src, gate)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     if gate[1] != Int32(-7)
         dst[i] = src[i]
     end
+    return nothing
 end
 
 """The exception the fault injection throws."""
@@ -71,7 +77,7 @@ end
 """The Float32 elements of `pages` sparse pages."""
 pagecount(dev, pages) = pages * caps(dev).sparsepage ÷ sizeof(Float32)
 
-"""An element count whose growth by 16x stays below the sparse threshold (4 sparse pages; RR:202)."""
+"""An element count whose growth by 16x stays below the sparse threshold (4 sparse pages; resizing-and-raytracing.jl B.1, sparsethreshold)."""
 smallcount(dev) = max(16, caps(dev).sparsepage ÷ 64)
 
 """Blocks the next call of `verb` on `fd`; returns the call count before it and the channel that lets it go."""
@@ -101,7 +107,7 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
 
 # ── I. Applying changes: prepare!, submitwith!, Again ──
 
-# AP-01 RR:327-338, api.md:432-433, INT:1799-1814: storage for a growth past the storage is allocated in prepare! with no sync-state, channel or pool lock held: while that allocation is held, resize! of the array, a device wait and an eager call elsewhere complete.
+# AP-01 resizing-and-raytracing.jl B.4 (step 1), api.md section 5 (`acquire!` is never called with a sync-state, channel or pool lock held), internals.jl section 9: storage for a growth past the storage is allocated in prepare! with no sync-state, channel or pool lock held: while that allocation is held, resize! of the array, a device wait and an eager call elsewhere complete.
 @case "AP-01" 4 :sparse begin
     fd = FaultDevice(testdevice())
     Mantle.checklocks!(fd, true)
@@ -125,7 +131,7 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
     foreach(free!, (a, s, other))
 end
 
-# AP-02 RR:339-344,410-415: another thread resize!s `a` past what a submitter is preparing: the submitter returns Again before emitting anything, and its retry applies both changes in one move.
+# AP-02 resizing-and-raytracing.jl B.4 (step 2: Again, start over): another thread resize!s `a` past what a submitter is preparing: the submitter returns Again before emitting anything, and its retry applies both changes in one move.
 @case "AP-02" 4 :sparse begin
     fd = FaultDevice(testdevice())
     n = pagecount(testdevice(), 4)
@@ -150,7 +156,7 @@ end
     foreach(free!, (a, s))
 end
 
-# AP-03 RR:339-344,431: another submitter applies the change while the first is preparing: the first returns Again, nothing is applied twice, and memory is back at its baseline after free!.
+# AP-03 resizing-and-raytracing.jl B.4 (step 2: Again, start over): another submitter applies the change while the first is preparing: the first returns Again, nothing is applied twice, and memory is back at its baseline after free!.
 @case "AP-03" 4 :sparse begin
     fd = FaultDevice(testdevice())
     n = pagecount(testdevice(), 4)
@@ -183,7 +189,7 @@ end
     foreach(free!, (s1, s2))
 end
 
-# AP-04 RR:327-338, INT:1799-1814: the allocation in prepare! throws: the call throws, the pending changes are unchanged, and the next submitter applies them.
+# AP-04 resizing-and-raytracing.jl B.4 (step 1), internals.jl section 9: the allocation in prepare! throws: the call throws, the pending changes are unchanged, and the next submitter applies them.
 @case "AP-04" 4 :sparse begin
     fd = FaultDevice(testdevice())
     n = pagecount(testdevice(), 4)
@@ -202,7 +208,7 @@ end
     foreach(free!, (a, s))
 end
 
-# AP-05 RR:440-445 (bound pages are marked and not bound again), PLAN:712-715: the submission after the page bind throws (FI-B; injected at submitnative!, the first point after bindnow! a FaultDevice reaches): the next submitter maps no more than an unfaulted twin, and free! unmaps everything.
+# AP-05 resizing-and-raytracing.jl B.4 (bindnow!: bound pages are marked and not bound again): the submission after the page bind throws (injected at submitnative!, the first point after bindnow! a FaultDevice reaches): the next submitter maps no more than an unfaulted twin, and free! unmaps everything.
 @case "AP-05" 4 :sparse begin
     fd = FaultDevice(testdevice())
     n = pagecount(testdevice(), 4)
@@ -225,7 +231,7 @@ end
     free!(s)
 end
 
-# AP-06 INT:1241, PLAN:466-470: a store applied in the prefix of a run's first segment is seen by every later part of the run, on whichever queue core puts it (the negative control, removing that wait, has no hook).
+# AP-06 internals.jl section 6, recording-plan.md, The graph and its plan (later segments of the stage wait on the first segment's token): a store applied in the prefix of a run's first segment is seen by every later part of the run, on whichever queue core puts it (the negative control, removing that wait, has no hook).
 @case "AP-06" 4 :multiqueue begin
     dev = testdevice()
     n = 4096
@@ -244,7 +250,7 @@ end
     free!(g); foreach(free!, (a, gate)); foreach(free!, outs)
 end
 
-# AP-07 RR:395-397, PLAN:580-601: graph g reads `a` and is in flight; a store into `a` applied by an eager host read waits for g: g still reads the old values (no write-after-read hazard).
+# AP-07 resizing-and-raytracing.jl B.4 (the changes' uses wait for every earlier access), recording-plan.md, Ordering across graphs and queues: graph g reads `a` and is in flight; a store into `a` applied by an eager host read waits for g: g still reads the old values (no write-after-read hazard).
 @case "AP-07" 4 :multiqueue begin
     dev = testdevice()
     n = 4096
@@ -259,7 +265,7 @@ end
     free!(g); foreach(free!, (a, out))
 end
 
-# AP-08 RR:395-397,569-571: storage a move replaced while a run still reads it is not reused before that run's token (VAL: GPU-AV clean).
+# AP-08 resizing-and-raytracing.jl B.4, B.5 (a move retires the old storage with its token): storage a move replaced while a run still reads it is not reused before that run's token (VAL: GPU-AV clean).
 @case "AP-08" 4 begin
     dev = testdevice()
     n = smallcount(dev)
@@ -276,7 +282,7 @@ end
     free!(g); foreach(free!, others); foreach(free!, (a, out))
 end
 
-# AP-09 PLAN:462-472, RR:402-433: 1000 arrays with a pending store each, one run naming them all: no extra submission, 1000 store steps, and the run's host time grows linearly with the changes.
+# AP-09 recording-plan.md, The graph and its plan (a plot updated every frame costs no submission of its own), resizing-and-raytracing.jl B.4 (submitwith!): 1000 arrays with a pending store each, one run naming them all: no extra submission, 1000 store steps, and the run's host time grows linearly with the changes.
 @case "AP-09" 4 begin
     dev = testdevice()
     arrays = [MantleArray(dev, Float32, 16) for _ in 1:1000]
@@ -300,7 +306,7 @@ end
     free!(g); foreach(free!, arrays); free!(out)
 end
 
-# AP-10 api.md:200-207, PLAN:260-268: a resize and a store pending; withview(CuArray, a, stream): the view has the new length and data; the stream waited for the applying submission.
+# AP-10 api.md 2.9, recording-plan.md, Arrays (vendor views): a resize and a store pending; withview(CuArray, a, stream): the view has the new length and data; the stream waited for the applying submission.
 @case "AP-10" 6 :vendorview begin
     dev = testdevice()
     cuda = cudamodule()
@@ -315,7 +321,7 @@ end
     free!(a)
 end
 
-# AP-11 RR:487-525 (lockexpanded starts over when a member snapshot changed): runs building `t` on one thread while another pushes ranges with new BLASes: no deadlock, every push! applied (the pause between expansion and locking has no hook; this drives the race; that builds see the new members needs a trace).
+# AP-11 resizing-and-raytracing.jl B.4 (lockexpanded starts over when a member snapshot changed): runs building `t` on one thread while another pushes ranges with new BLASes: no deadlock, every push! applied (the pause between expansion and locking has no hook; this drives the race; that builds see the new members needs a trace).
 @case "AP-11" 5 :rt begin
     dev = testdevice()
     vertices = MantleArray(dev, Point3f[(0, 0, 0), (1, 0, 0), (0, 1, 0)])

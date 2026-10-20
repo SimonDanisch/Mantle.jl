@@ -69,8 +69,7 @@ global BENCH = normpath(joinpath(@__DIR__, "..", "..", "minimalloc", "benchmarks
 # failure modes by a distance.
 #
 # Guarded rather than deleted: with the corpus present these are the only thing
-# pinning how GOOD the packing is, as opposed to merely legal (see
-# `docs/design.md`). Clone it beside this checkout to get them back:
+# pinning how GOOD the packing is, as opposed to merely legal. Clone it beside this checkout to get them back:
 #     git clone https://github.com/google/minimalloc ../../minimalloc
 global HAVE_BENCH = isdir(BENCH)
 HAVE_BENCH || @warn """
@@ -569,7 +568,8 @@ include(joinpath(@__DIR__, "test_argmap.jl"))
 include(joinpath(@__DIR__, "test_tuple_varyings.jl"))
 include(joinpath(@__DIR__, "test_integer_attachments.jl"))
 include(joinpath(@__DIR__, "test_core_names_no_backend.jl"))
-# The guards for `docs/mantle-owns-it.md`. Mostly `@test_broken`: they are
+# The guards for the plan's first rule, core decides and device types implement
+# verbs (`docs/recording-plan.md`, Rules). Mostly `@test_broken`: they are
 # written before the refactor deletes anything, so each one fails today and
 # turns into an "Unexpectedly Pass" the moment its phase lands.
 include(joinpath(@__DIR__, "test_mantle_owns_it.jl"))

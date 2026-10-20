@@ -15,21 +15,30 @@
 # id → channel lock.
 # Leaves, nothing else taken inside them and no GPU wait inside them: the pool
 # lock, the inbox (lock-free), the texture and sampler tables' locks, a plan's
-# runend lock (endbetween!, taken under record locks). A value GPURef has no
+# runend lock (endbetween!, taken under record locks). A GPURef has no
 # lock of its own: it is a slot with a sync state, like any shared resource
 # (section 7).
 # While the host waits (for a shared arena part, a host node's inputs, the
 # swapchain acquire, a pressure step's tokens) no sync-state, channel, pool or
 # window lock is held; the graph lock and the run's arena-part holds may be
 # (section 6). The host never waits for a graph's previous run on the GPU: a
-# run's first segment waits for it there, and a value GPURef store is
-# scheduled (decisions B4.9). A change waiting for a run to end (stalewait,
+# run's first segment waits for it there, and a GPURef store is
+# scheduled. A change waiting for a run to end (stalewait,
 # resizing-and-raytracing.jl B.3) holds no lock at all and is never inside a
 # run. No Mantle lock is held while vendor code runs (section 14).
 
 # ══ 1. Types ══════════════════════════════════════════════════════════════════
 
 abstract type Device <: KA.Backend end      # LavaDevice, MetalDevice, CudaDevice, ROCmDevice
+abstract type Resource end                  # what a graph names and holds: an array's state, an Image, a TLAS, a BLAS, a GPURef
+abstract type CompiledCommand end           # CompiledDispatch, CompiledTrace, CompiledCopy, ...
+struct HoldDrop{H}                          # a hold to drop once a submission's token is known
+    holder::H
+end
+struct HardwareKey                          # one hardware device under one driver
+    type::Type{<:Device}
+    uuid::UInt128                           # the driver's device UUID
+end
 
 mutable struct Graph
     const device::Device            # the real device it compiles for
@@ -42,49 +51,33 @@ mutable struct Graph
     @atomic owner::Union{Nothing,Task}
     @atomic hostcaller::Union{Nothing,Task}   # the task running one of its host functions, or nothing (inhostfunction)
     nodes::Vector{Node}             # as declared; compile copies them (section 4)
-    named::IdDict{Any,Int}          # resources it holds, with the number of declarations naming each (section 10)
-    unnamed::Vector{Any}            # resources no node names any more; their holds drop after the plan naming them retires
-    block::Union{Nothing,NodeBlock} # the insert! block being declared, or nothing
+    named::IdDict{Resource,Int}     # resources it holds, with the number of declarations naming each (section 10)
+    unnamed::Vector{Resource}       # resources no node names any more; their holds drop after the plan naming them retires
     declarer::Union{Nothing,Task}   # the task declaring under the graph lock (nested declarations reuse it)
     rewrites::Tuple                 # opted-in rewriters, empty by default
-    plan::Union{Nothing,Plan}       # compiled state; a declaration or delete! marks it for recompile, the graph stays
+    plan::Union{Nothing,Plan}       # compiled state; its next run applies declarations and deletes (section 5), the graph stays
     @atomic recompile::Bool         # set by markstale! (resizing-and-raytracing.jl B.6), a graph array or window
                                     # beyond its placed size, a failed compile, nodes declared or deleted after compile
     @atomic windowchanged::Bool     # set by resize!(window)
     @atomic freed::Bool
 end
-# No mode state: launch groups are values (Group, below), and when! takes one
-# launch (decisions B4.1, B4.2).
+# No mode state: groups are values and places in the order (Group, below),
+# and when! takes one launch or one draw.
 
 # Graph arrays point at this, never at the Graph: a graph is not a device, but
-# it is a KernelAbstractions backend (decisions B4.3, section 2).
+# it is a KernelAbstractions backend (section 2).
 struct GraphDevice <: KA.Backend
     graph::WeakRef
 end
-
-# A launch group (decisions B4.2): a value, not a do-block. Launches are
-# declared into it by passing it, dispatch!(group, …), anywhere in the code;
-# repeat!(group, n) attaches it to its graph (section 2). Not a location
-# (B4.4): arrays and allocations belong to the device or the graph. What it may
-# hold (launches only) is enforced by which methods exist for Group: no
-# HostCall, build, render pass or image copy has one, so those are a
-# MethodError.
-mutable struct Group
-    const graph::Graph
-    const name::String
-    const nodes::Vector{Node}       # its launches in declaration order: KernelNodes, TraceNodes, PrepareNodes
-    loop::Union{Nothing,LoopNode}   # set by repeat!: the node the group runs as
-end
-Group(g::Graph, name) = Group(g, String(name), Node[], nothing)
 
 # What an array and all its views share: ArrayState, with its storage, host
 # view, cell, sync state, holds, freed mark, dependents and readers, is
 # defined in resizing-and-raytracing.jl B.2. The finalizer is on that object
 # (section 10). Here it also has `source`: the host array a read-only array
-# keeps (MantleArray(dev, host; readonly = true), decisions B4.6), or nothing.
+# keeps (MantleArray(dev, host; readonly = true)), or nothing.
 
-# One array type for every location L (a device type or GraphDevice; decisions
-# B4.5). Read-only, host-written, Readback memory and resizable are runtime
+# One array type for every location L (a device type or GraphDevice).
+# Read-only, unified and resizable are runtime
 # properties of the resource (ArrayState), not type parameters.
 struct MantleArray{T,N,L} <: AbstractGPUArray{T,N}
     location::L
@@ -102,10 +95,10 @@ end
 Base.size(a::MantleArray) = a.dims === nothing ? size(a.state) : a.dims
 Base.size(st::ArrayState) = size(st, st.lengthsource)
 Base.size(st::ArrayState, ::HostLength) = st.dims       # the requested dims (a pending resize! included)
-# A length a kernel writes follows Julia's array API (decisions B4.10):
+# A length a kernel writes follows Julia's array API:
 # size and length wait for the kernel that writes it and read the cell back
 # (section 11). During the declaration of a graph that writes it no run has
-# produced it, so the call throws, as host reads of contents do (B4.3).
+# produced it, so the call throws, as host reads of contents do.
 function Base.size(st::ArrayState, ::DeviceLength)
     declaringwriter(st) &&      # the calling task declares into a graph with a node writing lengthof(a)
         throw(ArgumentError("the length of an array a kernel writes, read while declaring the graph that writes it"))
@@ -130,38 +123,73 @@ mutable struct CompiledNode
     queue::Queue                    # schedule!: a channel, or HostSide() for a host node
     preds::Vector{Node}             # dependencies!: direct predecessors only
     barrier::Barrier                # barriers!, image transitions included
-    command::Any                    # compile!: CompiledDispatch / CompiledTrace / CompiledCopy / …
+    command::CompiledCommand        # compile!: CompiledDispatch / CompiledTrace / CompiledCopy / …
     cost::Float64                   # costs!
     slots::UnitRange{Int}           # bindings!: its slice of the plan's argument block
 end
 
 # Every declared node keeps its origin: the Julia call that launched it (for rewriters).
-struct Origin
-    f::Any; args::Tuple
+struct Origin{F,A<:Tuple}
+    f::F; args::A
 end
 
-mutable struct KernelNode{K,A,R,W} <: Node  # dispatch!(location, kernel, args, ndrange)
+mutable struct KernelNode{K,A,R,W,O} <: Node  # dispatch!(location, kernel, args, ndrange)
     const kernel::K; const args::A; const ndrange::R
     const when::W                           # nothing, or a when! flag: launched indirect, count × flag (section 2)
-    const origin::Origin
+    const origin::O                         # an Origin
     compiled::Union{Nothing,CompiledNode}
 end
-mutable struct TraceNode{P,A,R,W} <: Node   # trace!(g, pipeline, accel, args, ndrange)
+mutable struct TraceNode{P,A,R,W,O} <: Node  # trace!(g, pipeline, accel, args, ndrange)
     const pipeline::P; const args::A; const ndrange::R; const when::W
-    const origin::Origin
+    const origin::O                         # an Origin
     compiled::Union{Nothing,CompiledNode}
 end
-mutable struct LoopNode{C} <: Node          # repeat!(group, n): launches only, declared once
+mutable struct LoopNode{C,O} <: Node        # a repeated group, made by compile (section 4): launches only
     const count::Int
-    const while_nonzero::C                  # nothing, or an integer count on the device (a queue's live size, B4.1)
-    const body::Vector{Node}                # the group's nodes: KernelNodes, TraceNodes, PrepareNodes
-    const origin::Origin
+    const while_nonzero::C                  # nothing, or an integer count on the device (a queue's live size)
+    const body::Vector{Node}                # the group's nodes, copied: KernelNodes, TraceNodes, PrepareNodes
+    const origin::O                         # an Origin
     compiled::Union{Nothing,CompiledNode}
 end
-mutable struct HostNode{F,A} <: Node        # HostCall(f); writes declared
+mutable struct HostNode{F,A,O} <: Node      # HostCall(f); writes declared
     const f::F; const args::A; const writes::Tuple
-    const origin::Origin
+    const origin::O                         # an Origin
     compiled::Union{Nothing,CompiledNode}
+end
+mutable struct ClearNode{T,V,O} <: Node     # clear!(g or group, target, v): a load operation (section 5)
+    const target::T; const value::V
+    const origin::O                         # an Origin
+    compiled::Union{Nothing,CompiledNode}
+end
+mutable struct DrawNode{T,P,A,C,I,X,W,O} <: Node   # draw!/when!(g or group, target, pipeline, args, count; …)
+    const target::T                         # a Window, an Image, or a tuple of them (colour, then depth)
+    const pipeline::P; const args::A; const count::C; const instances::I; const indices::X
+    const when::W                           # nothing, or a when! flag: indirect, count × flag (section 2)
+    const origin::O                         # an Origin
+    compiled::Union{Nothing,CompiledNode}
+end
+
+# A group: a value, not a do-block, and a place in its parent's order (the
+# graph, or another group), fixed when the group is made. Work is declared
+# into it by passing it (dispatch!(group, …), draw!(group, target, …),
+# Group(group, name)) anywhere in the code, and runs at the group's place
+# whenever it was declared. Not an owner: arrays and allocations belong to
+# the device or the graph. It holds GPU work only: no HostCall, build or
+# image copy has a method for Group, so those are a MethodError. Its uses
+# (section 2): repeat!(group, n) loops it, delete!(g, group) removes it,
+# sort!(group) reorders the groups in it; a group of draws is recorded on its
+# own, so adding or deleting one recompiles nothing (section 5).
+struct Loop{C}
+    count::Int
+    while_nonzero::C                        # nothing, or an integer count on the device (a queue's live size)
+end
+mutable struct Group <: Node
+    const graph::Graph
+    const parent::Union{Graph,Group}
+    const name::String
+    const nodes::Vector{Node}               # in order: KernelNodes, TraceNodes, ClearNodes, DrawNodes, Groups
+    loop::Union{Nothing,Loop}               # set by repeat!
+    live::Bool                              # false once deleted: a second delete! throws
 end
 # Added by Mantle, not declared by the user:
 mutable struct HeadNode <: Node             # the first node of every stage of a run (section 5)
@@ -176,7 +204,8 @@ mutable struct PrepareNode{A,K} <: Node
     const kind::K
     compiled::Union{Nothing,CompiledNode}
 end
-# CopyNode (images, host transfers), RenderNode (targets and draws), BuildNode
+# CopyNode (images, host transfers), RenderNode (a pass compile forms from
+# clears and draws, section 5), BuildNode
 # (a TLAS or BLAS build or refit), ForeignNode (a closed library), RegionNode
 # (a rewriter's merged run), VideoDecodeNode and PresentNode have the same
 # shape: data, origin, `compiled`.
@@ -184,8 +213,8 @@ end
 # What a plan holds of one array or GPURef in its argument block: the address,
 # the size, the KA ndrange values and launch commands over it; for a value
 # GPURef, its slot's address, baked by bindings! (the head writes no values:
-# a launch reads the value through the slot, a shared resource; decisions
-# B4.9). A resource of the plan like any other, so the head and prepare nodes
+# a launch reads the value through the slot, a shared resource). A resource
+# of the plan like any other, so the head and prepare nodes
 # that write it and the launches that read it get edges and barriers from the
 # same rules as data.
 struct Bound{R}
@@ -193,7 +222,7 @@ struct Bound{R}
 end
 
 # The host side of a shared resource (a device array, an image, an
-# acceleration structure, an array GPURef, a value GPURef's slot, an arena
+# acceleration structure, a GPURef's slot, an arena
 # part). Runs are not
 # recorded here: what a run did is its segments' tokens, found through the
 # plans that name the resource (section 8). Recorded here is only what is not
@@ -213,7 +242,7 @@ mutable struct SyncState
                                     #   replaced under this lock by register!/unregister! (section 8);
                                     #   for an arena part, its tenants (all writers)
     pending::Vector{Change}         # changes not yet submitted, in call order (section 8)
-    deferred::Vector{Any}           # hold drops due once the submission applying `pending` is made
+    deferred::Vector{HoldDrop}      # hold drops due once the submission applying `pending` is made
                                     #   (resizing-and-raytracing.jl B.4); not changes, so coalescing never drops them
     lent::Bool                      # inside a withview block (section 14)
     freed::Bool                     # an array's creator hold was dropped (section 10); the only `freed` of an array
@@ -230,15 +259,15 @@ end
 # Two graphs, or two devices, is an error.
 location(args...) = foldl(join, (location(a) for a in resources(args)))
 location(a::MantleArray) = a.location
-location(r::GPURef) = r.device      # both forms live on a device (resizing-and-raytracing.jl B.8b)
+location(r::GPURef) = r.device      # a GPURef lives on a device
 join(a::Device, b::Device) = a === b ? a : throw(ArgumentError("arguments from two devices"))
 join(g::GraphDevice, d::Device) = device(g) === d ? g : throw(ArgumentError("arguments from two devices"))
 join(d::Device, g::GraphDevice) = join(g, d)
 join(a::GraphDevice, b::GraphDevice) = a === b ? a : throw(ArgumentError("arguments from two graphs"))
 
-# A graph is a KernelAbstractions backend (decisions B4.3, Simon's proposal of
-# 2026-10-14): KA launches, broadcasting, GPUArrays' generic code and KA
-# libraries run on graph arrays and declare into the graph. Only host reads
+# A graph is a KernelAbstractions backend: KA launches, broadcasting,
+# GPUArrays' generic code and KA libraries run on graph arrays and declare
+# into the graph. Only host reads
 # and writes of contents throw, at their line: during declaration no run has
 # produced them, and data the host supplies per run is a device array (section 7).
 Base.getindex(::MantleArray{T,N,GraphDevice}, i...) where {T,N} = nodata()
@@ -279,105 +308,103 @@ function declare!(l::Union{GraphDevice,Group}, p::KernelNode)
 end
 graph(gr::Group) = gr.graph
 
-# A write touch on a read-only array throws at the call, declared or eager
-# (decisions B4.6): from the per-argument access dispatch! derives at
-# declaration (today's argument_usage, graph/build.jl; api.md G2), the same
-# access uses(p) reads at compile. No compile is involved.
+# A write touch on a read-only array throws at the call, declared or eager:
+# from the per-argument access dispatch! derives at declaration (api.md, section 3),
+# the same access uses(p) reads at compile. No compile is involved.
 function checkwritable(kernel, args)
     for (r, u) in argumentuses(kernel, args)        # per argument: the resource, and Read() or Write()
         writes(u) && isreadonly(r) &&
             throw(ArgumentError("a launch writes a read-only array (readonly = true)"))
     end
 end
-# A runtime property of the resource (B4.5): the host array that
+# A runtime property of the resource: the host array that
 # MantleArray(dev, host; readonly = true) keeps, or nothing.
 Base.isreadonly(st::ArrayState) = st.source !== nothing
 Base.isreadonly(::Union{GPURef,AccelStructure,Image}) = false    # no read-only form
 
-# A graph is never replaced for a structure change (Simon, 2026-10-05: "nen
-# plot hinzufuegen darf niemals den kompletten graph wegschmeissen"; decisions
-# B3.16). Nodes declared into a compiled graph, or deleted from it, only mark
-# its plan: the next run!(g) compiles a new plan from the graph's nodes and
-# retires the old one after its last run (recompile!). The graph, its windows,
-# the resources it names and the device arrays it reads stay. Nodes that will
-# be removed are declared in a block that returns a handle (names open):
-#   h = insert!(g) do … end     # a plot's compute kernels
-#   delete!(g, h)               # the plot removed
-# (A plot's draws are a piece of the render pass, section 5.) Nodes declared
-# outside a block stay until free!(g). A graph array's contents live only
-# during a run, so what must survive runs and recompiles (a film, an
-# accumulation count) is a device array the graph names.
+# A graph is never replaced for a structure change. Nodes declared into a
+# compiled graph, or a group deleted from it, are the next run's to apply
+# (applychanges!, section 5): groups of draws are recorded on their own, any
+# other change compiles a new plan from the graph's nodes and retires the old
+# one after its last run (recompile!). The graph, its windows, the resources
+# it names and the device arrays it reads stay. Work that will be removed is
+# declared into a group:
+#   plot = Group(g, "plot")              # its place: the end of g's order, now
+#   draw!(plot, target, pipeline, args, n)
+#   delete!(g, plot)                     # the plot removed
+# Nodes declared into the graph itself stay until free!(g). A graph array's
+# contents live only during a run, so what must survive runs and recompiles
+# (a film, an accumulation count) is a device array the graph names.
 # Declaring takes the graph lock, so it waits while a run of g has stages
-# left; a declaration inside another declaration of the same task (an insert!
-# block) runs under the lock already held. A host function of g that declares
-# into g throws (lockgraph).
-mutable struct NodeBlock
-    const graph::Graph
-    nodes::Vector{Node}             # its top-level nodes (an attached group is one LoopNode)
-    live::Bool                      # false once deleted: a second delete! throws
-end
+# left; a declaration inside another declaration of the same task runs under
+# the lock already held. A host function of g that declares into g throws
+# (lockgraph).
 declarable(g::Graph) = (@atomic g.freed) && throw(ArgumentError("declaring into a freed graph"))
 declaring(f, g::Graph) = g.declarer === current_task() ? f() : lockgraph(g) do
     declarable(g)
     g.declarer = current_task()
     try f() finally g.declarer = nothing end
 end
-# A top-level node names its resources (a LoopNode those of its group), joins
-# the open block and marks a compiled graph.
-function addnode!(g::Graph, n::Node)
-    push!(g.nodes, n)
+graph(g::Graph) = g
+graph(gr::Group) = gr.graph
+nodelist(g::Graph) = g.nodes
+nodelist(gr::Group) = gr.nodes
+islive(::Graph) = true
+islive(gr::Group) = gr.live && islive(gr.parent)
+# A node joins the end of its parent's order and names its resources. With a
+# plan, the change is recorded for the next run, which decides whether it is
+# a piece change or a recompile (applychanges!, section 5).
+function addnode!(parent::Union{Graph,Group}, n::Node)
+    islive(parent) || throw(ArgumentError("declaring into a deleted group"))
+    checkloop(parent, n)
+    push!(nodelist(parent), n)
+    g = graph(parent)
     name!(g, n)
-    g.block === nothing || push!(g.block.nodes, n)
-    g.plan === nothing || (@atomic g.recompile = true)
+    g.plan === nothing || push!(g.plan.changes, Added(parent, n))
 end
 addnode!(l::GraphDevice, n::Node) = addnode!(graph(l), n)
-# A group's launches go to the group's node list, not the graph's; the
-# LoopNode names their resources when repeat! attaches the group. A launch
-# declared into a group repeat! has attached already (its LoopNode holds the
-# same list) is named now and marks a compiled graph, like any declaration
-# into a compiled graph (decisions B3.16).
-function addnode!(gr::Group, n::Node)
-    push!(gr.nodes, n)
-    gr.loop === nothing && return
-    name!(gr.graph, n)
-    gr.graph.plan === nothing || (@atomic gr.graph.recompile = true)
-end
-# One node from a declaring call (build!, refit!, a render pass, a copy).
-declare!(g::Graph, n::Node) = declaring(() -> (foreach(usable, heldresources(n)); addnode!(g, n)), g)
+# A repeated group holds launches only (repeat!, below).
+checkloop(::Graph, n) = nothing
+checkloop(gr::Group, n) = gr.loop === nothing || loopable(n) ||
+    throw(ArgumentError("a draw, a clear or a group declared into the repeated group $(gr.name)"))
+loopable(::Union{KernelNode,TraceNode}) = true
+loopable(::Node) = false
+# One node from a declaring call (build!, refit!, a clear, a draw, a copy).
+declare!(l::Union{Graph,Group}, n::Node) = declaring(() -> (foreach(usable, heldresources(n)); addnode!(l, n)), graph(l))
 
-function Base.insert!(f, g::Graph)
-    declaring(g) do
-        g.block === nothing || throw(ArgumentError("insert! blocks do not nest"))
-        h = NodeBlock(g, Node[], true)
-        g.block = h
-        ok = false
-        try
-            f(); ok = true
-        finally
-            g.block = nothing
-            ok || removenodes!(g, h.nodes)          # a throw inside the block leaves the graph as it was
-        end
-        return h
+function Group(parent::Union{Graph,Group}, name)
+    declaring(graph(parent)) do
+        gr = Group(graph(parent), parent, String(name), Node[], nothing, true)
+        addnode!(parent, gr)                        # its place: the end of the parent's order, now
+        return gr
     end
 end
-Base.delete!(g::Graph, h::NodeBlock) = declaring(g) do
-    h.graph === g && h.live || throw(ArgumentError("delete! of a node block not in this graph (deleted already?)"))
-    h.live = false
-    removenodes!(g, h.nodes)
+# The group and everything in it leave the order; their resources lose
+# their names. With a plan, the next run decides: a group of draws leaves its
+# pass's list, any other group recompiles (section 5).
+Base.delete!(g::Graph, gr::Group) = declaring(g) do
+    gr.graph === g && islive(gr) || throw(ArgumentError("delete! of a group not in this graph (deleted already?)"))
+    gr.live = false
+    filter!(n -> n !== gr, nodelist(gr.parent))
+    g.plan === nothing ? unname!(g, declared(gr)) : push!(g.plan.changes, Deleted(gr))
+end
+# The groups a group holds, reordered (by sees the groups); its other nodes
+# keep their places. The next run rewrites the pass's list where they are
+# groups of draws in one pass, and recompiles otherwise (section 5).
+function Base.sort!(gr::Group; by = identity, lt = isless, rev = false)
+    declaring(gr.graph) do
+        slots = findall(n -> n isa Group, gr.nodes)
+        gr.nodes[slots] = sort(gr.nodes[slots]; by, lt, rev)
+        gr.graph.plan === nothing || push!(gr.graph.plan.changes, Reordered(gr))
+        return gr
+    end
 end
 # A resource no remaining node names leaves `named`; while a plan names it,
 # its hold drops only after that plan's last run (recompile!; release!).
-function removenodes!(g::Graph, nodes)
-    drop = IdSet(nodes)
-    filter!(n -> !(n in drop), g.nodes)
-    unname!(g, (x for n in drop for x in declared(n)))
-    empty!(nodes)
-    g.plan === nothing || (@atomic g.recompile = true)
-end
 declared(n::Node) = (n,)
-declared(p::RenderNode) = [p; [d for piece in p.pieces for d in piece.draws]]   # targets, then each draw
+declared(gr::Group) = [gr; [x for n in gr.nodes for x in declared(n)]]   # its loop count, then its nodes
 function unname!(g::Graph, nodes)
-    for n in nodes, st in unique(heldresources(n))   # a LoopNode: its group's and its while_nonzero count's
+    for n in nodes, st in unique(heldresources(n))   # a Group: its while_nonzero count's
         (g.named[st] -= 1) == 0 || continue
         delete!(g.named, st)
         g.plan === nothing ? drophold!(st) : push!(g.unnamed, st)
@@ -429,22 +456,26 @@ end
 Base.copyto!(dst::MantleArray, src::MantleArray) =
     (dispatch!(location(dst, src), copy_kernel!, (dst, src), launchrange(src)); dst)
 
-# repeat!(group, n; while_nonzero) (decisions B4.2): attaches the group to its
-# graph as one LoopNode, run n times per run, or until while_nonzero, an
-# integer count on the device (a queue's live size, B4.1), is 0. No do-block
-# body: it invited host code between dispatches (Simon, 2026-10-14). The group
-# holds launches only (kernels, traces, their prepare nodes) because only
-# launch verbs have methods for Group; a trace in it is indirect, and the loop
-# head zeroes its count once the loop ends. Before each iteration a loop-head
-# kernel writes the index into the slots of the launches that take
-# iteration(group) (name open).
+# repeat!(group, n; while_nonzero): the group runs n times per run at its
+# place, or until while_nonzero, an integer count on the device (a queue's
+# live size), is 0. No do-block body: a body would invite host code between
+# dispatches. A repeated group holds launches only (kernels, traces, copy
+# kernels): a draw, a clear or a group in it throws, here or when declared
+# later (checkloop), because a render pass would need its targets' layout to
+# be the same on the way in and out of every iteration, and loops do not
+# nest. A trace in it is indirect, and the loop head zeroes its count once
+# the loop ends. Before each iteration a loop-head kernel writes the index
+# into the slots of the launches that take iteration(group) (name open).
+# Compile makes the group's LoopNode (section 4).
 iteration(gr::Group) = LoopIndex(gr)   # a placeholder argument; the loop head writes i into its slots
 function repeat!(gr::Group, count::Int; while_nonzero = nothing)
     declaring(gr.graph) do
-        gr.loop === nothing || throw(ArgumentError("repeat! of group $(gr.name), attached already"))
+        gr.loop === nothing || throw(ArgumentError("repeat! of group $(gr.name), repeated already"))
+        all(loopable, gr.nodes) || throw(ArgumentError("repeat! of group $(gr.name): it holds a draw, a clear or a group"))
         while_nonzero === nothing || usable(while_nonzero)
-        gr.loop = LoopNode(count, while_nonzero, gr.nodes, Origin(repeat!, (gr, count)), nothing)
-        addnode!(gr.graph, gr.loop)                 # names the group's resources and the count's
+        gr.loop = Loop(count, while_nonzero)
+        name!(gr.graph, gr)                         # the count (heldresources of a Group)
+        gr.graph.plan === nothing || (@atomic gr.graph.recompile = true)
     end
     return gr
 end
@@ -455,33 +486,34 @@ function repeat!(g::Graph, kernel, args::Tuple, ndrange; max::Int, while_nonzero
     return repeat!(gr, max; while_nonzero)
 end
 
-# when! (decisions B4.1, B4.2): ONE launch that runs only where `flag` is true
+# when!: ONE launch that runs only where `flag` is true
 # on the GPU. The flag is a Bool by the methods' argument types: a
-# GPURef{Bool} (only a ValueBox{Bool} is one) or a one-element Bool array; any
-# other type is a MethodError by dispatch, no runtime check. Several launches
-# under one flag are several when!s. trace! has the same methods with a
-# TraceNode; when!(p::RenderNode, …) is one draw (section 5).
-when!(g::Graph, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel, args::Tuple, ndrange; kw...) =
+# GPURef{Bool} or a one-element Bool array; any
+# other type is a MethodError by dispatch, no runtime check. The kernel is a
+# function: a HostCall, an operation or a build is a MethodError too. Several
+# launches under one flag are several when!s. trace! has the same methods with a
+# TraceNode; when!(g or group, target, flag, …) is one draw (section 5).
+when!(g::Graph, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel::Function, args::Tuple, ndrange; kw...) =
     when!(g.location, flag, kernel, args, ndrange; kw...)
-when!(l::Union{GraphDevice,Group}, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel, args::Tuple, ndrange;
+when!(l::Union{GraphDevice,Group}, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel::Function, args::Tuple, ndrange;
       origin = Origin(kernel, args)) =
     declare!(l, KernelNode(kernel, args, ndrange, flag, origin, nothing))   # named through the node, like its arguments
 # A draw's visibility is a store into its flag, never a new plan. The
 # mechanism repeat!'s loop head uses: every when! launch and draw is indirect,
 # and whoever writes its indirect command multiplies the count by the flag
 # (values other than 0 and 1 cannot exist). That is the head for a flag the
-# host writes (a store or a value GPURef), and a PrepareNode(flag,
+# host writes (a store or a GPURef), and a PrepareNode(flag,
 # FlagPrepare()) right after the kernel that writes it otherwise (compile
 # inserts it, section 4). No conditional rendering: the flag is read by
 # address like any argument, so it may move and is never a handle dependence,
 # and Metal, which has no conditional rendering, needs nothing else. The
-# meaning is the same on every device type (B5.2); CUDA and HIP reach it with
+# meaning is the same on every device type; CUDA and HIP reach it with
 # their own mechanism, from the same flag (phase 10, plan's device-type table):
 # CUDA can set a kernel node's grid from the device or use a conditional node,
 # HIP 7.1 has neither and checks the flag at kernel entry.
 
 # A host function inside a call is a node; Mantle schedules it (section 6).
-# No method for a Group (B4.2), and not a when! launch.
+# No method for a Group, and not a when! launch.
 function dispatch!(l::GraphDevice, h::HostCall, args::Tuple; writes::Tuple)
     g = graph(l)
     declaring(g) do
@@ -514,10 +546,10 @@ qualifies(k, ::KernelsOnly) = false
 
 # A fixed sequence of steps, each a function of the compile state. Record and
 # run may not inspect the graph or the device; this is where that happens.
-# The state holds copies of the graph's nodes (a loop's body copied too): the
-# plan owns them and their compiled data.
+# The state holds copies of the graph's nodes in order, groups resolved
+# (flatten): the plan owns them and their compiled data.
 function compile(g::Graph)
-    s = CompileState(g, [deepcopynode(n) for n in g.nodes])
+    s = CompileState(g, flatten(g.nodes, g))
     pushfirst!(s.nodes, HeadNode(nothing, nothing))
     for h in hostnodes(s.nodes)     # each later stage copies the cells again
         insertafter!(s.nodes, h, HeadNode(h, nothing))
@@ -526,6 +558,7 @@ function compile(g::Graph)
         insertafter!(s.nodes, w, PrepareNode(flag, FlagPrepare(), nothing))   # its when! launches' commands × flag (section 2)
     end
     layout!(s)                      # the Bound resources, before anything reads them
+    formpasses!(s)                  # clears and draws into the same targets: one RenderNode each (section 5)
     isempty(g.rewrites) || (dependencies!(s); foreach(r -> r(s), g.rewrites))
     dependencies!(s)
     foreach(n -> compile!(s, n), s.nodes)
@@ -534,8 +567,18 @@ function compile(g::Graph)
     return Plan(s)      # stages, placement, argument block, tables; starts marked: unmapped,
 end                     #   restore; running = false; compiles = 1 (recompile! carries the count)
 
+# The order with groups resolved: a group's nodes at its place, a repeated
+# group as one LoopNode over copies of its nodes. Each copy of a draw keeps
+# the group that holds it (its holder), so formpasses! can cut a pass's draws
+# into pieces.
+flatten(nodes, holder) = Node[x for n in nodes for x in flatten(n, holder)]
+flatten(n::Node, holder) = (deepcopynode(n, holder),)
+flatten(gr::Group, holder) = flatten(gr, gr.loop)
+flatten(gr::Group, ::Nothing) = flatten(gr.nodes, gr)
+flatten(gr::Group, l::Loop) = (LoopNode(l.count, l.while_nonzero, flatten(gr.nodes, gr), Origin(repeat!, (gr, l.count)), nothing),)
+
 # What each node touches. The Bound resources are the plan's argument slots.
-# A value GPURef argument is a read of its slot (argumentuses), a shared
+# A GPURef argument is a read of its slot (argumentuses), a shared
 # resource whose address the plan bakes.
 uses(p::KernelNode, s) = (argumentuses(p.args)..., (Bound(r) => Read() for r in bound(p.args))..., flaguses(p.when)...)
 uses(p::TraceNode, s) = uses(p, s, p.args)
@@ -551,23 +594,18 @@ uses(p::PrepareNode, s) = uses(p, s, p.kind)
 uses(p::PrepareNode, s, ::LengthPrepare) = (p.array => CellRead(), Bound(p.array) => Write())
 uses(p::PrepareNode, s, ::FlagPrepare) = (p.array => Read(), (Bound(q) => Write() for q in conditionedby(s, p.array))...)
 uses(p::HostNode, s) = (hostreads(p.args)..., (w => Write() for w in p.writes)..., HostDone(p) => Write())
-# Members compile does not know (push!, delete! and rebinds change them
-# without recompiling) get placeholders. A node that reads through a
-# composite (a build or refit of a structure, a trace or ray query of a TLAS,
-# whose hit shaders read BLAS geometry, a launch or draw reading through an
-# array GPURef) also reads AnyWrite: it conflicts with every earlier write in
-# the plan, and every later write conflicts with it. A kernel that writes
-# through an array GPURef writes AnyMemory, a write every later node
-# conflicts with. dependencies! and barriers! match both against every key,
-# not by name, which gives the edges and a full memory barrier. At run the
-# members are known: expand (B.4) turns the build into a write of the
-# structure and reads of its members, a read of a composite into reads of its
-# members, and the WriteThrough of a GPURef into a read of it and a write of
-# its target, for waits, records and the stage's written arrays.
+# Members compile does not know (push! and delete! change them without
+# recompiling) get a placeholder. A node that reads through a composite (a
+# build or refit of a structure, a trace or ray query of a TLAS, whose hit
+# shaders read BLAS geometry) also reads AnyWrite: it conflicts with every
+# earlier write in the plan, and every later write conflicts with it.
+# dependencies! and barriers! match it against every key, not by name, which
+# gives the edges and a full memory barrier. At run the members are known:
+# expand (B.4) turns the build into a write of the structure and reads of its
+# members, and a read of a composite into reads of its members, for waits
+# and records.
 uses(p::BuildNode, s) = (p.structure => BuildUse(), AnyWrite() => Read())
-argumentuse(r::ArrayBox, ::Write) = (r => WriteThrough(), AnyMemory() => Write())   # inside argumentuses
-argumentuse(r::ArrayBox, ::Read)  = (r => Read(), AnyWrite() => Read())
-argumentuse(t::TLAS, ::Read)      = (t => Read(), AnyWrite() => Read())             # traces and ray queries
+argumentuse(t::TLAS, ::Read) = (t => Read(), AnyWrite() => Read())   # traces and ray queries, inside argumentuses
 
 # ── dependencies!: an edge "q before p" wherever two nodes conflict ──
 # One hazard function, shared with barriers! and the ordering across graphs.
@@ -575,7 +613,7 @@ hazard(before::Use, after::Use) =
     !(reads(before) && reads(after)) && !(unordered(before) && unordered(after))
 
 function dependencies!(s)
-    last = Dict{Any,Vector{Tuple{Node,Use}}}()
+    last = Dict{Resource,Vector{Tuple{Node,Use}}}()
     for p in s.nodes, (r, u) in uses(p, s)
         for (q, v) in earlier(last, r)
             hazard(v, u) && addedge!(s.dag, q, p)
@@ -588,13 +626,12 @@ function dependencies!(s)
     # replacement runs through a conditional node: that node may not run.
     transitivereduce!(s.dag; through = n -> !conditional(n))
 end
-# The earlier uses a use conflicts with: those of the same key, an earlier
-# write through a GPURef (AnyMemory, written anything), and an earlier read
-# through a composite (AnyWrite, read anything: a later write must follow
-# it); for AnyWrite and AnyMemory themselves, every earlier use of any key, of
+# The earlier uses a use conflicts with: those of the same key, and an
+# earlier read through a composite (AnyWrite, read anything: a later write
+# must follow it); for AnyWrite itself, every earlier use of any key, of
 # which hazard keeps the conflicting ones.
-earlier(last, r) = [get(last, r, ()); get(last, AnyMemory(), ()); get(last, AnyWrite(), ())]
-earlier(last, ::Union{AnyWrite,AnyMemory}) = [e for es in values(last) for e in es]
+earlier(last, r) = [get(last, r, ()); get(last, AnyWrite(), ())]
+earlier(last, ::AnyWrite) = [e for es in values(last) for e in es]
 
 # ── compile!: one method per node type; no lowering here ──
 # CompiledDispatch(kernel, extents, arguments): arguments are InBlock() (the
@@ -608,7 +645,7 @@ function compile!(s, p::KernelNode)
                                           launchextents(s.device, p), InBlock())
 end
 # A KA launch's ndrange came from the host (HostRange, section 2): an
-# argument array resized since its declaration makes the compile throw (B4.3).
+# argument array resized since its declaration makes the compile throw.
 checkrange(r::HostRange) = all(((st, dims),) -> st.dims == dims, r.dims) ||
     throw(ArgumentError("a KA launch's ndrange was computed on the host from an array resized since; declare it again"))
 checkrange(_) = nothing
@@ -617,16 +654,16 @@ function compile!(s, p::TraceNode)
     p.compiled.command = CompiledTrace(compiletrace(s.device, p.pipeline, argtypes(p.args)),
                                        launchextents(s.device, p), InBlock())
 end
-# A render pass (decisions B3.17): the compiled render keeps its targets and
-# their load operations; each piece of p.pieces is compiled on its own with
-# compilepiece!, the same call an insert makes at run (section 5): its
-# pipelines, argument region and cell-copy entries, into the plan's list for
-# the pass. Pipelines are values; the device type compiles each for the
+# A render pass (formed by formpasses!): the compiled render keeps its
+# targets and their load and store operations; each piece of p.pieces is
+# compiled on its own with compilepiece!, the same call a new group of draws
+# gets at run (section 5): its pipelines, argument region and cell-copy
+# entries, into the plan's list for the pass. Pipelines are values; the device type compiles each for the
 # argument types and the target formats (cached by the device type, like
 # kernels).
 function compile!(s, p::RenderNode)
     p.compiled = CompiledNode()
-    p.compiled.command = CompiledRender(p.targets)
+    p.compiled.command = CompiledRender(p.targets, p.loads, storeops(s, p))   # storeops: Discard where no later node reads
     setpieces!(s, p, [compilepiece!(s, piece) for piece in p.pieces])   # recorded with the plan (recordpiece)
 end
 function compile!(s, p::LoopNode)
@@ -644,9 +681,9 @@ compile!(s, p::HeadNode) = (p.compiled = CompiledNode(); p.compiled.command = Co
 compile!(s, p::PrepareNode) = (p.compiled = CompiledNode(); p.compiled.command = CompiledDispatch(kernel!(s.device, prepare_kernel!, preparetypes(p)), 1, InBlock()))
 compile!(s, p::HostNode) = (p.compiled = CompiledNode(); p.compiled.command = CompiledHost(p.f, p.args))
 
-# The `Kernel` lives at the kernel's CodeInstance (B5.11): `kernelfor` finds it
+# The `Kernel` lives at the kernel's CodeInstance: `kernelfor` finds it
 # through `GPUCompiler.cached_results` (one per compiler configuration), with the
-# access per argument set at declaration (B5.10). compilekernel fills its code if
+# access per argument set at declaration. compilekernel fills its code if
 # missing and its entry for `dev` (native handle and KernelInfo), each once under
 # the kernel's lock, and says whether this call compiled, for the per-device
 # compile counter. No other kernel table exists, in core or in a device type.
@@ -662,7 +699,7 @@ costs!(s) = foreach(p -> (p.compiled.cost = estimate(s.device, p)), s.nodes)
 estimate(dev, p) = estimate(caps(dev), p) * calibration(dev, p)
 estimate(c::Caps, p) = max(work(p) / c.throughput[eltype(p)], bytes(p) / c.bandwidth)
     # work: 2MNK for a mul!, else from KernelInfo and the ndrange (the capacity for a kernel-written length)
-    # c.throughput, c.bandwidth: facts the device type reports (api.md G3)
+    # c.throughput, c.bandwidth: facts the device type reports (api.md, `caps` in 4.1)
     # calibration: from past profiled runs of this device, 1.0 without any
 
 # ── schedule!: order and queue per node ──
@@ -731,7 +768,7 @@ function barriers!(s)
         state = conditional(p) ? merge(state, after) : after    # later nodes are correct either way
     end
 end
-# memkey(s, AnyWrite()) and memkey(s, AnyMemory()) overlap every key: the node
+# memkey(s, AnyWrite()) overlaps every key: the node
 # gets a global memory barrier (VkMemoryBarrier2 without a resource, one per
 # build node; device memory caches only, no layout change).
 
@@ -739,7 +776,7 @@ end
 # A stage is the segments between two host nodes, and the host node after them.
 function submissions!(s)
     c = Cutter(submissionbudget(caps(s.device)))    # core's policy from the device's facts: a smaller target
-                                                     #   where caps(dev).display (new work: today 0.1 s for all)
+                                                     #   where caps(dev).display
     foreach(p -> addnode!(s, c, p), s.order)
     finish!(s, c)                                    # closes the last stage, also after a trailing host node
     # Within a run, a segment waits on the segments holding its predecessors on
@@ -794,7 +831,7 @@ notinpresent(::Union{BuildNode,HostNode}) = true
 notinpresent(_) = false
 
 # A loop is cut between iterations when one iteration fits the budget and the
-# loop does not (open decision 11).
+# loop does not (open).
 
 # ── summary!: every access of every stage to what the plan shares ──
 function summary!(s)
@@ -807,12 +844,11 @@ function summary!(s)
         stage.hostuses = [(r, u) for (r, u) in uses(stage.host, s) if shared(r)]
     end
     # shared: device arrays (storage and cell), resizable graph arrays (their
-    # cell), images, acceleration structures, array GPURefs, value GPURef
-    # slots, arena parts. Bound resources are the plan's own. A composite (a
-    # TLAS, a BLAS, an array GPURef) is listed as itself; its members are
-    # added at run, from the snapshots lockexpanded takes
-    # (resizing-and-raytracing.jl B.4), since a rebind or push! changes them
-    # without recompiling.
+    # cell), images, acceleration structures, GPURef slots, arena parts.
+    # Bound resources are the plan's own. A composite (a TLAS, a BLAS) is
+    # listed as itself; its members are added at run, from the snapshots
+    # lockexpanded takes (resizing-and-raytracing.jl B.4), since push! and
+    # delete! change them without recompiling.
 end
 
 # ── bindings!: the argument block and the tables the head and prepares read ──
@@ -845,7 +881,7 @@ function (::FuseEpilogues)(s)
     end
 end
 
-struct MergeRegions; attribute::Any; end
+struct MergeRegions{A}; attribute::A; end
 function (r::MergeRegions)(s)
     runs = maximalruns(p -> hasattribute(candidate(p), r.attribute), s.dag)   # no path leaves a run and re-enters it
     for run in runs
@@ -871,8 +907,8 @@ end
 # segment is a list of parts submitted together: recordings, written here
 # once, and BuildRecordings. A run re-records only the BuildRecordings a change
 # marked (resizing-and-raytracing.jl B.8), the parts that recorded the handle
-# of an array that moved (an index buffer; decisions B3.11), a pass's list
-# after a piece insert, delete or sort! (B3.17, B4.8) and, per swapchain
+# of an array that moved (an index buffer), a pass's list
+# after a piece insert, delete or sort! and, per swapchain
 # generation, the segments that draw into window-sized targets and the
 # per-image present segments (section 7).
 
@@ -905,21 +941,45 @@ function emit!(b, pl, p::RenderNode)
     endrender!(b)
 end
 
-# ── Pieces: draws inserted into a compiled pass (decisions B3.17) ──
-# Simon, 2026-10-05: optimize complex GUIs without slowing large meshes and
-# scatters; an insert in the millisecond range is fine, and visibility must
-# be cheap. A render pass is an ordered list of pieces. A piece is the draws
-# of one block: the draws declared in render!'s do-block are the first, and
-# each `h = insert!(p) do … end` on the pass adds one (a plot). A piece is
-# compiled and recorded on its own, so inserting or deleting one compiles and
-# records that piece and rewrites the pass's list (one part recorded again
-# before its next submission, as a marked BuildRecording); the plan is not
-# recompiled and no other piece is recorded again. Each draw keeps its own
-# pipeline, index buffer and argument layout, so a large mesh draws exactly
-# as it would alone. Visibility stays a store into the draw's when! flag (the
-# count times the flag): no piece is touched. A changed draw order is a
-# rewrite of the list: `sort!(p; by, lt, rev)` reorders the pieces (decisions
-# B4.8), applied by the next run like an insert, nothing compiled.
+# ── Render passes: formed by compile ──
+# Draws and clears are nodes in the order like launches; there is no pass
+# object. Core forms the passes: clears and draws into the same targets, in
+# order with no node between them that reads what they write, are one
+# RenderNode. Other nodes between them are scheduled before or after the pass.
+# A target's load operation is Clear(v) when a clear of it comes before its
+# draws in the pass and Keep() otherwise; its store operation is Discard()
+# when no later node reads it (liveness) and Store() otherwise. The pass's
+# draws are cut into pieces by their holder: each run of draws one group (or
+# the graph itself) holds is one piece.
+mutable struct RenderNode{T<:Tuple,L<:Tuple} <: Node
+    const targets::T                        # windows and images: colour, then depth
+    const loads::L                          # per target: Clear(v) or Keep()
+    pieces::Vector{Piece}                   # in order
+    compiled::Union{Nothing,CompiledNode}
+end
+struct Piece                                # the draws one holder has in one pass
+    holder::Union{Graph,Group}
+    draws::Vector{DrawNode}                 # the plan's copies, in order
+end
+function formpasses!(s)
+    for run in passruns(s)                  # maximal runs of ClearNodes and DrawNodes into the same targets
+        p = RenderNode(targetsof(run), loadsof(run), cutpieces(run), nothing)   # cut by holder
+        replacerun!(s.nodes, run, p)        # the nodes between them that touch none of their resources move out
+    end
+end
+
+# ── Pieces: groups of draws change without a recompile ──
+# Pieces serve complex GUIs without slowing large meshes and scatters: an
+# insert may take milliseconds, and visibility is cheap. A group whose nodes
+# are draws into one pass is a piece of that pass, compiled and recorded on
+# its own. On a graph with a plan, a new group of draws, draws declared into
+# such a group, its delete! and a sort! of such groups compile and record
+# that group's piece only and rewrite the pass's list (one part recorded
+# again before its next submission, as a marked BuildRecording); the plan is
+# not recompiled and no other piece is recorded again. Each draw keeps its
+# own pipeline, index buffer and argument layout, so a large mesh draws
+# exactly as it would alone. Visibility stays a store into the draw's when!
+# flag (the count times the flag): no piece is touched.
 #
 # What makes a piece independent of the plan:
 #   - its own argument region (a pool region the piece holds) and its own
@@ -931,170 +991,142 @@ end
 #     writes before it -> vertex, index, indirect and fragment reads), so a
 #     new draw adds no dependency inside the graph that compile would have
 #     to place;
-#   - its own registration: the piece's resources join the namers (B3.15),
+#   - its own registration: the piece's resources join the namers,
 #     holds and dependents, as register! does for a plan, for these uses only.
-# A piece holds draws only (when! draws included); a block that
-# declares anything else throws, and kernels per plot go into the graph with
-# insert!(g) (B3.16), which recompiles. Core Vulkan inherits no state into a
-# secondary command buffer ("No state, including dynamic state, is inherited
-# from one command buffer to another", pipelines.adoc:131-133), so each piece
-# binds its pipelines and sets viewport and scissor itself: the pieces of a
-# pass into a window are recorded per swapchain generation, like the other
-# window-sized parts (a resize records each piece once).
+# Core Vulkan inherits no state into a secondary command buffer ("No state,
+# including dynamic state, is inherited from one command buffer to
+# another", pipelines.adoc:131-133), so each piece binds its pipelines and
+# sets viewport and scissor itself: the pieces of a pass into a window are
+# recorded per swapchain generation, like the other window-sized parts (a
+# resize records each piece once).
 #
-# Two lists. The graph's pass node holds the declared pieces (insert! and
-# delete! edit it under the graph lock; a recompile compiles from it). Each
-# plan holds its own compiled list per pass (piecesof), which only
-# updatepieces! edits, under the graph lock before the run (run!(g)): an
-# inserted piece joins it once compiled and recorded, a deleted one leaves it
+# Two lists. The graph's groups hold the declared draws (declarations,
+# delete! and sort! edit them under the graph lock; a recompile compiles from
+# them). Each plan holds its own compiled list per pass (piecesof), which
+# only updatepieces! edits, under the graph lock before the run (run!(g)): a
+# new piece joins it once compiled and recorded, a deleted one leaves it
 # before its region and recording are retired. recordwindows! records the
 # plan's list, after updatepieces! (run!(g)).
-mutable struct Piece                # declared: the graph's
-    const pass::RenderNode
-    draws::Vector{DrawNode}         # in declaration order; each names its resources (holds counted per draw)
-    live::Bool                      # false once deleted (a second delete!, or an insert! after it, throws)
-end
-mutable struct CompiledPiece        # one plan's; released with the plan, or by a delete
+mutable struct CompiledPiece{N}             # one plan's; released with the plan, or by a delete
     const piece::Piece
-    args::Region                    # its argument region (the slot addresses of the value GPURefs it reads, baked)
-    copies::Vector{Int}             # its entries in the plan's cell-copy table
-    native::Any                     # the device type's recording (recordpiece), per generation for a window pass
+    args::Region                            # its argument region (the slot addresses of the GPURefs it reads, baked)
+    copies::Vector{Int}                     # its entries in the plan's cell-copy table
+    native::N                               # the device type's recording (recordpiece), per generation for a window pass
 end
 
-# render! returns the pass; its do-block declares the first piece. draw! and
-# when!(p, …) append to the open piece and name the draw's resources (holds
-# counted per draw, like nodes).
-function render!(f, g::Graph, targets...)
-    declaring(g) do
-        p = RenderNode(targets, Piece[], nothing, Origin(render!, targets), nothing)
-        first = Piece(p, DrawNode[], true)
-        p.open = first
-        ok = false
-        try
-            f(p); ok = true
-        finally
-            p.open = nothing
-            ok || unname!(g, first.draws)
-        end
-        push!(p.pieces, first)
-        addnode!(g, p)                              # names the targets; a compiled graph recompiles (a new pass)
-        return p
-    end
-end
-draw!(p::RenderNode, pipeline, args, count; instances = 1, indices = nothing) =
-    push!(p, DrawNode(pipeline, args, count, instances, indices, nothing, Origin(draw!, args), nothing))
-# One conditional draw (decisions B4.1): indirect, its count multiplied by the
-# Bool flag, as for a when! launch (section 2); visibility is a store into the
-# flag. The flag comes from this method only.
-when!(p::RenderNode, flag::Union{ValueBox{Bool},MantleArray{Bool,1}}, pipeline, args, count;
+# draw!(g or group, target, pipeline, args, count; instances, indices): one
+# DrawNode at the end of its place. when! is one conditional draw: indirect,
+# its count multiplied by the Bool flag, as for a when! launch (section 2);
+# visibility is a store into the flag. clear! is the load operation of
+# target in the pass of the draws after it. On a device each runs now, as its
+# own pass (section 11).
+draw!(l::Union{Graph,Group}, target, pipeline, args::Tuple, count; instances = 1, indices = nothing) =
+    declare!(l, DrawNode(target, pipeline, args, count, instances, indices, nothing, Origin(draw!, args), nothing))
+when!(l::Union{Graph,Group}, target, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, pipeline, args::Tuple, count;
       instances = 1, indices = nothing) =
-    push!(p, DrawNode(pipeline, args, count, instances, indices, flag, Origin(draw!, args), nothing))
-function Base.push!(p::RenderNode, d::DrawNode)
-    p.open === nothing && throw(ArgumentError("a draw outside render!'s block or an insert! block of the pass"))
-    foreach(usable, resources(d))                   # its arguments, counts, indices and flag
-    push!(p.open.draws, d)
-    name!(graph(p), d)
-    return p
+    declare!(l, DrawNode(target, pipeline, args, count, instances, indices, flag, Origin(when!, args), nothing))
+clear!(l::Union{Graph,Group}, target::Union{Window,Image}, v) =
+    declare!(l, ClearNode(target, v, Origin(clear!, (target, v)), nothing))
+
+# What a declaration or delete! on a graph with a plan leaves for the next run.
+struct Added{P<:Union{Graph,Group},N<:Node}
+    parent::P; node::N
+end
+struct Deleted
+    group::Group
+end
+struct Reordered
+    group::Group
 end
 
-# Declared under the graph lock like any declaration. Only the graph's next
-# run compiles it (run!(g): updatepieces!), never the call; until then the
-# pass draws without it.
-function Base.insert!(f, p::RenderNode)
-    g = graph(p)
-    declaring(g) do
-        p.open === nothing || throw(ArgumentError("insert! blocks do not nest"))
-        p in g.nodes || throw(ArgumentError("insert! into a pass that was deleted from its graph"))
-        piece = Piece(p, DrawNode[], true)
-        p.open = piece                              # draw!(p, …) appends to the open piece and names its resources
-        ok = false
-        try
-            f(); ok = true
-        finally
-            p.open = nothing
-            ok || (unname!(g, piece.draws); empty!(piece.draws))
-        end
-        push!(p.pieces, piece)                      # the list order is the draw order
-        g.plan === nothing || push!(g.plan.piecechanges, Inserted(piece))
-        return piece
-    end
-end
-Base.delete!(p::RenderNode, piece::Piece) = declaring(graph(p)) do
-    piece.pass === p && piece.live || throw(ArgumentError("delete! of a piece not in this pass (deleted already?)"))
-    piece.live = false
-    filter!(x -> x !== piece, p.pieces)
-    g = graph(p)
-    g.plan === nothing ? unname!(g, piece.draws) : push!(g.plan.piecechanges, Deleted(piece))
-end
-# A changed draw order (decisions B4.8): the declared list reordered under the
-# graph lock (by, lt and rev see the pieces insert! returned); the next run
-# rewrites the plan's list from it (updatepieces!), nothing is compiled.
-Base.sort!(p::RenderNode; by = identity, lt = isless, rev = false) = declaring(graph(p)) do
-    sort!(p.pieces; by, lt, rev)
-    g = graph(p)
-    g.plan === nothing || push!(g.plan.piecechanges, Reordered(p))
-    return p
-end
+# Applied by run!(g) under the graph lock, before the run's stages. Piece
+# changes only: updatepieces!. Anything else: a recompile, which compiles
+# every piece anew.
+applychanges!(g::Graph) = all(c -> piecechange(g.plan, c), g.plan.changes) ? updatepieces!(g.plan) : recompile!(g)
+# A piece change touches only draws in passes the plan has: a group made
+# (empty, or of draws whose place is inside a pass of the plan with their
+# targets), a draw declared into such a group, a deleted group of draws, a
+# sort! of groups of draws in one pass. A launch, a clear, a trace, a draw
+# into the graph itself, a group of draws that would start a new pass: a
+# recompile.
+piecechange(pl, c::Added) = piecechange(pl, c.parent, c.node)
+piecechange(pl, ::Union{Graph,Group}, gr::Group) = gr.loop === nothing && drawsonly(gr) && (isempty(gr.nodes) || passof(pl, gr) !== nothing)
+piecechange(pl, gr::Group, ::DrawNode) = drawsonly(gr) && passof(pl, gr) !== nothing
+piecechange(pl, ::Union{Graph,Group}, ::Node) = false
+piecechange(pl, c::Deleted) = drawsonly(c.group)
+piecechange(pl, c::Reordered) = (gs = filter(n -> n isa Group, c.group.nodes); all(drawsonly, gs) && onepass(pl, gs))
+drawsonly(gr::Group) = all(isdraw, gr.nodes)
+isdraw(::DrawNode) = true
+isdraw(::Node) = false
+# passof(pl, gr): the plan's RenderNode holding the group's piece; for a
+# group the plan has no piece of, the pass its place lies in (the draw or
+# clear before or after the place in the order belongs to it) whose targets
+# are the targets of the group's draws; nothing otherwise.
 
-# Applied by run!(g) under the graph lock, before the run's stages, in call
-# order. An insert: pipelines from the device type's cache, the argument
-# region (acquire!, before any lock, like prepare!), the cell-copy entries
-# (a store into the plan's table, applied by the run's first stage), the
-# piece's recording (recordpiece) and its registration. A delete: the piece
-# leaves the namers (its last-run tokens into the resources' `retired`, the
-# other namers notified) and its holds drop, its region, entries and
-# recording are retired with the plan's last tokens (the graph lock is held,
-# so no run of this plan is submitting). A sort!: nothing but the list below.
-# In every case the part holding the pass
-# is marked and recorded again before its next submission. A piece that
-# fails to compile (a pipeline error, memory) is taken out of the pass, its
-# resources unnamed, and run! throws; the rest of the graph keeps running.
+# An added or changed group: pipelines from the device type's cache, the
+# argument region (acquire!, before any lock, like prepare!), the cell-copy
+# entries (a store into the plan's table, applied by the run's first stage),
+# the piece's recording (recordpiece) and its registration; a group recorded
+# before has its old CompiledPiece retired with the plan's last tokens. A
+# delete: the group's draws leave the namers (its last-run tokens into the
+# resources' `retired`, the other namers notified) and their holds drop, its
+# region, entries and recording are retired with the plan's last tokens (the
+# graph lock is held, so no run of this plan is submitting). A sort!: nothing
+# but the list below. In every case the part holding the pass is marked and
+# recorded again before its next submission. A group that fails to compile
+# (a pipeline error, memory) is deleted as delete! does, its resources
+# unnamed, and run! throws; the rest of the graph keeps running.
 function updatepieces!(pl::Plan)
-    passes = unique(passof(c) for c in pl.piecechanges)
+    added = unique(changedgroup(c) for c in pl.changes if c isa Added)
+    deleted = [c.group for c in pl.changes if c isa Deleted]
+    sorted = [x for c in pl.changes if c isa Reordered for x in c.group.nodes if x isa Group]
+    passes = unique(filter(!isnothing, [passof(pl, gr) for gr in [added; deleted; sorted]]))
     try
-        foreach(c -> apply!(pl, c), pl.piecechanges)
+        foreach(gr -> deleted!(pl, gr), deleted)
+        foreach(gr -> islive(gr) && !isempty(gr.nodes) && recordgroup!(pl, gr), added)
     finally
-        empty!(pl.piecechanges)                     # a failed insert was taken out; run! throws after this
+        empty!(pl.changes)                          # a failed group was deleted; run! throws after this
         for pass in passes                          # the plan's list: the graph's order, compiled pieces only
-            setpieces!(pl, pass, [compiledof(pl, x) for x in pass.pieces if iscompiled(pl, x)])
+            setpieces!(pl, pass, compiledpieces(pl, pass))
             markpart!(pl, pass)                     # the list part is recorded again before its next submission
         end
     end
 end
-function apply!(pl::Plan, c::Inserted)
-    c.piece.live || return                          # deleted before it was ever compiled
+changedgroup(c::Added{<:Union{Graph,Group},Group}) = c.node   # a group made
+changedgroup(c::Added{Group,<:DrawNode}) = c.parent           # a draw declared into a group
+function recordgroup!(pl::Plan, gr::Group)
+    old = compiledpiece(pl, gr)                     # nothing for a new group
     ok = false
     try
-        cp = compilepiece!(pl, c.piece)             # pipelines, region, copy-table entries, recordpiece
-        registerpiece!(pl, c.piece)                 # register! (resizing-and-raytracing.jl B.6) for its uses only;
+        cp = compilepiece!(pl, Piece(gr, [deepcopynode(d, gr) for d in gr.nodes]))   # pipelines, region, copy-table entries, recordpiece
+        registerpiece!(pl, cp)                      # register! (resizing-and-raytracing.jl B.6) for its uses only;
         ok = true                                   #   a resource the plan names already gets the union of both uses
     finally
-        ok || (c.piece.live = false; filter!(x -> x !== c.piece, c.piece.pass.pieces);
-               releasepiece!(pl, c.piece, ()); dropunnamed!(graph(pl), c.piece.draws, ()))   # never used by a run
+        ok || (gr.live = false; filter!(n -> n !== gr, nodelist(gr.parent));
+               dropunnamed!(graph(pl), declared(gr), ()))   # never used by a run
     end
+    old === nothing || releasepiece!(pl, old, lasttokens(pl))
 end
-function apply!(pl::Plan, c::Deleted)
+function deleted!(pl::Plan, gr::Group)
     tokens = lasttokens(pl)
-    dropunnamed!(graph(pl), c.piece.draws, tokens; plan = pl)
-    releasepiece!(pl, c.piece, tokens)              # its CompiledPiece: region, copy-table entries (blanked), recording
+    dropunnamed!(graph(pl), declared(gr), tokens; plan = pl)
+    cp = compiledpiece(pl, gr)
+    cp === nothing || releasepiece!(pl, cp, tokens)   # its CompiledPiece: region, copy-table entries (blanked), recording
 end
-apply!(pl::Plan, ::Reordered) = nothing             # updatepieces! rebuilds the list in the graph's new order
-passof(c::Union{Inserted,Deleted}) = c.piece.pass
-passof(c::Reordered) = c.pass
-# The resources no other node or piece names any more (unname! puts them in
+# The resources no other node names any more (unname! puts them in
 # g.unnamed; a recompile ran first if one was due, so nothing else is there):
 # the plan leaves their namers (its last-run tokens into their `retired`, the
 # other namers notified, as unregister!), and their holds drop after `tokens`.
-function dropunnamed!(g::Graph, draws, tokens; plan = nothing)
-    unname!(g, draws)
+function dropunnamed!(g::Graph, nodes, tokens; plan = nothing)
+    unname!(g, nodes)
     plan === nothing || unregisteruses!(plan, g.unnamed)
     foreach(st -> dropafter!(st, tokens), g.unnamed); empty!(g.unnamed)
 end
-# A recompile compiles every piece in the passes' lists with the new plan. It
-# first unnames the draws of pieces deleted since the last run (their holds
-# drop with the old plan's tokens, below) and clears piecechanges.
-recompiled!(g, c::Deleted) = unname!(g, c.piece.draws)
-recompiled!(g, ::Union{Inserted,Reordered}) = nothing
+# A recompile compiles every piece with the new plan. It first unnames the
+# nodes of groups deleted since the last run (their holds drop with the old
+# plan's tokens, below) and clears the changes.
+recompiled!(g, c::Deleted) = unname!(g, declared(c.group))
+recompiled!(g, ::Union{Added,Reordered}) = nothing
 # A PresentNode records only its barrier (the image to the present layout);
 # the present itself is submitnative!'s (section 8). A VideoDecodeNode
 # records through the decode verbs of the plan's video section.
@@ -1102,7 +1134,7 @@ emit!(b, pl, p::PresentNode) = emitcopy!(b, p, NoCopy(), deps(p))   # the barrie
 # The head: copies cells into the Bound slots, writes the launch commands and
 # ndrange values over resizable arrays, and multiplies each when! launch's
 # count by its flag where the host writes the flag (section 2). It writes no
-# values: a value GPURef is read through its slot. Its barrier to the
+# values: a GPURef is read through its slot. Its barrier to the
 # launches after it is theirs (barriers! put it on the first reader of each Bound).
 emit!(b, pl, p::HeadNode) =
     for k in p.compiled.command.kernels              # copycells, launches
@@ -1154,7 +1186,7 @@ holdsany(task, g::Graph) = g.plan !== nothing && any(p -> p.holder === task, are
 # check, so a window resized past its capacity recompiles in the same run
 # (plan, Run). Pieces are updated before the windows are recorded, so a new
 # generation records the current list. run!(g) returns what the plan's run
-# returned: Submitted() or Skipped(), both public (decisions B4.8).
+# returned: Submitted() or Skipped(), both public.
 function run!(g::Graph)
     while true
         r = lockgraph(g) do
@@ -1162,7 +1194,7 @@ function run!(g::Graph)
             while true
                 applywindows!(g)    # a resize! of a window this graph renders to: generation, cell writes, mark (section 7)
                 (g.plan === nothing || @atomic g.recompile) && recompile!(g)
-                isempty(g.plan.piecechanges) || updatepieces!(g.plan)   # inserted, deleted or reordered pieces (section 5)
+                isempty(g.plan.changes) || applychanges!(g)      # declarations and deletes since the last run (section 5)
                 recordwindows!(g)   # the current generation's segments, if the plan has none for it yet (section 7)
                 v = run!(g.plan)
                 again(v) || return v                # Submitted, Skipped or WaitFor
@@ -1185,7 +1217,7 @@ again(_) = false
 function recompile!(g::Graph)
     @atomic g.recompile = false
     if g.plan !== nothing
-        foreach(c -> recompiled!(g, c), g.plan.piecechanges); empty!(g.plan.piecechanges)
+        foreach(c -> recompiled!(g, c), g.plan.changes); empty!(g.plan.changes)
     end
     ok = false
     new = nothing
@@ -1201,7 +1233,7 @@ function recompile!(g::Graph)
         end
         old, g.plan = g.plan, new
         ok = true                             # new is the graph's plan now: a throw below must not discard it
-        old === nothing || (new.compiles = old.compiles + 1)   # carried: the count a test asserts did not move (B4.9)
+        old === nothing || (new.compiles = old.compiles + 1)   # carried: the count a test asserts did not move
         old === nothing || retireplan!(old, new)   # B.6: off the dependents and
                                               #   namers, structures' command lists, held targets
         foreach(st -> dropafter!(st, lasttokens(old)), g.unnamed); empty!(g.unnamed)   # resources deleted nodes named
@@ -1231,10 +1263,10 @@ discard!(pl::Plan) = (unregister!(pl);
 # another run) goes back in `finally`. The same rule as every change
 # (resizing-and-raytracing.jl B.4, change!).
 mutable struct RunState
-    pages::IdDict{Arena,Any}            # per arena part of the plan: pages for its unmapped range (section 9)
+    pages::IdDict{Arena,Vector{PageRun}}   # per arena part of the plan: pages for its unmapped range (section 9)
     prepared::Prepared                  # what applying the pending changes and restores needs (B.4 step 1)
-    image::Any                          # nothing, an Image not yet presented, WindowChanged() or Minimized()
-    generation::Any                     # the swapchain generation this run's window-sized segments use
+    image::Union{Nothing,Image,WindowChanged,Minimized}
+    generation::Int                     # the swapchain generation this run's window-sized segments use
     waits::Vector{Token}                # other graphs' work found by earlier stages (section 8); later stages wait too
 end
 
@@ -1309,7 +1341,7 @@ function run!(pl::Plan)
                 # A later stage never gets WaitFor (takepending leaves such
                 # changes for after this run); Again: prepare and lock again.
             end
-            pendreaders!(pl, r.written)               # after the stage is submitted (open decision 16, ruled B3.9/B3.10)
+            pendreaders!(pl, r.written)               # after the stage is submitted
         end
         return Submitted()
     finally
@@ -1412,8 +1444,7 @@ function submitstage!(pl, stage, recs, items, rs)
     # Still under the locks: what the stage wrote goes into the inboxes of
     # the other plans reading it (section 8).
     foreach(r -> notifyreaders!(r, pl), namedwrites(stage))
-    # The shared arrays the stage writes, from compile; a write through an
-    # array GPURef counts as a write of its current target.
+    # The shared arrays the stage writes, from compile.
     return StageDone(writtenresources(stage))
 end
 
@@ -1421,8 +1452,8 @@ end
 # not the sum. A run holds its parts from before its first submission until
 # its last stage is submitted, so another graph's run on the same part waits
 # on the host for the whole run, host functions included; the GPU order after
-# that comes from the tokens. Waiting is preferred over memory of its own
-# (Simon, 2026-10-02). Parts are taken in id order, so two runs never wait on
+# that comes from the tokens. Waiting is preferred over memory of its own.
+# Parts are taken in id order, so two runs never wait on
 # each other. A task that already holds a part (a host function of a running
 # graph) and would wait for a part with a lower or equal id throws instead:
 # that wait breaks the id order and can deadlock (with the same part, it
@@ -1456,14 +1487,12 @@ releasepart!(part::Arena) = lock(part.cond) do
     notify(part.cond)
 end
 
-# Ruled (decisions B3.10: readers, option a). A stage that wrote arrays
-# something else is built from pends the readers' updates once it is
-# submitted: a TLAS Update,
+# A stage that wrote arrays something else is built from pends the readers'
+# updates once it is submitted: a TLAS Update,
 # a BLAS Update (a Build when the array is its index array), applied by the
 # next submission that touches the structure, which waits for this stage's
 # write through the sync states (B.4); a screen's redraw mark. `written`
-# is the arrays the stage wrote, from its expanded uses (a target written
-# through a GPURef included). Readers come from each array's snapshot
+# is the arrays the stage wrote, from its expanded uses. Readers come from each array's snapshot
 # (immutable, replaced under its lock; resizing-and-raytracing.jl B.2), so a
 # structure built after compile counts too, and iterating needs no lock. A
 # structure this plan builds or refits itself has its own command and is
@@ -1504,34 +1533,32 @@ lastrun(pl) = values(pl.lastrun)   # Tokens, the latest per channel
 
 # ══ 7. Changes ═══════════════════════════════════════════════════════════════
 # Stores, resize!, TLAS changes and how a submission applies them:
-# resizing-and-raytracing.jl B.3-B.8. Here: value GPURefs, windows.
+# resizing-and-raytracing.jl B.3-B.8. Here: GPURefs, windows.
 
-# GPURef(dev, v) for a value (decisions B4.9): ONE slot in device memory whose
+# GPURef(dev, v) for a value: ONE slot in device memory whose
 # address every plan and piece that reads it bakes; a launch reads the value
-# through it (a one-element buffer read costs what a true uniform costs,
-# within 0.8% on NVIDIA, AMD and the M5, experiments/draw_bench/). The slot is
+# through it (a one-element buffer read costs what a true uniform costs). The slot is
 # a shared resource with a sync state, like a device array: plans name it,
 # stand in its namers, and are ordered against the stores into it the same way
-# (section 8). (GPURef(dev, a::MantleArray) is the array form, ArrayBox,
-# resizing-and-raytracing.jl B.8b: a pending cell write.)
-mutable struct ValueBox{T} <: GPURef{T}
+# (section 8). Values only: an array argument is the array itself.
+mutable struct GPURef{T} <: Resource
     const device::Device
     const slot::Region                  # sizeof(T) bytes of device memory; it never moves, so its address is baked
     const sync::SyncState               # pending stores, eager accesses, namers, the freed mark
     const holds::Threads.Atomic{Int}    # the creator and each graph naming it (section 10)
 end
-syncstate(r::ValueBox) = r.sync
-# r[] = v is a scheduled store like any other (decisions B3.13, B3.18): the
+syncstate(r::GPURef) = r.sync
+# r[] = v is a scheduled store like any other: the
 # value is copied once at the call into an upload region, so a multi-word
 # value is never torn, and a Store into the slot is pended through change!
 # (B.3's Store, the slot as its storage). The next submission that touches
 # the slot applies it in front of its own work (inline, emitstore!, within
 # the device type's limit). It marks no plan, and nothing recompiles.
-function Base.setindex!(r::ValueBox{T}, v) where {T}
+function Base.setindex!(r::GPURef{T}, v) where {T}
     up = acquireupload!(pool(r.device), sizeof(T))    # host-visible system memory, before any lock
-    hostview(up, T)[1] = convert(T, v)                # the one copy
     ok = false
     try
+        hostview(up, T)[1] = convert(T, v)   # the one copy; a conversion error returns the region
         change!(((r, Write()),)) do
             usable(r)                                 # freed through the creator's handle: throws, under the lock
             Change[Store(nextseq!(r), r, up, 1:sizeof(T))]
@@ -1543,8 +1570,7 @@ function Base.setindex!(r::ValueBox{T}, v) where {T}
     return r
 end
 # Data the host supplies per run is a device array the graph names, written by
-# stores the same way (`hostwritten = true` is gone, B4.9); setindex! on a
-# graph array is nodata() (section 2).
+# stores the same way; setindex! on a graph array is nodata() (section 2).
 
 # Window-sized arrays take any dims within the size their slots were placed
 # for (the window's capacity: the largest monitor's size unless given); beyond
@@ -1555,12 +1581,12 @@ end
 # and a generation maps only the pages its size needs, so the capacity costs
 # address space, not memory. Without sparse residency the capacity is mapped.
 
-# One graph presents to a window (Simon, 2026-10-05, decisions.md B3.8, B4.8):
-# the first graph declaring any write into it (render!, a kernel, a copy)
+# One graph presents to a window:
+# the first graph declaring any write into it (a draw, a clear, a kernel, a copy)
 # presents; a second graph declaring one throws at declaration (other graphs
 # render into Images this graph reads). The binding ends when the graph is
-# freed or collected or its render node is removed; another graph may then
-# present. An eager render! into a window throws. So every
+# freed or collected or the nodes writing the window are removed; another graph may then
+# present. An eager draw into a window throws. So every
 # acquire and present of a window happens under its graph's lock, in that
 # graph's runs: no acquire is ever in progress while applywindows! runs, no
 # other graph's run holds one of its images, and a graph has one pl.window.
@@ -1701,14 +1727,13 @@ waitfor(ts) = foreach(waitfor, ts)               # a collection of tokens
 # thread needs.
 
 # ── Between graphs: through the resource, when it is written ──
-# Open decision 19, option B (Simon, 2026-10-05: few recompiles, a cheap run).
 # No plan keeps a list of other plans. A resource's SyncState has `namers`:
 # the plans naming it with their use from compile (read, write or both), an
 # immutable snapshot replaced under its lock by register! and unregister!
 # (resizing-and-raytracing.jl B.6). A plan naming a composite reads the
 # composite's members: namingplanuses(r) is r's namers and, as readers, the
-# plans naming the composites built from r (its readers snapshot, B.2),
-# transitively through array GPURefs. Snapshot reads, no lock.
+# plans naming the composites built from r (its readers snapshot, B.2).
+# Snapshot reads, no lock.
 #
 # A stage's waits on other graphs, computed under its locks (lockstage):
 #   - a resource the stage writes (`namedwrites`, from compile: named arrays,
@@ -1722,8 +1747,7 @@ waitfor(ts) = foreach(waitfor, ts)               # a collection of tokens
 #     accessed eagerly since the plan's last look): waitsfor, i.e. its eager
 #     accesses, the last tokens of retired plans that named it, and the last
 #     runs of the other plans writing it (read after write).
-# Both wait for the other plan's whole last run (Simon: waiting for the
-# complete run is fine here). The waits are kept in the run's state and every
+# Both wait for the other plan's whole last run. The waits are kept in the run's state and every
 # later stage waits for them too, so a resource one stage took from the inbox
 # and a later stage uses is covered. A stage that writes nothing another
 # plan names and finds its inbox empty pays its own sync lock and one
@@ -1741,25 +1765,18 @@ waitfor(ts) = foreach(waitfor, ts)               # a collection of tokens
 # writers: its first run (register! puts the shared resources it names into
 # its own inbox), or, for a composite's new member, the step applying the
 # composite's Build (the member is one of the build's uses; lockstage expands
-# to it). A plan that stops reading a resource through a composite (delete!,
-# a rebind) stays among its namers until the submission that removed it has
+# to it). A plan that stops reading a resource through a composite (delete!)
+# stays among its namers until the submission that removed it has
 # passed (resizing-and-raytracing.jl B.8); until then writers wait for it.
 # A retired plan's last run is in the `retired` list of every resource it
 # named, members of the composites it named included, and those resources
 # are put into the other namers' inboxes (unregister!).
-namingplanuses(r) = [namers(syncstate(r)); [(pl, through(c, u)) for c in readers(r) for (pl, u) in namingplanuses(c)]]
-# A plan writing through an array GPURef writes its target; a structure or a
-# screen built from r only reads it.
-through(::ArrayBox, u) = u
-through(_, u) = Read()
+# A structure or a screen built from r only reads it.
+namingplanuses(r) = [namers(syncstate(r)); [(pl, Read()) for c in readers(r) for (pl, _) in namingplanuses(c)]]
 namingplans(r) = unique(first.(namingplanuses(r)))
 readingplans(r) = unique(pl for (pl, u) in namingplanuses(r) if reads(u))
 sharers(pl, stage) = unique(q for r in namedwrites(stage) for q in namingplans(r) if q !== pl)
-# namedwrites(stage): from compile. A write through an array GPURef counts
-# for the target its cell points at (`applied`) and, while a Rebind is
-# pending, for r[] too: a stage that applies the Rebind in its prefix writes
-# the new target, so it waits for and locks that target's other users as
-# well. Both only change under the locks the stage holds.
+# namedwrites(stage): from compile.
 
 # Waits of a stage on other graphs. The caller holds the sync locks of
 # lockset (lockstage) and the SyncStates of the inbox items. An inbox item
@@ -1780,8 +1797,7 @@ otherwaits(pl, stage, items) =
 # handles only what is in it: their pending changes are applied in front of
 # the stage, the other work on them waited for. Nothing walks the resources
 # a plan names at run: a run's host time grows with the shared resources its
-# stages write and with its inbox, not with the number of resources it names
-# (Simon, 2026-10-05).
+# stages write and with its inbox, not with the number of resources it names.
 notifyplans!(r) = foreach(pl -> pushinbox!(pl, r), namingplans(r))
 notifyreaders!(r, self) = foreach(pl -> pl === self || pushinbox!(pl, r), readingplans(r))
 
@@ -1955,7 +1971,7 @@ function acquire!(pool::Pool, kind, bytes; constraint = nothing)
         r = tryacquire!(pool, kind, bytes, constraint)
         r === nothing || return r
     end
-    while true                                        # open decision 16, ruled B3.9/B3.10
+    while true
         tokens = evictfor!(pool, bytes)
         isempty(tokens) && break
         waitfor(tokens)                               # outside every lock: the evicted storage's retirement tokens
@@ -1966,21 +1982,28 @@ function acquire!(pool::Pool, kind, bytes; constraint = nothing)
     throw(OutOfDeviceMemory(kind, bytes, budget(pool.device)))
 end
 
-# ── Eviction and restore (open decision 16, ruled B3.9/B3.10) ──
+# ── Eviction and restore ──
 # Arrays and images only. Acceleration structures are not evicted (a TLAS or
 # BLAS would need its sources back before a rebuild).
 
+# The contents of an evicted writable array: pageable host memory, not pool
+# memory, so the OS may compress it or swap it to disk (Mantle writes no
+# files). Page-aligned, so a device type may write it directly (plan, open
+# decision 14).
+struct HostCopy
+    bytes::Vector{UInt8}
+end
 struct Evicted{H}
-    host::H                       # a Region of Readback-kind memory with the contents, valid once `token` passed;
-                                  #   or the host array a read-only array keeps (B4.6): nothing was copied out
+    host::H                       # a HostCopy with the contents, valid once `token` passed;
+                                  #   or the host array a read-only array keeps: nothing was copied out
     token::Union{Nothing,Token}   # the eviction copy's submission; nothing for a read-only array
 end
 
 # Checked under the record's lock. Not evictable: anything a composite holds
-# (a TLAS or BLAS range, an array GPURef reads it through a cell that a
-# restore would have to reach), anything a plan recorded by handle (a restore
-# moves it, so the parts that recorded the handle would be recorded again,
-# decisions B3.11), anything a running plan names, lent or with pending
+# (a TLAS or BLAS range reads it through a cell that a restore would have
+# to reach), anything a plan recorded by handle (a restore
+# moves it, so the parts that recorded the handle would be recorded again),
+# anything a running plan names, lent or with pending
 # changes. Accesses still in flight are allowed: the eviction copy waits for
 # the last write through the sync state (a read need not wait for reads),
 # and the storage is retired with the tokens of every access in flight and
@@ -1997,14 +2020,12 @@ evictablestorage(::Union{Evicted,Released}) = false
 # The last pressure step in acquire!: evicts idle resources, least recently
 # used first (the token of the last access), until their bytes cover `need`,
 # and returns the tokens the evicted storage was retired with, for acquire! to
-# wait on. Each copy is a submission of its own; a read-only array (B4.6) is
+# wait on. Each copy is a submission of its own; a read-only array is
 # copied nowhere, its device copy is dropped. Under the record's lock the
 # resource becomes Evicted and the plans that name it (all register in its
-# dependents, resizing-and-raytracing.jl B.6) are marked. On a device whose
-# readback memory is the same heap as its device memory (Apple M5) a host copy
-# frees nothing: no eviction.
+# dependents, resizing-and-raytracing.jl B.6) are marked. The same on every
+# device type: the device allocation is freed, and the copy is pageable.
 function evictfor!(pool, need)
-    caps(pool.device).separatehostheap || return Token[]
     tokens = Token[]
     freed = 0
     for st in leastrecentlyused(pool)                 # weak references, a snapshot; each rechecked under its lock
@@ -2035,20 +2056,24 @@ function evictfor!(pool, need)
     end
     return tokens
 end
-# Where an evicted array's contents go, by a runtime property of the resource
-# (decisions B4.5, B4.6): a read-only array keeps the caller's host array, from
+# Where an evicted array's contents go, by a runtime property of the resource:
+# a read-only array keeps the caller's host array, from
 # which a restore uploads again, so nothing is acquired and nothing is copied
-# out; any other array gets Readback memory and an eviction copy.
+# out; any other array gets a HostCopy and an eviction copy.
 evictionhost!(pool, st) = evictionhost!(pool, st, st.source)
-evictionhost!(pool, st, ::Nothing) = acquirehost!(pool, bytes(st))
+evictionhost!(pool, st, ::Nothing) = HostCopy(pagealigned(UInt8, bytes(st)))
 evictionhost!(pool, st, source::AbstractArray) = source
 # Under the locks. The copy waits for the last write, and a later write waits
 # for it. A read-only array has no copy; it tells the naming plans itself, as
 # the eager access of a copy would have.
-copyout!(st, host::Region) = submitnow!(((st, Read()),)) do b, after
+# How the copy reaches pageable memory is the device type's (emitcopy! into a
+# HostCopy: imported host memory released after the copy, or a staging region
+# and a memcpy after the token; plan, open decision 14).
+copyout!(st, host::HostCopy) = submitnow!(((st, Read()),)) do b, after
     emitcopy!(b, nothing, copyof(after(st) => host), Deps((), ()))
 end
 copyout!(st, ::AbstractArray) = (notifyplans!(st); nothing)
+release!(pool, ::HostCopy) = nothing                # Julia memory: the GC frees it once the Evicted is gone
 release!(pool, ::AbstractArray) = nothing           # the caller's host array is never Mantle's to release
 
 # Restore: one of the steps a submitter applies (resizing-and-raytracing.jl
@@ -2061,21 +2086,24 @@ release!(pool, ::AbstractArray) = nothing           # the caller's host array is
 # (pl.running is set first). Under the locks submitwith! emits, for each
 # evicted resource locked, a Restore step and a cell write with the prepared
 # storage, in front of the changes pending on it: the Restore writes the
-# resource, so it waits for the eviction copy (recorded as a read); the host
-# copy is retired with the submission's token. A read-only array has no copy
-# to wait for and no host copy to retire: its Restore uploads from the host
-# array it keeps (B4.6), staged through upload memory prepare! acquires and
-# fills before the locks, like a store's copy at its call (how a large one is
-# staged is open). Storage missing or too small
+# resource, so it waits for the eviction copy (recorded as a read). Both
+# sources are pageable host memory, a HostCopy or the host array a read-only
+# array keeps (no copy to wait for), so the Restore uploads from upload
+# memory prepare! acquires and fills before the locks, like a store's copy at
+# its call (how a large one is staged is open); a HostCopy is dropped once the
+# submission's token has passed. Storage missing or too small
 # (evicted after the submitter looked, or resized meanwhile): Again, nothing
 # emitted. No eviction can happen while the locks are held.
 restoresteps(st, ::Union{Region,Reserve,Committed}, _) = ()   # not evicted, or restored meanwhile
 restoresteps(st, ::Evicted, ::Missing) = Again()
+# new: the restore storage prepare! allocated, with the upload region it
+# filled from the host copy before the locks (restoreupload).
 restoresteps(st, ev::Evicted, new) = sizeof(new) >= bytes(st) ?        # bytes(st): the requested size
-    (Restore(st, ev.host, new, min(sizeof(ev.host), bytes(st))), CellWrite(st, address(new), st.dims)) : Again()
+    (Restore(st, restoreupload(new), new, min(sizeof(ev.host), bytes(st))), CellWrite(st, address(new), st.dims)) : Again()
+Base.sizeof(h::HostCopy) = sizeof(h.bytes)
 isevicted(::Evicted) = true
 isevicted(_) = false
-emitstep!(b, s::Restore) = emitcopy!(b, nothing, copyof(s.hostcopy => s.new, s.bytes), Deps((), ()))
+emitstep!(b, s::Restore) = emitcopy!(b, nothing, copyof(s.upload => s.new, s.bytes), Deps((), ()))
 
 # Everything else that meets an evicted array, by dispatch on the storage:
 # - an eager call, a store, a resize!, becoming a composite's member: the
@@ -2089,8 +2117,9 @@ emitstep!(b, s::Restore) = emitcopy!(b, nothing, copyof(s.hostcopy => s.new, s.b
 # - an image: restored into a new image under a new, unused table index, like
 #   a regrown texture (resizing-and-raytracing.jl B.9): commands submitted
 #   before the eviction may still read the old index;
-# - the last hold: the host copy is retired after the eviction token (section
-#   10); a read-only array's host array is the caller's, nothing is released.
+# - the last hold: the host copy is dropped after the eviction token (section
+#   10; Julia memory, the GC frees it); a read-only array's host array is the
+#   caller's, nothing is released.
 # The pool's least-recently-used list holds weak references, so it keeps
 # nothing alive; a released state leaves it (section 10).
 
@@ -2227,14 +2256,14 @@ function addhold!(st)
     end
 end
 drophold!(st) = Threads.atomic_sub!(st.holds, 1) == 1 && release!(st)
-# A composite's hold (a TLAS or BLAS range, an array GPURef) is counted twice:
+# A composite's hold (a TLAS or BLAS range) is counted twice:
 # in holds, and in composites, which keeps the array from being evicted
 # (section 9).
 # Taken under the array's record lock (holdmember!, resizing-and-raytracing.jl
-# B.8b), so evictable, checked under the same lock, sees both or neither.
+# B.8), so evictable, checked under the same lock, sees both or neither.
 addcompositehold!(st::ArrayState) = (addhold!(st); Threads.atomic_add!(st.composites, 1))
 dropcompositehold!(st::ArrayState) = (Threads.atomic_sub!(st.composites, 1); drophold!(st))
-addcompositehold!(x) = addhold!(x)      # a BLAS or an array GPURef held by a range: never evicted anyway
+addcompositehold!(x) = addhold!(x)      # a BLAS held by a range: never evicted anyway
 dropcompositehold!(x) = drophold!(x)
 # A hold dropped once tokens have passed: a composite's old member after the
 # submission that applied its replacement (resizing-and-raytracing.jl B.4,
@@ -2264,11 +2293,11 @@ end
 # claim a token check under the record lock instead (`locked`).
 usable(a::MantleArray) = usable(a.state)
 usable(st::ArrayState) = st.sync.freed && throw(ArgumentError("use of an array after free!"))
-usable(r::GPURef) = r.sync.freed && throw(ArgumentError("use of a GPURef after free!"))   # ArrayBox and ValueBox
+usable(r::GPURef) = r.sync.freed && throw(ArgumentError("use of a GPURef after free!"))
 
-# Every resource a top-level node names (heldresources: all but the graph's
+# Every resource a node names (heldresources: all but the graph's
 # transients), wherever it sits in an argument (inside a Broadcasted, a
-# keyword, a view's parent, a when! flag, a group's launches): one hold per
+# keyword, a view's parent, a when! flag, a repeated group's count): one hold per
 # graph, counted per node so delete! knows when the last node naming it went.
 function name!(g::Graph, n::Node)
     for st in unique(heldresources(n))
@@ -2280,7 +2309,7 @@ end
 
 # free! of a root array drops the creator's hold once, whatever the number of
 # threads; the state's finalizer does the same through the inbox. A view is
-# the same type (B4.5), told apart by its own dims.
+# the same type, told apart by its own dims.
 function free!(a::MantleArray)
     a.dims === nothing || throw(ArgumentError("free! of a view; free its parent"))
     dropcreator!(a.state)
@@ -2308,7 +2337,7 @@ end
 # work, one item at a time:
 #   finalizer(st -> push!(pool(st).inbox, DropCreator(st)), state)   # settle!: dropcreator!(st)
 #   finalizer(g -> push!(pool(g.device).inbox, Release(g)), g)       # settle!: (@atomicswap g.freed = true) || release!(g)
-#   finalizer(x -> push!(pool(x).inbox, DropHolds(x)), x)            # an ArrayBox, TLAS, BLAS or RenderObject:
+#   finalizer(x -> push!(pool(x).inbox, DropHolds(x)), x)            # a TLAS, BLAS or RenderObject:
 #                                                                    #   settle! drops the composite holds it has
 # The state's finalizer runs only when no array, view, graph or composite
 # refers to it (g.named and the composites' members keep it alive), so it
@@ -2319,15 +2348,15 @@ end
 
 # ══ 11. Eager calls: the same dispatch!, submitted now ════════════════════════
 
-# A value GPURef argument is packed with its slot's address; a pending store
-# into the slot is applied in front of the launch by the same submission
-# (B4.9). Conditions exist in graphs only (when! takes a Graph or a Group): an
+# A GPURef argument is packed with its slot's address; a pending store
+# into the slot is applied in front of the launch by the same submission.
+# Conditions exist in graphs only (when! takes a Graph or a Group): an
 # eager call runs. Its arguments' pending changes, and the restore of an
 # evicted one, are applied in front of the launch by the same submission
 # (submitapplying). A write to a read-only array throws first, as in a graph
 # (checkwritable, section 2).
 function dispatch!(dev::Device, kernel, args::Tuple, ndrange; origin = nothing)
-    checkwritable(kernel, args)                           # B4.6: before anything is compiled or acquired
+    checkwritable(kernel, args)                           # before anything is compiled or acquired
     k = kernel!(dev, kernel, argtypes(args))
     ch = channel(dev, Main())
     packed = acquire!(pool(dev), Unified(), argumentbytes(k))   # fallible: before any lock
@@ -2357,11 +2386,11 @@ MantleArray(f, l::GraphDevice, T, dims...) = f(MantleArray(l, T, dims...))
 # same submission and the data up to the capacity, so length and data come from
 # the same point in the queue.
 Base.Array(a::MantleArray{T,N,<:Device}) where {T,N} = Array(a, memorykind(a))
-# An array in Readback memory (a graph's output): its pending changes first (a
+# An array in unified memory (`unified = true`, a graph's output): its pending changes first (a
 # submission of their own only if there are any), then a wait for every write
 # to it, eager or by a run (waitsfor: the runs' last tokens are read under the
 # naming plans' sync locks; the wait happens outside the locks), and a memcpy.
-function Base.Array(a::MantleArray, ::Readback)
+function Base.Array(a::MantleArray, ::Unified)
     usable(a)
     haspending(a) && submitnow!((b, after) -> nothing, ((a.state, Read()),))
     waitfor(lockresources(((a.state, Read()),)) do recs, x
@@ -2389,8 +2418,8 @@ end
 # An evicted array: Array(a, kind, ::Evicted) waits for the eviction token and
 # copies from the host copy, holding the record's lock (section 9).
 
-# A length a kernel writes, for size(a) and length(a) (section 1; decisions
-# B4.10, Julia's array API, so no second name): a submission of its own that
+# A length a kernel writes, for size(a) and length(a) (section 1; Julia's
+# array API, so no second name): a submission of its own that
 # applies what is pending on the array and copies its cell into Readback
 # memory, ordered after every write to the array, eager or by a run
 # (submitnow! records a read: its waits are the last write and the last runs
@@ -2455,10 +2484,10 @@ rawalloc(dev::LavaDevice, kind, bytes, constraint) =
 struct DeviceRegistry
     lock::ReentrantLock
     types::Vector{Type}             # LavaDevice (MetalDevice on macOS); CudaDevice/ROCmDevice from extensions
-    opened::Dict{Any,Device}        # hardware key => the device object
-    instance::Ref{Any}
+    opened::Dict{HardwareKey,Device}   # the device type and the driver's device UUID => the device object
+    instance::Base.RefValue{Union{Nothing,VkInstance}}
 end
-const REGISTRY = DeviceRegistry(ReentrantLock(), Type[], Dict{Any,Device}(), Ref{Any}(nothing))
+const REGISTRY = DeviceRegistry(ReentrantLock(), Type[], Dict{HardwareKey,Device}(), Ref{Union{Nothing,VkInstance}}(nothing))
 # livegraphs(REGISTRY): the graphs of every opened device, held weakly by the
 # device (for inhostfunction, resizing-and-raytracing.jl B.3).
 # Mantle's __init__: push!(REGISTRY.types, LavaDevice). MantleCUDAExt's: CudaDevice.

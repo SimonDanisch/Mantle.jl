@@ -1,53 +1,69 @@
-# Locks and threads (catalogue-core.md, table 13: THR). Any thread compiles,
-# records, runs and frees; builders are values; host waits are GC-safe and
-# never hold a sync-state, channel, pool or window lock; the lock order holds
-# (api.md section 5, "Lock order"; recording-plan.md "Ordering across graphs
-# and queues", "Threads"; internals.jl sections 6 and 8).
+# Locks and threads (THR). Any thread compiles, records, runs and frees;
+# builders are values; host waits are GC-safe and never hold a sync-state,
+# channel, pool or window lock; the lock order holds (api.md section 5, "Lock
+# order"; recording-plan.md "Ordering across graphs and queues", "Threads";
+# internals.jl sections 6 and 8).
 #
-# Doc keys as in the catalogue: A api.md, P recording-plan.md, I internals.jl,
-# D decisions.md. The lock tracker is the test hook Mantle.checklocks!
-# (helpers.jl): with it on, a lock taken out of order, or a sync-state,
-# channel, pool or window lock held in a host wait, throws.
+# The lock tracker is the test hook Mantle.checklocks! (helpers.jl): with it
+# on, a lock taken out of order, or a sync-state, channel, pool or window lock
+# held in a host wait, throws.
 
-using KernelAbstractions: @kernel, @index
-
-@kernel function thr_copy!(dst, src)
-    i = @index(Global)
+function thr_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing    # ndrange is rounded up to whole work-groups
     @inbounds dst[i] = src[i]
+    return nothing
 end
 
-@kernel function thr_fill!(a, v)
-    i = @index(Global)
+function thr_fill!(a, v)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     @inbounds a[i] = v
+    return nothing
 end
 
-@kernel function thr_addone!(dst, src)
-    i = @index(Global)
+function thr_addone!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = src[i] + Int32(1)
+    return nothing
 end
 
-@kernel function thr_add!(dst, a, b)
-    i = @index(Global)
+function thr_add!(dst, a, b)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = a[i] + b[i]
+    return nothing
 end
 
-@kernel function thr_accumulate!(acc, src)
-    i = @index(Global)
+function thr_accumulate!(acc, src)
+    i = KI.get_global_id().x
+    i <= length(acc) || return nothing
     @inbounds acc[i] += src[i]
+    return nothing
 end
 
-@kernel function thr_muladd!(x, k)           # x = 3x + k, wrapping: the result depends on the order of the calls
-    i = @index(Global)
+"""x = 3x + k, wrapping: the result depends on the order of the calls."""
+function thr_muladd!(x, k)
+    i = KI.get_global_id().x
+    i <= length(x) || return nothing
     @inbounds x[i] = x[i] * Int32(3) + k
+    return nothing
 end
 
-@kernel function thr_broadcastfirst!(dst, val)   # dst[i] = val[1]
-    i = @index(Global)
+"""dst[i] = val[1]."""
+function thr_broadcastfirst!(dst, val)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = val[1]
+    return nothing
 end
 
-@kernel function thr_setfirst!(a, v)
+"""a[1] = v, one work item."""
+function thr_setfirst!(a, v)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds a[1] = v
+    return nothing
 end
 
 """A host function: dst = src + 1."""
@@ -193,7 +209,7 @@ end
 function thr_fuzzwindowtask(dev, win, iterations)
     rng = Xoshiro(99)
     g = Graph(dev)
-    render!(g, win => Clear((0f0, 0f0, 0f0, 1f0))) do p end
+    clear!(g, win, (0f0, 0f0, 0f0, 1f0))
     for _ in 1:iterations
         resize!(win, rand(rng, 64:640), rand(rng, 64:480))
         run!(g)
@@ -202,9 +218,9 @@ function thr_fuzzwindowtask(dev, win, iterations)
     return true
 end
 
-# ── 13. Locks and threads (THR) ──
+# ── Locks and threads (THR) ──
 
-# A:459, P:1910: declare on task A, first run (compile and record) on task B, run on task C, free on task D: exact, and the freed graph throws.
+# api.md 6 (test_any_thread.jl), plan, phase 0: declare on task A, first run (compile and record) on task B, run on task C, free on task D: exact, and the freed graph throws.
 @case "THR-01" 3 begin
     dev = testdevice(); n = 1024
     out = MantleArray(dev, zeros(Int32, n))
@@ -221,7 +237,7 @@ end
     @test_throws ArgumentError run!(g)
 end
 
-# P:1876-1878: test_interleaved_recording. Four tasks on one thread, then four on four threads, each declaring a graph and making eager calls with a yield after every call, 10^4 rounds in all: exact.
+# api.md 6, plan, phase 0: test_interleaved_recording. Four tasks on one thread, then four on four threads, each declaring a graph and making eager calls with a yield after every call, 10^4 rounds in all: exact.
 @case "THR-02" 3 :long begin
     dev = testdevice()
     for spawn in (f -> (@async f()), f -> (Threads.@spawn f()))
@@ -230,7 +246,7 @@ end
     end
 end
 
-# P:1879-1880: test_builder_is_a_value. Two builders on one channel, both open: no field of the device (its pool included) or of the channel references either.
+# api.md 6, plan, phase 0: test_builder_is_a_value. Two builders on one channel, both open: no field of the device (its pool included) or of the channel references either.
 @case "THR-03" 3 begin
     dev = testdevice()
     ch = Mantle.channel(dev, Mantle.Main())           # the channel eager calls use (plan, Eager work)
@@ -240,7 +256,7 @@ end
     @test !thr_reaches(ch, b1) && !thr_reaches(ch, b2)
 end
 
-# P:738-740: task T1 waits for a 1.2 s GPU job (Array of its output); meanwhile GC.gc() on another task returns at once: the host wait is GC-safe.
+# plan, Ordering (host waits are GC-safe), api.md 4.2 (waitfor): task T1 waits for a 1.2 s GPU job (Array of its output); meanwhile GC.gc() on another task returns at once: the host wait is GC-safe.
 @case "THR-05" 3 begin
     dev = testdevice()
     if Threads.nthreads() < 2
@@ -257,7 +273,7 @@ end
     end
 end
 
-# A:439, D:476-477: the lock tracker on over a workload of two graphs with host nodes sharing an array and an arena part, eager calls and host reads on two tasks: no violation, exact.
+# api.md 5 (lock order; the host waits only with the graph lock and the run's arena-part holds held): the lock tracker on over a workload of two graphs with host nodes sharing an array and an arena part, eager calls and host reads on two tasks: no violation, exact.
 @case "THR-06" 3 begin
     dev = testdevice()
     Mantle.checklocks!(dev, true)
@@ -266,7 +282,7 @@ end
     @test exact
 end
 
-# A:421-433: fuzz, 8 tasks: six own a graph each (crossing reads and writes, host nodes, runs, frees and rebuilds, eager calls, stores), two make eager calls and stores, and from phase 7 one resizes a window between runs; lock tracker on: no deadlock, no violation.
+# api.md 5 (lock order): fuzz, 8 tasks: six own a graph each (crossing reads and writes, host nodes, runs, frees and rebuilds, eager calls, stores), two make eager calls and stores, and from phase 7 one resizes a window between runs; lock tracker on: no deadlock, no violation.
 @case "THR-07" 4 :long begin
     dev = testdevice(); n = 1024; iterations = 2000
     arrays = [MantleArray(dev, zeros(Int32, n)) for _ in 1:4]
@@ -279,7 +295,7 @@ end
     Mantle.checklocks!(dev, false)
 end
 
-# P:980-981: two tasks each make 500 eager calls x = 3x + k on their own array through the one channel: each task's program order is kept.
+# plan, Eager work (calls on one channel from two threads are ordered by the channel lock; each thread's program order is kept): two tasks each make 500 eager calls x = 3x + k on their own array through the one channel: each task's program order is kept.
 @case "THR-08" 3 begin
     dev = testdevice(); n = 256; steps = 500
     xs = [MantleArray(dev, ones(Int32, n)) for _ in 1:2]
@@ -289,7 +305,7 @@ end
     @test all(x -> Array(x) == fill(want, n), xs)
 end
 
-# I:1019-1028: g's host function throws inside lockgraph: the exception propagates, the owner is cleared, so the same task declares into g and runs it again, and another task can run it.
+# internals.jl section 6 (lockgraph), plan, Run (host nodes: a throwing host function): g's host function throws inside lockgraph: the exception propagates, the owner is cleared, so the same task declares into g and runs it again, and another task can run it.
 @case "THR-09" 3 begin
     dev = testdevice(); n = 64
     out, again = MantleArray(dev, Int32, n), MantleArray(dev, Int32, n)
@@ -308,22 +324,22 @@ end
     @test withtimeout(() -> fetch(Threads.@spawn (run!(g); true)), 30)
 end
 
-# I:244, I:237: a nested declaration, fill! of a graph array inside a repeat! body, reuses the graph lock: no self-deadlock; four iterations add four.
+# plan, Threads (declarations into one graph are serialized by the graph lock; a nested declaration of the same task reuses it), api.md 2.3, 2.4 (Group, repeat!): on one task, fill! of a graph array (GPUArrays' generic code, declared into the graph through the array's location) and a repeated group of the same graph: no self-deadlock; four iterations add four.
 @case "THR-10" 1 begin
     dev = testdevice(); n = 64
     acc = MantleArray(dev, zeros(Int32, n))
     g = Graph(dev); t = MantleArray(g, Int32, n)
     withtimeout(30) do
-        repeat!(g, 4) do i
-            fill!(t, Int32(1))
-            dispatch!(g, thr_accumulate!, (acc, t), n)
-        end
+        fill!(t, Int32(1))                       # into g, before the loop's place: arrays belong to the graph, not a group
+        loop = Group(g, "loop")
+        dispatch!(loop, thr_accumulate!, (acc, t), n)
+        repeat!(loop, 4)
     end
     run!(g)
     @test Array(acc) == fill(Int32(4), n)
 end
 
-# P:1301-1302, I:2100-2111: graph finalizers fire (GC.gc) while another task holds a's sync-state lock (its eager call blocked in submitnative! [FI]); the graphs named a, yet the finalizers only push to the inbox: no deadlock.
+# api.md 5 (finalizers push their hold drops through the pool's inbox), internals.jl section 9 (retire!: lock-free, safe in a finalizer): graph finalizers fire (GC.gc) while another task holds a's sync-state lock (its eager call blocked in submitnative! through FaultDevice); the graphs named a, yet the finalizers only push to the inbox: no deadlock.
 @case "THR-11" 3 begin
     d = FaultDevice(testdevice()); n = 1024
     a = MantleArray(d, zeros(Int32, n))
