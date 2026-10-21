@@ -1,3 +1,9 @@
+"""Create a native shader module from aligned SPIR-V bytes."""
+function create_shader_module(dev::VK.Device, bytes::Vector{UInt8})
+    @assert length(bytes) % 4 == 0 "SPIR-V must be 4-byte aligned"
+    return VK.ShaderModule(dev, length(bytes), reinterpret(UInt32, bytes))
+end
+
 # Compute pipeline creation and caching for Lava.jl
 #
 # Creates VkShaderModule + VkComputePipeline from validated SPIR-V binary.
@@ -314,16 +320,7 @@ Validates SPIR-V before creating the shader module.
 function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_name::String;
                                push_constant_size::Integer=8,
                                needs_tlas_descriptor::Bool=false)
-    # `spirv_content_hash`, NOT `hash(spirv_bytes)` — see its docstring. The
-    # length goes in too, so a truncation cannot alias a prefix.
-    #
-    # `ctx.id` leads, because a `LavaComputePipeline` owns a `VkPipeline`, a
-    # `VkShaderModule`, a pipeline layout and a descriptor-set layout, and every
-    # one of those belongs to the `VkDevice` that made it. Without the device in
-    # the key, two devices compiling the same kernel produce the same key and the
-    # second is handed the first's handles to bind into its own command buffer —
-    # undefined behaviour, and the same class as the `hash(spirv_bytes)` collision
-    # this line already carries a warning about (`GUARDRAILS.md` §8).
+    # Content/length and layout define reuse within this device-owned cache.
     cache_key = hash((spirv_content_hash(spirv_bytes), length(spirv_bytes),
                       entry_name, push_constant_size, needs_tlas_descriptor))
     cached = get(ctx.caches.pipelines, cache_key, nothing)
@@ -333,10 +330,7 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
 
     dev = ctx.device
 
-    # Create shader module from SPIR-V
-    @assert length(spirv_bytes) % 4 == 0 "SPIR-V binary must be 4-byte aligned"
-    code_u32 = reinterpret(UInt32, spirv_bytes)
-    shader_mod = VK.ShaderModule(dev, length(spirv_bytes), code_u32)
+    shader_mod = create_shader_module(dev, spirv_bytes)
     check_validation_errors!("vkCreateShaderModule (compute)")
 
     # Pipeline layout with push constant range
@@ -507,37 +501,22 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
     return result
 end
 
-"""
-    alloc_compute_tlas_descriptor_set(dev, pipeline, tlas) -> (DescriptorPool, DescriptorSet)
+"""Allocate a compute binding for tlas.accel. The caller must hold the pool through
+submission completion (or reusable-recording release); this path does not cache it."""
+alloc_compute_tlas_descriptor_set(dev::VK.Device, pipeline::LavaComputePipeline, tlas) =
+    alloc_tlas_descriptor_set(dev, pipeline.descriptor_set_layout::VK.DescriptorSetLayout, tlas.accel)
 
-Allocate a fresh descriptor pool and descriptor set that binds `tlas.accel`
-to set=0, binding=0 for a compute pipeline compiled with
-`needs_tlas_descriptor=true`. The caller MUST `pin!(batch, pool)` so the
-pool stays alive until the dispatch retires; once the batch is reclaimed
-the pool's destructor frees it.
-
-We deliberately do NOT cache here. A previous version keyed a cache by
-`(ds_layout, objectid(LavaTLAS))`, but `Raycore.sync!` produces a new
-LavaTLAS each rebuild → cache misses → unbounded growth → eviction with
-WeakRef-based HWTLAS-GC detection that lags Julia GC → pools destroyed
-while their descriptor sets were still in flight on the GPU. Per-dispatch
-allocation is microseconds and removes the entire class of bug.
-
-`tlas` is a `LavaTLAS` — declared later in raytracing/acceleration.jl.
-"""
-function alloc_compute_tlas_descriptor_set(dev::VK.Device,
-                                            pipeline::LavaComputePipeline,
-                                            tlas)  # LavaTLAS — declared later
-    ds_layout = pipeline.descriptor_set_layout::VK.DescriptorSetLayout
+"""Allocate and write a binding-0 acceleration-structure descriptor; caller owns pool/set lifetime."""
+function alloc_tlas_descriptor_set(dev::VK.Device, ds_layout::VK.DescriptorSetLayout, accel)
     desc_pool = VK.DescriptorPool(dev, UInt32(1), [
         VK.DescriptorPoolSize(
             VK.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, UInt32(1)),
     ])
-    desc_sets = @vk_checked "vkAllocateDescriptorSets (compute HWTLAS)" VK.allocate_descriptor_sets(dev,
+    desc_sets = @vk_checked "vkAllocateDescriptorSets (TLAS)" VK.allocate_descriptor_sets(dev,
         VK.DescriptorSetAllocateInfo(desc_pool, [ds_layout]))
     desc_set = desc_sets[1]
 
-    as_write = VK.WriteDescriptorSetAccelerationStructureKHR([tlas.accel])
+    as_write = VK.WriteDescriptorSetAccelerationStructureKHR([accel])
     write_ds = VK.WriteDescriptorSet(
         desc_set, UInt32(0), UInt32(0),
         VK.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,

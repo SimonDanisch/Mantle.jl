@@ -1188,27 +1188,10 @@ nothing to a second run. The plan's argument memory belongs to the plan for as
 long as the plan lives, which is what recording needs.
 """
 function packtrace!(e::Emitter, t::CompiledTrace)
-    am = e.args
-    off = t.argoff
-    c = t.compiled
-    owner = e.owner
-    # Held as the unmodelled path holds: the shaders are closures, and a
-    # per-material closest-hit holds the device arrays of the material it shades.
-    holdleaves!(owner, c.desc.raygen_func)
-    for chit in c.desc.closesthit_funcs
-        holdleaves!(owner, chit)
-    end
-    holdleaves!(owner, c.desc.miss_func)
-    holdleaves!(owner, c.desc.anyhit_func)     # a no-op on `nothing`
-    ad = LavaAdaptor(owner)
-    # `rawargs` first, so a `Ref` argument is re-read NOW rather than frozen at
-    # compile — that is how a new sample index reaches a plan compiled once.
-    raw = rawargs(t.args)
-    holdleaves!(owner, raw)
-    all_args = (Adapt.adapt(ad, c.desc.raygen_func), devargs(ad, raw)...)
-    pack_args_direct!(owner, am.ptr + off, am.address + off,
-                      c.offsets, c.argbytes, c.byval, all_args)
-    return am.address + off
+    am, c, off = e.args, t.compiled, t.argoff
+    # Resolve Ref-backed values now; the recording owns these bytes through every replay.
+    return packtrace!(e.owner, c.desc, rawargs(t.args), am.ptr + off, am.address + off,
+                      c.offsets, c.argbytes, c.byval)
 end
 
 """
@@ -1230,13 +1213,13 @@ function tracelaunch!(e::Emitter, r::DeviceRange, t::CompiledTrace, tlas,
     # core's), with the trace's gate folded in; nothing to prepare here.
     indirect = indirectof(e.args, t.indirect)
     argaddr = packtrace!(e, t)
-    emit_trace_indirect!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
+    emit_trace!(e, t.compiled.pipeline, tlas, argaddr, indirect, name)
     return nothing
 end
 
 function tracelaunch!(e::Emitter, n, t::CompiledTrace, tlas, name::AbstractString)
     argaddr = packtrace!(e, t)
-    emit_trace!(e, t.compiled.pipeline, tlas, argaddr, Int(n), 1, 1, name)
+    emit_trace!(e, t.compiled.pipeline, tlas, argaddr, (Int(n),1,1), name)
     return nothing
 end
 

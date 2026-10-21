@@ -1,20 +1,4 @@
-# `RayTracingPipeline` is Mantle's, in `src/raytracing/pipeline.jl`, and a pure
-# description: the compiled pipelines live in `DeviceCaches.rt_pipelines`, beside
-# the graphics ones, because a compiled pipeline is a device object.
-
-# No-op: cache is tied to the current VkContext's lifetime.  On reset_device!,
-# the whole module should re-initialize its pipelines anyway.
-
-
-# High-level Ray Tracing Pipeline API for Lava.jl
-#
-# Provides a Julia-function-based API:
-#   rt = RayTracingPipeline(raygen=f, closest_hit=g, miss=h)
-#   trace_rays!(rt, tlas, args...; width=W, height=H)
-#
-# Compilation is lazy — shaders are compiled on first use and cached.
-
-
+# Native RT compilation and eager submission; descriptions and shader ownership are core types.
 
 """
 Cache key for a compiled RT pipeline: what it is, plus what it is called with.
@@ -29,7 +13,23 @@ rt_cache_key(p::RayTracingPipeline, tt_key) =
 
 # `_normalise_chit` moved to core with the pipeline it normalises for.
 
-invalidate_stale_rt_cache!(::RayTracingPipeline) = nothing
+"""Retain shader/argument leaves and pack into caller-owned memory; works for eager and recorded traces."""
+function packtrace!(owner, pipeline::RayTracingPipeline, args::Tuple, ptr, address,
+                    offsets, argbytes, byval)
+    holdleaves!(owner, pipeline)
+    holdleaves!(owner, args)
+    ad = LavaAdaptor(owner)
+    all_args = (Adapt.adapt(ad, pipeline.raygen_func), devargs(ad, args)...)
+    pack_args_direct!(owner, ptr, address, offsets, argbytes, byval, all_args)
+    return address
+end
+
+function traceargbuffer!(owner, pipeline, args, raygen, offsets, byval)
+    argbytes = raygen.push_info.arg_buffer_size
+    buffer = get_arg_buffer(owner, argbytes + compute_inline_extra_from_byval(byval))
+    packtrace!(owner, pipeline, args, buffer.mapped_ptr, buffer.address, offsets, argbytes, byval)
+    return buffer
+end
 
 """
     trace_rays!(pipeline, tlas, args...; width, height, depth=1)
@@ -49,53 +49,18 @@ function trace_rays!(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipel
 
     oneshot!(bq; tag = :trace) do e
         owner = e.owner
-        holdleaves!(owner, pipeline.raygen_func)
-        for chit in pipeline.closesthit_funcs
-            holdleaves!(owner, chit)
-        end
-        holdleaves!(owner, pipeline.miss_func)
-        holdleaves!(owner, pipeline.anyhit_func)   # holdleaves!(::Nothing) is a no-op
-        holdleaves!(owner, args)
-        adaptor = LavaAdaptor(owner)
-        converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
-        converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
-
-        all_args = (converted_raygen, converted_args...)
-        inline_extra = compute_inline_extra_from_byval(byval_sizes)
-        total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
-
-        arg_buf = get_arg_buffer(owner, total_size)
-        pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
-                          raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
+        arg_buf = traceargbuffer!(owner, pipeline, args, raygen_compiled, offsets, byval_sizes)
         driver(bq).last_dispatch_info = "rt_trace w=$width h=$height"
-        emit_trace!(e, vk_pipeline, tlas, arg_buf.address, width, height, depth,
+        emit_trace!(e, vk_pipeline, tlas, arg_buf.address, (width,height,depth),
                     driver(bq).last_dispatch_info)
     end
     return nothing
 end
 
-"""
-    rt_compiled_for(bq, pipeline, args) -> (vk_pipeline, raygen, offsets, byval_sizes)
-
-The compiled ray-tracing pipeline for these argument types, from the device's
-cache or freshly built.
-
-A cold compile builds the shader binding table through `upload_typed!`, which
-is a submission of its own — so every caller does this BEFORE the one-shot it
-records into, where a submission in the middle would be a second command
-buffer. The ownerless adaptor below exists only to drive `Adapt`: the signature
-has to be the post-adapt one, because that is what `pack_args_direct!` writes,
-and the strip is pure.
-
-Extracted so `trace_rays!`, `trace_rays_indirect!` and
-`compile_dispatch(::Trace)` share it. Three copies would drift silently: a
-modelled trace resolves the pipeline at COMPILE and records later, so a
-difference in how the key is built shows up as a second pipeline for the same
-work rather than as an error.
-"""
+"""Resolve the current shader world and device-owned pipeline. Compile before opening a
+one-shot: cold SBT upload submits its own work. Keys use post-adaptation argument types."""
 function rt_compiled_for(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTracingPipeline, args)
     ctx = ctxof(bq)
-    invalidate_stale_rt_cache!(pipeline)
     tt_key = Tuple{map(arg_sigtype, args)...}
     key = rt_cache_key(pipeline, tt_key)
     world = Base.tls_world_age()
@@ -139,26 +104,9 @@ function trace_rays_indirect!(bq::SubmitChannel{<:VulkanQueue}, pipeline::RayTra
         indirectbarrier!(e, VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                          VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
 
-        holdleaves!(owner, pipeline.raygen_func)
-        for chit in pipeline.closesthit_funcs
-            holdleaves!(owner, chit)
-        end
-        holdleaves!(owner, pipeline.miss_func)
-        holdleaves!(owner, pipeline.anyhit_func)   # holdleaves!(::Nothing) is a no-op
-        holdleaves!(owner, args)
-        adaptor = LavaAdaptor(owner)
-        converted_raygen = Adapt.adapt(adaptor, pipeline.raygen_func)
-        converted_args = argmap(a -> Adapt.adapt(adaptor, a), args)
-
-        all_args = (converted_raygen, converted_args...)
-        inline_extra = compute_inline_extra_from_byval(byval_sizes)
-        total_size = raygen_compiled.push_info.arg_buffer_size + inline_extra
-
-        arg_buf = get_arg_buffer(owner, total_size)
-        pack_args_direct!(owner, arg_buf.mapped_ptr, arg_buf.address, offsets,
-                          raygen_compiled.push_info.arg_buffer_size, byval_sizes, all_args)
+        arg_buf = traceargbuffer!(owner, pipeline, args, raygen_compiled, offsets, byval_sizes)
         driver(bq).last_dispatch_info = "rt_indirect"
-        emit_trace_indirect!(e, vk_pipeline, tlas, arg_buf.address, indirect_view,
+        emit_trace!(e, vk_pipeline, tlas, arg_buf.address, indirect_view,
                              driver(bq).last_dispatch_info)
     end
     return nothing

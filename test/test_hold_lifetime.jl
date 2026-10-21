@@ -1,40 +1,4 @@
-# What a submission holds, and when it lets go — core's lifetime layer
-# (`graph/lifetime.jl`), driven with no device.
-#
-# Asserted as a PROPERTY and not as a mechanism: an `IdSet` of pinned objects on
-# the closed command buffer, a `pinned_refs` list of retained `DataRef`s beside
-# it, and a backend stamping `last_write_bq` at submit are three ways for a
-# backend to decide a lifetime. What they are for is the same either way, and it
-# is what this file pins:
-#
-#   * while a recording that names an object can still submit, a destroy
-#     requested for it is recorded and not performed;
-#   * once the device has passed the submission, the hold goes and the destroy
-#     that was owed runs;
-#   * an object nothing holds is destroyed at the first drain.
-#
-# A buffer a live recording names must never be destroyed underneath it. The
-# Vulkan backend's hardware-RT teardown (`destroy_now!` -> `unsafe_free!(as.storage)`
-# and its `preserves`) frees arrays that a still-open one-shot has already named.
-# Before the claim `hold!` takes, that path broke submit in two ways: it dropped
-# the array's own `DataRef`, and it destroyed the `VkManagedBuffer` while a
-# command buffer that names it could still be submitted.
-#
-# The timeline cannot answer this case on its own: a stamp is written at SUBMIT,
-# so a buffer named by a closed-but-unsubmitted recording reads as never
-# submitted and looks idle to every timeline check. `Stamp.holders` is the fact
-# that closes it, and it is core's: a destroy REQUESTED while something can still
-# submit is recorded and run later, never refused and never performed early.
-#
-# These were two device files, `test_held_buffer_lifetime.jl` (and before it
-# `test_pinned_buffer_lifetime.jl`, over `pins` / `free_requested` /
-# `deferred_frees` in the backend) and this one, both driving the Vulkan queue
-# and reading its buffers' state. The decisions are core's and need no device:
-# `SubmitChannel` is the Vulkan backend's submission model (Metal holds through
-# its batch's roots), so a fake channel over a counter is the honest way to pin
-# them on every machine. What a user sees of them on a real device — memory freed
-# mid-flight is not reused until the device is past it — is
-# `test_free_during_recording.jl`.
+# Recording holds, completion and deferred destruction, driven by a host timeline.
 
 using Test
 import Mantle
@@ -196,6 +160,28 @@ end
     Mantle.retire!(ch, d)
     Mantle.drain!(ch)
     @test destroyed(tl, d)
+end
+
+@testset "all ray-tracing stages retain captured arrays" begin
+    arrays = [Float32[i] for i in 1:4]
+    capture(a) = () -> a[1]
+    pipe = Mantle.RayTracingPipeline(; raygen=capture(arrays[1]),
+        closest_hit=(capture(arrays[2]),capture(arrays[3])),
+        miss=capture(arrays[4]), any_hit=capture(arrays[1]))
+    tl = HoldTimeline()
+    ch = HoldChannel(tl)
+    r = Mantle.acquire!(ch)
+    Mantle.holdleaves!(ch,pipe)
+    expected = arrays[[1,2,3,4,1]]
+    @test length(last(ch.holds)) == length(expected)
+    @test all(a === b for (a,b) in zip(last(ch.holds),expected))
+    tok = Mantle.submit!(ch,r)
+    Mantle.handover!(ch,tok,r)
+    @test all(a === b for (a,b) in zip(only(ch.outstanding).payload.holds,expected))
+    tl.completed = tok
+    Mantle.drain!(ch)
+    @test isempty(ch.outstanding)
+    @test all(isempty,ch.spare)
 end
 
 end  # @testset

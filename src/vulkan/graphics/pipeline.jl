@@ -54,8 +54,8 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
     end
 
     # Create shader modules
-    frag_mod = create_gfx_shader_module(dev, fragment_spirv)
-    front_mod = create_gfx_shader_module(dev, mesh_spirv === nothing ? vertex_spirv : mesh_spirv)
+    frag_mod = create_shader_module(dev, fragment_spirv)
+    front_mod = create_shader_module(dev, mesh_spirv === nothing ? vertex_spirv : mesh_spirv)
     front_bit = mesh_spirv === nothing ? VK.SHADER_STAGE_VERTEX_BIT : VK.SHADER_STAGE_MESH_BIT_EXT
     modules = VK.ShaderModule[front_mod, frag_mod]
 
@@ -67,7 +67,7 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
 
     # Optional: geometry shader
     if geometry_spirv !== nothing
-        geom_mod = create_gfx_shader_module(dev, geometry_spirv)
+        geom_mod = create_shader_module(dev, geometry_spirv)
         push!(modules, geom_mod)
         push!(stages, VK.PipelineShaderStageCreateInfo(
             VK.SHADER_STAGE_GEOMETRY_BIT, geom_mod, "main"))
@@ -75,8 +75,8 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
 
     # Optional: tessellation shaders
     if tess_ctrl_spirv !== nothing && tess_eval_spirv !== nothing
-        tc_mod = create_gfx_shader_module(dev, tess_ctrl_spirv)
-        te_mod = create_gfx_shader_module(dev, tess_eval_spirv)
+        tc_mod = create_shader_module(dev, tess_ctrl_spirv)
+        te_mod = create_shader_module(dev, tess_eval_spirv)
         push!(modules, tc_mod, te_mod)
         push!(stages, VK.PipelineShaderStageCreateInfo(
             VK.SHADER_STAGE_TESSELLATION_CONTROL_BIT, tc_mod, "main"))
@@ -249,11 +249,7 @@ colorformats(f::AbstractVector{VK.Format}) = collect(f)
 colorformats(T::Type) = [vkformat(VulkanAPI(), T)]
 colorformats(ts::AbstractVector{<:Type}) = [vkformat(VulkanAPI(), T) for T in ts]
 
-function create_gfx_shader_module(dev::VK.Device, spirv_bytes::Vector{UInt8})
-    @assert length(spirv_bytes) % 4 == 0 "SPIR-V binary must be 4-byte aligned"
-    code_u32 = reinterpret(UInt32, spirv_bytes)
-    VK.ShaderModule(dev, length(spirv_bytes), code_u32)
-end
+
 
 # ── Pipeline State Dispatch ──
 

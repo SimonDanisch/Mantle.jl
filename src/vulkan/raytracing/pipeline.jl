@@ -235,20 +235,7 @@ function create_rt_pipeline(ctx::VkContext,
     )
 end
 
-"""
-    get_rt_descriptor_set(pipeline, tlas) -> VK.DescriptorSet
-
-Look up (or lazily allocate) the RT descriptor set that binds `tlas.accel` for
-the layout used by `pipeline`.  The pool + set are stored on `tlas.desc_sets`,
-keyed by descriptor-set-layout Vulkan handle, so their lifetime tracks the
-LavaTLAS exactly: `destroy_now!(tlas)` destroys the pool, releasing the set.
-
-The previous implementation used a global cache keyed by `objectid(tlas)`,
-which broke after a freed LavaTLAS was GC'd and a new LavaTLAS reused that
-objectid: the cache returned a descriptor set bound to the destroyed
-VkAccelerationStructureKHR.  Per-HWTLAS storage eliminates that hazard
-entirely — no global cache, no objectid keying, no eviction policy.
-"""
+"""Cache binding-0 descriptors per TLAS/layout. The TLAS owns each pool through destruction."""
 function get_rt_descriptor_set(pipeline::LavaRTPipeline, tlas::LavaTLAS)
     layout_handle = UInt64(pipeline.descriptor_set_layout.vks)
     cached = get(tlas.desc_sets, layout_handle, nothing)
@@ -256,112 +243,46 @@ function get_rt_descriptor_set(pipeline::LavaRTPipeline, tlas::LavaTLAS)
         return cached[2]
     end
 
-    dev = pipeline.ctx.device
-    desc_pool = VK.DescriptorPool(dev, UInt32(1), [
-        VK.DescriptorPoolSize(
-            VK.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, UInt32(1)),
-    ])
-    desc_sets = @vk_checked "vkAllocateDescriptorSets (RT)" VK.allocate_descriptor_sets(dev,
-        VK.DescriptorSetAllocateInfo(desc_pool, [pipeline.descriptor_set_layout]))
-    desc_set = desc_sets[1]
-
-    as_write = VK.WriteDescriptorSetAccelerationStructureKHR([tlas.accel])
-    write_ds = VK.WriteDescriptorSet(
-        desc_set, UInt32(0), UInt32(0),
-        VK.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
-        VK.DescriptorImageInfo[],
-        VK.DescriptorBufferInfo[],
-        VK.BufferView[];
-        descriptor_count=UInt32(1),
-        next=as_write,
-    )
-    VK.update_descriptor_sets(dev, [write_ds], [])
-
+    desc_pool, desc_set = alloc_tlas_descriptor_set(pipeline.ctx.device,
+                                                   pipeline.descriptor_set_layout, tlas.accel)
     tlas.desc_sets[layout_handle] = (desc_pool, desc_set)
     return desc_set
 end
 
-"""
-    emit_trace!(emitter, pipeline, tlas, push_bda, width, height, depth, name)
-    emit_trace_indirect!(emitter, pipeline, tlas, push_bda, indirect, name)
-
-Write one ray-tracing dispatch, and nothing else. The descriptor set comes from
-`get_rt_descriptor_set`, which has always cached per (TLAS, layout) on the TLAS
-itself — so unlike the compute HWTLAS path there was never a per-dispatch pool
-here. The unmodelled forms (`trace_rays!`, `trace_rays_indirect!`) write these
-into a one-shot of their own; a plan's `trace!` writes them into its recording.
-"""
+"""Bind, retain and timestamp one trace. Launch is a (width,height,depth) tuple or a GPU command."""
 function emit_trace!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
-                     push_bda::UInt64, width::Integer, height::Integer,
-                     depth::Integer, name::AbstractString = "")
+                     push_bda::UInt64, launch, name::AbstractString="")
     cmd = e.cmd
     desc_set = get_rt_descriptor_set(pipeline, tlas)
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
     hold!(e, pipeline)
     VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-    # One hold covers BOTH levels: the top level references every bottom level it
-    # instances, so keeping it keeps them, and `syncbuf!(::LavaTLAS)` records
-    # each level's storage for ordering. `pintrace!` was a walk from outside
-    # doing the same thing to a list it could not see the end of.
+    # TLAS ownership retains every BLAS; syncbuf! registers their storage uses.
     hold!(e, tlas)
     push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
-    # Same optional GPU timestamps as the compute paths.  Without these the
-    # profiler is blind to hardware ray tracing — on an hw_accel=true frame
-    # that is where nearly all the GPU time goes, so a report built only
-    # from `cmd_dispatch` accounts for a small fraction of the frame and
-    # invites the wrong conclusion about what is slow.
     ts_slot = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name;
-                                             stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
-    VK.cmd_trace_rays_khr(cmd,
-        pipeline.raygen_region, pipeline.miss_region,
-        pipeline.hit_region, pipeline.callable_region,
-        UInt32(width), UInt32(height), UInt32(depth))
+        stage=VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
+    tracecommand!(e, pipeline, launch)
     maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts_slot, e.ctx.cmd_pipeline_barrier_fptr;
-        stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
+        stage=VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        stage_mask=UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
     emitted!(e, name)
     return nothing
 end
 
-function emit_trace_indirect!(e::Emitter, pipeline::LavaRTPipeline, tlas::LavaTLAS,
-                              push_bda::UInt64, indirect::LavaArray{UInt32,1},
-                              name::AbstractString = "")
-    cmd = e.cmd
-    desc_set = get_rt_descriptor_set(pipeline, tlas)
-    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.pipeline)
-    hold!(e, pipeline)
-    VK.cmd_bind_descriptor_sets(cmd, VK.PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-        pipeline.pipeline_layout, UInt32(0), [desc_set], UInt32[])
-    # One hold covers BOTH levels: the top level references every bottom level it
-    # instances, so keeping it keeps them, and `syncbuf!(::LavaTLAS)` records
-    # each level's storage for ordering. `pintrace!` was a walk from outside
-    # doing the same thing to a list it could not see the end of.
-    hold!(e, tlas)
-    push_constants_bda!(cmd, pipeline.pipeline_layout, pipeline.stage_flags, push_bda)
-    # bda_address(indirect) includes the view's element offset, so the address
-    # passed to Vulkan points exactly at the 3-UInt32 command.
-    ts_slot = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name;
-                                             stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR)
-    VK.cmd_trace_rays_indirect_khr(cmd,
-        pipeline.raygen_region, pipeline.miss_region,
-        pipeline.hit_region, pipeline.callable_region,
-        bda_address(indirect))
-    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts_slot, e.ctx.cmd_pipeline_barrier_fptr;
-        stage = VK.PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        stage_mask = UInt32(VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR))
-    # The ray count is READ BY THE DEVICE from here.
+function tracecommand!(e::Emitter, p::LavaRTPipeline, dims::NTuple{3,Integer})
+    VK.cmd_trace_rays_khr(e.cmd, p.raygen_region, p.miss_region, p.hit_region,
+                        p.callable_region, UInt32(dims[1]), UInt32(dims[2]), UInt32(dims[3]))
+    return nothing
+end
+
+function tracecommand!(e::Emitter, p::LavaRTPipeline, indirect::LavaArray{UInt32,1})
     hold!(e, indirect)
-    emitted!(e, name)
+    # Includes the command view's element offset; no count readback.
+    VK.cmd_trace_rays_indirect_khr(e.cmd, p.raygen_region, p.miss_region, p.hit_region,
+                                 p.callable_region, bda_address(indirect))
     return nothing
-end
-
-# ── Internal helpers ──
-
-function create_shader_module(dev, spirv_bytes::Vector{UInt8})
-    @assert length(spirv_bytes) % 4 == 0 "SPIR-V must be 4-byte aligned"
-    code_u32 = reinterpret(UInt32, spirv_bytes)
-    return VK.ShaderModule(dev, length(spirv_bytes), code_u32)
 end
 
 """Build the SBT for raygen + miss + `n_hit_groups` triangles-hit-groups.
