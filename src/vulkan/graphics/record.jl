@@ -1,27 +1,5 @@
-# The hand-recorded render pass, on this backend.
-#
-# Core's `pass!` (`graphics/record.jl`) is the imperative half of the graph:
-# same three primitives, with the ORDER decided by a caller instead of by a
-# plan. RayMakie's overlay compositor is written against it, and on this backend
-# every one of its verbs was a `MethodError` — the family that existed here took
-# an `Emitter` and was reached through `Base.get_extension`.
-#
-# What the walk uses is unchanged: `beginrender!`/`emitdraw!`/`endrender!` write
-# into the recording a plan owns (`graph.jl`). What is here is the other caller,
-# and it owns its own one-shot: `begin_render_pass!` opens one, `end_render_pass!`
-# seals and submits it, so a hand-recorded pass reaches the device the moment it
-# closes, exactly as every other ad hoc piece of work does.
-
-"""
-What a colour or depth attachment is to a hand-recorded pass: the view it draws
-through, and the image whose layout it transitions.
-
-Two handles and not one, which is why this type exists rather than passing the
-view: dynamic rendering binds a `VkImageView`, and the transition into
-`COLOR_ATTACHMENT_OPTIMAL` names the `VkImage`. Metal's attachment is one
-texture and needs no wrapper, which is why the value core passes through is
-opaque to it.
-"""
+# Vulkan implementation of portable pass recording; closing the pass submits its one-shot.
+"""Native attachment view, transition image and extent for a manual render pass."""
 struct VulkanAttachment
     view::VK.ImageView
     image::VK.Image
@@ -38,22 +16,11 @@ currentimage(w::VulkanWindow) =
     VulkanAttachment(target_view(w), target_image(w),
                      Int(w.extent.width), Int(w.extent.height))
 
-# `target_extent` is already answered for a framebuffer (`graph.jl`) and for a
-# window (`graphics/window.jl`); the two TARGET wrappers are core's and forward
-# to those.
+# Target extent/format forwarding is defined by the resource wrappers.
+"""eltypeof(::VK.Format) -> Type
 
-# `blittarget`, the element type of a target's colour attachment, is core's
-# (`graphics/resources.jl`): `target_format` answers with the `VkFormat`, and
-# `eltypeof` below is the Julia type it was lowered from.
-
-"""
-    eltypeof(::VK.Format) -> Type
-
-The Julia element type a format stores, for the formats a render target can
-have. The inverse of `vkformat`, and only over the attachment formats: a caller
-names a target's element type to compile a pipeline for it, and the target
-carries a driver format.
-"""
+Element type of a supported attachment format. This projection loses sRGB versus
+UNORM; graph compilation must retain the native format rather than round-trip it."""
 function eltypeof(f::VK.Format)
     f === VK.FORMAT_B8G8R8A8_SRGB   && return BGRA{N0f8}
     f === VK.FORMAT_B8G8R8A8_UNORM  && return BGRA{N0f8}
@@ -68,53 +35,40 @@ function eltypeof(f::VK.Format)
                         "here and to `vkformat`, which is the other direction"))
 end
 
-"""
-A draw compiled for a set of attachments: the pipeline, and the shader whose
-push constant block its arguments are packed against.
-
-`compile_draw` is core's name and takes ELEMENT TYPES for the attachments, like
-everywhere a caller names a format in Mantle; the lowering to `VkFormat` is
-here. The graph's `compiledraw` builds the same pair for a recorded pass and
-carries the plan's argument offset with it, which a hand-recorded draw has no
-use for — it packs into scratch the one-shot owns.
-"""
+"""Compiled native pipeline plus the shader defining its packed argument layout."""
 struct VulkanDraw
     pipeline::VulkanCompiledGraphicsPipeline
     shader::LavaGfxShader
 end
 
-# Both pipeline kinds, one body: the two differ in which stages get compiled and
-# which draw command is legal, and `resolve_shader_pair` /
-# `ensure_compiled_with_shader!` / `ismeshpipeline` are where each of those is
-# answered. Nothing here is different, so there is nothing to write twice.
+# Raster and mesh draws share preparation; stage wrappers select their native compilation.
 function compile_draw(dev::LavaDevice, p::Union{GraphicsPipeline, MeshPipeline},
                       color_formats, depth_format, vargs, fargs; bindings = nothing)
+    return compile_vulkan_draw(dev, p,
+        VK.Format[vkformat(VulkanAPI(), T) for T in color_formats],
+        depth_format === nothing ? VK.FORMAT_UNDEFINED : vkformat(VulkanAPI(), depth_format),
+        vargs, fargs; bindings)
+end
+
+"""Prepare graph/manual draws against exact native attachment formats.
+The caller chooses argument storage and retains the returned pipeline/shader."""
+function compile_vulkan_draw(dev::LavaDevice, p, color_formats, depth_format,
+                             vargs, fargs; bindings=nothing)
     ctx = dev.ctx
     ad = adaptor(dev.bq)
-    vtt = typeof(convert_args(devargs(ad, rawargs(vargs))))
-    ftt = typeof(convert_args(devargs(ad, rawargs(fargs))))
+    vtt = typeof(devargs(ad, rawargs(vargs)))
+    ftt = typeof(devargs(ad, rawargs(fargs)))
     vfn, vtt, ffn, ftt = resolve_shader_pair(p, vtt, ftt)
     shader, compiled = ensure_compiled_with_shader!(p, vfn, ffn, vtt, ftt; ctx,
-        color_format = VK.Format[vkformat(VulkanAPI(), T) for T in color_formats],
-        depth_format = depth_format === nothing ? VK.FORMAT_UNDEFINED :
-                                                  vkformat(VulkanAPI(), depth_format),
-        # The layout the sampled textures are bound through. A pipeline built
-        # without it has no set 0, and `vkCmdBindDescriptorSets` against it is
-        # invalid — which is why this travels with the compile and not only with
-        # the bind.
+        color_format = color_formats, depth_format,
+        # Sampled stages need the binding table's descriptor layout.
         descriptor_set_layout = bindings === nothing ? nothing : bindings.layout)
-    # Whichever stage's shader reads the block. The same rule the graph's
-    # `compiledraw` applies, and for the same reason: a fullscreen pass whose
-    # vertex stage takes nothing and whose fragment stage reads a g-buffer is
-    # the case that makes the usual answer wrong.
+    # Fragment arguments choose the packed layout when present.
     isempty(fargs) || (shader = get_or_compile_gfx(ffn, ftt, :fragment))
     return VulkanDraw(compiled, shader)
 end
 
-"""
-A pass open right now: the one-shot its commands are going into, and the emitter
-over it. Core holds it as an opaque handle.
-"""
+"""A manual pass owns one one-shot and its emitter until end_render_pass! submits it."""
 struct VulkanPassHandle{E}
     e::E
     o::OneShot

@@ -547,6 +547,8 @@ if _VULKAN_OK
     check_cache_invalidation(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_pipeline_publication.jl"))
     check_pipeline_publication(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_draw_argument_lifetime.jl"))
+    check_draw_argument_lifetime(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_tlas_mutation.jl"))
     check_tlas_mutation_allocations(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_video_sessions.jl"))

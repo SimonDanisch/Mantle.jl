@@ -106,7 +106,7 @@ end
 end
 
 # The same hazard, reached without any submit at all — which is the shape the
-# Vulkan graphics path has. `pack_gfx_args` takes an arg buffer for a draw and
+# Vulkan graphics path has. `pack_gfx_args_bda` takes an arg buffer for a draw and
 # only then records the draw. With nothing in flight and no draw recorded yet,
 # a sweep that resets the pool hands the buffer just given to draw k out again
 # to draw k+1, and the frame submits with two draws pointing at one

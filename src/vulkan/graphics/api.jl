@@ -1,19 +1,7 @@
-# High-level graphics API for Lava.jl
-#
-# GraphicsPipeline — the central type for configuring and dispatching
-# graphics shaders. Supports lazy compilation, caching, and multiple
-# draw dispatch via RenderTarget types.
+# Native shader/pipeline preparation, shared graphics argument packing and presentation.
+"""get_or_compile_gfx(f, tt, stage; config) -> LavaGfxShader
 
-
-# ── Lazy Compilation ──
-
-"""
-    get_or_compile_gfx(f, tt, stage; config) -> LavaGfxShader
-
-Stage `stage` of `f` with arguments of types `tt`, compiled for the code `f`
-has now (`Lava.cached_gfx_shader`). SPIR-V names no device, so one compile
-serves every context.
-"""
+Cache device-independent SPIR-V against current CodeInstance identity."""
 get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol; config=nothing) =
     cached_gfx_shader(f, tt, stage; config)
 
@@ -28,20 +16,8 @@ function pipeline_cache_key(shaders::Tuple, pipeline, color_format, depth_format
             descriptor_set_layout !== nothing)
 end
 
-"""Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
-function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
-                              vert_fn, frag_fn, tt_vertex, tt_fragment;
-                              ctx::VkContext,
-                              color_format=VK.FORMAT_B8G8R8A8_SRGB,
-                              depth_format=VK.FORMAT_UNDEFINED,
-                              descriptor_set_layout=nothing)
-    vert = get_or_compile_gfx(vert_fn, tt_vertex, :vertex)
-    compiled = ensure_compiled!(pipeline, vert_fn, frag_fn, tt_vertex, tt_fragment;
-        ctx, color_format, depth_format, descriptor_set_layout)
-    return vert, compiled
-end
-
-function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_vertex, tt_fragment;
+"""Compile native raster stages/pipeline and return (vertex_shader, pipeline)."""
+function ensure_compiled_with_shader!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_vertex, tt_fragment;
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
@@ -52,13 +28,7 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
     # Optional stages
     geom = nothing
     if pipeline.geometry !== nothing
-        # WRAPPED, like the other two stages: a geometry body takes
-        # `(emitter, primitive, args...)` and emits through `emit!`, and the
-        # wrapper is what reads the arrayed inputs into `primitive` and turns an
-        # emit into "write the outputs, then `emit_vertex!`". Compiling the bare
-        # function reaches it with the vertex stage's argument tuple and no
-        # method — `lines_geometry` has two leading parameters that nothing
-        # supplies.
+        # Geometry wrappers supply the emitter and primitive inputs before user arguments.
         geom_cfg = Mantle.stageconfig(pipeline.geometry)
         geom = get_or_compile_gfx(geometrystage(pipeline, geom_cfg), tt_vertex,
                                   :geometry; config=geom_cfg)
@@ -74,8 +44,8 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
 
     cache_key = pipeline_cache_key((vert, frag, geom, tc, te), pipeline, color_format,
                                    depth_format, descriptor_set_layout)
-    return get!(ctx.caches.gfx_pipelines, cache_key) do
-        compiled = create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
+    compiled = get!(ctx.caches.gfx_pipelines, cache_key) do
+        return create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
             ctx, blend=pipeline.blend, cull=pipeline.cull,
             topology=pipeline.topology, depth=pipeline.depth,
             color_format=color_format, depth_format=depth_format,
@@ -85,31 +55,12 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
             tess_eval_spirv=te === nothing ? nothing : te.spirv_bytes,
             tess_config=tess_cfg,
             descriptor_set_layout=descriptor_set_layout)
-
-        return compiled
     end
+    return vert, compiled
 end
 
-"""
-The mesh-pipeline half of [`ensure_compiled_with_shader!`](@ref).
-
-Returns the MESH stage's shader as the first element, for the same reason the
-classic one returns the vertex stage's: it is the stage the argument block is
-laid out to unless the fragment stage takes arguments of its own.
-"""
-function ensure_compiled_with_shader!(pipeline::MeshPipeline,
-                              mesh_fn, frag_fn, tt_mesh, tt_fragment;
-                              ctx::VkContext,
-                              color_format=VK.FORMAT_B8G8R8A8_SRGB,
-                              depth_format=VK.FORMAT_UNDEFINED,
-                              descriptor_set_layout=nothing)
-    mesh = get_or_compile_gfx(mesh_fn, tt_mesh, :mesh; config = Mantle.meshconfig(pipeline))
-    compiled = ensure_compiled!(pipeline, mesh_fn, frag_fn, tt_mesh, tt_fragment;
-        ctx, color_format, depth_format, descriptor_set_layout)
-    return mesh, compiled
-end
-
-function ensure_compiled!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_fragment;
+"""Compile native mesh stages/pipeline and return (mesh_shader, pipeline)."""
+function ensure_compiled_with_shader!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_fragment;
                               color_format=VK.FORMAT_B8G8R8A8_SRGB,
                               depth_format=VK.FORMAT_UNDEFINED,
                               descriptor_set_layout=nothing,
@@ -123,73 +74,39 @@ function ensure_compiled!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_
 
     cache_key = pipeline_cache_key((mesh, frag), pipeline, color_format, depth_format,
                                    descriptor_set_layout)
-    return get!(ctx.caches.gfx_pipelines, cache_key) do
+    compiled = get!(ctx.caches.gfx_pipelines, cache_key) do
         # No `topology`: a mesh stage has no input stream to assemble, and what it
         # EMITS is an execution mode of its own entry point rather than pipeline
         # state — `MeshConfig` carries it and the compile above reads it there.
-        compiled = create_graphics_pipeline(nothing, frag.spirv_bytes;
+        return create_graphics_pipeline(nothing, frag.spirv_bytes;
             ctx, mesh_spirv=mesh.spirv_bytes,
             blend=pipeline.blend, cull=pipeline.cull, depth=pipeline.depth,
             color_format=color_format, depth_format=depth_format,
             push_constant_size=max(mesh.push_info.push_size, frag.push_info.push_size),
             descriptor_set_layout=descriptor_set_layout)
-
-        return compiled
     end
+    return mesh, compiled
 end
+
+ensure_compiled!(pipeline::Union{GraphicsPipeline,MeshPipeline}, args...; kw...) =
+    last(ensure_compiled_with_shader!(pipeline, args...; kw...))
 
 # ── Draw API ──
 
-"""Convert args to device-side values (LavaArray → LavaDeviceArray, scalars pass through)."""
-convert_args(args::Tuple) = map(arg -> arg isa LavaArray ? LavaDeviceArray(arg) : arg, args)
-convert_args(::Tuple{}) = ()
-
-"""
-Resolve the vertex and fragment callables and their type tuples.
-
-Always wrapped, and there is no second path: a `varyings` list beside numbered
-`gfx_output`/`gfx_input` locations is two ways to declare one interface, and the
-numbered one cannot express a pipeline with a geometry stage at all.
-`Mantle.outputtype` answers it from the stage that actually feeds the
-rasteriser, which is the geometry stage when there is one.
-
-An empty output list is a real answer: a shadow pass writes only its clip
-position, and that is a pipeline whose fragment stage reads nothing.
-
-Returns (vert_fn, vert_tt, frag_fn, frag_tt).
-"""
+"""Resolve wrapped vertex/fragment functions and type tuples. Varyings come from
+the last geometry-producing stage; empty outputs support depth-only passes."""
 function resolve_shader_pair(pipeline, vert_tt::Type, frag_tt::Type)
     last = Mantle.lastgeometrystage(pipeline)
     vout = Mantle.outputtype(last)
-    # Which names the declaration marked `Flat`. Both wrappers get the same
-    # tuple, because Vulkan requires the producing and consuming stage to agree
-    # on the interpolation of every location: a disagreement is a link failure
-    # rather than a wrong picture, and an integer varying has no other legal
-    # form. `outputtype` strips the marker — flatness says WHERE a value is
-    # delivered, never what it is — so it has to travel beside the type.
+    # Both stages must agree on Flat interpolation, including integer varyings.
     flats = Mantle.flatoutputs(last)
     wrapped_vert = VertexWrapper{typeof(Mantle.stagefunction(pipeline.vertex)), flats}()
     wrapped_frag = FragmentWrapper{typeof(Mantle.stagefunction(pipeline.fragment)), vout, flats}()
     return wrapped_vert, vert_tt, wrapped_frag, frag_tt
 end
 
-"""
-The mesh and fragment callables of a [`MeshPipeline`](@ref), and their type
-tuples.
-
-Same shape as the classic pair so every caller — `compile_draw`, the graph's
-`compiledraw`, `vertextouches` — stays one function.
-
-BOTH sides are told the declaration. The mesh stage numbers each field it writes
-by its place in `outputtype` — not by its place in the tuple the body writes,
-which agreed with the declaration only for a body that wrote every output per
-vertex and in order — and writes the `Flat` ones to the PRIMITIVE plane, a
-`PerPrimitiveEXT` array, whether the body names them per vertex or through
-`set_mesh_primitive_data!`; the topology says how many vertices a primitive has,
-which is what a per-vertex `Flat` field is attributed to a primitive by. The
-fragment stage reads those same names as per-primitive inputs (the fourth
-parameter), because Vulkan requires `PerPrimitiveEXT` on both sides of a location.
-"""
+"""Resolve mesh/fragment wrappers against one output declaration. Flat outputs
+use primitive storage and PerPrimitiveEXT on both producing/consuming stages."""
 function resolve_shader_pair(pipeline::MeshPipeline, mesh_tt::Type, frag_tt::Type)
     vout = Mantle.outputtype(pipeline.mesh)
     flats = Mantle.flatoutputs(pipeline.mesh)
@@ -200,15 +117,8 @@ function resolve_shader_pair(pipeline::MeshPipeline, mesh_tt::Type, frag_tt::Typ
     return wrapped_mesh, mesh_tt, wrapped_frag, frag_tt
 end
 
-"""
-The geometry stage, wrapped: the vertex stage's outputs are what the primitive
-arrays, the geometry stage's own outputs are what an emit writes, and the input
-topology says how many vertices a primitive has.
-
-`Mantle.outputtype` twice over, because the two stages' declarations are
-different things: `VIn` is what this stage READS per vertex and `Out` what it
-WRITES per emit.
-"""
+"""Wrap geometry inputs from the vertex output declaration, outputs from its own
+declaration, and primitive width from input topology."""
 function geometrystage(pipeline::GraphicsPipeline, cfg)
     gs = pipeline.geometry
     return GeometryWrapper{typeof(Mantle.stagefunction(gs)),
@@ -218,80 +128,28 @@ function geometrystage(pipeline::GraphicsPipeline, cfg)
                            Mantle.primitivevertices(cfg.input_topology)}()
 end
 
-# `draw!(device, pipeline, target, count)` is CORE's — `src/graphics/record.jl`.
-# Two methods stood here and did their own image transitions, their own
-# `vkCmdBeginRendering` and their own bind through `vk_draw!`, sharing nothing
-# with `begin_pass!`/`record_draw!`. That is why they never learned mesh
-# pipelines and why their barrier logic had to be fixed a second time.
+# Portable draw sequencing lives in graphics/record.jl.
+"""Hold original argument leaves, adapt to device values, and pack into caller-owned
+mapped argument memory. Shared by graph slots and manual draw scratch."""
+function pack_gfx_args!(owner::Closed, args, ptr::Ptr{UInt8}, address::UInt64,
+                        info::PushConstantInfo)
+    holdleaves!(owner, args)
+    converted = devargs(LavaAdaptor(owner), args)
+    pack_args_direct!(owner, ptr, address, info.arg_offsets, info.arg_buffer_size,
+                      info.byval_llvm_sizes, converted)
+    return nothing
+end
 
-"""
-    pack_gfx_args_bda(owner, args, push_info) -> UInt64
-
-Pack a draw's arguments and return the buffer device address to push, rather than
-an eight-byte `Vector` holding it.
-
-The push constant is one BDA and always has been; wrapping it in a heap array
-allocated 48 bytes of header plus the payload *per draw per frame*, which at a
-hundred plots is most of a frame's garbage. `pack_gfx_args` still returns the
-vector for callers written against it.
-"""
+"Pack manual draw arguments into the owner's scratch and return its device address."
 function pack_gfx_args_bda(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
     (push_info.push_size == 0 || isempty(args)) && return UInt64(0)
-    adaptor = LavaAdaptor(batch)
-    converted = argmap(a -> Adapt.adapt(adaptor, a), args)
-    byval_sizes = push_info.byval_llvm_sizes
-    total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(byval_sizes)
+    total_size = push_info.arg_buffer_size + compute_inline_extra_from_byval(push_info.byval_llvm_sizes)
     arg_buf = get_arg_buffer(batch, total_size)
-    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, push_info.arg_offsets,
-                      push_info.arg_buffer_size, byval_sizes, converted)
+    pack_gfx_args!(batch, args, arg_buf.mapped_ptr, arg_buf.address, push_info)
     return arg_buf.address
 end
 
-function pack_gfx_args(batch::O, args, push_info::PushConstantInfo) where {O<:Closed}
-    push_info.push_size == 0 && return UInt8[]
-    isempty(args) && return UInt8[]
-
-    # LavaAdaptor is the single point that strips LavaArray → LavaDeviceArray
-    # AND pins the original into the owner's pinned set.  Adapt.jl's recursion
-    # handles wrapper structs / Broadcasted / NamedTuple, so any nested
-    # LavaArray gets both its pointer strip and its pin in the same pass.
-    adaptor = LavaAdaptor(batch)
-    converted = argmap(a -> Adapt.adapt(adaptor, a), args)
-
-    # Use the same arg buffer packing as compute: inline byval structs into
-    # the arg buffer with self-referencing BDA pointers.
-    offsets = push_info.arg_offsets      # precomputed: this ran per draw per frame
-    byval_sizes = push_info.byval_llvm_sizes
-
-    inline_extra = compute_inline_extra_from_byval(byval_sizes)
-    total_size = push_info.arg_buffer_size + inline_extra
-
-    arg_buf = get_arg_buffer(batch, total_size)
-
-    pack_args_direct!(batch, arg_buf.mapped_ptr, arg_buf.address, offsets,
-                       push_info.arg_buffer_size, byval_sizes, converted)
-
-    # Push constant = BDA of arg buffer
-    push_data = Vector{UInt8}(undef, 8)
-    GC.@preserve push_data begin
-        unsafe_store!(Ptr{UInt64}(pointer(push_data)), arg_buf.address)
-    end
-    return push_data
-end
-
-# Empty-args variant
-function pack_gfx_args(::Closed, args, ::Nothing=nothing)
-    isempty(args) && return UInt8[]
-    error("pack_gfx_args requires push_info for non-empty args.")
-end
-
-"""
-    presentready!(e, win)
-
-Transition the acquired swapchain image to `PRESENT_SRC`, as the last command
-of the frame's one-shot. The frame draws into the image in
-`COLOR_ATTACHMENT_OPTIMAL`; the presentation engine wants it in this one.
-"""
+"""Transition the drawn swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC; retain its window."""
 function presentready!(e::Emitter, win::VulkanWindow)
     image = win.images[win.current_image_idx + 1]
     transition_image!(e.cmd, image,
@@ -304,15 +162,7 @@ function presentready!(e::Emitter, win::VulkanWindow)
     return nothing
 end
 
-"""
-    presentuntouched!(e, win)
-
-The whole of an abandoned frame's one-shot: the acquired image to `PRESENT_SRC`
-from `UNDEFINED`, its contents discarded, so it can be presented without having
-been drawn into. From `UNDEFINED` and not from the layout the last frame left it
-in, because an acquired image's contents are undefined by the specification and
-a transition from `UNDEFINED` is valid whatever the presentation engine did.
-"""
+"""Discard an acquired, undrawn image and transition UNDEFINED to PRESENT_SRC; retain its window."""
 function presentuntouched!(e::Emitter, win::VulkanWindow)
     image = win.images[win.current_image_idx + 1]
     transition_image!(e.cmd, image,
@@ -324,25 +174,10 @@ function presentuntouched!(e::Emitter, win::VulkanWindow)
     return nothing
 end
 
-"""
-    submit_and_present!(bq, win, frame) -> token
+"""submit_and_present!(bq, win, frame) -> token
 
-Submit the frame's one-shot and present.
-
-Internal to this backend: the portable verb is `present_frame!(device, window)`,
-which builds the one-shot and calls this. A caller outside the backend has no
-one-shot to pass, and which channel a frame submits on is Mantle's to decide.
-
-One submission, through the same `submit!` everything else goes through, with
-the two extra semaphores a swapchain image needs — wait for the image to be
-available before colour attachment writes, signal render-finished for the
-present — and the frame slot's fence, which `acquire_next_image!` waits on
-before it reuses the slot. The one-shot must end with [`presentready!`](@ref).
-
-One route: nothing takes an open batch over and submits it by a second one,
-with a list of sealed segments and bookkeeping of which of them a recording
-lent it.
-"""
+Submit a sealed frame with image-available wait, per-image render-finished signal
+and frame-slot fence, then present. The caller records the final image transition."""
 function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow,
                              frame::OneShot)
     win.acquired || error("present_frame!: no image acquired (call acquire_next_image! first)")
@@ -362,19 +197,7 @@ function submit_and_present!(bq::SubmitChannel{<:VulkanQueue}, win::VulkanWindow
     return tok
 end
 
-# ── Mantle's shader builtins, on this backend ────────────────────────────────
-#
-# The counterpart to the Metal backend's block, and the reason both exist: a
-# shader names `Mantle.vertex_index()` and the compiler that is running decides
-# what that means. `@lava_device_override` is Lava's wrapper around the same
-# method-table overlay `@device_override` is on the other side.
-#
-# forgotten here is a `MethodError` naming it rather than a shader that reads
-# the wrong thing.
-#
-
-# Both stages exist here. Declared in `graphics/commands.jl` with a `false`
-# default, so this is the opt-in and Metal's silence is its answer.
+# Native Vulkan graphics capabilities.
 Mantle.supports_geometry_stage(::LavaBackend) = true
 Mantle.supports_tessellation(::LavaBackend) = true
 

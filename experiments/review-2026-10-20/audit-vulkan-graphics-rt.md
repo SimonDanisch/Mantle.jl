@@ -1,5 +1,9 @@
 # Audit: src/vulkan/graphics and src/vulkan/raytracing against docs/api.md
 
+Historical inventory. Implemented consolidations are tracked in
+[consolidation-order.md](consolidation-order.md); locations/counts below belong
+to this audit snapshot. Absence of consumer call sites alone does not prove dead code.
+
 Scope: every line of `src/vulkan/graphics/{pipeline,framebuffer,window,api,textures,record}.jl`
 (2 659 lines) and `src/vulkan/raytracing/{acceleration,hwtlas,pipeline,raycore_compat,shaders,instance_record}.jl`
 (3 699 lines); 6 358 lines in total. Targets read first: `docs/api.md` sections 2.6, 2.6b, 2.7,
@@ -219,13 +223,15 @@ shader, L81-84), `VulkanPassHandle` (emitter + one-shot, L118-121), `HardwareAcc
   `RTRay`/`RTHitResult` (L7). Still needed in part: Hikari calls `trace_closest_hits!`
   (`Hikari/src/integrators/volpath/hw-rt.jl` L42) and `trace_closest_hits_indirect!`
   (`volpath.jl` L58), and `hwtlas.jl` L821-830 makes one `HardwareAccel` per `VulkanTLAS` to hold
-  the RT pipeline. Not needed: the any-hit variants (L101-110, L157-175; callers only in Mantle
-  tests), and `HardwareAccel(tlas; ctx)` (L57-62), which converts a Raycore CPU `TLAS` and has no
-  caller.
-- Dead chain in acceleration.jl: `build_hw_accel_from_tlas` L1364-1597, `build_blas_pooled`
+  the RT pipeline. The any-hit variants (L101-110, L157-175) have Mantle test callers;
+  `HardwareAccel(tlas; ctx)` (L57-62) converts a Raycore CPU TLAS. Test-only or
+  unobserved consumer usage is not a deletion proof for either capability.
+- Bulk Raycore import chain in acceleration.jl: `build_hw_accel_from_tlas` L1364-1597, `build_blas_pooled`
   L1146-1299, `build_blas_from_primitives` L1312-1335, `to_cpu_vector` L1601-1614,
-  `create_as_input_pool` L741-776 — no call site in `src`, `test`, Hikari, RayMakie, Raycore
-  (≈ 530 lines).
+  `create_as_input_pool` L741-776 (≈ 530 lines). Reachable through
+  `HardwareAccel(tlas; ctx)`; preserve its batched pooled allocation until that
+  entry point is replaced or explicitly retired. No consumer call site was found
+  in the audited packages; that does not make the chain unreachable.
 - `pack_gfx_args` vector form api.jl L268-304 ("for callers written against it", L253-254): no
   caller. `LavaTexture` textures.jl L286 and `Base.:*(tex, sam)` L285: no caller.
   `VulkanTexture1D` L23-31: no constructor, no caller (only a docstring mention in

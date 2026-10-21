@@ -864,39 +864,11 @@ shader reads it. The layout is core's (`argoff`); what is compiled is this
 backend's.
 """
 function compiledraw(c::Compile{LavaDevice}, p::Pass, d, argoff::Int)
-    ad = adaptor(c.graph.dev.bq)
-    args = devargs(ad, rawargs(drawargs(d.args)))
-    vtt = typeof(convert_args(args))
-    ftt = typeof(convert_args(devargs(ad, rawargs(d.frag_args))))
-    vfn, vtt, ffn, ftt = resolve_shader_pair(d.shader, vtt, ftt)
-    # The pass says whether there is a depth attachment, and with dynamic
-    # rendering the pipeline has to declare the same thing: a pipeline built for
-    # one and drawn into a pass without it is invalid, and the reverse is too.
-    shader, compiled = ensure_compiled_with_shader!(d.shader, vfn, ffn, vtt, ftt;
-                                                    ctx = c.graph.dev.ctx,
-                                                    color_format = VK.Format[target_format(t) for t in p.targets],
-                                                    depth_format = p.depth === nothing ?
-                                                        VK.FORMAT_UNDEFINED :
-                                                        target_format(p.depth),
-                                                    # What the draw samples, which
-                                                    # `DrawCall.bindings` exists to carry: a
-                                                    # pipeline whose fragment stage declares a
-                                                    # texture and whose layout declares no set
-                                                    # is a SPIR-V referencing a binding the
-                                                    # layout does not have. The hand-recorded
-                                                    # path passed this and the graph did not, so
-                                                    # the first sampled draw declared into a
-                                                    # graph — every Makie line, which samples its
-                                                    # dash pattern — segfaulted the driver inside
-                                                    # `vkCreateGraphicsPipelines`.
-                                                    descriptor_set_layout =
-                                                        d.bindings === nothing ? nothing :
-                                                        d.bindings.layout)
-    # The block is laid out to whichever stage's shader reads it.
-    # `ensure_compiled_with_shader!` hands back the vertex shader because that
-    # is the usual answer; a fullscreen pass whose vertex stage takes nothing
-    # and whose fragment stage reads a g-buffer is the other one.
-    isempty(d.frag_args) || (shader = get_or_compile_gfx(ffn, ftt, :fragment))
+    native = compile_vulkan_draw(c.graph.dev, d.shader,
+        VK.Format[target_format(t) for t in p.targets],
+        p.depth === nothing ? VK.FORMAT_UNDEFINED : target_format(p.depth),
+        drawargs(d.args), d.frag_args; bindings=d.bindings)
+    shader, compiled = native.shader, native.pipeline
     # The CELL when there is one, so a rebind reaches the packer. A plan holding
     # one is not `recordable`, so it is never frozen into a recording.
     packed = packedargs(d.args, d.args, d.frag_args)
@@ -1070,13 +1042,8 @@ every Makie frame's draws are cells, and none could be recorded or run.
 function packdraw!(e::Emitter, d::CompiledDraw)
     am = e.args
     off = d.argoff
-    info = d.shader.push_info
-    raw = rawargs(drawargs(d.args))
-    holdleaves!(e.owner, raw)
-    pack_args_direct!(e.owner, am.ptr + off, am.address + off, info.arg_offsets,
-                      info.arg_buffer_size, info.byval_llvm_sizes,
-                      devargs(adaptor(e), raw))
-    return nothing
+    return pack_gfx_args!(e.owner, rawargs(drawargs(d.args)),
+                          am.ptr + off, am.address + off, d.shader.push_info)
 end
 
 """

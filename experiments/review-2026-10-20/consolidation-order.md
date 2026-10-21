@@ -16,6 +16,7 @@ error behavior and native requirements. Measure implementation and prose separat
 | [Kernel preparation](consolidation-kernel-preparation.md) | Eager and declared KI preparation, KA construction and capture validation. |
 | [Geometry/strides](consolidation-geometry.md) | Shared support pairs, simplex reductions, contact interpolation/reservation, transform construction and stride swapping. Native geometry, contention, tails and numerical checks preserve contracts. |
 | [GEMM generation](consolidation-gemm-generator.md) | One wide/narrow/ablation body and one tile-product generator for all eight staged families; distinct measured schedules remain. Native output, shader and timing checks preserve behavior. |
+| [Draw preparation/packing](consolidation-draw.md) | Graph/manual shader preparation and argument packing; unused legacy packer deleted. Shared retention fixes manual nested-array lifetime, qualified by freeing before submission. |
 | [Trace packing/setup](consolidation-trace.md) | Eager/recorded argument packing, direct/indirect native bindings/timestamps, shader modules and TLAS descriptor writes. |
 | [TLAS mutations](consolidation-tlas-mutation.md) | Shared batch state, geometry registration, push/update/delete/visibility/range algorithms; backend metadata copies and unused offset state deleted. |
 | [Video sessions](consolidation-video.md) | Shared decoder state, session resources, Annex-B splitting, upload packing and batch decoding. Codec parsing and native picture/reference structures remain distinct. |

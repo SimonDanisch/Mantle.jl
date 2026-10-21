@@ -188,3 +188,7 @@ physical lines; all 115 source files still parse.
 [Shared geometry/strides](consolidation-geometry.md) removes 49 implementation
 lines, corrects stale geometry contracts and qualifies contact-slot ordering
 with native contention/tail cases (629 targeted assertions).
+
+[Shared draw preparation/packing](consolidation-draw.md) removes 50 implementation
+lines and fixes manual draw argument retention. Native lifetime, rendering,
+publication and exact attachment-format checks pass on AMD/NVIDIA.

@@ -1,0 +1,3 @@
+device	before_host_bytes	after_host_bytes	before_host_us	after_host_us
+AMD Radeon RX 7900 XTX (RADV NAVI31)	1984	1904	6.154440000000001	5.0912500000000005
+NVIDIA RTX 4000 Ada Generation	1984	1904	6.11266	5.07792

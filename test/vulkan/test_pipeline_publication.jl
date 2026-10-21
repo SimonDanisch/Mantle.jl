@@ -30,6 +30,13 @@ function check_pipeline_publication(ctx, other=nothing)
             @test compile(Mantle.lavadevice(other)).pipeline !== pipelines[1].pipeline
         end
 
+        # Element types cannot distinguish these native attachment formats.
+        for format in (Mantle.VK.FORMAT_R8G8B8A8_SRGB,Mantle.VK.FORMAT_R8G8B8A8_UNORM)
+            draw = Mantle.compile_vulkan_draw(dev,description,Mantle.VK.Format[format],
+                                              Mantle.VK.FORMAT_UNDEFINED,(),())
+            @test draw.pipeline.color_formats == [format]
+        end
+
         fb = Mantle.Framebuffer(Mantle.backend(dev), 8, 8; depth=false, color_format=RGBA{Float32})
         Mantle.draw!(dev, description, Mantle.OffscreenTarget(fb), 3)
         Mantle.flush!(dev)
