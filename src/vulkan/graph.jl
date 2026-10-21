@@ -1044,12 +1044,7 @@ function compile_dispatch(c::Compile{LavaDevice}, d::Dispatch, argoff::Int, indi
     # decision about what a dispatch means, so a backend reads it.
     buildskernel(d.kernel, backend(dev)) ||
         return kicompile_dispatch(c, dev, d, argoff, indirect)
-    obj = kernelfor(d.kernel, d.group, backend(dev))
-    isempty(fieldnames(typeof(obj.f))) ||
-        throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
-                            "A plan resolves its arguments once, so a captured device array " *
-                            "would be the one it had when the plan was built — pass it as a " *
-                            "dispatch argument instead, where a rename is followed."))
+    obj = kernelfor(d, dev)
     raw = rawargs(d.args)
     args = devargs(adaptor(dev.bq), raw)
     nd = dispatchrange(d.ndrange)

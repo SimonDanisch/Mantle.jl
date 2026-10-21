@@ -428,12 +428,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{<:MetalDevice}, d::Mantle.Dis
                                      groups, threads, entry, argoff, nbytes, indirect,
                                      d.ndrange)
     end
-    obj = Mantle.kernelfor(d.kernel, d.group, Mantle.backend(dev))
-    isempty(fieldnames(typeof(obj.f))) ||
-        throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
-                            "A plan resolves its arguments once, so a captured device array " *
-                            "would be the one it had when the plan was built — pass it as a " *
-                            "dispatch argument instead, where a rename is followed."))
+    obj = Mantle.kernelfor(d, dev)
     raw = map(a -> Mantle.resolve(dev, a), d.args)
     args = map(Metal.mtlconvert, raw)
     nd = recordedrange(d.ndrange)

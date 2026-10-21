@@ -537,6 +537,7 @@ include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 include(joinpath(@__DIR__, "test_raytracing_geometry.jl"))
 include(joinpath(@__DIR__, "test_collection_policy.jl"))
 include(joinpath(@__DIR__, "test_compilation_cache.jl"))
+include(joinpath(@__DIR__, "test_kernel_preparation.jl"))
 if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_collection_policy.jl"))
     check_pressure_collection(Mantle.vk_context())

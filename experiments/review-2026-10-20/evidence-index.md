@@ -89,6 +89,12 @@ assertions, including actual concurrent native creation and AMD/NVIDIA rendering
 and tracing. The 52-line net source increase and remaining idle/hold/compute
 ownership work are explicit.
 
+The [kernel-preparation batch](consolidation-kernel-preparation.md) shares KI
+preparation between eager array launches and declared dispatches, and centralizes
+the repeated KA constructor/capture policy. It records 1,011 passing targeted
+assertions, including GEMV, FFT/STFT and allocation-free recorded runs on
+AMD/NVIDIA. The full Builder/emission replacement remains open.
+
 The [2026-10-21 similarity experiment](similarity-2026-10-21/README.md) provides
 local semantic code-to-code and responsibility-based search across 1,987
 methods/regions from all 111 source files. It compares Qwen and Jina embeddings

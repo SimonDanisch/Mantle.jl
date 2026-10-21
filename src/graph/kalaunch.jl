@@ -213,8 +213,12 @@ kibackend(dev) = backend(dev)
 
 Can `dev` compile the macro-free kernel `f` at all?
 """
-kisupported(dev, f) =
-    hasmethod(KI.kernel_function, Tuple{typeof(kibackend(dev)), typeof(f), Type})
+function kisupported(dev, f)
+    be = kibackend(dev)
+    applicable(KI.argconvert, be, f) || return false
+    converted = KI.argconvert(be, f)
+    return hasmethod(KI.kernel_function, Tuple{typeof(be), typeof(converted), Type})
+end
 
 """
     kikernel(f, dev, args) -> KI.Kernel
@@ -235,7 +239,7 @@ function kikernel(f, dev, args)
         "`KernelAbstractions` and not `KernelInterface`, so it can run an " *
         "`@kernel` but cannot compile a plain function.")
     tt = Base.to_tuple_type(map(a -> Core.Typeof(KI.argconvert(be, a)), args))
-    return KI.kernel_function(be, f, tt)
+    return KI.kernel_function(be, KI.argconvert(be, f), tt)
 end
 
 """
@@ -261,6 +265,17 @@ end
 
 kernelfor(k, ::Nothing, backend) = k(backend)
 kernelfor(k, group, backend) = k(backend, group)
+
+"""Construct a declared KA kernel and enforce its capture policy once, in core."""
+function kernelfor(d::Dispatch, dev::Device)
+    obj = kernelfor(d.kernel, d.group, backend(dev))
+    isempty(fieldnames(typeof(obj.f))) ||
+        throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
+                            "A plan resolves its arguments once, so a captured device array " *
+                            "would be the one it had when the plan was built — pass it as a " *
+                            "dispatch argument instead, where a rename is followed."))
+    return obj
+end
 
 """
     callgroup(kernel, group) -> group or nothing
