@@ -31,6 +31,7 @@ function tu_vertex()
     return (position = Vec4f(x, y, 0f0, 1f0),
             uv = Vec2f((x + 1f0) * 0.5f0, (y + 1f0) * 0.5f0))
 end
+
 function tu_fragment(inputs)
     u = inputs.uv[1]; v = inputs.uv[2]
     return Vec4f(sample_texture_2d(UInt32(0), u, v, UInt32(0)),
@@ -111,4 +112,32 @@ end
     @test_throws DimensionMismatch Mantle.upload_texture_data!(t, tu_texels(0f0)[1:8, :])
     @test_throws DimensionMismatch Mantle.upload_texture_data!(
         t, Mantle.devicearray(be, tu_texels(0f0)[1:8, :]))
+end
+
+@testset "mipmaps filter minified textures and refresh on upload" begin
+    be = Mantle.defaultbackend()
+    Mantle.supports_graphics(be) || return
+    dev = Mantle.todevice(be)
+    # At eight texels per output pixel, nearest level-0 sampling aliases the
+    # checkerboard; its mip chain must converge to the mean instead.
+    checker = [isodd(x + y) ? 1f0 : 0f0 for x in 1:128, y in 1:128]
+    plain = Mantle.Texture2D(be, checker)
+    tex = Mantle.Texture2D(be, checker; mipmap = true)
+    @test !Mantle.mipmapped(plain)
+    @test Mantle.mipmapped(tex)
+    @test all(p -> p.r < 0.01 || p.r > 0.99, tu_draw(dev, be, plain))
+    @test all(p -> abs(Float32(p.r) - 0.5f0) < 0.01, tu_draw(dev, be, tex))
+
+    Mantle.upload_texture_data!(tex, fill(0.25f0, size(checker)))
+    @test all(p -> abs(Float32(p.r) - 0.25f0) < 0.01, tu_draw(dev, be, tex))
+    Mantle.upload_texture_data!(tex, Mantle.devicearray(be, fill(0.75f0, size(checker))))
+    @test all(p -> abs(Float32(p.r) - 0.75f0) < 0.01, tu_draw(dev, be, tex))
+
+    # Non-square, odd extents and a one-texel texture cover the ends of the
+    # chain, where dimensions must bottom out at one independently.
+    for dims in ((127, 65), (128, 1), (1, 1))
+        t = Mantle.Texture2D(be, fill(0.4f0, dims); mipmap = true)
+        @test Mantle.mipmapped(t) == (maximum(dims) > 1)
+        @test all(p -> abs(Float32(p.r) - 0.4f0) < 0.01, tu_draw(dev, be, t))
+    end
 end

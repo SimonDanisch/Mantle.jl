@@ -316,7 +316,7 @@ export RenderTarget
 # backend is loaded — see `graphics/resources.jl` for why each is one or the
 # other, and which three turned out portable outright.
 export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
-export upload_texture_data!
+export upload_texture_data!, mipmapped
 export argidentity
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, ExternalImage

@@ -83,6 +83,7 @@ struct MetalTexture2D{T} <: Mantle.Texture2D{T}
 end
 
 Base.size(t::MetalTexture2D) = (t.width, t.height)
+Mantle.mipmapped(t::MetalTexture2D) = t.tex.mipmapLevelCount > 1
 
 """A sampler on Metal."""
 struct MetalSampler <: Mantle.Sampler
@@ -126,11 +127,14 @@ back through `getBytes!`.
 
 `data` may be on the host or already on the device; see
 [`upload_texture_data!`](@ref) for both.
+
+`mipmap = true` gives it the full chain of mip levels, made from level 0 at every
+upload, as on the Vulkan side.
 """
-function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}) where {T}
+function Mantle.Texture2D(::Metal.MetalBackend, data::AbstractMatrix{T}; mipmap::Bool = false) where {T}
     dev = Metal.device()
     w, h = size(data)          # first index is x, second is y
-    desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, false)
+    desc = MTLm.MTLTextureDescriptor(mtlsampledformat(T), w, h, mipmap)
     desc.usage = MTLm.MTLTextureUsageShaderRead
     desc.storageMode = MTLm.MTLStorageModeShared
     t = MetalTexture2D{T}(MTLm.MTLTexture(dev, desc), w, h)
@@ -201,6 +205,7 @@ function blit_into_texture!(t::MetalTexture2D{T}, src::MTLm.MTLBuffer, soff::Int
     MTLm.MTLBlitCommandEncoder(cb) do enc
         MTLm.append_copy!(enc, t.tex, MTLm.MTLOrigin(0, 0, 0), MTLm.MTLSize(w, h, 1),
                           src, soff, w * sizeof(T), 0)
+        t.tex.mipmapLevelCount > 1 && MTLm.append_generate_mipmaps!(enc, t.tex)
     end
     # Waited for, so the caller's array is free the moment this returns — the
     # contract the Vulkan side keeps by copying into its own scratch first.
@@ -228,6 +233,9 @@ function Mantle.Sampler(::Metal.MetalBackend; filter::Symbol = :linear,
     desc = MTLm.MTLSamplerDescriptor()
     desc.minFilter = f
     desc.magFilter = f
+    # a texture with mip levels is read from the one its footprint asks for;
+    # one without has only level 0 either way
+    desc.mipFilter = MTLm.MTLSamplerMipFilterLinear
     desc.sAddressMode = a
     desc.tAddressMode = a
     desc.normalizedCoordinates = true

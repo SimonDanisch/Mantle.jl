@@ -2,7 +2,7 @@
 #
 # VkImage + VkSampler + descriptor set management for texture sampling in shaders.
 
-"""2D texture backed by VkImage."""
+"""2D texture backed by VkImage, with `levels` mip levels (1: none)."""
 struct VulkanTexture2D{T} <: Texture2D{T}
     image::VK.Image
     memory::VK.DeviceMemory
@@ -10,6 +10,7 @@ struct VulkanTexture2D{T} <: Texture2D{T}
     width::Int
     height::Int
     format::VK.Format
+    levels::Int
     ctx::VkContext
 end
 
@@ -19,6 +20,7 @@ end
 # keeps a recorded plan's baked descriptor set pointing at the right image.
 Base.size(t::VulkanTexture2D) = (t.width, t.height)
 Base.eltype(::VulkanTexture2D{T}) where {T} = T
+mipmapped(t::VulkanTexture2D) = t.levels > 1
 
 """1D texture backed by VkImage."""
 struct VulkanTexture1D{T} <: Texture1D{T}
@@ -58,6 +60,10 @@ function VulkanSampler(; ctx::VkContext, filter::Symbol=:linear, wrap::Symbol=:r
               wrap == :clamp_border ? VK.SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER :
               error("Unknown wrap mode: $wrap")
 
+    # Every level a texture has may be read: a texture made with `mipmap = true`
+    # is sampled from the level its footprint on screen asks for, and one
+    # without has only level 0, so the open upper clamp changes nothing there.
+    # The clamp was 0 before 2026-10-20, which pinned every texture to level 0.
     sampler = VK.Sampler(dev,
         vk_filter, vk_filter,
         VK.SAMPLER_MIPMAP_MODE_LINEAR,
@@ -66,7 +72,7 @@ function VulkanSampler(; ctx::VkContext, filter::Symbol=:linear, wrap::Symbol=:r
         anisotropy > 0,
         Float32(anisotropy),
         false, VK.COMPARE_OP_ALWAYS,
-        0.0f0, 0.0f0,
+        0.0f0, VK.LOD_CLAMP_NONE,
         VK.BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
         false,
     )
@@ -82,8 +88,16 @@ end
 decoded video frame, the output of a compute pass — and a texture built from
 those should not go out to the host and back. Which of the two it is, is
 [`upload_texture_data!`](@ref)'s question, answered by dispatch.
+
+`mipmap = true` gives the texture its full chain of mip levels, each half the
+one before, made on the device from level 0 at every upload: a texture shown
+smaller than it is (a map on a globe a few hundred pixels wide) is then sampled
+from a level of about its size on screen, instead of one texel out of many
+landing in each pixel, which aliases. Off by default, because it is wrong for a
+texture whose texels are separate pictures: a glyph atlas, whose smaller
+levels would mix neighbouring glyphs.
 """
-function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear, wrap=:repeat) where T
+function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear, wrap=:repeat, mipmap::Bool=false) where T
     dev = ctx.device
 
     # `data[x, y]`: the FIRST index is the horizontal one, as on the Metal side and
@@ -97,14 +111,17 @@ function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear
     # scrambled, an N-by-M texture reading its texels along the wrong stride.
     w, h = size(data)
     format = julia_to_vk_format(T)
+    levels = mipmap ? floor(Int, log2(max(w, h))) + 1 : 1
+    mipmap && checkmipmappable(ctx, format)
 
     image = VK.Image(dev,
         VK.IMAGE_TYPE_2D, format,
         VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)),
-        UInt32(1), UInt32(1),
+        UInt32(levels), UInt32(1),
         VK.SAMPLE_COUNT_1_BIT,
         VK.IMAGE_TILING_OPTIMAL,
-        VK.IMAGE_USAGE_SAMPLED_BIT | VK.IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK.IMAGE_USAGE_SAMPLED_BIT | VK.IMAGE_USAGE_TRANSFER_DST_BIT |
+            (mipmap ? VK.IMAGE_USAGE_TRANSFER_SRC_BIT : VK.ImageUsageFlag(0)),
         VK.SHARING_MODE_EXCLUSIVE, UInt32[],
         VK.IMAGE_LAYOUT_UNDEFINED,
     )
@@ -116,9 +133,9 @@ function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear
             VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY,
             VK.COMPONENT_SWIZZLE_IDENTITY, VK.COMPONENT_SWIZZLE_IDENTITY),
         VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT,
-            UInt32(0), UInt32(1), UInt32(0), UInt32(1)))
+            UInt32(0), UInt32(levels), UInt32(0), UInt32(1)))
 
-    tex = VulkanTexture2D{T}(image, memory, view, w, h, format, ctx)
+    tex = VulkanTexture2D{T}(image, memory, view, w, h, format, levels, ctx)
 
     # Upload data
     upload_texture_data!(tex, data)
@@ -127,10 +144,65 @@ function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear
 end
 
 """
+The mip levels are made by blits with linear filtering, which the format has to
+support; a format that does not is refused here rather than given levels nothing
+can fill.
+"""
+function checkmipmappable(ctx::VkContext, format::VK.Format)
+    features = VK.get_physical_device_format_properties(ctx.physical_device, format).optimal_tiling_features
+    needed = VK.FORMAT_FEATURE_BLIT_SRC_BIT | VK.FORMAT_FEATURE_BLIT_DST_BIT | VK.FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+    needed & features == needed ||
+        throw(ArgumentError("mipmap = true: $format cannot be blitted with linear filtering on $(ctx.device_name)"))
+    return nothing
+end
+
+"""A barrier taking mip levels `first:first+count-1` of `image` from one layout to another."""
+function transition_levels!(cmd, image::VK.Image, first::Integer, count::Integer, old_layout, new_layout,
+                            src_stage, dst_stage, src_access, dst_access)
+    barrier = VK.ImageMemoryBarrier(src_access, dst_access, old_layout, new_layout,
+        VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED, image,
+        VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT, UInt32(first), UInt32(count), UInt32(0), UInt32(1)))
+    VK.cmd_pipeline_barrier(cmd, [], [], [barrier]; src_stage_mask = src_stage, dst_stage_mask = dst_stage)
+end
+
+"""
+Fill levels 1 and up of `tex` from level 0, each a linear blit of the one before,
+and leave every level ready to sample. Level 0 arrives in TRANSFER_DST.
+"""
+function record_mipmaps!(cmd, tex::VulkanTexture2D)
+    w, h = tex.width, tex.height
+    for level in 1:tex.levels-1
+        transition_levels!(cmd, tex.image, level - 1, 1,
+            VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+            VK.ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
+        w2, h2 = max(1, w ÷ 2), max(1, h ÷ 2)
+        blit = VK.ImageBlit(
+            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT, UInt32(level - 1), UInt32(0), UInt32(1)),
+            (VK.Offset3D(0, 0, 0), VK.Offset3D(w, h, 1)),
+            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT, UInt32(level), UInt32(0), UInt32(1)),
+            (VK.Offset3D(0, 0, 0), VK.Offset3D(w2, h2, 1)))
+        VK.cmd_blit_image(cmd, tex.image, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            tex.image, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, [blit], VK.FILTER_LINEAR)
+        transition_levels!(cmd, tex.image, level - 1, 1,
+            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK.ACCESS_TRANSFER_READ_BIT, VK.ACCESS_SHADER_READ_BIT)
+        w, h = w2, h2
+    end
+    transition_levels!(cmd, tex.image, tex.levels - 1, 1,
+        VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK.ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_SHADER_READ_BIT)
+    return nothing
+end
+
+"""
     copy_into_texture!(srcfor, tex)
 
-Record `tex`'s upload: the two layout transitions and the buffer-to-image copy,
-around whatever buffer `srcfor(e)` answers with.
+Record `tex`'s upload: the layout transitions and the buffer-to-image copy into
+level 0, around whatever buffer `srcfor(e)` answers with, then the mip levels
+made from it.
 
 ONE recording for both sources. `srcfor` returns `(VkBuffer, byte_offset)` and is
 responsible for keeping whatever it named alive for the submission — it runs
@@ -143,7 +215,7 @@ function copy_into_texture!(srcfor, tex::VulkanTexture2D)
     cmd = e.cmd
     staging_buf, src_offset = srcfor(e)
 
-    transition_image!(cmd, tex.image,
+    transition_levels!(cmd, tex.image, 0, tex.levels,
         VK.IMAGE_LAYOUT_UNDEFINED, VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK.PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
         VK.AccessFlag(0), VK.ACCESS_TRANSFER_WRITE_BIT)
@@ -158,10 +230,7 @@ function copy_into_texture!(srcfor, tex::VulkanTexture2D)
     VK.cmd_copy_buffer_to_image(cmd, staging_buf, tex.image,
         VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, [region])
 
-    transition_image!(cmd, tex.image,
-        VK.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK.ACCESS_TRANSFER_WRITE_BIT, VK.ACCESS_SHADER_READ_BIT)
+    record_mipmaps!(cmd, tex)
 
     # The submission names the texture; the SOURCE was held by `srcfor`.
     hold!(e, tex)

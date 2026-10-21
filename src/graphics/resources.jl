@@ -42,6 +42,13 @@ A two-dimensional texture. Backends provide the concrete type — `VulkanTexture
 abstract type Texture2D{T} <: Texture{T, 2} end
 
 """
+    mipmapped(tex::Texture2D) -> Bool
+
+Whether `tex` has mip levels above level 0 (it was made with `mipmap = true`).
+"""
+function mipmapped end
+
+"""
     Sampler
 
 How a texture is filtered and addressed when a shader reads it.
