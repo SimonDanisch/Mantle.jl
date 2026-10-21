@@ -119,7 +119,7 @@ function emitkernel!(e::Emitter, @nospecialize(f), args...;
     pipeline, argaddr, groups, name =
         preparekernel(e.owner, f, args, ndrange, workgroup_size, tlas)
     if e.ctx.diag.dispatch_logging
-        queueof(e).last_dispatch_info = name
+        driver(queueof(e)).last_dispatch_info = name
     end
     emit_dispatch!(e, pipeline, argaddr, groups, tlas, name)
     return nothing

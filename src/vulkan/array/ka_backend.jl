@@ -60,6 +60,24 @@ LavaBackend() = LavaBackend(vk_context())
 LavaBackend(ctx::VkContext) = (let bq = ctx.default_bq; LavaBackend(bq, bq); end)
 LavaBackend(bq::SubmitChannel{<:VulkanQueue}) = LavaBackend(bq, bq)
 
+"""
+    LavaDeviceBackend <: KA.Backend
+
+A `LavaBackend` as a kernel sees it: a type to dispatch on and nothing to launch
+with. Kernels capture their backend — TrixiParticles' neighbour loop closes over
+`semi.parallelization_backend` to choose a loop by type — and CUDA's, ROCm's and
+Metal's backends are empty structs that can ride along as they are. A
+`LavaBackend` holds its queues, which are not bits.
+"""
+struct LavaDeviceBackend <: KA.Backend end
+
+Adapt.adapt_structure(::LavaAdaptor, ::LavaBackend) = LavaDeviceBackend()
+
+# A backend holds no array a kernel reads. Walked as a struct, its queue leads to
+# the `Vulkan.Instance` whose destructor captures it, the cycle the `DeviceArray`
+# method in `graph/lifetime.jl` documents, and the launch overflows the stack.
+holdleaves!(holder, ::LavaBackend) = nothing
+
 # The device it launches on; the two channels only when they differ.
 function Base.show(io::IO, b::LavaBackend)
     print(io, "LavaBackend(", repr(b.dispatch_bq.channel.ctx.device_name))

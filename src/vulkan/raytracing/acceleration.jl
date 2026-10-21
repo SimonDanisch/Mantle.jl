@@ -46,12 +46,16 @@ mutable struct LavaBLAS
     n_triangles::UInt32
     max_vertex::UInt32
     geo_flags::UInt32
+    # The boxes a refittable procedural BLAS re-reads: written in place on the
+    # device (by a kernel, say) and refit from there (see `refit_blas!`), so the
+    # address the driver retained stays valid. `nothing` for triangles.
+    aabbs::Union{Nothing, LavaArray{AABB, 1}}
 end
 
-# A BLAS with no refit support — what the AABB and pooled builders produce.
+# A BLAS with no refit support — what the pooled builders produce.
 LavaBLAS(accel, storage, address, preserves) =
     LavaBLAS(accel, storage, address, preserves,
-             false, UInt64(0), nothing, UInt64(0), UInt32(0), UInt32(0), UInt32(0))
+             false, UInt64(0), nothing, UInt64(0), UInt32(0), UInt32(0), UInt32(0), nothing)
 
 """
     LavaTLAS
@@ -282,7 +286,7 @@ function build_blas_from_addresses(ctx::VulkanAccelBuildContext, vertex_arr, ind
                     allow_update,
                     allow_update ? UInt64(sizes.update_scratch_size) : UInt64(0),
                     allow_update ? vertex_arr : nothing,
-                    index_addr, n_triangles, max_vertex, geo_flags)
+                    index_addr, n_triangles, max_vertex, geo_flags, nothing)
     finalizer(unsafe_free!, blas)
     return blas
 end
@@ -345,25 +349,9 @@ function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS,
         index_addr=blas.index_addr,
         transform_addr=UInt64(0))
 
-    # Same barrier reasoning as refit_tlas!: the vertex rewrite above is a
-    # transfer write that the AS build has to see, and a previous build/refit of
-    # this same AS has to have finished.
-    cmd = buildcmd(ctx)
-    pre_barrier = VK.MemoryBarrier(
-        C_NULL,
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
-        VK.ACCESS_SHADER_WRITE_BIT |
-        VK.ACCESS_TRANSFER_WRITE_BIT,
-        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-    )
-    VK.cmd_pipeline_barrier(
-        cmd, [pre_barrier], [], [];
-        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                       VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT |
-                       VK.PIPELINE_STAGE_TRANSFER_BIT,
-        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-    )
+    # The vertex rewrite above is a transfer write the AS build has to see, and a
+    # previous build/refit of this same AS has to have finished.
+    asbuildbarrier!(ctx)
 
     build_as_on_gpu(ctx, blas.accel, scratch_addr, geom;
         as_type=UInt32(1), build_flags,
@@ -381,14 +369,33 @@ Raycore.refit!(blas::LavaBLAS, vertices::AbstractVector) =
     end
 
 """
-    build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque=true) -> LavaBLAS
+    aabbinput(backend::LavaBackend, n) -> LavaArray{AABB,1}
 
-Build a procedural-AABB BLAS from a vector of `AABB` records. The resulting
-BLAS is intended for use with inline ray queries (rayQuery + AABB candidate
-intersection); accordingly, this function errors loudly if the device does
-not support `VK_KHR_ray_query`.
+`n` boxes on the device that a kernel writes and an acceleration-structure build
+reads (see [`build_blas_aabb`](@ref)): procedural geometry made on the GPU, built
+and refit there, never on the host.
 """
-function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque::Bool=true)
+aabbinput(backend::LavaBackend, n::Integer) =
+    LavaArray{AABB,1}(undef, (Int(n),); bq = backend.dispatch_bq, extra_usage = AS_INPUT_USAGE)
+
+"""
+    build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1}; opaque = true, allow_update = false) -> LavaBLAS
+    build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque = true, allow_update = false) -> LavaBLAS
+
+Build a procedural-AABB BLAS over boxes on the device (allocated by
+[`aabbinput`](@ref), or any `LavaArray{AABB,1}` carrying `AS_INPUT_USAGE`): the
+build reads them by address, so boxes a kernel just wrote go in without a trip to
+the host. A `Vector` is uploaded once and built the same way.
+
+`allow_update = true` builds it refittable: [`refit_blas!`](@ref) then refits it
+from the same buffer after a kernel has moved the boxes. The BLAS keeps the
+buffer, so its address, which the driver may retain, stays valid.
+
+The BLAS is for inline ray queries (rayQuery + AABB candidate intersection), so
+this errors when the device does not support `VK_KHR_ray_query`.
+"""
+function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::LavaArray{AABB,1};
+                         opaque::Bool=true, allow_update::Bool=false)
     (ctxof(ctx.bq)).ray_query_available || error(
         "build_blas_aabb: this Vulkan device does not support " *
         "VK_KHR_ray_query. Procedural-AABB BLASes are only useful with " *
@@ -396,29 +403,15 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaq
 
     bq  = ctx.bq
     dev = as_device(ctx)
+    n   = length(aabbs)
 
-    # Pack into VkAabbPositionsKHR layout (24 bytes per AABB: minX,Y,Z,maxX,Y,Z).
-    n     = length(aabbs)
-    bytes = Vector{UInt8}(undef, 24 * n)
-    GC.@preserve bytes begin
-        p = pointer(bytes)
-        for (i, a) in enumerate(aabbs)
-            base = p + (i - 1) * 24
-            unsafe_store!(Ptr{Float32}(base +  0), a.min[1])
-            unsafe_store!(Ptr{Float32}(base +  4), a.min[2])
-            unsafe_store!(Ptr{Float32}(base +  8), a.min[3])
-            unsafe_store!(Ptr{Float32}(base + 12), a.max[1])
-            unsafe_store!(Ptr{Float32}(base + 16), a.max[2])
-            unsafe_store!(Ptr{Float32}(base + 20), a.max[3])
-        end
-    end
-
-    aabb_arr  = LavaArray(bytes; bq, extra_usage=AS_INPUT_USAGE)
-    aabb_addr = aabb_arr.buf[].address
-
-    geom       = AABBsGeometry(; aabb_addr, aabb_stride=UInt64(24))
+    # `AABB` is two `Point3f`: VkAabbPositionsKHR's layout, 24 bytes a box.
+    geom       = AABBsGeometry(; aabb_addr = bda_address(aabbs), aabb_stride = UInt64(sizeof(AABB)))
     geo_flags  = opaque ? UInt32(VK.GEOMETRY_OPAQUE_BIT_KHR) : UInt32(0)
     build_flags = UInt32(VK.BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
+    if allow_update
+        build_flags |= UInt32(VK.BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR)
+    end
 
     sizes = query_as_build_sizes(dev, geom;
         as_type=UInt32(1), build_flags,
@@ -435,8 +428,8 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaq
     scratch_addr = bda_address(scratch_arr)
     push!(ctx.preserves, scratch_arr)
 
-    blas_preserves = LavaArray[aabb_arr]
-
+    # The boxes a kernel wrote before this build must be visible to it.
+    asbuildbarrier!(ctx)
     build_as_on_gpu(ctx, accel, scratch_addr, geom;
         as_type=UInt32(1), build_flags,
         geo_flags, primitive_count=UInt32(n))
@@ -447,10 +440,84 @@ function build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaq
         push!((ctxof(ctx.bq)).diag.alloc_log,
               (kind=:blas_aabb_as, addr=as_addr, size=0, pool=false, mtype=-1, unified=false, usage=UInt32(0)))
     end
-    blas = LavaBLAS(accel, storage, as_addr, blas_preserves)
+    blas = LavaBLAS(accel, storage, as_addr, LavaArray[aabbs],
+                    allow_update,
+                    allow_update ? UInt64(sizes.update_scratch_size) : UInt64(0),
+                    nothing, UInt64(0), UInt32(0), UInt32(0), geo_flags,
+                    allow_update ? aabbs : nothing)
     finalizer(unsafe_free!, blas)
     return blas
 end
+
+build_blas_aabb(ctx::VulkanAccelBuildContext, aabbs::Vector{AABB}; opaque::Bool=true, allow_update::Bool=false) =
+    build_blas_aabb(ctx, LavaArray(aabbs; bq = ctx.bq, extra_usage = AS_INPUT_USAGE); opaque, allow_update)
+
+"""
+    asbuildbarrier!(ctx::VulkanAccelBuildContext)
+
+Make what kernels, copies and earlier builds wrote visible to the next
+acceleration-structure build or refit in `ctx`.
+"""
+function asbuildbarrier!(ctx::VulkanAccelBuildContext)
+    barrier = VK.MemoryBarrier(
+        C_NULL,
+        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+        VK.ACCESS_SHADER_WRITE_BIT |
+        VK.ACCESS_TRANSFER_WRITE_BIT,
+        VK.ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+        VK.ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+    )
+    VK.cmd_pipeline_barrier(
+        buildcmd(ctx), [barrier], [], [];
+        src_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                       VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                       VK.PIPELINE_STAGE_TRANSFER_BIT,
+        dst_stage_mask=VK.PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+    )
+    return ctx
+end
+
+"""
+    refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS, aabbs::LavaArray{AABB,1})
+
+Refit a procedural BLAS in place (`MODE_UPDATE_KHR`) to boxes on the device.
+`aabbs` is the buffer it was built from, rewritten by a kernel, or another of the
+same length, copied into that one on the device. The BLAS must have been built
+with `allow_update = true`.
+
+A refit keeps the tree of the build, so traversal slows as the boxes move away
+from where they were; rebuild when it has slowed more than a build costs.
+"""
+function refit_blas!(ctx::VulkanAccelBuildContext, blas::LavaBLAS, aabbs::LavaArray{AABB,1})
+    blas.allow_update || throw(ArgumentError(
+        "refit_blas!: BLAS was built with allow_update=false; cannot refit. " *
+        "Rebuild it via build_blas_aabb(...; allow_update=true)."))
+    own = blas.aabbs
+    own === nothing && throw(ArgumentError("refit_blas!: this BLAS holds no boxes; it is not a refittable procedural BLAS."))
+    length(aabbs) == length(own) || throw(ArgumentError(
+        "refit_blas!: box count changed ($(length(aabbs)) vs $(length(own)) at build). " *
+        "MODE_UPDATE_KHR cannot change the primitive count — rebuild instead."))
+    aabbs === own || copyto!(own, aabbs)
+
+    scratch_arr = LavaArray{UInt8,1}(undef, (max(Int(blas.update_scratch_size), 16),);
+                                      bq = ctx.bq, extra_usage=AS_SCRATCH_USAGE, scratch=true)
+    push!(ctx.preserves, scratch_arr)
+    geom = AABBsGeometry(; aabb_addr = bda_address(own), aabb_stride = UInt64(sizeof(AABB)))
+    build_flags = UInt32(VK.BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR) |
+                  UInt32(VK.BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR)
+    asbuildbarrier!(ctx)
+    build_as_on_gpu(ctx, blas.accel, bda_address(scratch_arr), geom;
+        as_type=UInt32(1), build_flags,
+        geo_flags=blas.geo_flags, primitive_count=UInt32(length(own)),
+        mode=UInt32(1), src_as=blas.accel)   # MODE_UPDATE_KHR, in place
+    return blas
+end
+
+# On the device's dispatch channel, after the kernels that wrote the boxes.
+Raycore.refit!(blas::LavaBLAS, aabbs::LavaArray{AABB,1}) =
+    build_accel!(KA.get_backend(blas.storage).dispatch_bq) do ctx
+        refit_blas!(ctx, blas, aabbs)
+    end
 
 """
     build_tlas(ctx::VulkanAccelBuildContext, blas_list; transforms=nothing, custom_indices=nothing) -> LavaTLAS

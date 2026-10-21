@@ -1169,10 +1169,17 @@ consecutive pieces into one submission while their measured cost fits the plan's
 budget, so a loop whose iterations are cheap is still one submission and one that
 is not is cut between iterations; a piece not measured yet is a submission of its
 own. A conditional (`when!`) piece is always its own, so a run can leave it out.
+
+A gated loop's timestamps describe its LAST iteration, which may have discarded
+all its work. They cannot bound the cost of batching several live iterations.
+At a finite budget each such iteration therefore starts a new submission, even
+when its measured tail would let the whole loop fit. Pieces within an iteration
+can still be grouped. An explicit infinite budget keeps the caller's opt-out.
 """
 function submissionbatches(pl::Plan, ranges, parts::Vector{R}, conds) where {R}
     loopof(r) = isempty(r) ? nothing : pl.passes[first(r)].pass.loop
     order = Int[]
+    gatedheads = Set{Int}()
     k = 1
     while k <= length(ranges)
         l = loopof(ranges[k])
@@ -1183,6 +1190,10 @@ function submissionbatches(pl::Plan, ranges, parts::Vector{R}, conds) where {R}
             j = k
             while j < length(ranges) && loopof(ranges[j + 1]) === l
                 j += 1
+            end
+            if isfinite(pl.budget) && any(i -> pl.passes[i].pass.predicate !== nothing,
+                                         first(ranges[k]):last(ranges[j]))
+                push!(gatedheads, k)
             end
             for _ in 1:l.count
                 append!(order, k:j)
@@ -1197,7 +1208,7 @@ function submissionbatches(pl::Plan, ranges, parts::Vector{R}, conds) where {R}
     t = Inf
     for k in order
         c = cost(k)
-        if conds[k] !== nothing || !isempty(bconds) && bconds[end] !== nothing ||
+        if k in gatedheads || conds[k] !== nothing || !isempty(bconds) && bconds[end] !== nothing ||
            isempty(batches) || t + c > pl.budget
             push!(batches, R[])
             push!(bconds, conds[k])
@@ -1293,9 +1304,8 @@ pass is often its slowest.
 
 A `repeat!` body writes its timestamps again every iteration and what is read is
 the last iteration's. So a gated loop whose last iteration the gate discarded is
-measured as nearly free, and its iterations are batched as if they were: a
-budget that holds for plain loops and is only as good as that last iteration for
-a gated one.
+measured as nearly free. `submissionbatches` keeps those iterations separate:
+the discarded tail's timing cannot bound several live iterations together.
 """
 function measure!(pl::Plan)
     # Only a recording that carries timestamps has anything to measure, and a

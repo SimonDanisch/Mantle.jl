@@ -73,7 +73,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     end
     bq  = ctx.default_bq
     dev = ctx.device
-    clear_validation_messages!()
+    clear_validation_messages!(ctx)
     arr = LavaArray{Int32,1}(undef, (16,); bq)
     # Write FAR past the (pool-disabled) dedicated 64-byte buffer — 400 KB out,
     # so the faulting address lies outside EVERY tracked VkBuffer range.  GPU-AV's
@@ -83,7 +83,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     # 4 KB probe gave a false negative on the RTX 4000 Ada for exactly this
     # reason.)
     bad_idx = 100_000
-    Base.invokelatest(KI.Kernel(LavaBackend(), _lava_gpuav_check_kernel!),
+    Base.invokelatest(KI.Kernel(LavaBackend(bq), _lava_gpuav_check_kernel!),
                       arr, bad_idx; ndrange=4, workgroupsize=1)
     # GPU-AV surfaces the violation only after the host waits for the dispatch
     # to complete (the layer reads back the instrumented error log in its
@@ -109,7 +109,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     end
     if isempty(caught_msg)
         n = length(ctx.validation.messages)
-        reset_device!()   # clear the half-flushed faulting batch
+        reset_device!(lavadevice(ctx))   # recover the device that was checked
         throw(LavaError("verify_gpu_av",
             "GPU-AV did not report a known out-of-bounds write within $(timeout)s " *
             "($(n) validation messages captured, none matching 'Out of bounds access').",
@@ -119,8 +119,8 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
             "way to switch it on afterwards."))
     end
     @info "Lava: GPU-AV verified working" sample=first(caught_msg, 240)
-    # The OOB left the batch queue in an errored state; reset so subsequent
-    # code starts clean.
-    reset_device!()
+    # The OOB left this device's batch queue in an errored state. Recover the
+    # same physical device; an unselected reset may choose another GPU.
+    reset_device!(lavadevice(ctx))
     return true
 end

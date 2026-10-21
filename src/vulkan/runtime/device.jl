@@ -2356,7 +2356,12 @@ end
 # caller who holds the KA backend and should not have to reach for the context
 # to get at the handle underneath it — is in `array/ka_backend.jl`, with the
 # type.
-waitidle(ctx::VkContext) = VK.device_wait_idle(ctx.device)
+function waitidle(ctx::VkContext)
+    # Vulkan.jl returns a Result. Discarding it let a lost device look idle
+    # and blamed the next unrelated dispatch for the earlier GPU failure.
+    throw_if_error(ctx, "vkDeviceWaitIdle", VK.device_wait_idle(ctx.device))
+    return nothing
+end
 waitidle(d::VK.Device) = VK.device_wait_idle(d)
 
 # Vulkan rasterizes. See `supports_graphics` in `src/graphics/commands.jl`.
