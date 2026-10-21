@@ -33,7 +33,9 @@ function _vk_reduce_fadd_kernel!(out, src, total_threads::Int32)
     s = subgroup_add(acc)
     # One atomic per wave, from the first active lane.
     if subgroup_elect()
-        Atomix.@atomic out[1] += s
+        # Independent sums: the submission fence makes all writes visible to
+        # the host before it reads the mapped scalar.
+        Atomix.@atomic :monotonic out[1] += s
     end
     nothing
 end
