@@ -177,7 +177,7 @@ Builds are one-off setup rather than per-frame work, so this synchronises rather
 than threading them through the graph's timeline. When acceleration-structure
 builds move into a pass, this becomes an encoder the graph hands over.
 """
-@autoreleasepool function withaccelencoder(f, d::MetalDevice)
+function withaccelencoder(f, d::MetalDevice)
     cb = MTL.MTLCommandBuffer(cmdqueue(d))
     enc = MTL.MTLAccelerationStructureCommandEncoder(cb)
     try
@@ -206,10 +206,10 @@ a refit and Metal rejects one. Note that a refittable structure may still report
 `refitScratchBufferSize == 0` — that means "no scratch needed", not "no refit
 allowed", which is why the permission is tracked as a flag.
 """
-@autoreleasepool function build_blas(d::MetalDevice, vertices::MTL.MTLBuffer, ntriangles::Integer;
-                                     stride::Integer = 12, refittable::Bool = false,
-                                     indices::Union{Nothing, MTL.MTLBuffer} = nothing,
-                                     nvertices::Integer = 3 * ntriangles)
+function build_blas(d::MetalDevice, vertices::MTL.MTLBuffer, ntriangles::Integer;
+                    stride::Integer = 12, refittable::Bool = false,
+                    indices::Union{Nothing, MTL.MTLBuffer} = nothing,
+                    nvertices::Integer = 3 * ntriangles)
     geo = MTL.MTLAccelerationStructureTriangleGeometryDescriptor()
     geo.vertexBuffer = vertices
     geo.vertexStride = stride
@@ -299,7 +299,7 @@ Write the moved `vertices` (as many as it was built with) into the structure's
 vertex buffer and refit it in place. An `ArgumentError` for a structure built
 without `allow_update`, or a different vertex count.
 """
-@autoreleasepool function Raycore.refit!(blas::MetalBLAS, vertices::AbstractVector)
+function Raycore.refit!(blas::MetalBLAS, vertices::AbstractVector)
     blas.refittable && blas.vertices !== nothing || throw(ArgumentError(
         "refit!: this BLAS was not built with `allow_update = true`, so its descriptor " *
         "lacks `MTLAccelerationStructureUsageRefit`; rebuild it instead"))
@@ -325,8 +325,8 @@ is never opaque in the sense a triangle is, because there is nothing to intersec
 until an intersection function says so. The flag exists so a caller spells the build
 the same way on both backends.
 """
-@autoreleasepool function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
-                                                 aabbs::Vector{Mantle.AABB}; opaque::Bool = true)
+function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
+                                aabbs::Vector{Mantle.AABB}; opaque::Bool = true)
     d = ctx.device
     n = length(aabbs)
     n > 0 || throw(ArgumentError("build_blas_aabb: no boxes to build over"))
@@ -374,8 +374,8 @@ already written into `descriptors` (a `MtlVector{MetalInstanceDescriptor}`),
 each naming its geometry by index into `blases`. The structure keeps
 `descriptors`: a refit reads them again.
 """
-@autoreleasepool function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::MtlArray,
-                                       n::Integer; refittable::Bool = false)
+function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::MtlArray,
+                      n::Integer; refittable::Bool = false)
     eltype(descriptors) === MetalInstanceDescriptor || throw(ArgumentError(
         "build_accel!: descriptors must be MetalInstanceDescriptor, got $(eltype(descriptors))"))
     n <= length(descriptors) || throw(ArgumentError(
@@ -415,7 +415,7 @@ Much cheaper than a rebuild — the point of holding a HWTLAS across frames — 
 does not re-cluster, so instances that move far enough degrade traversal until
 they are rebuilt.
 """
-@autoreleasepool function refit_tlas!(d::MetalDevice, tlas::MetalTLAS)
+function refit_tlas!(d::MetalDevice, tlas::MetalTLAS)
     tlas.refittable || throw(ArgumentError(
         "refit_tlas!: this structure was not built with `refittable = true`, so " *
         "its descriptor lacks `MTLAccelerationStructureUsageRefit` and Metal will " *

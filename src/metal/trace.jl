@@ -131,8 +131,8 @@ Trace `n_rays` from `rays` against `tlas`, writing the nearest hit of each into
 
 `cull_mask` is ANDed with each instance's mask, as in Vulkan.
 """
-@autoreleasepool function trace_closest_hits!(hits::MtlArray, rays::MtlArray, tlas::MetalTLAS,
-                                              n_rays::Integer; cull_mask::UInt32 = UInt32(0xFF))
+function trace_closest_hits!(hits::MtlArray, rays::MtlArray, tlas::MetalTLAS,
+                             n_rays::Integer; cull_mask::UInt32 = UInt32(0xFF))
     n_rays == 0 && return hits
     eltype(rays) === Raycore.RTRay ||
         throw(ArgumentError("trace_closest_hits!: rays must be RTRay, got $(eltype(rays))"))
