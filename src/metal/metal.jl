@@ -38,11 +38,10 @@ using Metal: @device_override
 # dependency (the Vulkan backend's windows use it), and `ObjectiveC` comes in
 # through Metal.jl rather than as a dependency of its own.
 using GLFW
-# `@autoreleasepool` because Metal hands back descriptors, `NSArray`s and command
-# buffers autoreleased, and nothing in a Julia process drains a pool by itself: a
-# build made outside one keeps its descriptor, and every buffer and structure that
-# names, for the life of the process.
-using Metal.ObjectiveC: @objc, id, @autoreleasepool
+# ObjectiveC 7 gives each @objc call its own autorelease pool. Current Metal.jl
+# returns retained wrappers for descriptors and command buffers; do not wrap
+# whole builds in the removed global-locking @autoreleasepool macro.
+using Metal.ObjectiveC: @objc, id
 # `MTLSetReportFailureBlock` is looked up in Metal.framework by name, and handed a
 # block that receives an `NSString` (`debug.jl`).
 import Libdl
