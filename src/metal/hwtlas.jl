@@ -323,26 +323,9 @@ end
 # would follow forever.
 Mantle.holdleaves!(holder, t::MetalHWTLAS) = Mantle.holdleaves!(holder, t.static_tlas)
 
-"""
-Kernel form: drop `hwtlas` and take every array down to its device view.
-
-The host form keeps a live `MetalHWTLAS` so callers can reach `sync!` and the
-built structure; that object is a `Dict`-and-`Pool` graph and could never cross
-into a kernel. `Metal.Adaptor` is the adaptor Metal.jl converts launch
-arguments with, so this fires exactly at dispatch — the same split
-`MantleVulkanExt` makes with `LavaAdaptor`.
-"""
-function Adapt.adapt_structure(to::Metal.Adaptor, accel::AdaptedAccel)
-    AdaptedAccel(
-        nothing,
-        Adapt.adapt(to, accel.triangles),
-        Adapt.adapt(to, accel.offsets),
-        accel.empty,
-        Adapt.adapt(to, accel.scene),
-        Adapt.adapt(to, accel.procedural),
-        Adapt.adapt(to, accel.instances),
-    )
-end
+"""Drop the host owner and adapt arrays plus the in-band native scene binding."""
+Adapt.adapt_structure(to::Metal.Adaptor, accel::AdaptedAccel) =
+    adaptaccel(to, accel, Base.Fix1(Adapt.adapt, to))
 
 # ── Geometry ─────────────────────────────────────────────────────────────────
 

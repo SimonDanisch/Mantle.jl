@@ -196,3 +196,7 @@ publication and exact attachment-format checks pass on AMD/NVIDIA.
 [Shared typed host upload](consolidation-host-upload.md) removes transfer-sized
 wrapper copies, with ordinary/mapped allocation measurements and 102 native
 assertions. Adaptation comments now consistently require explicit leaf retention.
+
+[Shared acceleration projection](consolidation-accel-projection.md) deletes both
+backend field walks while preserving their distinct scene conversions; 126 host
+and native assertions pass. Native Metal qualification remains outstanding.

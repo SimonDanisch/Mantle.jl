@@ -215,24 +215,10 @@ function Adapt.adapt_structure(to, hwtlas::VulkanTLAS{Tri}) where Tri
     return hwtlas.static_tlas::AdaptedAccel
 end
 
-"""
-Kernel-form adaptation: drops `hwtlas` (so the kernel sees a Nothing-typed
-field, which is bitstype) and walks the array fields through the adaptor so
-`LavaArray` becomes `LavaDeviceArray` for the BDA arg buffer.  The auto-
-discovered HWTLAS binding is wired by `lava_launch!`/`ka_launch!` from the
-pre-adapt `AdaptedAccel.hwtlas` field.
-"""
-function Adapt.adapt_structure(to::LavaAdaptor, accel::AdaptedAccel)
-    AdaptedAccel(
-        nothing,
-        Adapt.adapt(to, accel.triangles),
-        Adapt.adapt(to, accel.offsets),
-        accel.empty,
-        accel.scene,
-        Adapt.adapt(to, accel.procedural),
-        Adapt.adapt(to, accel.instances),
-    )
-end
+"""Drop the host owner and adapt traversal arrays; keep the out-of-band scene value.
+Descriptor discovery uses the original unadapted hwtlas reference."""
+Adapt.adapt_structure(to::LavaAdaptor, accel::AdaptedAccel) =
+    adaptaccel(to, accel, identity)
 
 # ============================================================================
 # Accessors

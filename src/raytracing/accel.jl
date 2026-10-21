@@ -1,62 +1,30 @@
-# The CPU-side view of a built acceleration structure.
-#
-# `AdaptedAccel` (was `HWAdaptedAccel`) reaches its backend's HWTLAS through a
-# type parameter, so it never names one — which is why it is here and the
-# `HWTLAS` it wraps is only declared.
-"""
-    AdaptedAccel{H, T, O, Tri, S} <: Raycore.AbstractAdaptedAccel
-
-GPU-adapted form of `VulkanTLAS`.  Carries the kernel-side data needed by
-`Raycore.closest_hit(::AdaptedAccel, ray)` / `any_hit` (which lower to
-`OpRayQueryInitializeKHR` etc.):
-
-  * `triangles` — flat array of all BLAS triangles, concatenated.
-  * `offsets`   — per-instance offset into `triangles`, indexed by `gl_InstanceID + 1`.
-  * `empty`     — sentinel triangle returned on miss.
-  * `instances` — the TLAS's `Raycore.InstanceRecord`s, every batch's in build
-                  order, indexed by `gl_InstanceID + 1`, so a hit triangle can
-                  be moved from its BLAS into world space (see
-                  [`hittriangle`](@ref)); `nothing` where a backend has none,
-                  and then triangles come back as stored.
-  * `hwtlas`    — CPU-side `VulkanTLAS` reference for callers that need it
-                  (descriptor binding, sync, RT pipeline path); `nothing` in
-                  the kernel-form produced by `Adapt.adapt`.
-
-Constructed by `sync!(hwtlas)` from the live VulkanTLAS state.  The kernel-form
-(returned by `Adapt.adapt(LavaAdaptor, accel)`) drops `hwtlas` (Nothing) and
-adapts the array fields to `LavaDeviceArray`.
-"""
+"""Host/device traversal data shared by hardware backends. Host hwtlas retains the
+native owner; device adaptation drops it. Triangles and per-instance offsets feed
+hittriangle, empty is its miss sentinel, scene is an optional in-band native
+binding, procedural supplies non-triangle intersection data, and instances carry
+world transforms. Offsets and instances follow native build order."""
 struct AdaptedAccel{H, T, O, Tri, S, P, I} <: Raycore.AbstractAdaptedAccel
     hwtlas::H
     triangles::T
     offsets::O
     empty::Tri
-    # How the KERNEL reaches the acceleration structure, when the backend needs
-    # it in-band rather than bound beside the dispatch.
-    #
-    # Vulkan binds its TLAS as a descriptor, so a ray query names nothing and
-    # this stays `nothing` — a ghost type, so the kernel-side struct is byte-for
-    # byte what it was. Metal has no descriptor for an acceleration structure
-    # reachable from a Julia kernel: traversal is a linked MSL function that
-    # takes the structure through an argument buffer, and this carries the
-    # pointer to it.
+    # In-band traversal binding (Metal); Vulkan binds the TLAS separately.
     scene::S
-    # The geometry that is NOT triangles: an AABB per primitive plus a solve
-    # that the traversal loop runs when the acceleration structure hands it a
-    # box. `nothing` for a triangles-only scene, and then every branch reading
-    # it folds away — the traversal is byte-for-byte the one that was here.
-    #
-    # See `procedural_candidate` / `procedural_commit` for what a value has to
-    # implement. It is deliberately not a triangle: a primitive that reports
-    # `(t, ξ)` is what lets an isoparametric FEM element be intersected exactly
-    # instead of being tessellated first.
+    # Non-triangle intersection data; nothing removes the procedural branch.
     procedural::P
     instances::I
 end
 
-# Shorter forms for the backends and call sites that need neither of the
-# trailing fields. Keeping them means adding a field did not touch a single
-# existing construction site.
+"""Project traversal fields to device values. The backend supplies sceneconvert;
+invoke it in field order and never adapt the cyclic native hwtlas owner."""
+@inline function adaptaccel(to, accel::AdaptedAccel, sceneconvert)
+    return AdaptedAccel(nothing,
+        Adapt.adapt(to, accel.triangles), Adapt.adapt(to, accel.offsets),
+        accel.empty, sceneconvert(accel.scene), Adapt.adapt(to, accel.procedural),
+        Adapt.adapt(to, accel.instances))
+end
+
+# Optional traversal fields default to nothing.
 AdaptedAccel(hwtlas, triangles, offsets, empty) =
     AdaptedAccel(hwtlas, triangles, offsets, empty, nothing, nothing, nothing)
 AdaptedAccel(hwtlas, triangles, offsets, empty, scene) =
@@ -64,12 +32,7 @@ AdaptedAccel(hwtlas, triangles, offsets, empty, scene) =
 AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural) =
     AdaptedAccel(hwtlas, triangles, offsets, empty, scene, procedural, nothing)
 
-# The walk that holds a submission's memory stops at `hwtlas`. What a ray query
-# reads are the arrays exposed as the other fields, and the TLAS object is a cycle
-# on every backend: it caches its own adapted form (`static_tlas`), and on Vulkan
-# its channel holds the context, which holds the channel. For EVERY holder, so a
-# new one cannot fall through to the generic walker: Metal's `argmanaged` did, the
-# first time a hardware-RT plan was recorded there, and overflowed the stack.
+# Hold exposed resource leaves; the cached native owner forms a cycle via static_tlas.
 @inline function holdleaves!(holder, a::AdaptedAccel)
     holdleaves!(holder, a.triangles)
     holdleaves!(holder, a.offsets)

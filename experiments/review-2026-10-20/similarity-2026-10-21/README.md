@@ -64,7 +64,7 @@ are below; historical file:line locations are not current source coordinates.
 | `src/graph/build.jl:1012`, `src/runtime/dispatch.jl:315` | `indirectcount!` repeats usage registration and resource touching. Its wrappers return different values (`Commands(n)` versus `n`); preserve that distinction if sharing registration. |
 | `src/vulkan/runtime/video.jl:500`, `src/vulkan/runtime/video_h265.jl:495` | `feed!` shares access-unit accumulation, maximum-size accounting, buffer reservation and decoder reset. Consolidated in video_common.jl; codec NAL/slice parsing remains distinct. |
 | `src/metal/graphics.jl:1164`, `src/metal/mesh.jl:503` | `compile_draw` repeats argument normalization, format conversion and compilation plumbing. Stage-specific argument and compiled-result types remain distinct. |
-| `src/metal/hwtlas.jl:358`, `src/vulkan/raytracing/hwtlas.jl:262` | Highly similar `AdaptedAccel` field walks differ on adapting `scene`. Determine its representation contract before sharing the projection. |
+| `src/metal/hwtlas.jl:358`, `src/vulkan/raytracing/hwtlas.jl:262` | Highly similar `AdaptedAccel` field walks differ on adapting `scene`. Shared projection now preserves scene forwarding on Vulkan and adaptation on Metal; see consolidation-accel-projection.md. |
 | `ext/MantleROCmExt.jl:1022`, `src/metal/ka.jl:193` | Batched-GEMM dispatch wrappers are related, but native eligibility and launch configuration differ. Similarity alone does not establish a duplicated algorithm. |
 
 Full outputs: [Qwen report](qwen-report.json), [Jina report](jina-report.json).
