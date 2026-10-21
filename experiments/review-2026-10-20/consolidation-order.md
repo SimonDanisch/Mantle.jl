@@ -10,7 +10,7 @@ error behavior and native requirements. Measure implementation and prose separat
 | Shared owner | Deleted duplication and qualification |
 |---|---|
 | [Setup helpers](consolidation-first-batch.md) | Memory-type search, borrowed Metal views, attachment/depth setup, fragment input types. Metal execution remains unqualified here. |
-| [Memory collection](consolidation-memory.md) | Vulkan's independent collection budget, GC/reclaim coordination and pooled-allocation retry; native allocation still reports device requirements. |
+| [Memory collection](consolidation-memory.md) | Vulkan's independent collection budget, GC/reclaim coordination and pooled-allocation retry; native allocation still reports device requirements. Arena classes share buffer creation/binding/wrapping while retaining native memory requirements. |
 | [TLAS metadata / cache invalidation](consolidation-tlas-cache.md) | Triangle-table preparation and complete compute-cache invalidation. Preserve native content reuse during replacement. |
 | [Compilation publication](consolidation-publication.md) | Core publication for native graphics/mesh/ray pipelines; device-owned Metal caches replace process globals. |
 | [Kernel preparation](consolidation-kernel-preparation.md) | Eager and declared KI preparation, KA construction and capture validation. |

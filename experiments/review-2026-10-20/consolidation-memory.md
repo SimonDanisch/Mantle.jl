@@ -63,9 +63,26 @@ This is an admission-check measurement, not a workload speedup claim.
 
 ## Size and remaining work
 
-Physical source inventory is now 112 files / 55,000 lines, 73 fewer than this
+Physical source inventory after that batch was 112 files / 55,000 lines, 73 fewer than its
 batch's baseline (including comments and blank lines). Backend collection and
 retry policy is removed rather than copied into another backend. Tests and
 this report are outside that count. Cache ownership, eager/recorded execution,
 TLAS mutation state and the unified token retirement engine remain open in
 [the ownership/deletion map](consolidation-order.md).
+
+## Shared arena-buffer allocation
+
+Baseline `bc6a542`: one native allocation/binding/wrapping body replaces three
+in vulkan/graph.jl. Core still owns blocks and reclamation. Native classes retain:
+
+| Class | Memory | Mapping / address |
+|---|---|---|
+| Buffers | Required local; existing device_memory budget check | Unmapped, BDA enabled |
+| Unified | Required coherent host access; prefer local | Mapped once, BDA enabled, indirect usage |
+| Readback | Required coherent host access; prefer cached | Mapped once, no BDA |
+
+200 native assertions pass across AMD/NVIDIA: pool reuse/trim, cached downloads,
+record/replay, shared-arena growth, device retirement, zero-byte allocations and
+empty validation drains. AMD exercises the 4 GB allocation spill; that case skips
+NVIDIA because its allocation limit is not below half capacity. Source shrinks
+53,478 → 53,379 physical and 23,266 → 23,222 implementation lines; all 115 files parse.

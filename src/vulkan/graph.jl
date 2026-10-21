@@ -711,155 +711,56 @@ function build_pass_barrier(g, ts::Vector{Transition})
 end
 
 
-# `peakbytes`/`naivebytes` are NOT defined here. `Plan <: Plan` and
-# both read a field the same way in every backend, so core owns them.
+# Native buffer classes preserve distinct residency, mapping and command usage.
+arenabufferconfig(::Buffers) = (
+    usage=VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK.BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    mapped=false, addressable=true)
+arenabufferconfig(::Unified) = (
+    usage=arenabufferconfig(Buffers()).usage | VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+    mapped=true, addressable=true)
+arenabufferconfig(::Readback) = (usage=VK.BufferUsageFlag(0), mapped=true, addressable=false)
 
-# `Compile` is Mantle's now — see `src/graph/types.jl`.
+arenamemory(ctx, ::Buffers, req) = device_memory(ctx, req.size, req.type_bits)
 
+function arenamemory(ctx, kind::Union{Unified,Readback}, req)
+    # Placement preferences never weaken coherent host-access requirements.
+    required = VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK.MEMORY_PROPERTY_HOST_COHERENT_BIT
+    preferred = kind isa Unified ? VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK.MEMORY_PROPERTY_HOST_CACHED_BIT
+    idx = find_memory_type(ctx, req.type_bits, required; preferred_flags=preferred)
+    flags = arenabufferconfig(kind).addressable ? VK.MemoryAllocateFlagsInfo(UInt32(0);
+        flags=VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT) : C_NULL
+    return VK.DeviceMemory(ctx.device, UInt64(req.size), idx; next=flags)
+end
 
-"""
-An edge from i to j when they share a resource and at least one writes it.
-
-Read-after-read is deliberately not an edge: two passes that only read the same
-thing may run in either order, which is the freedom the scheduler spends.
-"""
-# ── Place ─────────────────────────────────────────────────────────────────────
-"""Back an arena. Buffers get a Lava array; images get raw device memory."""
-# The arena is one allocation shared by transients of several element types, so
-# its usage bits are the union of what they ask for.
-# `BufferBlock` is Mantle's now — see `src/graph/types.jl`.
-
-function rawalloc(dev::LavaDevice, ::Buffers, bytes::Int, usage)
-    n = max(bytes, 1)
-    # SHADER_DEVICE_ADDRESS is not optional: kernels reach a suballocated
-    # transient by `address + offset`, which is the whole bridge.
-    u = VK.BufferUsageFlag(usage) |
-        VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-        VK.BUFFER_USAGE_STORAGE_BUFFER_BIT |
-        VK.BUFFER_USAGE_TRANSFER_SRC_BIT |
-        VK.BUFFER_USAGE_TRANSFER_DST_BIT
-    buf = unbound_buffer(dev.ctx, n, u)
-    req = buffer_requirements(dev.ctx, buf)
-    mem = device_memory(dev.ctx, req.size, req.type_bits)
-    bind_buffer!(dev.ctx, buf, mem, 0)
-    addr = VK.get_buffer_device_address(
-        dev.ctx.device, VK.BufferDeviceAddressInfo(buf))
-    managed = VkManagedBuffer(buf, mem, UInt64(addr), Ptr{UInt8}(C_NULL), Int(req.size),
-                              nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, dev.ctx)
+"""Back an arena buffer. Map once per allocation, retain device addresses where
+kernels need them, and leave reclamation to the owning core block."""
+function rawalloc(dev::LavaDevice, kind::Union{Buffers,Unified,Readback}, bytes::Int, usage)
+    ctx = dev.ctx::VkContext
+    cfg = arenabufferconfig(kind)
+    u = VK.BufferUsageFlag(usage) | cfg.usage |
+        VK.BUFFER_USAGE_TRANSFER_SRC_BIT | VK.BUFFER_USAGE_TRANSFER_DST_BIT
+    buf = unbound_buffer(ctx, max(bytes,1), u)
+    req = buffer_requirements(ctx, buf)
+    mem = arenamemory(ctx, kind, req)
+    bind_buffer!(ctx, buf, mem, 0)
+    ptr = cfg.mapped ? Ptr{UInt8}(unwrap(VK.map_memory(ctx.device, mem, 0, UInt64(req.size)))) : Ptr{UInt8}(C_NULL)
+    addr = cfg.addressable ? UInt64(VK.get_buffer_device_address(ctx.device, VK.BufferDeviceAddressInfo(buf))) : UInt64(0)
+    managed = VkManagedBuffer(buf, mem, addr, ptr, Int(req.size), nothing,
+                              Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
     ref = GPUArrays.DataRef(_ -> nothing, managed)
-    return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
+    return BufferBlock(buf, mem, addr, Int(req.size), ref)
 end
 
 rawalloc(dev::LavaDevice, ::Images, bytes::Int, bits) =
-    device_memory(dev.ctx, max(bytes, 1), bits)
+    device_memory(dev.ctx, max(bytes,1), bits)
 
-"""
-Back a [`Unified`](@ref) arena: one buffer in BAR memory, mapped for the whole
-life of the block.
-
-`INDIRECT_BUFFER` unconditionally, because the arena holds both halves of what a
-recording reads — argument blocks the host writes and workgroup counts the
-command processor does — and one usage mask is what makes them one allocation.
-Splitting them would be two blocks to satisfy two bits.
-
-Mapped once here rather than per region: `vkMapMemory` may be called only once
-per allocation, and a `Region` is a slice of one. The pointer rides in the
-`VkManagedBuffer` the block already carries, so a region's host address is
-`ptr + offset` exactly as its device address is `address + offset`.
-"""
-function rawalloc(dev::LavaDevice, ::Unified, bytes::Int, usage)
-    ctx = dev.ctx::VkContext
-    n = max(bytes, 1)
-    u = VK.BufferUsageFlag(usage) |
-        VK.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-        VK.BUFFER_USAGE_STORAGE_BUFFER_BIT |
-        VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-        VK.BUFFER_USAGE_TRANSFER_SRC_BIT |
-        VK.BUFFER_USAGE_TRANSFER_DST_BIT
-    buf = unbound_buffer(ctx, n, u)
-    req = buffer_requirements(ctx, buf)
-    # Device-local AND host-visible where the device has such a heap, plain
-    # host-visible where it does not. `find_memory_type_optional` is the one that
-    # may answer `nothing`, which is the whole reason for the pair: a card with no
-    # resizable BAR still has to be able to back this arena.
-    idx = find_memory_type_optional(ctx, req.type_bits,
-              VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-              VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-              VK.MEMORY_PROPERTY_HOST_COHERENT_BIT)
-    idx === nothing && (idx = find_memory_type(ctx, req.type_bits,
-              VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-              VK.MEMORY_PROPERTY_HOST_COHERENT_BIT))
-    flags = VK.MemoryAllocateFlagsInfo(UInt32(0);
-        flags = VK.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
-    mem = VK.DeviceMemory(ctx.device, UInt64(req.size), idx; next = flags)
-    bind_buffer!(ctx, buf, mem, 0)
-    ptr = Ptr{UInt8}(unwrap(VK.map_memory(ctx.device, mem, 0, UInt64(req.size))))
-    addr = VK.get_buffer_device_address(ctx.device, VK.BufferDeviceAddressInfo(buf))
-    managed = VkManagedBuffer(buf, mem, UInt64(addr), ptr, Int(req.size),
-                              nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
-    ref = GPUArrays.DataRef(_ -> nothing, managed)
-    return BufferBlock(buf, mem, UInt64(addr), Int(req.size), ref)
-end
-
-# Nothing a caller of this arena declares narrows it: the usage mask above is
-# fixed, because what a recording reads is the same on every plan.
 constraintof(::LavaDevice, ::Unified, ts) = UInt32(0)
 mergeconstraints(::LavaDevice, ::Unified, a::Integer, b::Integer) = a | b
-
-"""
-Back a [`Readback`](@ref) arena: one buffer in HOST-CACHED memory, mapped for
-the whole life of the block.
-
-Not the `Unified` arena, though both are host-visible: `Unified` is BAR memory,
-which the host reads at write-combined speed (see `Readback`). `TRANSFER_DST`
-is what a download copies into, `TRANSFER_SRC` what the framebuffer readback
-and an upload out of the same kind would need; no device address, because no
-kernel ever reads it.
-
-`find_memory_type_optional` for the cached type, because a device may have no
-host-cached heap at all (lavapipe reports every type cached; some mobile parts
-none), and the plain host-visible fallback is still correct, just slow.
-"""
-function rawalloc(dev::LavaDevice, ::Readback, bytes::Int, usage)
-    ctx = dev.ctx::VkContext
-    n = max(bytes, 1)
-    u = VK.BufferUsageFlag(usage) |
-        VK.BUFFER_USAGE_TRANSFER_SRC_BIT |
-        VK.BUFFER_USAGE_TRANSFER_DST_BIT
-    buf = unbound_buffer(ctx, n, u)
-    req = buffer_requirements(ctx, buf)
-    idx = find_memory_type_optional(ctx, req.type_bits,
-              VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-              VK.MEMORY_PROPERTY_HOST_COHERENT_BIT |
-              VK.MEMORY_PROPERTY_HOST_CACHED_BIT)
-    idx === nothing && (idx = find_memory_type(ctx, req.type_bits,
-              VK.MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-              VK.MEMORY_PROPERTY_HOST_COHERENT_BIT))
-    mem = VK.DeviceMemory(ctx.device, UInt64(req.size), idx)
-    bind_buffer!(ctx, buf, mem, 0)
-    ptr = Ptr{UInt8}(unwrap(VK.map_memory(ctx.device, mem, 0, UInt64(req.size))))
-    managed = VkManagedBuffer(buf, mem, UInt64(0), ptr, Int(req.size),
-                              nothing, Stamp{UInt64}(), BUF_STATE_ALIVE, ctx)
-    ref = GPUArrays.DataRef(_ -> nothing, managed)
-    return BufferBlock(buf, mem, UInt64(0), Int(req.size), ref)
-end
 
 constraintof(::LavaDevice, ::Readback, ts) = UInt32(0)
 mergeconstraints(::LavaDevice, ::Readback, a::Integer, b::Integer) = a | b
 
-"""
-Destroy a block's Vulkan objects.
-
-Not a no-op. Leaving it to the `VkBuffer` and `VkDeviceMemory` wrappers' Julia
-finalizers collects them eventually, and "eventually" is not good
-enough when this pool took over device allocation: `trim_gpu_pool!` exists so a
-caller can say "I have finished and want the VRAM back NOW", and a figure that
-depends on when the GC next runs is not an answer to that.
-
-Destructor failures are logged rather than thrown. The two callers are `trim!`
-and `destroy_pool!`, and the second runs while a device is being torn down or is
-already lost, where the driver may have released the handles itself.
-"""
+"""Release native block objects promptly. Log destructor failures during teardown/reset."""
 function rawfree(::LavaDevice, blk::BufferBlock)
     try
         blk.buffer.destructor()

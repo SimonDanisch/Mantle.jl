@@ -56,7 +56,7 @@ are not added as distinct coverage.
 
 The 100-iteration mesh replacement checks retain the same measured live-region
 and pool-block counts. These are existing workload checks, not a measured
-before/after speedup from this consolidation. All 114 current source files parse.
+before/after speedup from this consolidation. All 114 source files at that revision parse.
 Native Metal execution is unavailable on this Linux host; parsing and the host
 index-representation tests do not qualify it. The replacement API suite still
 cannot run against this legacy implementation.
@@ -101,5 +101,5 @@ The remaining independent TLAS pending-change, build/refit and native lifetime
 owners still need the planned MemberSet/range/change machinery. The shared
 mutation bodies are the source to carry forward, not duplicate anew per backend.
 The other major ownership groups—cache idle/active holds and compute entries,
-unified token retirement, Builder execution and decoder session/DPB policy—also
-remain open. P0.A10 stays `doing`.
+unified token retirement and Builder execution—also remain open.
+Decoder consolidation is recorded in consolidation-video.md. P0.A10 stays `doing`.

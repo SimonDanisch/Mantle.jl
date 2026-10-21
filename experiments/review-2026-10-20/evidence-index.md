@@ -171,3 +171,5 @@ now explicit; no runtime fallback was added. The Vulkan-intrinsic AABB fixture
 moved under test/vulkan. Boundary checks pass (one existing pure-method triage
 remains broken); host batch mutations and native AABB/mipmap checks pass on both GPUs.
 The guard's historical prose is condensed; its checking syntax is unchanged.
+
+The memory report also records shared Vulkan arena-buffer construction and 200 native assertions across AMD/NVIDIA; required coherent/local flags, cached placement, BDA flags and block ownership remain explicit.
