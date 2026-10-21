@@ -1,15 +1,23 @@
-# The instances a top-level acceleration structure holds.
-#
-# Here and not per backend: a handle allocator, a batch list and a
-# handle-to-index map are the same five steps on any driver — allocate a handle,
-# append a batch, record its index, look one up, drop one and reindex what
-# shifted. Written per backend they differ in signature and not in content,
-# which is what makes a scan for shared names call them private helpers.
-#
-# None of that is a driver's. What a batch CONTAINS is — Vulkan's holds a
-# device-resident instance buffer and a BLAS, Metal's a transform list and an
-# index into the BLAS list — so the container is parameterised on it and knows
-# nothing else about it.
+"""
+Incremental TLAS with core-owned geometry registration and batch mutations.
+Implementations provide `blas_list`, `instances`, `root_aabb`,
+`dirty` and `transforms_dirty`; low-level, already-built HWTLAS types do not
+participate in this interface. Native construction, array upload and transform
+submission are backend methods.
+"""
+abstract type BatchedTLAS{Tri} <: HWTLAS{Tri} end
+
+"""Portable batch state; `blas` is a native object or its native table index."""
+mutable struct InstanceBatch{Tri,Geometry,Records}
+    blas::Geometry
+    records::Records
+    n::Int
+    handle::Raycore.TLASHandle
+    triangles::Vector{Tri}
+    sbt_offset::UInt32
+    hidden::Bool
+end
+Base.length(b::InstanceBatch) = b.n
 
 """
     InstanceBatches{B}()
@@ -17,8 +25,8 @@
 The batches of instances a top-level structure holds, and the handle each was
 registered under.
 
-`B` is the backend's batch type. This owns the ORDER and the handles; the
-backend owns what is in a batch.
+`B` selects a batch representation. This container owns order and handles;
+`InstanceBatch` owns portable batch state and its native references.
 """
 mutable struct InstanceBatches{B}
     batches::Vector{B}

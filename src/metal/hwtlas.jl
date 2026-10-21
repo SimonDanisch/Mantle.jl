@@ -242,24 +242,8 @@ end
 # ── The host side ────────────────────────────────────────────────────────────
 
 """One batch of instances that all reference the same BLAS."""
-mutable struct MetalInstanceBatch{Tri}
-    blas_idx::Int
-    # The instances, as a kernel writes them (`Raycore.instance_buffer`): a
-    # `MtlVector{Raycore.InstanceRecord}`, only the first `n` of which are
-    # instances. Each carries its own CUSTOM index — what Vulkan calls
-    # `gl_InstanceCustomIndexEXT` and Metal `user_instance_id`. Hikari routes a
-    # per-instance material through it (`resolve_mi_idx`), which is how every
-    # sphere of a `meshscatter!` gets its own colour; dropped here until
-    # September 2026, and the spheres all rendered black.
-    records::Any
-    n::Int
-    handle::Raycore.TLASHandle
-    triangles::Vector{Tri}
-    # Built with mask 0, which no ray's mask matches (`Raycore.set_visible!`);
-    # the records keep their own masks for when it is shown again.
-    hidden::Bool
-end
-Base.length(b::MetalInstanceBatch) = b.n
+const MetalInstanceBatch{Tri} =
+    InstanceBatch{Tri,Int,MtlVector{Raycore.InstanceRecord}}
 
 """
     MetalHWTLAS{Tri} <: HWTLAS{Tri}
@@ -268,20 +252,16 @@ Metal's incremental acceleration structure. Same contract as `VulkanTLAS`:
 `push!` geometry, `Raycore.sync!` to build, read the adapted form from
 `static_tlas`.
 
-The bookkeeping here — the BLAS list, the instance batches, the handle map, the
-root bounds, the dirty flags — is the same as Vulkan's and is a candidate to be
-shared once both implementations exist to generalise from. What is genuinely
-per-backend is narrow: building a BLAS, building the TLAS, and how a kernel
-reaches the result.
+Core owns geometry registration and batch mutations through `BatchedTLAS`.
+This backend owns native builds, record packing, residency and traversal.
 """
-mutable struct MetalHWTLAS{Tri} <: HWTLAS{Tri}
+mutable struct MetalHWTLAS{Tri} <: BatchedTLAS{Tri}
     backend::Any
     device::MetalDevice
 
     blas_list::Vector{MetalBLAS}
-    blas_triangles::Vector{Vector{Tri}}
     # The order, the handles and the reindex on delete are core's
-    # (`raytracing/batches.jl`); this backend supplies only the batch type.
+    # (`raytracing/batches.jl`); native types parameterize the shared batch.
     instances::Mantle.InstanceBatches{MetalInstanceBatch{Tri}}
 
     root_aabb::Raycore.Bounds3
@@ -319,7 +299,7 @@ function MetalHWTLAS{Tri}(backend::Metal.MetalBackend) where {Tri}
     d = Device(MetalAPI())
     ensure_traversal_linked!(d)
     MetalHWTLAS{Tri}(backend, d,
-        MetalBLAS[], Vector{Tri}[],
+        MetalBLAS[],
         Mantle.InstanceBatches{MetalInstanceBatch{Tri}}(),
         Raycore.Bounds3(),
         nothing, nothing, nothing, nothing, nothing, nothing,
@@ -327,9 +307,6 @@ function MetalHWTLAS{Tri}(backend::Metal.MetalBackend) where {Tri}
         true, false)
 end
 
-Raycore.world_bound(t::MetalHWTLAS)  = t.root_aabb
-Raycore.n_geometries(t::MetalHWTLAS) = length(t.blas_list)
-Raycore.n_instances(t::MetalHWTLAS)  = Mantle.ninstances(t.instances)
 Raycore.wait_for_gpu!(t::MetalHWTLAS) = (Metal.synchronize(); t)
 
 AdaptedAccel(t::MetalHWTLAS{Tri}) where {Tri} =
@@ -369,192 +346,26 @@ end
 
 # ── Geometry ─────────────────────────────────────────────────────────────────
 
-# Identical to the Vulkan path except for the BLAS build itself: same triangle
-# extraction, same degenerate-face skip, same running bounds.
-function add_geometry!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh) where {Tri}
-    cpu_triangles = Mantle.meshtriangles(Tri, mesh)
-    # Metal's BLAS builder takes a flat vertex buffer, three floats per vertex
-    # and three vertices per triangle, packed by the shared host preparation.
-    n_tris = length(cpu_triangles)
-    vertices = Mantle.trianglevertices(cpu_triangles)
+# Core supplies packed vertices; only native storage and AS creation live here.
+# One native triangle per three consecutive vertices.
+function buildgeometry!(t::MetalHWTLAS, vertices)
     vbuf = MTL.MTLBuffer(t.device.dev, sizeof(vertices); storage = Metal.SharedStorage)
-    unsafe_copyto!(convert(Ptr{NTuple{3,Float32}}, MTL.contents(vbuf)), pointer(vertices), length(vertices))
-    blas = build_blas(t.device, vbuf, n_tris)
-
-    push!(t.blas_list, blas)
-    push!(t.blas_triangles, cpu_triangles)
-
-    for tri in cpu_triangles, v in tri.vertices
-        t.root_aabb = Raycore.union(t.root_aabb, Raycore.Bounds3(Point3f(v)))
-    end
-    t.dirty = true
-    return length(t.blas_list)
+    GC.@preserve vertices unsafe_copyto!(convert(Ptr{NTuple{3,Float32}}, MTL.contents(vbuf)),
+                                        pointer(vertices), length(vertices))
+    return build_blas(t.device, vbuf, length(vertices) ÷ 3)
 end
 
-# What a Metal instance batch IS. The list it goes into, the handle it gets and
-# the reindex when one is dropped are `Mantle.InstanceBatches`.
-addbatch!(t::MetalHWTLAS{Tri}, blas_idx::Int, records::MtlArray, n::Int,
-          triangles::Vector{Tri}) where {Tri} =
-    Mantle.register!(t.instances, h ->
-        MetalInstanceBatch{Tri}(blas_idx, records, n, h, triangles, false))
+geometryref(::MetalHWTLAS, i::Int) = i
+instancearray(::MetalHWTLAS, records::AbstractVector) = MtlArray(records)
+instancearray(::MetalHWTLAS, records::MtlArray) = records
 
-# The host-record form: upload the records into an array of their own first.
-function addbatch!(t::MetalHWTLAS{Tri}, blas_idx::Int,
-                   records::Vector{Raycore.InstanceRecord}) where {Tri}
-    t.dirty = true
-    return addbatch!(t, blas_idx, MtlArray(records), length(records), t.blas_triangles[blas_idx])
-end
-
-# A pre-built BLAS joins `blas_list` once, however many batches instance it: an
-# instance names its geometry by index into that list.
-function addgeometry!(t::MetalHWTLAS{Tri}, blas::MetalBLAS, triangles::Vector{Tri}) where {Tri}
-    i = findfirst(b -> b === blas, t.blas_list)
-    i === nothing || return i
-    push!(t.blas_list, blas)
-    push!(t.blas_triangles, triangles)
-    t.dirty = true
-    return length(t.blas_list)
-end
-
-# `sbt_offset` is accepted and has nothing to do here: it selects a hit group in
-# a shader binding table, and Metal traverses inline from the shading kernel
-# with no table (`supports_rt_pipeline` is `false`). Accepted so a caller spells
-# the push the same way on both backends, as `Hikari`'s `scene-mesh.jl` does.
-
-"""
-    push!(t::MetalHWTLAS, blas::MetalBLAS, transform = I;
-          instance_id = 0, instance_mask = 0xff) -> TLASHandle
-
-Register a PRE-BUILT bottom-level structure — the one
-[`Mantle.build_blas`](@ref) or [`Mantle.build_blas_aabb`](@ref) returns — as a
-geometry and one instance of it.
-
-No triangle metadata comes with it: a hit on it returns the empty triangle
-(`hittriangle`). For boxes that is the point — what a ray hits inside one is the
-`procedural_candidate`/`procedural_commit` protocol's to say, not a triangle
-table's.
-
-Mirrors the Vulkan method of the same shape, so `Hikari`'s `fem.jl` spells one
-`push!` for both backends.
-"""
-function Base.push!(t::MetalHWTLAS{Tri}, blas::MetalBLAS,
-                    transform::Mat4f = Mat4f(LinearAlgebra.I);
-                    instance_id::UInt32 = UInt32(0), instance_mask::UInt8 = UInt8(0xff),
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    idx = addgeometry!(t, blas, Tri[])
-    return addbatch!(t, idx, Mantle.instancerecords([transform], [instance_id], instance_mask))
-end
-
-function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
-                    transform::Mat4f = Mat4f(LinearAlgebra.I);
-                    instance_id::UInt32 = UInt32(0), instance_mask::UInt8 = UInt8(0xff),
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    idx = add_geometry!(t, mesh)
-    return addbatch!(t, idx, Mantle.instancerecords([transform], [instance_id], instance_mask))
-end
-
-function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
-                    transforms::AbstractVector{Mat4f};
-                    instance_ids::Union{Nothing, AbstractVector{<:Integer}} = nothing,
-                    instance_mask::UInt8 = UInt8(0xff),
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    # BEFORE the geometry is added, as Vulkan does: refusing after
-    # `add_geometry!` would leave a BLAS no instance names.
-    records = Mantle.instancerecords(transforms, instance_ids, instance_mask)
-    idx = add_geometry!(t, mesh)
-    return addbatch!(t, idx, records)
-end
-
-"""
-    push!(t::MetalHWTLAS, blas::MetalBLAS, records::MtlVector{Raycore.InstanceRecord};
-          n = length(records), triangles = Tri[]) -> TLASHandle
-
-An N-instance batch of a pre-built `blas` whose instances are `records[1:n]`,
-a device array a kernel writes; `Raycore.instance_buffer` returns this same
-array, and `Raycore.refit!` commits what was written. `triangles` is the BLAS's
-per-triangle data, for hits to return. The Vulkan method of the same shape.
-"""
-function Base.push!(t::MetalHWTLAS{Tri}, blas::MetalBLAS, records::MtlVector{Raycore.InstanceRecord};
-                    n::Integer = length(records), triangles::Vector{Tri} = Tri[],
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    n <= length(records) || throw(ArgumentError(
-        "push!: n=$n exceeds the $(length(records)) records"))
-    idx = addgeometry!(t, blas, triangles)
-    t.dirty = true
-    return addbatch!(t, idx, records, Int(n), triangles)
-end
-
-"""
-    push!(t::MetalHWTLAS, mesh, records::MtlVector{Raycore.InstanceRecord};
-          n = length(records)) -> TLASHandle
-
-A BLAS built from `mesh` and an N-instance batch of it whose instances are
-`records[1:n]`, a device array a kernel writes.
-"""
-function Base.push!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh,
-                    records::MtlVector{Raycore.InstanceRecord};
-                    n::Integer = length(records), sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    n <= length(records) || throw(ArgumentError(
-        "push!: n=$n exceeds the $(length(records)) records"))
-    idx = add_geometry!(t, mesh)
-    t.dirty = true
-    return addbatch!(t, idx, records, Int(n), t.blas_triangles[idx])
-end
-
-# A transform update is a kernel writing the batch's records — the shared one,
-# which keeps each record's id and mask — and a refit at the next `sync!`.
-function Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle,
-                                    transforms::MtlVector{Mat3x4f})
-    b = Mantle.batchof(t.instances, handle)
-    b === nothing && throw(ArgumentError("update_transforms!: unknown handle $handle"))
-    length(transforms) == b.n || throw(ArgumentError(
-        "update_transforms!: $(length(transforms)) transforms for a batch of $(b.n)"))
-    KI.Kernel(t.backend, update_instance_records_kernel!)(b.records, transforms; ndrange = b.n)
-    t.transforms_dirty = true
+# Preserve Metal's immediate record update and its return value. Submission and
+# native build/refit policy remain backend-specific.
+function updatebatch!(t::MetalHWTLAS, batch, transforms)
+    batch.n == 0 || KI.Kernel(t.backend, update_instance_records_kernel!)(
+        batch.records, transforms; ndrange = batch.n)
     return t
 end
-
-Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transforms::AbstractVector) =
-    Raycore.update_transforms!(t, handle,
-        MtlArray(Mat3x4f[m isa Mat3x4f ? m : mat4_to_vk_transform(m) for m in transforms]))
-
-# Read back, not iterated: a device array of `Mat4f`s refuses host indexing, and
-# converting them is a host loop.
-Raycore.update_transforms!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transforms::MtlArray) =
-    Raycore.update_transforms!(t, handle, Array(transforms))
-
-# Every instance of the batch, as on Vulkan and Raycore's own structure.
-function Raycore.update_transform!(t::MetalHWTLAS, handle::Raycore.TLASHandle, transform)
-    b = Mantle.batchof(t.instances, handle)
-    b === nothing && throw(ArgumentError("update_transform!: unknown handle $handle"))
-    return Raycore.update_transforms!(t, handle, fill(transform, b.n))
-end
-
-function Base.delete!(t::MetalHWTLAS, handle::Raycore.TLASHandle)
-    Mantle.delete!(t.instances, handle) || return false
-    t.dirty = true
-    return true
-end
-
-"""
-    Raycore.set_visible!(t::MetalHWTLAS, handle, visible) -> Bool
-
-Hide a batch by building its instances with mask 0, or show it with its records'
-masks again. Its BLAS and its instances' places are untouched.
-"""
-function Raycore.set_visible!(t::MetalHWTLAS, handle::Raycore.TLASHandle, visible::Bool)
-    changed = Mantle.sethidden!(t.instances, handle, !visible)
-    changed === nothing && return false
-    changed && (t.dirty = true)
-    return true
-end
-
-# The portable instance API: the batch's records, and a refit from whatever they
-# now hold.
-Raycore.instance_buffer(t::MetalHWTLAS, handle::Raycore.TLASHandle) =
-    Mantle.recordsof(t.instances, handle)
-
-Raycore.refit!(t::MetalHWTLAS) = (t.transforms_dirty = true; Raycore.sync!(t))
 
 # ── The commit boundary ──────────────────────────────────────────────────────
 
@@ -591,7 +402,7 @@ function writeinstances!(t::MetalHWTLAS, descriptors::MtlArray, shading::MtlArra
     for b in t.instances
         b.n == 0 && continue
         KI.Kernel(t.backend, mtlinstances_kernel!)(descriptors, shading, b.records,
-            Int32(offset), Int32(b.n), UInt32(b.blas_idx - 1), options,
+            Int32(offset), Int32(b.n), UInt32(b.blas - 1), options,
             b.hidden ? UInt32(0) : UInt32(0xff); ndrange = b.n)
         offset += b.n
     end

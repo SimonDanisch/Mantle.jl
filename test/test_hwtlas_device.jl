@@ -1,8 +1,8 @@
 """
 An HWTLAS built on a non-default device keeps its buffers on that device.
 
-The mesh-push path (`push!(::VulkanTLAS, ::Mesh)` → `hwtlas_add_geometry!` →
-`_register_batch!` → `sync!`) allocates several device arrays: the per-batch
+The mesh-push path (`push!(::BatchedTLAS, ::Mesh)` → `batchgeometry!` /
+`addbatch!` → `sync!`) allocates several device arrays: the per-batch
 instance buffer, the concatenated instance buffer, and the triangle/offset GPU
 arrays. Each used the bare `LavaArray` constructor, whose queue defaults to the
 PROCESS-GLOBAL context — so a TLAS built for a second device put its instance

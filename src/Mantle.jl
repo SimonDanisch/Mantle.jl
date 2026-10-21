@@ -265,6 +265,7 @@ include("raytracing/batches.jl")
 include("raytracing/accel.jl")
 include("raytracing/geometry.jl")
 include("raytracing/instances.jl")
+include("raytracing/mutation.jl")
 include("raytracing/api.jl")
 
 # Building and running the graph. Last of the core includes: it names `Buffer`

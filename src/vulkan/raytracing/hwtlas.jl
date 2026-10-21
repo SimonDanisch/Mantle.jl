@@ -3,7 +3,7 @@
 # ============================================================================
 #
 # Single GPU-resident-instances code path: every push! produces an
-# `InstanceBatch{Tri}` that owns a `LavaArray{Raycore.InstanceRecord, 1}`, the
+# `VulkanInstanceBatch{Tri}` that owns a `LavaArray{Raycore.InstanceRecord, 1}`, the
 # portable records a kernel may write (`Raycore.instance_buffer`). Mutations
 # (update_transform!/update_transforms!) write them GPU-side via compute kernels
 # and flag `transforms_dirty`. `sync!` decides rebuild-vs-refit from the dirty
@@ -23,40 +23,8 @@ const Mat4f = SMatrix{4, 4, Float32, 16}
 # the acceleration structures in `raytracing/acceleration.jl`; a backing that
 # may be `nothing` is checked at the call, there is no method for `nothing`.
 
-# ============================================================================
-# InstanceBatch struct
-# ============================================================================
-
-"""
-    InstanceBatch{Tri}
-
-A batch of N HWTLAS instances all referencing the same BLAS, with their
-`Raycore.InstanceRecord`s in a GPU-resident `records` array that `sync!` reads
-at every build and refit. The `handle` it carries is the one core's
-`InstanceBatches` registered it under, and is what a caller tracks it by.
-
-`triangles` holds the per-triangle metadata for the BLAS (typically
-`Vector{Triangle{UInt32}}`). Pass an empty vector for rayQuery-only
-callers that don't need Hikari's per-triangle TriangleMeta lookup.
-"""
-mutable struct InstanceBatch{Tri}
-    blas::LavaBLAS
-    # The instances, as a caller's kernel writes them (`Raycore.instance_buffer`):
-    # transform, custom index and mask each. Only the first `n` are instances.
-    records::LavaArray{Raycore.InstanceRecord, 1}
-    n::Int
-    handle::Raycore.TLASHandle
-    triangles::Vector{Tri}
-    # SBT hit-group offset every instance in the batch shares.  0 maps to the
-    # first chit slot (legacy single-chit pipelines); per-material pipelines
-    # set this per push! to the material's slot index in
-    # `RayTracingPipeline.closesthit_funcs`.
-    sbt_offset::UInt32
-    # Built with mask 0, which no ray's cull mask matches (`Raycore.set_visible!`).
-    # The records keep their own masks, so showing it again restores them.
-    hidden::Bool
-end
-Base.length(b::InstanceBatch) = b.n
+const VulkanInstanceBatch{Tri} =
+    InstanceBatch{Tri,LavaBLAS,LavaArray{Raycore.InstanceRecord,1}}
 
 # ============================================================================
 # VulkanTLAS struct
@@ -107,7 +75,7 @@ For a CPU-blocking drain use `Raycore.wait_for_gpu!(hwtlas)`, which calls
 `flush!(hwtlas.bq)` (waits on the VulkanTLAS's own queue specifically, not
 the backend-wide queue the Raycore default `wait_for_gpu!` uses).
 """
-mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
+mutable struct VulkanTLAS{Tri} <: BatchedTLAS{Tri}
     backend::LavaBackend
 
     # submit channel for all AS builds and RT dispatches on this VulkanTLAS.
@@ -115,16 +83,14 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
 
     # Geometry (accumulated on push!)
     blas_list::Vector{LavaBLAS}
-    blas_triangles::Vector{Vector{Tri}}
-    blas_offsets::Vector{UInt32}
 
     # Instance batches -- N instances of one BLAS each, transforms in a GPU buffer.
     # Every push! produces one batch; per-mesh push! batches simply have n=1.
     #
     # The order, the handles and the reindex on delete are core's
-    # (`raytracing/batches.jl`); this backend supplies only the batch type, so
-    # the list, the handle→index `Dict` and the counter are not per backend.
-    instances::InstanceBatches{InstanceBatch{Tri}}
+    # (`raytracing/batches.jl`); native types parameterize the shared batch.
+    # The list, the handle→index `Dict` and the counter are not per backend.
+    instances::InstanceBatches{VulkanInstanceBatch{Tri}}
 
     # Bounding box (CPU-side, updated on push!)
     root_aabb::Raycore.Bounds3
@@ -157,10 +123,7 @@ mutable struct VulkanTLAS{Tri} <: HWTLAS{Tri}
 
     # Queued transform updates: handle → arguments for the per-batch kernel.
     # Populated by update_transforms!; consumed (and cleared) by sync!.
-    # Last write wins per handle (Dict key). Value is one of:
-    #   AbstractVector{<:AbstractMatrix}                    — CPU matrix path
-    #   (LavaArray{Point3f,1}, LavaArray{Vec4f,1}, Float32, UInt32)   — GPU uniform scale
-    #   (LavaArray{Point3f,1}, LavaArray{Vec4f,1}, LavaArray{Vec3f,1}, UInt32) — GPU per-vec scale
+    # Last write wins per handle (Dict key); values are Mat3x4f device arrays.
     pending_updates::Dict{Raycore.TLASHandle, Any}
 
     # The scene's procedural geometry, or `nothing`. Lives beside `blas_list`
@@ -183,8 +146,8 @@ HWTLAS{Tri}(backend::LavaBackend; kw...) where {Tri} = VulkanTLAS{Tri}(backend; 
 function VulkanTLAS{Tri}(backend::LavaBackend; bq::SubmitChannel{<:VulkanQueue}=backend.dispatch_bq) where {Tri}
     VulkanTLAS{Tri}(
         backend, bq,
-        LavaBLAS[], Vector{Tri}[], UInt32[],
-        InstanceBatches{InstanceBatch{Tri}}(),
+        LavaBLAS[],
+        InstanceBatches{VulkanInstanceBatch{Tri}}(),
         Raycore.Bounds3(),
         nothing, nothing, nothing, nothing,
         nothing,                  # combined_instance_buf
@@ -275,21 +238,6 @@ end
 # Accessors
 # ============================================================================
 
-Raycore.world_bound(hwtlas::VulkanTLAS)    = hwtlas.root_aabb
-Raycore.n_geometries(hwtlas::VulkanTLAS)   = length(hwtlas.blas_list)
-Raycore.n_instances(hwtlas::VulkanTLAS)    = ninstances(hwtlas.instances)
-
-# The portable instance API, `Raycore.instance_buffer` and `Raycore.refit!`: the
-# batch's records, and a refit (MODE_UPDATE_KHR) from whatever they now hold.
-Raycore.instance_buffer(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle) =
-    recordsof(hwtlas.instances, handle)
-
-Raycore.refit!(hwtlas::VulkanTLAS) = (hwtlas.transforms_dirty = true; Raycore.sync!(hwtlas))
-
-# RayMakie asks `isempty(hwtlas.instances)` and `length(hwtlas.instances)`, and
-# `InstanceBatches` answers both — of BATCHES, not of instances, because the
-# field IS the batches.
-
 # ============================================================================
 # wait_for_gpu!
 # ============================================================================
@@ -309,317 +257,22 @@ end
 # Mutation API
 # ============================================================================
 
-function hwtlas_add_geometry!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh) where {Tri}
-    cpu_triangles = meshtriangles(Tri, mesh)
-    blas_vertices = trianglevertices(cpu_triangles)
-    n_tris = length(cpu_triangles)
-    blas_indices = Vector{UInt32}(undef, n_tris * 3)
-    for i in 0:(n_tris*3 - 1)
-        blas_indices[i+1] = UInt32(i)
+# Native primitives used by core's batch registration and mutation algorithms.
+function buildgeometry!(t::VulkanTLAS, vertices)
+    indices = UInt32.(0:length(vertices)-1)
+    return build_accel!(t.bq) do ctx
+        build_blas(ctx, vertices, indices)
     end
-
-    hw_blas = build_accel!(hwtlas.bq) do ctx
-        build_blas(ctx, blas_vertices, blas_indices)
-    end
-
-    push!(hwtlas.blas_list, hw_blas)
-    push!(hwtlas.blas_triangles, cpu_triangles)
-    blas_idx = length(hwtlas.blas_list)
-
-    offset = isempty(hwtlas.blas_offsets) ? UInt32(0) :
-             hwtlas.blas_offsets[end] + UInt32(length(hwtlas.blas_triangles[end-1]))
-    push!(hwtlas.blas_offsets, offset)
-
-    for tri in cpu_triangles
-        for v in tri.vertices
-            hwtlas.root_aabb = Raycore.union(hwtlas.root_aabb, Raycore.Bounds3(Point3f(v)))
-        end
-    end
-
-    hwtlas.dirty = true
-    return blas_idx
 end
 
-# What a Vulkan instance batch IS: a device-resident record buffer and the BLAS
-# every instance in it references. The list it goes into, the handle it gets and
-# the reindex when one is dropped are `Mantle.InstanceBatches`, so no part of
-# that is per backend.
-addbatch!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS,
-          records::LavaArray{Raycore.InstanceRecord, 1}, n::Int,
-          triangles::Vector{Tri}, sbt_offset::UInt32) where {Tri} =
-    register!(hwtlas.instances, h ->
-        InstanceBatch{Tri}(blas, records, n, h, triangles, sbt_offset, false))
+instancearray(t::VulkanTLAS, records::AbstractVector) = LavaArray(records; bq=t.bq)
+instancearray(::VulkanTLAS, records::LavaArray) = records
 
-# The host-record form: upload the records into a buffer of their own first.
-function addbatch!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS,
-                   records::Vector{Raycore.InstanceRecord}, triangles::Vector{Tri},
-                   sbt_offset::UInt32) where {Tri}
-    h = addbatch!(hwtlas, blas, LavaArray(records; bq = hwtlas.bq), length(records),
-                  triangles, sbt_offset)
-    hwtlas.dirty = true
-    return h
-end
-
-# A pre-built BLAS joins `blas_list` once, however many batches instance it: the
-# list is what a trace holds (`build_tlas`'s `blases`), so a BLAS missing from it
-# could be destroyed under a trace still walking it.
-function addgeometry!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS, triangles::Vector{Tri}) where {Tri}
-    any(b -> b === blas, hwtlas.blas_list) && return nothing
-    push!(hwtlas.blas_list, blas)
-    push!(hwtlas.blas_triangles, triangles)
-    offset = isempty(hwtlas.blas_offsets) ? UInt32(0) :
-             hwtlas.blas_offsets[end] + UInt32(length(hwtlas.blas_triangles[end-1]))
-    push!(hwtlas.blas_offsets, offset)
+# Queue the already validated buffer. Last write wins per live handle; sync!
+# emits updates and the records-to-native conversion in the same submission.
+function updatebatch!(t::VulkanTLAS, batch, transforms)
+    t.pending_updates[batch.handle] = transforms
     return nothing
-end
-
-function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh, transform::Mat4f=Mat4f(I);
-                    instance_id::UInt32=UInt32(0), instance_mask::UInt8=UInt8(0xff),
-                    sbt_offset::UInt32=UInt32(0)) where {Tri}
-    blas_idx  = hwtlas_add_geometry!(hwtlas, mesh)
-    records   = instancerecords([transform], [instance_id], instance_mask)
-    return addbatch!(hwtlas, hwtlas.blas_list[blas_idx], records,
-                     hwtlas.blas_triangles[blas_idx], sbt_offset)
-end
-
-function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh, transforms::AbstractVector{Mat4f};
-                    instance_ids::Union{Nothing, AbstractVector{<:Integer}}=nothing,
-                    instance_mask::UInt8=UInt8(0xff),
-                    sbt_offset::UInt32=UInt32(0)) where {Tri}
-    # Before the geometry is built, so a refused push leaves no BLAS behind.
-    records   = instancerecords(transforms, instance_ids, instance_mask)
-    blas_idx  = hwtlas_add_geometry!(hwtlas, mesh)
-    return addbatch!(hwtlas, hwtlas.blas_list[blas_idx], records,
-                     hwtlas.blas_triangles[blas_idx], sbt_offset)
-end
-
-"""
-    push!(hwtlas::VulkanTLAS, blas::LavaBLAS, transform::Mat4f=Mat4f(I);
-          instance_id::UInt32=UInt32(0), instance_mask = 0xff) -> TLASHandle
-
-Register a pre-built `LavaBLAS` (from `build_blas` or `build_blas_aabb`) as a
-geometry and one instance of it. No triangle data is associated, so a hit on it
-returns the empty triangle (`hittriangle`), and the ray-tracing pipeline path is
-not usable on this VulkanTLAS; trace it with `closest_hit` in a kernel.
-"""
-function Base.push!(hwtlas::VulkanTLAS{Tri}, blas::LavaBLAS, transform::Mat4f=Mat4f(I);
-                    instance_id::UInt32=UInt32(0), instance_mask::UInt8=UInt8(0xff),
-                    sbt_offset::UInt32=UInt32(0)) where {Tri}
-    addgeometry!(hwtlas, blas, Tri[])
-    return addbatch!(hwtlas, blas, instancerecords([transform], [instance_id], instance_mask),
-                     Tri[], sbt_offset)
-end
-
-"""
-    push!(tlas::VulkanTLAS{Tri}, blas::LavaBLAS,
-          records::LavaArray{Raycore.InstanceRecord, 1};
-          n = length(records), triangles::Vector{Tri} = Tri[],
-          sbt_offset = 0) -> Raycore.TLASHandle
-
-Register an N-instance batch in the HWTLAS. All N instances reference the
-same `blas`; their transforms, custom indices and masks are `records[1:n]`, a
-device array a kernel writes (see `write_grain_instances_kernel`), and
-`Raycore.instance_buffer` returns this same array.
-
-`n` defaults to `length(records)`. Pass a smaller value when the buffer
-is pre-allocated larger than the current live instance count.
-
-`triangles` supplies the BLAS's per-triangle metadata for Hikari's path tracer
-(`tri_gpu` / `off_gpu` lookup). Pass empty (the default) for rayQuery-only
-callers -- those don't need per-triangle metadata.
-
-Returns one `TLASHandle` for the whole batch. Subsequent `sync!` builds
-the underlying `LavaTLAS` with `allow_update=true` so per-frame refits work.
-"""
-function Base.push!(tlas::VulkanTLAS{Tri}, blas::LavaBLAS,
-                    records::LavaArray{Raycore.InstanceRecord, 1};
-                    n::Integer = length(records),
-                    triangles::Vector{Tri} = Tri[],
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    n_int = Int(n)
-    n_int <= length(records) || throw(ArgumentError(
-        "push!: n=$n_int exceeds the $(length(records)) records"))
-    addgeometry!(tlas, blas, triangles)
-    handle = addbatch!(tlas, blas, records, n_int, triangles, sbt_offset)
-    tlas.dirty = true
-    return handle
-end
-
-"""
-    push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh,
-          records::LavaArray{Raycore.InstanceRecord, 1};
-          n = length(records), sbt_offset = 0) -> Raycore.TLASHandle
-
-Build a BLAS from `mesh` and register an N-instance batch of it whose
-instances are `records[1:n]`, a device array a kernel writes.
-
-`n` defaults to `length(records)`. Pass a smaller value when the buffer
-is pre-allocated larger than the current live instance count.
-
-Returns one `TLASHandle` for the whole batch.
-"""
-function Base.push!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh,
-                    records::LavaArray{Raycore.InstanceRecord, 1};
-                    n::Integer = length(records),
-                    sbt_offset::UInt32 = UInt32(0)) where {Tri}
-    n_int = Int(n)
-    n_int <= length(records) || throw(ArgumentError(
-        "push!: n=$n_int exceeds the $(length(records)) records"))
-    blas_idx = hwtlas_add_geometry!(hwtlas, mesh)
-    handle = addbatch!(hwtlas, hwtlas.blas_list[blas_idx], records, n_int,
-                       hwtlas.blas_triangles[blas_idx], sbt_offset)
-    hwtlas.dirty = true
-    return handle
-end
-
-# ============================================================================
-# GPU update kernel + update_transform!/update_transforms!
-# ============================================================================
-
-# The kernel that writes them is core's (`update_instance_records_kernel!` in
-# `raytracing/instances.jl`): it reads each record's id and mask back and writes
-# only the transform, so an update keeps per-instance ids and masks.
-
-"""
-    Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::TLASHandle,
-                               transforms::LavaArray{Mat3x4f, 1})
-
-Queue a bulk transform update for every instance in `handle`'s batch.
-`transforms` must be a GPU-resident `LavaArray{Mat3x4f}`.
-`length(transforms)` must equal the batch size. The kernel that writes them into
-the batch's records runs in the next `sync!`, which then issues a
-`MODE_UPDATE_KHR` refit.
-"""
-function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
-                                    transforms::LavaArray{Mat3x4f, 1})
-    batch = batchof(hwtlas.instances, handle)
-    # `ArgumentError`, as Metal throws: a caller's wrong handle or count is an
-    # argument error on every backend.
-    batch === nothing && throw(ArgumentError("update_transforms!: unknown handle $handle"))
-    length(transforms) == batch.n || throw(ArgumentError(
-        "update_transforms!: $(length(transforms)) transforms for a batch of $(batch.n) instances"))
-    hwtlas.pending_updates[handle] = transforms
-    hwtlas.transforms_dirty = true
-    return nothing
-end
-
-# CPU-array overload: upload to GPU then delegate.
-function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
-                                    transforms::AbstractVector{Mat3x4f})
-    Raycore.update_transforms!(hwtlas, handle, LavaArray(collect(transforms); bq=hwtlas.bq))
-end
-
-# Mat4f convenience: mirrors Raycore's HWTLAS overloads — accept the natural
-# homogeneous 4×4 form and convert at the boundary.
-function Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
-                                    transforms::AbstractVector{Mat4f})
-    Raycore.update_transforms!(hwtlas, handle, map(Raycore.mat4_to_mat3x4, transforms))
-end
-
-"""
-    Raycore.update_instance_transforms!(hwtlas, transforms, n_to_update[, first_idx])
-
-Raycore's FLAT-index form of a transform update, mapped onto this TLAS's batches.
-
-Every mutation above is addressed by `TLASHandle`, because that is how a
-`VulkanTLAS` stores instances: one `InstanceBatch` per push!, each with its own
-GPU buffer. `Raycore.TLAS` instead keeps one flat instance array and lets callers
-address a range of it directly, and RayMakie's mesh path uses exactly that form —
-a plot remembers `instance_idx = n_instances(accel)` from when it was pushed and
-later writes one transform at that index.
-
-Without this method that call fell through to a `MethodError`, and because
-RayMakie catches per-plot render failures and logs them, the result was not a
-crash but a scene that DID NOT MOVE: measured on an animated figure, two opposite
-extremes of a walk cycle rendered 0 differing pixels out of 76800, while the same
-scene on GLMakie differed in 3669. Ten plots, ten swallowed errors, one perfectly
-still picture.
-
-`n_instances` sums the batches in push order, so a flat index maps onto them by
-walking that order. A range that does not line up with exactly one whole batch is
-refused rather than approximated — `pending_updates` holds one transform array
-per handle and has no way to express "part of a batch", and quietly writing the
-wrong instances is the failure this method exists to end.
-"""
-function Raycore.update_instance_transforms!(hwtlas::VulkanTLAS, transforms::AbstractVector,
-                                             n_to_update::Integer, first_idx::Integer)
-    n, i0 = Int(n_to_update), Int(first_idx)
-    n > 0 || return nothing
-    base = 0
-    for batch in hwtlas.instances
-        if i0 <= base + batch.n
-            (i0 == base + 1 && n == batch.n) || error(
-                "update_instance_transforms!: instances $(i0):$(i0 + n - 1) do not " *
-                "cover exactly one batch (batch at $(base + 1):$(base + batch.n)). " *
-                "A VulkanTLAS updates whole batches; address it by handle instead.")
-            return Raycore.update_transforms!(hwtlas, batch.handle, transforms)
-        end
-        base += batch.n
-    end
-    error("update_instance_transforms!: instance index $(i0) past the end " *
-          "($(base) instances in $(length(hwtlas.instances)) batches).")
-end
-
-Raycore.update_instance_transforms!(hwtlas::VulkanTLAS, transforms::AbstractVector,
-                                    n_to_update::Integer) =
-    Raycore.update_instance_transforms!(hwtlas, transforms, n_to_update, 1)
-
-# A GPU-resident `LavaArray{Mat4f}` is what RayMakie hands over (it allocates
-# through KA). `map` over one would run on the device and hand back a device
-# array of a type the handle path does not take, so convert on the host — these
-# are single-instance updates, not a bulk path.
-Raycore.update_transforms!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle,
-                           transforms::LavaArray{Mat4f, 1}) =
-    Raycore.update_transforms!(hwtlas, handle,
-                               map(Raycore.mat4_to_mat3x4, collect(transforms)))
-
-"""
-    update_transform!(hwtlas::VulkanTLAS, handle::TLASHandle, transform)
-
-Set every instance in `handle`'s batch to the same transform. Accepts
-`Mat3x4f` (canonical) or `Mat4f` (auto-converted). An unknown handle is an
-`ArgumentError`, as on Metal and Raycore's own structure.
-"""
-function Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat3x4f)
-    batch = batchof(hwtlas.instances, handle)
-    batch === nothing && throw(ArgumentError("update_transform!: unknown handle $handle"))
-    Raycore.update_transforms!(hwtlas, handle,
-                               LavaArray(fill(transform, batch.n); bq = hwtlas.bq))
-    return nothing
-end
-
-Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat4f) =
-    Raycore.update_transform!(hwtlas, handle, Raycore.mat4_to_mat3x4(transform))
-
-
-# ============================================================================
-# delete!
-# ============================================================================
-
-function Base.delete!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle)::Bool
-    # The reindex of every handle whose batch shifted is core's, and it is the
-    # half that was written twice and is easy to get wrong.
-    delete!(hwtlas.instances, handle) || return false
-    hwtlas.dirty = true
-    return true
-end
-
-# ============================================================================
-# set_visible!
-# ============================================================================
-
-"""
-    Raycore.set_visible!(hwtlas::VulkanTLAS, handle, visible) -> Bool
-
-Hide a batch by building its instances with mask 0, which no ray's cull mask
-matches; show it by building them with their records' masks again. The BLAS,
-the records and their places are untouched, so per-instance lookups stay valid.
-"""
-function Raycore.set_visible!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, visible::Bool)
-    changed = sethidden!(hwtlas.instances, handle, !visible)
-    changed === nothing && return false
-    changed && (hwtlas.dirty = true)
-    return true
 end
 
 # ============================================================================
@@ -701,40 +354,20 @@ function writeinstances!(hwtlas::VulkanTLAS, native::LavaArray{VulkanInstanceRec
     return nothing
 end
 
-# Compact `blas_list` / `blas_triangles` / `blas_offsets` to drop entries
-# no longer referenced by any live batch.  Returns the dropped BLASes so the
-# caller can `unsafe_free!` them after the rebuild.
-function _compact_blas_list!(hwtlas::VulkanTLAS{Tri}) where {Tri}
-    n_blas = length(hwtlas.blas_list)
-    n_blas == 0 && return LavaBLAS[]
-    used = Set{Int}()
-    # Identify each BLAS by reference identity (===) since multiple batches
-    # may share the same LavaBLAS object.
-    for batch in hwtlas.instances
-        for (i, blas) in enumerate(hwtlas.blas_list)
-            blas === batch.blas && push!(used, i)
-        end
+# Native TLAS objects copy the BLAS keepalive list at build time. Compact the
+# current scene's list in place; old structures keep their own native owners
+# until their queued uses retire. Each batch names its BLAS by object identity.
+function _compact_blas_list!(t::VulkanTLAS)
+    used = Base.IdSet{LavaBLAS}()
+    for batch in t.instances
+        push!(used, batch.blas)
     end
-    length(used) == n_blas && return LavaBLAS[]
-
     dropped = LavaBLAS[]
-    new_blas       = LavaBLAS[]
-    new_triangles  = Vector{Tri}[]
-    new_offsets    = UInt32[]
-    running_offset = UInt32(0)
-    for i in 1:n_blas
-        if i in used
-            push!(new_blas, hwtlas.blas_list[i])
-            push!(new_triangles, hwtlas.blas_triangles[i])
-            push!(new_offsets, running_offset)
-            running_offset += UInt32(length(hwtlas.blas_triangles[i]))
-        else
-            push!(dropped, hwtlas.blas_list[i])
-        end
+    filter!(t.blas_list) do blas
+        keep = blas in used
+        keep || push!(dropped, blas)
+        return keep
     end
-    hwtlas.blas_list      = new_blas
-    hwtlas.blas_triangles = new_triangles
-    hwtlas.blas_offsets   = new_offsets
     return dropped
 end
 

@@ -68,6 +68,22 @@ The source index and model weights are deliberately excluded from commits.
 Store reviewed findings and a dated report in `experiments/`, not the vector
 cache. Rebuild after source changes before relying on file locations.
 
+## Size accounting
+
+`inventory.jl` uses the same parser and lexer to distinguish implementation
+from docstrings, comments and blanks. A mixed code/comment line counts as code;
+ordinary string literals, including embedded native shader source, stay code.
+Docstrings are recognized by syntax, so `#` inside a shader or string is not
+mistaken for a comment. These are source lines, not statement counts.
+
+```julia
+include("tools/similarity/inventory.jl")
+write_inventory(pwd(), "tools/similarity/.cache/inventory.toml")
+```
+
+Use the same metric at both revisions. Moving documentation, reformatting code,
+or moving implementations between files is not algorithm consolidation.
+
 ## Primary references
 
 - [Qwen3 Embedding](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B):
