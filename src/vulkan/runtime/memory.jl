@@ -72,49 +72,9 @@ const BDA_POISON = UInt64(0)
 # way. `reset_memory_stats!` is the one piece left, and `reset_device!` calls
 # it directly.
 
-# ── GPU memory pressure tracking (ported from AMDGPU.jl) ──
-# Julia's GC doesn't know about GPU memory. LavaArray wrappers are ~50 bytes on
-# the CPU heap, but back 100+ MB of VRAM each. Without pressure signals, GC
-# never fires and dead GPU buffers accumulate until OOM.
-#
-# Strategy mirrors `AMDGPU.jl/src/memory.jl::maybe_collect`:
-#   * Pressure-based trigger (`live / heap_size`), not raw byte counter, so the
-#     same logic works for 8 GiB iGPUs and 24 GiB dGPUs without tuning.
-#   * GC-rate budget: collector skips itself when it has already spent more than
-#     ~5% of wall time in GC (`last_gc_time / dt`).  Budget doubles on high
-#     pressure, on blocking calls, and after a productive collection.
-#   * Only `GC.gc(false)` (incremental) is ever called automatically — full GC
-#     is too expensive to fire from the alloc hot path; if we're truly OOM the
-#     caller's retry loop in `vk_alloc` runs the full GC explicitly.
-#   * EWMA on `last_gc_time` so a single slow GC doesn't permanently inhibit
-#     future GCs.
-#
-# What this device holds is `gpu_live_bytes(ctx)`, and every gate here reads
-# that rather than `mempolicy(ctx).live_bytes[]`, which is not the same number:
-# `live_bytes` counts only buffers that own their memory — staging, mapped,
-# unusual usage flags — while the suballocated bytes are
-# `Mantle.reserved(spans(ctx))`, and the total is the sum.
-#
-# Reading the counter alone is a live bug, not a nuance: it makes every threshold
-# here compare device pressure against a few megabytes of staging and conclude
-# there is nothing to do. The trim (`maybe_trim_pool!`, core's `autotrim!` now) did
-# exactly that and declined to trim a pool holding 1.3 GB.
-
-# `MemoryStats` moved to `coretypes.jl`, beside the `MemoryPolicy` field that
-# holds one.
-
-# `const MEMORY_STATS = MemoryStats()` and `const EAGER_GC = Ref{Bool}(true)`
-# were here, deleted 2026-09-15. Both were process-global state a BACKEND read to
-# decide what to do, which it has no business doing: the context is an argument at
-# every call site, `MemoryPolicy` is already per-pool, and the comment on that
-# struct describes this exact mistake being fixed for eleven other module-level
-# `Ref`s — "module-level, these were one number for two heaps, so the pressure
-# ratio, the trim threshold and the OOM retry all read the SUM of both devices
-# against ONE device's capacity". `MEMORY_STATS` was the twelfth and survived the
-# fix, so a busy discrete GPU still drove collection on an idle integrated one
-# through the heap-size probe and the GC rate limiter.
-#
-# They are `mempolicy(ctx).stats` and `mempolicy(ctx).eager_gc` now.
+# Native heap facts and usage feed the shared PoolPolicy controller. Usage is
+# pooled capacity plus dedicated buffers; the dedicated-byte counter alone
+# misses most device memory. No second collection budget lives in this backend.
 
 """
     eager_gc!(ctx, flag::Bool)
@@ -129,9 +89,6 @@ function reset_memory_stats!(ctx::VkContext = vk_context())
     st = mempolicy(ctx).stats
     @atomic st.size = 0
     @atomic st.last_updated = 0.0
-    @atomic st.last_time = 0.0
-    @atomic st.last_gc_time = 0.0
-    @atomic st.last_freed = 0
     return
 end
 
@@ -205,8 +162,7 @@ overbudget(heap::NamedTuple, bytes::Integer) = heap.usage + bytes > heap.budget
 """
     maybe_collect(ctx::VkContext; blocking::Bool=false)
 
-Trigger an incremental GC if GPU pressure is high.  Ported from
-`AMDGPU.jl/src/memory.jl::maybe_collect`.
+Query native heap pressure and enter core's shared collection controller.
 
 Called from `vk_alloc` and `pool_alloc` before allocating.  `blocking=true`
 lowers the pressure threshold and inflates the rate budget — use it when the
@@ -243,8 +199,6 @@ The automatic path keeps the cheap gate; see `Mantle.reclaimable`. This one is
 the explicit "I have finished and want the memory back", so it pays the stall.
 """
 function trim_gpu_pool!(ctx::VkContext = vk_context())
-    GC.gc(true)
-    isempty(poolblocks(ctx)) && return (0, 0)
     bq = ctx.default_bq
     quiesce_before_reclaim!(bq) || return (0, 0)
     return reclaim_empty_pool_blocks!(bq)
@@ -273,51 +227,13 @@ function maybe_collect(ctx::VkContext; blocking::Bool=false)
     size = (@atomic stats.size)
     size > 0 || return  # haven't probed yet
 
-    live = gpu_live_bytes(ctx)
-    pressure = live / size
-    min_pressure = blocking ? 0.5 : 0.75
-    pressure < min_pressure && return
+    autocollect!(() -> drain!(ctx.default_bq), spans(ctx);
+                 pressure = gpu_live_bytes(ctx) / size, blocking) || return
 
-    # GC rate budget: skip if we've already burned >5% wall time on GC.
-    last_time = @atomic stats.last_time
-    last_gc_time = @atomic stats.last_gc_time
-    dt = current_time - last_time
-    gc_rate = dt > 0 ? last_gc_time / dt : 0.0
-    max_gc_rate = 0.05
-    (@atomic stats.last_freed) > 0.1 * size && (max_gc_rate *= 2)
-    blocking && (max_gc_rate *= 2)
-    pressure > 0.9 && (max_gc_rate *= 2)
-    pressure > 0.95 && (max_gc_rate *= 2)
-    gc_rate > max_gc_rate && return
+    # Capacity counts against heap pressure too. Core returns reclaimable
+    # blocks without paying for another collection through explicit quiescence.
+    trimcollected!(spans(ctx), lavadevice(ctx))
 
-    @atomic stats.last_time = current_time
-
-    pre_gc_live = live
-    gc_time = Base.@elapsed GC.gc(false)
-    post_gc_live = gpu_live_bytes(ctx)
-
-    # The GC just returned sub-allocations to their pool blocks, but a block is
-    # only handed back to the driver on an OOM retry.  `pool.live_bytes` tracks
-    # pool *capacity*, so without this the pressure signal never falls: we keep
-    # collecting, relieve nothing, and the first thing to notice the pool is
-    # holding gigabytes of dead blocks is an allocation failure — or, on an iGPU
-    # sharing system RAM, a driver timeout, because the pressure is on memory
-    # the rest of the system also needs.
-    #
-    # Reclaim here, where a collection is already being paid for.  The scan for
-    # empty blocks is cheap; only pay `quiesce_before_reclaim!` (which waits for
-    # in-flight batches) when a block would actually be returned.
-    if any(b -> isempty(b.live), poolblocks(ctx))
-        bq = ctx.default_bq
-        if quiesce_before_reclaim!(bq)
-            n_blocks, bytes_freed = reclaim_empty_pool_blocks!(bq)
-            n_blocks > 0 && @debug "Lava: reclaimed empty pool blocks after GC" blocks=n_blocks MiB=(bytes_freed >> 20)
-            post_gc_live = gpu_live_bytes(ctx)
-        end
-    end
-
-    @atomic stats.last_freed = pre_gc_live - post_gc_live
-    @atomic stats.last_gc_time = 0.75 * last_gc_time + 0.25 * gc_time
     return
 end
 
@@ -451,53 +367,14 @@ batch-signal desync, or a segfault inside the driver's `vkCmdPipelineBarrier`.
 Flushing first makes the invariant unconditional — after it there is no
 recorded-but-unsubmitted work and everything submitted has completed — and it
 only runs once an allocation has already failed, so the stall is free in the
-steady state. `pool.reclaiming` guards the re-entry through `flush!`'s own
-allocations.
+steady state. The core collection claim guards re-entry through `flush!`'s allocations.
 """
 
 function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
-    # Refuse while any plan on this device holds a recording, and say so, because
-    # the caller must not go on to reclaim either.
-    #
-    # A drain is what makes reclaiming safe, and a recording cannot be drained
-    # into safety: it is submitted again next run, so a block its command buffer
-    # names is live for as long as the plan is. Waiting does not change that.
-    #
-    # `movable` asks the pool about its tenants, which is the property that
-    # matters and the same one arena growth refuses on. "Is a capture open"
-    # (`bq.capturing !== nothing`) is true only during `bake!` and false for
-    # every recording already taken.
-    #
-    # Here and not at the two trim entry points, which is where this check went
-    # first. Same effect, worse test: an entry point has three gates in front of
-    # it (`trim_threshold`, `trim_min_interval`, `reclaimable`) and a test-sized
-    # workload trips none of them, so a regression test written against the entry
-    # point passes whether the guard is there or not. Two were, and both were
-    # worthless. Here there is one thing to ask and one answer.
-    movable(pool(lavadevice(ctxof(bq)))) || return false
-    p = mempolicy(ctxof(bq))
-    if !p.reclaiming[] && !device_lost(ctxof(bq))
-        p.reclaiming[] = true
-        try
-            flush!(bq)
-        finally
-            p.reclaiming[] = false
-        end
-    end
-    GC.gc(true)
-    drain!(bq)
-    # The POOL's retired regions, which `drain!` above does not touch: that one
-    # is the channel's, for passed submissions and the destroys waiting on them.
-    # `reclaim!(::Pool, dev)` is the regions `retire!` queued, and without it a
-    # retired region stays on `pool.pending` and its block never becomes empty,
-    # so a trim finds nothing to return.
-    #
-    # `wait = true`: this function's contract is a flush, a wait and a drain, and
-    # its caller is the explicit trim, which pays the stall.
-    let dev = lavadevice(ctxof(bq))
-        reclaim!(pool(dev), dev; wait = true)
-    end
-    return true
+    ctx = ctxof(bq)
+    device_lost(ctx) && return false
+    dev = lavadevice(ctx)
+    return quiesce_pool!(() -> flush!(bq), () -> drain!(bq), pool(dev), dev)
 end
 
 """
@@ -907,8 +784,7 @@ const POOL_ALIGN = 256
 # module-level `Ref`s. The trim and the soft cap are the pool's own policy now
 # (`PoolPolicy`, core's), which every backend's pool applies.
 MemoryPolicy() = MemoryPolicy(false, false, true, MemoryStats(),
-                              Threads.Atomic{Int}(0), Set{VkManagedBuffer}(),
-                              Threads.Atomic{Bool}(false))
+                              Threads.Atomic{Int}(0), Set{VkManagedBuffer}())
 
 """
     lavadevice(ctx) -> LavaDevice
@@ -1002,7 +878,7 @@ function destroy_pool!(ctx::VkContext)
     return nothing
 end
 
-"""Collections run by the soft cap, and the seconds they cost: the pool's
+"""Pool collection cycles and their cost: the pool's
 policy's counters (`PoolPolicy`)."""
 pool_gc_stats(ctx::VkContext = vk_context()) =
     (; count = spans(ctx).policy.gc_count, seconds = spans(ctx).policy.gc_seconds)
@@ -1121,18 +997,9 @@ function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usa
 end
 
 """
-Acquire a region, and treat an out-of-memory from the driver as a request to
-collect rather than as the answer.
-
-`Mantle.acquire!` already reclaims its own retired regions twice before it grows,
-so what is left for this to handle is the case where growth itself fails: the
-device is genuinely full, and the memory the caller needs is held by
-`LavaArray`s that are dead but uncollected, or by blocks that are empty but not
-yet handed back.
-
-`VulkanError` by name, not a bare `catch`. An OOM is the one failure that is
-worth retrying and it is the only one retried here; anything else — a lost
-device, a bad usage flag — propagates with its own message intact.
+Acquire through core's bounded reclamation/retry policy, then add Vulkan's
+diagnostic to a final native OOM. Other errors propagate unchanged. An open
+recording's scratch allocation passes `maywait = false` directly to core.
 """
 # `dev` is untyped for the same reason `ctxof(bq)` is: `LavaDevice` is declared in
 # `graph.jl`, which this file is included before. A signature annotation is
@@ -1142,31 +1009,14 @@ function acquire_or_reclaim!(bq::SubmitChannel{<:VulkanQueue}, sp::Pool, dev,
     try
         return acquire!(sp, dev, Buffers(), nothing, nbytes;
                         align = POOL_ALIGN, blocksize = POOL_BLOCK_SIZE,
-                        constraint = extra_usage)
+                        constraint = extra_usage,
+                        onpressure = () -> makeroom!(() -> quiesce_before_reclaim!(bq), sp, dev))
     catch err
-        isoutofmemory(err) || rethrow()
-    end
-    # One escalation, in the order that costs least first: collect, drain, and
-    # only then stall the queue to get pinned and in-flight buffers back.
-    GC.gc(true)
-    drain!(bq)
-    # Not while capturing; see `quiesce_before_reclaim!`. The acquire below
-    # still runs and still throws its own out-of-memory error if it cannot.
-    if quiesce_before_reclaim!(bq)
-        nblocks, freed = reclaim_empty_pool_blocks!(bq)
-        nblocks > 0 &&
-            @info "Lava: reclaimed empty pool blocks on OOM retry" blocks=nblocks MiB=(freed >> 20)
-    end
-    try
-        return acquire!(sp, dev, Buffers(), nothing, nbytes;
-                        align = POOL_ALIGN, blocksize = POOL_BLOCK_SIZE,
-                        constraint = extra_usage)
-    catch err
-        err isa VK.VulkanError || rethrow()
+        (err isa VK.VulkanError && isoutofmemory(err)) || rethrow()
         throw(LavaError("pool_alloc",
             "Cannot allocate $(nbytes) bytes: the device is out of memory with " *
-            "$(humanbytes(reserved(sp))) already reserved by this pool, and a full " *
-            "collection plus a queue drain freed nothing that helps.",
+            "$(humanbytes(reserved(sp))) already reserved by this pool after " *
+            "the core reclamation and retry policy.",
             "Free unused LavaArrays, reduce problem size, or check for leaks with " *
             "gpu_memory_usage()."))
     end

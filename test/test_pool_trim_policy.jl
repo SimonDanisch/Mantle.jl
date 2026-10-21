@@ -76,7 +76,7 @@ end
         # collection's own interval passed too, so the trim may pay for one if the
         # incremental collection did not reach the dropped buffers.
         policy.last_trim = 0.0
-        policy.last_full_gc = 0.0
+        policy.gc_full_last = 0.0
         @test Mantle.autotrim!(p, dev)
         trimmed = Mantle.reserved(p)
         @test trimmed < grown                     # capacity actually came back

@@ -535,6 +535,11 @@ include(joinpath(@__DIR__, "test_basealignment.jl"))
 # output object.
 include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
 include(joinpath(@__DIR__, "test_raytracing_geometry.jl"))
+include(joinpath(@__DIR__, "test_collection_policy.jl"))
+if _VULKAN_OK
+    include(joinpath(@__DIR__, "vulkan", "test_collection_policy.jl"))
+    check_pressure_collection(Mantle.vk_context())
+end
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin
 # is portable code over an output object, so `runprimitive` plus

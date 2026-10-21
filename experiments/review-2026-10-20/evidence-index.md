@@ -70,6 +70,12 @@ It records 42 net source lines removed, 224 passing targeted assertions and
 the outstanding Metal native qualification. The larger ownership/deletion
 gates remain open in [consolidation-order.md](consolidation-order.md).
 
+The [memory policy batch](consolidation-memory.md) removes Vulkan's independent
+collection budget and pooled-allocation retry, shares quiescence and collection
+coordination in core, and records 9,110 passing targeted assertions, including
+AMD/NVIDIA native validation. It removes another 73 physical source lines.
+Unified token retirement and the other ownership groups remain open.
+
 The [2026-10-21 similarity experiment](similarity-2026-10-21/README.md) provides
 local semantic code-to-code and responsibility-based search across 1,987
 methods/regions from all 111 source files. It compares Qwen and Jina embeddings
