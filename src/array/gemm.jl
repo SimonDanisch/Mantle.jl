@@ -978,6 +978,26 @@ A operand computed by an [`apair`](@ref) loader instead of read from a matrix.
 """
 const GEMM_STAGED_GATHER_KERNELS = Dict{GemmTiling,Any}()
 
+"""Quote staged products with one live A/B fragment. Caller supplies sA/sB, sm/sn
+and c_mt_nt; optional offsets select the active half of a double buffer.
+This runs at definition time; regenerate the @eval kernels after editing it."""
+function stagedmma(STM, STN, NKT, LDA, LDB, width; aoffset=0, boffset=0)
+    return quote
+        Base.Cartesian.@nexprs $NKT u -> begin
+            kt = (u - 1) * GEMM_TILE
+            Base.Cartesian.@nexprs $STM mt -> begin
+                a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
+                    sA, 1 + $aoffset + (sm + mt - 1) * $(GEMM_TILE ÷ width) + kt * $LDA, $LDA)
+                Base.Cartesian.@nexprs $STN nt -> begin
+                    b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
+                        sB, 1 + $boffset + (kt ÷ $width) + (sn + nt - 1) * GEMM_TILE * $LDB, $LDB)
+                    c_mt_nt = muladd(a, b, c_mt_nt)
+                end
+            end
+        end
+    end
+end
+
 for (ci, cfg) in enumerate(GEMM_TILINGS)
     STM, STN, WM, WN, BK, PAD = cfg
     BM, BN = GEMM_TILE * STM * WM, GEMM_TILE * STN * WN
@@ -1051,18 +1071,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                 # One A fragment and one B fragment live, both reassigned — the
                 # reference's ordering. See the note above on why reloading beats
                 # hoisting here.
-                Base.Cartesian.@nexprs $NKT u -> begin
-                    kt = (u - 1) * GEMM_TILE
-                    Base.Cartesian.@nexprs $STM mt -> begin
-                        a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                sA, 1 + (sm + mt - 1) * GEMM_TILE + kt * $LDA, $LDA)
-                        Base.Cartesian.@nexprs $STN nt -> begin
-                            b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                    sB, 1 + kt + (sn + nt - 1) * GEMM_TILE * $LDB, $LDB)
-                            c_mt_nt = muladd(a, b, c_mt_nt)
-                        end
-                    end
-                end
+                $(stagedmma(STM,STN,NKT,LDA,LDB,1))
                 KI.barrier()   # nothing may refill shared until every subgroup is done
             end
 
@@ -1137,20 +1146,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                         $staging
                         KI.barrier()
 
-                        Base.Cartesian.@nexprs $NKT u -> begin
-                            kt = (u - 1) * GEMM_TILE
-                            Base.Cartesian.@nexprs $STM mt -> begin
-                                a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                        sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                            kt * $LDA2, $LDA2)
-                                Base.Cartesian.@nexprs $STN nt -> begin
-                                    b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                            sB, 1 + (kt ÷ 2) +
-                                                (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                                    c_mt_nt = muladd(a, b, c_mt_nt)
-                                end
-                            end
-                        end
+                        $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
                         KI.barrier()
                     end
 
@@ -1245,20 +1241,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                         end
                     end
 
-                    Base.Cartesian.@nexprs $NKT u -> begin
-                        kt = (u - 1) * GEMM_TILE
-                        Base.Cartesian.@nexprs $STM mt -> begin
-                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                    sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                        kt * $LDA2, $LDA2)
-                            Base.Cartesian.@nexprs $STN nt -> begin
-                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                        sB, 1 + (kt ÷ 2) +
-                                            (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                                c_mt_nt = muladd(a, b, c_mt_nt)
-                            end
-                        end
-                    end
+                    $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
 
                     # The last product has no successor to publish.
                     if kb + Int32(1) < nkb
@@ -1371,20 +1354,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                             (VecElement(B[g]), VecElement(B[g + Int32(1)]))
                     end
 
-                    Base.Cartesian.@nexprs $NKT u -> begin
-                        kt = (u - 1) * GEMM_TILE
-                        Base.Cartesian.@nexprs $STM mt -> begin
-                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                    sA, 1 + Int(rda) + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                        kt * $LDA2, $LDA2)
-                            Base.Cartesian.@nexprs $STN nt -> begin
-                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                        sB, 1 + Int(rdb) + (kt ÷ 2) +
-                                            (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                                c_mt_nt = muladd(a, b, c_mt_nt)
-                            end
-                        end
-                    end
+                    $(stagedmma(STM,STN,NKT,LDA2,LDB2,2; aoffset=:(Int(rda)),boffset=:(Int(rdb))))
                     # ONE barrier: it both publishes the tile just staged and
                     # retires the reads of the tile just consumed.
                     KI.barrier()
@@ -1459,20 +1429,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                     end
                     KI.barrier()
 
-                    Base.Cartesian.@nexprs $NKT u -> begin
-                        kt = (u - 1) * GEMM_TILE
-                        Base.Cartesian.@nexprs $STM mt -> begin
-                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                    sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 4)) +
-                                        kt * $LDA4, $LDA4)
-                            Base.Cartesian.@nexprs $STN nt -> begin
-                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                        sB, 1 + (kt ÷ 4) +
-                                            (sn + nt - 1) * GEMM_TILE * $LDB4, $LDB4)
-                                c_mt_nt = muladd(a, b, c_mt_nt)
-                            end
-                        end
-                    end
+                    $(stagedmma(STM,STN,NKT,LDA4,LDB4,4))
                     KI.barrier()
                 end
 
@@ -1547,33 +1504,9 @@ for (ci, cfg) in enumerate(vcat(GEMM_TILINGS, CONV_GATHER_TILINGS))
     AREPS2, BREPS2 = (BM * BK) ÷ 2 ÷ WG, (BK * BN) ÷ 2 ÷ WG
     BM2, BK2 = BM ÷ 2, BK ÷ 2
 
-    # ── the same schedule with a GATHERED A operand ───────────────────
-    #
-    # A twin of the prefetch kernel (`coopmat_gemm_staged_kernel_*_prefetch!`)
-    # rather than a flag on it, because the two want opposite things from the
-    # register queue. The prefetch kernel's `MVector` is Function storage that Lava scalar-replaces only when the
-    # staging loop UNROLLS; a gathering `apair` in that loop keeps the trip
-    # count and the queue becomes a packed `[N x i64]` reached by a dynamic
-    # sub-element index, which is a register queue in name only. Generating
-    # the bindings makes the unroll explicit instead of hoped for.
-    #
-    # **Doing that to the shared kernel regressed the plain path**, which is
-    # the reason there are two of them. Interleaved in one process against
-    # the untouched `v2n` kernel, which this schedule is meant to BEAT by
-    # 7-13%, one kernel serving both measured:
-    #
-    #     M x N x K            one kernel   two kernels
-    #     4096 x 4096 x 4096       1.377x        0.900x
-    #     2304 x 4096 x  576       1.093         0.948
-    #      576 x 4096 x 2304       0.885         0.865
-    #     1152 x 16384 x  288      1.143         0.913
-    #
-    # Lower is better and under 1.0 is the point of this kernel existing.
-    #
-    # The queue is live across the whole k-loop, so spelling it as SSA values
-    # adds `AREPS2 + BREPS2` of them to a kernel already at 256 VGPRs. The
-    # gather needs the unroll and pays for it with traffic it no longer does;
-    # a plain A read gets nothing back for the registers.
+    # Gather uses an explicitly unrolled register queue. Plain prefetch keeps
+    # MVector storage: sharing that queue encoding regressed its measured path.
+    # Their cooperative-matrix products share stagedmma without changing queues.
     kg = Symbol("coopmat_gemm_staged_kernel_", ci, "_gather!")
     @eval begin
         function $kg(
@@ -1633,20 +1566,7 @@ for (ci, cfg) in enumerate(vcat(GEMM_TILINGS, CONV_GATHER_TILINGS))
                     end
                 end
 
-                Base.Cartesian.@nexprs $NKT u -> begin
-                    kt = (u - 1) * GEMM_TILE
-                    Base.Cartesian.@nexprs $STM mt -> begin
-                        a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                    kt * $LDA2, $LDA2)
-                        Base.Cartesian.@nexprs $STN nt -> begin
-                            b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                    sB, 1 + (kt ÷ 2) +
-                                        (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                            c_mt_nt = muladd(a, b, c_mt_nt)
-                        end
-                    end
-                end
+                $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
 
                 # The last product has no successor to publish.
                 if kb + Int32(1) < nkb

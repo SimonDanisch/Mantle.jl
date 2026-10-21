@@ -1,25 +1,5 @@
-"""
-The staged GEMM against the register-blocked one, on shapes that expose its
-assumptions — and **every tiling in `GEMM_TILINGS`, individually**.
-
-That last part is not thoroughness for its own sake. `(3, 2, 2, 4, 32, 8)` — a
-96 x 128 block — silently lost 4 of every 32 k-terms per row, while 96 x 64 and
-160 x 128 were correct, and nothing about the tiling predicted which. The cause
-was not the tiling at all but the shape of the kernel's k-loop: see
-`test_shared_index_division.jl`, where `while` loses 92% of a staged block that
-a counted `for` keeps intact, on identical instructions.
-
-So a tiling is trusted because it was run, never because it looks like one that
-was.
-
-The other bug this file exists for: **the staged kernel does not split K.** It
-walks the whole of it and writes one plane. But `coopmat_gemm_shape` picks
-`splitk` from the shape, and at 64x64x64 it picks 4 — so the caller allocates
-four partial planes and sums them, three of which the staged kernel never wrote.
-The result came back with 0.83 relative error, and only on small shapes: every
-shape the kernel had ever been benchmarked on chooses `splitk == 1`. A GEMM test
-suite made of the shapes a GEMM is fast at is a suite that cannot find this.
-"""
+# Staged GEMM: CPU references, every tiling/staging family, k-loop boundaries,
+# split-k selection, index widths and padding.
 
 using Test, DNNKernels, KernelAbstractions
 const KA = KernelAbstractions
@@ -28,12 +8,6 @@ include(joinpath(@__DIR__, "testbackend.jl"))
 
 "Relative error of `matmul!` against a Float32 CPU reference, over a slice."
 function gemmerr(backend, ws, M, N, K; staged::Bool, withbias::Bool, gemmkw...)
-    # `matmul!` takes a context, not a `(backend, ws)` pair — DNNKernels'
-    # kernel-library refactor moved every entry point onto `Ctx`, which is one
-    # argument where there were two. This test is in the OTHER repo and so was
-    # not caught by that change's own suite; the symptom here was a MethodError
-    # per shape, then a device loss from the repeated failures, which reads like
-    # a Lava bug and is not one.
     ctx = DNNKernels.Ctx(backend; ws)
     hA = rand(Float16, M, K) .- Float16(0.5)
     hB = rand(Float16, K, N) .- Float16(0.5)
@@ -59,14 +33,8 @@ function gemmerr(backend, ws, M, N, K; staged::Bool, withbias::Bool, gemmkw...)
     return maximum(abs.(Float32.(Array(out)[rows, :]) .- ref)) / maximum(abs.(ref))
 end
 
-"""
-Every k-term accumulated, or not.
-
-`A` and `B` all ones makes each output element the count of products that
-actually landed, so a result of 28 where K is 32 says *which* is wrong rather
-than merely *that* it is — and an integer count survives fp16 exactly, where a
-relative error on random data can hide four missing terms in the tolerance.
-"""
+"""Count accumulated products using all-one operands: every output must equal K.
+This catches missing terms directly, including across k-block boundaries."""
 function stagedcount(backend, cfg, K; blocks = 2,
                      kernels = Mantle.GEMM_STAGED_KERNELS, gather::Bool = false)
     M = Mantle.gemm_bm(cfg) * blocks
@@ -156,6 +124,14 @@ if hasstagedgemm()
                 r = stagedcount(backend, cfg, K;
                                 kernels = Mantle.GEMM_STAGED_PREFETCH_KERNELS)
                 r.correct || @info "prefetched tiling $cfg lost k-terms" K = r.K seen = r.seen
+                @test r.correct
+            end
+        end
+
+        @testset "vec4 staging accumulates every k-term" begin
+            for cfg in keys(Mantle.GEMM_STAGED_V4_KERNELS), blocks in (1,2,3,9)
+                K = blocks * Mantle.gemm_bk(cfg)
+                r = stagedcount(backend,cfg,K; kernels=Mantle.GEMM_STAGED_V4_KERNELS)
                 @test r.correct
             end
         end

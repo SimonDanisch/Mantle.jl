@@ -4,10 +4,13 @@
 module GemmFamilyProbe
 using Mantle, Test, Random, Statistics
 const TABLES = (:GEMM_STAGED_V2_KERNELS,:GEMM_STAGED_V2N_KERNELS,:GEMM_STAGED_ABL_KERNELS)
-const ORIGINAL_KEYS = Dict(n=>Set(keys(getproperty(Mantle,n))) for n in TABLES)
+const STAGED_TABLES = (:GEMM_STAGED_KERNELS,TABLES...,:GEMM_STAGED_PREFETCH_KERNELS,
+                       :GEMM_STAGED_DB_KERNELS,:GEMM_STAGED_V4_KERNELS,:GEMM_STAGED_GATHER_KERNELS)
+const ORIGINAL_KEYS = Dict(n=>Set(keys(getproperty(Mantle,n))) for n in STAGED_TABLES)
 
 function plan(ctx,cfg,family,K,M,N,A,B,out;profile=false,ablation=:all)
     args=(out,A,B,nothing,identity,Val(M),Val(N),Val(K))
+    family===:GEMM_STAGED_GATHER_KERNELS && (args=(out,A,B,nothing,identity,nothing,Val(M),Val(N),Val(K)))
     family===:GEMM_STAGED_ABL_KERNELS && (args=(args...,Val(ablation)))
     kern=getproperty(Mantle,family)[cfg]
     wg=Mantle.gemm_wg(cfg)
@@ -34,22 +37,21 @@ function fixture(ctx,cfg,family,K;blocks=2,large=false)
     return (;ctx,cfg,family,K,M,N,A,B,out,plan=p,result,large)
 end
 
-function baseline(contexts)
+function baseline(contexts;tables=TABLES)
     fixtures=Any[]
     @testset "baseline staged generator families" begin
         for ctx in contexts
-            for cfg in Mantle.GEMM_TILINGS, family in TABLES
-                haskey(getproperty(Mantle,family),cfg) || continue
+            for family in tables, cfg in sort(collect(keys(getproperty(Mantle,family))))
                 f=fixture(ctx,cfg,family,2Mantle.gemm_bk(cfg))
                 @test size(f.result)==(f.M,f.N)
                 push!(fixtures,f)
             end
             cfg=Mantle.GEMM_TILINGS[1]
-            for kblocks in (1,3,9), family in TABLES
+            for kblocks in (1,3,9), family in tables
                 push!(fixtures,fixture(ctx,cfg,family,kblocks*Mantle.gemm_bk(cfg)))
             end
             cfg=(3,2,2,4,32,8)
-            for family in TABLES
+            for family in tables
                 push!(fixtures,fixture(ctx,cfg,family,576;large=true))
             end
             @test isempty(Mantle.validationmessages!(Mantle.lavadevice(ctx)))
@@ -62,7 +64,7 @@ end
 function compare(fixtures)
     after=Any[]
     @testset "shared GEMM generator preserves every output byte" begin
-        for family in TABLES
+        for family in unique(f.family for f in fixtures)
             @test ORIGINAL_KEYS[family]==Set(keys(getproperty(Mantle,family)))
         end
         for f in fixtures

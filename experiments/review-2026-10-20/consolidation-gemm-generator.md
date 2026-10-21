@@ -29,3 +29,24 @@ it does not rewrite the shaders used by tests or timings.
 All 115 source files parse. Source shrinks 53,379 → 53,165 physical lines and
 23,222 → 23,111 implementation lines: 111 implementation lines removed, with
 the remainder from prose cleanup. Native Metal/ROCm execution is not qualified here.
+
+## Shared tile products
+
+Baseline: `e0e1c29`. All eight staged families now expand the same tile-product
+quote, parameterized by packing width and double-buffer offsets. Queue storage,
+staging, barriers and epilogues stay in their respective schedules. Plain prefetch
+and gather retain their measured, distinct register queues.
+
+The paired probe's `baseline(contexts;tables=STAGED_TABLES)` covers 180 native
+cases, including all table entries and 1/3/9-block loops. All output bytes and
+eight table key sets match (188 assertions); all 180 shader modules have matching
+live instructions/declarations under the comparison above. The staged, epilogue
+and widening suites pass 2,486 assertions, including new vec4 k-term coverage.
+A fresh Julia session also loads all eight families and passes all 180 CPU-reference
+cases. Validation and synchronization validation drains are empty on both GPUs.
+
+[Interleaved medians](staged-mma-timings.tsv), using the same protocol above,
+change by less than 0.7%; this preserves runtime rather than establishing a
+speedup. Families were measured separately: these numbers do not rank schedules.
+Source shrinks 53,165 → 53,085 physical and 23,111 → 23,051 implementation
+lines: another 60 implementation lines removed, without a runtime abstraction.
