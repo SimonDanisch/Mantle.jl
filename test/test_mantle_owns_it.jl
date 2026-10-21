@@ -1,21 +1,5 @@
-# The guards for the plan's first rule (`docs/recording-plan.md`, Rules), written BEFORE the refactor deletes
-# anything.
-#
-# Every one of them fails on the code as it stands. That failure is the point:
-# a guard that passes when it is written has not been shown to detect anything.
-# They are `@test_broken` so the suite stays usable while the work runs — Julia
-# turns a `@test_broken` that starts passing into a FAILURE ("Unexpectedly
-# Pass"), which is exactly the signal that a phase is done and the guard should
-# be promoted to a plain `@test`.
-#
-# Each guard names the finding it pins and the phase of the plan that clears it.
-# The violations are `@info`-ed rather than only counted, because the list is
-# the work list.
-#
-# This file lives at the top level and not under `test/vulkan/`, unlike
-# `test_backend_vocabulary.jl`, which asks a closely related question and runs
-# only in the Vulkan section — so it has never run on a machine with no Vulkan
-# driver, which is every machine where the Metal backend is the one under test.
+# Ownership guards for core/backend boundaries (docs/recording-plan.md).
+# Known debt is explicit; backend source checks run even when that backend is not loaded.
 
 using Test, Mantle
 
@@ -41,26 +25,9 @@ function sourcefiles()
     return core, backend
 end
 
-"""
-Every name DEFINED in a set of files or directories: a method, or a type.
-
-Crude on the same terms as 0.8, and for the same reason: a definition is a
-top-level `NAME(` or a top-level `struct`/`abstract type`/`primitive type NAME`,
-at column zero. In-tree backends spell a method without a module prefix because
-they are included INTO `Mantle`; an extension spells it `Mantle.NAME`. Leading
-macros are skipped, which is not cosmetic: `supports_tessellation`'s core
-default is `@doc (@doc supports_geometry_stage) supports_tessellation(b) = false`
-and a pattern anchored on `function` or the bare name misses it.
-
-Types are here because five vocabulary entries ARE types (`Framebuffer`,
-`Sampler`, `Texture2D`, `Window`, `Profiler`), declared abstract in core and
-constructed per backend. A method-table view could not see that: an abstract
-type is not a `Function`, so the loop that asked `f isa Function` skipped all
-five, and `methods(Framebuffer)` shows only the one backend's outer constructor.
-
-A call at column zero would be read as a definition, which over-approximates
-towards saying a name IS answered, so it can hide a hole but never invent one.
-"""
+"""Names with top-level method/type definitions in source files or trees. Handles
+Mantle-qualified extension methods and leading macros. The regex may mistake a
+column-zero call for a definition; implementation completeness also checks defaults."""
 function definednames(paths)
     mac = raw"(?:@[\w.]+(?:\s*\([^\n]*\))?\s+)*"
     pat = Regex("^" * mac * raw"(?:function\s+)?(?:Mantle\.)?([A-Za-z_][\w!]*)\s*\(", "m")
@@ -79,22 +46,8 @@ function definednames(paths)
     return out
 end
 
-"""
-Each backend's files, keyed by backend: the trees under `src/`, plus every
-extension that answers `caps`.
-
-`caps` is the marker because it is the one verb a backend must answer to be a
-device at all, so asking for it needs no vendor name and admits a future
-extension that is not a backend without breaking this guard.
-
-Files rather than method tables, which is the correction: this question is about
-the REPO, and a method table only shows the backends this process loaded. Metal
-never loads on the machines the Vulkan backend is tested on and the ROCm
-extension loads on neither, so a method-table answer changes per machine and
-`UNIMPLEMENTED_BACKEND_FUNCS` could not be a ratchet against it. It also read a method in
-`ext/` as core's answer for everyone, which is how `caps`, `closerecording!`,
-`defaultdevice!`, `devicename` and `devices` came to look portable.
-"""
+"""Source trees for every backend, plus extensions defining caps. Read source rather
+than loaded methods so completeness checks do not depend on the current host."""
 function backendsources()
     d = Dict{String,Vector{String}}(b => [joinpath(ROOT, "src", b)] for b in BACKEND_DIRS)
     extdir = joinpath(ROOT, "ext")
@@ -106,12 +59,7 @@ function backendsources()
     return d
 end
 
-# ── 0.1 No vendor name in the portable vocabulary ────────────────────────────
-#
-# `BACKEND_VOCABULARY` is the list of core functions a backend may extend, so a
-# vendor-prefixed entry in it is a portable hook that only one vendor can mean.
-# `:vkformat` is one; Metal's counterpart is `mtlformat`. CLAUDE.md states the
-# rule for code paths and this is a code path.
+# 0.1: portable vocabulary names contain no vendor prefixes.
 
 @testset "0.1 the vocabulary names no vendor" begin
     bad = filter(n -> occursin(r"^(vk|mtl|lava|VK_|MTL)"i, String(n)),
@@ -121,76 +69,21 @@ end
     @test isempty(bad)
 end
 
-# ── 0.2 Every vocabulary name is answered by core, or by every backend ───────
-#
-# A name only one backend answers is either not portable (it belongs in that
-# backend) or not implemented (it belongs on a list). Both are decisions; being
-# in the vocabulary with one implementation is the absence of one.
-#
-# `BACKEND_SPECIFIC_FUNCS` is where a deliberate answer goes, with its reason. Not
-# an escape hatch: a name belongs here only when "every backend answers it" is the
-# WRONG requirement, not when it is merely unmet. An unmet one is
-# `UNIMPLEMENTED_BACKEND_FUNCS` below.
-#
-# `staged_gemm_tile` was on this list as a build-global hook answered by whichever
-# backend tree had the staged GEMM. The kernels are core's now and so is the
-# answer, which the testset below pins.
-#
-# `deviceslice` is a deliberate answer: a per-device verb that one
-# backend must NOT implement. It is how `materialize!` wraps a transient's bytes in
-# the backend's array type, and its docstring (`phases.jl`) says a backend that
-# keeps the block instead implements no method. Vulkan keeps the block, because a
-# buffer barrier scopes to (VkBuffer, offset, size), which an array view cannot
-# name; Metal wraps. Answering it on Vulkan would hand barriers a view.
-#
-# `hostspan` the same way, by its docstring (`memory/resources.jl`): it is where a
-# backend's memory begins in the HOST address space, answered by a backend whose
-# device memory the CPU addresses directly (Metal's `Shared` buffers). Vulkan's is
-# not mapped; it writes `upload!`, `download` and `devicecopy!` itself, through a
-# staging copy, and has no span to give.
-#
-# `feed!`, `decodemore!` and `remaining` (2026-10-10) take a decoder, and the only
-# way to get one is `h264decoder`, which core answers by refusing on a device with
-# no hardware video decode. A backend without a decoder has nothing these could be
-# called on, so answering them there would be dead code.
+# 0.2: every vocabulary verb has a core default or the required native implementations.
+# Optional resource-specific hooks are distinguished from missing implementations below.
 const BACKEND_SPECIFIC_FUNCS = Set{Symbol}([
-    :deviceslice, :hostspan, :feed!, :decodemore!, :remaining
+    :deviceslice,                         # native array views; some backends keep blocks instead
+    :hostspan,                            # directly host-addressable device memory only
+    :feed!, :decodemore!, :remaining,      # hardware decoder objects only
+    :buildgeometry!, :instancearray, :updatebatch!,  # BatchedTLAS native primitives
+    :mipmapped,                           # graphics textures only
 ])
 
-# The 56 that are lonely TODAY, so the guard can fail on a 57th.
-#
-# Five names left this list when the guard started reading FILES: `caps`,
-# `closerecording!`, `defaultdevice!`, `devicename` and `devices` are answered
-# by all three backends and always were. They were on it because the guard
-# asked method tables, and neither Metal nor the ROCm extension loads on the
-# machine this suite runs on, so both looked silent.
-#
-# `@test_broken isempty(lonely)` could never do that: a list of 58 passes as
-# "still broken" whether it holds 58 or 580, so the guard reported the number and
-# detected nothing. `emitkernel!` is the entry that proves the cost — a verb
-# `graph/backend.jl` declares and only Lava answers, which was noted in two
-# docstrings of the ROCm extension and then worked around instead of
-# implemented, because a HIP capture made a different verb produce the right
-# behaviour. A guard that named it as new would have been read; one naming it
-# among 57 others was not.
-#
-# So: a name here is a known hole, and the test fails on anything NOT here —
-# and also on anything here that has been fixed without being removed, so the
-# list can only shrink.
-#
-# Three joined on 2026-09-26 without a new hole behind them: `vertextouches`,
-# `fragmenttouches` and `shadertouches` were core declarations missing from the
-# vocabulary, so this guard never asked about them. The ROCm extension has no
-# graphics pipeline to answer the first two, and neither it nor Metal has a
-# ray-tracing pipeline for the third, exactly like `compile_draw` and
-# `trace_rays!` above.
+# Known missing implementations. New omissions and resolved entries both fail the guard.
 const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
-    # `build_blas_aabb` and `upload_texture_data!` joined the vocabulary 2026-10-09:
-    # declared in core, answered by Vulkan and Metal, not by the ROCm extension,
-    # which has no ray tracing or textures — the same as `build_accel!`.
-    # `build_blas` (triangles) joined on 2026-10-10 for the same reason.
+    # These native graphics/RT operations are not implemented by the ROCm backend.
     :build_blas_aabb, :build_blas, :upload_texture_data!,
     :build_accel!, :colorimage, :compile_draw, :currentimage,
     :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
@@ -219,29 +112,14 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     backendfiles = reduce(vcat, values(bysrc))
     isbackendfile(f) = any(b -> occursin(b, string(f)), backendfiles)
 
-    # Two questions, each asked of the source that can answer it.
-    #
-    # "Does every backend answer this name" is about the REPO, so it reads
-    # files: Metal does not load on the machines the Vulkan backend is tested
-    # on, and a method-table answer would therefore call every graphics verb
-    # unanswered on Linux and answered on a Mac. `UNIMPLEMENTED_BACKEND_FUNCS` cannot ratchet
-    # against a number that moves per machine.
-    #
-    # "Is there a default for everyone" is NOT only about this repo: `caps`,
-    # `supports`, `bestshape`, `matrix_shapes` and `wggranularity` are
-    # `import`ed from KernelInterface, so whatever fallback they have is in a
-    # package that loads whenever Mantle does. That one reads the method table,
-    # and reads it safely — an unloaded backend contributes no methods, so it
-    # can never make a name look defaulted when it is not.
+    # Read implementation presence from all backend source trees. Inspect defaults in
+    # method tables, excluding extensions and test doubles: neither supplies a core default.
     function hasdefault(n)
         n in coredefs && return true
         isdefined(Mantle, n) || return false
         v = getglobal(Mantle, n)
         (v isa Function || v isa Type) || return false
-        # Nor a TEST file: the suite's `FaultDevice` forwards every verb, so once
-        # it is loaded each name has a method outside the backends, and this read
-        # every one of them as defaulted. Run after the suite the guard passed;
-        # run alone it named `hostspan`. A test double is not a default.
+        # Test doubles do not supply core defaults.
         return any(m -> !isbackendfile(m.file) && !startswith(string(m.file), @__DIR__),
                    methods(v))
     end
@@ -267,19 +145,8 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     @test isempty(fixed)
 end
 
-# ── 0.2b A no-argument method in core is not answered again by a backend ──────
-#
-# A backend tree is `include`d INTO `Mantle`, so a method it defines with core's
-# signature replaces core's, and precompilation refuses that outright. With no
-# arguments there is nothing for the two to dispatch apart on. It happened to
-# `staged_gemm_tile`: the GEMM kernels moved to core with their answer, and
-# Metal's `@static if !VK.HAS_LOADER` answer stayed behind, so Mantle stopped
-# precompiling on a Mac without a Vulkan loader and on no other machine. Read
-# from files for the same reason as 0.2: the clash only exists where Metal loads.
-#
-# Device overlays are not methods of the function, they are entries in a
-# compiler's method table, so `@device_override` and `@lava_device_override`
-# definitions are not counted.
+# 0.2b: identical nullary core/backend methods would overwrite during precompilation.
+# Compiler device overlays are separate method tables and do not count.
 @testset "0.2b a no-argument method in core is not answered again by a backend" begin
     # Indented too, unlike `definednames`: the one that clashed sat inside an
     # `@static if`. So a definition is spelled out, `function NAME()` or
@@ -301,29 +168,9 @@ end
     @test :staged_gemm_tile in nullary(core)
 end
 
-# ── 0.3 A method in a backend touches the driver ─────────────────────────────
-#
-# The mechanical form of the rule: a function in a backend that contains no
-# driver call is portable logic in the wrong package. `recycle!` is what
-# motivates it — one implementation, no `vkDestroy`, no `vkFree`, no driver
-# call at all, just pin lists, region releases through Mantle's own `release!`,
-# and two free lists.
-#
-# Scoped to methods of VOCABULARY names, which is where the rule bites and
-# what a reader can act on; a private helper with no driver call is usually a
-# few lines of arithmetic. Phase 2 may widen this.
-#
-# DELEGATION COUNTS. `upload!(dst::VkManagedBuffer, …)` is one line handing off
-# to `copy_buffer!`, which is where the driver call is; reporting it would train
-# a reader to skim the list. So a body that calls any function defined in the
-# same backend tree has reached the driver as far as this guard is concerned.
-# What is left is a leaf of pure bookkeeping, which is the thing being hunted.
-#
-# This is a TRIAGE list, not a violation list: an entry is either moved to core
-# or added to `PURE_BOOKKEEPING_ALLOWED` with the reason it is a leaf that
-# legitimately touches nothing (`fence` returning a counter, say — except that
-# one is finding 2 and does not get a pass).
-# Cleared by: phases 1.1, 1.2, 2.2, 2.3.
+# 0.3: triage backend vocabulary methods with neither driver operations nor delegation.
+# A pure result can be a native fact rather than misplaced policy; review each candidate.
+# This known debt remains @test_broken.
 
 const DRIVER_TOKENS = r"\b(VK\.|vk[A-Z_]|VK_|MTL\.|MTLm\.|Metal\.|@objc)\b"
 const PURE_BOOKKEEPING_ALLOWED = Set{Symbol}()
@@ -358,15 +205,7 @@ const PURE_BOOKKEEPING_ALLOWED = Set{Symbol}()
     @test_broken isempty(pure)
 end
 
-# ── 0.4 Core names no backend ────────────────────────────────────────────────
-#
-# `src/` outside the two backend trees must not name a driver or a driver
-# package in code position. Comments and docstrings are stripped, as in
-# `test_core_names_no_backend.jl`.
-# ALREADY TRUE, so this is a plain `@test` and not a `@test_broken`: with the
-# three deliberate `…API` markers excluded, core names no backend in ONE place.
-# It is a ratchet over a property that already holds, and the one guard here
-# that must never go red rather than one that starts red.
+# 0.4: core names no driver in code, except the exact backend-loader imports.
 
 @testset "0.4 core names no backend" begin
     core, _ = sourcefiles()
@@ -383,31 +222,15 @@ end
             push!(hits, (replace(relpath(p, ROOT), '\\' => '/'), m.match))
         end
     end
-    # The one exception, pinned exactly rather than pattern-matched away.
-    # `src/Mantle.jl` ends in an `@static if Sys.isapple()` that picks the
-    # backend at PARSE time, and picking it means naming the package: `import
-    # Vulkan as VK` and `using Vulkan: unwrap, iserror, unwrap_error`. That is
-    # the whole point of the block — it is what replaced `ext/MantleVulkanExt.jl`
-    # — and it is the only spelling of a backend core gets. A third mention,
-    # here or anywhere else, fails. (`Metal` and `include("vulkan/vulkan.jl")`
-    # do not match the pattern, so the Metal arm of the same block needs no
-    # entry; if the pattern ever widens, they belong here beside these two.)
+    # Only Mantle.jl's backend loader may import Vulkan; keep the exception exact.
     allowed = [("src/Mantle.jl", "Vulkan"), ("src/Mantle.jl", "Vulkan")]
     extra = sort(hits) != sort(allowed) ? hits : Tuple{String,String}[]
     isempty(extra) || @info "0.4 backend names in core" count = length(hits) first10 = first(hits, 10)
     @test sort(hits) == sort(allowed)
 end
 
-# ── 0.6 One device per process ───────────────────────────────────────────────
-#
-# `caps(::MetalBackend)` builds a second `MetalDevice` through a second cache
-# (`_DEVICE` in `metal/caps.jl`) beside `METAL_DEVICE` in `metal/device.jl`:
-# a second `Pool`, a second `MTLCommandQueue`, a second `MTLSharedEvent`.
-# `metal/device.jl:65` forbids exactly that, and `metal/graphics.jl` records two
-# Metal queues as the cause of a hang, because they have no order between them.
-#
-# 0.5 (downstream names no backend) lives in the consumers' own suites; it
-# cannot run from here, because Mantle does not depend on Hikari or RayMakie.
+# 0.6: all Metal capability/device entry points must share one device and pool.
+# Consumer boundary checks run in consumer suites.
 
 @testset "0.6 one device per process" begin
     hasmetal = any(m -> occursin(joinpath("src", "metal"), string(m.file)),
@@ -427,24 +250,8 @@ end
     end
 end
 
-# ── 0.7 The shared test layer names no backend ───────────────────────────────
-#
-# `test/*.jl` looks shared and was not: it hardcoded `VulkanAPI()` 57 times
-# against `MetalAPI()` once — `test_window.jl` 35 times in 2,021 lines,
-# `test_arena_recording.jl` 10, `test_compile_golden.jl` 4,
-# `test_devicerange.jl` 3. Windows, surfaces, resize, presentation, arena
-# recording and device ranges are portable behaviour, and they were checked
-# against exactly one backend. Both bugs a person found by looking at a window
-# were in that blind spot, and `test_window.jl` is the file that should have
-# caught them.
-#
-# Those four now take their device from `TESTBACKEND`, which `runtests.jl` sets
-# once per `Mantle.eachbackend()`.
-#
-# The exceptions are named, not waved through:
-#   * `runtests.jl` — the harness itself, which has to name the sections it
-#     guards on.
-#   * this file — 0.6 asks a Metal-specific question about a second device.
+# 0.7: shared test files select their backend through TESTBACKEND.
+# Only the harness and this explicit ownership guard may name a backend directly.
 
 const BACKEND_NAMED_ALLOWED = Set([
     "runtests.jl",                # the harness names the sections it guards
@@ -464,38 +271,9 @@ const BACKEND_NAMED_ALLOWED = Set([
     @test isempty(hits)
 end
 
-# ── 0.7b The shared test layer names no backend-only BINDING ─────────────────
-#
-# 0.7 above asks whether a shared test hardcodes an API marker. It never asked
-# what those tests NAME. With the backend in an extension a reach is spelled
-# `MVE.LavaArray` and the module prefix announces itself; compiled in, there is
-# no prefix and `Mantle.LavaArray` reads exactly like portable API.
-#
-# So ask the definition SITE, which is what the rule was always about and needs
-# no vendor name in the pattern: is this a thing only `src/vulkan/` or
-# `src/metal/` defines? That covers more than the prefix ever did, because it
-# also catches a shared test that names a backend-private binding unqualified.
-#
-# 1,913 of the 1,960 reaches were in `test/vulkan/`, which is the backend's own
-# test directory and exactly where they belong. The 47 in the shared layer are
-# in the four files below, all of them already named by `BACKEND_NAMED_ALLOWED`
-# with the split that retires them. This starts green and is a ratchet: it locks
-# in that no OTHER shared test reaches into a backend.
-#
-# Functions and types only: those are the things with a definition site to ask
-# about. A plain `const` (`GEMM_TILE`) and a module alias (`VK`, from `import
-# Vulkan as VK`) have none, so three of the seventeen names the shared layer
-# reaches for are not covered here — all three are in files on the allow-list.
-# Asking about modules by any other means does not work: every `using`d package
-# and every core submodule (`Transient`) is a module bound in `Mantle` too, and
-# separating a driver from a dependency would mean naming the vendor.
-#
-# The token scan OVER-approximates: it does not know a binding from a reference,
-# so a local named `acc` or `stage` counts as naming the backend function that
-# happens to share the spelling. That is the right direction for a ratchet which
-# starts green — a new entry is read by a person either way — and the precise
-# extractor lives in `test_core_names_no_backend.jl`, which is a separate file
-# included separately, so reaching for it here would be an ordering dependency.
+# 0.7b: shared tests may use core/vocabulary bindings, not backend-private ones.
+# Method definition sites identify ownership; the conservative token scan may report
+# local names that collide with a backend binding, requiring review.
 @testset "0.7b the shared test layer names no backend-only binding" begin
     backendsrc(f) = any(d -> occursin(joinpath("src", d), string(f)), BACKEND_DIRS)
     coresrc(f) = startswith(string(f), joinpath(ROOT, "src")) && !backendsrc(f)
@@ -514,10 +292,7 @@ end
     for f in readdir(dir)
         endswith(f, ".jl") && !(f in BACKEND_NAMED_ALLOWED) || continue
         code = codeonly(read(joinpath(dir, f), String))
-        # A name with its bang: `\b` after `!` fails before `(`, and the match then
-        # backed off to `oneshot` for `oneshot!(` — a different function. And not a
-        # quoted symbol: `(:maybe_collect, :Metal)` is a list of names, not a use of
-        # one. A `::` is a type annotation and still counts.
+        # Include trailing ! and type annotations; quoted symbols are not binding references.
         named = Set(Symbol(m.match) for m in eachmatch(r"(?<![A-Za-z0-9_!])(?<![^:]:)[A-Za-z_][A-Za-z0-9_]*!?", code))
         bad = sort(collect(filter(backendonly, named)); by = string)
         isempty(bad) || push!(hits, (f, bad))
@@ -526,61 +301,20 @@ end
     @test isempty(hits)
 end
 
-# ── 0.8 a hook whose default is a silent no-op ───────────────────────────────
-#
-# The shape that produced the worst bug this backend has had. `resource_moved!`
-# was a vocabulary verb with a PERMISSIVE CORE DEFAULT — one accepting any
-# argument, returning `nothing` — that Vulkan implemented and Metal did not. Core
-# announced every buffer move through it; on Metal the announcement went nowhere,
-# so a recorded plan kept reading a `resize!`d buffer's old storage. Silently: a
-# retired region is not freed, so it returned well-formed stale numbers, and the
-# whole suite was green throughout. A passing suite is NOT evidence against this
-# class, which is exactly why it wants a ratchet.
-#
-# What this pins is the SET, not zero. Some of these are legitimate — a capability
-# one backend has, or machinery only one submission model uses — and the honest
-# state is a list that does not grow without someone looking. Audited 2026-09-14,
-# all by design:
-#
-#   emitpreparebarrier!, emitkernel!, workgroupsize
-#       the device-sized-dispatch prepare. Metal records a `DeviceRange` at its
-#       CEILING and bounds-checks in the kernel, so there is no indirect command
-#       to write and no prepare to order — see `recordedrange`.
-#   hold!, holdleaves!, stampof
-#       `SubmitChannel`, which is Vulkan's submission model. Metal holds through
-#       its batch's roots instead (`retire!(::Pool, ::MTLBuffer)`).
-#   supports_*  capability questions, where the answer legitimately differs.
-#
-# A NEW name here is the thing to look at: ask whether the backend that does not
-# implement it reaches the call, and whether the default is right when it does.
+# 0.8: monitor permissive defaults implemented by only one native backend tree.
+# Some are valid capability/default answers; others need explicit refusal or implementation.
+# Keep the legacy count bound until those contracts have individual regressions.
 @testset "0.8 hooks that default to silence are a known set" begin
     corefile(f) = startswith(string(f), joinpath(ROOT, "src")) &&
                   !any(d -> occursin(joinpath("src", d), string(f)), BACKEND_DIRS)
 
-    # `unwrap_unionall`: a parametric method's `sig` IS a `UnionAll` and has no
-    # `.parameters` at all.
-    # The catch-alls, ENUMERATED. `t isa UnionAll` was the test here and it is a
-    # false positive on every bare parametric type: `::Launch`, `::Call`,
-    # `::CompiledDispatch` and `::CompiledDraw` are all `UnionAll`s, so twelve
-    # perfectly specific dispatches counted as permissive defaults —
-    # `argsize`, `argument_usage`, `callgroup`, `collect!`, `devicesized`,
-    # `extrausage`, `finishrecording!`, `hold!`, `holdleaves!`, `indirectindex`,
-    # `initial_usage`, `workgroupsize`. That is also why this number drifted from
-    # 26 without anyone being able to act on it: core grew parametric types, and
-    # each one inflated the count without adding any silent-default risk.
-    #
-    # `Type` stays, and is why this is a list rather than `t === Any`: it is a
-    # `UnionAll` AND a genuine catch-all — `argument_usage(F::Type, A::Type) =
-    # nothing` answers for every function there is.
+    # Unwrap parametric method signatures, but treat only Any, Device and Type as
+    # catch-alls. Bare parametric types such as CompiledDispatch are specific dispatches.
     permissive(m) = corefile(m.file) &&
         all(t -> t === Any || t === Mantle.Device || t === Type,
             collect(Base.unwrap_unionall(m.sig).parameters)[2:end])
 
-    # Read the backend TREES, not the loaded methods. Only one backend is compiled
-    # into any build (chosen at parse time), so `methods()` can never see the other
-    # one — and "exactly one backend answers" would then be trivially true for
-    # everything. Both source trees are on disk either way, so the answer here is
-    # the same on a Metal build and a Vulkan one, which is what a ratchet needs.
+    # Read both backend trees; loaded method tables depend on the host platform.
     defines(dir, nm) = any(readdir(joinpath(ROOT, "src", dir); join = true)) do f
         isdir(f) && return any(g -> endswith(g, ".jl") &&
                                     occursin(Regex("(^|\n)\\s*(function\\s+)?(Mantle\\.)?\\Q$(nm)\\E\\("),
@@ -601,103 +335,12 @@ end
     sort!(lonely; by = string)
 
     @info "0.8 vocabulary verbs with a permissive core default and ONE backend tree implementing" count=length(lonely) lonely
-    # 26 on both builds, 2026-09-14. Reading the trees rather than the loaded
-    # methods is what makes that number the same in each; if it ever differs by
-    # build, this test has drifted back to asking about the compiled backend.
-    #
-    # 28 after the recording verbs were declared, 2026-09-15: 25 of the 26, plus
-    # the three below. `Surface` left the set in the same merge — the portable
-    # `Window(width, height)` and `color_format` work made both trees answer it.
-    #
-    # The three, each looked at as the note above this testset asks:
-    #
-    #   submitrecording!, callgroup
-    #       ARTIFACTS of `permissive`, not holes. Their core methods take
-    #       `RecordingParts` and `KernelAbstractions.Kernel` — parametric types
-    #       named without their parameters, so each is a `UnionAll` and the
-    #       predicate reads it as "accepts anything". Neither accepts anything:
-    #       a `Call` or a `Launch` matches neither. Tightening the predicate
-    #       would mean deciding that a bare `::Plan` is specific while `::Any`
-    #       is not, which is a judgement this ratchet should not make silently,
-    #       so they are recorded here instead.
-    #   abandonrecording!
-    #       REAL, and narrow. `abandonrecording!(::Device, e) = nothing` is a
-    #       no-op default; Vulkan and the ROCm extension release the recording,
-    #       Metal does not implement it. `recordparts!` calls it when a
-    #       partition throws part way through, so on Metal that path leaks the
-    #       open indirect command buffer. An error path, and a leak rather than
-    #       a wrong answer — but it is the `resource_moved!` shape and the fix
-    #       is one method on `MetalRecorder`, on a machine that can run it.
-    #
-    # 31 after the access walk was declared, 2026-09-16: the 28 above plus
-    # `argtype`, `isdevicearray` and `accesscache`. Looked at together, because
-    # the same fact answers all three — **Metal does not implement
-    # `kerneltouches`**, so no part of the walk runs there and none of these
-    # three is reached on that build:
-    #
-    #   isdevicearray
-    #       The one with the `resource_moved!` shape if it were reachable.
-    #       `isdevicearray(x) = false` makes `resourceleaves!` descend into a
-    #       value's FIELDS instead of recording it, so a Metal array answering
-    #       the default would drop a declaration rather than raise anything.
-    #   argtype
-    #       `typeof(y)` is not a permissive default but the RIGHT answer for a
-    #       backend that hands a kernel what it resolved, which is what the host
-    #       does. Only a backend that adapts on the way to the shader has to
-    #       answer, and one that adapts has a `kerneltouches` to answer it from.
-    #   accesscache
-    #       `nothing` means "no cache", which costs the analysis again and
-    #       cannot be wrong. The host answers it; Metal need not.
-    #
-    # So the note for whoever brings the walk to Metal: `kerneltouches` is not
-    # one method, it is four, and `isdevicearray` is the one that fails quietly.
-    #
-    # 30 after merging the Metal frame-allocation work in the same session: it
-    # answers `devicearray` in that tree, so the name left the set. Which is the
-    # direction this number is supposed to move.
-    #
-    # 31 for `intrinsic_usage`, and this one is not a permissive default at all:
-    # `nothing` means the symbol an `llvmcall` calls is UNDECLARED, which the
-    # walk treats as "assume the worst" and is on its way to refusing outright.
-    # A backend that spells its intrinsics as `llvmcall`s and does not answer
-    # gets conservative declarations, not silence -- barriers it does not need,
-    # never a missing one. Metal's intrinsics are `@device_override`s on real
-    # instructions rather than external symbols, so it may never need a method;
-    # if it does, the shape is Lava's in `src/vulkan/access.jl`.
-    #
-    # 22 on 2026-09-26, and `argidentity` is in it because it was declared that
-    # day, not because anything changed. Looked at: nothing in this tree or in
-    # RayMakie calls it, and on Metal it would be right anyway, since Metal does
-    # not record plans (`recordsplans`) and packs a draw's arguments again on
-    # every run, so no address is baked for a reallocation to leave stale.
-    #
-    # `videodecodes` joined on 2026-10-07, and it is the capability-question kind
-    # named at the top of this testset: core answers `false`, and only Vulkan has
-    # a hardware decoder to say `true` about. A backend that reaches the default
-    # reads its video on the CPU, which is the right lane for it, not a silence.
+    # Legacy ceiling for the reviewed default set; this is not proof that every default is safe.
     @test length(lonely) <= 31
 end
 
-# ── 0.9 An extension extends the vocabulary and nothing else ─────────────────
-#
-# `BACKEND_VOCABULARY` is the list of core functions a backend may extend, so a
-# backend method on a name outside it is a decision taken in the wrong package:
-# either core has no opinion where it should have one, or the backend is
-# answering a question core never asked. The in-tree backends are checked by
-# 0.2 and 0.3 from their method tables; a backend that ships as a package
-# EXTENSION has no method table here, because the package it weakly depends on
-# is not installed on most machines this suite runs on.
-#
-# So this reads the files. Crude on purpose: a top-level `Mantle.NAME(` or
-# `function Mantle.NAME(` is a definition, and every other mention is a call.
-# That is enough, because the thing being hunted is a `Mantle.foo(...) = ...`
-# for a `foo` that no other backend answers and core never declared — which is
-# how an extension grows its own private API on Mantle's namespace and how the
-# pair of `resource_moved!`/`arena_moved!` methods that were DEFINING two dead
-# functions survived as long as they did.
-#
-# No extension is named here and none is special-cased: the directory is the
-# subject. Starts green and is a ratchet.
+# 0.9: extension-defined Mantle methods must belong to the declared vocabulary.
+# Read source so unloaded extensions are checked too.
 @testset "0.9 an extension defines only vocabulary names" begin
     voc = Set(Mantle.BACKEND_VOCABULARY)
     dir = joinpath(ROOT, "ext")

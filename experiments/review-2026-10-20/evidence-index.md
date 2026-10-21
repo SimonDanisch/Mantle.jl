@@ -164,3 +164,10 @@ and disposition map do not mean those deletions are already complete.
 Graph backend, packing, lifetime, submission and queue comments/docs now state current contracts concisely. JuliaSyntax comparison confirms identical implementation trees excluding docstrings; the cleanup removes 884 prose lines, including stale Metal and hold-frame claims.
 
 [Shared trace packing/setup](consolidation-trace.md) records eager/recorded ownership, native helper deletion and 677 host/AMD/NVIDIA assertions.
+
+Boundary guards exposed missing registry entries for the existing BatchedTLAS
+native primitives and mipmapped query. Their resource-specific applicability is
+now explicit; no runtime fallback was added. The Vulkan-intrinsic AABB fixture
+moved under test/vulkan. Boundary checks pass (one existing pure-method triage
+remains broken); host batch mutations and native AABB/mipmap checks pass on both GPUs.
+The guard's historical prose is condensed; its checking syntax is unchanged.

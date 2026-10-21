@@ -524,7 +524,7 @@ const BACKEND_VOCABULARY = (
     # answers with its address, so a cached plan sees a reallocation.
     :argidentity,
     :setviewport!, :colorimage, :depthimage, :currentimage, :blittarget,                             # Vulkan needs a usage bit at allocation, Metal does not
-    :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel,
+    :storage, :resourcekind, :makeimage, :remakeimage!, :AdaptedAccel, :mipmapped,
     :supports, :supports_graphics, :supports_geometry_stage,
     :supports_tessellation, :supports_mesh_pipeline, :supports_batch_queue,
     :supports_rt_pipeline, :supports_procedural_traversal, :supports_hwtlas, :supports_float64, :supports_int64_atomics,
@@ -603,6 +603,8 @@ const BACKEND_VOCABULARY = (
     :vertextouches, :fragmenttouches, :shadertouches,
     # ray tracing
     :build_accel!, :build_blas, :refit_tlas!, :set_anyhit_pipeline!, :trace_rays!,
+    # Native batch hooks apply only to hardware BatchedTLAS implementations.
+    :buildgeometry!, :instancearray, :updatebatch!,
     :trace_rays_indirect!, :trace_closest_hits!, :trace_closest_hits_indirect!,
     :trace_closest_hits_anyhit!, :trace_closest_hits_anyhit_indirect!,
 )

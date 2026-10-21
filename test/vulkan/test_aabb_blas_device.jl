@@ -13,7 +13,7 @@ using Test, Mantle, Raycore, Adapt
 import KernelAbstractions as KA
 using KernelAbstractions: @kernel, @index, @Const
 using GeometryBasics: Point3f
-include(joinpath(@__DIR__, "testbackend.jl"))
+include(joinpath(@__DIR__, "..", "testbackend.jl"))
 
 if TESTBACKEND isa Mantle.LavaBackend && Mantle.supports_hwtlas(TESTBACKEND) &&
    Mantle.supports_procedural_traversal(TESTBACKEND)

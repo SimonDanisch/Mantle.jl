@@ -776,7 +776,7 @@ foreachbackend(joinpath(@__DIR__, "test_coopmat_reduce.jl"))
 foreachbackend(joinpath(@__DIR__, "test_coopmat_components.jl"))
 
 foreachbackend(joinpath(@__DIR__, "test_aabb_blas_overlap.jl"))
-foreachbackend(joinpath(@__DIR__, "test_aabb_blas_device.jl"))
+_VULKAN_OK && foreachbackend(joinpath(@__DIR__, "vulkan", "test_aabb_blas_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_atomics_and_dispatch.jl"))
 foreachbackend(joinpath(@__DIR__, "test_float_conversion_exact.jl"))
 foreachbackend(joinpath(@__DIR__, "test_integer_division.jl"))
