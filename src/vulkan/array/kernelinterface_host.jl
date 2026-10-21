@@ -77,20 +77,9 @@ KI.multiprocessor_count(backend::LavaBackend) = caps(backend).cores
 # would come from.
 KI.max_work_group_size(k::KI.Kernel{LavaBackend}) = KI.max_work_group_size(k.backend)
 
-# ── Launch ──────────────────────────────────────────────────────────────────
-#
-# Calling a `KI.Kernel` validates the launch keywords and resolves the geometry
-# (`KI.launch_geometry`), then calls `KI.launch` with three-dimensional workgroup
-# counts and sizes. The kernel is launched with the ORIGINAL args: `argconvert`
-# exists to derive the compiled signature, and the adaptation that pins device
-# memory happens here. That is Lava's split already, which is why this is an
-# adapter over `ka_launch!` and not a second launch path.
-
-"""
-A pure strip to the device-side form, matching `KA.argconvert`: no pin, because
-KI uses this only to derive the type tuple to compile against. The pinning
-adaptation happens in the launch below, against the original arguments.
-"""
+# KI resolves geometry before launch. Original arguments reach the recording path,
+# which holds their leaves before pure device-value conversion.
+"""Derive compiled argument types without retaining resources."""
 KI.argconvert(::LavaBackend, a::LavaArray{T,N}) where {T,N} =
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 KI.argconvert(::LavaBackend, x) = x

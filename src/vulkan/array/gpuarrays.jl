@@ -8,27 +8,9 @@ import Adapt
 
 # ── Adapt.jl integration ──
 
-# LavaAdaptor struct is declared in array/lavaarray.jl (needed earlier by
-# ka_backend.jl method signatures).  This file defines the Adapt rules.
-#
-# The adaptor is the single place LavaArray → LavaDeviceArray (pointer strip)
-# happens during kernel-arg conversion, so it is also the single place buffer-
-# lifetime pinning fires.  Adapt.jl's recursion handles wrapper structs,
-# Broadcasted, NamedTuple — every LavaArray anywhere inside lands here.
-
-"""
-    adapt_storage(::LavaAdaptor, ::LavaArray) → LavaDeviceArray
-
-Pure strip: wrap the GPU buffer address in a device-visible struct. **No pin
-side effect**. Callers must separately invoke `holdleaves!(batch, args...)`
-before submitting a command buffer that uses the stripped result — otherwise
-the underlying `VkManagedBuffer` can be GC'd before the GPU reads from it.
-
-(AMDGPU's adapt is also pure; they get away without an explicit pin pass
-because `@roc` uses `GC.@preserve vars...` lexically around a synchronous
-dispatch. Lava's dispatches are batched and submitted later, so `@preserve`
-isn't enough — hence the explicit `holdleaves!` step.)
-"""
+"""Convert LavaArray to a device address/dimensions value without lifetime effects.
+Launch/recording callers must holdleaves! the original arguments before adapting;
+the resulting descriptor does not retain its backing allocation."""
 function Adapt.adapt_storage(::LavaAdaptor, a::LavaArray{T,N}) where {T,N}
     return LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 end
@@ -469,20 +451,8 @@ end
 
 # ── copyto! variants for CPU↔GPU transfers ──
 
-# ── No staging copy in either direction ──
-#
-# A staging `Vector{UInt8}` the size of the transfer, allocated only to satisfy
-# `upload!`/`download!`'s signature, is a second full copy of every byte that
-# crosses the bus: **3.6 MB of host allocation per Kokoro utterance** (measured,
-# `--track-allocation`).
-#
-# `copy_buffer!` underneath them takes a raw pointer and a byte count — `upload!`
-# is only a wrapper — so these call it directly, like `download_typed!` does.
-# `GC.@preserve` keeps the host array alive across the call.
-# The device-to-device copy is `Mantle.d2dcopy_kernel!` in `runtime/dispatch.jl`
-# now — every backend needs the same one, and this file had the only copy of it
-# while the ROCm extension had a second. See the recording branch below.
-
+# Host copies pass pointers/byte counts directly; GC.@preserve protects host storage.
+# copy_buffer! owns native mapping/staging and queue synchronization.
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::Array{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
@@ -544,7 +514,7 @@ function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
     #
     # Holding the array is the level that keeps the refcount up, which is why
     # both are held here as well as inside the copy. Every kernel argument
-    # already gets exactly this lifetime through `LavaAdaptor`; only the copy
+    # already gets this lifetime through the launch's holdleaves!; only the copy
     # path was holding a level too low.
     # The `openrecording()` consult was here, deleted 2026-09-15 with `batched!`
     # for the same reason as the one in `ka_backend.jl`: which command buffer a

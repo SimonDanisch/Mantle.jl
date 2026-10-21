@@ -1047,37 +1047,19 @@ function reclaim_empty_pool_blocks!(bq::SubmitChannel{<:VulkanQueue})
     return (nbefore - length(poolblocks(ctx)), before - reserved(sp))
 end
 
-# ── Staging for CPU↔GPU transfers ──
-#
-# No staging buffer shared across transfers: each transfer is its own
-# submission, so reusing one would race the previous transfer still in flight.
-# An upload's staging bytes are a `Unified` scratch region owned by the one-shot
-# that copies out of them (`scratch!`), released by the sweep once the transfer
-# has passed; a download's are a `Readback` region — host-cached, not BAR — that
-# the caller acquires, waits for, reads and releases. Both come from
-# `rawalloc(dev, ::Readback, …)`, pooled.
+# Mapped transfers use host pointers. Other copies use pooled Readback memory:
+# upload scratch belongs to its one-shot; download regions belong to the caller
+# until completion, host read and release. Transfer storage is not shared in flight.
 
 """Largest download read straight out of mapped BAR memory; see `copy_buffer!`."""
 const BAR_DIRECT_READ_BYTES = 4096
 
-"""
-    copy_buffer!(direction, managed, host_ptr, nbytes; offset=0)
+"""copy_buffer!(direction, managed, host_ptr, nbytes; offset=0)
 
-Unified CPU↔GPU buffer copy — single entry point for every host-visible
-transfer path.  `direction` is `:upload` (host → GPU) or `:download` (GPU → host).
-
-Fast path (BAR memory): direct memcpy via `managed.mapped_ptr` after
-`waitfor!(stampof(managed))` drains any in-flight writer.  No staging, no batch.
-
-Slow path (device-local): allocate staging, record `cmd_copy_buffer!` into
-the active batch, flush, and memcpy between staging and host.  For downloads
-we route the copy through the queue that last wrote `managed` so the copy
-piggy-backs on producer dispatches (one fence wait instead of two).  For
-uploads we use the buffer's ctx default queue.
-
-The caller is responsible for keeping `host_ptr`'s backing array alive
-(typically via `GC.@preserve`).
-"""
+Copy host/device bytes, with direction :upload or :download. Mapped uploads and
+small mapped downloads memcpy after prior use completes. Other transfers copy
+through pooled Readback regions; downloads use the buffer's last live channel.
+The caller must preserve host_ptr storage through this call."""
 function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
                      host_ptr::Ptr{UInt8}, nbytes::Integer; offset::Integer=0)
     nbytes == 0 && return
@@ -1161,7 +1143,7 @@ end
 
 """Upload host data to a device-local buffer (BAR direct or via staging)."""
 function upload!(dst::VkManagedBuffer, host_data::Vector{UInt8}; offset::Int=0)
-    GC.@preserve host_data copy_buffer!(:upload, dst, pointer(host_data), length(host_data); offset)
+    upload_typed!(dst, host_data; offset)
 end
 
 """Download data from a device-local buffer to a host byte vector."""
@@ -1169,10 +1151,13 @@ function download!(host_data::Vector{UInt8}, src::VkManagedBuffer; offset::Int=0
     GC.@preserve host_data copy_buffer!(:download, src, pointer(host_data), length(host_data); offset)
 end
 
-"""Upload a typed array to a device-local buffer."""
-function upload_typed!(dst::VkManagedBuffer, data::AbstractVector{T}; offset::Int=0) where T
-    bytes = Vector{UInt8}(reinterpret(UInt8, vec(collect(data))))
-    upload!(dst, bytes; offset)
+"""Upload plain-bit host values. Dense Arrays transfer directly; other layouts
+materialize once in logical order. The native transfer owns any GPU copy lifetime."""
+function upload_typed!(dst::VkManagedBuffer, data::AbstractArray{T}; offset::Int=0) where T
+    isbitstype(T) || throw(ArgumentError("upload_typed! requires an isbits element type, got $T"))
+    src = data isa Array ? data : collect(data)
+    GC.@preserve src copy_buffer!(:upload, dst, Ptr{UInt8}(pointer(src)),
+                                  length(src) * sizeof(T); offset)
 end
 
 """Download data from a device-local buffer into a typed array."""

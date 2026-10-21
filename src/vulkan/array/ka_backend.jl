@@ -343,23 +343,8 @@ end
 
 # ── Argument conversion ──
 
-# Convert kernel arguments for GPU compilation via Adapt.jl.
-# LavaArray → LavaDeviceArray (Ptr-wrapping). The `LavaAdaptor(batch)` in this
-# conversion path is the single place a LavaArray gets stripped to a pointer,
-# and it pins the original LavaArray into `batch` at the same point.  There is
-# no separate pinning walker — Adapt.jl's own recursion over wrapper structs /
-# Broadcasted / NamedTuple lands every LavaArray at `adapt_storage`, and that
-# method does both the strip and the pin.
-#
-# `obj.f` is the kernel closure — it goes through the same adaptor so any
-# LavaArray captured in closure-over fields is pinned too.
-#
-# `KA.argconvert(kernel, arg)` is a pure strip used by callers (Raycore's
-# MultiTypeSet, etc.) to cache a device-side view of a LavaArray into their
-# own CPU-side structs *outside* any kernel dispatch.  No pin here — the
-# caller is responsible for keeping the original LavaArray alive until the
-# cached device form is used, and the subsequent kernel dispatch pins that
-# original LavaArray via `LavaAdaptor`.
+# Reflection conversion is pure. Cached descriptors do not retain source arrays;
+# dispatch callers hold original arguments/closures separately with holdleaves!.
 KA.argconvert(::KA.Kernel{LavaBackend}, a::LavaArray{T,N}) where {T,N} =
     LavaDeviceArray{T,N}(Ptr{T}(bda_address(a)), a.dims)
 KA.argconvert(::KA.Kernel{LavaBackend}, x) = x

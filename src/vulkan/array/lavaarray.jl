@@ -241,19 +241,9 @@ basealignment(a::LavaArray) = powalign(bda_address(a))
 # and the throw is the report.
 @inline syncbuf!(owner::Closed, a::LavaArray) = syncbuf!(owner, a.buf[])
 
-# LavaAdaptor: converts LavaArray → LavaDeviceArray (Ptr-wrapping) for GPU
-# kernel compilation, and pins every visited LavaArray into the current batch.
-# Declared here (ahead of ka_backend.jl which uses it in method signatures);
-# the `adapt_storage` / `adapt_structure` methods live in gpuarrays.jl.
-# PARAMETERISED on the owner, not `batch::Closed`. An abstract-typed field makes
-# the struct non-concrete, so `adaptor.batch` is a dynamic load and every
-# `holdleaves!`/`pack_arg!` reached through it becomes a dynamic call — 835 bytes
-# per dispatch, measured by `test_dispatch_allocation.jl`, which exists for
-# exactly this class of regression.
-#
-# `nothing` is an owner too: at COMPILE there is nothing to emit into yet, and
-# the adaptor is used for its pure half — `adapt_storage` is a strip, and the
-# pinning is a separate walk that never sees this field.
+# Pure device-value conversion; callers retain originals with holdleaves!.
+# Carry a concrete owner type for packers that also receive this adaptor;
+# nothing denotes compilation without a recording owner.
 struct LavaAdaptor{P<:Union{Nothing,Closed}}
     batch::P
 end
@@ -263,13 +253,7 @@ end
 """Upload host data to GPU array (must have matching length)."""
 function upload!(dst::LavaArray{T}, data::AbstractArray{T}) where T
     @assert length(data) == length(dst) "Size mismatch: $(length(data)) vs $(length(dst))"
-    src = vec(collect(data))
-    nbytes = length(src) * sizeof(T)
-    bytes = Vector{UInt8}(undef, nbytes)
-    GC.@preserve src bytes begin
-        unsafe_copyto!(Ptr{UInt8}(pointer(bytes)), Ptr{UInt8}(pointer(src)), nbytes)
-    end
-    GC.@preserve dst upload!(dst.buf[], bytes; offset=dst.offset)
+    GC.@preserve dst upload_typed!(dst.buf[], data; offset=dst.offset)
 end
 
 # `update!` is deleted — use `Base.resize!(arr, length(new)) + Base.copyto!(arr, new)`.

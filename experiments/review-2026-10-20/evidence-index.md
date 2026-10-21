@@ -192,3 +192,7 @@ with native contention/tail cases (629 targeted assertions).
 [Shared draw preparation/packing](consolidation-draw.md) removes 50 implementation
 lines and fixes manual draw argument retention. Native lifetime, rendering,
 publication and exact attachment-format checks pass on AMD/NVIDIA.
+
+[Shared typed host upload](consolidation-host-upload.md) removes transfer-sized
+wrapper copies, with ordinary/mapped allocation measurements and 102 native
+assertions. Adaptation comments now consistently require explicit leaf retention.

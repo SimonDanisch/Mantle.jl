@@ -71,23 +71,10 @@ Runs by default; disable with `ctx.diag.launch_arg_validation = false`.
     return Expr(:block, exprs...)
 end
 
-"""
-    lava_launch!(bq, f, args...; ndrange, workgroup_size=(64,1,1))
+"""lava_launch!(bq, f, args...; ndrange, workgroup_size=(64,1,1))
 
-Compile and dispatch a Julia function as a Vulkan compute kernel on `bq`.
-
-Arguments flow through `LavaAdaptor(batch)`, which strips every `LavaArray`
-reached by `Adapt.adapt` (top level or nested inside closures / wrapper
-structs) to a `LavaDeviceArray{T,N}` AND pins its backing `VkManagedBuffer`
-into the batch.  Kernels therefore see exactly the post-adapt types — the
-same ABI as KernelAbstractions — never `Ptr{T}` for what was originally a
-LavaArray.
-
-Example:
-    a = LavaArray{Float32,1}(undef, (n,))
-    lava_launch!(bq, my_kernel, a, b, Int32(n); ndrange=n, workgroup_size=(256,1,1))
-    # kernel signature: my_kernel(a::LavaDeviceArray{Float32,1}, ...)
-"""
+Submit a plain kernel in a one-shot. preparekernel holds the original function
+and argument leaves, then adapts and packs device values before dispatch."""
 function lava_launch!(bq::SubmitChannel{<:VulkanQueue}, @nospecialize(f), args...;
                        ndrange::Union{Integer, NTuple{3,<:Integer}},
                        workgroup_size::NTuple{3,Int} = (64, 1, 1),
@@ -110,7 +97,7 @@ emitter holds — a plan's recording, whose barriers were derived from declared
 usage and already emitted, or a one-shot a caller is composing.
 
 Everything up to the dispatch is shared: [`preparekernel`](@ref) compiles,
-adapts, pins and packs identically for both.
+holds, adapts and packs identically for both.
 """
 function emitkernel!(e::Emitter, @nospecialize(f), args...;
                      ndrange::Union{Integer, NTuple{3,<:Integer}},
@@ -205,11 +192,8 @@ end
 # inlined right after the fixed layout and the slot holds a self-referencing
 # BDA that points back at the inlined bytes.
 #
-# Every leaf that is a GPU-visible buffer was already stripped + pinned by
-# `LavaAdaptor` at the kernel call boundary, so by the time `pack_args_direct!`
-# runs we're looking at `LavaDeviceArray{T,N}` (a plain isbits struct) — no
-# special case needed for it here.  `VkManagedBuffer` is kept as an escape
-# hatch for a few internal low-level callers.
+# Callers hold original leaves before pure adaptation. Descriptors carry addresses,
+# not ownership; the explicit VkManagedBuffer packer below also holds its allocation.
 
 """
     compute_inline_extra_from_byval(byval_sizes::Vector{Int})

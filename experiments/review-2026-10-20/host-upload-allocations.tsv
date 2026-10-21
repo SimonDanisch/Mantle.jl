@@ -1,0 +1,5 @@
+device	unified	mapped	source_bytes	before_julia_host_bytes	after_julia_host_bytes
+AMD Radeon RX 7900 XTX (RADV NAVI31)	false	false	4194304	8389504	640
+NVIDIA RTX 4000 Ada Generation	false	false	4194304	8429104	624
+AMD Radeon RX 7900 XTX (RADV NAVI31)	true	true	4194304	8388784	32
+NVIDIA RTX 4000 Ada Generation	true	true	4194304	8388784	32
