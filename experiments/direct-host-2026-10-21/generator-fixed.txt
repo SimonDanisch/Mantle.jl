@@ -1,0 +1,318 @@
+WrapperConfig: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/config.jl:8
+  Expression: extensions(wrapper_config(include_provisional_exts = true)) == extensions(wrapper_config(include_platforms = [PLATFORM_PROVISIONAL]))
+   Evaluated: Extensions(SpecExtension[SpecExtension("VK_KHR_surface", EXTENSION_TYPE_INSTANCE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_SURFACE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_SURFACE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_SURFACE_LOST_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_SURFACE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkSurfaceKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceTransformFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkPresentModeKHR, SYMBOL_TYPE, false), SymbolInfo(:VkColorSpaceKHR, SYMBOL_TYPE, false), SymbolInfo(:VkCompositeAlphaFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkCompositeAlphaFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceCapabilitiesKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceFormatKHR, SYMBOL_TYPE, false), SymbolInfo(:vkDestroySurfaceKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfaceSupportKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfaceCapabilitiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfaceFormatsKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfacePresentModesKHR, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_swapchain", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_SWAPCHAIN_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_SWAPCHAIN_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_SUBOPTIMAL_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_OUT_OF_DATE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_SWAPCHAIN_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkSwapchainCreateFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSwapchainCreateFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSwapchainCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSwapchainKHR, SYMBOL_TYPE, false), SymbolInfo(:VkPresentInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:vkCreateSwapchainKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkDestroySwapchainKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetSwapchainImagesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkAcquireNextImageKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkQueuePresentKHR, SYMBOL_COMMAND, false)], [""], nothing), SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_CAPABILITIES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_IMAGE_SWAPCHAIN_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkImageSwapchainCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkBindImageMemorySwapchainInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkAcquireNextImageInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentModeFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentModeFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentCapabilitiesKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupSwapchainCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:vkGetDeviceGroupPresentCapabilitiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDeviceGroupSurfacePresentModesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDevicePresentRectanglesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkAcquireNextImage2KHR, SYMBOL_COMMAND, false), SymbolInfo(:VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_display", EXTENSION_TYPE_INSTANCE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_DISPLAY_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_DISPLAY_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DISPLAY_MODE_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_DISPLAY_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_DISPLAY_MODE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkDisplayKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplayModeCreateFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplayModeCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplayModeKHR, SYMBOL_TYPE, false)  …  SymbolInfo(:VkDisplaySurfaceCreateFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplaySurfaceCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceTransformFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:vkGetPhysicalDeviceDisplayPropertiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceDisplayPlanePropertiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDisplayPlaneSupportedDisplaysKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDisplayModePropertiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkCreateDisplayModeKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDisplayPlaneCapabilitiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkCreateDisplayPlaneSurfaceKHR, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_display_swapchain", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_DISPLAY_SWAPCHAIN_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_DISPLAY_SWAPCHAIN_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DISPLAY_PRESENT_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_INCOMPATIBLE_DISPLAY_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkDisplayPresentInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:vkCreateSharedSwapchainsKHR, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_EXT_debug_report", EXTENSION_TYPE_INSTANCE, String[], ApplicableAPI[VULKAN], "GOOGLE", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_DEBUG_REPORT_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_DEBUG_REPORT_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT, SYMBOL_ENUM, true), SymbolInfo(:VK_ERROR_VALIDATION_FAILED_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_VALIDATION_FAILED_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkDebugReportCallbackEXT, SYMBOL_TYPE, false), SymbolInfo(:PFN_vkDebugReportCallbackEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportFlagBitsEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportFlagsEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportObjectTypeEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportCallbackCreateInfoEXT, SYMBOL_TYPE, false), SymbolInfo(:vkCreateDebugReportCallbackEXT, SYMBOL_COMMAND, false), SymbolInfo(:vkDestroyDebugReportCallbackEXT, SYMBOL_COMMAND, false), SymbolInfo(:vkDebugReportMessageEXT, SYMBOL_COMMAND, false)], [""], nothing), SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_DEBUG_REPORT_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_EXT, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, "VK_EXT_debug_utils"), SpecExtension("VK_NV_glsl_shader", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "NV", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_NV_GLSL_SHADER_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_NV_GLSL_SHADER_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_INVALID_SHADER_NV, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, ""), SpecExtension("VK_EXT_depth_range_unrestricted", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "NV", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_DEPTH_RANGE_UNRESTRICTED_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_sampler_mirror_clamp_to_edge", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE, SYMBOL_ENUM, false), SymbolInfo(:VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE_KHR, SYMBOL_ENUM, true)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, v"1.2.0", nothing), SpecExtension("VK_IMG_filter_cubic", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "IMG", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_IMG_FILTER_CUBIC_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_IMG_FILTER_CUBIC_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_FILTER_CUBIC_IMG, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_IMG, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_AMD_rasterization_order", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "AMD", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_AMD_RASTERIZATION_ORDER_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_AMD_RASTERIZATION_ORDER_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_RASTERIZATION_ORDER_AMD, SYMBOL_ENUM, false), SymbolInfo(:VkRasterizationOrderAMD, SYMBOL_TYPE, false), SymbolInfo(:VkPipelineRasterizationStateRasterizationOrderAMD, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing)  …  SpecExtension("VK_KHR_depth_clamp_zero_one", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_DEPTH_CLAMP_ZERO_ONE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_DEPTH_CLAMP_ZERO_ONE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLAMP_ZERO_ONE_FEATURES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceDepthClampZeroOneFeaturesKHR, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_EXT_vertex_attribute_robustness", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "EXT", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, "VK_KHR_maintenance9", nothing), SpecExtension("VK_ARM_format_pack", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "ARM", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_ARM_FORMAT_PACK_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_ARM_FORMAT_PACK_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FORMAT_PACK_FEATURES_ARM, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceFormatPackFeaturesARM, SYMBOL_TYPE, false), SymbolInfo(:VK_FORMAT_R10X6_UINT_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R10X6G10X6_UINT_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R10X6G10X6B10X6A10X6_UINT_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R12X4_UINT_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R12X4G12X4_UINT_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R12X4G12X4B12X4A12X4_UINT_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2_UINT_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2_UINT_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2B14X2A14X2_UINT_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2_UNORM_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2_UNORM_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2B14X2A14X2_UNORM_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_G14X2_B14X2R14X2_2PLANE_420_UNORM_3PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_G14X2_B14X2R14X2_2PLANE_422_UNORM_3PACK16_ARM, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_VALVE_fragment_density_map_layered", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "VALVE", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_VALVE_FRAGMENT_DENSITY_MAP_LAYERED_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_VALVE_FRAGMENT_DENSITY_MAP_LAYERED_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_FEATURES_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_PROPERTIES_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_DENSITY_MAP_LAYERED_CREATE_INFO_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_RENDER_PASS_CREATE_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_RENDERING_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_PIPELINE_CREATE_2_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapLayeredFeaturesVALVE, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapLayeredPropertiesVALVE, SYMBOL_TYPE, false), SymbolInfo(:VkPipelineFragmentDensityMapLayeredCreateInfoVALVE, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_robustness2", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_ROBUSTNESS_2_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_ROBUSTNESS_2_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceRobustness2FeaturesKHR, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDeviceRobustness2PropertiesKHR, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_NV_present_metering", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "NV", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_NV_PRESENT_METERING_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_NV_PRESENT_METERING_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_SET_PRESENT_CONFIG_NV, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_METERING_FEATURES_NV, SYMBOL_ENUM, false), SymbolInfo(:VkSetPresentConfigNV, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDevicePresentMeteringFeaturesNV, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_PROVISIONAL), true, false, nothing, nothing), SpecExtension("VK_EXT_fragment_density_map_offset", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "EXT", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_FRAGMENT_DENSITY_MAP_OFFSET_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_FRAGMENT_DENSITY_MAP_OFFSET_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VkRenderingEndInfoEXT, SYMBOL_TYPE, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_FEATURES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_PROPERTIES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_OFFSET_END_INFO_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_RENDERING_END_INFO_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapOffsetPropertiesEXT, SYMBOL_TYPE, false), SymbolInfo(:VkRenderPassFragmentDensityMapOffsetEndInfoEXT, SYMBOL_TYPE, false), SymbolInfo(:vkCmdEndRendering2EXT, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_EXT_zero_initialize_device_memory", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "EXT", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_ZERO_INITIALIZE_DEVICE_MEMORY_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_ZERO_INITIALIZE_DEVICE_MEMORY_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_DEVICE_MEMORY_FEATURES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_present_mode_fifo_latest_ready", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_PRESENT_MODE_FIFO_LATEST_READY_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_SEC_pipeline_cache_incremental_mode", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "SEC", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_SEC_PIPELINE_CACHE_INCREMENTAL_MODE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_SEC_PIPELINE_CACHE_INCREMENTAL_MODE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CACHE_INCREMENTAL_MODE_FEATURES_SEC, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDevicePipelineCacheIncrementalModeFeaturesSEC, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing)]) == Extensions(SpecExtension[SpecExtension("VK_KHR_surface", EXTENSION_TYPE_INSTANCE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_SURFACE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_SURFACE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_SURFACE_LOST_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_SURFACE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkSurfaceKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceTransformFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkPresentModeKHR, SYMBOL_TYPE, false), SymbolInfo(:VkColorSpaceKHR, SYMBOL_TYPE, false), SymbolInfo(:VkCompositeAlphaFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkCompositeAlphaFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceCapabilitiesKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceFormatKHR, SYMBOL_TYPE, false), SymbolInfo(:vkDestroySurfaceKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfaceSupportKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfaceCapabilitiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfaceFormatsKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceSurfacePresentModesKHR, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_swapchain", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_SWAPCHAIN_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_SWAPCHAIN_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_SUBOPTIMAL_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_OUT_OF_DATE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_SWAPCHAIN_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkSwapchainCreateFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSwapchainCreateFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSwapchainCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSwapchainKHR, SYMBOL_TYPE, false), SymbolInfo(:VkPresentInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:vkCreateSwapchainKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkDestroySwapchainKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetSwapchainImagesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkAcquireNextImageKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkQueuePresentKHR, SYMBOL_COMMAND, false)], [""], nothing), SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_CAPABILITIES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_IMAGE_SWAPCHAIN_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEVICE_GROUP_PRESENT_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEVICE_GROUP_SWAPCHAIN_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkImageSwapchainCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkBindImageMemorySwapchainInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkAcquireNextImageInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentModeFlagBitsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentModeFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentCapabilitiesKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupPresentInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDeviceGroupSwapchainCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:vkGetDeviceGroupPresentCapabilitiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDeviceGroupSurfacePresentModesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDevicePresentRectanglesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkAcquireNextImage2KHR, SYMBOL_COMMAND, false), SymbolInfo(:VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_display", EXTENSION_TYPE_INSTANCE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_DISPLAY_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_DISPLAY_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DISPLAY_MODE_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_DISPLAY_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_DISPLAY_MODE_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkDisplayKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplayModeCreateFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplayModeCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplayModeKHR, SYMBOL_TYPE, false)  …  SymbolInfo(:VkDisplaySurfaceCreateFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:VkDisplaySurfaceCreateInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:VkSurfaceTransformFlagsKHR, SYMBOL_TYPE, false), SymbolInfo(:vkGetPhysicalDeviceDisplayPropertiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetPhysicalDeviceDisplayPlanePropertiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDisplayPlaneSupportedDisplaysKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDisplayModePropertiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkCreateDisplayModeKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkGetDisplayPlaneCapabilitiesKHR, SYMBOL_COMMAND, false), SymbolInfo(:vkCreateDisplayPlaneSurfaceKHR, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_display_swapchain", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_DISPLAY_SWAPCHAIN_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_DISPLAY_SWAPCHAIN_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DISPLAY_PRESENT_INFO_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_INCOMPATIBLE_DISPLAY_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkDisplayPresentInfoKHR, SYMBOL_TYPE, false), SymbolInfo(:vkCreateSharedSwapchainsKHR, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_EXT_debug_report", EXTENSION_TYPE_INSTANCE, String[], ApplicableAPI[VULKAN], "GOOGLE", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_DEBUG_REPORT_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_DEBUG_REPORT_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT, SYMBOL_ENUM, true), SymbolInfo(:VK_ERROR_VALIDATION_FAILED_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_VALIDATION_FAILED_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkDebugReportCallbackEXT, SYMBOL_TYPE, false), SymbolInfo(:PFN_vkDebugReportCallbackEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportFlagBitsEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportFlagsEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportObjectTypeEXT, SYMBOL_TYPE, false), SymbolInfo(:VkDebugReportCallbackCreateInfoEXT, SYMBOL_TYPE, false), SymbolInfo(:vkCreateDebugReportCallbackEXT, SYMBOL_COMMAND, false), SymbolInfo(:vkDestroyDebugReportCallbackEXT, SYMBOL_COMMAND, false), SymbolInfo(:vkDebugReportMessageEXT, SYMBOL_COMMAND, false)], [""], nothing), SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_DEBUG_REPORT_OBJECT_TYPE_SAMPLER_YCBCR_CONVERSION_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_DEBUG_REPORT_OBJECT_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_EXT, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, "VK_EXT_debug_utils"), SpecExtension("VK_NV_glsl_shader", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "NV", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_NV_GLSL_SHADER_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_NV_GLSL_SHADER_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_ERROR_INVALID_SHADER_NV, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, ""), SpecExtension("VK_EXT_depth_range_unrestricted", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN, VULKAN_SC], "NV", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_DEPTH_RANGE_UNRESTRICTED_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_sampler_mirror_clamp_to_edge", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE, SYMBOL_ENUM, false), SymbolInfo(:VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE_KHR, SYMBOL_ENUM, true)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, v"1.2.0", nothing), SpecExtension("VK_IMG_filter_cubic", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "IMG", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_IMG_FILTER_CUBIC_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_IMG_FILTER_CUBIC_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_FILTER_CUBIC_IMG, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_CUBIC_BIT_IMG, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_AMD_rasterization_order", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "AMD", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_AMD_RASTERIZATION_ORDER_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_AMD_RASTERIZATION_ORDER_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_RASTERIZATION_ORDER_AMD, SYMBOL_ENUM, false), SymbolInfo(:VkRasterizationOrderAMD, SYMBOL_TYPE, false), SymbolInfo(:VkPipelineRasterizationStateRasterizationOrderAMD, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing)  …  SpecExtension("VK_KHR_depth_clamp_zero_one", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_DEPTH_CLAMP_ZERO_ONE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_DEPTH_CLAMP_ZERO_ONE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLAMP_ZERO_ONE_FEATURES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceDepthClampZeroOneFeaturesKHR, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_EXT_vertex_attribute_robustness", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "EXT", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_VERTEX_ATTRIBUTE_ROBUSTNESS_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_ROBUSTNESS_FEATURES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, "VK_KHR_maintenance9", nothing), SpecExtension("VK_ARM_format_pack", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "ARM", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_ARM_FORMAT_PACK_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_ARM_FORMAT_PACK_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FORMAT_PACK_FEATURES_ARM, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceFormatPackFeaturesARM, SYMBOL_TYPE, false), SymbolInfo(:VK_FORMAT_R10X6_UINT_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R10X6G10X6_UINT_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R10X6G10X6B10X6A10X6_UINT_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R12X4_UINT_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R12X4G12X4_UINT_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R12X4G12X4B12X4A12X4_UINT_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2_UINT_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2_UINT_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2B14X2A14X2_UINT_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2_UNORM_PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2_UNORM_2PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_R14X2G14X2B14X2A14X2_UNORM_4PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_G14X2_B14X2R14X2_2PLANE_420_UNORM_3PACK16_ARM, SYMBOL_ENUM, false), SymbolInfo(:VK_FORMAT_G14X2_B14X2R14X2_2PLANE_422_UNORM_3PACK16_ARM, SYMBOL_ENUM, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_VALVE_fragment_density_map_layered", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "VALVE", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_VALVE_FRAGMENT_DENSITY_MAP_LAYERED_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_VALVE_FRAGMENT_DENSITY_MAP_LAYERED_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_FEATURES_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_LAYERED_PROPERTIES_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_DENSITY_MAP_LAYERED_CREATE_INFO_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_RENDER_PASS_CREATE_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_RENDERING_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VK_PIPELINE_CREATE_2_PER_LAYER_FRAGMENT_DENSITY_BIT_VALVE, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapLayeredFeaturesVALVE, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapLayeredPropertiesVALVE, SYMBOL_TYPE, false), SymbolInfo(:VkPipelineFragmentDensityMapLayeredCreateInfoVALVE, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_robustness2", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_ROBUSTNESS_2_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_ROBUSTNESS_2_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_PROPERTIES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceRobustness2FeaturesKHR, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDeviceRobustness2PropertiesKHR, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_NV_present_metering", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "NV", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_NV_PRESENT_METERING_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_NV_PRESENT_METERING_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_SET_PRESENT_CONFIG_NV, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_METERING_FEATURES_NV, SYMBOL_ENUM, false), SymbolInfo(:VkSetPresentConfigNV, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDevicePresentMeteringFeaturesNV, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_PROVISIONAL), true, false, nothing, nothing), SpecExtension("VK_EXT_fragment_density_map_offset", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "EXT", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_FRAGMENT_DENSITY_MAP_OFFSET_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_FRAGMENT_DENSITY_MAP_OFFSET_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VkRenderingEndInfoEXT, SYMBOL_TYPE, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_FEATURES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_OFFSET_PROPERTIES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_OFFSET_END_INFO_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_RENDERING_END_INFO_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT, SYMBOL_TYPE, false), SymbolInfo(:VkPhysicalDeviceFragmentDensityMapOffsetPropertiesEXT, SYMBOL_TYPE, false), SymbolInfo(:VkRenderPassFragmentDensityMapOffsetEndInfoEXT, SYMBOL_TYPE, false), SymbolInfo(:vkCmdEndRendering2EXT, SYMBOL_COMMAND, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_EXT_zero_initialize_device_memory", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "EXT", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_EXT_ZERO_INITIALIZE_DEVICE_MEMORY_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_EXT_ZERO_INITIALIZE_DEVICE_MEMORY_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_DEVICE_MEMORY_FEATURES_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT, SYMBOL_ENUM, false), SymbolInfo(:VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_KHR_present_mode_fifo_latest_ready", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "KHR", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR, SYMBOL_ENUM, false), SymbolInfo(:VK_PRESENT_MODE_FIFO_LATEST_READY_KHR, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing), SpecExtension("VK_SEC_pipeline_cache_incremental_mode", EXTENSION_TYPE_DEVICE, String[], ApplicableAPI[VULKAN], "SEC", SymbolGroup[SymbolGroup(ApplicableAPI[], SymbolInfo[SymbolInfo(:VK_SEC_PIPELINE_CACHE_INCREMENTAL_MODE_SPEC_VERSION, SYMBOL_ENUM, false), SymbolInfo(:VK_SEC_PIPELINE_CACHE_INCREMENTAL_MODE_EXTENSION_NAME, SYMBOL_ENUM, false), SymbolInfo(:VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CACHE_INCREMENTAL_MODE_FEATURES_SEC, SYMBOL_ENUM, false), SymbolInfo(:VkPhysicalDevicePipelineCacheIncrementalModeFeaturesSEC, SYMBOL_TYPE, false)], [""], nothing)], PlatformType(PLATFORM_NONE), false, false, nothing, nothing)])
+
+Stacktrace:
+ [1] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/config.jl:4
+ [2] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [3] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/config.jl:8 [inlined]
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+Friendly constructors: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+  Expression: prettify(to_expr(x)) == prettify(y)
+   Evaluated: function _PipelineShaderStageCreateInfo(stage::ShaderStageFlag, _module, name::AbstractString; next = C_NULL, flags = 0, specialization_info = C_NULL)
+        next = cconvert(Ptr{Cvoid}, next)
+        name = cconvert(Cstring, name)
+        specialization_info = cconvert(Ptr{VkSpecializationInfo}, specialization_info)
+        deps = Any[next, name, specialization_info]
+        vks = VkPipelineShaderStageCreateInfo(structure_type(VkPipelineShaderStageCreateInfo), unsafe_convert(Ptr{Cvoid}, next), convert(VkPipelineShaderStageCreateFlags, flags), VkShaderStageFlagBits(flag_value(stage)), convert(VkShaderModule, _module), unsafe_convert(Cstring, name), unsafe_convert(Ptr{VkSpecializationInfo}, specialization_info))
+        _PipelineShaderStageCreateInfo(vks, deps, _module)
+    end == function _PipelineShaderStageCreateInfo(stage::ShaderStageFlag, _module, name::AbstractString; next = C_NULL, flags = 0, specialization_info = C_NULL)
+        next = cconvert(Ptr{Cvoid}, next)
+        name = cconvert(Cstring, name)
+        specialization_info = cconvert(Ptr{VkSpecializationInfo}, specialization_info)
+        deps = Any[next, name, specialization_info]
+        vks = VkPipelineShaderStageCreateInfo(structure_type(VkPipelineShaderStageCreateInfo), unsafe_convert(Ptr{Cvoid}, next), convert(VkPipelineShaderStageCreateFlags, flags), VkShaderStageFlagBits(stage.val), convert(VkShaderModule, _module), unsafe_convert(Cstring, name), unsafe_convert(Ptr{VkSpecializationInfo}, specialization_info))
+        _PipelineShaderStageCreateInfo(vks, deps, _module)
+    end
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] test_ex(x::Constructor{StructDefinition{false, SpecStruct}, SpecStruct}, y::Expr)
+   @ Main /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+ [3] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/structs/low_level.jl:2
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [5] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/structs/low_level.jl:52 [inlined]
+ [6] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [7] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/structs/low_level.jl:112 [inlined]
+Enums: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+  Expression: prettify(to_expr(x)) == prettify(y)
+   Evaluated: @cenum(AttachmentLoadOp::UInt32, begin
+            ATTACHMENT_LOAD_OP_LOAD = 0
+            ATTACHMENT_LOAD_OP_CLEAR = 1
+            ATTACHMENT_LOAD_OP_DONT_CARE = 2
+            ATTACHMENT_LOAD_OP_NONE = 1000400000
+        end) == @cenum(AttachmentLoadOp::UInt32, begin
+            ATTACHMENT_LOAD_OP_LOAD = 0
+            ATTACHMENT_LOAD_OP_CLEAR = 1
+            ATTACHMENT_LOAD_OP_DONT_CARE = 2
+            ATTACHMENT_LOAD_OP_NONE_EXT = 1000400000
+        end)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] test_ex(x::EnumDefinition, y::Expr)
+   @ Main /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+ [3] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/enums.jl:2
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [5] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/enums.jl:2 [inlined]
+Enums: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+  Expression: prettify(to_expr(x)) == prettify(y)
+   Evaluated: @cenum(Result::Int32, begin
+            SUCCESS = 0
+            NOT_READY = 1
+            TIMEOUT = 2
+            EVENT_SET = 3
+            EVENT_RESET = 4
+            INCOMPLETE = 5
+            ERROR_OUT_OF_HOST_MEMORY = -1
+            ERROR_OUT_OF_DEVICE_MEMORY = -2
+            ERROR_INITIALIZATION_FAILED = -3
+            ERROR_DEVICE_LOST = -4
+            ERROR_MEMORY_MAP_FAILED = -5
+            ERROR_LAYER_NOT_PRESENT = -6
+            ERROR_EXTENSION_NOT_PRESENT = -7
+            ERROR_FEATURE_NOT_PRESENT = -8
+            ERROR_INCOMPATIBLE_DRIVER = -9
+            ERROR_TOO_MANY_OBJECTS = -10
+            ERROR_FORMAT_NOT_SUPPORTED = -11
+            ERROR_FRAGMENTED_POOL = -12
+            ERROR_UNKNOWN = -13
+            ERROR_OUT_OF_POOL_MEMORY = -1000069000
+            ERROR_INVALID_EXTERNAL_HANDLE = -1000072003
+            ERROR_FRAGMENTATION = -1000161000
+            ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS = -1000257000
+            PIPELINE_COMPILE_REQUIRED = 1000297000
+            ERROR_NOT_PERMITTED = -1000174001
+            ERROR_VALIDATION_FAILED = -1000011001
+            ERROR_INVALID_PIPELINE_CACHE_DATA = -1000298000
+            ERROR_NO_PIPELINE_MATCH = -1000298001
+            ERROR_SURFACE_LOST_KHR = -1000000000
+            ERROR_NATIVE_WINDOW_IN_USE_KHR = -1000000001
+            SUBOPTIMAL_KHR = 1000001003
+            ERROR_OUT_OF_DATE_KHR = -1000001004
+            ERROR_INCOMPATIBLE_DISPLAY_KHR = -1000003001
+            ERROR_VALIDATION_FAILED_EXT = -1000011001
+            ERROR_INVALID_SHADER_NV = -1000012000
+            ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR = -1000023000
+            ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR = -1000023001
+            ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR = -1000023002
+            ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR = -1000023003
+            ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR = -1000023004
+            ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR = -1000023005
+            ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT = -1000158000
+            ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT = -1000255000
+            THREAD_IDLE_KHR = 1000268000
+            THREAD_DONE_KHR = 1000268001
+            OPERATION_DEFERRED_KHR = 1000268002
+            OPERATION_NOT_DEFERRED_KHR = 1000268003
+            ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR = -1000299000
+            ERROR_COMPRESSION_EXHAUSTED_EXT = -1000338000
+            INCOMPATIBLE_SHADER_BINARY_EXT = 1000482000
+            PIPELINE_BINARY_MISSING_KHR = 1000483000
+            ERROR_NOT_ENOUGH_SPACE_KHR = -1000483000
+        end) == @cenum(Result::Int32, begin
+            SUCCESS = 0
+            NOT_READY = 1
+            TIMEOUT = 2
+            EVENT_SET = 3
+            EVENT_RESET = 4
+            INCOMPLETE = 5
+            ERROR_OUT_OF_HOST_MEMORY = -1
+            ERROR_OUT_OF_DEVICE_MEMORY = -2
+            ERROR_INITIALIZATION_FAILED = -3
+            ERROR_DEVICE_LOST = -4
+            ERROR_MEMORY_MAP_FAILED = -5
+            ERROR_LAYER_NOT_PRESENT = -6
+            ERROR_EXTENSION_NOT_PRESENT = -7
+            ERROR_FEATURE_NOT_PRESENT = -8
+            ERROR_INCOMPATIBLE_DRIVER = -9
+            ERROR_TOO_MANY_OBJECTS = -10
+            ERROR_FORMAT_NOT_SUPPORTED = -11
+            ERROR_FRAGMENTED_POOL = -12
+            ERROR_UNKNOWN = -13
+            ERROR_OUT_OF_POOL_MEMORY = -1000069000
+            ERROR_INVALID_EXTERNAL_HANDLE = -1000072003
+            ERROR_FRAGMENTATION = -1000161000
+            ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS = -1000257000
+            PIPELINE_COMPILE_REQUIRED = 1000297000
+            ERROR_SURFACE_LOST_KHR = -1000000000
+            ERROR_NATIVE_WINDOW_IN_USE_KHR = -1000000001
+            SUBOPTIMAL_KHR = 1000001003
+            ERROR_OUT_OF_DATE_KHR = -1000001004
+            ERROR_INCOMPATIBLE_DISPLAY_KHR = -1000003001
+            ERROR_VALIDATION_FAILED_EXT = -1000011001
+            ERROR_INVALID_SHADER_NV = -1000012000
+            ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR = -1000023000
+            ERROR_VIDEO_PICTURE_LAYOUT_NOT_SUPPORTED_KHR = -1000023001
+            ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR = -1000023002
+            ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR = -1000023003
+            ERROR_VIDEO_PROFILE_CODEC_NOT_SUPPORTED_KHR = -1000023004
+            ERROR_VIDEO_STD_VERSION_NOT_SUPPORTED_KHR = -1000023005
+            ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT = -1000158000
+            ERROR_NOT_PERMITTED_KHR = -1000174001
+            ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT = -1000255000
+            THREAD_IDLE_KHR = 1000268000
+            THREAD_DONE_KHR = 1000268001
+            OPERATION_DEFERRED_KHR = 1000268002
+            OPERATION_NOT_DEFERRED_KHR = 1000268003
+            ERROR_COMPRESSION_EXHAUSTED_EXT = -1000338000
+        end)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] test_ex(x::EnumDefinition, y::Expr)
+   @ Main /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+ [3] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/enums.jl:2
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [5] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/enums.jl:11 [inlined]
+Enums: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+  Expression: prettify(to_expr(x)) == prettify(y)
+   Evaluated: @cenum(PipelineCacheHeaderVersion::UInt32, begin
+            PIPELINE_CACHE_HEADER_VERSION_ONE = 1
+            PIPELINE_CACHE_HEADER_VERSION_SAFETY_CRITICAL_ONE = 1000298001
+        end) == @cenum(PipelineCacheHeaderVersion::UInt32, PIPELINE_CACHE_HEADER_VERSION_ONE = 1)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] test_ex(x::EnumDefinition, y::Expr)
+   @ Main /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+ [3] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/enums.jl:2
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [5] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/enums.jl:61 [inlined]
+Bitmask flags: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+  Expression: prettify(to_expr(x)) == prettify(y)
+   Evaluated: @bitmask(ShaderStageFlag::UInt32, begin
+            SHADER_STAGE_VERTEX_BIT = 1
+            SHADER_STAGE_TESSELLATION_CONTROL_BIT = 2
+            SHADER_STAGE_TESSELLATION_EVALUATION_BIT = 4
+            SHADER_STAGE_GEOMETRY_BIT = 8
+            SHADER_STAGE_FRAGMENT_BIT = 16
+            SHADER_STAGE_COMPUTE_BIT = 32
+            SHADER_STAGE_RAYGEN_BIT_KHR = 256
+            SHADER_STAGE_ANY_HIT_BIT_KHR = 512
+            SHADER_STAGE_CLOSEST_HIT_BIT_KHR = 1024
+            SHADER_STAGE_MISS_BIT_KHR = 2048
+            SHADER_STAGE_INTERSECTION_BIT_KHR = 4096
+            SHADER_STAGE_CALLABLE_BIT_KHR = 8192
+            SHADER_STAGE_TASK_BIT_EXT = 64
+            SHADER_STAGE_MESH_BIT_EXT = 128
+            SHADER_STAGE_SUBPASS_SHADING_BIT_HUAWEI = 16384
+            SHADER_STAGE_CLUSTER_CULLING_BIT_HUAWEI = 524288
+            SHADER_STAGE_RESERVED_15_BIT_NV = 32768
+            SHADER_STAGE_ALL_GRAPHICS = 31
+            SHADER_STAGE_ALL = 2147483647
+        end) == @bitmask(ShaderStageFlag::UInt32, begin
+            SHADER_STAGE_VERTEX_BIT = 1
+            SHADER_STAGE_TESSELLATION_CONTROL_BIT = 2
+            SHADER_STAGE_TESSELLATION_EVALUATION_BIT = 4
+            SHADER_STAGE_GEOMETRY_BIT = 8
+            SHADER_STAGE_FRAGMENT_BIT = 16
+            SHADER_STAGE_COMPUTE_BIT = 32
+            SHADER_STAGE_RAYGEN_BIT_KHR = 256
+            SHADER_STAGE_ANY_HIT_BIT_KHR = 512
+            SHADER_STAGE_CLOSEST_HIT_BIT_KHR = 1024
+            SHADER_STAGE_MISS_BIT_KHR = 2048
+            SHADER_STAGE_INTERSECTION_BIT_KHR = 4096
+            SHADER_STAGE_CALLABLE_BIT_KHR = 8192
+            SHADER_STAGE_TASK_BIT_EXT = 64
+            SHADER_STAGE_MESH_BIT_EXT = 128
+            SHADER_STAGE_SUBPASS_SHADING_BIT_HUAWEI = 16384
+            SHADER_STAGE_CLUSTER_CULLING_BIT_HUAWEI = 524288
+            SHADER_STAGE_ALL_GRAPHICS = 31
+            SHADER_STAGE_ALL = 2147483647
+        end)
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] test_ex(x::BitmaskDefinition, y::Expr)
+   @ Main /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+ [3] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/bitmasks.jl:2
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [5] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/enums/bitmasks.jl:27 [inlined]
+API functions: Test Failed at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+  Expression: prettify(to_expr(x)) == prettify(y)
+   Evaluated: function _enumerate_physical_device_queue_family_performance_query_counters_khr(physical_device, queue_family_index::Integer)::ResultTypes.Result{Tuple{Vector{_PerformanceCounterKHR}, Vector{_PerformanceCounterDescriptionKHR}}, VulkanError}
+        pCounterCount = Ref{UInt32}()
+        @repeat_while_incomplete begin
+                @check @dispatch(instance(physical_device), vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR(physical_device, queue_family_index, pCounterCount, C_NULL, C_NULL))
+                pCounters = fill(initialize_core(VkPerformanceCounterKHR, []), pCounterCount[])
+                pCounterDescriptions = fill(initialize_core(VkPerformanceCounterDescriptionKHR, []), pCounterCount[])
+                @check @dispatch(instance(physical_device), vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR(physical_device, queue_family_index, pCounterCount, pCounters, pCounterDescriptions))
+            end
+        (from_vk.(_PerformanceCounterKHR, pCounters), from_vk.(_PerformanceCounterDescriptionKHR, pCounterDescriptions))
+    end == function _enumerate_physical_device_queue_family_performance_query_counters_khr(physical_device, queue_family_index::Integer)::ResultTypes.Result{Tuple{Vector{_PerformanceCounterKHR}, Vector{_PerformanceCounterDescriptionKHR}}, VulkanError}
+        pCounterCount = Ref{UInt32}()
+        @repeat_while_incomplete begin
+                @check @dispatch(instance(physical_device), vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR(physical_device, queue_family_index, pCounterCount, C_NULL, C_NULL))
+                pCounters = Vector{VkPerformanceCounterKHR}(undef, pCounterCount[])
+                pCounterDescriptions = Vector{VkPerformanceCounterDescriptionKHR}(undef, pCounterCount[])
+                @check @dispatch(instance(physical_device), vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR(physical_device, queue_family_index, pCounterCount, pCounters, pCounterDescriptions))
+            end
+        (from_vk.(_PerformanceCounterKHR, pCounters), from_vk.(_PerformanceCounterDescriptionKHR, pCounterDescriptions))
+    end
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] test_ex(x::APIFunction{SpecFunc}, y::Expr)
+   @ Main /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:7
+ [3] top-level scope
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/functions/low_level.jl:2
+ [4] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [5] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/codegen/functions/low_level.jl:184 [inlined]
+Test Summary:                                    | Pass  Fail  Total  Time
+VulkanGen.jl                                     |  192     7    199  1.7s
+  Wrapper utilities                              |   60           60  0.1s
+  WrapperConfig                                  |    4     1      5  0.0s
+  State                                          |    8            8  0.5s
+  Code generation                                |  120     6    126  1.1s
+    Structs                                      |   46     1     47  0.2s
+      Low-level                                  |   17     1     18  0.0s
+        Definitions                              |    7            7  0.0s
+        Friendly constructors                    |    8     1      9  0.0s
+        Blob structs convert their members       |    1            1  0.0s
+        Manual tweaks                            |    1            1  0.0s
+      High-level wrapper                         |   19           19  0.1s
+      Unions                                     |   10           10  0.1s
+    Constants                                    |    1            1  0.0s
+    Enums                                        |          3      3  0.0s
+    Bitmask flags                                |    4     1      5  0.0s
+    Handles                                      |   10           10  0.6s
+    Functions                                    |   39     1     40  0.2s
+      API functions                              |   31     1     32  0.2s
+        Automatic reconstruction of create infos |    2            2  0.0s
+      High-level functions                       |    6            6  0.0s
+      Overloads                                  |    2            2  0.0s
+    Alias declarations                           |    3            3  0.0s
+    Generated documentation                      |   17           17  0.0s
+RNG of the outermost testset: Random.Xoshiro(0xfd72d69a451c084e, 0xc121293c3fae5a67, 0xb9b8a91772f4027e, 0x108bc96999fc5c52, 0x554421a778d1aa37)
+CAUGHT: LoadError: Some tests did not pass: 192 passed, 7 failed, 0 errored, 0 broken.
+in expression starting at /sim/Programmieren/VideoEdit/dev/Vulkan/generator/test/runtests.jl:9

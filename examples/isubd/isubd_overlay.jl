@@ -165,7 +165,10 @@ function RayMakie.mesh_overlay_dispatch!(material::Hikari.FEMMaterial, screen, s
     uniforms = merge((nkeys = Int32(length(keys)), model = Mat4f(args.model_f32c),
                       view = Mat4f(args.view), projection = Mat4f(args.projection),
                       world_normalmatrix = Mat3f(args.world_normalmatrix),
-                      params = Vec4f(e.warp, material.field.vmin, material.field.vmax, 0f0)), shading)
+                      params = Vec4f(e.warp, material.field.vmin, material.field.vmax, 0f0),
+                      # RayMakie's shadow pass draws casters from `:raster_positions`,
+                      # which a surface the mesh shader generates does not have.
+                      casts_shadow = false), shading)
     ramp = [Vec3f(c.c[1], c.c[2], c.c[3]) for c in material.field.ramp]
     groups = cld(length(keys), meshthreads())
 

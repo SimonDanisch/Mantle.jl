@@ -1,0 +1,9 @@
+Document validation after debug-first/direct-restore ruling — 2026-10-21
+Test Summary:               | Pass  Total  Time
+FaultDevice native boundary |   78     78  0.8s
+Test Summary:                          | Pass  Total  Time
+Execution model with negative controls |   34     34  0.2s
+Test Summary:                   | Pass  Total  Time
+Shared caps and fixture helpers |   19     19  0.2s
+Parsed 52 suite/design/doc Julia files; expanded/lowered 42 areas with 585 unique cases. No GPU bodies executed.
+These host/syntax checks do not qualify native direct restoration.

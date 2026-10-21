@@ -1,5 +1,5 @@
-# What a submission holds, what has to outlive it, and what gets reused —
-# phases 2.2 and 2.3 of `docs/mantle-owns-it.md`.
+# What a submission holds, what has to outlive it, and what gets reused
+# (`docs/recording-plan.md`, Memory).
 #
 # `graph/submission.jl` already had the model: `Outstanding(token, payload, tag)`,
 # `submitted!`, `sweep!`, `passed`, `recycle!`. What was missing is that anything

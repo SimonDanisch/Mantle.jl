@@ -395,26 +395,14 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     desc = MTLm.MTLMeshRenderPipelineDescriptor()
     desc.meshFunction = mfun
     desc.fragmentFunction = ffun
-    for (i, fmt) in enumerate(color_formats)
-        att = desc.colorAttachments[i]
-        att.pixelFormat = fmt
-        apply_blend!(att, Mantle.attachmentblend(p.blend, i,
-                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
-    end
-    depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
+    apply_attachments!(desc, color_formats, depth_format, p.blend)
     # The declared threadgroup width. Metal compares this against what the shader
     # says and refuses a mismatch, which is why it comes from the `MeshConfig`
     # rather than from the draw.
     desc.maxTotalThreadsPerMeshThreadgroup = cfg.threads
     state = MTLm.MTLRenderPipelineState(dev, desc)
 
-    dstate = nothing
-    if depth_format !== nothing && !(p.depth isa Mantle.DepthOff)
-        dd = MTLm.MTLDepthStencilDescriptor()
-        dd.depthCompareFunction = mtl_depth_compare(p.depth)
-        dd.depthWriteEnabled    = depth_writes(p.depth)
-        dstate = MTLm.MTLDepthStencilState(dev, dd)
-    end
+    dstate = depthstate(dev, p.depth, depth_format)
 
     compiled = MetalCompiledMeshPipeline(state, dstate, mtl_cull(p.cull), cfg.threads,
                                          Any[mlib, flib])

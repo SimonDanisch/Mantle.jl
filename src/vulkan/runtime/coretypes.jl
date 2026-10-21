@@ -127,15 +127,9 @@ mutable struct MemoryStats
     # Probed lazily from `ctx.memory_properties` and refreshed every 10s.
     @atomic size::Int
     @atomic last_updated::Float64
-
-    # Last `maybe_collect` run + the rolling cost of that GC.
-    @atomic last_time::Float64
-    @atomic last_gc_time::Float64
-    # Bytes freed by the most recent `maybe_collect`-triggered GC.
-    @atomic last_freed::Int
 end
 
-MemoryStats() = MemoryStats(0, 0.0, 0.0, 0.0, 0)
+MemoryStats() = MemoryStats(0, 0.0)
 
 mutable struct MemoryPolicy
     # ── Policy. These were module-level `Ref`s, which is the same mistake as the
@@ -145,8 +139,9 @@ mutable struct MemoryPolicy
     # `PoolPolicy`, which every backend's pool applies.
     disabled::Bool
     track_allocs::Bool
-    # Whether the pressure-driven `maybe_collect` runs at all, and the state it
-    # rate-limits itself with. Both were module-level — `EAGER_GC` a `Ref{Bool}`
+    # Whether the pressure-driven `maybe_collect` runs, and its cached native
+    # heap facts. Collection pacing is shared with the soft cap in PoolPolicy.
+    # These were module-level — `EAGER_GC` a `Ref{Bool}`
     # and `MEMORY_STATS` a `MemoryStats()` — which made a BACKEND read
     # process-global state to decide what to do while the context sat in its
     # argument list.
@@ -166,9 +161,6 @@ mutable struct MemoryPolicy
     # reachable from a finalizer.
     live_bytes::Threads.Atomic{Int}
     live_buffers::Set{VkManagedBuffer}
-    # Guards re-entry into reclamation through `flush!`'s own allocation path.
-    # Per pool: one device quiescing must not make another's reclaim a no-op.
-    reclaiming::Threads.Atomic{Bool}
 end
 
 # Linked result: session-dependent, stored in the cache Dict.

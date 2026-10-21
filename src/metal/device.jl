@@ -55,7 +55,7 @@ mutable struct MetalDevice{Q} <: Device
     retired::Bool
     # The channels `allocate_batch_queue!` handed out and nobody released: the
     # device holds them, so a channel outlives every buffer launched on it.
-    channels::Vector{Metal.BatchedCommandQueue}
+    channels::Vector{Metal.ConcreteBatchedQueue}
     # What released channels had committed, so `submissions` stays monotone.
     releasedsubmits::Int
 end
@@ -94,12 +94,15 @@ mutable struct LegacyQueue
     # graph whose blocks were made resident on one task's set and replayed from
     # another's reads zeros and drops its writes, with nothing reported. So the
     # device makes one and `openrun` adopts it for whatever task is running.
-    bq::Metal.BatchedCommandQueue
+    bq::Metal.ConcreteBatchedQueue
     # `next` is the fence value the next retirement gets; `completed` is the
     # highest value a `Metal.synchronize()` has covered. A region is reusable
     # only when its fence is <= `completed`.
     next::UInt64
     completed::UInt64
+    # Whether recorded plans are encoded every frame instead of replayed; see
+    # `encodesrecordings`.
+    encodes::Bool
 end
 
 function LegacyQueue(dev::MTL.MTLDevice)
@@ -107,7 +110,22 @@ function LegacyQueue(dev::MTL.MTLDevice)
     mtl.label = "Mantle"
     bq = Metal.BatchedCommandQueue(mtl)
     pinpipeline!(bq)
-    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0))
+    return LegacyQueue(mtl, bq, UInt64(0), UInt64(0), encodesrecordings(dev))
+end
+
+"""
+    encodesrecordings(dev) -> Bool
+
+Whether a legacy queue on `dev` encodes recorded plans instead of replaying their
+indirect command buffer. On M1 (Apple7), replaying with `executeCommandsInBuffer:`
+while WindowServer composites hangs the GPU: the watchdog resets it, WindowServer is
+blamed and the replay is discarded as an innocent victim. Encoding the same
+dispatches does not. `MANTLE_METAL_ENCODE=1` or `0` overrides the default.
+"""
+function encodesrecordings(dev::MTL.MTLDevice)
+    override = get(ENV, "MANTLE_METAL_ENCODE", "")
+    isempty(override) || return override == "1"
+    return MTL.is_m1(dev)
 end
 
 """
@@ -276,7 +294,7 @@ metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 function MetalDevice(mtldev::MTL.MTLDevice, q, debug::DebugConfig = DebugConfig())
     checkdebug(mtldev, debug)
     d = MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache(),
-                    Dict{UInt,Metal.Managed}(), debug, false, Metal.BatchedCommandQueue[], 0)
+                    Dict{UInt,Metal.Managed}(), debug, false, Metal.ConcreteBatchedQueue[], 0)
     # Registered before anything can allocate on it, so the exit hook reaches it.
     push!(METAL.live, WeakRef(d))
     return d
@@ -524,7 +542,7 @@ abstractly typed command buffer, and reading `.status` off it was a dynamic call
 boxed the enum, 16 bytes on every `closesubmit!`.
 """
 function quiet(q)
-    batchqueue(q).cmdbuf === nothing || return false
+    Metal.has_open_batch(batchqueue(q)) && return false
     return MTL.all_completed(cmdqueue(q))
 end
 
@@ -588,7 +606,7 @@ end
 """What one legacy submission is: the batched queue, and its compute encoder —
 the batch's own, borrowed, which the batch ends and releases."""
 struct LegacySubmission
-    bq::Metal.BatchedCommandQueue
+    bq::Metal.ConcreteBatchedQueue
     enc::MTL.MTLComputeCommandEncoderRef
 end
 
@@ -632,7 +650,8 @@ function opensubmit!(q::LegacyQueue, ::MTL.MTLDevice, bufs)
     return LegacySubmission(q.bq, enc)
 end
 
-function executesegment!(::LegacyQueue, s::LegacySubmission, rec, seg)
+function executesegment!(q::LegacyQueue, s::LegacySubmission, rec, seg)
+    q.encodes && return encodecommands!(s.enc, rec, seg.first:seg.last)
     if seg.slot < 0
         MTL.execute_commands!(s.enc, rec.icb, seg.first:seg.last)
     else
@@ -684,7 +703,7 @@ function closesubmit!(q::LegacyQueue, s::LegacySubmission)
     # An indirect execution leaves the encoder's own pipeline binding undefined,
     # and `set_pipeline!` skips a set it believes is already in place. Forgetting
     # this sends the next ordinary launch through whatever the recording left.
-    s.bq.last_pipeline = nothing
+    s.bq.backend.last_pipeline = nothing
     Metal.note_recorded!(s.bq, 0, nothing)
     # Committed only: `replay!` holds `submission_lock` around this and waits for a
     # free in-flight slot after releasing it, which is the other half of `flush!`.
@@ -745,7 +764,7 @@ mutable struct MTL4Queue
     event::MTL.MTLSharedEvent
     next::UInt64
     mtl::MTL.MTLCommandQueue
-    bq::Metal.BatchedCommandQueue
+    bq::Metal.ConcreteBatchedQueue
     # How a failed submission is heard about. MTL4 has no error on a command
     # buffer and no `waitUntilCompleted`, so without this a fault is a value that
     # never arrives and a `waitfor` that never returns, with nothing in the system
@@ -767,7 +786,9 @@ end
 
 function MTL4Queue(dev::MTL.MTLDevice)
     n = MTL4_FRAMES_IN_FLIGHT
-    q = MTL.MTL4CommandQueue(dev)
+    # With a descriptor for the `error:`: without one a device that refuses a queue
+    # returns nil and says nothing.
+    q = MTL.MTL4CommandQueue(dev, MTL.MTL4CommandQueueDescriptor())
     mtl = MTL.MTLCommandQueue(dev)
     mtl.label = "Mantle"
     # `BatchedCommandQueue` installs the residency set for its queue, so asking
@@ -829,6 +850,7 @@ record time and nothing per frame.
 """
 encodes(q) = false
 encodes(::MTL4Queue) = true
+encodes(q::LegacyQueue) = q.encodes
 
 """
 An argument table holding one dispatch's addresses, built once at record time.
@@ -837,9 +859,11 @@ The MTL4 replacement for the buffer bindings a recorded command carries. A
 recorded plan's addresses do not move — that is what makes a recording a
 recording — so the table is filled here and only bound at run time.
 """
-function argtable(d::MetalDevice, args, store::MTL.MTLBuffer)
+argtable(d::MetalDevice, args, store::MTL.MTLBuffer) = argtable(d.queue, d, args, store)
+
+function argtable(::MTL4Queue, d::MetalDevice, args, store::MTL.MTLBuffer)
     nslots = maximum(a -> a.index, args; init = 0)
-    t = MTL.MTL4ArgumentTable(d.dev; buffers = max(nslots, 1))
+    t = MTL.MTL4ArgumentTable(d.dev; buffers = max(nslots, 1), initialize = true)
     for a in args
         buf = a.buffer === nothing ? store : a.buffer
         off = a.buffer === nothing ? a.offset : a.bufoffset
@@ -862,7 +886,7 @@ said out loud.
 function encodeplan!(s::MTL4Submission, rec)
     enc = s.enc
     for c in rec.encoded
-        c.barrier && MTL.barrier!(enc)
+        c.barrier && MTL.barrierAfterEncoderStages!(enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
         MTL.set_argument_table!(enc, c.table)
         MTL.set_function!(enc, c.pipeline)
         if c.slotoff >= 0
@@ -870,7 +894,7 @@ function encodeplan!(s::MTL4Submission, rec)
             # wrote into its slot, before the barrier this command carries.
             MTL.dispatch_threadgroups_indirect!(enc, rec.argstore, c.slotoff, c.threads)
         elseif c.gridoff < 0
-            MTL.dispatch_threadgroups!(enc, c.groups, c.threads)
+            MTL.dispatchThreadgroups!(enc, c.groups, c.threads)
         else
             # A gated dispatch. The count is four bytes per word into the grid
             # buffer, and a closed gate has left three zeros there — which runs no
@@ -878,6 +902,32 @@ function encodeplan!(s::MTL4Submission, rec)
             MTL.dispatch_threadgroups_indirect!(enc, rec.gridbuf,
                                                 rec.gridoff + 4 * c.gridoff,
                                                 c.threads)
+        end
+    end
+    return nothing
+end
+
+function argtable(::LegacyQueue, d::MetalDevice, args, store::MTL.MTLBuffer)
+    return LegacyBindings([(a.buffer === nothing ? store : a.buffer,
+                            a.buffer === nothing ? a.offset : a.bufoffset,
+                            a.index) for a in args])
+end
+
+bufferbarrier!(enc::MTL.MTLComputeCommandEncoderRef) =
+    @objc [enc::id{MTL.MTLComputeCommandEncoderRef} memoryBarrierWithScope:MTL.MTLBarrierScopeBuffers::MTL.MTLBarrierScope]::Nothing
+
+function encodecommands!(enc::MTL.MTLComputeCommandEncoderRef, rec, commands::UnitRange{Int})
+    for c in view(rec.encoded, commands)
+        c.barrier && bufferbarrier!(enc)
+        MTL.set_function!(enc, c.pipeline)
+        for (buf, off, index) in c.table
+            MTL.set_buffer!(enc, buf, off, index)
+        end
+        if c.gridoff < 0
+            MTL.dispatchThreadgroups!(enc, c.groups, c.threads)
+        else
+            MTL.dispatchThreadgroupsIndirect!(enc, rec.gridbuf, rec.gridoff + 4 * c.gridoff,
+                                              c.threads)
         end
     end
     return nothing
@@ -932,10 +982,10 @@ function executesegment!(::MTL4Queue, s::MTL4Submission, rec, seg)
     end
     # Before, so the dispatch that wrote this range has landed; after, so the
     # next segment does not start on top of whatever the iteration wrote.
-    MTL.barrier!(s.enc)
+    MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
     MTL.execute_commands_indirect!(s.enc, rec.icb, rec.rangebuf,
                                    rec.rangeoff + 8 * seg.slot)
-    MTL.barrier!(s.enc)
+    MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch)
     return nothing
 end
 
@@ -963,13 +1013,13 @@ function opensubmit!(q::MTL4Queue, dev::MTL.MTLDevice, bufs)
     alloc = q.allocs[q.slot]
     MTL.reset!(alloc)
     cb = q.cbs[q.slot]
-    MTL.begin_command_buffer!(cb, alloc)
+    MTL.beginCommandBuffer!(cb, alloc)
     enc = MTL.MTL4ComputeCommandEncoderRef(cb)
     q.resset === nothing || MTL.use_residency_set!(cb, q.resset)
     return MTL4Submission(cb, enc, q.slot)
 end
 
-nextpiece!(::MTL4Queue, s::MTL4Submission, ids) = (MTL.barrier!(s.enc); nothing)
+nextpiece!(::MTL4Queue, s::MTL4Submission, ids) = (MTL.barrierAfterEncoderStages!(s.enc, MTL.MTLStageDispatch, MTL.MTLStageDispatch); nothing)
 
 """
 Close whatever this frame put on the LEGACY queue, and give back the timeline
@@ -996,7 +1046,7 @@ function flushlegacy!(q::MTL4Queue)
     bq = q.bq
     # A signal cannot be encoded while an encoder is open.
     Metal.end_encoder!(bq)
-    cb = bq.cmdbuf
+    cb = bq.backend.cmdbuf
     if cb === nothing
         quiet(q) && return UInt64(0)
         f = (q.next += UInt64(1))
@@ -1016,7 +1066,7 @@ end
 
 function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     close(s.enc)
-    MTL.end_command_buffer!(s.cb)
+    MTL.endCommandBuffer!(s.cb)
     # Wait for EVERYTHING earlier: the legacy work this frame put on the other
     # queue, and the previous submission on this one.
     #
@@ -1040,7 +1090,7 @@ function closesubmit!(q::MTL4Queue, s::MTL4Submission)
     prev = q.next
     fl = flushlegacy!(q)
     w = iszero(fl) ? prev : fl
-    iszero(w) || MTL.wait_for_event!(q.q, q.event, w)
+    iszero(w) || MTL.wait_event!(q.q, q.event, w)
     q.batch[1] = pointer(s.cb)
     MTL.commit!(q.q, q.batch, q.feedback)
     q.commits += 1

@@ -1,20 +1,21 @@
 # Consumer patterns of JuliaVision's model calls, written against Mantle alone
 # (recording-plan.md "One call, one graph"; api.md 2.2-2.5; examples.jl 11-21
-# and 38-41; decisions.md B3.9, B3.13, B3.18).
+# and 38-41).
 #
 # The models compute with small integers held as Float32 (or Int32), so the
 # arithmetic is exact on every device whatever the driver fuses, and results
 # are compared with `==` against a host model.
 #
 # Phase: the latest ledger phase among the contracts a case relies on. Every
-# case here uses stores, hostwritten arrays, resize!, creation from data or
-# eviction, which are phase 4 (the suite runs nothing before APIPHASE).
+# case here uses stores, resize!, creation from data or eviction, which are
+# phase 4. Per-run host data is a
+# device array the graph names, written by stores (api.md 2.5).
 #
 # What this file assumes beyond helpers.jl:
 #   Mantle.steplog(dev) entries have `kind`, the step's name as a Symbol
 #   (:Restore for an evicted array brought back), as in resize.jl.
 
-using KernelAbstractions: @kernel, @index
+import Mmap
 
 const DNN_N = 4096          # elements of a layer
 
@@ -30,72 +31,95 @@ layermodel(w, b, x) = [max(w[mod1(i, length(w))] * x[i] + b[1], 0f0) for i in ea
 """Host model of `declaremodel!`: relu(2 * (w[mod1(i, end)] * x[i] + b[1]))."""
 callmodel(w, b, x) = [max(2f0 * (w[mod1(i, length(w))] * x[i] + b[1]), 0f0) for i in eachindex(x)]
 
-@kernel function dnn_affine!(h, x, w, b)
-    i = @index(Global)
+function dnn_affine!(h, x, w, b)
+    i = KI.get_global_id().x
+    i <= length(h) || return nothing      # ndrange is rounded up to whole work-groups
     @inbounds h[i] = w[mod1(i, length(w))] * x[i] + b[1]
+    return nothing
 end
 
-@kernel function dnn_relu!(y, h)
-    i = @index(Global)
+function dnn_relu!(y, h)
+    i = KI.get_global_id().x
+    i <= length(y) || return nothing
     @inbounds y[i] = max(h[i], 0f0)
+    return nothing
 end
 
-@kernel function dnn_gather!(out, w, idx)
-    i = @index(Global)
+function dnn_gather!(out, w, idx)
+    i = KI.get_global_id().x
+    i <= length(out) || return nothing
     @inbounds out[i] = w[idx[i]]
+    return nothing
 end
 
-@kernel function dnn_weightpattern!(w, seed)
-    i = @index(Global)
+function dnn_weightpattern!(w, seed)
+    i = KI.get_global_id().x
+    i <= length(w) || return nothing
     @inbounds w[i] = weightvalue(i, seed)
+    return nothing
 end
 
 """The weight index the `i`-th of `m` samples reads in an array of `n`."""
 sampleindex(i, n, m) = (i - 1) * (n ÷ m) + 1
 
-@kernel function dnn_sampleweights!(acc, w)
-    i = @index(Global)
+function dnn_sampleweights!(acc, w)
+    i = KI.get_global_id().x
+    i <= length(acc) || return nothing
     @inbounds acc[i] += w[sampleindex(i, length(w), length(acc))]
+    return nothing
 end
 
-@kernel function dnn_mask!(mask, x)
-    i = @index(Global)
+function dnn_mask!(mask, x)
+    i = KI.get_global_id().x
+    i <= length(mask) || return nothing
     @inbounds mask[i] = x[i] > 0f0 ? Int32(1) : Int32(0)
+    return nothing
 end
 
-@kernel function dnn_scale!(y, x, s)
-    i = @index(Global)
+function dnn_scale!(y, x, s)
+    i = KI.get_global_id().x
+    i <= length(y) || return nothing
     @inbounds y[i] = s * x[i]
+    return nothing
 end
 
-@kernel function dnn_accumulate!(acc, x)
-    i = @index(Global)
+function dnn_accumulate!(acc, x)
+    i = KI.get_global_id().x
+    i <= length(acc) || return nothing
     @inbounds acc[i] += x[i]
+    return nothing
 end
 
-@kernel function dnn_nexttoken!(tokens, pos)
+# One work item.
+function dnn_nexttoken!(tokens, pos)
+    KI.get_global_id().x == 1 || return nothing
     p = pos[1]
     @inbounds tokens[p + 1] = (tokens[p] * Int32(31) + p) % Int32(1000)
+    return nothing
 end
 
 """The cache entry the step at position `p` appends in row `i`."""
 kvvalue(i, p) = Float32((i + 3p) % 17 - 8)
 
-@kernel function dnn_kvappend!(kv, pos)
-    i = @index(Global)
+function dnn_kvappend!(kv, pos)
+    i = KI.get_global_id().x
+    i <= size(kv, 1) || return nothing
     p = pos[1]
     @inbounds kv[i, p] = kvvalue(i, p)
+    return nothing
 end
 
-# Reads the whole cache up to the step's position: what attention over the
-# cache does, reduced to a sum.
-@kernel function dnn_kvattend!(outs, kv, pos)
+# One work item. Reads the whole cache up to the step's position: what
+# attention over the cache does, reduced to a sum.
+function dnn_kvattend!(outs, kv, pos)
+    KI.get_global_id().x == 1 || return nothing
     p = pos[1]
     s = 0f0
     for j in 1:p, i in 1:size(kv, 1)
         @inbounds s += kv[i, j]
     end
     @inbounds outs[p] = s
+    return nothing
 end
 
 """An encoder module: declares its layer where its arrays live (example 15)."""
@@ -168,10 +192,14 @@ function withpeak(f, probe)
     return v, peak[]
 end
 
-"""Resident memory of this process in bytes (VmRSS); 0 where /proc is missing."""
+"""
+Anonymous resident memory of this process in bytes (RssAnon): the memory the
+process itself holds, not the pages of a mapped file the OS can drop and read
+again. 0 where /proc is missing.
+"""
 function residentbytes()
     Sys.islinux() || return 0
-    line = only(filter(startswith("VmRSS:"), readlines("/proc/self/status")))
+    line = only(filter(startswith("RssAnon:"), readlines("/proc/self/status")))
     return 1024 * parse(Int, split(line)[2])
 end
 
@@ -185,17 +213,18 @@ function writeweights(path, n; chunk = 1 << 22)
 end
 
 # DNN-01: one graph whose input shape changes (api.md 2.2, resize! on a graph
-# array). A shape within the size the graph arrays were placed for is a cell
-# write; one beyond it makes the graph recompile at its next run. The first
-# resize! of the fixed arrays also recompiles once, since the plan launched
-# over them directly (derived from api.md 2.2: "Plans that launched over it
-# directly recompile once"); here it is also a shape beyond the placement.
+# array). The input is a device array written by stores (api.md 2.5). A shape
+# within the size the graph arrays were placed for is a cell write; one beyond
+# it makes the graph recompile at its next run. The first resize! of the fixed
+# arrays also recompiles once, since the plan launched over them directly
+# (derived from api.md 2.2: "Plans that launched over it directly recompile
+# once"); here it is also a shape beyond the placement.
 @case "DNN-01" 4 begin
     dev = testdevice()
     hw, hb = smallints(Float32, 512; seed = 1), Float32[3]
     w, b = MantleArray(dev, hw), MantleArray(dev, hb)
     g = Graph(dev)
-    x = MantleArray(g, Float32, 64; hostwritten = true)
+    x = MantleArray(dev, Float32, 64)            # per-run host data: written by stores
     h = MantleArray(g, Float32, 64)
     y = MantleArray(dev, Float32, 64)
     dispatch!(g, dnn_affine!, (h, x, w, b), launchrange(h))
@@ -228,7 +257,7 @@ end
         known = haskey(calls, n)
         m = get!(calls, n) do
             g = Graph(dev)
-            x = MantleArray(g, Float32, n; hostwritten = true)
+            x = MantleArray(dev, Float32, n)     # per-run host data: written by stores
             (; g, x, y = declaremodel!(g, dev, x, w, b))
         end
         hx = smallints(Float32, n; seed = 20 + k)
@@ -244,7 +273,7 @@ end
 end
 
 # DNN-03: one graph over device arrays whose length changes per call, through
-# scheduled changes (B3.13): `copy!` of the input (a resize keeping nothing and
+# scheduled changes (api.md 2.2): `copy!` of the input (a resize keeping nothing and
 # a store) and `resize!` of the output. Both arrays are resizable before the
 # plan exists, so its launches over them are indirect and no shape recompiles,
 # also one past the arrays' storage (a move: addresses reach the plan through
@@ -272,8 +301,8 @@ end
     free!(g)
 end
 
-# DNN-04: weights from host data (B3.18; catalogue CR-01, CR-02, CR-05,
-# CR-07). Uploaded at creation in chunks through upload regions (or written
+# DNN-04: weights from host data (api.md 2.2, `MantleArray(dev, data)`;
+# resizing-and-raytracing.jl B.7). Uploaded at creation in chunks through upload regions (or written
 # directly into host-visible storage): the pool never holds a second copy of
 # the array, only the array and a few chunks. The data is taken at creation;
 # a graph naming the weights right after creation reads them (its first run
@@ -305,22 +334,22 @@ end
     @test after.cells == before.cells
 end
 
-# DNN-05: weights from a mapped file (B3.9, B3.18; catalogue CR-04, EVICT-25).
-# Streamed from the file in chunks: the process's resident memory grows by the
-# chunks in flight, not by the file. Read-only: a store into it throws.
-# pending decision 5: `MantleArray(dev, path, …; mmap = true)` with the device
-# as an argument (rule 3); the element type and dims are given as for
-# `Mmap.mmap(io, Array{T,N}, dims)`, which the plan does not specify; a store
-# throws ArgumentError at the call.
+# DNN-05: weights from a mapped file (api.md 2.2, `MantleArray(dev, host;
+# readonly = true)`; resizing-and-raytracing.jl B.5, B.7). The caller maps the
+# file (`Mmap.mmap` returns a plain Array) and creates a read-only array from
+# it: streamed from the mapping in chunks, so the process's own (anonymous)
+# resident memory grows by the chunks in flight, not by the file. Read-only: a
+# store into it throws ArgumentError at the call.
 @case "DNN-05" 4 begin
     dev = testdevice()
     n = (1 << 30) ÷ sizeof(Float32)
     path = tempname()
     writeweights(path, n)
     positions = 1:9973:n
+    host = open(io -> Mmap.mmap(io, Vector{Float32}, n), path)        # the file's pages, mapped by the caller
     rss = residentbytes()
     w, peak = withpeak(residentbytes) do
-        MantleArray(dev, path, Vector{Float32}, (n,); mmap = true)      # pending decision 5
+        MantleArray(dev, host; readonly = true)                        # keeps `host`, no copy
     end
     if Sys.islinux()
         @test peak - rss <= n * sizeof(Float32) ÷ 2
@@ -333,24 +362,24 @@ end
     dispatch!(g, dnn_gather!, (out, w, idx), length(out))
     run!(g)
     @test Array(out) == weightvalue.(positions, 1)
-    @test_throws ArgumentError w[1:1] = Float32[0]                     # pending decision 5
+    @test_throws ArgumentError w[1:1] = Float32[0]                     # a write to a read-only array
     free!(g)
     foreach(free!, (w, idx, out))
     rm(path)
 end
 
 # DNN-06: two models whose weights do not fit together, run alternately back
-# to back with no host wait between them (B3.6 "two DNNs that each use 90% of
-# VRAM must both run", B3.9; api.md 6 test_eviction.jl; catalogue EVICT-01).
-# The device answers a budget of 1 GiB (a FaultDevice, FI-9) and each model's
+# to back with no host wait between them (examples.jl 40b; api.md 6,
+# test_eviction.jl; plan, Memory, eviction).
+# The device answers a budget of 1 GiB (a FaultDevice) and each model's
 # weights take 60% of it, so every run restores its weights and evicts the
 # other model's. Results exact; nothing recompiles, since addresses reach the
 # plans through cells. A device that ignored the budget would pass without
 # evicting: that the budget holds is the arena and eviction areas' concern.
-@case "DNN-06" 4 :separateheap begin
+@case "DNN-06" 4 begin
     budget = 1 << 30
     dev = FaultDevice(testdevice())
-    inject!(dev, :budget, Answer(1, budget))
+    inject!(dev, :budget, BudgetLimit(1, dev, budget))
     n = (6 * budget ÷ 10) ÷ sizeof(Float32)
     m1 = residentmodel(dev, n, 1)
     m2 = residentmodel(dev, n, 2)
@@ -386,7 +415,7 @@ end
     dev = testdevice()
     n = DNN_N
     g = Graph(dev)
-    x = MantleArray(g, Float32, n; hostwritten = true)
+    x = MantleArray(dev, Float32, n)             # per-run host data: written by stores
     mask = MantleArray(g, Int32, n)
     idx = MantleArray(g, Int32, n)
     feats = MantleArray(dev, Float32, n)
@@ -529,4 +558,42 @@ end
     run!(g)
     @test Array(y) == callmodel(hw, hb, later)
     free!(g)
+end
+
+# DNN-12: composing a module into a repeated Group must keep all of the
+# module's internal launches in that Group. Scratch belongs to the graph;
+# recurrent state belongs to the model and survives both iterations and runs.
+# Source evidence: DNNKernels.emitgraph!, MatAnyone's repeated warmup calls.
+function dnn_composedmodule!(target, graph, x, w, b)
+    h = MantleArray(graph, Float32, length(x))
+    y = MantleArray(graph, Float32, length(x))
+    dispatch!(target, dnn_affine!, (h, x, w, b), length(x))
+    dispatch!(target, dnn_relu!, (y, h), length(x))
+    return y
+end
+@case "DNN-12" 4 begin
+    dev = testdevice()
+    n = 128
+    hx = Float32.(mod.(1:n, 7) .- 3)
+    x = MantleArray(dev, hx)
+    w = MantleArray(dev, Float32[2])
+    b = MantleArray(dev, Float32[1])
+    state = MantleArray(dev, zeros(Float32, n))
+    out = MantleArray(dev, Float32, n)
+    g = Graph(dev)
+    body = Group(g, "two modules and recurrent update")
+    first = dnn_composedmodule!(body, g, x, w, b)
+    second = dnn_composedmodule!(body, g, first, w, b)
+    dispatch!(body, dnn_accumulate!, (state, second), n)
+    repeat!(body, 3)
+    dispatch!(g, dnn_scale!, (out, state, 1f0), n)
+    expected = layermodel(Float32[2], Float32[1], layermodel(Float32[2], Float32[1], hx))
+    run!(g)
+    @test Array(out) == 3f0 .* expected
+    _, steady = counted(() -> run!(g))
+    @test Array(out) == 6f0 .* expected
+    @test steady.plancompiles == 0 && steady.kernelcompiles == 0 && steady.records == 0
+    free!(g)
+    @test Array(state) == 6f0 .* expected
+    foreach(free!, (x, w, b, state, out))
 end

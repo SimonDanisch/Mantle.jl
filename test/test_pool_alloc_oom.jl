@@ -1,25 +1,18 @@
 """
 A request the device cannot satisfy is refused by name, and the device survives it.
 
-This is the one allocation path no other test reaches, because reaching it means
-being out of device memory. It is also the path most likely to be wrong without
-anyone noticing: it only runs under memory pressure, and if it throws the wrong
-thing it does so at the moment a workload is already in trouble.
+This exercises oversized-request rejection and recovery. It does not establish
+that the GPU is out of memory: 400 GiB can also exceed its maximum buffer size.
+The pool must reject that before calling the driver with an invalid size.
 
 Two claims, on both ways a caller allocates: a `Mantle.Buffer` (the device's
 pool, every backend) and a backend array (`KernelAbstractions.allocate`, which is
 the pool on Vulkan and Metal.jl's allocator on Metal).
 
-**A refusal says it is out of memory.** On Vulkan the pool's growth reaches
-`VK.DeviceMemory(device, bytes, type)`, a constructor that THROWS rather than
-returning a `ResultTypes.Result`, and `acquire_or_reclaim!` catches
-`VK.VulkanError` by name, escalates once (collect, drain the deferred frees,
-quiesce the queue, hand back empty blocks, try again) and then raises a
-`LavaError` that names the pool's footprint. With either the type or the `code`
-wrong the escalation never runs and a lost device is misreported as an OOM, or an
-OOM as something else. What a caller can rely on, whatever the backend, is the
-message: an error that does not say "memory" sends whoever reads it to the wrong
-place.
+**A refusal names the memory request.** Core's single-allocation bound rejects
+an impossible size without GC or a retry that could not help. Genuine allocation
+exhaustion, reclaim and bounded retry are exercised separately by `BudgetDev` in
+`test_pool.jl`. A Vulkan error other than native OOM must propagate unchanged.
 
 **The device still works afterwards.** A failed allocation must leave nothing
 half-carved: no block with a region nobody holds, no lock still taken. The
@@ -51,17 +44,17 @@ function partitions(blk)
     return at == blk.bytes
 end
 
-@testset "an impossible allocation is refused, and the device survives" begin
+@testset "an oversized allocation is refused, and the device survives" begin
     dev = Mantle.Device(TESTBACKEND)
     huge = 400 * 1024^3
 
-    @testset "a Buffer from the pool is refused as out of memory" begin
-        # The displayed message, matched case-insensitively: Vulkan's driver code
-        # is `ERROR_OUT_OF_DEVICE_MEMORY`, Metal's refusal an `OutOfMemoryError`.
+    @testset "a Buffer beyond the allocation limit is refused" begin
+        # Core refuses an oversized pooled request before native allocation.
+        # Backend-owned arrays may report their native memory refusal instead.
         @test_throws r"memory"i Mantle.Buffer(dev, UInt8, huge)
     end
 
-    @testset "a backend array is refused as out of memory" begin
+    @testset "a backend array beyond the allocation limit is refused" begin
         @test_throws r"memory"i KA.allocate(TESTBACKEND, UInt8, huge)
     end
 

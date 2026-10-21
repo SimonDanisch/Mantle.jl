@@ -73,6 +73,25 @@ function apply_blend!(att, ::Mantle.Additive)
     return att
 end
 
+function apply_attachments!(desc, color_formats, depth_format, blend)
+    for (i, fmt) in enumerate(color_formats)
+        att = desc.colorAttachments[i]
+        att.pixelFormat = fmt
+        apply_blend!(att, Mantle.attachmentblend(blend, i,
+                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
+    end
+    depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
+    return desc
+end
+
+function depthstate(dev, depth, depth_format)
+    (depth_format === nothing || depth isa Mantle.DepthOff) && return nothing
+    dd = MTLm.MTLDepthStencilDescriptor()
+    dd.depthCompareFunction = mtl_depth_compare(depth)
+    dd.depthWriteEnabled = depth_writes(depth)
+    return MTLm.MTLDepthStencilState(dev, dd)
+end
+
 # ── resources ────────────────────────────────────────────────────────────────
 
 """A 2D texture on Metal. The element type is Mantle's spelling of the format."""
@@ -725,23 +744,10 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     ffun === nothing || (desc.fragmentFunction = ffun)
     # One descriptor slot per attachment, in the order the pass declared them,
     # which is the order `air.render_target <i>` numbers the fragment's outputs.
-    for (i, fmt) in enumerate(color_formats)
-        att = desc.colorAttachments[i]
-        att.pixelFormat = fmt
-        apply_blend!(att, Mantle.attachmentblend(p.blend, i,
-                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
-    end
     Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
-    depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
+    apply_attachments!(desc, color_formats, depth_format, p.blend)
     state = MTLm.MTLRenderPipelineState(dev, desc)
-
-    dstate = nothing
-    if depth_format !== nothing && !(p.depth isa Mantle.DepthOff)
-        dd = MTLm.MTLDepthStencilDescriptor()
-        dd.depthCompareFunction = mtl_depth_compare(p.depth)
-        dd.depthWriteEnabled    = depth_writes(p.depth)
-        dstate = MTLm.MTLDepthStencilState(dev, dd)
-    end
+    dstate = depthstate(dev, p.depth, depth_format)
 
     compiled = MetalCompiledGraphicsPipeline(state, dstate, mtl_primitive(p.topology),
                                              mtl_cull(p.cull), ffun !== nothing,
@@ -861,7 +867,7 @@ framebuffer!(::MTLm.MTLDevice) = framebuffer!(Device(MetalAPI()))
 function framebuffer!(d::MetalDevice)
     bq = batchqueue(d)
     # Compute was recorded since our last buffer. Theirs first, then ours.
-    bq.cmdbuf === nothing || Metal.flush!(bq)
+    Metal.has_open_batch(bq) && Metal.flush!(bq)
     return MTLm.MTLCommandBuffer(bq.queue)
 end
 
@@ -872,7 +878,7 @@ Through `Metal.submit_command_buffer`, which commits Metal.jl's open batch first
 claims the arrays the passes bound (`metal_buffer`) for this queue, so host reads of
 them wait for this buffer."""
 function commit!(cb::MTLm.MTLCommandBuffer)
-    Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb)
+    Metal.submit_command_buffer(() -> MTLm.commit!(cb), cb, true)
     committed!(cb)
     return cb
 end
@@ -960,7 +966,7 @@ function Mantle.gpupasstime!(d::MetalDevice)
     # here, so the numbers describe the frame as it ran.
     # A managed wrapper with a reference of its own: the batch's buffer is borrowed,
     # and the batch gives its reference back when the flush below commits it.
-    open_cb = bq.cmdbuf
+    open_cb = bq.backend.cmdbuf
     open_cb === nothing || push!(COMMITTED, MTLm.retained(open_cb))
     Metal.flush!(bq)
     isempty(COMMITTED) && return 0.0

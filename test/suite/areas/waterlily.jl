@@ -3,8 +3,8 @@
 # `get_backend(a)`), broadcasts, reductions on arrays and views (`sum`,
 # `maximum`, `dot`), `similar`, `copy`, `fill!`, and a host read of the
 # Poisson residual after every V-cycle. Mantle is only WaterLily's `mem`:
-# `mem = data -> MantleArray(dev, data)` uploads each host array at creation
-# (B3.18); every launch after that is eager on the device (api.md 2.2).
+# `mem = data -> MantleArray(dev, data)` uploads each host array at creation;
+# every launch after that is eager on the device (api.md 2.2).
 #
 # The accuracy cases repeat WaterLily's own tests (test/test_flow.jl and
 # test/helper.jl of WaterLily 1.8.0) with Mantle arrays. Phase 6: MantleArray

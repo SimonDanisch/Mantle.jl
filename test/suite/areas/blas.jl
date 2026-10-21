@@ -1,7 +1,7 @@
-# BLAS (catalogue-resize-rt.md, table M).
+# BLAS.
 #
-# References: API = docs/api.md; RR = docs/resizing-and-raytracing.jl (line
-# numbers of 2026-10-05); VK-AS = vkdocs chapters/accelstructures.adoc;
+# References name sections of the design docs (api.md,
+# resizing-and-raytracing.jl). VK-AS = vkdocs chapters/accelstructures.adoc;
 # VK-BC/VK-DC = vkdocs chapters/commonvalidity/
 # build_acceleration_structure_{common,device_common}.adoc.
 #
@@ -17,13 +17,12 @@
 #   Mantle.pendingof(x): a BuildAccel's `mode` is Build() or Update();
 #   Mantle.steplog(dev): entries with `kind` (:MoveStorage, :BindPages,
 #       :MoveAccel, :BuildAccel, ...) and `target` (the resource the user holds);
-#   a new BLAS pends its first Build (API:150, "a new topology: a Build").
+#   a new BLAS pends its first Build (api.md 2.6, "a new topology: a Build").
 # Validation-layer and GPU-AV expectations are comments marked VAL.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Point3f, Vec3f, Vec, Mat4f, TriangleFace
 
-# ── Ray-tracing helpers, the same in tlas.jl, blas.jl, gpuref.jl and hikari_patterns.jl ──
+# ── Ray-tracing helpers, the same in tlas.jl, blas.jl and hikari_patterns.jl ──
 
 const TRIANGLEVERTICES = (Point3f(-0.4, -0.4, 0), Point3f(0.4, -0.4, 0), Point3f(0, 0.4, 0), Point3f(0, -0.2, 0))
 const TRIANGLEFACE = TriangleFace{UInt32}(1, 2, 3)   # covers the origin
@@ -55,11 +54,13 @@ rayorigins(dev, positions) = MantleArray(dev, [p - Vec3f(0, 0, 1) for p in posit
 readygate(dev) = MantleArray(dev, Int32[0])
 
 """Ray i from origins[i] along +z: (instanceCustomIndex, InstanceId - rangeoffset) of the closest hit, or NOHIT."""
-@kernel function rt_hits!(out, t, origins, gate)
-    i = @index(Global)
+function rt_hits!(out, t, origins, gate)
+    i = KI.get_global_id().x
+    i <= length(out) || return nothing      # ndrange is rounded up to whole work-groups
     q = Mantle.rayquery(t, origins[i], Vec3f(0, 0, 1))
     out[i] = q.hit & (gate[1] != Int32(-1)) ?
              InstanceHit(q.customindex, q.instanceid - Mantle.rangeoffset(t, q.customindex)) : NOHIT
+    return nothing
 end
 
 """The hits of rays through `positions`, by one eager launch (which applies what is pending on `t`)."""
@@ -128,24 +129,27 @@ hitflags(hits) = [h != NOHIT for h in hits]
 hitmask(dev, t, n) = hitflags(queryhits(dev, t, instancegrid(n)))
 
 """The vertices of the first `n` row triangles, and 3n as their length (a length a kernel writes)."""
-@kernel function bl_rowvertices!(v, len, n)
-    i = @index(Global)
+function bl_rowvertices!(v, len, n)
+    i = KI.get_global_id().x
     if i <= 3n
         k, c = divrem(i - 1, 3)
         corner = c == 0 ? Point3f(-0.4f0, -0.4f0, 0f0) : c == 1 ? Point3f(0.4f0, -0.4f0, 0f0) : Point3f(0f0, 0.4f0, 0f0)
         @inbounds v[i] = corner + Vec3f(k % 256, k ÷ 256, 0)
         i == 1 && (len[] = 3n)
     end
+    return nothing
 end
 
-"""a[i] = x."""
-@kernel function bl_set!(a, i, x)
+"""a[i] = x, by the first work item."""
+function bl_set!(a, i, x)
+    KI.get_global_id().x == 1 || return nothing   # ndrange is rounded up to whole work-groups
     a[i] = x
+    return nothing
 end
 
-# ── M. BLAS ──
+# ── BLAS ──
 
-# API:150, RR:1152-1158: moved vertices with the same topology are a BLAS Update and an Update of the TLASes over it. A store into the vertices, same count.
+# api.md 2.6, resizing-and-raytracing.jl B.8 (BLAS): moved vertices with the same topology are a BLAS Update and an Update of the TLASes over it. A store into the vertices, same count.
 @case "BL-01" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -160,7 +164,7 @@ end
     @test mask == [false]
 end
 
-# RR:974-975, RR:1153-1155, VK-BC:259-268 (VUID-03768): new indices are a Build into the BLAS's own storage, and a TLAS Update. A store into the faces.
+# resizing-and-raytracing.jl B.8 (BLAS), VK-BC:259-268 (VUID-03768): new indices are a Build into the BLAS's own storage, and a TLAS Update. A store into the faces.
 @case "BL-02" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -176,7 +180,7 @@ end
     # VAL: VUID-03768 (an Update keeps the indices of the last build) never fires: this is a Build
 end
 
-# RR:1149-1153, VK-BC:164-171 (VUID-03764): a new topology within the capacity is a Build in place, no MoveAccel. Shrink 8 triangles to 4, then back to 8.
+# resizing-and-raytracing.jl B.8 (BLAS), VK-BC:164-171 (VUID-03764): a new topology within the capacity is a Build in place, no MoveAccel. Shrink 8 triangles to 4, then back to 8.
 @case "BL-03" 5 :rt begin
     dev = testdevice()
     b, v, f = rowblas(dev, 8)
@@ -196,7 +200,7 @@ end
     # VAL: VUID-03764 clean
 end
 
-# RR:1151-1158, VK-AS:159-162: beyond the capacity a MoveAccel, the new address through the BLAS's cell; the TLAS gets an Update, not a Build. Grow 8 triangles to 1024.
+# resizing-and-raytracing.jl B.8 (BLAS), VK-AS:159-162: beyond the capacity a MoveAccel, the new address through the BLAS's cell; the TLAS gets an Update, not a Build. Grow 8 triangles to 1024.
 @case "BL-04" 5 :rt begin
     dev = testdevice()
     b, v, f = rowblas(dev, 8)
@@ -212,7 +216,7 @@ end
     # VAL: clean (an Update may change which BLAS an instance references)
 end
 
-# RR:1141-1143, RR:1155-1158: the old BLAS storage is retired after the traces in flight and the TLAS Update. BL-04 with a trace in flight.
+# resizing-and-raytracing.jl B.8 (capacity, BLAS): the old BLAS storage is retired after the traces in flight and the TLAS Update. BL-04 with a trace in flight.
 @case "BL-05" 5 :rt begin
     dev = testdevice()
     b, v, f = rowblas(dev, 8)
@@ -231,7 +235,7 @@ end
     # VAL: GPU-AV clean (the old BLAS is never read after its release)
 end
 
-# RR:434-439: a TLAS Update pended by a BLAS move is applied by the next submission touching the TLAS, before its trace. The move applied through another TLAS; then t traced.
+# resizing-and-raytracing.jl B.4: a TLAS Update pended by a BLAS move is applied by the next submission touching the TLAS, before its trace. The move applied through another TLAS; then t traced.
 @case "BL-06" 5 :rt begin
     dev = testdevice()
     b, v, f = rowblas(dev, 8)
@@ -246,7 +250,7 @@ end
     # VAL: GPU-AV clean (no query reads the old BLAS address)
 end
 
-# API:150, RR:968-975, VK-AS:261-262: geometry whose length a kernel writes is built over the capacity with zero-area primitives past the length; a length change is an Update. The kernel writes 4, 10, 2 triangles.
+# api.md 2.6, resizing-and-raytracing.jl B.8 (buildcount), VK-AS:261-262: geometry whose length a kernel writes is built over the capacity with zero-area primitives past the length; a length change is an Update. The kernel writes 4, 10, 2 triangles.
 @case "BL-07" 5 :rt begin
     dev = testdevice()
     v = MantleArray(dev, Point3f, 0; capacity = 48)
@@ -268,7 +272,7 @@ end
     # and the Update invalid); maxVertex is the capacity's in every build
 end
 
-# RR:973-975, API:150: a run that writes a BLAS's vertices pends an Update; one that writes its faces pends a Build.
+# resizing-and-raytracing.jl B.8 (buildcount), api.md 2.6: a run that writes a BLAS's vertices pends an Update; one that writes its faces pends a Build.
 @case "BL-08" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -285,7 +289,7 @@ end
     @test buildmode.(pendingbuilds(b)) == [:Build]
 end
 
-# API:150, RR:1158-1159: one BLAS serves every range over it and is built once (blas!(scene, mesh), RR:1502, is RayMakie's lookup over this). Two ranges in one TLAS and one in another.
+# api.md 2.6, resizing-and-raytracing.jl B.8 (BLAS): one BLAS serves every range over it and is built once (blas!(scene, mesh), resizing-and-raytracing.jl D.3, is RayMakie's lookup over this). Two ranges in one TLAS and one in another.
 @case "BL-09" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -300,7 +304,7 @@ end
     @test isonerange(hits[1:4]) && isonerange(hits[5:8]) && hits[1][1] != hits[5][1] && isonerange(hits2)
 end
 
-# RR:1312-1323: at the last hold the pending changes are dropped and nothing is submitted. free!(blas) with its first Build pending and no other holder.
+# resizing-and-raytracing.jl B.10: at the last hold the pending changes are dropped and nothing is submitted. free!(blas) with its first Build pending and no other holder.
 @case "BL-10" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -312,7 +316,7 @@ end
     @test memory(dev).cells < before.cells
 end
 
-# RR:932-933, API:158: a refit of a structure never built is a Build. refit!(g, blas) on a new BLAS, traced through a TLAS.
+# resizing-and-raytracing.jl B.8 (effectivemode), api.md 2.6: a refit of a structure never built is a Build. refit!(g, blas) on a new BLAS, traced through a TLAS.
 @case "BL-11" 5 :rt begin
     dev = testdevice()
     v, f = trianglearrays(dev); b = BLAS(dev, v, f)
@@ -326,7 +330,7 @@ end
     @test isempty(pendingbuilds(b))
 end
 
-# RR:177-206, VK-DC:28-35 (VUID-03673): geometry arrays keep their build-input usage after moves into Committed and Reserve storage. Grow to 64 triangles, then 2^14.
+# resizing-and-raytracing.jl B.1, VK-DC:28-35 (VUID-03673): geometry arrays keep their build-input usage after moves into Committed and Reserve storage. Grow to 64 triangles, then 2^14.
 @case "BL-12" 5 :rt :sparse begin
     dev = testdevice()
     b, v, f = rowblas(dev, 8)

@@ -1,31 +1,41 @@
-# Graph lifecycle (catalogue-core.md, table 2): compile and record once, free!,
+# Graph lifecycle (api.md 2.3; plan, "The graph and its plan" and "Run";
+# internals.jl sections 2, 6 and 10): compile and record once, free!,
 # finalizers, introspection, rewrites, the graph lock.
 
-using KernelAbstractions: @kernel, @index, @Const
 using LinearAlgebra: mul!
 import NNlib
 
-@kernel function gr_add!(dst, @Const(src), v)
-    i = @index(Global)
+function gr_add!(dst, src, v)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing      # ndrange is rounded up to whole work-groups
     @inbounds dst[i] = src[i] + v
+    return nothing
 end
 
-@kernel function gr_mul!(dst, @Const(src), v)
-    i = @index(Global)
+function gr_mul!(dst, src, v)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = src[i] * v
+    return nothing
 end
 
-@kernel function gr_fill!(a, v)
-    i = @index(Global)
+function gr_fill!(a, v)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     @inbounds a[i] = v
+    return nothing
 end
 
-@kernel function gr_bump!(c)
+function gr_bump!(c)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds c[1] += one(eltype(c))
+    return nothing
 end
 
-@kernel function gr_ends!(out, @Const(t))
+function gr_ends!(out, t)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = t[1] + t[end]
+    return nothing
 end
 
 # submissions(g) lists stages (cut by host nodes), each with its segments (cut
@@ -95,7 +105,8 @@ end
 
 # ── 2. Graph lifecycle (GR) ──
 
-# A:101, P:433-434: three kernels, run! 20 times: compiled and recorded by the first run only.
+# api.md 2.3 (run!); plan, "The graph and its plan": three kernels, run! 20
+# times: compiled and recorded by the first run only.
 @case "GR-01" 1 begin
     g, out, expected = threekernels(testdevice(), 4096)
     _, d1 = counted(() -> run!(g))
@@ -109,8 +120,9 @@ end
     @test Array(out) == expected
 end
 
-# P:888-889: run! of an empty graph, and of a graph whose head is empty (it names
-# transients only), does not throw. The return value is unspecified (ambiguity 18).
+# plan, Run ("The head node": an empty head is not recorded): run! of an empty
+# graph, and of a graph whose head is empty (it names transients only), does
+# not throw.
 @case "GR-02" 1 begin
     dev = testdevice()
     nothingdeclared = Graph(dev)
@@ -123,7 +135,7 @@ end
     @test d.records == 0
 end
 
-# A:101, I:1010: run! after free!(g) throws.
+# api.md 2.3 (run!, free!): run! after free!(g) throws.
 @case "GR-03" 2 begin
     g, _, _ = threekernels(testdevice(), 64)
     run!(g)
@@ -131,9 +143,10 @@ end
     @test_throws ArgumentError run!(g)
 end
 
-# A:102, I:2088-2090: free!(g) twice, and from 2 threads at once: g's hold on a
-# device array it names is dropped once (a second drop would release b, which
-# its creator still holds), and the memory goes back.
+# api.md 2.3 (free!); internals.jl section 10 (free!(g), release!): free!(g)
+# twice, and from 2 threads at once: g's hold on a device array it names is
+# dropped once (a second drop would release b, which its creator still holds),
+# and the memory goes back.
 @case "GR-04" 2 begin
     dev = testdevice(); n = 1024
     b, out = MantleArray(dev, Int32.(1:n)), MantleArray(dev, Int32, n)
@@ -149,8 +162,9 @@ end
     @test memory().reserved <= baseline.reserved
 end
 
-# A:102, I:243: after free!(g), fill! on its array, MantleArray(g, …) and
-# dispatch!(g, …) throw, and the device array passed adds no hold.
+# api.md 2.3 (free!); internals.jl section 2 (declarable): after free!(g),
+# fill! on its array, MantleArray(g, …) and dispatch!(g, …) throw, and the
+# device array passed adds no hold.
 @case "GR-05" 2 begin
     dev = testdevice(); n = 16 << 20
     g = Graph(dev)
@@ -167,8 +181,9 @@ end
     @test memory().reserved <= baseline.reserved
 end
 
-# P:1911-1913: every reference to g and its transient dropped while a run is in
-# flight, then GC: the run completes correctly and the memory comes back.
+# internals.jl section 10 (finalizers: a finalized graph cannot be running):
+# every reference to g and its transient dropped while a run is in flight,
+# then GC: the run completes correctly and the memory comes back.
 @case "GR-06" 2 begin
     dev = testdevice()
     out = MantleArray(dev, Int32, 1)
@@ -180,8 +195,9 @@ end
     @test memory().reserved <= baseline.reserved
 end
 
-# A:102, I:2088: T1 runs g, held in its host function; T2 calls free!(g): T2
-# waits for T1's last stage, the results are correct, a later run! throws.
+# api.md 2.3 (free!); internals.jl section 10 (free!(g) under lockgraph): T1
+# runs g, held in its host function; T2 calls free!(g): T2 waits for T1's last
+# stage, the results are correct, a later run! throws.
 @case "GR-07" 3 begin
     dev = testdevice(); n = 1024
     a, out = MantleArray(dev, Int32, n), MantleArray(dev, Int32, n)
@@ -201,7 +217,8 @@ end
     @test_throws ArgumentError run!(g)
 end
 
-# A:474, I:2084-2087: g's host function calls free!(g): run! throws, g still
+# api.md section 7; internals.jl section 10 (free!(g): the re-entry check
+# before the swap): g's host function calls free!(g): run! throws, g still
 # runs, and once nothing refers to g its finalizer gives the memory back.
 @case "GR-08" 3 begin
     dev = testdevice()
@@ -213,11 +230,12 @@ end
     @test memory().reserved <= baseline.reserved
 end
 
-# A:103: submissions(g) of a graph with a host cut and a budget cut lists both:
-# two stages, and more segments than stages.
+# api.md 2.3 (submissions); plan, "Submission split: estimated": submissions(g)
+# of a graph with a host cut and a budget cut lists both: two stages, and more
+# segments than stages.
 @case "GR-09" 1 begin
     dev = testdevice()
-    g = longchain(Graph(dev), dev, 0.3)            # three times today's 0.1 s budget
+    g = longchain(Graph(dev), dev, 3 * Mantle.submissionbudget(dev))   # three times the submission budget
     h1, h2, out = (MantleArray(dev, Float32, 1) for _ in 1:3)
     dispatch!(g, gr_fill!, (h1, 1f0), 1)
     dispatch!(g, HostCall(_ -> nothing), (h1,); writes = (h2,))
@@ -227,8 +245,9 @@ end
     @test segmentcount(g) > stagecount(g)
 end
 
-# A:105: naivebytes and peakbytes of a chain of four transients: only adjacent
-# ones live together, so the peak is about two of them.
+# api.md 2.3 (naivebytes, peakbytes): naivebytes and peakbytes of a chain of
+# four transients: only adjacent ones live together, so the peak is about two
+# of them.
 @case "GR-10" 1 begin
     dev = testdevice(); n = 1 << 20; bytes = sizeof(Int32) * n
     src, out = MantleArray(dev, Int32.(1:n)), MantleArray(dev, Int32, n)
@@ -243,16 +262,18 @@ end
     @test Array(out) == (1:n) .+ 5
 end
 
-# I:58-61: a graph array kept, its graph dropped and collected, then fill!: a clean error.
+# internals.jl section 1 (GraphDevice holds its graph by WeakRef): a graph
+# array kept, its graph dropped and collected, then fill!: a clean error.
 @case "GR-11" 6 begin
     x = transientofdropped(testdevice())
     GC.gc(true); GC.gc(true)
     @test_throws Exception fill!(x, 1f0)
 end
 
-# A:100, E:105-117: mul! + bias + gelu with no rewrites and with FuseEpilogues():
-# the results are identical. The node count (2 vs 1) is not visible through
-# the suite's hooks.
+# api.md 2.3 (Graph rewrites); examples.jl 16: mul! + bias + gelu with no
+# rewrites and with FuseEpilogues(): the results are identical. The input is
+# per-run host data, a device array written by a store. The node count (2 vs
+# 1) is not visible through the suite's hooks.
 @case "GR-12" 6 begin
     dev = testdevice()
     W = MantleArray(dev, reshape(testdata(Float32, 512 * 1024), 512, 1024))
@@ -260,7 +281,7 @@ end
     x = testdata(Float32, 1024; seed = 3)
     results = map(((), (Mantle.FuseEpilogues(),))) do rewrites
         g = Graph(dev; rewrites)
-        xd = MantleArray(g, Float32, 1024; hostwritten = true)
+        xd = MantleArray(dev, Float32, 1024)     # per-run host data: a device array written by stores
         yd = MantleArray(g, Float32, 512)
         out = MantleArray(dev, Float32, 512)
         mul!(yd, W, xd)
@@ -273,7 +294,8 @@ end
     @test results[1] == results[2]
 end
 
-# P:546-548: Graph(dev; profile = true), 20 runs: recorded once; after a
+# plan, "Submission split: estimated" (measured times only calibrate the next
+# compile): Graph(dev; profile = true), 20 runs: recorded once; after a
 # structure change, recorded once again (profiling never re-records).
 @case "GR-13" 1 begin
     dev = testdevice()
@@ -291,15 +313,15 @@ end
     @test d.records == 0
 end
 
-# A:217, P:729-731: a compile under the graph lock meets a budget [FI-9] that
-# only finalizers can make room in: they run (the lock is a semaphore) and the
-# arena allocation succeeds.
+# internals.jl section 1 (Graph.lock is a semaphore) and section 9: a compile
+# under the graph lock meets a budget (FaultDevice answers :budget) that only
+# finalizers can make room in: they run and the arena allocation succeeds.
 @case "GR-14" 3 begin
     fd = FaultDevice(testdevice()); n = 16 << 20
     out = MantleArray(fd, Float32, 1)
-    Array(out)                                      # the readback staging exists before the budget is set
+    Array(out)                                      # the host read's staging exists before the budget is set
     dropgarbage(fd, 4, 64 << 20)
-    inject!(fd, :budget, Answer(1, Mantle.reserved(fd)))
+    inject!(fd, :budget, BudgetLimit(1, fd, Mantle.reserved(fd)))
     g = Graph(fd)
     t = MantleArray(g, Float32, n)
     dispatch!(g, gr_fill!, (t, 2f0), n)
@@ -308,8 +330,9 @@ end
     @test Array(out) == [4f0]
 end
 
-# A:101: run!(g) from 8 threads, 1000 times each: all complete, serialized, no
-# run overlaps another (a read-modify-write counter is exact).
+# api.md 2.3 (run!) and section 6 (runs of one graph never overlap): run!(g)
+# from 8 threads, 1000 times each: all complete, serialized, no run overlaps
+# another (a read-modify-write counter is exact).
 @case "GR-15" 3 begin
     dev = testdevice()
     c = MantleArray(dev, Int32, 1)

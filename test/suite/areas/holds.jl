@@ -1,25 +1,32 @@
-# Holds, free! and finalizers (catalogue-core.md, table 17: HOLD). Contracts:
-# api.md:79, 91, 374-375, 471, 482; recording-plan.md "Memory" (holds and the
-# last hold, 1299-1321); internals.jl section 10 (2082-2179);
-# resizing-and-raytracing.jl B.10 (1312-1323); examples.jl 36 and 38.
-# Line numbers of 2026-10-05.
+# Holds, free! and finalizers. Contracts: api.md 2.2 (`free!`, views), 5
+# (an array's holds, the last hold) and 7; recording-plan.md "Memory" (holds
+# and the last hold); internals.jl section 10; resizing-and-raytracing.jl
+# B.10; examples.jl 36 and 38.
 #
 # Use after free is caught with canaries allocated right after the release
 # while work that writes the released memory is still on the GPU
 # (slowwrite!): had the memory been reused early, that write lands in a
 # canary. Leaks are caught with memory() back at its baseline.
 
-using KernelAbstractions: @kernel, @index, get_backend
-
 const HO_LEN = 2^16
 
-# Spins `iters` steps, then writes `value` into x[1] (vendor work in flight).
-@kernel function ho_spinwrite!(x, value, iters)
+"""Spins `iters` steps, then writes `value` into x[1] (vendor work in flight)."""
+function ho_spinwrite!(x, value, iters)
+    KI.get_global_id().x == 1 || return nothing     # ndrange is rounded up to whole work-groups
     acc = Int32(0)
     for i in Int32(1):iters
         acc = acc * Int32(1103515245) + i
     end
     x[1] = value + (acc == Int32(-7) ? Int32(1) : Int32(0))
+    return nothing
+end
+
+"""dst[i] = src[i] + k."""
+function ho_add!(dst, src, k)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing      # ndrange is rounded up to whole work-groups
+    @inbounds dst[i] = src[i] + k
+    return nothing
 end
 
 """A graph that adds one to device array `a` into a transient and copies it to `out`: it names both."""
@@ -57,39 +64,38 @@ end
 """Drops, without free!, an array of `n` Int32 whose last use (a write of `value` into its first element) is still on the GPU."""
 @noinline ho_dropinflight(dev, n, value) = (slowwrite!(dev, MantleArray(dev, Int32, n), value; ms = 500); nothing)
 
-# HOLD-10's operations on its state `s` (live arrays, graphs, insert! blocks).
+# HOLD-10's operations on its state `s` (live arrays, graphs, groups).
 ho_new!(s) = push!(s.arrays, MantleArray(s.dev, zeros(Int32, rand(s.rng, 1:4096))))
 ho_free!(s) = isempty(s.arrays) || free!(popat!(s.arrays, rand(s.rng, eachindex(s.arrays))))
 ho_drop!(s) = isempty(s.arrays) || popat!(s.arrays, rand(s.rng, eachindex(s.arrays)))   # left to the GC
 ho_graph!(s) = push!(s.graphs, Graph(s.dev))
-function ho_insert!(s)
+function ho_group!(s)
     (isempty(s.graphs) || isempty(s.arrays)) && return
     g, a = rand(s.rng, s.graphs), rand(s.rng, s.arrays)
-    h = insert!(g) do
-        t = MantleArray(g, Int32, length(a))
-        t .= a .+ Int32(1)
-        copyto!(a, t)
-    end
-    push!(s.blocks, (g, h))
+    h = Group(g, "plusone")
+    t = MantleArray(g, Int32, length(a))
+    dispatch!(h, ho_add!, (t, a, Int32(1)), length(a))
+    dispatch!(h, ho_add!, (a, t, Int32(0)), length(a))
+    push!(s.groups, (g, h))
 end
 function ho_delete!(s)
-    isempty(s.blocks) && return
-    g, h = popat!(s.blocks, rand(s.rng, eachindex(s.blocks)))
+    isempty(s.groups) && return
+    g, h = popat!(s.groups, rand(s.rng, eachindex(s.groups)))
     delete!(g, h)
 end
-ho_run!(s) = isempty(s.blocks) || run!(first(rand(s.rng, s.blocks)))
+ho_run!(s) = isempty(s.groups) || run!(first(rand(s.rng, s.groups)))
 function ho_freegraph!(s)
     isempty(s.graphs) && return
     g = popat!(s.graphs, rand(s.rng, eachindex(s.graphs)))
-    filter!(b -> first(b) !== g, s.blocks)
+    filter!(b -> first(b) !== g, s.groups)
     free!(g)
 end
 ho_collect!(s) = GC.gc(false)
-const HO_FUZZ = (ho_new!, ho_free!, ho_drop!, ho_graph!, ho_insert!, ho_delete!, ho_run!, ho_freegraph!, ho_collect!)
+const HO_FUZZ = (ho_new!, ho_free!, ho_drop!, ho_graph!, ho_group!, ho_delete!, ho_run!, ho_freegraph!, ho_collect!)
 
-# ── 17. Holds, free!, finalizers (HOLD) ──
+# ── Holds, free!, finalizers (HOLD) ──
 
-# api.md:79: free!(a) from 16 threads at once while a graph holds a: the creator's hold drops once, so the graph keeps a (exact runs, a canary allocated after is never written) and a is released once at free!(g).
+# api.md 2.2 (`free!(a)`: the creator's hold drops once, whatever the number of threads): free!(a) from 16 threads at once while a graph holds a: the creator's hold drops once, so the graph keeps a (exact runs, a canary allocated after is never written) and a is released once at free!(g).
 @case "HOLD-01" 2 begin
     dev = testdevice()
     base = memory(dev)
@@ -109,7 +115,7 @@ const HO_FUZZ = (ho_new!, ho_free!, ho_drop!, ho_graph!, ho_insert!, ho_delete!,
     @test memory(dev) == base
 end
 
-# api.md:79, 482: free!(a) while g1 and g2 hold it: both keep running; an eager call, a store and a declaration through a throw.
+# api.md 2.2 (`free!(a)`: later use through any handle throws), 7: free!(a) while g1 and g2 hold it: both keep running; an eager call, a store and a declaration through a throw.
 @case "HOLD-02" 2 begin
     dev = testdevice()
     x = testdata(Int32, HO_LEN)
@@ -127,7 +133,7 @@ end
     @test Array(o2) == x .+ Int32(1)
 end
 
-# examples.jl:331-336: free!(feat), free!(e1), free!(d1) while both graphs' runs still write feat: feat's memory is released only after both last runs (canaries allocated at once stay intact), and memory comes back.
+# examples.jl 38: free!(feat), free!(e1), free!(d1) while both graphs' runs still write feat: feat's memory is released only after both last runs (canaries allocated at once stay intact), and memory comes back.
 @case "HOLD-03" 2 begin
     dev = testdevice()
     base = memory(dev)
@@ -145,7 +151,7 @@ end
     @test memory(dev) == base
 end
 
-# api.md:471: free! and resize! of a view or a reshape throw; the parent stays usable.
+# api.md 7 (resize! or free! of a view throws): free! and resize! of a view or a reshape throw; the parent stays usable.
 @case "HOLD-04" 6 begin
     dev = testdevice()
     a = MantleArray(dev, Int32, 16)
@@ -158,7 +164,7 @@ end
     @test all(==(Int32(3)), Array(a))
 end
 
-# internals.jl:2084-2092: a declaration adding a hold races the last hold's drop (100 times): either the declaration throws ArgumentError, or it won and the graph keeps a (exact run, canary intact); a hold never goes from 0 back to 1.
+# internals.jl section 10 (addhold!: a hold never goes from zero back to one): a declaration adding a hold races the last hold's drop (100 times): either the declaration throws ArgumentError, or it won and the graph keeps a (exact run, canary intact); a hold never goes from 0 back to 1.
 @case "HOLD-05" 2 begin
     dev = testdevice()
     x = testdata(Int32, HO_LEN)
@@ -187,7 +193,7 @@ end
     end
 end
 
-# api.md:375: the last hold of an array with a pending resize and store: no submission, the changes and their upload region are dropped, nothing is written into the released memory (a canary), memory back at the baseline.
+# api.md 5 (the last hold: pending changes dropped, upload regions retired): the last hold of an array with a pending resize and store: no submission, the changes and their upload region are dropped, nothing is written into the released memory (a canary), memory back at the baseline.
 @case "HOLD-06" 4 begin
     dev = testdevice()
     base = memory(dev)
@@ -203,7 +209,7 @@ end
     @test memory(dev) == base
 end
 
-# recording-plan.md:1299-1303, internals.jl:2168-2179: arrays and a graph dropped without free!: the GC's finalizers only push to the inbox (cells and upload regions still live), and sweep! releases them.
+# recording-plan.md "Memory" (one release engine: finalizers push onto the inbox and nothing else), internals.jl section 10 (finalizers, settle!): arrays and a graph dropped without free!: the GC's finalizers only push to the inbox (cells and upload regions still live), and sweep! releases them.
 @case "HOLD-07" 2 begin
     dev = testdevice()
     base = memory(dev)
@@ -214,7 +220,7 @@ end
     @test memory(dev) == base             # memory() sweeps
 end
 
-# examples.jl:316-322: an array dropped without free! while its last write is on the GPU, then GC: an array allocated at once does not get its memory before that write passed (a canary).
+# examples.jl 36: an array dropped without free! while its last write is on the GPU, then GC: an array allocated at once does not get its memory before that write passed (a canary).
 @case "HOLD-08" 2 begin
     dev = testdevice()
     ho_dropinflight(dev, HO_LEN, 7)
@@ -225,7 +231,7 @@ end
     free!(c)
 end
 
-# api.md:91: a view of a freed parent shares its freed mark: eager calls, stores, host reads and declarations through it throw.
+# api.md 2.2 (views share the parent's freed mark): a view of a freed parent shares its freed mark: eager calls, stores, host reads and declarations through it throw.
 @case "HOLD-09" 6 begin
     dev = testdevice()
     a = MantleArray(dev, Int32, 16)
@@ -239,31 +245,30 @@ end
     @test_throws ArgumentError (t .= v)
 end
 
-# api.md:374: 10 000 random creations, free!s, drops, graphs, insert!/delete! blocks, runs, graph free!s and collections: no error, and memory back at the baseline after everything is freed.
+# api.md 5 (an array's holds), 2.3 (`Group`, `delete!(g, group)`): 10 000 random creations, free!s, drops, graphs, groups declared and deleted, runs, graph free!s and collections: no error, and memory back at the baseline after everything is freed.
 @case "HOLD-10" 2 :long begin
     dev = testdevice()
     base = memory(dev)
-    s = (dev = dev, rng = Xoshiro(10), arrays = Any[], graphs = Any[], blocks = Any[])
+    s = (dev = dev, rng = Xoshiro(10), arrays = Any[], graphs = Any[], groups = Any[])
     for _ in 1:10_000
         rand(s.rng, HO_FUZZ)(s)
     end
     foreach(free!, s.graphs)
     foreach(free!, s.arrays)
-    empty!(s.graphs); empty!(s.arrays); empty!(s.blocks)
+    empty!(s.graphs); empty!(s.arrays); empty!(s.groups)
     @test memory(dev) == base
 end
 
-# internals.jl:2156-2167: free!(g) after delete!(g, h) and no further run: the holds the deleted block left (g.unnamed) drop with the plan; memory back at the baseline.
+# internals.jl section 10 (release!(g): g.unnamed): free!(g) after delete!(g, h) and no further run: the holds the deleted group left (g.unnamed) drop with the plan; memory back at the baseline.
 @case "HOLD-11" 2 begin
     dev = testdevice()
     base = memory(dev)
     a, o = MantleArray(dev, testdata(Int32, HO_LEN)), MantleArray(dev, Int32, HO_LEN)
     g = Graph(dev)
-    h = insert!(g) do
-        t = MantleArray(g, Int32, HO_LEN)
-        t .= a .+ Int32(1)
-        copyto!(o, t)
-    end
+    h = Group(g, "plusone")
+    t = MantleArray(g, Int32, HO_LEN)
+    dispatch!(h, ho_add!, (t, a, Int32(1)), HO_LEN)
+    dispatch!(h, ho_add!, (o, t, Int32(0)), HO_LEN)
     run!(g)
     delete!(g, h)                         # no node names a or o; g's plan still does
     free!(a); free!(o)
@@ -271,7 +276,7 @@ end
     @test memory(dev) == base
 end
 
-# api.md:79, 206: free!(a) inside withview while a vendor kernel still writes a: a's memory goes back only after the stream's token (canaries allocated after the block stay intact); memory back at the baseline.
+# api.md 2.2 (`free!`), 2.9 (the hold is dropped with the stream's token): free!(a) inside withview while a vendor kernel still writes a: a's memory goes back only after the stream's token (canaries allocated after the block stay intact); memory back at the baseline.
 @case "HOLD-12" 10 :vendorview begin
     dev = testdevice()
     base = memory(dev)
@@ -279,7 +284,7 @@ end
     s = cuda.stream()
     a = MantleArray(dev, Int32, HO_LEN)
     withview(cuda.CuArray, a, s) do v
-        ho_spinwrite!(get_backend(v))(v, Int32(7), Int32(calibratedspin(dev, 500)); ndrange = 1)
+        KI.@launch KI.get_backend(v) ndrange = 1 ho_spinwrite!(v, Int32(7), Int32(calibratedspin(dev, 500)))
         free!(a)
     end
     cs = [canary(dev, HO_LEN) for _ in 1:4]
@@ -289,7 +294,7 @@ end
     @test memory(dev) == base
 end
 
-# api.md:79: free!(a) with a store pending while a graph holds a: the graph's next run applies the store.
+# api.md 2.2 (`free!(a)`: graphs that hold a keep using it): free!(a) with a store pending while a graph holds a: the graph's next run applies the store.
 @case "HOLD-13" 4 begin
     dev = testdevice()
     x = testdata(Int32, HO_LEN)
@@ -303,7 +308,7 @@ end
     @test Array(o) == x .+ Int32(1)
 end
 
-# internals.jl:2229-2230 (ambiguity 22, settled there): a host read through a freed handle throws, as other calls do, while a graph still holds the array and keeps running.
+# internals.jl section 11 (`Array`: a host read through a freed handle throws), api.md 2.2: a host read through a freed handle throws, as other calls do, while a graph still holds the array and keeps running.
 @case "HOLD-14" 2 begin
     dev = testdevice()
     x = testdata(Int32, HO_LEN)

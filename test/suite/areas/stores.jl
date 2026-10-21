@@ -1,31 +1,35 @@
-# Stores: a[r] = data, scheduled (catalogue-resize-rt.md, table C).
-#
-# References: api.md; RR = docs/resizing-and-raytracing.jl; PLAN =
-# docs/recording-plan.md; INT = docs/internals.jl (line numbers of 2026-10-05).
+# Stores: a[r] = data, scheduled. api.md 2.2 (`a[r] = data`, `copyto!`,
+# `Array(a)`); resizing-and-raytracing.jl B.3 (Store, coalescing), B.5
+# (setindex!), B.8 (stores into a structure's sources); recording-plan.md,
+# The graph and its plan.
 # What this file assumes of the test hooks (helpers.jl):
-#   Mantle.pendingof(x)  the Change objects (Store, Resize, Rebind, BuildAccel)
-#                        pending on x, in sequence order, with RR B.3's fields
-#                        (a BuildAccel's `mode` is Build() or Update()).
+#   Mantle.pendingof(x)  the Change objects (Store, Resize, BuildAccel)
+#                        pending on x, in sequence order, with the fields of
+#                        resizing-and-raytracing.jl B.3 (a BuildAccel's `mode`
+#                        is Build() or Update()).
 #   Mantle.steplog(dev)  entries with `kind` (the step's name as a Symbol:
 #                        :InlineStore, :StagedStore, :MoveStorage, :CellWrite,
 #                        :BindPages, :BuildAccel), `target` (the root resource
 #                        the user holds), `seq` and `token`.
 #   diagnostics `allocations` counts every acquire!, upload regions included.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Mat4f, Point3f, TriangleFace
 
-@kernel function st_copy!(dst, src)
-    i = @index(Global)
+function st_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing   # ndrange is rounded up to whole work-groups
     dst[i] = src[i]
+    return nothing
 end
 
 # Copies after reading `gate`, which slowwrite! writes: the copy waits for the spin.
-@kernel function st_copyafter!(dst, src, gate)
-    i = @index(Global)
+function st_copyafter!(dst, src, gate)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     if gate[1] != Int32(-7)
         dst[i] = src[i]
     end
+    return nothing
 end
 
 const ST_STOREKINDS = (:InlineStore, :StagedStore)
@@ -57,7 +61,7 @@ function emittedbefore(log, firsts, then)
     return i !== nothing && j !== nothing && i < j
 end
 
-"""The step a store of `bytes` at byte `offset` becomes (api.md:82): inline within the device type's limit and alignment, else staged."""
+"""The step a store of `bytes` at byte `offset` becomes (api.md 2.2, `a[r] = data`): inline within the device type's limit and alignment, else staged."""
 storekind(dev, offset, bytes) = (c = caps(dev);
     bytes <= c.inlinestore && offset % c.inlinealign == 0 && bytes % c.inlinealign == 0 ? :InlineStore : :StagedStore)
 
@@ -80,7 +84,7 @@ end
 
 # ── C. Stores ──
 
-# ST-01 api.md:82, RR:590: a[1:3] = [1, 2] throws DimensionMismatch before an upload region is acquired; nothing pends.
+# ST-01 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.5: a[1:3] = [1, 2] throws DimensionMismatch before an upload region is acquired; nothing pends.
 @case "ST-01" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 8))
@@ -91,7 +95,7 @@ end
     free!(a)
 end
 
-# ST-02 RR:599: length 5, resize!(a, 10), a[6:10] = x: bounds are checked against the requested size, so the store is accepted and applied.
+# ST-02 resizing-and-raytracing.jl B.5 (requestedlength): length 5, resize!(a, 10), a[6:10] = x: bounds are checked against the requested size, so the store is accepted and applied.
 @case "ST-02" 4 begin
     dev = testdevice()
     x0, y = testdata(Float32, 5), testdata(Float32, 5; seed = 2)
@@ -104,7 +108,7 @@ end
     free!(a)
 end
 
-# ST-03 RR:599,604: length 5, resize!(a, 3), a[4:5] = x: BoundsError; the upload region goes back with no tokens; only the Resize pends.
+# ST-03 resizing-and-raytracing.jl B.5: length 5, resize!(a, 3), a[4:5] = x: BoundsError; the upload region goes back with no tokens; only the Resize pends.
 @case "ST-03" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 5))
@@ -116,7 +120,7 @@ end
     free!(a)
 end
 
-# ST-04 RR:593-594,604 (catalogue A5): a[1:1] = [1.5] into a MantleArray{Int32}: InexactError, and the live upload count is back where it was.
+# ST-04 resizing-and-raytracing.jl B.5: a[1:1] = [1.5] into a MantleArray{Int32}: InexactError, and the live upload count is back where it was.
 @case "ST-04" 4 begin
     dev = testdevice()
     a = MantleArray(dev, Int32[1, 2, 3, 4])
@@ -127,7 +131,7 @@ end
     free!(a)
 end
 
-# ST-05 RR:252-257, PLAN:59-63: a[1:n] = x, then x .= 0, then a submission: `a` holds the original x (copied at the call).
+# ST-05 resizing-and-raytracing.jl B.3, recording-plan.md rule 8: a[1:n] = x, then x .= 0, then a submission: `a` holds the original x (copied at the call).
 @case "ST-05" 4 begin
     dev = testdevice()
     n = 1000
@@ -140,7 +144,7 @@ end
     free!(a)
 end
 
-# ST-06 api.md:82, RR:575-580,608-611: a store of exactly 65536 bytes at offset 0: inline where the device type's limit allows it, else copied from its upload region; the same contents on every device.
+# ST-06 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.5: a store of exactly 65536 bytes at offset 0: inline where the device type's limit allows it, else copied from its upload region; the same contents on every device.
 @case "ST-06" 4 begin
     dev = testdevice()
     n = 65536 ÷ sizeof(Float32)
@@ -153,7 +157,7 @@ end
     free!(a)
 end
 
-# ST-07 api.md:82, RR:256-257,610: a store of 65540 bytes is copied from its upload region (staged), which is retired with the applying submission's token.
+# ST-07 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.3, B.5: a store of 65540 bytes is copied from its upload region (staged), which is retired with the applying submission's token.
 @case "ST-07" 4 begin
     dev = testdevice()
     n = 65540 ÷ sizeof(Float32)
@@ -169,7 +173,7 @@ end
     free!(a)
 end
 
-# ST-08 RR:578-580,611: a[2:4] = 3 bytes into a UInt8 array: not 4-byte aligned, so staged; a[1] and a[5] untouched.
+# ST-08 resizing-and-raytracing.jl B.5: a[2:4] = 3 bytes into a UInt8 array: not 4-byte aligned, so staged; a[1] and a[5] untouched.
 @case "ST-08" 4 begin
     dev = testdevice()
     a = MantleArray(dev, UInt8[1, 2, 3, 4, 5, 6, 7, 8])
@@ -180,7 +184,7 @@ end
     free!(a)
 end
 
-# ST-09 api.md:82, RR:259-262: a[1:3] = x, then resize!(a, 10^6) (a move): the store is applied before the move, which carries it; a[1:3] == x.
+# ST-09 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.3: a[1:3] = x, then resize!(a, 10^6) (a move): the store is applied before the move, which carries it; a[1:3] == x.
 @case "ST-09" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 16))
@@ -193,7 +197,7 @@ end
     free!(a)
 end
 
-# ST-10 RR:583-586: v = view(m, 1:2:9), v[1:5] = x: nothing is submitted at the call; the applying submission writes the five strided elements and leaves the ones between untouched.
+# ST-10 resizing-and-raytracing.jl B.5 (a store through a view with non-unit strides): v = view(m, 1:2:9), v[1:5] = x: nothing is submitted at the call; the applying submission writes the five strided elements and leaves the ones between untouched.
 @case "ST-10" 4 begin
     dev = testdevice()
     m = MantleArray(dev, zeros(Float32, 10))
@@ -208,7 +212,7 @@ end
     free!(m)
 end
 
-# ST-11 api.md:82, RR:258: v = view(a, 101:200), v[1:10] = x: the Store's span is the parent bytes of elements 101:110 (400 bytes past a store at a[1]).
+# ST-11 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.3 (span): v = view(a, 101:200), v[1:10] = x: the Store's span is the parent bytes of elements 101:110 (400 bytes past a store at a[1]).
 @case "ST-11" 4 begin
     dev = testdevice()
     x0, y = testdata(Float32, 300), testdata(Float32, 10; seed = 2)
@@ -226,7 +230,7 @@ end
     free!(a)
 end
 
-# ST-12 api.md:155, RR:580-582,1115-1117: a store into a TLAS range's source pends the TLAS Update in the same call; the applying run emits the Store, then the Update.
+# ST-12 api.md 2.6 (`tlas[h] = t`), resizing-and-raytracing.jl B.5, B.8: a store into a TLAS range's source pends the TLAS Update in the same call; the applying run emits the Store, then the Update.
 @case "ST-12" 5 :rt begin
     dev = testdevice()
     blas, vertices, faces = quadblas(dev)
@@ -243,7 +247,7 @@ end
     free!(g); foreach(free!, (t, blas, xs, vertices, faces))
 end
 
-# ST-13 api.md:150, RR:580-582,1116-1117: a store into a BLAS's index array pends a BLAS Build and a TLAS Update in the same call.
+# ST-13 api.md 2.6 (BLAS), resizing-and-raytracing.jl B.5, B.8: a store into a BLAS's index array pends a BLAS Build and a TLAS Update in the same call.
 @case "ST-13" 5 :rt begin
     dev = testdevice()
     blas, vertices, faces = quadblas(dev)
@@ -257,7 +261,7 @@ end
     free!(g); foreach(free!, (t, blas, vertices, faces))
 end
 
-# ST-14 api.md:79, RR:598,604: after free!(a) a store throws ArgumentError, directly and through a view; the upload region goes back; nothing pends.
+# ST-14 api.md 2.2 (free!), resizing-and-raytracing.jl B.5: after free!(a) a store throws ArgumentError, directly and through a view; the upload region goes back; nothing pends.
 @case "ST-14" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 16))
@@ -270,7 +274,7 @@ end
     @test isempty(Mantle.pendingof(a))
 end
 
-# ST-15 api.md:83,93, RR:589-594 (catalogue A15: device sources, scalar and colon stores not yet specified): a[1:n] = b and copyto!(c, b) from a device array copy after b's pending store with no host wait; a[5] = v and a[:] = x store like ranges.
+# ST-15 api.md 2.2 (`a[r] = data`, `copyto!`), resizing-and-raytracing.jl B.5: a[1:n] = b and copyto!(c, b) from a device array copy after b's pending store with no host wait; a[5] = v and a[:] = x store like ranges.
 @case "ST-15" 4 begin
     dev = testdevice()
     n = 64
@@ -290,7 +294,7 @@ end
     foreach(free!, (a, b, c))
 end
 
-# ST-16 api.md:82, RR:256-257,292: 10^4 covering stores into a[1:16] with a run every 100: at most one upload region live between runs, none after the last run.
+# ST-16 api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.3: 10^4 covering stores into a[1:16] with a run every 100: at most one upload region live between runs, none after the last run.
 @case "ST-16" 4 begin
     dev = testdevice()
     a, out = MantleArray(dev, Float32, 16), MantleArray(dev, Float32, 16)
@@ -310,7 +314,7 @@ end
     free!(g); foreach(free!, (a, out))
 end
 
-# ST-17 PLAN:455,470-472, RR:575-580: a one-element camera array stored every frame while the GPU is frames behind: no host wait in the store or in run!, an inline store per frame, no allocation in run!.
+# ST-17 recording-plan.md, The graph and its plan (a plot updated every frame costs no submission of its own), resizing-and-raytracing.jl B.5: a one-element camera array stored every frame while the GPU is frames behind: no host wait in the store or in run!, an inline store per frame, no allocation in run!.
 @case "ST-17" 4 begin
     dev = testdevice()
     cam, out = MantleArray(dev, [translation(0, 0, 0)]), MantleArray(dev, Mat4f, 1)
@@ -331,7 +335,7 @@ end
     free!(g); foreach(free!, (cam, out, gate))
 end
 
-# ST-18 RR:586-588: a store waits only inside acquiring its upload region (held here in rawalloc); a resize! on another thread completes meanwhile, and the store pends after it.
+# ST-18 resizing-and-raytracing.jl B.5 (the upload region is acquired before any lock): a store waits only inside acquiring its upload region (held here in rawalloc); a resize! on another thread completes meanwhile, and the store pends after it.
 @case "ST-18" 4 begin
     fd = FaultDevice(testdevice())
     n = 2^24                                         # 64 MiB: a new upload block
@@ -351,7 +355,7 @@ end
     free!(a)
 end
 
-# ST-19 RR:589-606 (catalogue A24: zero-length stores not yet specified): a[1:0] = T[] pends nothing and acquires no upload region.
+# ST-19 resizing-and-raytracing.jl B.5: a[1:0] = T[] pends nothing and acquires no upload region.
 @case "ST-19" 4 begin
     dev = testdevice()
     a = MantleArray(dev, testdata(Float32, 8))
@@ -364,7 +368,7 @@ end
     free!(a)
 end
 
-# ST-20 api.md:85, INT:2229-2245: a store is pending; Array(a) applies it and copies in one submission and returns the new data.
+# ST-20 api.md 2.2 (`Array(a)`), internals.jl section 11: a store is pending; Array(a) applies it and copies in one submission and returns the new data.
 @case "ST-20" 4 begin
     dev = testdevice()
     x, y = testdata(Float32, 64), testdata(Float32, 4; seed = 2)
@@ -374,5 +378,21 @@ end
     @test submitcount(d) == 1
     @test stepkinds(log, a) == [storekind(dev, 0, 16)]
     @test r == [y; x[5:end]]
+    free!(a)
+end
+
+# Strided-store coverage is the actual elements, not their bounding span.
+# The second store's bounding span covers the first, but their elements are
+# disjoint: coalescing must preserve both, with packed upload sizes.
+@case "ST-21" 4 begin
+    dev = testdevice()
+    a = MantleArray(dev, zeros(Int32, 12))
+    evens, odds = view(a, 2:2:10), view(a, 1:2:11)
+    _, d = counted(() -> begin
+        evens[1:5] = Int32.(21:25)
+        odds[1:6] = Int32.(11:16)
+    end, dev)
+    @test submitcount(d) == 0
+    @test Array(a) == Int32[11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 0]
     free!(a)
 end

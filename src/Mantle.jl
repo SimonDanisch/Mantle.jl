@@ -192,8 +192,8 @@ include("graph/access.jl")   # what a kernel does to its arguments, read off the
 # Before `lifetime.jl`: a `SubmitChannel` holds the outstanding list this declares.
 include("graph/submission.jl")
 # After it: `SubmitChannel` holds the `Outstanding` list that file declares, and
-# `oneshot!` goes through `submitted!`. Phases 2.2 and 2.3 of
-# docs/mantle-owns-it.md — the hold list and the recording pool, in core.
+# `oneshot!` goes through `submitted!`: the hold list and the recording pool, in
+# core (`docs/recording-plan.md`, Memory).
 include("graph/lifetime.jl")
 include("graph/queue.jl")
 include("memory/resources.jl")   # needs Resource (api.jl) and blocksize (phases.jl)
@@ -262,6 +262,7 @@ include("raytracing/pipeline.jl")
 # reindex on delete. Portable; a backend supplies only the batch type.
 include("raytracing/batches.jl")
 include("raytracing/accel.jl")
+include("raytracing/geometry.jl")
 include("raytracing/instances.jl")
 include("raytracing/api.jl")
 

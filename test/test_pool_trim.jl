@@ -10,9 +10,8 @@
 # The explicit verb is `Mantle.makeroom!(pool, dev)`: collect, wait for what the
 # device has been given, release what it has finished with, and hand every block
 # nothing uses back (`trim!`). The Vulkan backend's automatic trigger on top of it
-# (`maybe_trim_pool!`'s absolute-capacity threshold, its rate limit, and the cost
-# budget of a soft-cap collection) is that backend's allocation policy and is
-# tested beside it, in `vulkan/test_pool_trim_policy.jl`.
+# (heap-pressure facts) feeds core's shared collection policy; threshold, rate
+# limit and soft-cap behavior are tested in `test_pool_trim_policy.jl`.
 #
 # `Mantle.Buffer`s, because they are the pool's on every backend; a backend array
 # is the pool's on Vulkan and Metal.jl's own on Metal.

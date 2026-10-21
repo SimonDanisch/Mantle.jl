@@ -1,0 +1,350 @@
+Atomic ordering native qualification 2026-10-21T16:59:11.151 Julia=1.12.7
+Mantle loaded=false
+┌ Error: Validation (VUID-VkShaderModuleCreateInfo-pCode-08740): vkCreateShaderModule(): SPIR-V Capability Int8 was declared, but one of the following requirements must be met (VkPhysicalDeviceVulkan12Features::shaderInt8).
+│ The Vulkan spec states: If pCode is a pointer to SPIR-V code, and pCode declares any of the capabilities listed in the SPIR-V Environment appendix, one of the corresponding requirements must be satisfied (https://docs.vulkan.org/spec/latest/chapters/shaders.html#VUID-VkShaderModuleCreateInfo-pCode-08740)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+atomic visibility: AMD Radeon RX 7900 XTX (RADV NAVI31): Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78
+  Got exception outside of a @test
+  BoundsError: attempt to access 4-element Vector{Int64} at index [5]
+  Stacktrace:
+    [1] throw_boundserror(A::Vector{Int64}, I::Tuple{Int64})
+      @ Base ./essentials.jl:15
+    [2] getindex(A::Vector{Int64}, i::Int64)
+      @ Base ./essentials.jl:919
+    [3] arguments!(d::Main.AtomicVisibility.RecordedSlots.Native, s::Main.AtomicVisibility.RecordedSlots.Shader, args::Tuple{Ptr{Int32}, Ptr{Int32}, Ptr{Int32}, Int32, Val{:loadstore}})
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/feasibility-2026-10-21/recorded-slots.jl:155
+    [4] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:103 [inlined]
+    [5] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+    [6] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:79
+    [7] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+    [8] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+    [9] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [10] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+   [11] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [12] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:145 [inlined]
+   [13] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [14] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:144 [inlined]
+   [15] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [16] open
+      @ ./io.jl:409 [inlined]
+   [17] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:143
+   [18] top-level scope
+      @ string:1
+   [19] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [20] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [21] include_string
+      @ ./loading.jl:2962 [inlined]
+   [22] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [23] top-level scope
+      @ none:1
+   [24] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [25] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [26] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [27] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [28] repl_main
+      @ ./client.jl:586 [inlined]
+   [29] _start()
+      @ Base ./client.jl:561
+F33 native visibility: Test Failed at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+  Expression: N.VALIDATION_ERRORS[] == before
+   Evaluated: 1 == 0
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] probe(match::String; count::Int64, repeats::Int64)
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+ [3] probe
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+ [4] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [6] (::Main.AtomicVisibility.var"#run##4#run##5")()
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+┌ Error: Validation (VUID-VkShaderModuleCreateInfo-pCode-08740): vkCreateShaderModule(): SPIR-V Capability Int8 was declared, but one of the following requirements must be met (VkPhysicalDeviceVulkan12Features::shaderInt8).
+│ The Vulkan spec states: If pCode is a pointer to SPIR-V code, and pCode declares any of the capabilities listed in the SPIR-V Environment appendix, one of the corresponding requirements must be satisfied (https://docs.vulkan.org/spec/latest/chapters/shaders.html#VUID-VkShaderModuleCreateInfo-pCode-08740)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+atomic visibility: NVIDIA RTX 4000 Ada Generation: Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78
+  Got exception outside of a @test
+  BoundsError: attempt to access 4-element Vector{Int64} at index [5]
+  Stacktrace:
+    [1] throw_boundserror(A::Vector{Int64}, I::Tuple{Int64})
+      @ Base ./essentials.jl:15
+    [2] getindex(A::Vector{Int64}, i::Int64)
+      @ Base ./essentials.jl:919
+    [3] arguments!(d::Main.AtomicVisibility.RecordedSlots.Native, s::Main.AtomicVisibility.RecordedSlots.Shader, args::Tuple{Ptr{Int32}, Ptr{Int32}, Ptr{Int32}, Int32, Val{:loadstore}})
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/feasibility-2026-10-21/recorded-slots.jl:155
+    [4] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:103 [inlined]
+    [5] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+    [6] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:79
+    [7] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+    [8] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+    [9] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [10] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+   [11] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [12] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:145 [inlined]
+   [13] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [14] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:144 [inlined]
+   [15] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [16] open
+      @ ./io.jl:409 [inlined]
+   [17] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:143
+   [18] top-level scope
+      @ string:1
+   [19] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [20] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [21] include_string
+      @ ./loading.jl:2962 [inlined]
+   [22] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [23] top-level scope
+      @ none:1
+   [24] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [25] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [26] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [27] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [28] repl_main
+      @ ./client.jl:586 [inlined]
+   [29] _start()
+      @ Base ./client.jl:561
+F33 native visibility: Test Failed at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+  Expression: N.VALIDATION_ERRORS[] == before
+   Evaluated: 2 == 1
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] probe(match::String; count::Int64, repeats::Int64)
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+ [3] probe
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+ [4] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [6] (::Main.AtomicVisibility.var"#run##4#run##5")()
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+┌ Error: Validation (VUID-VkShaderModuleCreateInfo-pCode-08740): vkCreateShaderModule(): SPIR-V Capability Int8 was declared, but one of the following requirements must be met (VkPhysicalDeviceVulkan12Features::shaderInt8).
+│ The Vulkan spec states: If pCode is a pointer to SPIR-V code, and pCode declares any of the capabilities listed in the SPIR-V Environment appendix, one of the corresponding requirements must be satisfied (https://docs.vulkan.org/spec/latest/chapters/shaders.html#VUID-VkShaderModuleCreateInfo-pCode-08740)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+atomic visibility: AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO): Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78
+  Got exception outside of a @test
+  BoundsError: attempt to access 4-element Vector{Int64} at index [5]
+  Stacktrace:
+    [1] throw_boundserror(A::Vector{Int64}, I::Tuple{Int64})
+      @ Base ./essentials.jl:15
+    [2] getindex(A::Vector{Int64}, i::Int64)
+      @ Base ./essentials.jl:919
+    [3] arguments!(d::Main.AtomicVisibility.RecordedSlots.Native, s::Main.AtomicVisibility.RecordedSlots.Shader, args::Tuple{Ptr{Int32}, Ptr{Int32}, Ptr{Int32}, Int32, Val{:loadstore}})
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/feasibility-2026-10-21/recorded-slots.jl:155
+    [4] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:103 [inlined]
+    [5] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+    [6] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:79
+    [7] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+    [8] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+    [9] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [10] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+   [11] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [12] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:145 [inlined]
+   [13] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [14] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:144 [inlined]
+   [15] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [16] open
+      @ ./io.jl:409 [inlined]
+   [17] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:143
+   [18] top-level scope
+      @ string:1
+   [19] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [20] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [21] include_string
+      @ ./loading.jl:2962 [inlined]
+   [22] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [23] top-level scope
+      @ none:1
+   [24] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [25] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [26] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [27] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [28] repl_main
+      @ ./client.jl:586 [inlined]
+   [29] _start()
+      @ Base ./client.jl:561
+F33 native visibility: Test Failed at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+  Expression: N.VALIDATION_ERRORS[] == before
+   Evaluated: 3 == 2
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] probe(match::String; count::Int64, repeats::Int64)
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+ [3] probe
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+ [4] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [6] (::Main.AtomicVisibility.var"#run##4#run##5")()
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+┌ Error: Validation (VUID-VkShaderModuleCreateInfo-pCode-08740): vkCreateShaderModule(): SPIR-V Capability Int8 was declared, but one of the following requirements must be met (VkPhysicalDeviceVulkan12Features::shaderInt8).
+│ The Vulkan spec states: If pCode is a pointer to SPIR-V code, and pCode declares any of the capabilities listed in the SPIR-V Environment appendix, one of the corresponding requirements must be satisfied (https://docs.vulkan.org/spec/latest/chapters/shaders.html#VUID-VkShaderModuleCreateInfo-pCode-08740)
+└ @ Vulkan /sim/Programmieren/VideoEdit/dev/Vulkan/src/validation.jl:46
+atomic visibility: llvmpipe (LLVM 23.1.3, 256 bits): Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78
+  Got exception outside of a @test
+  BoundsError: attempt to access 4-element Vector{Int64} at index [5]
+  Stacktrace:
+    [1] throw_boundserror(A::Vector{Int64}, I::Tuple{Int64})
+      @ Base ./essentials.jl:15
+    [2] getindex(A::Vector{Int64}, i::Int64)
+      @ Base ./essentials.jl:919
+    [3] arguments!(d::Main.AtomicVisibility.RecordedSlots.Native, s::Main.AtomicVisibility.RecordedSlots.Shader, args::Tuple{Ptr{Int32}, Ptr{Int32}, Ptr{Int32}, Int32, Val{:loadstore}})
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/feasibility-2026-10-21/recorded-slots.jl:155
+    [4] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:103 [inlined]
+    [5] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+    [6] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:79
+    [7] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+    [8] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+    [9] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [10] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+   [11] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [12] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:145 [inlined]
+   [13] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [14] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:144 [inlined]
+   [15] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [16] open
+      @ ./io.jl:409 [inlined]
+   [17] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:143
+   [18] top-level scope
+      @ string:1
+   [19] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [20] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [21] include_string
+      @ ./loading.jl:2962 [inlined]
+   [22] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [23] top-level scope
+      @ none:1
+   [24] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [25] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [26] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [27] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [28] repl_main
+      @ ./client.jl:586 [inlined]
+   [29] _start()
+      @ Base ./client.jl:561
+F33 native visibility: Test Failed at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+  Expression: N.VALIDATION_ERRORS[] == before
+   Evaluated: 4 == 3
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] probe(match::String; count::Int64, repeats::Int64)
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:137
+ [3] probe
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:73 [inlined]
+ [4] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+ [5] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [6] (::Main.AtomicVisibility.var"#run##4#run##5")()
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+F33 native visibility: Test Failed at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:153
+  Expression: N.VALIDATION_ERRORS[] == 0
+   Evaluated: 4 == 0
+
+Stacktrace:
+ [1] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:680 [inlined]
+ [2] macro expansion
+   @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:153 [inlined]
+ [3] macro expansion
+   @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+ [4] (::Main.AtomicVisibility.var"#run##4#run##5")()
+   @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149
+Test Summary:                                                                     | Pass  Fail  Error  Total  Time
+F33 native visibility                                                             |    8     5      4     17  1.6s
+  atomic visibility: AMD Radeon RX 7900 XTX (RADV NAVI31)                         |    2            1      3  0.3s
+  atomic visibility: NVIDIA RTX 4000 Ada Generation                               |    2            1      3  0.0s
+  atomic visibility: AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) |    2            1      3  0.0s
+  atomic visibility: llvmpipe (LLVM 23.1.3, 256 bits)                             |    2            1      3  0.0s
+RNG of the outermost testset: Random.Xoshiro(0x1362949bd133b8b3, 0x757e3d49d3f6ed97, 0x2dd557c60545d1b3, 0x6b17b5b6a0519f0d, 0x46adfb55c9b0f352)

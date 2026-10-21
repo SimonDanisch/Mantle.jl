@@ -565,9 +565,11 @@ mutable struct BudgetDev
     budget::Int
     held::Int
     freed::Vector{Int}
+    attempts::Int
 end
-BudgetDev(budget) = BudgetDev(budget, 0, Int[])
+BudgetDev(budget) = BudgetDev(budget, 0, Int[], 0)
 function M.rawalloc(d::BudgetDev, kind, bytes, c)
+    d.attempts += 1
     d.held + bytes > d.budget && throw(OutOfMemoryError())
     d.held += bytes
     return zeros(UInt8, bytes)
@@ -577,6 +579,7 @@ M.deviceaddress(::BudgetDev, mem::Vector{UInt8}) = UInt64(pointer(mem))
 M.constraintof(::BudgetDev, kind, ts) = kind
 M.compatible(::BudgetDev, a, b) = a === b
 M.bufferusage(::BudgetDev, ::Type) = nothing
+M.maxalloc(d::BudgetDev) = d.budget
 
 @testset "Pool: an out-of-memory trims empty blocks before it is final" begin
     for grow in (:acquire, :reserve)
@@ -588,6 +591,7 @@ M.bufferusage(::BudgetDev, ::Type) = nothing
         r = grow === :acquire ? M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096) :
                                 M.reserve!(p, d, :other, nothing, 4096; blocksize = 4096)
         @test length(r) == 4096
+        @test d.attempts == 4                  # two initial blocks, refusal, retry
         @test d.freed == [4096]               # the empty block, and only it
         @test d.held == 8192
     end
@@ -596,6 +600,7 @@ M.bufferusage(::BudgetDev, ::Type) = nothing
     d, p = BudgetDev(4096), M.Pool()
     M.acquire!(p, d, :buf, nothing, 4096; blocksize = 4096)
     @test_throws OutOfMemoryError M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096)
+    @test d.attempts == 3                      # initial block, then two refusals
 
     # Not where waiting is refused: that caller is mid-recording (see `carveorgrow!`).
     d, p = BudgetDev(8192), M.Pool()
@@ -605,4 +610,91 @@ M.bufferusage(::BudgetDev, ::Type) = nothing
     @test_throws OutOfMemoryError M.acquire!(p, d, :other, nothing, 4096; blocksize = 4096,
                                              maywait = false)
     @test isempty(d.freed)
+    @test d.attempts == 3                      # no reclaim/retry while recording
+end
+
+@testset "Pool: a single-allocation limit is checked before the driver" begin
+    d, p = BudgetDev(4096), M.Pool()
+    @test_throws ArgumentError M.acquire!(p, d, :buf, nothing, 4097)
+    @test d.attempts == 0
+    # An ordinary small request must not grow a default 64 MiB block on a
+    # device whose native allocations are limited to 4 KiB.
+    r = M.acquire!(p, d, :buf, nothing, 256)
+    @test length(r) == 256
+    @test d.held == 4096
+    @test d.attempts == 1
+end
+
+@testset "Pool: returning collected capacity does not collect again" begin
+    d, p = BudgetDev(4096), M.Pool()
+    r = M.acquire!(p, d, :buf, nothing, 4096; blocksize=4096)
+    M.release!(r)
+    @test M.trimcollected!(p, d)
+    @test d.freed == [4096]
+    @test p.policy.gc_count == 0
+    @test !M.trimcollected!(p, d)
+end
+
+# Model a queue that keeps a dropped owner alive until its submission drains.
+mutable struct HeldDev
+    memory::BudgetDev
+    holds::Vector{Any}
+    flushes::Int
+end
+M.rawalloc(d::HeldDev, kind, bytes, c) = M.rawalloc(d.memory, kind, bytes, c)
+M.rawfree(d::HeldDev, mem) = M.rawfree(d.memory, mem)
+M.deviceaddress(d::HeldDev, mem::Vector{UInt8}) = M.deviceaddress(d.memory, mem)
+M.constraintof(::HeldDev, kind, ts) = kind
+M.compatible(::HeldDev, a, b) = a === b
+M.maxalloc(d::HeldDev) = d.memory.budget
+M.supports_batch_queue(::HeldDev) = true
+M.flush!(d::HeldDev) = (d.holds = Any[]; d.flushes += 1; nothing)
+M.fence(::HeldDev) = UInt64(0)
+M.passed(::HeldDev, ::UInt64) = true
+M.batchqueue(::HeldDev) = nothing
+
+Base.@noinline function holdregion!(d::HeldDev, p)
+    owner = Ref(M.acquire!(p, d, :buf, nothing, 4096; blocksize=4096))
+    weak = WeakRef(owner)
+    finalizer(x -> M.retire!(p, d, x[]), owner)
+    push!(d.holds, owner)
+    return weak
+end
+
+# Keep the allocation/recovery in compiled functions: top-level evaluation can
+# retain interpreter temporaries across the collection this fixture exercises.
+function check_held_recovery()
+    d, p = HeldDev(BudgetDev(4096), Any[], 0), M.Pool()
+    owner = holdregion!(d, p)
+    r = M.acquire!(p, d, :other, nothing, 4096; blocksize=4096)
+    @test owner.value === nothing
+    @test length(r) == 4096
+    @test d.flushes == 1
+    @test d.memory.attempts == 3
+    @test d.memory.freed == [4096]
+    @test d.memory.held == 4096
+end
+
+function check_channel_recovery()
+    d, p = HeldDev(BudgetDev(4096), Any[], 0), M.Pool()
+    owner = holdregion!(d, p)
+    flushes, drains = Ref(0), Ref(0)
+    flush = () -> (empty!(d.holds); flushes[] += 1; nothing)
+    drain = () -> (drains[] += 1; nothing)
+    onpressure = () -> M.makeroom!(
+        () -> M.quiesce_pool!(flush, drain, p, d), p, d)
+    r = M.acquire!(p, d, :other, nothing, 4096; blocksize=4096, onpressure)
+    @test owner.value === nothing
+    @test length(r) == 4096
+    @test (flushes[], drains[], d.flushes) == (1, 1, 0)
+    @test d.memory.attempts == 3
+    @test d.memory.freed == [4096]
+end
+
+@testset "Pool: retry releases owners kept alive until the queue drains" begin
+    check_held_recovery()
+end
+
+@testset "Pool: recovery uses the allocating channel's collection scope" begin
+    check_channel_recovery()
 end

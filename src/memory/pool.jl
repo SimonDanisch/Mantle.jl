@@ -395,7 +395,6 @@ mutable struct PoolPolicy
     gc_full_mingap::Float64
     gc_budget::Float64
     last_trim::Float64
-    last_full_gc::Float64
     gc_last::Float64
     gc_full_last::Float64
     # What the last collection cost, in seconds: the gap after it is this over
@@ -403,12 +402,10 @@ mutable struct PoolPolicy
     gc_lastcost::Float64
     gc_seconds::Float64
     gc_count::Int
-    # Set while a trim drains the queue: the drain may allocate, and that
-    # allocation must not start a second trim inside the first.
-    trimming::Bool
+    collecting::Threads.Atomic{Bool}
 end
 PoolPolicy() = PoolPolicy(1 << 30, 5.0, 30.0, 2 << 30, 0.02, 0.5, 0.05,
-                          0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, false)
+                          0.0, 0.0, 0.0, 0.0, 0.0, 0, Threads.Atomic{Bool}(false))
 
 """
 Blocks per arena kind, and the shared arena each kind is placed into.
@@ -652,14 +649,14 @@ constant because the right value is a device property, not a Mantle opinion.
 """
 function acquire!(pool::Pool, dev, kind, transients, bytes::Int;
                   align::Int = 256, blocksize::Int = 64 << 20, constraint = nothing,
-                  maywait::Bool = true)
+                  maywait::Bool = true, onpressure = nothing)
     refuseretired(dev)
     bytes = max(bytes, 1)
     # `constraint` given means the caller knows more than these transients do —
     # an arena reconciling what its other tenants also need. Deriving it here
     # would size the block for this plan alone.
     want = constraint === nothing ? constraintof(dev, basekind(kind), transients) : constraint
-    return underpressure(pool, dev, maywait) do
+    return underpressure(pool, dev, maywait, onpressure) do
         carveorgrow!(pool, dev, kind, bytes, align, blocksize, want, maywait)
     end
 end
@@ -684,13 +681,13 @@ sitting inside it: holding a `ReentrantLock` disables finalizers (Base's
 allowed — `makeroom!` waits, and the caller that says it may not is
 mid-recording (see `maywait` in [`carveorgrow!`](@ref)).
 """
-function underpressure(f, pool::Pool, dev, maywait::Bool)
+function underpressure(f, pool::Pool, dev, maywait::Bool, onpressure = nothing)
     try
         return f()
     catch err
         (maywait && isoutofmemory(err)) || rethrow()
     end
-    makeroom!(pool, dev)
+    onpressure === nothing ? makeroom!(pool, dev) : onpressure()
     return f()
 end
 
@@ -741,7 +738,10 @@ function carveorgrow!(pool::Pool, dev, kind, bytes::Int, align::Int, blocksize::
             r === nothing || return r
         end
         blks = blocksof(pool, kind)
-        n = max(bytes, blocksize)
+        limit = maxalloc(dev)
+        bytes <= limit || throw(ArgumentError(
+            "GPU memory request of $bytes bytes exceeds the device's single-allocation limit of $limit bytes"))
+        n = min(max(bytes, blocksize), limit)
         blk = Block(rawalloc(dev, basekind(kind), n, want), n, kind, want)
         push!(blks, blk)
         pool.blockgen[] += 1
@@ -943,14 +943,73 @@ function reclaim!(p::Pool, dev; wait::Bool = false)
     end
 end
 
+function trimready!(pool::Pool, dev)
+    if supports_batch_queue(dev)
+        ch = batchqueue(dev)
+        holdsretired(ch) && drain!(ch)
+    end
+    reclaim!(pool, dev; wait = true)
+    return trim!(pool, dev)
+end
+
+function withcollection(f, p::PoolPolicy)
+    # No pool lock across GC: it disables the finalizers that retire regions.
+    Threads.atomic_cas!(p.collecting, false, true) && return false
+    try
+        return f()
+    finally
+        p.collecting[] = false
+    end
+end
+
+# A pressure collection has already run. Return its dead capacity without
+# starting another full collection through the explicit reclamation path.
+function trimcollected!(pool::Pool, dev)
+    movable(pool) || return false
+    return withcollection(pool.policy) do
+        reclaimable(pool, dev) || return false
+        supports_batch_queue(dev) && flush!(dev)
+        trimready!(pool, dev)
+        return true
+    end
+end
+
+function collection!(f, p::PoolPolicy; continuing::Bool = false)
+    t0 = time_ns()
+    try
+        return f()
+    finally
+        p.gc_last = time()
+        elapsed = (time_ns() - t0) / 1e9
+        p.gc_lastcost = elapsed + (continuing ? p.gc_lastcost : 0.0)
+        p.gc_seconds += elapsed
+        continuing || (p.gc_count += 1)
+    end
+end
+
+function quiesce_pool!(flush, drain, pool::Pool, dev)
+    movable(pool) || return false
+    p = pool.policy
+    return withcollection(p) do
+        # Submission holds must be released before GC can find dropped owners.
+        # The wait is not charged to the GC budget.
+        flush()
+        collection!(p) do
+            GC.gc(true)
+            p.gc_full_last = time()
+        end
+        drain()
+        reclaim!(pool, dev; wait = true)
+        return true
+    end
+end
+
 """
     makeroom!(pool, dev) -> pool
 
-Everything the pool holds that nothing uses goes back to the device: a full
-collection so dropped `Buffer`s retire, a flush of the device's channel so the
-scratch its finished submissions borrowed is released, a waiting
-[`reclaim!`](@ref) so what the device has finished with is released, then
-[`trim!`](@ref). What a placement that does not fit tries before it gives up.
+Release submission holds by flushing first, then collect the dropped owners,
+reclaim retired objects and regions, and trim empty blocks. Refused while a
+recording pins the pool. What a placement that does not fit tries before it gives up.
 
 The flush is what frees an upload's staging: those bytes belong to the one-shot
 that copies out of them and go back when the channel sweeps it, which nothing
@@ -958,10 +1017,21 @@ else here does. A 175 MB staging region kept its 1.77 GB block alive through
 the trim, and the placement that asked for room was refused.
 """
 function makeroom!(pool::Pool, dev)
-    GC.gc(true)
-    supports_batch_queue(dev) && flush!(dev)
-    reclaim!(pool, dev; wait = true)
-    return trim!(pool, dev)
+    return makeroom!(() -> quiesce_pool!(pool, dev), pool, dev)
+end
+
+function makeroom!(quiesce, pool::Pool, dev)
+    quiesce() && trim!(pool, dev)
+    return pool
+end
+
+function quiesce_pool!(pool::Pool, dev)
+    flush = () -> (supports_batch_queue(dev) && flush!(dev))
+    drain = () -> if supports_batch_queue(dev)
+        ch = batchqueue(dev)
+        holdsretired(ch) && drain!(ch)
+    end
+    return quiesce_pool!(flush, drain, pool, dev)
 end
 
 """
@@ -988,26 +1058,28 @@ seconds.
 """
 function autotrim!(pool::Pool, dev)
     p = pool.policy
-    p.trimming && return false
     reserved(pool) < p.trim_threshold && return false
-    now = time()
-    now - p.last_trim < p.trim_min_interval && return false
-    p.last_trim = now
-    GC.gc(false)
-    if !reclaimable(pool, dev)
-        now - p.last_full_gc < p.trim_full_gc_interval && return false
-        p.last_full_gc = now
-        GC.gc(true)
-        reclaimable(pool, dev) || return false
+    return withcollection(p) do
+        now = time()
+        now - p.last_trim < p.trim_min_interval && return false
+        p.last_trim = now
+        full = collection!(p) do
+            GC.gc(false)
+            return !reclaimable(pool, dev)
+        end
+        full && now - p.gc_full_last < p.trim_full_gc_interval && return false
+        movable(pool) || return false
+        supports_batch_queue(dev) && flush!(dev)
+        if full
+            collection!(p; continuing = true) do
+                GC.gc(true)
+                p.gc_full_last = time()
+            end
+            reclaimable(pool, dev) || return false
+        end
+        trimready!(pool, dev)
+        return true
     end
-    movable(pool) || return false
-    p.trimming = true
-    try
-        makeroom!(pool, dev)
-    finally
-        p.trimming = false
-    end
-    return true
 end
 
 """
@@ -1034,7 +1106,7 @@ function reclaimable(pool::Pool, dev)
 end
 
 """
-    autocollect!(drain, pool) -> Bool
+    autocollect!(drain, pool; pressure = nothing, blocking = false) -> Bool
 
 A collection on the allocation path, run when the pool is past `policy.soft_cap`
 and about to grow: the memory a request needs is then far more likely dead and
@@ -1047,24 +1119,37 @@ Spaced by `policy.gc_mingap`, or by what the LAST collection cost over
 what it costs: an incremental collection on a heap holding a couple of GiB of
 device arrays takes ~63 ms, so a 20 ms gap allowed three quarters of the clock
 in the allocator. A full collection joins it at most every `policy.gc_full_mingap`.
+
+`pressure` is the fraction of the device heap in use. Below 75% (50% when
+`blocking`) it does nothing. Above 90% and 95%, and when blocking, it doubles
+the budget. Heap pressure and the soft cap share this history, so one allocation
+cannot collect twice through independent rate controllers. A pressure-triggered
+collection adds the full collection only when the pool also exceeds its soft cap.
 """
-function autocollect!(drain, pool::Pool)
+function autocollect!(drain, pool::Pool; pressure = nothing, blocking::Bool = false)
+    pressure !== nothing && pressure < (blocking ? 0.5 : 0.75) && return false
     p = pool.policy
-    now = time()
-    now - p.gc_last < max(p.gc_mingap, p.gc_lastcost / p.gc_budget) && return false
-    t0 = time_ns()
-    GC.gc(false)
-    drain()
-    if now - p.gc_full_last >= p.gc_full_mingap
-        GC.gc(true)
-        drain()
-        p.gc_full_last = now
+    return withcollection(p) do
+        now = time()
+        budget = p.gc_budget
+        if pressure !== nothing
+            blocking && (budget *= 2)
+            pressure > 0.9 && (budget *= 2)
+            pressure > 0.95 && (budget *= 2)
+        end
+        now - p.gc_last < max(p.gc_mingap, p.gc_lastcost / budget) && return false
+        collection!(p) do
+            GC.gc(false)
+            drain()
+            full = pressure === nothing || (p.soft_cap > 0 && reserved(pool) >= p.soft_cap)
+            if full && now - p.gc_full_last >= p.gc_full_mingap
+                GC.gc(true)
+                drain()
+                p.gc_full_last = time()
+            end
+        end
+        return true
     end
-    p.gc_last = time()
-    p.gc_lastcost = (time_ns() - t0) / 1e9
-    p.gc_seconds += p.gc_lastcost
-    p.gc_count += 1
-    return true
 end
 
 """

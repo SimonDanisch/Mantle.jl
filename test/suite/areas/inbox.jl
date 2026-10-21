@@ -1,53 +1,66 @@
-# Inbox, ordering with eager and host work (catalogue-core.md, table 12:
-# INBOX). What is not a run (eager calls, host reads, sparse binding, the
-# steps applying pending changes) records its accesses on the resource's sync
-# state and puts the resource into the inbox of every plan naming it; a run
-# handles only its inbox (recording-plan.md, "Ordering across graphs and
-# queues", the inbox; internals.jl section 8, "With the host").
+# Inbox, ordering with eager and host work (INBOX). What is not a run (eager
+# calls, host reads, sparse binding, the steps applying pending changes)
+# records its accesses on the resource's sync state and puts the resource
+# into the inbox of every plan naming it; a run handles only its inbox
+# (recording-plan.md, "Ordering across graphs and queues", the inbox;
+# internals.jl section 8, "With the host").
 #
 # As in ordering.jl, the correct value depends on the wait: one side spins
 # before it writes or reads, the other is fast, and kernels are compiled by a
 # first run before the measured one.
 #
-# Doc keys as in the catalogue: A api.md, P recording-plan.md, I internals.jl.
-# A second queue: Graph(dev; priority = 1) (open decision 12 of the plan).
+# A second queue: Graph(dev; priority = 1) (plan, open decision 11).
 
-using KernelAbstractions: @kernel, @index
-
-@kernel function inbox_fill!(a, v)
-    i = @index(Global)
+function inbox_fill!(a, v)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing      # ndrange is rounded up to whole work-groups
     @inbounds a[i] = v
+    return nothing
 end
 
-@kernel function inbox_copy!(dst, src)
-    i = @index(Global)
+function inbox_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = src[i]
+    return nothing
 end
 
-@kernel function inbox_readfirst!(out, src)  # out[1] = src[1]
+"""out[1] = src[1], one work item."""
+function inbox_readfirst!(out, src)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = src[1]
+    return nothing
 end
 
-@kernel function inbox_readat!(out, src, k)  # out[1] = src[k]
+"""out[1] = src[k], one work item."""
+function inbox_readat!(out, src, k)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = src[k]
+    return nothing
 end
 
-# Spins, then out[1] = src[1]; the index depends on the spin (src has two elements).
-@kernel function inbox_slowread!(out, src, iters)
+# Spins, then out[1] = src[1] (one work item); the index depends on the spin
+# (src has two elements).
+function inbox_slowread!(out, src, iters)
+    KI.get_global_id().x == 1 || return nothing
     acc = Int32(0)
     for k in Int32(1):iters
         acc = acc * Int32(1103515245) + k
     end
     @inbounds out[1] = src[Int32(1) + (acc == Int32(-7) ? Int32(1) : Int32(0))]
+    return nothing
 end
 
-# Spins, then a[1] = a[1] + 1: one segment that reads, then writes a.
-@kernel function inbox_slowbump!(a, iters)
+# Spins, then a[1] = a[1] + 1 (one work item): one segment that reads, then
+# writes a.
+function inbox_slowbump!(a, iters)
+    KI.get_global_id().x == 1 || return nothing
     acc = Int32(0)
     for k in Int32(1):iters
         acc = acc * Int32(1103515245) + k
     end
     @inbounds a[1] = a[Int32(1) + (acc == Int32(-7) ? Int32(1) : Int32(0))] + Int32(1)
+    return nothing
 end
 
 inbox_spin(ms) = Int32(min(calibratedspin(testdevice(), ms), typemax(Int32)))
@@ -73,9 +86,9 @@ function inbox_hosttime(dev, k; runs = 30)
     return inbox_median(times) * runs / subs
 end
 
-# ── 12. Inbox, ordering with eager and host work (INBOX) ──
+# ── Inbox, ordering with eager and host work (INBOX) ──
 
-# P:622-631: run!(C) reads a after a spin, then an eager write of a: the eager call waits for C's last run, else C reads the new value.
+# plan, Ordering (who waits for what: anything not a run waits for the last runs of the plans naming the resource where their use conflicts): run!(C) reads a after a spin, then an eager write of a: the eager call waits for C's last run, else C reads the new value.
 @case "INBOX-01" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0])
@@ -87,7 +100,7 @@ end
     @test Array(a) == [7, 7]
 end
 
-# P:610-614: an eager slow write of a, then run!(C) reading a: C waits for the eager call's token.
+# plan, Ordering (the inbox: a stage waits for the recorded accesses of its inbox resources): an eager slow write of a, then run!(C) reading a: C waits for the eager call's token.
 @case "INBOX-02" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0])
@@ -98,7 +111,7 @@ end
     @test Array(out) == [7]
 end
 
-# P:617-618: a pending store into a, then run!(C): applied in front of C's first segment, in C's submission (no extra one), and C sees it.
+# plan, Ordering (the inbox: a stage applies the pending changes of its inbox resources in front of its first segment), plan, Run (stores): a pending store into a, then run!(C): applied in front of C's first segment, in C's submission (no extra one), and C sees it.
 @case "INBOX-03" 4 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0])
@@ -117,11 +130,11 @@ end
     @test Array(out) == [5]
 end
 
-# P:622-631: an eager read of a while reader C (second queue) spins 500 ms reading a: read after read, so the eager call waits for nothing.
-@case "INBOX-04" 3 :multiqueue begin
+# plan, Ordering (who waits for what: only where uses conflict): an eager read of a while reader C (second queue) spins 500 ms reading a: read after read, so the eager call waits for nothing.
+@case "INBOX-04" 3 :multicompute begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[3, 3]), MantleArray(dev, Int32[0])
-    b = MantleArray(dev, Int32, 2; memory = Mantle.Readback())
+    b = MantleArray(dev, Int32, 2; unified = true)
     c = Graph(dev; priority = 1); dispatch!(c, inbox_slowread!, (out, a, inbox_spin(500)), 1)
     run!(c); dispatch!(dev, inbox_copy!, (b, a), 2); Mantle.waitidle(dev)   # compiled
     run!(c)
@@ -129,7 +142,7 @@ end
     @test Array(b) == [3, 3]
 end
 
-# I:1697-1708: one eager segment reads, then writes a (after a spin): it is recorded as a writer, so reader C waits for it.
+# internals.jl section 8 (recordeager!: a segment that reads then writes a resource is recorded as a writer): one eager segment reads, then writes a (after a spin): it is recorded as a writer, so reader C waits for it.
 @case "INBOX-05" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0])
@@ -141,7 +154,7 @@ end
     @test Array(out) == [2]
 end
 
-# P:607-610: a resize moves a into a sparse reserve, whose pages the applying submission binds, and a store lands there; C reads it: C's segment waits for the bind token, else it reads unbound memory. 20 rounds, a fresh array each; then growth within the reserve (pages only).
+# plan, Ordering (sparse binding records its accesses like any submitter), resizing-and-raytracing.jl B.4 (bindnow!: the submission waits on the bind tokens): a resize moves a into a sparse reserve, whose pages the applying submission binds, and a store lands there; C reads it: C's segment waits for the bind token, else it reads unbound memory. 20 rounds, a fresh array each; then growth within the reserve (pages only).
 @case "INBOX-06" 4 :sparse begin
     dev = testdevice()
     n = 1 << 20                     # 4 MiB of Int32: a reserve (core's sparsethreshold is a few sparse pages)
@@ -162,7 +175,7 @@ end
     @test seen == [(r, -r) for r in 1:20]
 end
 
-# P:619-621: 10^4 eager writes of a between two runs of C: C's next run handles them in less than a tenth of their own host time (inbox dedupe unspecified) and sees the last.
+# plan, Ordering (the inbox: a run handles only what is in its inbox): 10^4 eager writes of a between two runs of C: C's next run handles them in less than a tenth of their own host time (inbox dedupe unspecified) and sees the last.
 @case "INBOX-07" 3 :long begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0])
@@ -176,7 +189,7 @@ end
     @test Array(out) == [10^4]
 end
 
-# A:466: a frame naming 5 000 arrays with one of them written before each run: its host time per run is that of a frame naming 50 (it follows the inbox, not the names).
+# api.md 6 (test_run_host_time.jl: a run's host time grows with its inbox, not with the resources it names): a frame naming 5 000 arrays with one of them written before each run: its host time per run is that of a frame naming 50 (it follows the inbox, not the names).
 @case "INBOX-08" 3 begin
     dev = testdevice()
     small, large = inbox_hosttime(dev, 50), inbox_hosttime(dev, 5000)

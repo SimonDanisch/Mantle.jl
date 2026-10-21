@@ -93,6 +93,10 @@ mutable struct MetalTLAS{Tri} <: HWTLAS{Tri}
     scratch::MTL.MTLBuffer
     refittable::Bool
     count::Int
+    function MetalTLAS{Tri}(handle, desc, blases, instances, scratch, refittable, count) where {Tri}
+        t = new{Tri}(handle, desc, blases, instances, scratch, refittable, count)
+        return finalizer(freebuffers!, t)
+    end
 end
 
 """
@@ -112,8 +116,59 @@ mutable struct MetalBLAS
     # writes the moved vertices into (`Raycore.refit!`); `nothing` for boxes.
     vertices::Union{Nothing, MTL.MTLBuffer}
     nvertices::Int
+    function MetalBLAS(handle, desc, scratch, refittable, vertices, nvertices)
+        b = new(handle, desc, scratch, refittable, vertices, nvertices)
+        return finalizer(freebuffers!, b)
+    end
 end
 MetalBLAS(handle, desc, scratch, refittable) = MetalBLAS(handle, desc, scratch, refittable, nothing, 0)
+
+"""
+The buffers a structure owns, back to the device when it is collected.
+
+`MTLBuffer` is an unmanaged wrapper, so nothing releases one unless asked.
+`Metal.free` is finalizer-safe, which is why this can run from one. A TLAS's
+instance descriptors are an `MtlArray`, which frees itself.
+"""
+function freebuffers!(b::MetalBLAS)
+    Metal.free(b.scratch)
+    b.vertices === nothing || Metal.free(b.vertices)
+    return nothing
+end
+freebuffers!(t::MetalTLAS) = (Metal.free(t.scratch); nothing)
+
+"""
+    newstructure(dev, bytes) -> MTLAccelerationStructure
+
+An empty acceleration structure that leaves the residency set when it is collected.
+
+[`make_resident!`](@ref) puts every structure a traversal reaches into the
+queue's residency set, and a set holds a strong reference to what is in it, so a
+structure still in the set outlives every Julia reference to it. The finalizer
+is on the structure rather than on the `MetalBLAS` or `MetalTLAS` holding it,
+because a TLAS keeps its instances' structures alive without their `MetalBLAS`.
+"""
+function newstructure(d::MetalDevice, bytes::Integer)
+    accel = MTL.alloc_acceleration_structure(d.dev, bytes)
+    return finalizer(Metal.forget_resident!, accel)
+end
+
+"""
+Build `desc` into a new structure with scratch that is freed as soon as the build has run.
+"""
+function buildstructure(d::MetalDevice, desc, sizes)
+    accel = newstructure(d, sizes.accelerationStructureSize)
+    scratch = MTL.MTLBuffer(d.dev, max(sizes.buildScratchBufferSize, 1);
+                            storage = Metal.PrivateStorage)
+    try
+        withaccelencoder(d) do enc
+            MTL.build!(enc, accel, desc, scratch)
+        end
+    finally
+        Metal.free(scratch)
+    end
+    return accel
+end
 
 """
 Encode `f(encoder)` into a fresh command buffer and wait for it.
@@ -122,7 +177,7 @@ Builds are one-off setup rather than per-frame work, so this synchronises rather
 than threading them through the graph's timeline. When acceleration-structure
 builds move into a pass, this becomes an encoder the graph hands over.
 """
-function withaccelencoder(f, d::MetalDevice)
+@autoreleasepool function withaccelencoder(f, d::MetalDevice)
     cb = MTL.MTLCommandBuffer(cmdqueue(d))
     enc = MTL.MTLAccelerationStructureCommandEncoder(cb)
     try
@@ -151,10 +206,10 @@ a refit and Metal rejects one. Note that a refittable structure may still report
 `refitScratchBufferSize == 0` — that means "no scratch needed", not "no refit
 allowed", which is why the permission is tracked as a flag.
 """
-function build_blas(d::MetalDevice, vertices::MTL.MTLBuffer, ntriangles::Integer;
-                    stride::Integer = 12, refittable::Bool = false,
-                    indices::Union{Nothing, MTL.MTLBuffer} = nothing,
-                    nvertices::Integer = 3 * ntriangles)
+@autoreleasepool function build_blas(d::MetalDevice, vertices::MTL.MTLBuffer, ntriangles::Integer;
+                                     stride::Integer = 12, refittable::Bool = false,
+                                     indices::Union{Nothing, MTL.MTLBuffer} = nothing,
+                                     nvertices::Integer = 3 * ntriangles)
     geo = MTL.MTLAccelerationStructureTriangleGeometryDescriptor()
     geo.vertexBuffer = vertices
     geo.vertexStride = stride
@@ -169,12 +224,7 @@ function build_blas(d::MetalDevice, vertices::MTL.MTLBuffer, ntriangles::Integer
     refittable && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
 
     sizes = MTL.accelerationStructureSizes(d.dev, desc)
-    accel = MTL.alloc_acceleration_structure(d.dev, sizes.accelerationStructureSize)
-    scratch = MTL.MTLBuffer(d.dev, max(sizes.buildScratchBufferSize, 1);
-                            storage = Metal.PrivateStorage)
-    withaccelencoder(d) do enc
-        MTL.build!(enc, accel, desc, scratch)
-    end
+    accel = buildstructure(d, desc, sizes)
     keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
                          storage = Metal.PrivateStorage)
     return MetalBLAS(accel, desc, keep, refittable, vertices, Int(nvertices))
@@ -234,9 +284,12 @@ function Mantle.build_blas(ctx::MetalAccelBuildContext, vertices::Vector{NTuple{
     vbuf, ibuf = GC.@preserve vertices indices (
         MTL.MTLBuffer(d.dev, sizeof(vertices), pointer(vertices); storage = Metal.SharedStorage),
         MTL.MTLBuffer(d.dev, sizeof(indices), pointer(indices); storage = Metal.SharedStorage))
-    # The descriptor keeps both buffers; the BLAS keeps the descriptor.
-    return build_blas(d, vbuf, length(indices) ÷ 3; indices = ibuf, nvertices = length(vertices),
+    # The descriptor keeps both buffers and the BLAS keeps the descriptor, so the
+    # index buffer is let go; the vertices are the BLAS's own, for a refit to write.
+    blas = build_blas(d, vbuf, length(indices) ÷ 3; indices = ibuf, nvertices = length(vertices),
                       refittable = allow_update)
+    Metal.free(ibuf)
+    return blas
 end
 
 """
@@ -246,7 +299,7 @@ Write the moved `vertices` (as many as it was built with) into the structure's
 vertex buffer and refit it in place. An `ArgumentError` for a structure built
 without `allow_update`, or a different vertex count.
 """
-function Raycore.refit!(blas::MetalBLAS, vertices::AbstractVector)
+@autoreleasepool function Raycore.refit!(blas::MetalBLAS, vertices::AbstractVector)
     blas.refittable && blas.vertices !== nothing || throw(ArgumentError(
         "refit!: this BLAS was not built with `allow_update = true`, so its descriptor " *
         "lacks `MTLAccelerationStructureUsageRefit`; rebuild it instead"))
@@ -272,8 +325,8 @@ is never opaque in the sense a triangle is, because there is nothing to intersec
 until an intersection function says so. The flag exists so a caller spells the build
 the same way on both backends.
 """
-function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
-                                aabbs::Vector{Mantle.AABB}; opaque::Bool = true)
+@autoreleasepool function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
+                                                 aabbs::Vector{Mantle.AABB}; opaque::Bool = true)
     d = ctx.device
     n = length(aabbs)
     n > 0 || throw(ArgumentError("build_blas_aabb: no boxes to build over"))
@@ -302,17 +355,14 @@ function Mantle.build_blas_aabb(ctx::MetalAccelBuildContext,
     desc.geometryDescriptors = NSArray([geo])
 
     sizes = MTL.accelerationStructureSizes(d.dev, desc)
-    accel = MTL.alloc_acceleration_structure(d.dev, sizes.accelerationStructureSize)
-    scratch = MTL.MTLBuffer(d.dev, max(sizes.buildScratchBufferSize, 1);
-                            storage = Metal.PrivateStorage)
-    withaccelencoder(d) do enc
-        MTL.build!(enc, accel, desc, scratch)
-    end
+    accel = buildstructure(d, desc, sizes)
     keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
                          storage = Metal.PrivateStorage)
-    # The box buffer has to outlive the build: the structure references it.
+    # The box buffer has to outlive the build: the structure references it. The
+    # geometry descriptor holds its own reference, and `desc` lives as long as the
+    # `MetalBLAS`, so this one is let go.
     blas = MetalBLAS(accel, desc, keep, false)
-    push!(ctx.preserves, buf)
+    Metal.free(buf)
     return blas
 end
 
@@ -324,8 +374,8 @@ already written into `descriptors` (a `MtlVector{MetalInstanceDescriptor}`),
 each naming its geometry by index into `blases`. The structure keeps
 `descriptors`: a refit reads them again.
 """
-function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::MtlArray,
-                      n::Integer; refittable::Bool = false)
+@autoreleasepool function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::MtlArray,
+                                       n::Integer; refittable::Bool = false)
     eltype(descriptors) === MetalInstanceDescriptor || throw(ArgumentError(
         "build_accel!: descriptors must be MetalInstanceDescriptor, got $(eltype(descriptors))"))
     n <= length(descriptors) || throw(ArgumentError(
@@ -346,12 +396,7 @@ function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::Mt
     refittable && (desc.usage = MTL.MTLAccelerationStructureUsageRefit)
 
     sizes = MTL.accelerationStructureSizes(d.dev, desc)
-    accel = MTL.alloc_acceleration_structure(d.dev, sizes.accelerationStructureSize)
-    scratch = MTL.MTLBuffer(d.dev, max(sizes.buildScratchBufferSize, 1);
-                            storage = Metal.PrivateStorage)
-    withaccelencoder(d) do enc
-        MTL.build!(enc, accel, desc, scratch)
-    end
+    accel = buildstructure(d, desc, sizes)
     # `max(…, 1)`: Metal wants a buffer even when it needs no bytes of it, and
     # a zero-length `MTLBuffer` is rejected.
     keep = MTL.MTLBuffer(d.dev, max(sizes.refitScratchBufferSize, 1);
@@ -370,7 +415,7 @@ Much cheaper than a rebuild — the point of holding a HWTLAS across frames — 
 does not re-cluster, so instances that move far enough degrade traversal until
 they are rebuilt.
 """
-function refit_tlas!(d::MetalDevice, tlas::MetalTLAS)
+@autoreleasepool function refit_tlas!(d::MetalDevice, tlas::MetalTLAS)
     tlas.refittable || throw(ArgumentError(
         "refit_tlas!: this structure was not built with `refittable = true`, so " *
         "its descriptor lacks `MTLAccelerationStructureUsageRefit` and Metal will " *

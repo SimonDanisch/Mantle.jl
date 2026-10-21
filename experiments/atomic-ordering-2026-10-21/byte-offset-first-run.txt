@@ -1,0 +1,433 @@
+Atomic ordering native qualification 2026-10-21T16:59:42.635 Julia=1.12.7
+Mantle loaded=false
+DEVICE AMD Radeon RX 7900 XTX (RADV NAVI31) mode=loadstore dispatches=32 observed_messages=8224 validation_errors=0
+DEVICE AMD Radeon RX 7900 XTX (RADV NAVI31) mode=fence dispatches=32 observed_messages=8224 validation_errors=0
+atomic visibility: AMD Radeon RX 7900 XTX (RADV NAVI31): Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:83
+  Got exception outside of a @test
+  Cannot determine pointee type for inttoptr result: LLVM.IntToPtrInst(%bda_ptr3 = inttoptr i64 %arg1_bda to ptr addrspace(1))
+  Stacktrace:
+    [1] error(s::String)
+      @ Base ./error.jl:44
+    [2] emit_inttoptr!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:5965
+    [3] emit_instruction!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:1071
+    [4] emit_block!(state::Lava.SPIRVEmitterState, bb::LLVM.BasicBlock)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:945
+    [5] emit_function!(state::Lava.SPIRVEmitterState, fn::LLVM.Function; is_entry::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:840
+    [6] emit_function!
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:683 [inlined]
+    [7] emit_spirv_from_llvm(llvm_mod::LLVM.Module, entry_name::String, workgroup_size::Tuple{Int64, Int64, Int64}; enable_ray_query::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2206
+    [8] emit_spirv_from_llvm
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2113 [inlined]
+    [9] (::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}})()
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:810
+   [10] timed_phase(f::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}}, group::String, label::String)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/phase_timer.jl:134
+   [11] (::Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}})(ctx::LLVM.Context)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:809
+   [12] #249
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:33 [inlined]
+   [13] context!(f::GPUCompiler.var"#249#250"{LLVM.Context, Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, ctx::LLVM.Context)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/state.jl:84
+   [14] #247
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:32 [inlined]
+   [15] with_disposal(f::GPUCompiler.var"#247#248"{Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, x::LLVM.ThreadSafeContext)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/base.jl:389
+   [16] LLVM.ThreadSafeContext(f::Function; kwargs::@Kwargs{})
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45
+   [17] ThreadSafeContext
+      @ ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45 [inlined]
+   [18] #JuliaContext#244
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:26 [inlined]
+   [19] JuliaContext
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:25 [inlined]
+   [20] #lava_compile_gpu_from_job#204
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:743 [inlined]
+   [21] lava_compile_gpu_from_job
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:727 [inlined]
+   [22] lava_compile_gpu(f::Any, tt::Any; workgroup_size::Tuple{Int64, Int64, Int64}, enable_ray_query::Bool, validate::Bool, force_inline_all::Bool, features::Lava.TargetFeatures)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:861
+   [23] lava_compile_gpu
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:849 [inlined]
+   [24] Main.AtomicVisibility.RecordedSlots.Shader(d::Main.AtomicVisibility.RecordedSlots.Native, f::Function, tt::Type)
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/../feasibility-2026-10-21/recorded-slots.jl:138
+   [25] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:92 [inlined]
+   [26] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [27] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:84
+   [28] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78 [inlined]
+   [29] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:155 [inlined]
+   [30] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [31] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:154
+   [32] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [33] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+   [34] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [35] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149 [inlined]
+   [36] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [37] open
+      @ ./io.jl:409 [inlined]
+   [38] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:148
+   [39] top-level scope
+      @ string:1
+   [40] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [41] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [42] include_string
+      @ ./loading.jl:2962 [inlined]
+   [43] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [44] top-level scope
+      @ none:1
+   [45] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [46] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [47] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [48] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [49] repl_main
+      @ ./client.jl:586 [inlined]
+   [50] _start()
+      @ Base ./client.jl:561
+DEVICE NVIDIA RTX 4000 Ada Generation mode=loadstore dispatches=32 observed_messages=8224 validation_errors=0
+DEVICE NVIDIA RTX 4000 Ada Generation mode=fence dispatches=32 observed_messages=8224 validation_errors=0
+atomic visibility: NVIDIA RTX 4000 Ada Generation: Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:83
+  Got exception outside of a @test
+  Cannot determine pointee type for inttoptr result: LLVM.IntToPtrInst(%bda_ptr3 = inttoptr i64 %arg1_bda to ptr addrspace(1))
+  Stacktrace:
+    [1] error(s::String)
+      @ Base ./error.jl:44
+    [2] emit_inttoptr!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:5965
+    [3] emit_instruction!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:1071
+    [4] emit_block!(state::Lava.SPIRVEmitterState, bb::LLVM.BasicBlock)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:945
+    [5] emit_function!(state::Lava.SPIRVEmitterState, fn::LLVM.Function; is_entry::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:840
+    [6] emit_function!
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:683 [inlined]
+    [7] emit_spirv_from_llvm(llvm_mod::LLVM.Module, entry_name::String, workgroup_size::Tuple{Int64, Int64, Int64}; enable_ray_query::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2206
+    [8] emit_spirv_from_llvm
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2113 [inlined]
+    [9] (::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}})()
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:810
+   [10] timed_phase(f::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}}, group::String, label::String)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/phase_timer.jl:134
+   [11] (::Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}})(ctx::LLVM.Context)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:809
+   [12] #249
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:33 [inlined]
+   [13] context!(f::GPUCompiler.var"#249#250"{LLVM.Context, Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, ctx::LLVM.Context)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/state.jl:84
+   [14] #247
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:32 [inlined]
+   [15] with_disposal(f::GPUCompiler.var"#247#248"{Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, x::LLVM.ThreadSafeContext)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/base.jl:389
+   [16] LLVM.ThreadSafeContext(f::Function; kwargs::@Kwargs{})
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45
+   [17] ThreadSafeContext
+      @ ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45 [inlined]
+   [18] #JuliaContext#244
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:26 [inlined]
+   [19] JuliaContext
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:25 [inlined]
+   [20] #lava_compile_gpu_from_job#204
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:743 [inlined]
+   [21] lava_compile_gpu_from_job
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:727 [inlined]
+   [22] lava_compile_gpu(f::Any, tt::Any; workgroup_size::Tuple{Int64, Int64, Int64}, enable_ray_query::Bool, validate::Bool, force_inline_all::Bool, features::Lava.TargetFeatures)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:861
+   [23] lava_compile_gpu
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:849 [inlined]
+   [24] Main.AtomicVisibility.RecordedSlots.Shader(d::Main.AtomicVisibility.RecordedSlots.Native, f::Function, tt::Type)
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/../feasibility-2026-10-21/recorded-slots.jl:138
+   [25] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:92 [inlined]
+   [26] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [27] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:84
+   [28] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78 [inlined]
+   [29] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:155 [inlined]
+   [30] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [31] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:154
+   [32] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [33] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+   [34] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [35] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149 [inlined]
+   [36] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [37] open
+      @ ./io.jl:409 [inlined]
+   [38] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:148
+   [39] top-level scope
+      @ string:1
+   [40] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [41] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [42] include_string
+      @ ./loading.jl:2962 [inlined]
+   [43] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [44] top-level scope
+      @ none:1
+   [45] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [46] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [47] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [48] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [49] repl_main
+      @ ./client.jl:586 [inlined]
+   [50] _start()
+      @ Base ./client.jl:561
+DEVICE AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) mode=loadstore dispatches=32 observed_messages=8224 validation_errors=0
+DEVICE AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) mode=fence dispatches=32 observed_messages=8224 validation_errors=0
+atomic visibility: AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO): Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:83
+  Got exception outside of a @test
+  Cannot determine pointee type for inttoptr result: LLVM.IntToPtrInst(%bda_ptr3 = inttoptr i64 %arg1_bda to ptr addrspace(1))
+  Stacktrace:
+    [1] error(s::String)
+      @ Base ./error.jl:44
+    [2] emit_inttoptr!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:5965
+    [3] emit_instruction!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:1071
+    [4] emit_block!(state::Lava.SPIRVEmitterState, bb::LLVM.BasicBlock)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:945
+    [5] emit_function!(state::Lava.SPIRVEmitterState, fn::LLVM.Function; is_entry::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:840
+    [6] emit_function!
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:683 [inlined]
+    [7] emit_spirv_from_llvm(llvm_mod::LLVM.Module, entry_name::String, workgroup_size::Tuple{Int64, Int64, Int64}; enable_ray_query::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2206
+    [8] emit_spirv_from_llvm
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2113 [inlined]
+    [9] (::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}})()
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:810
+   [10] timed_phase(f::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}}, group::String, label::String)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/phase_timer.jl:134
+   [11] (::Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}})(ctx::LLVM.Context)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:809
+   [12] #249
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:33 [inlined]
+   [13] context!(f::GPUCompiler.var"#249#250"{LLVM.Context, Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, ctx::LLVM.Context)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/state.jl:84
+   [14] #247
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:32 [inlined]
+   [15] with_disposal(f::GPUCompiler.var"#247#248"{Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, x::LLVM.ThreadSafeContext)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/base.jl:389
+   [16] LLVM.ThreadSafeContext(f::Function; kwargs::@Kwargs{})
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45
+   [17] ThreadSafeContext
+      @ ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45 [inlined]
+   [18] #JuliaContext#244
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:26 [inlined]
+   [19] JuliaContext
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:25 [inlined]
+   [20] #lava_compile_gpu_from_job#204
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:743 [inlined]
+   [21] lava_compile_gpu_from_job
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:727 [inlined]
+   [22] lava_compile_gpu(f::Any, tt::Any; workgroup_size::Tuple{Int64, Int64, Int64}, enable_ray_query::Bool, validate::Bool, force_inline_all::Bool, features::Lava.TargetFeatures)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:861
+   [23] lava_compile_gpu
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:849 [inlined]
+   [24] Main.AtomicVisibility.RecordedSlots.Shader(d::Main.AtomicVisibility.RecordedSlots.Native, f::Function, tt::Type)
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/../feasibility-2026-10-21/recorded-slots.jl:138
+   [25] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:92 [inlined]
+   [26] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [27] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:84
+   [28] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78 [inlined]
+   [29] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:155 [inlined]
+   [30] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [31] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:154
+   [32] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [33] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+   [34] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [35] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149 [inlined]
+   [36] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [37] open
+      @ ./io.jl:409 [inlined]
+   [38] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:148
+   [39] top-level scope
+      @ string:1
+   [40] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [41] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [42] include_string
+      @ ./loading.jl:2962 [inlined]
+   [43] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [44] top-level scope
+      @ none:1
+   [45] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [46] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [47] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [48] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [49] repl_main
+      @ ./client.jl:586 [inlined]
+   [50] _start()
+      @ Base ./client.jl:561
+DEVICE llvmpipe (LLVM 23.1.3, 256 bits) mode=loadstore dispatches=32 observed_messages=8224 validation_errors=0
+DEVICE llvmpipe (LLVM 23.1.3, 256 bits) mode=fence dispatches=32 observed_messages=8224 validation_errors=0
+atomic visibility: llvmpipe (LLVM 23.1.3, 256 bits): Error During Test at /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:83
+  Got exception outside of a @test
+  Cannot determine pointee type for inttoptr result: LLVM.IntToPtrInst(%bda_ptr3 = inttoptr i64 %arg1_bda to ptr addrspace(1))
+  Stacktrace:
+    [1] error(s::String)
+      @ Base ./error.jl:44
+    [2] emit_inttoptr!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:5965
+    [3] emit_instruction!(state::Lava.SPIRVEmitterState, inst::LLVM.IntToPtrInst)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:1071
+    [4] emit_block!(state::Lava.SPIRVEmitterState, bb::LLVM.BasicBlock)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:945
+    [5] emit_function!(state::Lava.SPIRVEmitterState, fn::LLVM.Function; is_entry::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:840
+    [6] emit_function!
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/spirv/emit.jl:683 [inlined]
+    [7] emit_spirv_from_llvm(llvm_mod::LLVM.Module, entry_name::String, workgroup_size::Tuple{Int64, Int64, Int64}; enable_ray_query::Bool)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2206
+    [8] emit_spirv_from_llvm
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:2113 [inlined]
+    [9] (::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}})()
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:810
+   [10] timed_phase(f::Lava.var"#227#228"{String, Bool, Tuple{Int64, Int64, Int64}}, group::String, label::String)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/phase_timer.jl:134
+   [11] (::Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}})(ctx::LLVM.Context)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:809
+   [12] #249
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:33 [inlined]
+   [13] context!(f::GPUCompiler.var"#249#250"{LLVM.Context, Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, ctx::LLVM.Context)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/state.jl:84
+   [14] #247
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:32 [inlined]
+   [15] with_disposal(f::GPUCompiler.var"#247#248"{Lava.var"#215#216"{Bool, Bool, Bool, CompilerJob{SPIRVCompilerTarget, Lava.LavaCompilerParams}, Tuple{Int64, Int64, Int64}}}, x::LLVM.ThreadSafeContext)
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/base.jl:389
+   [16] LLVM.ThreadSafeContext(f::Function; kwargs::@Kwargs{})
+      @ LLVM ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45
+   [17] ThreadSafeContext
+      @ ~/.julia/packages/LLVM/fxbjm/src/executionengine/ts_module.jl:45 [inlined]
+   [18] #JuliaContext#244
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:26 [inlined]
+   [19] JuliaContext
+      @ ~/.julia/packages/GPUCompiler/paQCf/src/driver.jl:25 [inlined]
+   [20] #lava_compile_gpu_from_job#204
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:743 [inlined]
+   [21] lava_compile_gpu_from_job
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:727 [inlined]
+   [22] lava_compile_gpu(f::Any, tt::Any; workgroup_size::Tuple{Int64, Int64, Int64}, enable_ray_query::Bool, validate::Bool, force_inline_all::Bool, features::Lava.TargetFeatures)
+      @ Lava /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:861
+   [23] lava_compile_gpu
+      @ /sim/Programmieren/VideoEdit/dev/Lava/src/compiler/compilation.jl:849 [inlined]
+   [24] Main.AtomicVisibility.RecordedSlots.Shader(d::Main.AtomicVisibility.RecordedSlots.Native, f::Function, tt::Type)
+      @ Main.AtomicVisibility.RecordedSlots /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/../feasibility-2026-10-21/recorded-slots.jl:138
+   [25] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:92 [inlined]
+   [26] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [27] probe(match::String; count::Int64, repeats::Int64)
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:84
+   [28] probe
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:78 [inlined]
+   [29] macro expansion
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:155 [inlined]
+   [30] macro expansion
+      @ ~/.julia/juliaup/julia-1.12.7+0.x64.linux.gnu/share/julia/stdlib/v1.12/Test/src/Test.jl:1777 [inlined]
+   [31] (::Main.AtomicVisibility.var"#run##4#run##5")()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:154
+   [32] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##4#run##5", stream::IOStream)
+      @ Base ./stream.jl:1464
+   [33] #run##2
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:150 [inlined]
+   [34] (::Base.RedirectStdStream)(thunk::Main.AtomicVisibility.var"#run##2#run##3"{IOStream}, stream::IOStream)
+      @ Base ./stream.jl:1464
+   [35] #run##0
+      @ /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:149 [inlined]
+   [36] open(::Main.AtomicVisibility.var"#run##0#run##1", ::String, ::Vararg{String}; kwargs::@Kwargs{})
+      @ Base ./io.jl:412
+   [37] open
+      @ ./io.jl:409 [inlined]
+   [38] run()
+      @ Main.AtomicVisibility /sim/Programmieren/VideoEdit/dev/Mantle/experiments/atomic-ordering-2026-10-21/native.jl:148
+   [39] top-level scope
+      @ string:1
+   [40] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [41] include_string(mapexpr::typeof(identity), mod::Module, code::String, filename::String)
+      @ Base ./loading.jl:2952
+   [42] include_string
+      @ ./loading.jl:2962 [inlined]
+   [43] include_string(m::Module, txt::String)
+      @ Base ./loading.jl:2962
+   [44] top-level scope
+      @ none:1
+   [45] eval(m::Module, e::Any)
+      @ Core ./boot.jl:489
+   [46] eval_user_input(errio::Base.PipeEndpoint, ast::Any, show_value::Bool)
+      @ Base ./client.jl:140
+   [47] run_fallback_repl(interactive::Bool)
+      @ Base ./client.jl:447
+   [48] run_main_repl(interactive::Bool, quiet::Bool, banner::Symbol, history_file::Bool)
+      @ Base ./client.jl:504
+   [49] repl_main
+      @ ./client.jl:586 [inlined]
+   [50] _start()
+      @ Base ./client.jl:561
+Test Summary:                                                                     | Pass  Error  Total  Time
+F33 native visibility                                                             |  797      4    801  1.2s
+  atomic visibility: AMD Radeon RX 7900 XTX (RADV NAVI31)                         |  198      1    199  0.7s
+  atomic visibility: NVIDIA RTX 4000 Ada Generation                               |  198      1    199  0.1s
+  atomic visibility: AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) |  198      1    199  0.1s
+  atomic visibility: llvmpipe (LLVM 23.1.3, 256 bits)                             |  198      1    199  0.1s
+RNG of the outermost testset: Random.Xoshiro(0x1362949bd133b8b3, 0x757e3d49d3f6ed97, 0x2dd557c60545d1b3, 0x6b17b5b6a0519f0d, 0x46adfb55c9b0f352)

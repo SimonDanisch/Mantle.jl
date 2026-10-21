@@ -332,7 +332,18 @@ end
     # kernel into a Vulkan pipeline (`src/vulkan/runtime/launch.jl`, on a
     # `VkContext`), Metal.jl's links a method instance in its compiler. Neither is
     # exported and `src/metal/` calls neither.
-    known = [(:stage_output_type, :Metal), (:link_kernel, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
+    #
+    # `bind_buffer!`, `dispatch!`, `make_resident!` and `retire!` against Metal, reviewed
+    # 2026-10-19 with the merge of Metal.jl's main: they are the verbs of its new
+    # `CommandBackend` interface (binding an argument, encoding a dispatch, declaring a
+    # buffer to an encoder, recycling what a finished batch used), none exported. Mantle's
+    # are the Vulkan framebuffer's memory binding (`src/vulkan/graphics/framebuffer.jl`),
+    # the graph verb (`graph/build.jl`), the HW-TLAS residency grant on a `MetalDevice`
+    # (`src/metal/hwtlas.jl`) and the lifetime/pool retirement. `src/metal/` calls none of
+    # Metal's.
+    known = [(:bind_buffer!, :Metal), (:dispatch!, :Metal), (:make_resident!, :Metal),
+             (:retire!, :Metal),
+             (:stage_output_type, :Metal), (:link_kernel, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
              (:Launch, :KernelAbstractions), (:Loop, :LLVM), (:_lower, :AcceleratedKernels),
              (:access, :LLVM), (:claim!, :Metal), (:disjoint, :LLVM),
              (:invalidate!, :LLVM), (:slice, :AcceleratedKernels),

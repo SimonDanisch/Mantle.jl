@@ -72,8 +72,3 @@ What the fragment stage receives: the mesh stage's outputs. Entries may be
 `Flat{T}`, and the type form has them removed.
 """
 fragmentinputs(p::MeshPipeline) = stageoutputs(p.mesh)
-
-@doc (@doc fragmentinputs) function fragmentinputtype(p::MeshPipeline)
-    v = valuetypes(fragmentinputs(p))
-    return NamedTuple{keys(v), Tuple{values(v)...}}
-end

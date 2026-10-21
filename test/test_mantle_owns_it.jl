@@ -1,4 +1,4 @@
-# The guards for `docs/mantle-owns-it.md`, written BEFORE the refactor deletes
+# The guards for the plan's first rule (`docs/recording-plan.md`, Rules), written BEFORE the refactor deletes
 # anything.
 #
 # Every one of them fails on the code as it stands. That failure is the point:

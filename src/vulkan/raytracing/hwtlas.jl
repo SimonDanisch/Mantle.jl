@@ -310,37 +310,9 @@ end
 # ============================================================================
 
 function hwtlas_add_geometry!(hwtlas::VulkanTLAS{Tri}, mesh::GeometryBasics.Mesh) where {Tri}
-    nmesh = GeometryBasics.expand_faceviews(mesh)
-    fs = decompose(TriangleFace{UInt32}, nmesh)
-    verts = decompose(Point3f, nmesh)
-    norms = Raycore.Normal3f.(Raycore.decompose_normals(nmesh))
-    uvs_raw = GeometryBasics.decompose_uv(nmesh)
-    uvs = isnothing(uvs_raw) ? Point2f[] : Point2f.(uvs_raw)
-    indices = collect(reinterpret(UInt32, fs))
-
-    has_meta = hasproperty(nmesh, :face_meta)
-    n_faces = length(fs)
-
-    cpu_triangles = let tris = Tri[]
-        for i in 1:n_faces
-            Raycore.is_degenerate_face(verts, indices, i) && continue
-            meta = has_meta ? nmesh.face_meta[indices[3*(i-1)+1]] : UInt32(i)
-            push!(tris, Raycore.build_triangle(verts, norms, uvs, indices, i, meta))
-        end
-        tris
-    end
-    isempty(cpu_triangles) && error("Geometry has no valid triangles")
-
-    # Extract vertex positions for BLAS build
+    cpu_triangles = meshtriangles(Tri, mesh)
+    blas_vertices = trianglevertices(cpu_triangles)
     n_tris = length(cpu_triangles)
-    blas_vertices = Vector{NTuple{3,Float32}}(undef, n_tris * 3)
-    for i in 1:n_tris
-        vs = cpu_triangles[i].vertices
-        for j in 1:3
-            v = vs[j]
-            blas_vertices[(i-1)*3 + j] = (Float32(v[1]), Float32(v[2]), Float32(v[3]))
-        end
-    end
     blas_indices = Vector{UInt32}(undef, n_tris * 3)
     for i in 0:(n_tris*3 - 1)
         blas_indices[i+1] = UInt32(i)
@@ -797,26 +769,9 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         build_tlas(ctx, native, total; allow_update=true, blases=hwtlas.blas_list)
     end
 
-    # Concatenate triangle metadata across batches.  Each batch's instances all
-    # reference one BLAS, so all instances of batch i share the same offset
-    # into all_tris (= the running tri_offset where batch i's triangles begin).
-    # A batch with none gets `NOTRIANGLES` in the array a hit reads, so its hits
-    # answer the empty triangle instead of reading the next batch's.
-    all_tris = Tri[]
-    per_inst_offsets = UInt32[]
-    hit_offsets = UInt32[]
-    blas_offsets = UInt32[]
-    tri_offset = UInt32(0)
-    for batch in hwtlas.instances
-        push!(blas_offsets, tri_offset)
-        append!(all_tris, batch.triangles)
-        hit_offset = isempty(batch.triangles) ? NOTRIANGLES : tri_offset
-        for _ in 1:batch.n
-            push!(per_inst_offsets, tri_offset)
-            push!(hit_offsets, hit_offset)
-        end
-        tri_offset += UInt32(length(batch.triangles))
-    end
+    metadata = trianglemetadata(Tri, hwtlas.instances, Val(true))
+    all_tris, hit_offsets = metadata.triangles, metadata.hits
+    blas_offsets, per_inst_offsets = metadata.starts, metadata.raw
 
     hw_accel = if hwtlas.hw_accel isa HardwareAccel
         accel_prev = hwtlas.hw_accel

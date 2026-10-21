@@ -1,0 +1,5 @@
+Actual Mantle VkContext, validation + sync validation enabled, X display :93 for existing GLFW initialization
+DEVICE AMD Radeon RX 7900 XTX (RADV NAVI31)
+Compiled acquire/release shader with VulkanMemoryModelDeviceScope; shader module and pipeline created using this production context
+Validation messages: 0
+Context retired through mark_device_lost! and collected. An attempted destroy_pool! lookup first failed because this standalone context was not registered in Mantle.DEVICES; this does not count as a full runtime lifecycle test.

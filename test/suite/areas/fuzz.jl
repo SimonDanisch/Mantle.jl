@@ -1,9 +1,8 @@
-# Fuzz and steady-state gates: GT-01..GT-03 (catalogue-resize-rt.md, table R)
-# and THR-07, HOLD-10 (catalogue-core.md, tables 13 and 17). Tasks on several
-# threads change arrays, graphs and composites while graphs run; every array
-# has a host model and is compared exactly at the end; memory is back at its
-# baseline after everything is freed. All cases are `:long`: gates run at the
-# end of a phase.
+# Fuzz and steady-state gates, with the fuzz of THR-07 (threads.jl) and
+# HOLD-10 (holds.jl). Tasks on several threads change arrays, graphs and
+# composites while graphs run; every array has a host model and is compared
+# exactly at the end; memory is back at its baseline after everything is
+# freed. All cases are `:long`: gates run at the end of a phase.
 #
 # Results stay exact under any interleaving: each task changes only its own
 # arrays, in its program order, and arrays shared between tasks only receive
@@ -13,15 +12,14 @@
 # a write would see a mix and count it in its `bad` array.
 #
 # Not covered here: window resizes (THR-07 lists them; they need a display and
-# are in the windows area), plot updates (GT-01, phase 11, RayMakie's), and
-# "validation clean" (GT-01), which needs the validation layers on in the
+# are in the windows area), plot updates (phase 11, RayMakie's), and
+# "validation clean", which needs the validation layers on in the
 # suite's device configuration and no hook reports it.
 #
 # Worker tasks call no @test (Test keeps its test set in task-local storage);
 # they only act and update models, and a throw reaches the case through
 # `wait` under the watchdog.
 
-using KernelAbstractions: @kernel, @index
 using GeometryBasics: Mat4f, Point3f, TriangleFace
 
 const FZ_COUNTERS = 4           # shared counters
@@ -29,27 +27,36 @@ const FZ_COUNTERLENGTH = 1 << 16
 const FZ_OWNMAX = 4096          # largest length of a task's own array
 const FZ_TIMEOUT = 3600         # seconds for a whole fuzz
 
-@kernel function fz_add!(a, k)
-    i = @index(Global)
+"""a[i] += k; `k` a number or a GPURef (a kernel takes its value)."""
+function fz_add!(a, k)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing        # ndrange is rounded up to whole work-groups
     @inbounds a[i] += k
+    return nothing
 end
 
-@kernel function fz_uniform!(bad, s)
-    i = @index(Global)
+function fz_uniform!(bad, s)
+    i = KI.get_global_id().x
+    i <= length(bad) || return nothing
     @inbounds bad[i] += s[i] == s[1] ? Int32(0) : Int32(1)
+    return nothing
 end
 
 # One work item: names four arrays.
-@kernel function fz_touch4!(a, b, c, d)
+function fz_touch4!(a, b, c, d)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds a[1] += Int32(1)
     @inbounds b[1] += Int32(1)
     @inbounds c[1] += Int32(1)
     @inbounds d[1] += Int32(1)
+    return nothing
 end
 
-@kernel function fz_frametick!(out, cam)
-    i = @index(Global)
+function fz_frametick!(out, cam)
+    i = KI.get_global_id().x
+    i <= length(out) || return nothing
     @inbounds out[i] = cam[1][1, 1] * Float32(i)
+    return nothing
 end
 
 """An instance transform moved by `v`."""
@@ -73,7 +80,7 @@ function atbaseline(before, after)
     @test after.mapped <= before.mapped
 end
 
-# ── The threaded fuzz (THR-07, GT-01) ──
+# ── The threaded fuzz (THR-07) ──
 
 """What every task may touch: shared counters, graphs any task runs, and (with ray tracing) a TLAS."""
 struct FuzzShared
@@ -115,39 +122,36 @@ mutable struct FuzzWorld
     rng::Xoshiro
     own::Any                    # resized, stored into and added to
     ownmodel::Vector{Int32}
-    a::Any                      # the two targets of `ref`
-    b::Any
+    a::Any                      # the task's graph adds `ref`'s value to it every run
     amodel::Vector{Int32}
-    bmodel::Vector{Int32}
-    ref::Any                    # array GPURef: the task's graph adds 1 to its target every run
-    ona::Bool                   # whether `ref` points at `a`
+    ref::Any                    # GPURef{Int32}: a value slot, stored into between runs
+    refvalue::Int32             # the value last stored into `ref`: what the next run adds
     bad::Any                    # the task's graph's count of non-uniform reads
     graph::Any
     writes::Int                 # the counter the task's graph adds to
     add::Int32                  # what it adds per run
-    block::Any                  # a node block inserted into `graph`, or nothing
-    extra::Int32                # what that block adds to `own` per run
+    block::Any                  # a group in `graph` holding one launch, or nothing
+    extra::Int32                # what that group adds to `own` per run
     ranges::Vector{Any}         # (range, source) pairs pushed into the shared TLAS
 end
 
 function FuzzWorld(dev, shared, k)
     rng = Xoshiro(k)
     ownmodel = rand(rng, Int32(-100):Int32(100), 256)
-    amodel, bmodel = rand(rng, Int32(-100):Int32(100), 300), rand(rng, Int32(-100):Int32(100), 700)
-    own, a, b = MantleArray(dev, ownmodel), MantleArray(dev, amodel), MantleArray(dev, bmodel)
-    ref = GPURef(dev, a)
+    amodel = rand(rng, Int32(-100):Int32(100), 300)
+    own, a = MantleArray(dev, ownmodel), MantleArray(dev, amodel)
+    ref = GPURef(dev, Int32(1))
     bad = MantleArray(dev, zeros(Int32, FZ_COUNTERLENGTH))
     writes, reads, add = mod1(k, FZ_COUNTERS), mod1(k + 1, FZ_COUNTERS), Int32(k)
     graph = Graph(dev)
     dispatch!(graph, fz_add!, (own, Int32(1)), launchrange(own))
-    dispatch!(graph, fz_add!, (ref, Int32(1)), launchrange(ref))
+    dispatch!(graph, fz_add!, (a, ref), launchrange(a))
     dispatch!(graph, fz_add!, (shared.counters[writes], add), FZ_COUNTERLENGTH)
     dispatch!(graph, fz_uniform!, (bad, shared.counters[reads]), FZ_COUNTERLENGTH)
-    return FuzzWorld(rng, own, ownmodel, a, b, amodel, bmodel, ref, true, bad, graph, writes, add,
+    return FuzzWorld(rng, own, ownmodel, a, amodel, ref, Int32(1), bad, graph, writes, add,
                      nothing, Int32(0), Any[])
 end
 
-targetmodel(w) = w.ona ? w.amodel : w.bmodel
 newvalues(w, n) = rand(w.rng, Int32(-100):Int32(100), n)
 
 # The operations. Each method acts on the device and updates the host model
@@ -160,12 +164,12 @@ struct OpGrow end           # resize! past the length, then a store of the tail
 struct OpShrink end         # resize! below the length
 struct OpEager end          # an eager broadcast on its array
 struct OpEagerShared end    # an eager broadcast on a shared counter
-struct OpRebind end         # its array GPURef to the other target
+struct OpStoreRef end       # a store into its GPURef: the value its graph adds from the next run on
 struct OpTempArray end      # a temporary array used eagerly, then freed or dropped
 struct OpTempGraph end      # a temporary graph run once, then freed or dropped
 struct OpCollect end        # a garbage collection
-struct OpInsert end         # a node block inserted into its graph
-struct OpDelete end         # that block deleted
+struct OpInsert end         # a group with one launch declared into its graph
+struct OpDelete end         # that group deleted
 struct OpPushRange end      # a TLAS range over a new source
 struct OpDeleteRange end    # one of its ranges deleted
 struct OpStoreRange end     # a store into a range source: an Update
@@ -175,7 +179,7 @@ struct OpRunTLAS end        # a graph that refits or builds the TLAS
 function fuzzstep!(w, s, ::OpRun)
     run!(w.graph)
     w.ownmodel .+= Int32(1) + w.extra
-    targetmodel(w) .+= Int32(1)
+    w.amodel .+= w.refvalue
     Threads.atomic_add!(s.sums[w.writes], Int(w.add))
 end
 function fuzzstep!(w, s, ::OpRunShared)
@@ -220,9 +224,9 @@ function fuzzstep!(w, s, ::OpEagerShared)
     s.counters[j] .+= Int32(3)
     Threads.atomic_add!(s.sums[j], 3)
 end
-function fuzzstep!(w, s, ::OpRebind)
-    w.ona = !w.ona
-    w.ref[] = w.ona ? w.a : w.b
+function fuzzstep!(w, s, ::OpStoreRef)
+    w.refvalue = rand(w.rng, Int32(-100):Int32(100))
+    w.ref[] = w.refvalue
 end
 function fuzzstep!(w, s, ::OpTempArray)
     t = MantleArray(s.dev, Int32, length(w.ownmodel))
@@ -241,9 +245,8 @@ end
 fuzzstep!(w, s, ::OpCollect) = GC.gc(false)
 function fuzzstep!(w, s, ::OpInsert)
     w.block === nothing || return
-    w.block = insert!(w.graph) do
-        dispatch!(w.graph, fz_add!, (w.own, Int32(10)), launchrange(w.own))
-    end
+    w.block = Group(w.graph, "block")
+    dispatch!(w.block, fz_add!, (w.own, Int32(10)), launchrange(w.own))
     w.extra = Int32(10)
 end
 function fuzzstep!(w, s, ::OpDelete)
@@ -275,7 +278,7 @@ end
 fuzzstep!(w, s, ::OpRunTLAS) = run!(rand(w.rng, s.tlasgraphs))
 
 const FZ_CHANGEOPS = (OpRun(), OpRun(), OpRun(), OpRunShared(), OpStore(), OpStore(), OpCopy(), OpGrow(),
-                      OpShrink(), OpEager(), OpEagerShared(), OpRebind(), OpRebind(), OpTempArray(),
+                      OpShrink(), OpEager(), OpEagerShared(), OpStoreRef(), OpStoreRef(), OpTempArray(),
                       OpTempGraph(), OpCollect(), OpInsert(), OpDelete())
 const FZ_TLASOPS = (OpPushRange(), OpPushRange(), OpDeleteRange(), OpStoreRange(), OpResizeRange(),
                     OpRunTLAS(), OpRunTLAS())
@@ -285,7 +288,6 @@ function checkmodels(worlds, shared)
     for w in worlds
         @test Array(w.own) == w.ownmodel
         @test Array(w.a) == w.amodel
-        @test Array(w.b) == w.bmodel
         @test all(iszero, Array(w.bad))
     end
     for (c, total) in zip(shared.counters, shared.sums)
@@ -296,7 +298,7 @@ function checkmodels(worlds, shared)
     end
 end
 
-"""Drops every hold the fuzz took: ranges, graphs, boxes, arrays, the TLAS and its BLAS (free! is once per handle)."""
+"""Drops every hold the fuzz took: ranges, graphs, GPURefs, arrays, the TLAS and its BLAS (free! is once per handle)."""
 function freefuzz!(worlds, shared)
     for w in worlds
         for (r, src) in w.ranges
@@ -305,7 +307,7 @@ function freefuzz!(worlds, shared)
         end
         free!(w.graph)
         free!(w.ref)
-        foreach(free!, (w.own, w.a, w.b, w.bad))
+        foreach(free!, (w.own, w.a, w.bad))
     end
     foreach(run!, shared.tlasgraphs)             # applies the last deletes' build
     foreach(free!, shared.tlasgraphs)
@@ -344,7 +346,7 @@ mutable struct HeldArray
     freed::Bool
 end
 
-"""The hold fuzz's state: arrays, the graph, its node blocks as (block, array index, addition)."""
+"""The hold fuzz's state: arrays, the graph, its groups as (group, array index, addition)."""
 mutable struct HoldState
     dev::Any
     rng::Xoshiro
@@ -355,7 +357,7 @@ mutable struct HoldState
 end
 
 struct OpNewArray end       # an array created from data
-struct OpFree end           # an array's creator hold dropped; the graph's blocks keep using it
+struct OpFree end           # an array's creator hold dropped; the graph's groups keep using it
 struct OpNewGraph end       # the graph freed or dropped, a new one in its place
 struct OpRead end           # an array read back and compared with its model
 
@@ -371,9 +373,8 @@ function holdstep!(h, ::OpInsert)
     i = rand(h.rng, live)
     k = Int32(rand(h.rng, 1:9))
     x = h.arrays[i]
-    block = insert!(h.graph) do
-        dispatch!(h.graph, fz_add!, (x.array, k), length(x.model))
-    end
+    block = Group(h.graph, "block")
+    dispatch!(block, fz_add!, (x.array, k), length(x.model))
     push!(h.blocks, (block, i, k))
 end
 function holdstep!(h, ::OpDelete)
@@ -428,17 +429,16 @@ function freeholds!(h)
     foreach(x -> free!(x.array), h.arrays)
 end
 
-# ── Host time of a run against the resources it names (GT-03) ──
+# ── Host time of a run against the resources it names ──
 
-"""A graph naming `n` one-element arrays, four per launch; with `viaref` every other one through an array GPURef."""
-function namedgraph(dev, n; viaref)
+"""A graph naming `n` one-element arrays, four per launch."""
+function namedgraph(dev, n)
     arrays = [MantleArray(dev, Int32, 1) for _ in 1:n]
-    named = [viaref && isodd(k) ? GPURef(dev, a) : a for (k, a) in enumerate(arrays)]
     g = Graph(dev)
     for k in 1:4:n
-        dispatch!(g, fz_touch4!, Tuple(named[k:k+3]), 1)
+        dispatch!(g, fz_touch4!, Tuple(arrays[k:k+3]), 1)
     end
-    return g, arrays, named
+    return g, arrays
 end
 
 """The median host time of `run!(g)`, each run started on an idle device."""
@@ -453,13 +453,13 @@ end
 
 # FZ-01 = THR-07 (with HOLD-10's operations mixed in): 8 tasks, each with its
 # own graph, plus graphs any task runs, with crossing reads and writes
-# through the shared counters; stores, copy!, resizes, eager calls, array
-# GPURef rebinds, node blocks inserted and deleted, temporary arrays and
-# graphs freed or dropped, collections; on a ray-tracing device also TLAS
-# push!/delete!, source stores and resizes and refit/build runs. Under the
-# watchdog and the lock checker (FI-8: lock order, no sync-state, channel,
-# pool or window lock held in a host wait). Every array exact; memory back at
-# its baseline. A short fuzz first warms kernels, the pool and the cell arena.
+# through the shared counters; stores, copy!, resizes, eager calls, GPURef
+# stores, groups declared and deleted, temporary arrays and graphs freed or
+# dropped, collections; on a ray-tracing device also TLAS push!/delete!,
+# source stores and resizes and refit/build runs. Under the watchdog and the
+# lock checker (lock order, no sync-state, channel, pool or window lock held
+# in a host wait). Every array exact; memory back at its baseline. A short
+# fuzz first warms kernels, the pool and the cell arena.
 @case "FZ-01" 6 :long begin
     dev = testdevice()
     rt = has(dev, :rt)
@@ -475,23 +475,23 @@ end
     atbaseline(before, memory(dev))
 end
 
-# FZ-02 = GT-01: 4 tasks, 10^5 operations on composites (TLAS push!, delete!,
-# source stores and resizes, array GPURef rebinds) and their arrays, against
-# three graphs that refit or build the TLAS and the tasks' own graphs. No
-# deadlock, arrays exact, memory back at its baseline after free!.
+# FZ-02: 4 tasks, 10^5 operations on composites (TLAS push!, delete!, source
+# stores and resizes) and their arrays, against three graphs that refit or
+# build the TLAS and the tasks' own graphs. No deadlock, arrays exact, memory
+# back at its baseline after free!.
 @case "FZ-02" 6 :rt :long begin
     dev = testdevice()
-    ops = (FZ_TLASOPS..., OpRebind(), OpStore(), OpGrow(), OpShrink(), OpRun())
+    ops = (FZ_TLASOPS..., OpStore(), OpGrow(), OpShrink(), OpRun())
     fuzz!(dev, 2, 50, ops; rt = true)
     before = memory(dev)
     fuzz!(dev, 4, 25_000, ops; rt = true)
     atbaseline(before, memory(dev))
 end
 
-# FZ-03 = GT-02: steady state of a frame with per-frame stores (a camera as a
+# FZ-03: steady state of a frame with per-frame stores (a camera as a
 # one-element array, a moved instance's source) and a TLAS refit every run
 # (api.md 6, test_run_is_submit.jl). run! allocates, compiles and records
-# nothing (the instance count never changes, so no AccelCommand is marked)
+# nothing (the instance count never changes, so no BuildRecording is marked)
 # and submits its one segment once.
 @case "FZ-03" 5 :rt :long begin
     dev = testdevice()
@@ -520,30 +520,26 @@ end
     foreach(free!, (tlas, blas, vertices, faces, cam, out))
 end
 
-# FZ-04 = GT-03: plans naming 100, 2 500, 25 000 and 50 000 resources, once
-# directly and once with every other one through an array GPURef, run with
+# FZ-04: plans naming 100, 2 500, 25 000 and 50 000 resources, run with
 # nothing changed: the host time per run does not grow with the count (api.md
-# 6, test_run_host_time.jl; open decision 19, ruled). That file gates against
-# the phase 3 model; this case only checks the growth, with a 3x margin for
-# noise, and records the times.
+# 6, test_run_host_time.jl). That file gates against the phase 3 model; this
+# case only checks the growth, with a 3x margin for noise, and records the
+# times.
 @case "FZ-04" 6 :long begin
     dev = testdevice()
-    for viaref in (false, true)
-        times = map((100, 2_500, 25_000, 50_000)) do n
-            g, arrays, named = namedgraph(dev, n; viaref)
-            t = runhosttime(g, dev)
-            free!(g)
-            foreach(free!, named)
-            foreach(free!, arrays)
-            t
-        end
-        @info "FZ-04: host time per run for 100, 2 500, 25 000, 50 000 named resources" viaref times
-        @test last(times) <= 3 * first(times)
+    times = map((100, 2_500, 25_000, 50_000)) do n
+        g, arrays = namedgraph(dev, n)
+        t = runhosttime(g, dev)
+        free!(g)
+        foreach(free!, arrays)
+        t
     end
+    @info "FZ-04: host time per run for 100, 2 500, 25 000, 50 000 named resources" times
+    @test last(times) <= 3 * first(times)
 end
 
-# FZ-05 = HOLD-10: 10 000 random declarations (node blocks inserted and
-# deleted), runs, frees of arrays a graph still uses, graphs freed or dropped,
+# FZ-05 = HOLD-10: 10 000 random declarations (groups declared and deleted),
+# runs, frees of arrays a graph still uses, graphs freed or dropped,
 # collections and reads, under the watchdog. Every live array exact; a
 # declaration naming an array its creator freed throws and leaves the graph
 # runnable; memory back at its baseline.
@@ -557,9 +553,8 @@ end
     if !isempty(freed)
         x = first(freed)
         @test_throws ArgumentError fill!(x.array, Int32(0))
-        @test_throws ArgumentError insert!(h.graph) do
-            dispatch!(h.graph, fz_add!, (x.array, Int32(1)), length(x.model))
-        end
+        block = Group(h.graph, "block")
+        @test_throws ArgumentError dispatch!(block, fz_add!, (x.array, Int32(1)), length(x.model))
         run!(h.graph)
     end
     freeholds!(h)

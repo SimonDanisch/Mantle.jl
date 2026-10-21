@@ -114,13 +114,16 @@ end
 # residency set per command queue; acceleration structures reached through an
 # argument buffer are exactly the case where Metal cannot infer residency, and
 # the failure mode without this is a silent miss rather than an error.
+#
+# Through Metal.jl's own bookkeeping rather than `add_allocation!` on the set: a
+# set holds a strong reference to everything in it, and only an allocation
+# Metal.jl knows about is taken back out when it is freed (`forget_resident!`).
 function make_resident!(d::MetalDevice, resources...)
-    resset = Metal.install_queue_residency!(cmdqueue(d), d.dev)
+    Metal.install_queue_residency!(cmdqueue(d), d.dev)
     for r in resources
         r === nothing && continue
-        MTL.add_allocation!(resset, r)
+        Metal.make_persistently_resident!(r, d.dev)
     end
-    MTL.commit!(resset)
     return nothing
 end
 
@@ -369,36 +372,13 @@ end
 # Identical to the Vulkan path except for the BLAS build itself: same triangle
 # extraction, same degenerate-face skip, same running bounds.
 function add_geometry!(t::MetalHWTLAS{Tri}, mesh::GeometryBasics.Mesh) where {Tri}
-    nmesh = GeometryBasics.expand_faceviews(mesh)
-    fs = decompose(GeometryBasics.TriangleFace{UInt32}, nmesh)
-    verts = decompose(Point3f, nmesh)
-    norms = Raycore.Normal3f.(Raycore.decompose_normals(nmesh))
-    uvs_raw = GeometryBasics.decompose_uv(nmesh)
-    uvs = isnothing(uvs_raw) ? Point2f[] : Point2f.(uvs_raw)
-    indices = collect(reinterpret(UInt32, fs))
-    has_meta = hasproperty(nmesh, :face_meta)
-
-    cpu_triangles = Tri[]
-    for i in 1:length(fs)
-        Raycore.is_degenerate_face(verts, indices, i) && continue
-        meta = has_meta ? nmesh.face_meta[indices[3*(i-1)+1]] : UInt32(i)
-        push!(cpu_triangles, Raycore.build_triangle(verts, norms, uvs, indices, i, meta))
-    end
-    isempty(cpu_triangles) && error("Geometry has no valid triangles")
-
+    cpu_triangles = Mantle.meshtriangles(Tri, mesh)
     # Metal's BLAS builder takes a flat vertex buffer, three floats per vertex
-    # and three vertices per triangle — no index buffer, so the triangles are
-    # expanded here.
+    # and three vertices per triangle, packed by the shared host preparation.
     n_tris = length(cpu_triangles)
-    flat = Vector{Float32}(undef, n_tris * 9)
-    @inbounds for i in 1:n_tris
-        vs = cpu_triangles[i].vertices
-        for j in 1:3, k in 1:3
-            flat[(i-1)*9 + (j-1)*3 + k] = Float32(vs[j][k])
-        end
-    end
-    vbuf = MTL.MTLBuffer(t.device.dev, sizeof(flat); storage = Metal.SharedStorage)
-    unsafe_copyto!(convert(Ptr{Float32}, MTL.contents(vbuf)), pointer(flat), length(flat))
+    vertices = Mantle.trianglevertices(cpu_triangles)
+    vbuf = MTL.MTLBuffer(t.device.dev, sizeof(vertices); storage = Metal.SharedStorage)
+    unsafe_copyto!(convert(Ptr{NTuple{3,Float32}}, MTL.contents(vbuf)), pointer(vertices), length(vertices))
     blas = build_blas(t.device, vbuf, n_tris)
 
     push!(t.blas_list, blas)
@@ -652,15 +632,7 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     # One TLAS instance per record, each naming its batch's BLAS by index into
     # `blas_list`. A batch with no triangles gets `NOTRIANGLES` as its offset, so
     # its hits answer the empty triangle instead of the next batch's.
-    all_tris = Tri[]
-    per_inst_offsets = UInt32[]
-    tri_offset = UInt32(0)
-    for b in t.instances
-        append!(all_tris, b.triangles)
-        off = isempty(b.triangles) ? NOTRIANGLES : tri_offset
-        append!(per_inst_offsets, Iterators.repeated(off, b.n))
-        tri_offset += UInt32(length(b.triangles))
-    end
+    metadata = Mantle.trianglemetadata(Tri, t.instances)
 
     # One element at least, as on Vulkan: a kernel binds these whatever the
     # scene holds.
@@ -668,8 +640,8 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     t.records = MtlArray{Raycore.InstanceRecord}(undef, max(total, 1))
     writeinstances!(t, descriptors, t.records)
     t.built = build_accel!(t.device, t.blas_list, descriptors, total; refittable = true)
-    t.tri_gpu = MtlArray(all_tris)
-    t.off_gpu = MtlArray(per_inst_offsets)
+    t.tri_gpu = MtlArray(metadata.triangles)
+    t.off_gpu = MtlArray(metadata.hits)
 
     # The argument buffer the kernel dereferences. One resource ID for a
     # triangles-only scene; three slots when there is procedural geometry, laid

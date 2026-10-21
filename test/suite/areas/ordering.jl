@@ -1,8 +1,8 @@
-# Ordering between graphs (catalogue-core.md, table 11: ORD). Between graphs a
-# stage that writes a resource another plan names waits for that plan's
-# complete last run; a stage that finds a resource in its inbox waits for the
-# last runs of its writers (recording-plan.md, "Ordering across graphs and
-# queues"; internals.jl section 8; decisions.md B3.14, B3.15).
+# Ordering between graphs (ORD). Between graphs a stage that writes a
+# resource another plan names waits for that plan's complete last run; a
+# stage that finds a resource in its inbox waits for the last runs of its
+# writers (recording-plan.md, "Ordering across graphs and queues";
+# internals.jl section 8).
 #
 # Every ordering case makes the correct value depend on the wait: the writer
 # is slow (slowwrite!, which writes after a spin) or the reader spins before
@@ -10,73 +10,92 @@
 # wrong value. Kernels are compiled by a first run before the measured one, so
 # a compile never stands in for a wait.
 #
-# Doc keys as in the catalogue: A api.md, P recording-plan.md, I internals.jl,
-# R resizing-and-raytracing.jl, D experiments/plan-review/decisions.md.
-# A second queue: Graph(dev; priority = 1) (the plan's open decision 12 leaves
-# the keyword and its values open). A result read for a timing sits in
-# Readback memory (api.md 2.2, name open): its read waits for the writer and
-# submits nothing on another queue.
-
-using KernelAbstractions: @kernel, @index
+# A second queue: Graph(dev; priority = 1) (plan, open decision 11: the
+# keyword and its values are open). A result read for a timing is in unified
+# memory (`unified = true`, api.md 2.2): its read is a wait for its writer
+# and a memcpy, with no GPU copy on another queue.
 
 """Elements of the arrays the repeated cases bump and sum: enough GPU work per run to overlap."""
 const ORDN = 1 << 20
 
-@kernel function ord_bump!(a)                # a[i] += 1: a read and a write of a
-    i = @index(Global)
+"""a[i] += 1: a read and a write of a."""
+function ord_bump!(a)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing      # ndrange is rounded up to whole work-groups
     @inbounds a[i] += Int32(1)
+    return nothing
 end
 
-@kernel function ord_accumulate!(sums, src)  # sums[i] += src[i]: a read of src
-    i = @index(Global)
+"""sums[i] += src[i]: a read of src."""
+function ord_accumulate!(sums, src)
+    i = KI.get_global_id().x
+    i <= length(sums) || return nothing
     @inbounds sums[i] += src[i]
+    return nothing
 end
 
-@kernel function ord_copy!(dst, src)
-    i = @index(Global)
+function ord_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = src[i]
+    return nothing
 end
 
-@kernel function ord_addone!(dst, src)
-    i = @index(Global)
+function ord_addone!(dst, src)
+    i = KI.get_global_id().x
+    i <= length(dst) || return nothing
     @inbounds dst[i] = src[i] + Int32(1)
+    return nothing
 end
 
-@kernel function ord_fill!(a, v)
-    i = @index(Global)
+function ord_fill!(a, v)
+    i = KI.get_global_id().x
+    i <= length(a) || return nothing
     @inbounds a[i] = v
+    return nothing
 end
 
-@kernel function ord_set!(a, v)              # a[1] = v
+"""a[1] = v, one work item."""
+function ord_set!(a, v)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds a[1] = v
+    return nothing
 end
 
-@kernel function ord_readfirst!(out, src)    # out[1] = src[1]
+"""out[1] = src[1], one work item."""
+function ord_readfirst!(out, src)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = src[1]
+    return nothing
 end
 
-@kernel function ord_sum!(out, a, t)         # out[1] = a[1] + t[1]
+"""out[1] = a[1] + t[1], one work item."""
+function ord_sum!(out, a, t)
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = a[1] + t[1]
+    return nothing
 end
 
-# Spins, then out[1] = src[1]. The index depends on the spin, so the load is
-# not issued before it (src has two elements).
-@kernel function ord_slowread!(out, src, iters)
+# Spins, then out[1] = src[1] (one work item). The index depends on the spin,
+# so the load is not issued before it (src has two elements).
+function ord_slowread!(out, src, iters)
+    KI.get_global_id().x == 1 || return nothing
     acc = Int32(0)
     for k in Int32(1):iters
         acc = acc * Int32(1103515245) + k
     end
     @inbounds out[1] = src[Int32(1) + (acc == Int32(-7) ? Int32(1) : Int32(0))]
+    return nothing
 end
 
 """Spin iterations for about `ms` milliseconds on the device under test."""
 ord_spin(ms) = Int32(min(calibratedspin(testdevice(), ms), typemax(Int32)))
 
-"""A graph; on the second queue when `second` (priority, open decision 12 of the plan)."""
+"""A graph; on the second queue when `second` (`priority`; plan, open decision 11)."""
 ord_graph(dev, second::Bool; kw...) = second ? Graph(dev; priority = 1, kw...) : Graph(dev; kw...)
 
-"""A one-element result in Readback memory: reading it waits for its writer only."""
-ord_readback(dev) = MantleArray(dev, Int32, 1; memory = Mantle.Readback())
+"""A one-element result in unified memory: reading it waits for its writer only."""
+ord_unified(dev) = MantleArray(dev, Int32, 1; unified = true)
 
 """The channels that submitted something, from a Diagnostics."""
 ord_channels(d) = count(>(0), values(d.submissions))
@@ -125,14 +144,14 @@ function ord_crossgraphs(dev, s, sums, second; kw...)
     return g1, g2
 end
 
-# ── 11. Ordering between graphs (ORD) ──
+# ── Ordering between graphs (ORD) ──
 
-# P:587-606, D:225-243: P bumps a, C adds a into sums, 10^4 rounds back to back with no host wait, on one queue and on two; every C sees exactly the P before it.
+# plan, Ordering (between graphs, through the resource when it is written): P bumps a, C adds a into sums, 10^4 rounds back to back with no host wait, on one queue and on two; every C sees exactly the P before it.
 @case "ORD-01" 3 :long begin
     dev = testdevice()
     rounds = 10^4
     for second in (false, true)
-        second && !has(dev, :multiqueue) && continue
+        second && !has(dev, :multicompute) && continue
         a, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
         p = Graph(dev); dispatch!(p, ord_bump!, (a,), ORDN)
         c = ord_graph(dev, second); dispatch!(c, ord_accumulate!, (sums, a), ORDN)
@@ -150,7 +169,7 @@ end
     end
 end
 
-# P:595-597: C reads a slowly, then P writes a fast: P waits for C's whole last run, else C reads P's value.
+# plan, Ordering (a stage that writes a resource another plan names waits for that plan's complete last run): C reads a slowly, then P writes a fast: P waits for C's whole last run, else C reads P's value.
 @case "ORD-02" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0])
@@ -163,7 +182,7 @@ end
     @test Array(a) == [7, 1]
 end
 
-# I:1545-1548: P1 writes a after a spin, P2 writes a at once, alternately three times: each P2 write lands after the P1 write before it.
+# internals.jl section 8 (between graphs: write after write): P1 writes a after a spin, P2 writes a at once, alternately three times: each P2 write lands after the P1 write before it.
 @case "ORD-03" 3 begin
     dev = testdevice()
     a = MantleArray(dev, Int32[0])
@@ -176,11 +195,11 @@ end
     end
 end
 
-# P:599-601: R1 and R2 only read a, each spinning 400 ms, on two queues: neither waits for the other, so both finish in about the time of one.
-@case "ORD-04" 3 :multiqueue begin
+# plan, Ordering (two plans overlap on the GPU unless one writes what the other uses): R1 and R2 only read a, each spinning 400 ms, on two queues: neither waits for the other, so both finish in about the time of one.
+@case "ORD-04" 3 :multicompute begin
     dev = testdevice()
     a = MantleArray(dev, Int32[3, 3])
-    o1, o2 = ord_readback(dev), ord_readback(dev)
+    o1, o2 = ord_unified(dev), ord_unified(dev)
     spin = ord_spin(400)
     r1 = Graph(dev); dispatch!(r1, ord_slowread!, (o1, a, spin), 1)
     r2 = ord_graph(dev, true); dispatch!(r2, ord_slowread!, (o2, a, spin), 1)
@@ -193,7 +212,7 @@ end
     @test Array(o1) == Array(o2) == [3]
 end
 
-# R:657-662: C is compiled and registered while P's slow write of a is in flight: registration puts a into C's inbox, so C's first run waits for P.
+# plan, Ordering (registration puts the shared resources a plan uses into its own inbox): C is compiled and registered while P's slow write of a is in flight: registration puts a into C's inbox, so C's first run waits for P.
 @case "ORD-05" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0])
@@ -207,7 +226,7 @@ end
     @test Array(out) == [7]
 end
 
-# D:240-241: ten reader graphs of a register, run and are freed between runs of the writer P: P never recompiles, and reader k sees P's k-th run.
+# plan, Ordering (whether a resource is shared is read from the snapshot at run: a plan registering later needs no recompile): ten reader graphs of a register, run and are freed between runs of the writer P: P never recompiles, and reader k sees P's k-th run.
 @case "ORD-06" 3 begin
     dev = testdevice(); n = 1024
     a = MantleArray(dev, zeros(Int32, n))
@@ -225,7 +244,7 @@ end
     @test Array(a) == fill(Int32(11), n)
 end
 
-# R:667-671: P's plan writing a slowly is retired in flight (free!(P), then a recompile whose new plan no longer names a); C reads a next and waits for the retired plan's tokens.
+# plan, Ordering (the last runs of plans retired while naming a resource), internals.jl section 8 (unregister!): P's plan writing a slowly is retired in flight (free!(P), then a recompile after a group is deleted, whose new plan does not name a); C reads a next and waits for the retired plan's tokens.
 @case "ORD-07" 3 begin
     dev = testdevice()
     a, b, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0]), MantleArray(dev, Int32[0])
@@ -237,9 +256,8 @@ end
     run!(c)
     @test Array(out) == [7]
     p = Graph(dev)
-    h = insert!(p) do
-        slowwrite!(p, a, 8; ms = 500)
-    end
+    h = Group(p, "slow write")
+    slowwrite!(h, a, 8; ms = 500)
     dispatch!(p, ord_set!, (b, Int32(1)), 1)
     run!(p); run!(c); Mantle.waitidle(dev)
     dispatch!(dev, ord_fill!, (a, Int32(0)), 2)
@@ -249,13 +267,13 @@ end
     @test Array(out) == [8]
 end
 
-# A:458, P:1914-1918: test_crossplan_order. g1 reads then writes s, g2 copies s and sums it, sharing s and an arena part, 10^4 rounds on one queue and on two: exact. Negative control Unordered(): wrong on two queues.
+# api.md 6, plan, phase 0: test_crossplan_order. g1 reads then writes s, g2 copies s and sums it, sharing s and an arena part, 10^4 rounds on one queue and on two: exact. Negative control Unordered(): wrong on two queues.
 @case "ORD-08" 3 :long begin
     dev = testdevice()
     rounds = 10^4
     want = rounds * (rounds + 1) ÷ 2
     for second in (false, true), control in (false, true)
-        second && !has(dev, :multiqueue) && continue
+        second && !has(dev, :multicompute) && continue
         s, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
         kw = control ? (; ordering = Mantle.Unordered()) : (;)
         g1, g2 = ord_crossgraphs(dev, s, sums, second; kw...)
@@ -272,7 +290,7 @@ end
     end
 end
 
-# I:1613-1616: a graph whose stage writes nothing another plan names and whose inbox is empty: its host time per run does not grow from 10 to 2 000 named (shared, only read) arrays.
+# internals.jl section 8 (a stage that writes nothing another plan names and finds its inbox empty): a graph whose stage writes nothing another plan names and whose inbox is empty: its host time per run does not grow from 10 to 2 000 named (shared, only read) arrays.
 @case "ORD-09" 3 begin
     dev = testdevice()
     small, large = ord_hosttime(dev, 10), ord_hosttime(dev, 2000)
@@ -280,14 +298,14 @@ end
     @test large.persubmission < 2small.persubmission
 end
 
-# A:466, P:1934-1937: test_run_host_time. Plans naming 100, 2 500, 25 000 and 50 000 shared arrays, nothing changed: host time per run flat, the largest within 3x of the smallest.
+# api.md 6, plan, phase 0: test_run_host_time. Plans naming 100, 2 500, 25 000 and 50 000 shared arrays, nothing changed: host time per run flat, the largest within 3x of the smallest.
 @case "ORD-10" 3 :long begin
     dev = testdevice()
     times = [ord_hosttime(dev, k).persubmission for k in (100, 2_500, 25_000, 50_000)]
     @test maximum(times) < 3first(times)
 end
 
-# I:1606-1613: P writes a slowly; C's stage 1 takes a from its inbox without using it, stage 3 (after two host nodes) reads it: the wait found by stage 1 is kept for stage 3.
+# internals.jl section 6 (submitstage!: the waits a stage found are kept for the run's later stages): P writes a slowly; C's stage 1 takes a from its inbox without using it, stage 3 (after two host nodes) reads it: the wait found by stage 1 is kept for stage 3.
 @case "ORD-11" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0])
@@ -305,7 +323,7 @@ end
     @test Array(out) == [7]
 end
 
-# I:1213-1239: reader graphs register (40 compiles) on one task while P bumps a 200 times on another: P never recompiles, no run is lost, and each reader copies one whole state of a.
+# internals.jl section 6 (lockstage: a plan registered meanwhile makes the stage lock again; nothing recompiles): reader graphs register (40 compiles) on one task while P bumps a 200 times on another: P never recompiles, no run is lost, and each reader copies one whole state of a.
 @case "ORD-12" 3 begin
     dev = testdevice()
     rounds, readers = 200, 40
@@ -327,8 +345,8 @@ end
     @test all(o -> allequal(Array(o)), outs)
 end
 
-# P:647-651: gx writes x from y, gy (second queue) writes y from x, 10^4 rounds: no GPU deadlock and exact (validation is the session's: the suite runs with the validation layers on).
-@case "ORD-13" 3 :multiqueue :long begin
+# plan, Ordering (tokens per segment; a later stage's accesses are not recorded in advance): gx writes x from y, gy (second queue) writes y from x, 10^4 rounds: no GPU deadlock and exact (validation is the session's: the suite runs with the validation layers on).
+@case "ORD-13" 3 :multicompute :long begin
     dev = testdevice()
     rounds = 10^4
     x, y = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
@@ -344,17 +362,16 @@ end
     @test all(==(2rounds), Array(y))
 end
 
-# D:244-254 + D:225-243: delete! drops g's only (slow) read of a while g's old plan is in flight: P's write of a waits for it; after g recompiled, P no longer waits for g (timed where there are two queues).
+# api.md 2.3 (delete! of a group: a resource no remaining node names loses the graph's hold once the plan that names it has retired), plan, Ordering: delete! drops g's only (slow) read of a while g's old plan is in flight: P's write of a waits for it; after g recompiled, P does not wait for g (timed where there are two queues).
 @case "ORD-14" 3 begin
     dev = testdevice()
-    mq = has(dev, :multiqueue)
+    mq = has(dev, :multicompute)
     a, out, z = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0]), MantleArray(dev, Int32[0])
-    pdone = ord_readback(dev)
+    pdone = ord_unified(dev)
     g = ord_graph(dev, mq)
-    h = insert!(g) do
-        dispatch!(g, ord_slowread!, (out, a, ord_spin(500)), 1)
-    end
-    slowwrite!(g, z, 1; ms = 500)                     # g's node outside the block: its later runs stay busy
+    h = Group(g, "slow read")
+    dispatch!(h, ord_slowread!, (out, a, ord_spin(500)), 1)
+    slowwrite!(g, z, 1; ms = 500)                     # g's node outside the group: its later runs stay busy
     p = Graph(dev)
     dispatch!(p, ord_set!, (a, Int32(7)), 1)
     dispatch!(p, ord_set!, (pdone, Int32(1)), 1)
@@ -371,7 +388,7 @@ end
     end
 end
 
-# I:1649-1655: an eager slow write of a puts a into C's inbox; C's stage 1 does not use a, its stage 2 (after a host node) reads it: the item is waited for with C's use and kept for stage 2.
+# internals.jl section 8 (an inbox item the stage does not use is waited for with the plan's use, for its later stages): an eager slow write of a puts a into C's inbox; C's stage 1 does not use a, its stage 2 (after a host node) reads it: the item is waited for with C's use and kept for stage 2.
 @case "ORD-15" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[0, 0]), MantleArray(dev, Int32[0])
@@ -386,10 +403,10 @@ end
     @test Array(out) == [9]
 end
 
-# P:572-573, P:2316-2317: a priority frame graph beside a background graph busy for 500 ms: the frame's result is ready without waiting for the background (open decision 12 of the plan).
-@case "ORD-16" 3 :multiqueue begin
+# plan, Queues (independent graphs on different queues, with priorities), plan, open decision 11 (priorities): a priority frame graph beside a background graph busy for 500 ms: the frame's result is ready without waiting for the background.
+@case "ORD-16" 3 :multicompute begin
     dev = testdevice()
-    w, src, fout = MantleArray(dev, Int32[0]), MantleArray(dev, Int32[5, 5]), ord_readback(dev)
+    w, src, fout = MantleArray(dev, Int32[0]), MantleArray(dev, Int32[5, 5]), ord_unified(dev)
     background = Graph(dev); slowwrite!(background, w, 1; ms = 500)
     frame = Graph(dev; priority = 1); dispatch!(frame, ord_readfirst!, (fout, src), 1)
     run!(background); run!(frame); Mantle.waitidle(dev)
@@ -398,7 +415,7 @@ end
     @test Array(fout) == [5]
 end
 
-# I:1629-1634: free!(g) while g's slow read of a is in flight: unregister! puts a into P's inbox with g's last tokens, so P's write of a waits for that run.
+# internals.jl section 8 (a retired plan's last run is in the retired list of every resource it named; unregister!): free!(g) while g's slow read of a is in flight: unregister! puts a into P's inbox with g's last tokens, so P's write of a waits for that run.
 @case "ORD-17" 3 begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0])

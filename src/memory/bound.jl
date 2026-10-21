@@ -4,8 +4,7 @@
 The largest total size live at any one instant: the max-weight clique of the
 interval graph, by a sweep over `2n` events.
 
-This is the lower bound on any placement, and it is the number `graph-api-design.md`
-never computes. Without it "we fragmented 3%" is not a statement anyone can act on.
+This is the lower bound on any placement. Without it "we fragmented 3%" is not a statement anyone can act on.
 
 MiniMalloc does not compute or report a bound of any kind, so this is ours.
 Buchsbaum et al. bound the gap to optimal in terms of `hmax / maxload`, which is

@@ -1,44 +1,49 @@
-# Scheduling: a call changes nothing on the device (catalogue-resize-rt.md,
-# table A: SC). resize!, stores and copy! only enqueue at the call (Rule 8,
-# decisions.md B3.13; a store's one copy into an upload region, B3.18); the
-# next submission that touches the array applies them in front of its own
-# work, in sequence order (resizing-and-raytracing.jl B.3, B.4).
+# Scheduling: a call changes nothing on the device. resize!, stores and copy!
+# only enqueue at the call (recording-plan.md rule 8; a store's one copy goes
+# into an upload region, api.md 2.2); the next submission that touches the
+# array applies them in front of its own work, in sequence order
+# (resizing-and-raytracing.jl B.3, B.4).
 #
-# Doc keys as in the catalogue: PLAN recording-plan.md, RR
-# resizing-and-raytracing.jl, API api.md, INT internals.jl, DEC decisions.md.
 # The step log (Mantle.steplog): entries with `kind` (a Symbol: :InlineStore,
 # :StagedStore, :MoveStorage, :CellWrite, :BindPages, ...), `target` (the root
 # array the user holds), `seq` and `token`, in emission order.
 
-using KernelAbstractions: @kernel, @index
-
-@kernel function sc_copy!(dst, src)
-    i = @index(Global)
+function sc_copy!(dst, src)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing   # ndrange is rounded up to whole work-groups
     @inbounds dst[i] = src[i]
+    return nothing
 end
 
-@kernel function sc_firsts!(out, a, b)       # out = [a[1], b[1]]
+function sc_firsts!(out, a, b)       # out = [a[1], b[1]]
+    KI.get_global_id().x == 1 || return nothing
     @inbounds out[1] = a[1]
     @inbounds out[2] = b[1]
+    return nothing
 end
 
 # Stage 1 of a gated graph: dst[i] = src[i], and t[1] = 0 for the host node to read.
-@kernel function sc_copyfirst!(dst, src, t)
-    i = @index(Global)
+function sc_copyfirst!(dst, src, t)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     @inbounds dst[i] = src[i]
     if i == 1
         @inbounds t[1] = Int32(0)
     end
+    return nothing
 end
 
 # Stage 2: dst[i] = src[i] + t[1]; reading t keeps it after the host node.
-@kernel function sc_copythen!(dst, src, t)
-    i = @index(Global)
+function sc_copythen!(dst, src, t)
+    i = KI.get_global_id().x
+    i <= min(length(dst), length(src)) || return nothing
     @inbounds dst[i] = src[i] + t[1]
+    return nothing
 end
 
 # Spins, then copies src[1:4] into dst; the indices depend on the spin.
-@kernel function sc_slowcopy4!(dst, src, iters)
+function sc_slowcopy4!(dst, src, iters)
+    KI.get_global_id().x == 1 || return nothing
     acc = Int32(0)
     for k in Int32(1):iters
         acc = acc * Int32(1103515245) + k
@@ -47,10 +52,12 @@ end
     for j in Int32(1):Int32(4)
         @inbounds dst[j] = src[j + base]
     end
+    return nothing
 end
 
 # Spins, then out = [length(a), sum(a)]; the reads depend on the spin.
-@kernel function sc_slowsum!(out, a, iters)
+function sc_slowsum!(out, a, iters)
+    KI.get_global_id().x == 1 || return nothing
     acc = Int32(0)
     for k in Int32(1):iters
         acc = acc * Int32(1103515245) + k
@@ -63,10 +70,12 @@ end
     end
     @inbounds out[1] = n
     @inbounds out[2] = s
+    return nothing
 end
 
 # out = [length(a), Σ i * a[i]] (wrapping Int32).
-@kernel function sc_lengthsum!(out, a)
+function sc_lengthsum!(out, a)
+    KI.get_global_id().x == 1 || return nothing
     n = Int32(length(a))
     s = Int32(0)
     for j in Int32(1):n
@@ -74,6 +83,7 @@ end
     end
     @inbounds out[1] = n
     @inbounds out[2] = s
+    return nothing
 end
 
 sc_spin(ms) = Int32(min(calibratedspin(testdevice(), ms), typemax(Int32)))
@@ -96,7 +106,7 @@ sc_on(steps, a) = [s for s in steps if s.target === a]
 
 # ── A. Scheduling: a call changes nothing on the device (Rule 8) ──
 
-# PLAN:59-71, RR:238-247, DEC:208-216: resize!(a, 10^8) of a fixed 1000-element array only enqueues: length(a) is 10^8; reserved, mapped, tokens unchanged; nothing allocated; pending == [Resize].
+# recording-plan.md rule 8, resizing-and-raytracing.jl B.3: resize!(a, 10^8) of a fixed 1000-element array only enqueues: length(a) is 10^8; reserved, mapped, tokens unchanged; nothing allocated; pending == [Resize].
 @case "SC-01" 4 begin
     dev = testdevice()
     a = MantleArray(dev, Int32, 1000)
@@ -109,7 +119,7 @@ sc_on(steps, a) = [s for s in steps if s.target === a]
     free!(a)                                          # the last hold drops the Resize: 400 MB never allocated
 end
 
-# RR:244-251, DEC:269-277: a[1:1024] = x (4 KiB): one upload region live, device reserved unchanged, no token, pending == [Store]; the region is retired once applied.
+# api.md 2.2 (`a[r] = data`), resizing-and-raytracing.jl B.3: a[1:1024] = x (4 KiB): one upload region live, device reserved unchanged, no token, pending == [Store]; the region is retired once applied.
 @case "SC-02" 4 begin
     dev = testdevice()
     a = MantleArray(dev, Int32, 4096)
@@ -125,7 +135,7 @@ end
     @test memory(dev).uploads == m.uploads
 end
 
-# RR:18-20, PLAN:69-70: eager K reads a[1:4] after a 500 ms spin; then a[1:4] = y; then g2 reads a: K sees the old values, g2 sees y, applied in g2's one submission.
+# resizing-and-raytracing.jl rules, recording-plan.md rule 8: eager K reads a[1:4] after a 500 ms spin; then a[1:4] = y; then g2 reads a: K sees the old values, g2 sees y, applied in g2's one submission.
 @case "SC-03" 4 begin
     dev = testdevice()
     a = MantleArray(dev, Int32.(1:16))
@@ -142,7 +152,7 @@ end
     @test Array(outg) == y
 end
 
-# PLAN:69-70, RR:544-548: run1 (g1) sums a (n elements) after a spin; thread B resizes a to 2n (a move) and stores; run2 (g2) applies both: run1 saw n and the old data, run2 2n and the new; the old region is not reused before run1 ends (canary).
+# recording-plan.md rule 8, resizing-and-raytracing.jl B.5 (a move retires the old storage with its token): run1 (g1) sums a (n elements) after a spin; thread B resizes a to 2n (a move) and stores; run2 (g2) applies both: run1 saw n and the old data, run2 2n and the new; the old region is not reused before run1 ends (canary).
 @case "SC-04" 4 begin
     dev = testdevice(); n = 1024
     a = MantleArray(dev, Int32.(1:n))
@@ -163,7 +173,7 @@ end
     @test Array(out2) == [2n, sum(1:2n)]
 end
 
-# API:452: thread A runs g 10^4 times, reading (length(a), checksum) after each; thread B alternates copy!(a, p_i) over three patterns: every pair read is one whole p_i.
+# api.md section 6 (every stage sees the old or the new state, never a mix): thread A runs g 10^4 times, reading (length(a), checksum) after each; thread B alternates copy!(a, p_i) over three patterns: every pair read is one whole p_i.
 @case "SC-05" 4 :long begin
     dev = testdevice(); rounds = 10^4
     patterns = [testdata(Int32, k; seed = k) .% Int32(1000) for k in (37, 100, 1000)]
@@ -178,7 +188,7 @@ end
     @test all(in(want), seen)
 end
 
-# RR:705-712, DEC:213-214: g is held between stages (its host node blocks) and launches directly over fixed a; thread B calls resize!(a, 2n), a[1:2] = x, copy!(b, y): each returns at once, with no host wait and no submission.
+# resizing-and-raytracing.jl B.4, B.6 (the call that pended a change never waits): g is held between stages (its host node blocks) and launches directly over fixed a; thread B calls resize!(a, 2n), a[1:2] = x, copy!(b, y): each returns at once, with no host wait and no submission.
 @case "SC-06" 4 begin
     dev = testdevice(); n = 1024
     a, b = MantleArray(dev, Int32.(1:n)), MantleArray(dev, Int32, n)
@@ -198,7 +208,7 @@ end
     @test Array(b) == 1:n
 end
 
-# API:80: resize!(a); then a run of g2, which does not name a, and Array(b): a's Resize stays pending and no step on a is in either submission.
+# api.md 2.2 (resize!): resize!(a); then a run of g2, which does not name a, and Array(b): a's Resize stays pending and no step on a is in either submission.
 @case "SC-07" 4 begin
     dev = testdevice()
     a, b, out = MantleArray(dev, Int32, 1024), MantleArray(dev, Int32.(1:16)), MantleArray(dev, Int32, 16)
@@ -211,7 +221,7 @@ end
     @test Array(out) == 1:16
 end
 
-# PLAN:66-67, INT:2117-2131: three stores pending on a, then one eager dispatch!(dev, k, (out, a)): one submission, the three stores (inline where the device has an inline limit) in sequence order before the dispatch; out reflects them.
+# recording-plan.md rule 8, internals.jl section 11: three stores pending on a, then one eager dispatch!(dev, k, (out, a)): one submission, the three stores (inline where the device has an inline limit) in sequence order before the dispatch; out reflects them.
 @case "SC-08" 4 begin
     dev = testdevice()
     a, out = MantleArray(dev, zeros(Int32, 16)), MantleArray(dev, Int32, 4)
@@ -226,14 +236,14 @@ end
     @test Array(out) == [10, 20, 30, 0]
 end
 
-# API:483, INT:1003-1004: window minimized; g names a, which has a pending store; run!(g) returns Skipped and submits nothing, the store stays pending; Array(a) applies it in its own submission.
-@case "SC-09" 7 :window begin   # pending decision 4: Skipped() is public
+# api.md section 7 (a minimized window skips the run), internals.jl section 7 (acquireimage!): window minimized; g names a, which has a pending store; run!(g) returns Skipped and submits nothing, the store stays pending; Array(a) applies it in its own submission.
+@case "SC-09" 7 :window begin
     dev = testdevice()
     win = Window(dev, 320, 240)
     a, out = MantleArray(dev, Int32[1, 2]), MantleArray(dev, Int32, 1)
     g = Graph(dev)
     dispatch!(g, sc_copy!, (out, a), 1)
-    render!(g, win => Clear((0f0, 0f0, 0f0, 1f0))) do p end
+    clear!(g, win, (0f0, 0f0, 0f0, 1f0))
     run!(g); Mantle.waitidle(dev)
     a[1:1] = Int32[9]
     resize!(win, 0, 0)                                # minimized
@@ -247,7 +257,7 @@ end
     @test isempty(Mantle.pendingof(a))
 end
 
-# PLAN:66-68, RR:291-292,352-353: a[1:1] = x, b[1:1] = y, resize!(a, 64) (a move), then one eager kernel over both: the steps are emitted in seq order, a's Store, b's Store, then a's Resize steps.
+# recording-plan.md rule 8 (in call order across resources), resizing-and-raytracing.jl B.3, B.4: a[1:1] = x, b[1:1] = y, resize!(a, 64) (a move), then one eager kernel over both: the steps are emitted in seq order, a's Store, b's Store, then a's Resize steps.
 @case "SC-10" 4 begin
     dev = testdevice()
     a, b, out = MantleArray(dev, zeros(Int32, 16)), MantleArray(dev, zeros(Int32, 16)), MantleArray(dev, Int32, 2)

@@ -379,11 +379,14 @@ next dispatch of each kernel builds them again. The SPIR-V stays with its
 `CodeInstance`; an edited kernel needs none of this, since its new code is a
 new `CodeInstance` and a new compile.
 
-**Both** caches have to go. `caches.launchplans` holds its own `VkPipeline` and
-is consulted *before* `caches.linked` on every dispatch, so emptying only the
-latter leaves the previous pipeline running with no symptom.
+All three ownership layers must go together: launch plans can bypass linked
+kernel lookup, and the native content cache can otherwise return the same
+pipeline when linking again. Existing plans and submissions retain their own
+strong references; clearing lookup state does not invalidate accepted work.
 """
 function clear_kernel_cache!(ctx::VkContext = vk_context())
+    empty!(ctx.caches.pipelines)
+    empty!(ctx.caches.pipeline_order)
     empty!(ctx.caches.linked)
     empty!(ctx.caches.launchplans)
     return nothing
