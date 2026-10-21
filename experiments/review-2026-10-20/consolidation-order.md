@@ -14,6 +14,7 @@ error behavior and native requirements. Measure implementation and prose separat
 | [TLAS metadata / cache invalidation](consolidation-tlas-cache.md) | Triangle-table preparation and complete compute-cache invalidation. Preserve native content reuse during replacement. |
 | [Compilation publication](consolidation-publication.md) | Core publication for native graphics/mesh/ray pipelines; device-owned Metal caches replace process globals. |
 | [Kernel preparation](consolidation-kernel-preparation.md) | Eager and declared KI preparation, KA construction and capture validation. |
+| [GEMM generation](consolidation-gemm-generator.md) | One source body for wide/narrow/ablation variants; distinct measured schedules remain. Native output, shader and timing checks preserve behavior. |
 | [Trace packing/setup](consolidation-trace.md) | Eager/recorded argument packing, direct/indirect native bindings/timestamps, shader modules and TLAS descriptor writes. |
 | [TLAS mutations](consolidation-tlas-mutation.md) | Shared batch state, geometry registration, push/update/delete/visibility/range algorithms; backend metadata copies and unused offset state deleted. |
 | [Video sessions](consolidation-video.md) | Shared decoder state, session resources, Annex-B splitting, upload packing and batch decoding. Codec parsing and native picture/reference structures remain distinct. |

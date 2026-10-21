@@ -370,33 +370,7 @@ const GEMM_DOUBLEBUF_DEFAULT = false
 rule as `GEMM_DOUBLEBUF_DEFAULT`, and the same reason."""
 const GEMM_VEC4_DEFAULT = false
 
-"""Whether the narrow-index (`Int32` staging address) kernels may be selected.
-
-**On, and they are the CORRECT ones.** Measured 2026-09-22 on RADV NAVI31
-against `ones * ones = K`, which is exact in fp16 at these K and needs no host
-reference to argue with:
-
-    shape                narrow / prefetch      wide (`GEMM_STAGED_V2_KERNELS`)
-     576 x 4096 x 576    0 wrong of 2.36M       2.36M wrong of 2.36M
-    2304 x 4096 x 576    0 wrong of 9.44M       9.44M wrong of 9.44M
-    1024 x 1152 x 288    0 wrong of 1.18M       1.18M wrong of 1.18M
-
-So `test_gemm_staged.jl`'s "the narrow-index kernel agrees with the wide one"
-is a real disagreement reported against the wrong side, and the GPUVM fault it
-takes the device down with belongs to the wide kernel writing outside its
-allocation — it surfaces on whatever submits next, which is the narrow call
-after it.
-
-The wide vec2 kernel had no other caller: `vec2 = false` selects the scalar
-staged family and `vec2 = true` selects a narrow one whenever `gemm_fits32`
-holds, which is every shape in this repo. That is how it stayed broken — its
-only exercise was a test that compared it to something and blamed the
-something.
-
-**No longer reproduces (2026-09-28):** 0 wrong at every shape above and at the
-two that faulted, 4096x2304x576 and 4096x576x2304. The fix was not isolated —
-it came with one of the emitter corrections since — and `test_gemm_staged.jl`
-now asserts the two kernels agree everywhere, the faulting shapes included."""
+"""Use Int32 staging indices when all addressed matrix extents fit (gemm_fits32)."""
 const GEMM_NARROW_DEFAULT = true
 
 @inline function gemm_tiling(M::Int, N::Int, K::Int; forced = nothing)
@@ -845,30 +819,8 @@ rather than `<=`: the indices are 1-based, so the largest the A staging forms is
     widemul(Int(M), Int(K)) < typemax(Int32) && widemul(Int(K), Int(N)) < typemax(Int32) &&
     widemul(Int(M), Int(N)) < typemax(Int32)
 
-"""
-Narrow-index twins of `GEMM_STAGED_V2_KERNELS`: the ones `coopmat_gemm!`'s
-`narrow_ok` selects, which compute the staging addresses in `Int32` instead of
-`Int`.
-
-Julia hands out `Int64` indices and Lava emits them as-is, but NVIDIA has no
-64-bit integer unit: adds and multiplies are emulated. The same narrowing is
-worth **1.56x** in `im2col_kernel!`.
-
-It does **not** work the way that suggests. The register count goes *up*
-(118 -> 124) and the occupancy is unchanged at 2 workgroups an SM, so whatever it
-buys is instruction count in the staging loop, not residency. Measured
-interleaved in one session, both orders, over SAM 2's eight `addmm` shapes
-weighted by call count: **-1.2%**, from -4.9% to +0.9%, results bit-identical.
-
-The gap between that and the 3.5-9% a *cross-session* comparison first showed is
-the reason the rule exists — the earlier baseline was a different process on a
-differently-warmed card, and it inflated the effect by 4x.
-
-Kept anyway: it is free and never wrong. Both kernels exist because the narrow
-one is only *legal* while `M*K`, `K*N` and `M*N` fit in an `Int32`
-(`gemm_fits32`), and the wide one is the fallback for anything larger, so the
-duplication is a correctness requirement and not only a measurement convenience.
-"""
+"""Int32-index variants of vec2 staging, generated from the shared wide/narrow body.
+The selector uses gemm_fits32; larger extents retain Int indexing."""
 const GEMM_STAGED_V2N_KERNELS = Dict{GemmTiling,Any}()
 
 """
@@ -1002,16 +954,9 @@ rule directly.
 """
 const GEMM_STAGED_V4_KERNELS = Dict{GemmTiling,Any}()
 
-"""
-Ablation twins: `:all` is the kernel, `:nostage` stages only the first k-block
-and runs every later block's arithmetic on that stale tile.
-
-**They compute wrong answers on purpose.** The gap between them is what the
-staging loads cost, with the muladds and the barriers held fixed — the only
-instrument that says which half of the k-loop the ~36% deficit to cuBLAS lives
-in, now that tiling, double buffering and staging width are all measured and
-closed. Driven by `tools/gemm_ablate.jl`, never by a shipped path.
-"""
+"""Diagnostic variants: :nostage reuses only the first k-block (intentionally wrong);
+:all stages every block. Never selected by normal GEMM dispatch. ABI retained for
+JuliaVision/tools/gemm_ablate.jl."""
 const GEMM_STAGED_ABL_KERNELS = Dict{GemmTiling,Any}()
 
 "A 2-wide fp16 vector, i.e. `f16vec2`; see `Lava.coopmat_vecwidth`."
@@ -1131,157 +1076,93 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         GEMM_STAGED_KERNELS[$cfg] = $kname
     end
 
-    # ── the same kernel with `vec2` staging buffers ──────────────────────────
-    #
-    # Identical arithmetic; only the staging width changes. Each lane stores one
-    # packed pair rather than two halves, so the trip counts halve, and the
-    # cooperative-matrix loads address the vector with their stride counted in
-    # vectors — `LDA2`/`LDB2` and the tile offsets are all the scalar values
-    # divided by two, which is exact because every one of them is even by
-    # construction (`GEMM_TILE` is 16, `BK` and `PAD` are even).
+    # Packed pairs halve staging counts and cooperative-load strides. The guard
+    # keeps every pair, tile offset and workgroup transfer divisible by two.
     if iseven(BM) && iseven(BK) && iseven(LDA) && iseven(LDB) &&
        ((BM * BK) ÷ 2) % WG == 0 && ((BK * BN) ÷ 2) % WG == 0
         LDA2, LDB2 = LDA ÷ 2, LDB ÷ 2
         AREPS2, BREPS2 = (BM * BK) ÷ 2 ÷ WG, (BK * BN) ÷ 2 ÷ WG
         BM2, BK2 = BM ÷ 2, BK ÷ 2
-        kv2 = Symbol("coopmat_gemm_staged_kernel_", ci, "_v2!")
-        @eval begin
-            function $kv2(
-                                              C, A, B, bias, epi,
-                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
+        # Index width and optional ablation change code generation, not the schedule.
+        for (suffix, Index, table, ablation) in (
+            ("_v2!", Int, :GEMM_STAGED_V2_KERNELS, false),
+            ("_v2n!", Int32, :GEMM_STAGED_V2N_KERNELS, false),
+            ("_abl!", Int32, :GEMM_STAGED_ABL_KERNELS, true))
+            vname = Symbol("coopmat_gemm_staged_kernel_", ci, suffix)
+            extra_args = ablation ? (:(::Val{ABL}),) : ()
+            parameters = ablation ? (:M,:N,:K,:ABL) : (:M,:N,:K)
+            staging = quote
+                @inbounds for r in $Index(0):$Index($AREPS2 - 1)
+                    idx = tid + r * $Index($WG)
+                    p, kk = splitidx(idx, Val($BM2))
+                    g = $Index(1) + (tm + $Index(2) * $Index(p)) +
+                        (k0 + $Index(kk)) * $Index(M)
+                    sA[1 + Int(p) + Int(kk) * $LDA2] =
+                        (VecElement(A[g]), VecElement(A[g + $Index(1)]))
+                end
+                @inbounds for r in $Index(0):$Index($BREPS2 - 1)
+                    idx = tid + r * $Index($WG)
+                    q, j = splitidx(idx, Val($BK2))
+                    g = $Index(1) + (k0 + $Index(2) * $Index(q)) +
+                        (tn + $Index(j)) * $Index(K)
+                    sB[1 + Int(q) + Int(j) * $LDB2] =
+                        (VecElement(B[g]), VecElement(B[g + $Index(1)]))
+                end
+            end
+            if ablation
+                staging = :(if ABL !== :nostage || kb == $Index(0); $staging; end)
+            end
+            @eval begin
+                function $vname(C, A, B, bias, epi, ::Val{M}, ::Val{N}, ::Val{K},
+                                $(extra_args...)) where {$(parameters...)}
+                    sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+                    sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-                tid = KI.get_local_id().x - 1
-                blk = KI.get_group_id().x - 1
-                nblk_m = M ÷ $BM
-                tm = (blk % nblk_m) * $BM
-                tn = (blk ÷ nblk_m) * $BN
+                    tid = $Index(KI.get_local_id().x - 1)
+                    blk = $Index(KI.get_group_id().x - 1)
+                    nblk_m = $Index(M ÷ $BM)
+                    tm = (blk % nblk_m) * $Index($BM)
+                    tn = (blk ÷ nblk_m) * $Index($BN)
 
-                s = tid ÷ 32
-                sm = (s % $WM) * $STM
-                sn = (s ÷ $WM) * $STN
+                    s = tid ÷ $Index(32)
+                    sm = (s % $Index($WM)) * $Index($STM)
+                    sn = (s ÷ $Index($WM)) * $Index($STN)
 
-                bp = bias === nothing ? bias : pointer(bias)
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
+                    bp = bias === nothing ? bias : pointer(bias)
+                    Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                        c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
 
-                for kb in 0:(K ÷ $BK - 1)
-                    k0 = kb * $BK
-                    # A: pairs along `m`, the contiguous axis, so consecutive
-                    # lanes still read consecutive global addresses.
-                    @inbounds for r in 0:($AREPS2 - 1)
-                        idx = tid + r * $WG
-                        p, kk = splitidx(idx, Val($BM2))
-                        g = 1 + (tm + 2p) + (k0 + kk) * M
-                        sA[1 + p + kk * $LDA2] = (VecElement(A[g]), VecElement(A[g + 1]))
-                    end
-                    # B: pairs along `k`, contiguous here for the same reason.
-                    @inbounds for r in 0:($BREPS2 - 1)
-                        idx = tid + r * $WG
-                        q, j = splitidx(idx, Val($BK2))
-                        g = 1 + (k0 + 2q) + (tn + j) * K
-                        sB[1 + q + j * $LDB2] = (VecElement(B[g]), VecElement(B[g + 1]))
-                    end
-                    KI.barrier()
+                    for kb in $Index(0):$Index(K ÷ $BK - 1)
+                        k0 = kb * $Index($BK)
+                        $staging
+                        KI.barrier()
 
-                    Base.Cartesian.@nexprs $NKT u -> begin
-                        kt = (u - 1) * GEMM_TILE
-                        Base.Cartesian.@nexprs $STM mt -> begin
-                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                    sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                        kt * $LDA2, $LDA2)
-                            Base.Cartesian.@nexprs $STN nt -> begin
-                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                        sB, 1 + (kt ÷ 2) +
-                                            (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                                c_mt_nt = muladd(a, b, c_mt_nt)
+                        Base.Cartesian.@nexprs $NKT u -> begin
+                            kt = (u - 1) * GEMM_TILE
+                            Base.Cartesian.@nexprs $STM mt -> begin
+                                a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
+                                        sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
+                                            kt * $LDA2, $LDA2)
+                                Base.Cartesian.@nexprs $STN nt -> begin
+                                    b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
+                                            sB, 1 + (kt ÷ 2) +
+                                                (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
+                                    c_mt_nt = muladd(a, b, c_mt_nt)
+                                end
                             end
                         end
+                        KI.barrier()
                     end
-                    KI.barrier()
+
+                    Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                        accstore!(C,
+                                  1 + Int(tm + (sm + mt - 1) * $Index(GEMM_TILE)) +
+                                      (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                                  M, c_mt_nt, epi)
+                    return nothing
                 end
-
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    accstore!(C,
-                              1 + (tm + (sm + mt - 1) * GEMM_TILE) +
-                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                              M, c_mt_nt, epi)
-                return nothing
+                $table[$cfg] = $vname
             end
-            GEMM_STAGED_V2_KERNELS[$cfg] = $kv2
-        end
-
-        kv2n = Symbol("coopmat_gemm_staged_kernel_", ci, "_v2n!")
-        @eval begin
-            function $kv2n(
-                                              C, A, B, bias, epi,
-                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
-
-                tid = Int32(KI.get_local_id().x - 1)
-                blk = Int32(KI.get_group_id().x - 1)
-                nblk_m = Int32(M ÷ $BM)
-                tm = (blk % nblk_m) * Int32($BM)
-                tn = (blk ÷ nblk_m) * Int32($BN)
-
-                s = tid ÷ Int32(32)
-                sm = (s % Int32($WM)) * Int32($STM)
-                sn = (s ÷ Int32($WM)) * Int32($STN)
-
-                bp = bias === nothing ? bias : pointer(bias)
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-                for kb in Int32(0):Int32(K ÷ $BK - 1)
-                    k0 = kb * Int32($BK)
-                    # A: pairs along `m`, the contiguous axis, so consecutive
-                    # lanes still read consecutive global addresses.
-                    @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                        idx = tid + r * Int32($WG)
-                        p, kk = splitidx(idx, Val($BM2))
-                        g = Int32(1) + (tm + Int32(2) * Int32(p)) +
-                            (k0 + Int32(kk)) * Int32(M)
-                        sA[1 + Int(p) + Int(kk) * $LDA2] =
-                            (VecElement(A[g]), VecElement(A[g + Int32(1)]))
-                    end
-                    # B: pairs along `k`, contiguous here for the same reason.
-                    @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                        idx = tid + r * Int32($WG)
-                        q, j = splitidx(idx, Val($BK2))
-                        g = Int32(1) + (k0 + Int32(2) * Int32(q)) +
-                            (tn + Int32(j)) * Int32(K)
-                        sB[1 + Int(q) + Int(j) * $LDB2] =
-                            (VecElement(B[g]), VecElement(B[g + Int32(1)]))
-                    end
-                    KI.barrier()
-
-                    Base.Cartesian.@nexprs $NKT u -> begin
-                        kt = (u - 1) * GEMM_TILE
-                        Base.Cartesian.@nexprs $STM mt -> begin
-                            a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                    sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                        kt * $LDA2, $LDA2)
-                            Base.Cartesian.@nexprs $STN nt -> begin
-                                b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                        sB, 1 + (kt ÷ 2) +
-                                            (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                                c_mt_nt = muladd(a, b, c_mt_nt)
-                            end
-                        end
-                    end
-                    KI.barrier()
-                end
-
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    accstore!(C,
-                              1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
-                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                              M, c_mt_nt, epi)
-                return nothing
-            end
-            GEMM_STAGED_V2N_KERNELS[$cfg] = $kv2n
         end
 
         # ── ncnn schedule: register prefetch + one shared tile ─────────────
@@ -1606,92 +1487,7 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
         end
     end
 
-    # ── The ablation: staging or arithmetic? ───────────────────────────────
-    #
-    # Every external lever is measured and closed — tiling in both directions,
-    # double buffering, staging width — and the kernel still sits at ~64% of
-    # cuBLAS. This is the instrument that says which HALF of the k-loop the time
-    # is in, the same way `flash_cm2_ablate.jl` settled the flash kernel.
-    #
-    # It computes a WRONG answer on purpose: `:nostage` stages only the first
-    # k-block and then runs every remaining block's arithmetic on that stale
-    # tile. The muladds all still happen, the barriers all still happen, and the
-    # staging loads do not. `:all` minus `:nostage` is what the staging costs.
-    #
-    # The staging guard is around the STAGING, never around the `muladd` — a
-    # `muladd` under an `OpSelectionMerge` measured 3x here once and would make
-    # the ablation report its own artifact.
-    kabl = Symbol("coopmat_gemm_staged_kernel_", ci, "_abl!")
-    @eval begin
-        function $kabl(
-                                          C, A, B, bias, epi,
-                                          ::Val{M}, ::Val{N}, ::Val{K},
-                                          ::Val{ABL}) where {M,N,K,ABL}
-            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-            tid = Int32(KI.get_local_id().x - 1)
-            blk = Int32(KI.get_group_id().x - 1)
-            nblk_m = Int32(M ÷ $BM)
-            tm = (blk % nblk_m) * Int32($BM)
-            tn = (blk ÷ nblk_m) * Int32($BN)
-
-            s = tid ÷ Int32(32)
-            sm = (s % Int32($WM)) * Int32($STM)
-            sn = (s ÷ Int32($WM)) * Int32($STN)
-
-            bp = bias === nothing ? bias : pointer(bias)
-            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-            for kb in Int32(0):Int32(K ÷ $BK - 1)
-                k0 = kb * Int32($BK)
-                if ABL !== :nostage || kb == Int32(0)
-                    @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                        idx = tid + r * Int32($WG)
-                        p, kk = splitidx(idx, Val($BM2))
-                        g = Int32(1) + (tm + Int32(2) * Int32(p)) +
-                            (k0 + Int32(kk)) * Int32(M)
-                        sA[1 + Int(p) + Int(kk) * $LDA2] =
-                            (VecElement(A[g]), VecElement(A[g + Int32(1)]))
-                    end
-                    @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                        idx = tid + r * Int32($WG)
-                        q, j = splitidx(idx, Val($BK2))
-                        g = Int32(1) + (k0 + Int32(2) * Int32(q)) +
-                            (tn + Int32(j)) * Int32(K)
-                        sB[1 + Int(q) + Int(j) * $LDB2] =
-                            (VecElement(B[g]), VecElement(B[g + Int32(1)]))
-                    end
-                end
-                KI.barrier()
-
-                Base.Cartesian.@nexprs $NKT u -> begin
-                    kt = (u - 1) * GEMM_TILE
-                    Base.Cartesian.@nexprs $STM mt -> begin
-                        a = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                                sA, 1 + (sm + mt - 1) * ($(GEMM_TILE ÷ 2)) +
-                                    kt * $LDA2, $LDA2)
-                        Base.Cartesian.@nexprs $STN nt -> begin
-                            b = AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                                    sB, 1 + (kt ÷ 2) +
-                                        (sn + nt - 1) * GEMM_TILE * $LDB2, $LDB2)
-                            c_mt_nt = muladd(a, b, c_mt_nt)
-                        end
-                    end
-                end
-                KI.barrier()
-            end
-
-            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                accstore!(C,
-                          1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
-                              (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                          M, c_mt_nt, epi)
-            return nothing
-        end
-        GEMM_STAGED_ABL_KERNELS[$cfg] = $kabl
-    end
 end
 
 """
@@ -2501,17 +2297,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
                              M=$M N=$N K=$K splitk=$splitk has no staged tiling"))
     if c !== nothing
         wg = gemm_wg(c)
-        # The narrow kernel addresses in `Int32`, so it is only legal while every
-        # linear index it forms stays inside one: `M*K` for the A staging, `K*N`
-        # for B, `M*N` for the store. Far outside anything this repo runs — the
-        # largest is 18.9M against a 2.1e9 limit — but it is a silent wrong
-        # answer rather than an error if it is ever not, so it is checked.
-        #
-        # The FALLBACK below it — the wide vec2 kernel a shape too large for
-        # `gemm_fits32` lands on — is itself wrong; see `GEMM_NARROW_DEFAULT`.
-        # Nothing in this repo reaches it (the largest index formed here is
-        # 18.9M against a 2.1e9 limit), which is why it is a bug and not an
-        # outage, but a shape that did would get garbage.
+        # Narrow staging is legal only while all matrix indices fit Int32.
         narrow = narrow_ok && gemm_fits32(M, N, K)
         if aload !== nothing
             # `B` and `C` are the only matrices a gathering call has; `A` is the

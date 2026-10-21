@@ -173,3 +173,5 @@ remains broken); host batch mutations and native AABB/mipmap checks pass on both
 The guard's historical prose is condensed; its checking syntax is unchanged.
 
 The memory report also records shared Vulkan arena-buffer construction and 200 native assertions across AMD/NVIDIA; required coherent/local flags, cached placement, BDA flags and block ownership remain explicit.
+
+[Shared GEMM generation](consolidation-gemm-generator.md) records 111 removed implementation lines, native before/after output and shader comparisons, 2,430 existing assertions and interleaved timing preservation.
