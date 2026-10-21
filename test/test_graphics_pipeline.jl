@@ -418,6 +418,9 @@ end
         @test all(==(RGBA{Float32}(1, 0, 0, 1)), Array(Mantle.storage(oa)))
         @test all(p -> p.r ≈ 0.5f0 && p.g ≈ 1f0 && p.b ≈ 0.5f0 && p.alpha ≈ 1f0,
                   Array(Mantle.storage(on)))
+        # No shader arguments: the graph's argument slot must not turn into a
+        # push-constant write against a layout that declares no such range.
+        @test isempty(Mantle.validationmessages!(dev))
         Mantle.free!(oa)
         Mantle.free!(on)
     end

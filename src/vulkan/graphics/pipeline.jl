@@ -578,6 +578,30 @@ function draw_mesh_in_pass!(e::Emitter,
     hold!(e, pipeline)
 end
 
+# A graph gives every draw an argument-memory offset, including shaders whose
+# ABI has no arguments. Such a layout has no push-constant range at all.
+function push_draw_args!(cmd, pipeline::VulkanCompiledGraphicsPipeline,
+                         push_bda::UInt64, push_data::Vector{UInt8})
+    pipeline.push_constant_size == 0 && return nothing
+    # Push constants. The BDA path takes the address by value; the vector path is
+    # for callers written before it existed.
+    if push_bda != UInt64(0)
+        bda = Ref(push_bda)
+        GC.@preserve bda begin
+            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
+                pipeline.push_stage_flags, UInt32(0), UInt32(8),
+                Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
+        end
+    elseif !isempty(push_data)
+        GC.@preserve push_data begin
+            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
+                pipeline.push_stage_flags, UInt32(0), UInt32(length(push_data)),
+                Ptr{Nothing}(pointer(push_data)))
+        end
+    end
+    return nothing
+end
+
 """
 Bind the pipeline and set everything a draw reads before the draw command:
 viewport, scissor and the push constant block.
@@ -599,22 +623,7 @@ function bind_for_draw!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline;
         VK.cmd_set_scissor(cmd, [scissor])
     end
 
-    # Push constants. The BDA path takes the address by value; the vector path is
-    # for callers written before it existed.
-    if push_bda != UInt64(0)
-        bda = Ref(push_bda)
-        GC.@preserve bda begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(8),
-                Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
-        end
-    elseif !isempty(push_data)
-        GC.@preserve push_data begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(length(push_data)),
-                Ptr{Nothing}(pointer(push_data)))
-        end
-    end
+    push_draw_args!(cmd, pipeline, push_bda, push_data)
     return nothing
 end
 
@@ -696,20 +705,7 @@ function draw_indexed_in_pass!(e::Emitter,
 
     VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline)
 
-    if push_bda != UInt64(0)
-        bda = Ref(push_bda)
-        GC.@preserve bda begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(8),
-                Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, bda)))
-        end
-    elseif !isempty(push_data)
-        GC.@preserve push_data begin
-            VK.cmd_push_constants(cmd, pipeline.pipeline_layout,
-                pipeline.push_stage_flags, UInt32(0), UInt32(length(push_data)),
-                Ptr{Nothing}(pointer(push_data)))
-        end
-    end
+    push_draw_args!(cmd, pipeline, push_bda, push_data)
 
     VK.cmd_bind_index_buffer(cmd, indices_buffer, indices_offset, VK.INDEX_TYPE_UINT32)
     VK.cmd_draw_indexed(cmd, UInt32(index_count), UInt32(instances),

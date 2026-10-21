@@ -48,6 +48,7 @@ runs for tens of microseconds.
 """
 function runlaunches!(backend, launches)
     for l in launches
+        group = l.group == 0 ? nothing : l.group
         # MIGRATION SHIM. A plain function over `KernelInterface`'s intrinsics is
         # launched through `kilaunch!`; a `@kernel` is its own constructor
         # and answers `kern(backend)` with the object to call. The branch goes
@@ -58,12 +59,11 @@ function runlaunches!(backend, launches)
         # that test sent it down the constructor path and ran the kernel body on
         # the host. Core's predicate is the one place that question is answered.
         if buildskernel(l.kern, backend)
-            k = l.group == 0 ? Base.invokelatest(l.kern, backend) :
-                               Base.invokelatest(l.kern, backend, l.group)
+            k = Base.invokelatest(kernelfor, l.kern, group, backend)
             Base.invokelatest(k, l.args...; ndrange = l.ndrange)
         else
             Base.invokelatest(kilaunch!, backend, l.kern, l.args...; ndrange = l.ndrange,
-                              workgroupsize = l.group == 0 ? nothing : l.group)
+                              workgroupsize = group)
         end
     end
     return nothing
@@ -86,9 +86,7 @@ after, which is how Whisper's log-mel failed on ROCm. Anything portable in this
 directory launches through here.
 """
 function kilaunch!(backend, f, args...; ndrange, workgroupsize = nothing)
-    kb = kibackend(todevice(backend))
-    tt = Tuple{map(a -> Core.Typeof(KI.argconvert(kb, a)), args)...}
-    k = KI.kernel_function(kb, KI.argconvert(kb, f), tt)
+    k = kikernel(f, todevice(backend), args)
     if workgroupsize === nothing
         k(args...; ndrange)
     else

@@ -622,10 +622,6 @@ diagnostic. The buffers stay first either way, which is what keeps their
 texture_markers(n::Integer) =
     (ntuple(_ -> Metal.Texture2DPtr{Float32}, n)..., ntuple(_ -> Metal.SamplerPtr, n)...)
 
-"""Compiled pipelines, keyed on everything baked into one."""
-const GFX_CACHE = Dict{Any,Any}()
-const GFX_CACHE_LOCK = ReentrantLock()
-
 """
 What the fragment stage reads, as a `NamedTuple` type.
 
@@ -678,7 +674,7 @@ function stage_signatures(p::Mantle.GraphicsPipeline, ncolor::Int,
 end
 
 """
-    compile_pipeline(pipeline, color_formats, depth_format, vert_bufs, frag_bufs)
+    compile_pipeline(device, pipeline, color_formats, depth_format, vert_bufs, frag_bufs)
 
 Compile a portable `GraphicsPipeline` into a Metal render pipeline state.
 
@@ -689,7 +685,7 @@ follows from the pipeline, so there is one place that decides it.
 Cached on the shader pair, those argument types and the state, because
 everything in that list is baked into the compiled object and nothing else is.
 """
-function compile_pipeline(p::Mantle.GraphicsPipeline,
+function compile_pipeline(d::MetalDevice, p::Mantle.GraphicsPipeline,
                           color_formats::Vector{MTLm.MTLPixelFormat},
                           depth_format::Union{Nothing,MTLm.MTLPixelFormat},
                           vert_bufs::Type, frag_bufs::Type)
@@ -716,51 +712,42 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
               "`supports_tessellation(backend)` before building a pipeline " *
               "with it.")
 
-    dev = Metal.device()
+    dev = d.dev
     vfn, ffn, vert_tt, frag_tt =
         stage_signatures(p, length(color_formats), vert_bufs, frag_bufs; color_formats)
-    vstage = compile_stage_function(vfn, vert_tt, :vertex,
+    vstage = compile_stage_function(dev, vfn, vert_tt, :vertex,
                                     stagename(Mantle.stagefunction(p.vertex), "_vs"))
     fstage = ffn === nothing ? nothing :
-        compile_stage_function(ffn, frag_tt, :fragment,
+        compile_stage_function(dev, ffn, frag_tt, :fragment,
                                stagename(Mantle.stagefunction(p.fragment), "_fs"))
 
-    # The stages themselves, because each carries its function, its config and
-    # its interface, and keying those separately lets them disagree about which
-    # pipeline they belong to. And the compiled stage functions, by identity: a
-    # stage compiled again after an edit is a new one, and the pipeline follows.
-    key = (p.vertex, p.fragment, p.geometry, objectid(vstage), objectid(fstage),
-           vert_bufs, frag_bufs, color_formats, depth_format,
-           typeof(p.blend), typeof(p.cull), typeof(p.topology), typeof(p.depth))
-    Base.@lock GFX_CACHE_LOCK begin
-        cached = get(GFX_CACHE, key, nothing)
-        cached === nothing || return cached::MetalCompiledGraphicsPipeline
-    end
-    vfun, vlib = vstage
-    ffun, flib = fstage === nothing ? (nothing, nothing) : fstage
+    # Native stages carry compiled code identity, independent of captured data.
+    key = (:raster, CacheIdentity((vstage, fstage)), Tuple(color_formats),
+           depth_format, pipeline_state_key(p))
+    return get!(d.pipelines, key) do
+        vfun, vlib = vstage
+        ffun, flib = fstage === nothing ? (nothing, nothing) : fstage
 
-    desc = MTLm.MTLRenderPipelineDescriptor()
-    desc.vertexFunction = vfun
-    ffun === nothing || (desc.fragmentFunction = ffun)
-    # One descriptor slot per attachment, in the order the pass declared them,
-    # which is the order `air.render_target <i>` numbers the fragment's outputs.
-    Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
-    apply_attachments!(desc, color_formats, depth_format, p.blend)
-    state = MTLm.MTLRenderPipelineState(dev, desc)
-    dstate = depthstate(dev, p.depth, depth_format)
+        desc = MTLm.MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vfun
+        ffun === nothing || (desc.fragmentFunction = ffun)
+        # One descriptor slot per attachment, in the order the pass declared them,
+        # which is the order `air.render_target <i>` numbers the fragment's outputs.
+        Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
+        apply_attachments!(desc, color_formats, depth_format, p.blend)
+        state = MTLm.MTLRenderPipelineState(dev, desc)
+        dstate = depthstate(dev, p.depth, depth_format)
 
-    compiled = MetalCompiledGraphicsPipeline(state, dstate, mtl_primitive(p.topology),
-                                             mtl_cull(p.cull), ffun !== nothing,
-                                             Any[l for l in (vlib, flib) if l !== nothing])
-    Base.@lock GFX_CACHE_LOCK begin
-        GFX_CACHE[key] = compiled
-    end
-    return compiled
+        compiled = MetalCompiledGraphicsPipeline(state, dstate, mtl_primitive(p.topology),
+                                                 mtl_cull(p.cull), ffun !== nothing,
+                                                 Any[l for l in (vlib, flib) if l !== nothing])
+        return compiled
+    end::MetalCompiledGraphicsPipeline
 end
 
 """
 The Metal stage functions compiled from one Julia function at one point in its
-history, by `(stage, name)`. GPUCompiler holds them against the function's
+history, by `(device, stage, name)`. GPUCompiler holds them against the function's
 `CodeInstance` (`cached_results`), so an edit to the function or to anything
 inlined into it (Revise) compiles the stage again, where a cache keyed on the
 pipeline description drew its first compile for the rest of the session.
@@ -783,7 +770,7 @@ identifier(name::AbstractString) =
 stagename(f, suffix::AbstractString) = identifier(string(nameof(f))) * suffix
 
 """
-    compile_stage_function(f, tt, stage, name) -> (MTLFunction, MTLLibrary)
+    compile_stage_function(device, f, tt, stage, name) -> (MTLFunction, MTLLibrary)
 
 Compile one Julia shader into a Metal stage function, or hand back the one
 compiled from the code `f` has now.
@@ -792,8 +779,7 @@ The library is handed back, not discarded: an `MTLFunction` does not keep it
 alive, and a released library takes the pipeline's shaders with it — which shows
 up as a render that draws nothing rather than as an error.
 """
-function compile_stage_function(f, tt::Type, stage::Symbol, name::String)
-    dev = Metal.device()
+function compile_stage_function(dev::MTLm.MTLDevice, f, tt::Type, stage::Symbol, name::String)
     # `always_inline`: a stage binds its textures and samplers as ENTRY parameters
     # (Metal's `lower_texture_bindings!`), so every call that samples has to be
     # inlined into the entry. The optimiser does not promise that: RayMakie's
@@ -803,7 +789,7 @@ function compile_stage_function(f, tt::Type, stage::Symbol, name::String)
     # forces the same for every Vulkan graphics stage (`force_inline_all`).
     cfg = Metal.compiler_config(dev; stage, name, always_inline = true)
     job = Metal.GPUCompiler.CompilerJob(Metal.methodinstance(typeof(f), tt), cfg)
-    key = (stage, name)
+    key = (dev, stage, name)
     stages = Metal.GPUCompiler.cached_results(MetalStages, job)
     if stages !== nothing
         compiled = get(stages.stages, key, nothing)
@@ -1185,7 +1171,7 @@ function Mantle.compile_draw(d::MetalDevice, p::Mantle.GraphicsPipeline,
     # for a format the attachment does not have is rejected at draw time, and
     # the attachment's format comes from its element type like every other.
     dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
-    pipeline = compile_pipeline(p, cfmts, dfmt, buffer_types(vert), buffer_types(frag))
+    pipeline = compile_pipeline(d, p, cfmts, dfmt, buffer_types(vert), buffer_types(frag))
     return MetalCompiledDraw(pipeline, vert, frag)
 end
 

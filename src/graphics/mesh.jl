@@ -56,6 +56,8 @@ What the mesh stage of `p` may produce.
 """
 meshconfig(p::MeshPipeline) = stageconfig(p.mesh)
 
+pipeline_state_key(p::MeshPipeline) = (p.blend, p.cull, p.depth)
+
 """
     objectconfig(p::MeshPipeline) -> ObjectConfig or nothing
 

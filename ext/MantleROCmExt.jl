@@ -674,12 +674,7 @@ function Mantle.compile_dispatch(c::Mantle.Compile{ROCmDevice}, d::Mantle.Dispat
     Mantle.iscall(d) && return Mantle.bake(c, d)
     # KERNELINTERFACE next, for a kernel that is a plain function.
     Mantle.buildskernel(d.kernel, Mantle.backend(dev)) || return kicompile(c, dev, d)
-    obj = Mantle.kernelfor(d.kernel, d.group, Mantle.backend(dev))
-    isempty(fieldnames(typeof(obj.f))) ||
-        throw(ArgumentError("dispatch!: the kernel closes over $(fieldnames(typeof(obj.f))). " *
-                            "A plan resolves its arguments once, so a captured device array " *
-                            "would be the one it had when the plan was built — pass it as a " *
-                            "dispatch argument instead, where a rename is followed."))
+    obj = Mantle.kernelfor(d, dev)
     args = map(a -> Mantle.resolve(dev, a), d.args)
     nd = Mantle.dispatchrange(d.ndrange)
     # `callgroup`, not `nothing`: a kernel whose workgroup is `DynamicSize` was

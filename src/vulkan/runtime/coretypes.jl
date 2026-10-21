@@ -544,7 +544,7 @@ mutable struct DeviceCaches
     # Keyed on the shaders a pipeline is made of (`pipeline_cache_key`). The
     # shaders themselves are not a device's: GPUCompiler keeps them with the
     # code they were compiled from (`GfxShaders`).
-    gfx_pipelines::Dict{UInt64,VulkanCompiledGraphicsPipeline}
+    gfx_pipelines::CompilationCache{Tuple,VulkanCompiledGraphicsPipeline}
     # Ray-tracing pipelines, here for the same reason the graphics ones are: a
     # compiled pipeline is a device object, so it belongs to the device.
     #
@@ -557,7 +557,7 @@ mutable struct DeviceCaches
     #
     # `CompiledRTPipeline` and not `LavaRTPipeline`: see the supertype above for
     # why the concrete name cannot be spelled here.
-    rt_pipelines::Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
+    rt_pipelines::CompilationCache{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}
     # Which entry of `rt_pipelines` a pipeline description, called with these
     # argument types, draws with now, and the world age that was checked in.
     # In a newer world its stages are looked up again (`rt_compiled_for`), and an
@@ -603,8 +603,8 @@ DeviceCaches() = DeviceCaches(
     Dict{UInt64,LavaComputePipeline}(), UInt64[],
     IdDict{LavaGPUKernel,LavaLinkedKernel}(), IdDict{DataType,Vector{Any}}(),
     MemoryPolicy(), 0, nothing, (0, 0, 0), nothing, false,
-    Dict{UInt64,VulkanCompiledGraphicsPipeline}(),
-    Dict{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
+    CompilationCache{Tuple,VulkanCompiledGraphicsPipeline}(),
+    CompilationCache{UInt64,Tuple{CompiledRTPipeline,LavaRTShader,Vector{Int},Vector{Int}}}(),
     Dict{UInt64,Tuple{UInt,UInt64}}(),
     nothing, 0, 1.0, Any[],
     IdDict{DataType,Vector{Any}}(), nothing, nothing, Any[], AccessCache())
