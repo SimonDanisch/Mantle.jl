@@ -105,3 +105,10 @@ review conclusion. This does not turn unexecuted replacement paths into passes.
 ## Atomic ordering repair (2026-10-21)
 
 [Repair, permanent compiler regressions and native visibility qualification](../atomic-ordering-2026-10-21/README.md) close F33's demonstrated compiler defect. Historical demotion evidence remains a negative control; target eligibility and broader qualification remain F42.
+
+## Implementation consolidation before the foundation
+
+[Current-code consolidation order](consolidation-order.md) turns the existing
+audits into an initial verified cleanup batch and ties larger consolidations to
+one owner and explicit deletion gates. P0.A10 tracks implementation; the audit
+and disposition map do not mean those deletions are already complete.

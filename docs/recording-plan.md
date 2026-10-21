@@ -1748,10 +1748,18 @@ a substitute for preserving their consumers.
 2. **Comments:** every comment and docstring in Mantle checked against the code
    and this plan before implementation starts.
 3. **Tests**, red where the code does not satisfy them yet.
-4. **Bugs:** the bugs listed in `refactor-ledger.md` (rows P0.B1 to P0.B15),
+4. **Implementation consolidation:** use the existing source audits to verify
+   duplicate bodies, algorithms and ownership state against current code.
+   Complete independent consolidations first, preserving behavior and reporting
+   actual net deletions. Before foundational implementation, map each remaining
+   duplicate group and its callers to one owner and a deletion gate. The first
+   replacement slices consolidate the architecture-dependent groups; the
+   separately runnable baseline may retain its copies until switchover, but the
+   replacement must not reproduce them. Track this as P0.A10.
+5. **Bugs:** the bugs listed in `refactor-ledger.md` (rows P0.B1 to P0.B15),
    and the performance baseline (the whole-plan benchmark and each suite's
    model calls).
-5. Phases 1 to 12.
+6. Phases 1 to 12.
 
 The executable specification is `test/suite/runsuite.jl`, `helpers.jl`,
 `faultdevice.jl` and `areas/*.jl`. The suite areas below cover the invariants;

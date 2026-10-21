@@ -46,10 +46,10 @@ that scope; a settled choice does not close its phase's implementation gates.
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P0.A1 | `docs/recording-plan.md`: the target state only | written | doing | fixed choices and native qualification gates in plan/execution-contracts.md; review changes not committed |
+| P0.A1 | `docs/recording-plan.md`: the target state only | written | doing | fixed choices and native qualification gates in plan/execution-contracts.md; review committed in 45021c6; subsequent consolidation-order changes remain in progress |
 | P0.A2 | `docs/internals.jl`, `docs/examples.jl`, `docs/resizing-and-raytracing.jl` consistent with the plan | written | doing | |
 | P0.A3 | `docs/api.md`: every type and verb with its contract, ownership, invariants, corner cases, driver entry points, allowlists, vocabulary fates | written | doing | |
-| P0.A4 | `docs/refactor-ledger.md` (this file) | written | doing | document consistency pass reconciles settled contracts with open replacement gates; changes not committed |
+| P0.A4 | `docs/refactor-ledger.md` (this file) | written | doing | document consistency pass committed in 45021c6; replacement gates and implementation consolidation remain open |
 | P0.D1 | delete `docs/design.md`, `docs/submission-refactor.md`, `docs/backend-independence.md`, `docs/mantle-owns-it.md`, `docs/dispatch-api.md`; repoint the 9 references in `src/` and `test/` to the plan; move the two contents that only they hold (`vulkan/runtime/command.jl:404`'s measurement, `test/runtests.jl:73`'s clone note) into a comment or the plan (not in the plan: confirm) | 5 files tracked | done | a81bf41; deleted; their references in src/ and test/ point to recording-plan.md and api.md |
 | P0.D2 | remove the review material (`docs/recording-plan-review.md`, `experiments/plan-review/`) | - | done | a81bf41 historical removal; execution-contracts.md is now a normative companion, new review evidence lives under experiments/review-2026-10-20 |
 | P0.A5 | the docs committed | - | done | 034ae50 (the plan, api.md, internals, the suite) |
@@ -139,6 +139,10 @@ Every comment and docstring checked against the code and the plan (plan,
 | P0.A7 | each suite's model calls timed (JuliaVision runners, Hikari, RayMakie, VideoEditor) | - | open | |
 | P0.A8 | the new-API suite `test/suite/` (each case with its ledger phase; later phases skipped) and its test hooks in Mantle: `diagnostics`/`resetdiagnostics!` (plan, pipeline and kernel compiles, records, submissions per channel, allocations, host waits), `reserved`, `mapped`, `liveuploads`, `livecells`, `pendingof`, `steplog!`/`steplog`, `checklocks!`; `Window` and `Swapchain` parameterized by their device's type and `inner(x)` (so the suite's `FaultDevice` intercepts window verbs); `caps(dev).graphics`; `FaultDevice` in the suite | - | open | |
 | P0.A9 | before/after benchmarks through the consumers' unchanged APIs (`/sim/Programmieren/VideoEdit/benchmarks/`: Makie on GLMakie, RayMakie raster and traced; SAM 2, QwenImage, TRELLIS; VideoEditor; RayDemo `run_benchmarks.jl`); baseline environment `VideoEdit-baseline` kept on each worker; the comparison alternates both environments in fresh processes, with an A/A pair as the noise floor | - | open | existing benchmarks/jobs.jl and consumer acceptance baselines already provide the harness/workloads; run replacement delta against frozen baseline; evidence-index.md |
+
+| id | item | baseline at 5c2d4c6 | status | evidence |
+|---|---|---|---|---|
+| P0.A10 | consolidate verified duplicate implementation bodies before the foundation; map larger duplicated algorithms/state and every caller to one core owner and a deletion gate; each replacement slice supersedes named old copies rather than reproducing them | seven source audits and source-disposition.tsv exist | doing | experiments/review-2026-10-20/consolidation-order.md verifies the first current-code batch at 45021c6; no source deletions claimed yet; record actual net deletions and affected-path validation per batch |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
