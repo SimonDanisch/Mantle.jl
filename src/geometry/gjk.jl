@@ -1,27 +1,10 @@
-# GJK (Gilbert--Johnson--Keerthi) closest-point / overlap test -- CPU reference.
-#
-# Follows Casey Muratori's lecture structure and Bullet's btGjkPairDetector for
-# the do-simplex Voronoi-region case analysis.  This is intentionally a clean
-# CPU reference to be ported to GPU in P4.4; no SIMD / bitwise cleverness.
-#
-# Transform convention: NTuple{12, Float32} row-major 3x4, identical to
-# VulkanInstanceRecord.transform / Vulkan VkTransformMatrixKHR layout:
-#
-#   [ T[1]  T[2]  T[3]  T[4]  ]   row 0  (x row + tx)
-#   [ T[5]  T[6]  T[7]  T[8]  ]   row 1  (y row + ty)
-#   [ T[9]  T[10] T[11] T[12] ]   row 2  (z row + tz)
-#
-# So for a point p (column vector):
-#   out.x = T[1]*p.x + T[2]*p.y + T[3]*p.z + T[4]
-#   out.y = T[5]*p.x + T[6]*p.y + T[7]*p.z + T[8]
-#   out.z = T[9]*p.x + T[10]*p.y + T[11]*p.z + T[12]
-
+# GJK overlap test shared by host references and GPU kernels.
+# Transforms use the core row-major affine layout; support directions use its
+# transposed linear block. Simplex region tests follow Muratori/Bullet.
 using GeometryBasics: Vec3f
 using LinearAlgebra: dot, cross
 
-# ---------------------------------------------------------------------------
 # Transform helpers
-# ---------------------------------------------------------------------------
 
 """
     transform_point(T::NTuple{12,Float32}, p::Vec3f) -> Vec3f
@@ -50,13 +33,11 @@ to a direction `d` (no translation).
     )
 end
 
-"""
-    inv_transform_dir(T::NTuple{12,Float32}, d::Vec3f) -> Vec3f
+"""inv_transform_dir(T::NTuple{12,Float32}, d::Vec3f) -> Vec3f
 
-Apply the transpose of the rotation (upper-left 3x3) to direction `d`.
-For orthonormal / uniform-scale transforms this equals the inverse rotation.
-GJK uses this to convert a world-space search direction back into local space.
-"""
+Apply the transpose of T's linear block to a world-space support direction.
+Despite the name, this is not a general inverse; it equals inverse rotation
+only when the block is orthonormal."""
 @inline function inv_transform_dir(T::NTuple{12,Float32}, d::Vec3f)
     # Transpose of the 3x3 rotation block.
     # Row 0 of R is (T[1], T[2], T[3]); column 0 of R^T is the same row, so
@@ -68,9 +49,7 @@ GJK uses this to convert a world-space search direction back into local space.
     )
 end
 
-# ---------------------------------------------------------------------------
 # Minkowski-difference support
-# ---------------------------------------------------------------------------
 
 """
     support_AB(A, B, T_A, T_B, dir_world) -> Vec3f
@@ -79,37 +58,25 @@ Minkowski-difference support point for (A - B) along `dir_world`.
 Both shapes live in their own local frames; the transforms bring them into
 world space.  The returned point is in world space.
 """
-@inline function support_AB(A::ConvexShape, B::ConvexShape,
+@inline support_AB(A::ConvexShape, B::ConvexShape,
+                   T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32}, dir_world::Vec3f) =
+    support_pair_world(A, B, T_A, T_B, dir_world)[3]
+
+"World-space support pair and its Minkowski difference, shared by GJK and EPA."
+@inline function support_pair_world(A::ConvexShape, B::ConvexShape,
                              T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
                              dir_world::Vec3f)
-    # Transform dir into each shape's local frame (inverse = transpose for
-    # orthonormal transforms), evaluate support, transform results to world.
     dir_A = inv_transform_dir(T_A, dir_world)
     dir_B = inv_transform_dir(T_B, dir_world)
     s_A   = transform_point(T_A, support(A, dir_A))
     s_B   = transform_point(T_B, support(B, -dir_B))
-    return s_A - s_B
+    return s_A, s_B, s_A - s_B
 end
 
-# ---------------------------------------------------------------------------
-# Simplex helpers  (1-4 points: line / triangle / tetrahedron)
-# ---------------------------------------------------------------------------
-#
-# We track the simplex as a small fixed-size array of up to 4 Vec3f.
-# Julia's NTuple is immutable so we carry the count separately and return
-# updated tuples from each do-simplex step.
-#
-# Convention from Muratori:  the most recently added point is always simplex[n]
-# (1-indexed; we store newest last).
-
-# Convenience: dot3 with itself
+# Fixed four-point tuple plus active count; newest vertex is at index 1.
 @inline dot3(a::Vec3f) = dot(a, a)
 
-# Pick a direction perpendicular to `v`.  Used when the triple-product
-# cross(cross(v, w), v) degenerates to zero because w is collinear with v
-# (i.e. origin lies exactly on an edge or the direction from A to origin
-# is parallel to the edge).  We try two canonical axes and pick whichever
-# gives a larger cross product magnitude.
+# Break collinear simplex degeneracy using the better of two canonical axes.
 @inline function perpendicular_to(v::Vec3f)
     c1 = cross(v, Vec3f(1f0, 0f0, 0f0))
     c2 = cross(v, Vec3f(0f0, 1f0, 0f0))
@@ -126,13 +93,7 @@ end
     dot3(dir) > 0f0 ? dir : perpendicular_to(edge)
 end
 
-# ---------------------------------------------------------------------------
-# do_simplex_line
-#
-# Simplex has 2 points: A (newest) and B (oldest).
-# Find closest sub-simplex to origin and set next search direction.
-# Returns (new_simplex_tuple, n, dir, overlap).
-# ---------------------------------------------------------------------------
+# Reduce a two-point simplex to the closest region; A is newest.
 @inline function do_simplex_line(A::Vec3f, B::Vec3f)
     AB  = B - A
     AO  = -A          # direction from A to origin
@@ -149,12 +110,10 @@ end
     end
 end
 
-# ---------------------------------------------------------------------------
 # do_simplex_triangle
 #
 # Simplex has 3 points: A (newest), B, C (oldest).
 # Returns (simplex_4tuple, n, dir, overlap).
-# ---------------------------------------------------------------------------
 @inline function do_simplex_triangle(A::Vec3f, B::Vec3f, C::Vec3f)
     AB   = B - A
     AC   = C - A
@@ -165,25 +124,14 @@ end
     ABperp = cross(AB, ABC)
     if dot(ABperp, AO) > 0f0
         # Origin is outside edge AB -> reduce to line AB.
-        if dot(AB, AO) > 0f0
-            dir = triple_product_dir(AB, AO)
-            return (A, B, A, A), 2, dir, false
-        else
-            # Single point A
-            return (A, A, A, A), 1, AO, false
-        end
+        return do_simplex_line(A, B)
     end
 
     # Test edge AC side.
     ACperp = cross(ABC, AC)
     if dot(ACperp, AO) > 0f0
         # Origin is outside edge AC -> reduce to line AC.
-        if dot(AC, AO) > 0f0
-            dir = triple_product_dir(AC, AO)
-            return (A, C, A, A), 2, dir, false
-        else
-            return (A, A, A, A), 1, AO, false
-        end
+        return do_simplex_line(A, C)
     end
 
     # Origin is inside the triangle (projected).  Check which face side.
@@ -198,12 +146,10 @@ end
     end
 end
 
-# ---------------------------------------------------------------------------
 # do_simplex_tetrahedron
 #
 # Simplex has 4 points: A (newest), B, C, D (oldest).
 # Returns (simplex_4tuple, n, dir, overlap).
-# ---------------------------------------------------------------------------
 @inline function do_simplex_tetrahedron(A::Vec3f, B::Vec3f, C::Vec3f, D::Vec3f)
     AB   = B - A
     AC   = C - A
@@ -245,22 +191,17 @@ end
     # Origin is outside at least one face.  Find the closest face and recurse.
     if outside_ABC
         # Reduce to triangle ABC (drop D).  Keep A as newest, B, C.
-        simplex, n, dir, overlap = do_simplex_triangle(A, B, C)
-        return simplex, n, dir, overlap
+        return do_simplex_triangle(A, B, C)
     elseif outside_ACD
         # Reduce to triangle ACD (drop B).
-        simplex, n, dir, overlap = do_simplex_triangle(A, C, D)
-        return simplex, n, dir, overlap
+        return do_simplex_triangle(A, C, D)
     else
         # outside_ADB: reduce to triangle ADB (drop C).
-        simplex, n, dir, overlap = do_simplex_triangle(A, D, B)
-        return simplex, n, dir, overlap
+        return do_simplex_triangle(A, D, B)
     end
 end
 
-# ---------------------------------------------------------------------------
 # do_simplex dispatcher
-# ---------------------------------------------------------------------------
 
 @inline function do_simplex(pts::NTuple{4,Vec3f}, n::Int)
     if n == 1
@@ -279,41 +220,25 @@ end
     end
 end
 
-# ---------------------------------------------------------------------------
 # GJKResult
-# ---------------------------------------------------------------------------
 
-"""
-    GJKResult
+"""GJKResult
 
-Result of a GJK call.  `overlap == true` means the two shapes overlap; the
-`simplex` field then contains a 4-tuple of Minkowski-difference points
-enclosing the origin (input to EPA, P4.3).  `overlap == false` means the
-shapes are separated; `simplex` is unspecified.
-"""
+Overlap flag, Minkowski simplex and iteration count. On overlap the simplex
+feeds EPA; false also covers degeneracy and iteration exhaustion."""
 struct GJKResult
     overlap::Bool
     simplex::NTuple{4, Vec3f}   # valid (encloses origin) iff overlap == true
     iterations::Int              # for telemetry / cap diagnostics
 end
 
-# ---------------------------------------------------------------------------
 # Main GJK loop
-# ---------------------------------------------------------------------------
 
-"""
-    gjk(A::ConvexShape, B::ConvexShape, T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32};
-        max_iters::Int=32, eps::Float32=1f-6) -> GJKResult
+"""gjk(A, B, T_A, T_B; max_iters=32, eps=1f-6) -> GJKResult
 
-Run GJK between two transformed convex shapes.  Each transform is a row-major
-3x4 instance transform (same layout as `VulkanInstanceRecord.transform`).
-`A` and `B` are defined in their own instance-local frames; the algorithm
-transforms support directions / points into / out of those frames internally.
-
-Returns `GJKResult(overlap, simplex, iterations)`.  `overlap=true` means the
-4-simplex encloses the origin in Minkowski-difference space and is suitable
-input for EPA (P4.3).  `overlap=false` means the shapes are provably separated.
-"""
+Test transformed convex shapes using row-major Float32 affine tuples.
+An enclosing tetrahedron reports overlap; separation, degenerate search
+direction or iteration exhaustion reports false. No distance certificate is returned."""
 function gjk(A::ConvexShape, B::ConvexShape,
              T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32};
              max_iters::Int=32, eps::Float32=1f-6)

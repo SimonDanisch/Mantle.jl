@@ -1030,22 +1030,13 @@ end
 Describe a strided window: `A[i,j] == base[offset+(i-1)*rowstride+(j-1)*colstride]`.
 Offset is 1-based; strides count elements. Backends describe dense arrays, core
 unwraps strided views, and unrepresentable layouts return nothing for materialization."""
-function gemmstrides(A::PermutedDimsArray{T,2,(2, 1)}) where {T}
+function gemmstrides(A::Union{PermutedDimsArray{<:Any,2,(2,1)},
+                              LinearAlgebra.Transpose,LinearAlgebra.Adjoint{<:Real}})
     p = gemmstrides(parent(A))
     p === nothing ? nothing : (p[1], p[2], p[4], p[3])
 end
-gemmstrides(A::PermutedDimsArray{T,2,(1, 2)}) where {T} = gemmstrides(parent(A))
-
-function gemmstrides(A::LinearAlgebra.Transpose{T}) where {T}
-    p = gemmstrides(parent(A))
-    p === nothing ? nothing : (p[1], p[2], p[4], p[3])
-end
-# Only for real eltypes: an adjoint of a complex array also conjugates, which is
-# not something a stride can express.
-function gemmstrides(A::LinearAlgebra.Adjoint{T}) where {T<:Real}
-    p = gemmstrides(parent(A))
-    p === nothing ? nothing : (p[1], p[2], p[4], p[3])
-end
+gemmstrides(A::PermutedDimsArray{T,2,(1,2)}) where {T} = gemmstrides(parent(A))
+# Complex adjoints also conjugate, which cannot be expressed by strides alone.
 
 
 gemmstrides(::AbstractArray) = nothing

@@ -12,7 +12,7 @@ isdefined(@__MODULE__, :tx) ||
 # function, which that backend cannot compile. `n_grains` is the number of
 # grains; the contact buffer is sized `n_grains * max_contacts`. Returns
 # (counters, contacts).
-function run_compact(transforms, pairs, shape, n_grains, max_contacts)
+function run_compact(transforms, pairs, shape, n_grains, max_contacts; group=nothing)
     dev = Mantle.Device(TESTBACKEND)
     sentinel = ContactRecord(typemax(UInt32), typemax(UInt32),
                              Vec3f(0f0, 0f0, 0f0),
@@ -24,7 +24,7 @@ function run_compact(transforms, pairs, shape, n_grains, max_contacts)
     r = Mantle.Buffer(dev, fill(sentinel, n_grains * max_contacts))
     g = Mantle.Graph(dev)
     Mantle.dispatch!(g, narrow_phase_contacts_kernel,
-                     (t, p, shape, c, r, Int32(max_contacts)), length(pairs))
+                     (t, p, shape, c, r, Int32(max_contacts)), length(pairs); group)
     Mantle.runonce!(g)
     counters, contacts = Array(Mantle.storage(c)), Array(Mantle.storage(r))
     foreach(Mantle.free!, (t, p, c, r))
@@ -161,4 +161,12 @@ end
             @test (Int(contacts[slot].i), Int(contacts[slot].j)) == (1, g)
         end
     end
+end
+
+@testset "contact slots contend across workgroups" begin
+    transforms = [tx(0,0,0),tx(1.9,0,0)]
+    pairs = fill((Int32(1),Int32(2)),257)
+    counters,contacts = run_compact(transforms,pairs,UnitCube(),2,16;group=64)
+    @test counters == UInt32[257,257]
+    @test all(r -> r.i == 1 && r.j == 2 && isapprox(r.depth,0.1f0;atol=1f-3),contacts)
 end

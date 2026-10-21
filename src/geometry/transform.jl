@@ -1,51 +1,17 @@
-# The 3×4 affine transform every backend's instance descriptor carries.
-#
-# Core's, and not beside the record whose ABI it serves: that record is
-# genuinely the Vulkan backend's, because `VulkanInstanceRecord` is a byte-exact
-# mirror of `VkAccelerationStructureInstanceKHR` and Metal's
-# `MTLAccelerationStructureInstanceDescriptor` lays its fields out differently,
-# so that struct is genuinely the Vulkan backend's.
-#
-# The matrix is not. A 3×4 row-major float affine is what Metal's instance
-# descriptor holds too, and what every kernel reading a transform already wants,
-# so keeping the alias behind the Vulkan backend would mean a second backend
-# either re-declaring it or depending on the first one for a `StaticArrays`
-# typedef.
-
+# Portable affine layout; native instance descriptors convert at their ABI boundary.
 using StaticArrays: SMatrix
 
-"""
-    Mat3x4f
+"""Mat3x4f
 
-A 3×4 row-major affine transform, stored as `SMatrix{4, 3, Float32, 12}`.
-
-The type parameters look transposed because `SMatrix` storage is column-major
-and a column-major 4×3 has byte-for-byte the same layout as a row-major 3×4 —
-which is `VkTransformMatrixKHR` exactly, so the Vulkan backend hands these bytes
-to the driver with no reinterpret and no per-store conversion.
-
-**That is Vulkan's layout, not a universal one.** Metal's
-`MTLPackedFloat4x3` is also 48 bytes and also twelve floats, and it is the
-TRANSPOSE: four columns of three, where this is three rows of four. The identity
-alone tells them apart — `[1,0,0,0, 0,1,0,0, 0,0,1,0]` here against
-`[1,0,0, 0,1,0, 0,0,1, 0,0,0]` there. Reinterpreting one as the other produces a
-sheared transform and no error, so the Metal backend converts; see
-`metal/raytracing.jl`.
-
-What is shared is the CONCEPT and the size: an affine 3×4 of `Float32`, which is
-what every instance descriptor carries. The element order is the backend's.
-
-Pure linear indexing (`T[1]..T[12]`) returns the twelve floats in row-major
-order, which is what the GJK, EPA and narrow-phase kernels read.
-"""
+Row-major Float32 3×4 affine, stored as SMatrix{4,3,Float32,12} so linear
+indices expose rows. Byte-identical to VkTransformMatrixKHR; Metal repacks
+to its different column-major descriptor layout. Device geometry tables use
+this core row-major layout."""
 const Mat3x4f = SMatrix{4, 3, Float32, 12}
 
-"""
-    identity_transform() -> Mat3x4f
+"""identity_transform() -> Mat3x4f
 
-Row-major 3×4 identity transform. Useful default for instance records that
-want pure translation specified later.
-"""
+Row-major 3×4 identity affine."""
 identity_transform() = Mat3x4f(1.0f0, 0.0f0, 0.0f0, 0.0f0,
                                0.0f0, 1.0f0, 0.0f0, 0.0f0,
                                0.0f0, 0.0f0, 1.0f0, 0.0f0)
@@ -56,11 +22,7 @@ identity_transform() = Mat3x4f(1.0f0, 0.0f0, 0.0f0, 0.0f0,
 @assert isbitstype(Mat3x4f)     "Mat3x4f must be plain bits for kernel use"
 
 
-# ── Building transforms ───────────────────────────────────────────────────────
-#
-# What `write_grain_instances_kernel` (`raytracing/instances.jl`) composes an
-# instance transform from: a rotation and a scale into a 3x4 is arithmetic, not
-# any backend's.
+# Compose core transforms from rotation, scale and translation.
 """
     quat_to_rot3x3(q::Vec4f) -> NTuple{9, Float32}
 
@@ -79,25 +41,15 @@ returned as a 9-tuple (m00, m01, m02, m10, m11, m12, m20, m21, m22).
     )
 end
 
-"""
-    build_4x3(rot9::NTuple{9, Float32}, scale::Float32, p::Point3f) -> NTuple{12, Float32}
+"""build_4x3(rot9, scale::Float32, p::Point3f) -> NTuple{12,Float32}
 
-Combine a 3x3 rotation, uniform scale, and translation into a row-major 3x4
-transform suitable for VkAccelerationStructureInstanceKHR.
-"""
-@inline function build_4x3(rot9::NTuple{9, Float32}, scale::Float32, p::Point3f)
-    (rot9[1] * scale, rot9[2] * scale, rot9[3] * scale, p[1],
-     rot9[4] * scale, rot9[5] * scale, rot9[6] * scale, p[2],
-     rot9[7] * scale, rot9[8] * scale, rot9[9] * scale, p[3])
-end
+Combine row-major rotation, uniform scale and translation in core affine layout."""
+@inline build_4x3(rot9::NTuple{9,Float32}, scale::Float32, p::Point3f) =
+    build_4x3_pervec(rot9, Vec3f(scale), p)
 
-"""
-    build_4x3_pervec(rot9::NTuple{9, Float32}, sc::Vec3f, p::Point3f) -> NTuple{12, Float32}
+"""build_4x3_pervec(rot9, sc::Vec3f, p::Point3f) -> NTuple{12,Float32}
 
-Variant of `build_4x3` that applies a per-axis (Vec3f) scale instead of a
-uniform Float32 scale.  Each row of the rotation matrix gets multiplied by
-the corresponding axis scale; translation is unchanged.
-"""
+Scale rotation row i by sc[i], then append translation in core affine layout."""
 @inline function build_4x3_pervec(rot9::NTuple{9, Float32}, sc::Vec3f, p::Point3f)
     sx, sy, sz = sc[1], sc[2], sc[3]
     (rot9[1] * sx, rot9[2] * sy, rot9[3] * sz, p[1],
@@ -106,26 +58,10 @@ the corresponding axis scale; translation is unchanged.
 end
 
 
-# Moved here from the Vulkan backend: converting a 4×4 into the row-major 3×4 an
-# instance descriptor wants is arithmetic, not driver code, and Metal needs the
-# identical result — `MTLAccelerationStructureInstanceDescriptor` opens with the
-# same 48 bytes `VkAccelerationStructureInstanceKHR` does. The old name is kept
-# so no call site changes; `vk` in it is now historical rather than descriptive.
-"""Convert a 4×4 matrix to a `Mat3x4f` (Vulkan row-major 3×4 layout).
-Works with SMatrix{4,4}, Mat4f, or any indexable 4×4 matrix.
-
-The returned `Mat3x4f` (= `SMatrix{4, 3, Float32, 12}`) is byte-identical to
-`VkTransformMatrixKHR.matrix` (`float[12]`), so passing it as a kernel argument
-or storing it into `VulkanInstanceRecord.transform` is a memcpy, not a layout
-transform."""
+# Historical function name; the result is the core row-major affine layout.
+"""Convert an indexable 4×4 matrix to the core row-major Mat3x4f layout."""
 function mat4_to_vk_transform(m)::Mat3x4f
-    # Vulkan row-major 3×4:
-    # Row 0: m[1,1], m[1,2], m[1,3], m[1,4]
-    # Row 1: m[2,1], m[2,2], m[2,3], m[2,4]
-    # Row 2: m[3,1], m[3,2], m[3,3], m[3,4]
-    # SMatrix{4,3} ctor reads column-major, but our rows ARE the SMatrix's
-    # columns (the byte-equivalence trick), so we just hand the rows over in
-    # order.
+    # SMatrix columns hold the affine rows in linear storage order.
     return Mat3x4f(
         Float32(m[1,1]), Float32(m[1,2]), Float32(m[1,3]), Float32(m[1,4]),
         Float32(m[2,1]), Float32(m[2,2]), Float32(m[2,3]), Float32(m[2,4]),

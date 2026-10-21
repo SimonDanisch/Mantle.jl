@@ -1,37 +1,4 @@
-"""
-The staged scalar GEMM: `mul!`'s fp32 path.
-
-Ported from the `#else` (non-`COOPMAT`) branch of llama.cpp's `mul_mm.comp`,
-vendored at `reference/mul_mm/`. The cooperative-matrix branch of that same
-shader was already Lava's staged coopmat GEMM, and the two share their staging,
-so this is the other half of a port rather than a new kernel.
-
-It replaced `strided_gemm_kernel!`, which declared no `@localmem` at all: one
-invocation per output element with K walked in global memory, two global loads
-per `muladd`. That measured **0.448 TFLOP/s at 2048^3** on a Radeon 8060S against
-14.6 for the fp16 cooperative-matrix path, and it got *worse* with size, which is
-what a kernel whose working set outgrows cache does.
-
-There is no fp32 shortcut this could have used instead. The driver reports
-fourteen cooperative-matrix shapes and `FLOAT32` appears in none of them as an A
-or B type, only as an accumulator, matching AMD's documented RDNA3 WMMA input set
-of f16/bf16/iu8/iu4. So a tiled scalar GEMM is the answer rather than a
-workaround for a missing one, and this file is mostly about the two things such a
-kernel gets wrong: ragged extents, and being used when it should not be.
-
-What is pinned here:
-
-  * every combination of ragged extent, transpose and `alpha`/`beta`, because the
-    `FAST` specialisation means the guarded and unguarded paths are *different
-    compiled kernels* and a test that only exercises exact multiples would check
-    one of them;
-  * that the dispatch gate is on TILE COUNT and not on the extents. Gating on `M`
-    and `N` separately was tried, and it sent the 64 x 1370 plane to the
-    per-element kernel because of its 64 rows. That plane is the single largest
-    operation in Depth Anything's forward pass and the staged kernel wins it
-    1.63x, so the wrong gate silently gave back most of the point of the kernel.
-"""
-
+# Scalar GEMM: exact/ragged tiles, transposes, alpha/beta and selection thresholds.
 using Test, KernelAbstractions, LinearAlgebra, Random
 using LinearAlgebra: mul!
 include(joinpath(@__DIR__, "testbackend.jl"))
@@ -263,5 +230,17 @@ end
         # coopmat branch's `BK/2 + 4` (Lava's `GEMM_PAD = 4`) is a different
         # number for a different access pattern and must not be reused here.
         @test Mantle.SGEMM_SHF == Mantle.SGEMM_BK + 2
+    end
+end
+
+@testset "GEMM stride wrappers preserve conjugation rules" begin
+    for T in (Float32,ComplexF32)
+        a = KA.allocate(back,T,3,5)
+        swapped = (a,1,3,1)
+        @test Mantle.gemmstrides(transpose(a)) === swapped
+        @test Mantle.gemmstrides(PermutedDimsArray(a,(2,1))) === swapped
+        @test Mantle.gemmstrides(PermutedDimsArray(a,(1,2))) === (a,1,1,3)
+        expected = T <: Real ? swapped : nothing
+        @test Mantle.gemmstrides(adjoint(a)) === expected
     end
 end

@@ -184,3 +184,7 @@ unused top-level prose strings are deleted and a fourth is attached as method
 documentation. The inventory's resulting 40-line implementation decrease is
 prose reclassification, not algorithm deletion. Source decreases 53,085 → 51,636
 physical lines; all 115 source files still parse.
+
+[Shared geometry/strides](consolidation-geometry.md) removes 49 implementation
+lines, corrects stale geometry contracts and qualifies contact-slot ordering
+with native contention/tail cases (629 targeted assertions).

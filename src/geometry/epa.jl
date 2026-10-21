@@ -1,73 +1,23 @@
-# EPA (Expanding Polytope Algorithm) -- CPU reference for penetration recovery.
-#
-# Given two overlapping convex shapes (as established by GJK) plus the GJK
-# termination simplex, EPA iteratively expands a convex polytope around the
-# origin in Minkowski-difference space until the closest face's plane lies
-# (within eps) on the surface of the Minkowski difference.  That face's
-# outward normal is the penetration normal; the distance from origin to the
-# plane is the penetration depth; the contact point is recovered by
-# barycentric interpolation of the per-vertex world-space s_A values.
-#
-# Reference: Bullet's btGjkEpaSolver2 / btPolyhedralContactClipping; Casey
-# Muratori's GJK/EPA tutorial; Erin Catto's GDC notes.  This file is a clean
-# CPU port targeted at being callable from a GPU @kernel in P4.4 -- all
-# storage is fixed-size MVector / NTuple, no heap allocation in the hot loop.
-#
-# The transform / support / dot conventions are inherited from gjk.jl; do
-# not duplicate them.
-
+# EPA penetration recovery shared by host references and GPU kernels.
+# Expand a bounded polytope in A-B space; interpolate shape A's support points
+# at the closest face. Geometry/support conventions come from gjk.jl.
 using GeometryBasics: Vec3f
 using LinearAlgebra: dot, cross, norm
 using StaticArrays: MVector
 
-# ---------------------------------------------------------------------------
-# Storage bounds
-# ---------------------------------------------------------------------------
-# A unit-cube vs unit-cube tetrahedron starts with 4 verts / 4 faces / 0
-# edges; each iteration adds at most (silhouette_count) new faces and 1 new
-# vertex.  With max_iters=24, MAX_VERTS=32 leaves room for any reasonable
-# polytope growth.  MAX_FACES=64 / MAX_EDGES=64 are likewise generous.
-# These are deliberately oversized to avoid crowding the upper limit on
-# pathological cases (rotated long thin shapes); GPU shared-memory budget
-# is the only reason they're not larger still.
+# Fixed polytope capacity; exhausting any bound returns converged=false.
 const EPA_MAX_VERTS = 32
 const EPA_MAX_FACES = 64
 const EPA_MAX_EDGES = 64
 
-# ---------------------------------------------------------------------------
-# support_pair_world
-#
-# Like support_AB but returns the world-space s_A and s_B contributions
-# alongside the Minkowski-difference vertex.  EPA needs s_A to recover the
-# contact point on shape A's surface from the closest-face barycentric.
-# ---------------------------------------------------------------------------
-@inline function support_pair_world(A::ConvexShape, B::ConvexShape,
-                                    T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
-                                    dir_world::Vec3f)
-    dir_A = inv_transform_dir(T_A, dir_world)
-    dir_B = inv_transform_dir(T_B, dir_world)
-    sA    = transform_point(T_A, support(A, dir_A))
-    sB    = transform_point(T_B, support(B, -dir_B))
-    return sA, sB, sA - sB
-end
-
-# ---------------------------------------------------------------------------
 # EPAResult
-# ---------------------------------------------------------------------------
 
-"""
-    EPAResult
+"""EPAResult
 
-Result of an EPA penetration-recovery call.
-
-Fields:
-- `normal`: unit penetration normal in world space, pointing from B toward A
-  (i.e. the direction along which to push A away from B to separate them).
-- `depth`: penetration depth (>= 0) along `normal`.
-- `contact`: contact point in world space on shape A's surface.
-- `iterations`: number of EPA expansion iterations performed.
-- `converged`: true iff EPA converged within `max_iters`; false on cap-out.
-"""
+Closest-face normal of A-B, penetration depth, world-space contact on A,
+iteration count and convergence flag. Separating A uses -depth*normal.
+Iteration/storage exhaustion or an invalid polytope sets converged=false;
+failure paths may return a zero contact rather than an interpolated point."""
 struct EPAResult
     normal::Vec3f
     depth::Float32
@@ -76,19 +26,9 @@ struct EPAResult
     converged::Bool
 end
 
-# ---------------------------------------------------------------------------
-# Polytope seeding
-#
-# Build a 4-vertex tetrahedron that encloses the origin, with per-vertex
-# world-space s_A tracked alongside the Minkowski-difference vertex.  We
-# don't trust the GJK simplex's points directly (they don't carry s_A
-# bookkeeping); instead we resample 4 fresh support pairs.  For two
-# penetrating convex shapes whose Minkowski-difference origin is interior,
-# this GJK-init-style construction always succeeds.
-#
-# Returns (verts_m, verts_sA, ok).  `ok=false` on degenerate seed (e.g.
-# coplanar shapes); EPA returns a non-converged result in that case.
-# ---------------------------------------------------------------------------
+# Rebuild a four-point support candidate with shape A's world-space points.
+# Returns (Minkowski vertices, A support points); degenerate directions use
+# canonical axes. No separate seed-success flag is returned.
 @inline function seed_polytope(A::ConvexShape, B::ConvexShape,
                                T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
                                eps::Float32)
@@ -138,11 +78,9 @@ end
     return (m1, m2, m3, m4), (sA1, sA2, sA3, sA4)
 end
 
-# ---------------------------------------------------------------------------
 # Face plane: outward unit normal + signed distance from origin to plane.
 # Returns (normal, distance).  If the triangle is degenerate (zero-area),
 # returns (Vec3f(0), Inf32) which the closest-face search will skip.
-# ---------------------------------------------------------------------------
 @inline function compute_face_plane(v1::Vec3f, v2::Vec3f, v3::Vec3f, interior::Vec3f)
     e1   = v2 - v1
     e2   = v3 - v1
@@ -156,20 +94,13 @@ end
     if dot(n, v1 - interior) < 0f0
         n = -n
     end
-    # Signed distance from origin to plane along outward n:
-    #   plane:  dot(n, x - v1) = 0   =>   dot(n, x) = dot(n, v1)
-    #   distance(origin) = dot(n, 0) - dot(n, v1) = -dot(n, v1)
-    # but we want the magnitude along outward n.  Since n points outward and
-    # origin is interior, dot(n, v1) > 0; that value IS the distance from the
-    # origin to the plane along +n.  So:
+    # Outward plane equation dot(n,x)=dot(n,v1); the origin projection is d*n.
     d = dot(n, v1)
     return n, d
 end
 
-# ---------------------------------------------------------------------------
 # Closest-face search: pick the live face with smallest face.distance.
 # Returns the index, or -1 if no live faces (which would be a polytope bug).
-# ---------------------------------------------------------------------------
 @inline function find_closest_face(face_alive::MVector, face_dist::MVector, n_faces::Int)
     best_idx = -1
     best_d   = Inf32
@@ -182,13 +113,8 @@ end
     return best_idx
 end
 
-# ---------------------------------------------------------------------------
-# Barycentric coordinates of a point P on a triangle (v1,v2,v3).
-# Used to interpolate the per-vertex world-space s_A into a contact point.
-# Implementation: Christer Ericke "Real-Time Collision Detection" 3.4.
-# Returns (b1, b2, b3) summing to ~1; if triangle is degenerate returns
-# (1, 0, 0) so the contact falls back to v1's s_A.
-# ---------------------------------------------------------------------------
+# Barycentric interpolation (Real-Time Collision Detection §3.4).
+# Degenerate triangles use weights (1,0,0).
 @inline function barycentric_in_triangle(p::Vec3f, v1::Vec3f, v2::Vec3f, v3::Vec3f)
     e1   = v2 - v1
     e2   = v3 - v1
@@ -208,68 +134,28 @@ end
     return (b1, b2, b3)
 end
 
-# ---------------------------------------------------------------------------
-# epa()
-# ---------------------------------------------------------------------------
+# Interpolate shape A's support points at the closest face's origin projection.
+@inline function face_result(verts_m, verts_sA, v, normal, distance, iter, converged)
+    b1, b2, b3 = barycentric_in_triangle(normal * distance,
+        verts_m[v[1]], verts_m[v[2]], verts_m[v[3]])
+    contact = b1 * verts_sA[v[1]] + b2 * verts_sA[v[2]] + b3 * verts_sA[v[3]]
+    return EPAResult(normal, distance, contact, iter, converged)
+end
 
-"""
-    epa(A::ConvexShape, B::ConvexShape,
-        T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
-        gjk_simplex::NTuple{4,Vec3f};
-        max_iters::Int=24, eps::Float32=1f-4) -> EPAResult
+# Fixed-capacity MVectors are device-local scratch. CPU compilation may heap
+# allocate them; fixed capacity alone is not a host allocation-free guarantee.
 
-Recover the penetration normal, depth, and contact point for two overlapping
-convex shapes whose overlap was just established by `gjk()`.  The
-`gjk_simplex` argument is the 4-tuple Minkowski-difference simplex returned
-by `gjk()` when `overlap == true`; it currently informs the seed direction
-but the polytope is rebuilt from scratch with per-vertex `s_A` tracking
-(the GJK simplex doesn't carry that bookkeeping).
+"""epa(A, B, T_A, T_B, gjk_simplex; max_iters=24, eps=1f-4) -> EPAResult
 
-`EPAResult.normal` points from B toward A in world space (the direction
-along which to push A out of B); `EPAResult.depth` is the magnitude of
-penetration along that normal; `EPAResult.contact` is a point on shape A's
-surface at the contact face.
-
-`converged=false` only on iteration-cap exhaustion; the returned values are
-the closest-face data at that point and are still usable as a best-effort
-estimate.
-"""
-# CPU-allocation note: a `@allocated epa(...)` call from the Julia REPL on the
-# unit-cube-vs-unit-cube headline case reports ~1.2 KB / 6 small pool allocs
-# per invocation.  This is NOT a code defect, and does NOT affect the GPU
-# `@kernel` path that P4.4 will compile through KernelAbstractions /
-# GPUCompiler.  Investigation (see P4.3 review fix-up):
-#
-#   - Each individual MVector below stack-promotes cleanly when used in
-#     isolation (`@allocated` returns 0).
-#   - With all 7 MVectors live simultaneously (~3 KB total), Julia's CPU
-#     escape-analysis budget is exceeded and 1-2 of them spill to the GC pool.
-#     Which ones spill is non-deterministic across recompiles.
-#   - Switching the NTuple-element MVectors to parallel-Int32 MVectors,
-#     packed UInt64s, or a wrapping mutable struct does not eliminate the
-#     spill; it just changes which storage band escapes.
-#
-# The GPU compile path does not run Julia's CPU escape analysis: KA lowers
-# MVector storage to local / private memory or register tiles, with no GC
-# behind it.  P4.4 will validate this empirically when the @kernel composing
-# gjk + epa is built.  If a GPU compile failure surfaces here, this comment
-# is the place to revisit -- start by consolidating the per-element MVectors
-# into a single device-side scratch struct.
+Recover closest-face penetration data after GJK reports overlap. The simplex
+argument is retained for compatibility but unused: EPA rebuilds support pairs
+to track shape A's contact points. See EPAResult for orientation and failure data."""
 function epa(A::ConvexShape, B::ConvexShape,
              T_A::NTuple{12,Float32}, T_B::NTuple{12,Float32},
              gjk_simplex::NTuple{4,Vec3f};
              max_iters::Int=24, eps::Float32=1f-4)
 
-    # `gjk_simplex` is currently unused beyond its presence in the contract.
-    # We could exploit it as a seed-direction hint, but the GJK-init-style
-    # rebuild below works for all cases the cube-vs-cube spec demands and is
-    # robust to the GJK simplex coming back near-degenerate.  Keep the arg
-    # name in the signature for forward compatibility (P4.4 may pass it
-    # through unconditionally even when GJK reports no overlap).
-
-    # ------------------------------------------------------------------
-    # Storage (fixed-size, no heap alloc).
-    # ------------------------------------------------------------------
+    # The supplied simplex lacks support-pair bookkeeping; rebuild it below.
     verts_m  = MVector{EPA_MAX_VERTS, Vec3f}(undef)   # Minkowski-difference vertices
     verts_sA = MVector{EPA_MAX_VERTS, Vec3f}(undef)   # per-vertex world-space s_A
     face_v   = MVector{EPA_MAX_FACES, NTuple{3,Int32}}(undef)
@@ -278,9 +164,7 @@ function epa(A::ConvexShape, B::ConvexShape,
     face_alive = MVector{EPA_MAX_FACES, Bool}(undef)
     edges    = MVector{EPA_MAX_EDGES, NTuple{2,Int32}}(undef)
 
-    # ------------------------------------------------------------------
     # Seed the polytope.
-    # ------------------------------------------------------------------
     seed_m, seed_sA = seed_polytope(A, B, T_A, T_B, eps)
     verts_m[1]  = seed_m[1];  verts_sA[1] = seed_sA[1]
     verts_m[2]  = seed_m[2];  verts_sA[2] = seed_sA[2]
@@ -309,9 +193,7 @@ function epa(A::ConvexShape, B::ConvexShape,
         face_alive[i] = true
     end
 
-    # ------------------------------------------------------------------
     # Main expansion loop.
-    # ------------------------------------------------------------------
     last_idx = -1
     for iter in 1:max_iters
         idx = find_closest_face(face_alive, face_d, n_faces)
@@ -333,26 +215,13 @@ function epa(A::ConvexShape, B::ConvexShape,
         # than the face plane, the face IS the closest face on the surface
         # of the Minkowski difference.
         if d_new - d_face < eps
-            # Recover contact point.
-            v_idx  = face_v[idx]
-            v1     = verts_m[v_idx[1]]
-            v2     = verts_m[v_idx[2]]
-            v3     = verts_m[v_idx[3]]
-            origin_proj = n_face * d_face   # closest point on face plane to origin
-            b1, b2, b3  = barycentric_in_triangle(origin_proj, v1, v2, v3)
-            sA1    = verts_sA[v_idx[1]]
-            sA2    = verts_sA[v_idx[2]]
-            sA3    = verts_sA[v_idx[3]]
-            contact = b1 * sA1 + b2 * sA2 + b3 * sA3
-            return EPAResult(n_face, d_face, contact, iter, true)
+            return face_result(verts_m, verts_sA, face_v[idx], n_face, d_face, iter, true)
         end
 
-        # ----------------------------------------------------------
         # Expand: remove every face visible from the new support point,
         # collect silhouette edges (boundary edges of the removed region),
         # then add a new triangular face per silhouette edge fanning out
         # from m_new.
-        # ----------------------------------------------------------
         n_edges = 0
         @inbounds for fi in 1:n_faces
             if !face_alive[fi]
@@ -401,14 +270,7 @@ function epa(A::ConvexShape, B::ConvexShape,
             # No face was visible to the new support point.  This means
             # m_new lies inside the polytope -- numerical hiccup; treat as
             # converged at the closest face.
-            v_idx  = face_v[idx]
-            v1     = verts_m[v_idx[1]]
-            v2     = verts_m[v_idx[2]]
-            v3     = verts_m[v_idx[3]]
-            origin_proj = n_face * d_face
-            b1, b2, b3  = barycentric_in_triangle(origin_proj, v1, v2, v3)
-            contact = b1 * verts_sA[v_idx[1]] + b2 * verts_sA[v_idx[2]] + b3 * verts_sA[v_idx[3]]
-            return EPAResult(n_face, d_face, contact, iter, true)
+            return face_result(verts_m, verts_sA, face_v[idx], n_face, d_face, iter, true)
         end
 
         # Add the new vertex.
@@ -455,21 +317,10 @@ function epa(A::ConvexShape, B::ConvexShape,
         end
     end
 
-    # ------------------------------------------------------------------
     # Cap-out: return the closest-face data at the current state.
-    # ------------------------------------------------------------------
     idx = find_closest_face(face_alive, face_d, n_faces)
     if idx <= 0
         return EPAResult(Vec3f(1f0, 0f0, 0f0), 0f0, Vec3f(0f0), max_iters, false)
     end
-    n_face = face_n[idx]
-    d_face = face_d[idx]
-    v_idx  = face_v[idx]
-    v1     = verts_m[v_idx[1]]
-    v2     = verts_m[v_idx[2]]
-    v3     = verts_m[v_idx[3]]
-    origin_proj = n_face * d_face
-    b1, b2, b3  = barycentric_in_triangle(origin_proj, v1, v2, v3)
-    contact = b1 * verts_sA[v_idx[1]] + b2 * verts_sA[v_idx[2]] + b3 * verts_sA[v_idx[3]]
-    return EPAResult(n_face, d_face, contact, max_iters, false)
+    return face_result(verts_m, verts_sA, face_v[idx], face_n[idx], face_d[idx], max_iters, false)
 end

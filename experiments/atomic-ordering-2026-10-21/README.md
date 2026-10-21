@@ -133,3 +133,7 @@ contract. Complete target eligibility remains F42, including enabling and checki
 min/max. Their emitted code is tested here; native min/max is not part of the
 four-device visibility qualification. No replacement-runtime test
 or universal hardware-support claim follows from these results.
+
+The [contact-compaction follow-up](../review-2026-10-20/consolidation-geometry.md)
+migrates another reviewed caller: monotonic slot reservation, with payloads read
+only after dispatch completion. AMD/NVIDIA contention and tail checks pass.
