@@ -1,3 +1,6 @@
+# Normative execution/failure/retirement rules: execution-contracts.md.
+# A successful prefix survives later failure; native enqueue errors poison the
+# failure domain. GPU tokens alone never retire presentation resources.
 # Arrays that change, pending changes, acceleration structures, particles:
 # pseudocode.
 #
@@ -19,7 +22,8 @@
 #   view at the call and stay pending on the resource until the next
 #   submission that touches it, which applies them in front of its own work.
 # - "Kernel launch" means any launch of GPU work: traces count.
-# - TLAS: builds use the exact count; storage has a doubling capacity that
+# - TLAS: host-known counts build exactly; device-written totals build over
+#   capacity with mask-0 records past the total. Storage has a doubling capacity that
 #   never halves, capped at the device's maxInstanceCount; a plan's build or
 #   refit is a BuildRecording; Metal reads the count from a cell; Vulkan's
 #   indirect build is not used.
@@ -28,7 +32,7 @@
 #   one per element (D.3). The scene rectangle is applied in the vertex stage (D.3).
 # - A when! flag is a Bool; one launch or draw per when!.
 # - Groups are values and places in the order: Group(g or group, name).
-# - One array type: a view carries its own offset and dims.
+# - One array type: a view carries its own offset, dims and strides.
 # - Arrays can be read-only (`readonly = true`).
 # - A GPURef is one slot in device memory.
 # - length(a) and `capacity` follow Julia's array API.
@@ -37,6 +41,9 @@
 #   it (its readers, B.2).
 #
 # Facts this rests on:
+# Driver versions and timings below are historical experiment evidence, not
+# substitutes for querying enabled caps on the device being used. Existing
+# results and their scope are indexed in experiments/review-2026-10-20/evidence-index.md.
 # - Inactive instance = BLAS reference 0; invisible, still counted in instance
 #   ids; active <-> inactive needs a full build, not an update; an update may
 #   not change the instance count (vkdocs chapters/accelstructures.adoc:255-300,
@@ -64,7 +71,9 @@
 # - Shaders can take a TLAS as a 64-bit address (OpConvertUToAccelerationStructureKHR,
 #   SPV_KHR_ray_query; mentioned in vkdocs proposals/VK_EXT_mutable_descriptor_type.adoc:121).
 #   Lava binds a descriptor (Lava compiler/spirv/rayquery.jl:47,66-67).
-#   Which one Mantle uses is open.
+#   Core selects address access when caps(dev).accelbyaddress is enabled;
+#   otherwise descriptors are handle dependents and must be replaced/retired
+#   safely (execution-contracts.md sections 7 and 11).
 # - Descriptors may be written while a command buffer using the set is
 #   pending only if that buffer does not use them (descriptorsets.adoc:768-807).
 # - A kernel that reads a cell directly instead of its argument slot pays about
@@ -105,7 +114,7 @@ resize!(pos, 5000)                              # the first resize! makes it res
 pos[1:3] = newpoints                            # a store; lengths must match, as in Base
 copyto!(pos, newdata)                           # a store
 copy!(pos, newdata)                             # Base.copy!: resized to length(newdata) (old contents not kept), then stored
-trim!(pos)                                      # (name open) unmaps a reserve's pages beyond the size; nothing else does
+trim!(pos)                                      # unmaps a reserve's pages beyond the size; nothing else does
 length(pos)                                     # the requested length: a number, nothing waits (B.3)
 
 # In a graph launches name the array, not a count.
@@ -131,8 +140,8 @@ length(alive)                                   # the real length: waits for the
 # hardware path where the device has it; `hardware = false` forces software.
 
 blas = BLAS(dev, vertices, faces)               # vertices::MantleArray{Point3f,1}, faces::MantleArray{TriangleFace{UInt32},1}
-tlas = TLAS(dev)                                # storage sized for 64 instances, doubling, capped at the device's
-                                                #   maxInstanceCount; builds use the exact count (B.8);
+tlas = TLAS(dev; raytypes = 1)                                # storage sized for 64 instances, doubling, capped at the device's
+                                                #   maxInstanceCount; host-known counts build exactly (B.8);
                                                 #   pends a Build of zero instances, so it is never traced unbuilt
 
 h  = push!(tlas, blas, transform)               # one instance (transform::Mat4f)
@@ -140,7 +149,7 @@ r1 = push!(tlas, blas, transforms)              # a range, one instance per elem
 r2 = push!(tlas, marker, positions;             # a range computed on the device from positions (meshscatter);
            scale = sizes, rotation = rotations) #   positions: an array; sizes, rotations: arrays or one value
 tlas[h] = newtransform                          # a store into the range's source: a refit
-visible!(tlas, r2, false)                       # (name open) mask 0 in the range's records: a refit
+visible!(tlas, r2, false)                       # mask 0 in the range's records: a refit
 delete!(tlas, r1)                               # pending: its slot is freed, a build follows
 build!(tlas)                                    # pending: a full build, applied by the next use
 
@@ -159,9 +168,10 @@ copy!(color, fill(RGBAf(0, 0, 1, 1), length(points)))                # now one p
 # Another array object for an attribute is a new group of draws for the plot (D.3).
 # In a shader: attribute(color, i) == color[min(i, length(color))] (1-based)
 
-# Per-instance data in shaders: instanceCustomIndex is the range's slot (stable
+# Per-instance data in portable shaders: decoded customindex is the range's one-based slot (stable
 # for the range's life); the instance's index within its range is
-# InstanceId - rangeoffset(tlas, slot), read from an array the TLAS passes.
+# RayHit.instanceid - rangeoffset(tlas, slot), read from the TLAS range table.
+# Raw native KI indices stay zero-based; core decodes portable RayHit (§7).
 
 # ── Textures ──────────────────────────────────────────────────────────────────
 
@@ -186,6 +196,10 @@ struct Committed                        # a pool region with room to grow (doubl
     region::Region
 end
 struct Released end                     # after the last hold (internals.jl section 10)
+struct Unplaced end                     # a graph transient before compile assigns an arena slice
+struct ArenaSlice
+    arena::Arena; offset::Int; bytes::Int # owned by the plan's arena tenancy, never freed as an array region
+end
 
 # Where a resizable array goes, by dispatch on what the device has and how big
 # the array is. Decided by the submitter that applies a Resize (B.4 step 1),
@@ -202,20 +216,26 @@ struct Released end                     # after the last hold (internals.jl sect
 # one element per run binds O(log n) times. An array created with
 # `capacity = n` is resizable from the start and placed at creation
 # for n elements: Committed storage, or a reserve where outgrow picks one.
-growth(dev, r::Region, need)   = need <= sizeof(r) ? Adopt() : outgrow(caps(dev), need, caps(dev).sparseresidency)
-growth(dev, s::Committed, need) = need <= sizeof(s.region) ? InPlace() : outgrow(caps(dev), need, caps(dev).sparseresidency)
+growth(dev, r::Region, need)   = need <= sizeof(r) ? Adopt() : outgrow(caps(dev), need, Val(caps(dev).sparseresidency))
+growth(dev, s::Committed, need) = need <= sizeof(s.region) ? InPlace() : outgrow(caps(dev), need, Val(caps(dev).sparseresidency))
 growth(dev, s::Reserve, need)   = need <= s.mapped ? InPlace() :
                                   need <= s.bytes  ? MapPages(s, min(s.bytes, max(need, 2 * s.mapped))) :
-                                                     MoveTo(ReservePlan(reservesize(caps(dev), need)))
+                                                     outgrow(caps(dev), need, Val(caps(dev).sparseresidency))
 growth(dev, s::Evicted, need)   = RestoreTo(need)    # restored into storage of the new size (internals.jl section 9)
-outgrow(c, need, ::HasSparse) = need >= sparsethreshold(c) && fitsreserve(c, need) ? MoveTo(ReservePlan(reservesize(c, need))) :
+outgrow(c, need, ::Val{true}) = need >= sparsethreshold(c) && fitsreserve(c, need) ? MoveTo(ReservePlan(reservesize(c, need))) :
                                                              MoveTo(CommittedPlan(2 * need))
-outgrow(c, need, ::NoSparse)  = MoveTo(CommittedPlan(2 * need))
+outgrow(c, need, ::Val{false})  = MoveTo(CommittedPlan(2 * need))
 # Core's policy from the device's facts; a device type reports the facts
 # (c.sparsepage, c.sparseaddressspace, a total for the whole device) and
 # decides nothing:
 sparsethreshold(c; pages = 4) = pages * c.sparsepage   # smaller arrays double in the pool; the number is to be measured
-reservesize(c, need) = min(nextpow(2, 4 * need), reservelimit(c))   # reservelimit: a share of c.sparseaddressspace (open)
+reservelimit(c) = rounddown(min(c.maxalloc, c.sparseaddressspace ÷ 16), c.sparsepage)
+reservesize(c, need) = min(checkednextpow2(checkedmul(4, need)), reservelimit(c))
+# Initial bounded core heuristic: at most 1/16 of total sparse address space
+# per reserve, also within the conservative native allocation bound. Aggregate
+# virtual reservations are admitted by the pool; native reserve failure can
+# select committed storage before mutation. Arithmetic is checked. This default
+# is measurable policy, never a device-specific growth algorithm.
 # A need beyond reservelimit (lavapipe's 2 GiB of sparse address space) moves
 # into Committed storage instead: a reserve is never smaller than the need.
 fitsreserve(c, need) = need <= reservelimit(c)
@@ -223,8 +243,8 @@ fitsreserve(c, need) = need <= reservelimit(c)
 
 # ── B.2 Array state ───────────────────────────────────────────────────────────
 
-mutable struct ArrayState
-    storage::Union{Region,Reserve,Committed,Evicted,Released}   # as applied so far: only an applying submission
+mutable struct ArrayState <: Resource
+    storage::Union{Region,Reserve,Committed,Evicted,Released,Unplaced,ArenaSlice}   # device storage as applied; graph placement at compile
                                                  #   changes it (B.4); Evicted under pressure (internals.jl section 9)
     dims::NTuple                                 # the requested dims: length(a) for a host-set length, and what a
                                                  #   call's checks use under the locks; the GPU's are in the cell. A
@@ -240,7 +260,7 @@ mutable struct ArrayState
     const source::Union{Nothing,AbstractArray}   # the caller's host array for `readonly = true`, else nothing:
                                                  #   isreadonly(st); Mantle's write methods throw at the call
                                                  #   (checkwritable, B.5); a restore uploads from it (internals.jl section 9)
-    const cell::Cell                             # address and dims
+    cell::Union{Cell,NoCell}                      # fixed graph transients have NoCell; device arrays always have a Cell
     const pool::Pool                             # its device's pool: device(st), pool(st), nextseq!(st)
     const sync::SyncState                   # protects everything here, and the pending changes; has `freed` (B.10)
     const holds::Threads.Atomic{Int}             # the creator, each graph naming it, each composite holding it
@@ -248,11 +268,20 @@ mutable struct ArrayState
     const dependents::Dict{WeakPlan,Dependence}  # every plan that names it (B.6)
     readers::ReaderSet                           # composites built from it (B.8); an immutable snapshot
 end
+# A fresh graph transient starts Unplaced/NoCell. Compile assigns ArenaSlice;
+# compiled plans retain their own placements, so replacing this field never
+# alters an older plan. A first resize marks direct-count dependencies stale;
+# the replacement compile prepares its Cell before binding/recording. Later
+# resizes fitting the placed size use the cell. Device-array graph aliases
+# share the original device storage/Cell and never become arena allocations.
+# Dropping an ArenaSlice/Unplaced array state releases metadata (and any Cell),
+# not arena backing bytes: only plan tenancy/release owns those. This is the
+# same MantleArray/ArrayState with runtime storage properties, no role type.
 # Readers: the composites built from the array, counted per reader (a TLAS
 # with two ranges over it counts twice; delete! removes one): a TLAS or BLAS,
 # a screen (a redraw mark). The snapshot is replaced under the
 # array's lock, never changed in place, so a run iterates it without a lock
-# (internals.jl pendreaders!) and a change can check under its locks that the
+# (internals.jl pendreaders_locked!) and a change can check under its locks that the
 # snapshot it locked by is still current (B.4).
 #
 # Views (GPUArrays' derive) refer to this state with a static offset, dims and
@@ -294,9 +323,13 @@ abstract type Change end
 # array has at that point of the sequence, so a store pended before a resize
 # is copied along with the old contents, and one pended after it writes the
 # new storage.
-struct Store <: Change
-    seq::UInt64; target::ArrayState; upload::Region; span::UnitRange{Int}
+struct Store{R<:Resource,S} <: Change
+    seq::UInt64; target::R; upload::Region; span::S
 end
+# span is a UnitRange{Int} of parent bytes when contiguous; otherwise a
+# destination mapping (view = ArrayView(...), indices = r) for a scatter.
+# GPURef stores use the same Store, with the slot as target. A strided store
+# never qualifies for inline/copy-by-span; the prefix uses a scatter kernel.
 # resize!: the requested dims, and how many bytes of the old contents to keep
 # (Keep: up to the smaller size; Discard, copy!'s case: none).
 struct Resize <: Change
@@ -324,6 +357,9 @@ uses(c::BuildAccel) = ((c.target, Write()), ((m, Read()) for m in allmembers(c.t
 # before a held Resize and one pended after it stay two stores. A hold drop due after a
 # change is applied is not a change: it waits in the record's `deferred`
 # list, so coalescing never drops it.
+# Coverage means actual destination elements, not a strided mapping's bounding
+# interval: a store into odd elements cannot replace a pending even-element
+# store. Scatter upload size is the packed data size, not that interval.
 pendone!(c::Change) = coalesce!(syncstate(c.target).pending, c)   # under the target's lock
 nextseq!(x) = Threads.atomic_add!(device(x).changeseq, UInt64(1))   # x: anything on a device (an array state, a structure, a GPURef)
 
@@ -350,9 +386,10 @@ end
 # an eviction copy) applies the pending changes of what it locks, in front of
 # its own work, in the same submission. Two steps:
 #
-# 1. Before any lock, prepare!(prepared, records): from the pending lists of
-#    the records it will lock (read without their locks: a snapshot) and from
-#    their storage, decide what applying them needs, and allocate it, one item
+# 1. Before acquiring storage, capture each record's pending list and storage
+#    under that record's lock, briefly. Copy mutable vectors: reading a Vector
+#    concurrently with push!/coalesce! is not a snapshot. Release the locks,
+#    then prepare!(prepared, snapshots) decides what applying them needs and allocates it, one item
 #    at a time into `prepared`: for a Resize, growth(dev, storage at that
 #    point, requested size) (B.5) gives InPlace, Adopt, pages to map, or new
 #    storage; for an evicted array (or a composite member evicted before it
@@ -441,6 +478,11 @@ function submitwith!(ch, records, prepared, ownuses, ownparts; self = nothing, r
         done(s) || return Again()                    # missing or too small: nothing emitted, start over
         append!(steps, s)
     end
+    validateown(ownparts, storageafter(steps)) || return NeedDestination()
+    # OwnWork carries a pure validator, true by default. Staged Array uses it
+    # to reject a raced growth before any mapping or token is claimed.
+    # NeedDestination escapes submitapplying to its caller; retrying there
+    # with the same staging allocation would never make progress.
     binds = Token[]
     foreach(s -> bindnow!(ch, s, binds), steps)      # pages first, through the sparse queue
     pre = Builder(device(ch), ch)
@@ -454,6 +496,8 @@ function submitwith!(ch, records, prepared, ownuses, ownparts; self = nothing, r
     # the naming plans' last runs, read under those plans' sync locks.
     token = submit!(ch, [finish(pre); cmds...]; eager = [changeuses; ownuses...], self,
                     waits = [waitsfor([changeuses; ownuses...]); ownwaits; binds], present)
+    # No fallible work after acceptance: pre-reserve commit/retirement/notification
+    # capacity before claim. A bookkeeping failure poisons/quarantines the domain.
     commit!(taken, steps, token)   # remove from the records; update the storage they changed; retire
     return token, taken.records    #   replaced storage with token; deferred hold drops with (token,)
 end
@@ -533,10 +577,10 @@ inhostfunction(task) = any(g -> (@atomic g.hostcaller) === task, livegraphs(REGI
 # the frame's last run and puts the array into the frame's inbox, and the
 # frame's next run waits for the step (internals.jl section 8). Runs expand
 # only what their inbox names (internals.jl lockstage).
-function lockexpanded(f, uses; readers = false)
+function lockexpanded(f, uses; readers = false, lent = false)
     while true
         x = expansion(uses; readers)                  # each snapshot read under its own lock, briefly
-        r = locked(records(uses, x)) do               # the uses' records and every member's, by id
+        r = locked(records(uses, x); lent) do               # the uses' records and every member's, by id
             current(x) || return Again()
             Done(f(records(uses, x), x))
         end
@@ -596,7 +640,7 @@ resizesteps(st, old, new::Reserve, c) =               # a move into a new reserv
 resizesteps(st, old, new::Committed, c) =
     (MoveStorage(st, old, new, min(c.keep, sizeof(old))), CellWrite(st, address(new), c.dims))
 resizesteps(st, ev::Evicted, new::RestoreStorage, c) =   # restored into storage of the requested size
-    (Restore(st, ev.host, new.storage, min(c.keep, sizeof(ev.host))), CellWrite(st, address(new.storage), c.dims))
+    (restorecopies(st, new, min(c.keep, sizeof(ev.host)))..., CellWrite(st, address(new.storage), c.dims))
 # A move is a copy, a write of the array: applied, it waits for every earlier
 # access on any queue (B.4), and the old storage is retired with its token;
 # commit! raises the array's capacity to what the new storage holds (B.2). A
@@ -621,8 +665,8 @@ function Base.setindex!(a::MantleArray{T,N,<:Device}, data, r::AbstractRange) wh
     length(data) == length(r) || throw(DimensionMismatch("setindex! of $(length(data)) elements into $(length(r))"))
     checkwritable(a)                                  # a read-only array throws, before the region is acquired
     st = a.state
-    span = parentbytes(a, r)
-    up = acquireupload!(pool(st), length(span))       # host-visible system memory, before any lock
+    span = storedestination(a, r)                    # parent byte span, or (view, indices) for a scatter
+    up = acquireupload!(pool(st), length(data) * sizeof(T))   # packed data, not a strided destination's bounding span
     ok = false
     try
         copyto!(hostview(up, T), vec(data))   # the one copy, from the caller's memory; a conversion error returns the region
@@ -641,6 +685,7 @@ stepsof(c::Store, p) = storesteps(c, storageat(c, p), inlineor(c, caps(device(c.
 storesteps(c, s, ::Inline) = (InlineStore(c.target, s, c.span, c.upload),)   # emitstore! from the region's bytes
 storesteps(c, s, ::Staged) = (StagedStore(c.target, s, c.span, c.upload),)   # a copy from the region
 # inlineor: Inline() within c.inlinestore at c.inlinealign offsets and sizes, else Staged();
+# a mapped/strided destination selects Scatter() and a copy kernel instead.
 # takeor(p, key): the item prepared for key, or Missing(). It is only taken
 # (kept from release!) when commit! runs: an Again or a throw before the
 # submission leaves every item to the submitter's release!.
@@ -752,6 +797,8 @@ function register!(pl::Plan)
         r = lockplans([pl; others]) do
           locked([dependencyrecords(pl); [syncstate(c.structure) for c in accelcommands(pl)];
                   [syncstate(r) for (r, _) in xs]]) do
+            busy = transferwaits([syncstate(r) for (r, _) in xs], nothing)
+            isempty(busy) || return WaitForTransfers(busy)
             expandeduses(pl) == xs || return Retry()           # a member was added meanwhile
             otherplans(pl, xs) ⊆ others || return Retry()      # lock again with the new plan
             all(d -> matches(d.state, d.dependence.compiled), pl.depends) || return Again()   # stale: recompile
@@ -802,7 +849,7 @@ fixedness(st) = st.resizable ? Resizable() : Fixed()          # (a field typed b
 # lengthof(a) among a launch's arguments makes a's length kernel-written: the
 # call (a declaration or an eager launch) sets lengthsource to DeviceLength
 # under a's lock and marks the plans that launch over a directly, like a
-# resize! (B.6); launches over a are indirect from then on (above).
+# resize! (B.6); launches over a use dynamic extents from then on (above).
 
 # Temporaries sized from an array: a size expression evaluated at compile.
 # Host length: twice the current length. Kernel-written length: the capacity.
@@ -831,7 +878,8 @@ placesize(s, x::SizedBy) = (n = sizing(x.array, x.array.state.lengthsource); dep
 sizing(a, ::HostLength) = 2 * length(a)
 sizing(a, ::DeviceLength) = a.state.capacity
 
-# Eager launches over a kernel-written length are indirect from the cell too:
+# Eager launches over a kernel-written length also use GPU-resolved extents
+# (native indirect or capacity predication):
 # one behaviour for the eager and the graph form.
 
 # Draws: vertex, index and instance counts are numbers or LengthOf
@@ -875,7 +923,7 @@ mutable struct TLAS{P} <: AccelStructure     # P: Hardware() or Software()
     const commands::WeakSet{BuildRecording}    # plans' builds and refits of it, marked by changes (below)
     const dependents::Dict{WeakPlan,Dependence}   # plans sized from its capacity (D.1's temporaries; B.6)
     const cell::Cell                         # AS address (Vulkan) or resource ID (Metal)
-    const countcell::Cell                    # the total, written by the offsets kernel; read where the device reads counts from memory
+    const countcell::Cell                    # native build count: exact host total, capacity for DeviceTotal; offsets prepare writes it
     const sync::SyncState
     const holds::Threads.Atomic{Int}
 end
@@ -894,9 +942,10 @@ struct InstanceRange
 end
 # On the device a range names cells, not addresses: every array it reads has a
 # cell index. Slots are
-# stable for a range's life: instanceCustomIndex is the slot, and shaders find
-# an instance's index within its range as InstanceId - offsets[slot].
+# stable for a range's life: decoded RayHit.customindex is the one-based slot.
+# RayHit.instanceid - offsets[slot] is one-based within the range (execution-contracts.md §7).
 struct RangeEntry
+    hitgroup::UInt32                         # logical 1-based group; native offset uses t.raytypes
     blascell::UInt32
     sourcecell::UInt32
     inputcells::NTuple{2,UInt32}             # scale, rotation; 0 for "one value", in valueslots
@@ -909,7 +958,8 @@ end
 # arguments: the range table, the offsets and the records, read through
 # their cells, so a move of the records does not stale them, and the cell
 # arena). One computes each slot's offset from the lengths in the source cells
-# (a prefix sum) and writes the total into countcell; one writes every
+# (a prefix sum) and writes the native build count into countcell (capacity
+# for DeviceTotal, exact host total otherwise); one writes every
 # instance record (transform from the source and inputs, mask from the entry,
 # BLAS address or resource ID from the BLAS cell), and records with mask 0
 # from the device total up to the build count, so a count that ran ahead of
@@ -982,7 +1032,7 @@ buildcount!(t, ::Update) = t.builtcount
 buildcount(t::TLAS) = buildcount(t, countsource(t.device))
 buildcount(t::TLAS, ::CountFromMemory) = fromcell(t, t.totalsource)   # Metal
 fromcell(t, ::HostTotal) = FromCell(t.countcell)
-fromcell(t, ::DeviceTotal) = FromCell(t.countcell)   # the offsets kernel's total, read by the device itself
+fromcell(t, ::DeviceTotal) = FromCell(t.countcell)   # prepare writes fixed capacity, not changing logical total
 buildcount(t::TLAS, ::CountRecorded) = recordedtotal(t, t.totalsource)   # Vulkan, below
 recordedtotal(t, ::HostTotal) = total(t)          # the host view, exact, no padding
 recordedtotal(t, ::DeviceTotal) = t.capacity      # a kernel writes the total: built over the capacity
@@ -990,9 +1040,9 @@ buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geo
                                        #   kernel-written length, below); a BLAS is never counted from memory
 # hostcount(FromCell(_)) is the host view total(t) too: what builtcount keeps.
 # A total a kernel writes has no host value. Where the device reads the count
-# from memory (Metal) it builds with that total from countcell (whether a
-# refit after the total changed is legal there is checked in phase 5, a build
-# where it is not). Where the count is recorded (Vulkan) such a TLAS is
+# from memory (Metal) countcell carries capacity for DeviceTotal, just as
+# the recorded-count path does. This fixed count keeps Updates legal without
+# host readback or guessing whether a logical count changed. Such a TLAS is
 # built over `capacity`, with mask-0 records past the device total that
 # reference a valid BLAS (a reference of 0 would make them inactive): the
 # count stays the capacity and no record changes between active and
@@ -1017,7 +1067,8 @@ buildcount(b::BLAS) = primitives(b)    # the primitive count, host view (the geo
 # structure's commands under the structure's lock, and the run records the
 # marked ones again, after the change prefix (B.4). So a change of the count
 # or the capacity never recompiles or re-records the plan. On Metal, which
-# reads the count from the cell, a new count only matters to Updates.
+# reads the native build count from the cell, a changed host count still
+# marks Updates. A changed device logical total does not change builtcount.
 build!(g::Graph, t::AccelStructure) = declare!(g, BuildNode(t, Build()))
 refit!(g::Graph, t::AccelStructure) = declare!(g, BuildNode(t, Update()))
 # refit!(g, t) runs the records kernels and the Update (they are part of the
@@ -1175,15 +1226,17 @@ end
 # Capacity: storage and scratch for `capacity` instances, doubling until the
 # total fits, starting at 64, capped at the device's maxInstanceCount (a
 # total past it throws at the call that raises it, checkinstances above); it
-# does not shrink on its own, since builds and refits carry the exact count
-# and the capacity costs memory only (expected from the API: the driver gets
+# does not shrink on its own. For host-known totals, builds/refits carry the
+# exact count and capacity is expected to cost memory only (the driver gets
 # the count, not the capacity; not measured with storage sized beyond the
 # count, to confirm in phase 5). Growing, hardware: a new AS object on a new
 # pool Region (AS storage cannot be sparse) and new scratch, prepared by the
 # applier (B.4 step 1); the old ones retired with the applying token; the
 # structure's BuildRecordings are marked; traces and ray queries take the AS
-# by address through the cell (with descriptors instead, which is open, they
-# would be handle dependents). Software: the five arrays
+# by address through the cell where caps(dev).accelbyaddress is enabled;
+# otherwise descriptors are handle dependents and are replaced/retired safely.
+# Device-written totals build over capacity with mask-0 records (B.8), so their
+# capacity also affects build cost. Software: the five arrays
 # grow like any array (their Resize steps, B.5).
 # The steps, emitted before the Build's own; commit! sets t.storage, t.scratch
 # and t.capacity when the submission is made. The instance records hold
@@ -1255,19 +1308,19 @@ capacitysteps(t::TLAS{Software}, g::Capacity) = softwaresteps(t, g)   # the five
 
 caps(dev)                    # facts, no policy: .sparseresidency, .sparsepage, .sparseaddressspace,
                              #   .accelbyaddress,
-                             #   .display (drives a monitor), .inlinestore and .inlinealign (B.5),
-                             #   .maxinstances (maxInstanceCount, B.8; field names open);
+                             #   .displayattached (watchdog risk); .display is usable WSI, .inlinestore and .inlinealign (B.5),
+                             #   .maxinstances (maxInstanceCount, B.8; schema in execution-contracts.md §6);
                              #   core's sparsethreshold, reservesize (B.1) and submission budget are
                              #   computed from them
 countsource(dev)             # CountRecorded() (Vulkan) | CountFromMemory() (Metal): where a TLAS build gets its count
 createreserve(dev, bytes)    # -> Reserve
-bindpages!(ch, token, binds, waits)     # queue operation: vkQueueBindSparse | Metal sparse buffer mapping update (MTL4UpdateSparseBufferMappingOperation in Metal.jl; selector to check on the SDK) | cuMemMap; signals token
+bindpages!(ch, token, binds, waits)     # queue operation: vkQueueBindSparse | Metal sparse buffer mapping update (MTL4UpdateSparseBufferMappingOperation in Metal.jl; selector to check on the SDK); signals token; host cuMemMap/hipMemMap are NOT this operation
 unbindpages!(ch, token, unbinds, waits) # the same, unbinding
 instancerecordtype(dev)      # VkAccelerationStructureInstanceKHR | MTLIndirectAccelerationStructureInstanceDescriptor
 accelsizes(dev, path, n)     # storage and scratch for n instances or a geometry
 placeaccel(dev, path, region)        # AS object on a pool Region
 acceladdress(dev, as)        # vkGetAccelerationStructureDeviceAddressKHR | gpuResourceID
-emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; the exact count (Vulkan, in a BuildRecording) or from a cell (Metal)
+emitbuild!(b, node, cmd::CompiledBuild, deps)   # Build or Update; host exact / device capacity; recorded on Vulkan, count cell on Metal
 emitstore!(b, dst, upload)                      # an inline store in a change prefix, from the store's upload region
                                                 #   (B.5): vkCmdUpdateBuffer within .inlinestore; Metal, CUDA, HIP:
                                                 #   inline limit 0, a copy from the store's upload region, acquired
@@ -1353,7 +1406,7 @@ end
 
 # A plot attribute is a MantleArray, mutated in place: length 1 for one
 # value, n for one per element. Shaders read attribute(a, i) =
-# a[min(i, length(a))] (name open), so both are one pipeline. An attribute
+# a[min(i, length(a))], so both are one pipeline. An attribute
 # whose type changes is the plot deleted and inserted (a group of draws, no recompile);
 # a value that picks another pipeline (transparency) is a store into the flags
 # of one recorded when! draw per variant; a new Hikari material type recompiles
@@ -1443,7 +1496,7 @@ end
 # geometry arrays, held by every range that uses it), one instance range
 # following the positions.
 function meshscatter_instances!(tlas, plot)
-    marker = blas!(plot.scene, plot.marker[])        # the scene's BLAS for this geometry (name open)
+    marker = blas!(plot.scene, plot.marker[])        # application helper: the scene's BLAS for this geometry
     push!(tlas, marker, plot.attributes.positions; scale = plot.attributes.markersize,
           rotation = plot.attributes.rotation)
 end

@@ -148,27 +148,30 @@ end
 
 # api.md 2.2 (`Array(a)`), recording-plan.md "Ordering across graphs and queues" (anything that is not a run waits for the last runs of the plans naming the resource): host reads racing 50 runs that write a in two halves (a slow kernel between them): every read sees one run's whole result, never a mix.
 @case "READ-07" 3 begin
-    dev = testdevice()
-    n = 2^20
-    a = MantleArray(dev, zeros(Int32, n))
-    gate = MantleArray(dev, zeros(Int32, 1))
-    k = GPURef(dev, Int32(0))
-    g = Graph(dev)
-    dispatch!(g, rd_fill!, (a, k, 0, n ÷ 2), n ÷ 2)
-    slowwrite!(g, gate, 0; ms = 20)
-    dispatch!(g, rd_fillafter!, (a, k, n ÷ 2, n ÷ 2, gate), n ÷ 2)
-    run!(g)
-    writer = Threads.@spawn for i in 1:50
-        k[] = Int32(i)
+    for unified in (false, true)
+        dev = testdevice()
+        n = 2^20
+        a = MantleArray(dev, Int32, n; unified)
+        fill!(a, Int32(0))
+        gate = MantleArray(dev, zeros(Int32, 1))
+        k = GPURef(dev, Int32(0))
+        g = Graph(dev)
+        dispatch!(g, rd_fill!, (a, k, 0, n ÷ 2), n ÷ 2)
+        slowwrite!(g, gate, 0; ms = 20)
+        dispatch!(g, rd_fillafter!, (a, k, n ÷ 2, n ÷ 2, gate), n ÷ 2)
         run!(g)
+        writer = Threads.@spawn for i in 1:50
+            k[] = Int32(i)
+            run!(g)
+        end
+        whole = Bool[]
+        while !istaskdone(writer) && length(whole) < 1000
+            v = Array(a)
+            push!(whole, all(==(v[1]), v))
+        end
+        withtimeout(() -> fetch(writer), 60)
+        @test !isempty(whole)
+        @test all(whole)
+        @test Array(a) == fill(Int32(50), n)
     end
-    whole = Bool[]
-    while !istaskdone(writer) && length(whole) < 1000
-        v = Array(a)
-        push!(whole, all(==(v[1]), v))
-    end
-    withtimeout(() -> fetch(writer), 60)
-    @test !isempty(whole)
-    @test all(whole)
-    @test Array(a) == fill(Int32(50), n)
 end

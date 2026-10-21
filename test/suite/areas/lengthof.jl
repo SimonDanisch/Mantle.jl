@@ -219,3 +219,21 @@ end
     @test reads > 0
     free!(g); free!(alive)
 end
+
+# KL-10: ordinary kernels consume prepared slots, not source Cells. Include
+# a length writer/prepare chain so a constant empty audit cannot pass.
+@case "KL-10" 4 begin
+    dev = testdevice()
+    alive = MantleArray(dev, Float32, 0; capacity = 4096)
+    marks = zeroed(dev, 4096)
+    g = lengthgraph(dev, alive, Int32(300))
+    dispatch!(g, kl_mark!, (marks, alive), launchrange(alive))
+    run!(g)
+    access = Mantle.cellaccesses(g)
+    @test any(a -> a.role === :lengthwriter && a.writes > 0, access)
+    @test any(a -> a.role === :prepare && a.reads > 0, access)
+    @test any(a -> a.role === :ordinary, access)
+    @test all(a -> a.role !== :ordinary || (a.reads == 0 && a.writes == 0), access)
+    @test launchcount(marks) == 300
+    free!(g); free!(alive); free!(marks)
+end

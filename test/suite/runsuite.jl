@@ -37,22 +37,49 @@ const AREAS = [
 ]
 
 """
-    runsuite(; phase, areas = AREAS, devices = suitedevices(), long = false)
+    runsuite(; phase, areas = AREAS, devices = suitedevices(), long = false, driverpairs = ())
 
 Every case of `areas` whose phase is at most `phase`, on each device of
 `devices` (a case that needs a capability a device lacks is skipped there).
 """
-function runsuite(; phase::Integer, areas = AREAS, devices = suitedevices(), long::Bool = false)
+function runsuite(; phase::Integer, areas = AREAS, devices = suitedevices(), long::Bool = false, driverpairs = ())
+    phase >= 0 || throw(ArgumentError("phase must be nonnegative"))
+    isempty(devices) && throw(ArgumentError("the suite requires at least one device"))
+    isempty(areas) && throw(ArgumentError("the suite requires at least one area"))
+    for (cu, vk) in driverpairs
+        cu in devices && vk in devices && cu !== vk || throw(ArgumentError("driver pair must name two suite devices"))
+        caps(cu).api === :cuda && caps(vk).api === :vulkan || throw(ArgumentError("driverpairs contain (CUDA, Vulkan) fixture pairs"))
+    end
     SUITE.phase[] = phase
     SUITE.long[] = long
     @testset "Mantle suite (phase ≤ $phase)" begin
         for dev in devices
             SUITE.device[] = dev
             @testset "$(devicename(dev))" begin
+                executed = 0
                 for area in areas
                     @testset "$area" begin
-                        include(joinpath(@__DIR__, "areas", area * ".jl"))
+                        # Area helpers and constants have overlapping names.
+                        # Give each device/area pass its own definitions: a
+                        # previous area or a second runsuite call must not
+                        # replace a helper's behavior or redefine a struct.
+                        scope = Module(gensym(:MantleSuiteArea))
+                        Base.include(scope, joinpath(@__DIR__, "helpers.jl"))
+                        Base.include(scope, joinpath(@__DIR__, "faultdevice.jl"))
+                        config = getfield(scope, :SUITE)
+                        config.phase[] = phase
+                        config.long[] = long
+                        config.device[] = dev
+                        config.fixtures[] = (; devices = Tuple(devices), driverpairs = Tuple(driverpairs))
+                        Base.include(scope, joinpath(@__DIR__, "areas", area * ".jl"))
+                        executed += config.executed[]
                     end
+                end
+                # Phase 0 writes the specification. Every later full phase
+                # gate must execute cases on each joined device; all skips
+                # cannot count as a passing implementation gate.
+                if phase >= 1 && areas == AREAS
+                    @test executed > 0
                 end
             end
         end

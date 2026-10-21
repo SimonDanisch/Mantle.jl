@@ -46,8 +46,6 @@ function splitchain!(g, n, k)
     return prev
 end
 
-"""`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 """A FaultDevice over the suite's device whose caps report the fields in `kw` instead."""
 function capsdevice(; kw...)
@@ -85,7 +83,7 @@ channelsused(d) = count(>(0), values(d.submissions))
 end
 
 # recording-plan.md "Queues" (host-device copies go to a transfer queue where the copy is independent), internals.jl section 4 (queuefor): the host function reads w, a device array no kernel of g writes; its copy into host-visible memory is independent of g's kernels and goes to the transfer queue: a run submits on at least two channels; the host function sees w. Assumes the suite's devices with several queue kinds have a transfer queue.
-@case "SPLIT-02" 3 :multiqueue begin
+@case "SPLIT-02" 3 :transferqueue begin
     dev = testdevice(); n = 2^16
     data = testdata(Int32, n)
     w = MantleArray(dev, data)
@@ -103,7 +101,7 @@ end
 end
 
 # internals.jl section 4 (queuefor: overlap gain against caps(dev).crossqueuecost), recording-plan.md "Queues": two independent branches whose estimated overlap gain exceeds the cross-queue cost (reported as 0): the second branch runs on a second compute queue (a run submits on two channels); both exact.
-@case "SPLIT-03" 3 :multiqueue begin
+@case "SPLIT-03" 3 :multicompute begin
     fd = capsdevice(; crossqueuecost = 0.0); n = 2^16
     g = Graph(fd)
     outa = MantleArray(fd, Int32, n)
@@ -149,7 +147,7 @@ end
 end
 
 # internals.jl section 4 (submissions!: a segment waits on the segments holding its predecessors on other queues): two independent chains and a kernel joining them, one segment per kernel (bandwidth 1 byte/s) and the chains on two queues (crossqueuecost 0): a segment waits only on segments of other queues, never on an earlier one of its own queue (queue order covers that). Reads the segments from submissions(g); that a segment shows its `channel` and `after` (the run's segments it waits on, internals.jl section 6, submitstage!) is assumed, the shape being open (api.md 2.3, `submissions(g)`).
-@case "SPLIT-05" 3 :multiqueue begin
+@case "SPLIT-05" 3 :multicompute begin
     fd = capsdevice(; crossqueuecost = 0.0, bandwidth = 1.0); n = 1024
     g = Graph(fd)
     out = MantleArray(fd, Int32, n)

@@ -1304,6 +1304,10 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
                 VK.PhysicalDeviceVulkan12Features).next
         (buffer = q.shader_buffer_int_64_atomics, shared = q.shader_shared_int_64_atomics)
     end
+    # Shader Device scope needs its own feature; QueueFamily is not equivalent
+    # when work can run on the async compute family.
+    has_memory_model_device_scope = VK.get_physical_device_features_2(phys_dev,
+        VK.PhysicalDeviceVulkan12Features).next.vulkan_memory_model_device_scope
     # Subgroup ops on anything other than 32-bit types. `subgroup_shuffle` and the
     # rest are bound for Int64/UInt64/Float64 (test_subgroup_shuffle.jl's
     # "every element type round-trips"), and SPIR-V group operations on 8-, 16- or
@@ -1510,7 +1514,7 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
         false,  # buffer_device_address_capture_replay
         false,  # buffer_device_address_multi_device
         true,   # vulkan_memory_model  ← REQUIRED (QueueFamily scope)
-        false,  # vulkan_memory_model_device_scope
+        has_memory_model_device_scope,  # vulkan_memory_model_device_scope
         false,  # vulkan_memory_model_availability_visibility_chains
         false,  # shader_output_viewport_index
         false,  # shader_output_layer

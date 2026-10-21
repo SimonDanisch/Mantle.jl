@@ -1,0 +1,109 @@
+Direct host transfer qualification 2026-10-21T13:43:31.963 Julia=1.12.7
+Mantle loaded=false
+DEVICE AMD Radeon RX 7900 XTX (RADV NAVI31) host_alignment=4096
+COPIED kind=private_anon import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=99.577 upload_gpu_ms_median=1.4074 upload_plus_readback_wall_ms_median=8.7137 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.169 upload_gpu_ms_median=1.3716 upload_plus_readback_wall_ms_median=8.7356 explicit_upload_staging_bytes=0 validation_errors=0
+FAILED kind=file_private_rw bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_shared_rw bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_private_ro bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_shared_ro bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+DEVICE NVIDIA RTX 4000 Ada Generation host_alignment=4096
+COPIED kind=private_anon import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) import_ms=0.286 upload_gpu_ms_median=0.7759 upload_plus_readback_wall_ms_median=1.7235 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) import_ms=0.455 upload_gpu_ms_median=1.9707 upload_plus_readback_wall_ms_median=4.0318 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=file_private_rw import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) import_ms=1.8 upload_gpu_ms_median=6.3136 upload_plus_readback_wall_ms_median=12.9851 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=file_shared_rw import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) import_ms=0.929 upload_gpu_ms_median=6.3147 upload_plus_readback_wall_ms_median=12.9551 explicit_upload_staging_bytes=0 validation_errors=0
+FAILED kind=file_private_ro bytes=4194304 error=ERROR_OUT_OF_DEVICE_MEMORY: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_shared_ro bytes=4194304 error=ERROR_OUT_OF_DEVICE_MEMORY: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+DEVICE AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) host_alignment=4096
+COPIED kind=private_anon import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.148 upload_gpu_ms_median=0.2305 upload_plus_readback_wall_ms_median=2.0208 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.199 upload_gpu_ms_median=0.223 upload_plus_readback_wall_ms_median=1.9347 explicit_upload_staging_bytes=0 validation_errors=0
+FAILED kind=file_private_rw bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_shared_rw bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_private_ro bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+FAILED kind=file_shared_ro bytes=4194304 error=ERROR_INVALID_EXTERNAL_HANDLE: failed to execute #= /sim/Programmieren/VideoEdit/dev/Vulkan/generated/linux.jl:87576 =# @dispatch device vkAllocateMemory(device, allocate_info, allocator, pMemory)
+DEVICE llvmpipe (LLVM 23.1.3, 256 bits) host_alignment=4096
+COPIED kind=private_anon import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.083 upload_gpu_ms_median=0.3137 upload_plus_readback_wall_ms_median=0.8281 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.103 upload_gpu_ms_median=0.1422 upload_plus_readback_wall_ms_median=0.6351 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=file_private_rw import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.101 upload_gpu_ms_median=0.1805 upload_plus_readback_wall_ms_median=0.6741 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=file_shared_rw import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.103 upload_gpu_ms_median=0.2968 upload_plus_readback_wall_ms_median=0.7974 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=file_private_ro import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.102 upload_gpu_ms_median=0.2262 upload_plus_readback_wall_ms_median=0.724 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=file_shared_ro import_bytes=4194304 payload_bytes=4194292 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.122 upload_gpu_ms_median=0.1378 upload_plus_readback_wall_ms_median=0.4575 explicit_upload_staging_bytes=0 validation_errors=0
+DEVICE AMD Radeon RX 7900 XTX (RADV NAVI31) host_alignment=4096
+COPIED kind=private_anon import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=2.139 upload_gpu_ms_median=4.5718 upload_plus_readback_wall_ms_median=16.0518 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.909 upload_gpu_ms_median=4.4107 upload_plus_readback_wall_ms_median=14.6572 explicit_upload_staging_bytes=0 validation_errors=0
+DEVICE NVIDIA RTX 4000 Ada Generation host_alignment=4096
+COPIED kind=private_anon import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) import_ms=4.113 upload_gpu_ms_median=101.2193 upload_plus_readback_wall_ms_median=194.7069 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) import_ms=4.837 upload_gpu_ms_median=101.2065 upload_plus_readback_wall_ms_median=194.6672 explicit_upload_staging_bytes=0 validation_errors=0
+DEVICE AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) host_alignment=4096
+COPIED kind=private_anon import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=1.139 upload_gpu_ms_median=2.6245 upload_plus_readback_wall_ms_median=7.8637 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=1.086 upload_gpu_ms_median=2.7275 upload_plus_readback_wall_ms_median=6.8415 explicit_upload_staging_bytes=0 validation_errors=0
+DEVICE llvmpipe (LLVM 23.1.3, 256 bits) host_alignment=4096
+COPIED kind=private_anon import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.111 upload_gpu_ms_median=4.2024 upload_plus_readback_wall_ms_median=8.8079 explicit_upload_staging_bytes=0 validation_errors=0
+COPIED kind=cache_read import_bytes=67108864 payload_bytes=67108852 imported_flags=MemoryPropertyFlag(MEMORY_PROPERTY_DEVICE_LOCAL_BIT | MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) import_ms=0.11 upload_gpu_ms_median=4.2858 upload_plus_readback_wall_ms_median=8.8042 explicit_upload_staging_bytes=0 validation_errors=0
+MAPPED_DESTINATION device=AMD Radeon RX 7900 XTX (RADV NAVI31) bytes=4194304 cpu_copy_ms_median=0.5410600000000001 explicit_upload_staging_bytes=0 validation_errors=0
+MAPPED_DESTINATION device=NVIDIA RTX 4000 Ada Generation bytes=4194304 cpu_copy_ms_median=1.6019204999999999 explicit_upload_staging_bytes=0 validation_errors=0
+MAPPED_DESTINATION device=AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO) bytes=4194304 cpu_copy_ms_median=0.1576055 explicit_upload_staging_bytes=0 validation_errors=0
+MAPPED_DESTINATION device=llvmpipe (LLVM 23.1.3, 256 bits) bytes=4194304 cpu_copy_ms_median=0.380995 explicit_upload_staging_bytes=0 validation_errors=0
+DIAGNOSE AMD Radeon RX 7900 XTX (RADV NAVI31) bytes=4096
+SOURCE private_anon raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=private_anon type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_private_rw raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_private_rw type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+SOURCE file_shared_rw raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_shared_rw type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+SOURCE file_private_ro raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_private_ro type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+PRIVATE_RO_WITH_RW_PROTECTION type=5 result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+PRIVATE_RO_RW_COW_TOUCHED type=5 result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+SOURCE file_shared_ro raw_properties=VK_SUCCESS type_bits=32 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=1965
+RAW_ALLOCATE kind=file_shared_ro type=5 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_INVALID_EXTERNAL_HANDLE
+DIAGNOSE NVIDIA RTX 4000 Ada Generation bytes=4096
+SOURCE private_anon raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=private_anon type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_SUCCESS
+RAW_ALLOCATE kind=private_anon type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_private_rw raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_private_rw type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_SUCCESS
+RAW_ALLOCATE kind=file_private_rw type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_shared_rw raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_shared_rw type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_SUCCESS
+RAW_ALLOCATE kind=file_shared_rw type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_SUCCESS
+SOURCE file_private_ro raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_private_ro type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+PRIVATE_RO_WITH_RW_PROTECTION type=2 result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+PRIVATE_RO_RW_COW_TOUCHED type=2 result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+RAW_ALLOCATE kind=file_private_ro type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+PRIVATE_RO_WITH_RW_PROTECTION type=3 result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+PRIVATE_RO_RW_COW_TOUCHED type=3 result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+SOURCE file_shared_ro raw_properties=VK_SUCCESS type_bits=12 ptr_alignment=0
+copy_only_external_features=ExternalMemoryFeatureFlag(EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT | EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)
+copy_only_requirements size=4096 alignment=16 bits=15
+RAW_ALLOCATE kind=file_shared_ro type=2 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+RAW_ALLOCATE kind=file_shared_ro type=3 flags=MemoryPropertyFlag(MEMORY_PROPERTY_HOST_VISIBLE_BIT | MEMORY_PROPERTY_HOST_COHERENT_BIT | MEMORY_PROPERTY_HOST_CACHED_BIT) result=VK_ERROR_OUT_OF_DEVICE_MEMORY
+Test Summary:                    | Pass  Total     Time
+direct-host native qualification |  519    519  4m09.3s
+SHA256 975442fc0b419dddd49eee663a76d7aeeb772c219f55e61eb9ac5893e87bccdf probe.jl
+SHA256 49eafe1166aa343ede1a7cd7bcaa2d416426a3d6dbb0936fcfa5e19a5669ab99 diagnostics.jl
+SHA256 3fb40788d5f7d9c718763fbbb40dc59e27d3c365f79ac6cc010604ac4a85f7b6 run.jl
+SHA256 c2fc99a3b6b36628a2ac896c06b12654f0b239e56ca9554d3fbb6b118803b4ae ../../src/vulkan/runtime/external.jl
+SHA256 1fe87faa85e4fd14931699c23201fd50d31cf9933d1e41d72d2746ad10f6f775 ../../src/runtime/api.jl
+SHA256 d7003d6530b64b2308e3426439187ca261b12e4784641f3f344153518f9f65ef ../../src/vulkan/runtime/memory.jl
+SHA256 cf5f600dd3643d2c56ddc35c24f7d064e6cc4a6a7538ae018f6bec4b6a9955d6 ../../../Vulkan/generated/linux.jl
+SHA256 3a2b961f159ef9148c085cff0970386b4a9a46e3b1c9f9379eebf9dfec9ba8ed ../../../Vulkan/generator/src/wrap/initialization.jl

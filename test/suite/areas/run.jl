@@ -77,8 +77,6 @@ function countinggraph(dev, counters...; kw...)
     return g
 end
 
-"""`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 """A FaultDevice over the suite's device whose caps report the fields in `kw` instead."""
 function capsdevice(; kw...)
@@ -117,7 +115,7 @@ end
 
 # api.md 6 (test_runs_never_overlap.jl), plan, Run: a graph that reads, increments and writes two device counters in two independent branches on two queues (crossqueuecost 0), run 10 000 times from each of 2 threads with no host wait: both counters count every run. Negative control: the plan's test-only `ordering = Unordered()` keyword (test_crossplan_order.jl), assumed to drop the wait on the previous run too: the counts come out short.
 # The counters are device arrays the graph names.
-@case "RUN-01" 3 :multiqueue :long begin
+@case "RUN-01" 3 :multicompute :long begin
     fd = capsdevice(; crossqueuecost = 0.0); runs = 10_000
     a = MantleArray(fd, Int32, 1)
     b = MantleArray(fd, Int32, 1)
@@ -216,7 +214,7 @@ end
     m1 = memory(fd)
     resize!(win, 80, 60)
     resize!(a, 2n)
-    inject!(fd, :budget, Answer(calls(fd, :budget) + 1, m1.reserved))
+    inject!(fd, :budget, BudgetLimit(calls(fd, :budget) + 1, fd, m1.reserved))
     ballast = MantleArray(fd, UInt8, 3 * 2^22)
     @test Mantle.mapped(fd) < m1.mapped
     free!(ballast)
@@ -230,7 +228,7 @@ end
     @test Array(out) == Int32.(1:16)
 end
 
-# plan, Ordering (nothing can fail between claiming tokens and submitting): the next rawalloc throws (FaultDevice) while a run's prepare! allocates for a pending resize! of a beyond its storage: the error comes out of run! before any token is claimed (no hook shows tokens; later host waits all return); with rawalloc working again, the next run applies the resize and is exact, a's contents kept.
+# plan, Ordering (fallible preparation precedes claim; native enqueue failures poison): the next rawalloc throws (FaultDevice) while a run's prepare! allocates for a pending resize! of a beyond its storage: the error comes out of run! before any token is claimed (no hook shows tokens; later host waits all return); with rawalloc working again, the next run applies the resize and is exact, a's contents kept.
 @case "RUN-06" 4 begin
     fd = FaultDevice(testdevice()); n = 64
     data = testdata(Int32, n)
@@ -251,13 +249,15 @@ end
     @test length(a) == 2^26
 end
 
-# plan, Ordering (nothing can fail between claiming tokens and submitting), api.md 4.2 (submitnative!): submitnative! throws at g's next submission (FaultDevice): the error comes out of run!; every lock and the arena part are released: another task's eager call on g's output, a graph sharing the part, and g's next run all finish, exact.
+# plan, Ordering (fallible preparation precedes claim; native enqueue failures poison), api.md 4.2 (submitnative!): preparesubmit throws before g's next token claim (FaultDevice): the error comes out of run!; every lock and the arena part are released: another task's eager call on g's output, a graph sharing the part, and g's next run all finish, exact.
 @case "RUN-07" 3 begin
     fd = FaultDevice(testdevice()); n = 64
     g, out = twokernels(fd, n)
     run!(g)
-    failsubmit!(fd, calls(fd, :submitnative!) + 1, ErrorException("device lost (injected)"))
+    faultat = calls(fd, :preparesubmit) + 1
+    failsubmit!(fd, faultat, ErrorException("submission preparation failed (injected)"))
     @test thrown(() -> run!(g)) isa ErrorException
+    @test calls(fd, :preparesubmit) == faultat
     @test thrown(() -> fill!(out, Int32(0))) === nothing
     g2, out2 = twokernels(fd, n)
     @test thrown(() -> run!(g2)) === nothing
@@ -266,7 +266,7 @@ end
     @test Array(out2) == Int32.(1:n)
 end
 
-# plan, Run (failure of a run: retried by run! itself): a stale plan (first resize! of a, which g launches over directly) is recompiled and retried inside run!, never thrown. With a window (phase 7, a device with a display), a window resized from another task during 50 runs is applied and retried inside run!: every run returns Submitted. OUT_OF_DATE itself comes from the driver and has no FaultDevice verb (acquirenext takes the swapchain); the resize race takes the same retry path (the window changed, Again).
+# plan, Run (failure of a run: retried by run! itself): a stale plan (first resize! of a, which g launches over directly) is recompiled and retried inside run!, never thrown. With a window (phase 7, a device with a display), a window resized from another task during 50 runs is applied and retried inside run!: every run returns Submitted. OUT_OF_DATE is separately injected through FaultDevice acquirenext in windows.jl; the resize race takes the same retry path (the window changed, Again).
 @case "RUN-08" 4 begin
     dev = testdevice(); n = 64
     a = MantleArray(dev, Int32, n)
@@ -326,7 +326,7 @@ end
 end
 
 # internals.jl section 6 (submitstage!: a later segment that touches what the change prefix wrote waits on the first segment's token): two independent branches on two queues (crossqueuecost 0) both read w; a store into w before each run is applied in the first segment's change prefix, and the segment on the other queue waits for that segment's token: both branches see the new data in each of 100 runs.
-@case "RUN-11" 4 :multiqueue begin
+@case "RUN-11" 4 :multicompute begin
     fd = capsdevice(; crossqueuecost = 0.0); n = 4096
     w = MantleArray(fd, Int32, n)
     fill!(w, Int32(0))
@@ -353,7 +353,7 @@ end
 end
 
 # plan, Ordering (tokens per segment): two threads each store into w and run g (branches on two queues, crossqueuecost 0) 200 times: per channel, the tokens of the applied change steps never go back in emission order (claim and submit in one step under the channel lock); results exact. "Validation clean" has no hook in this suite; the validation-layer runs check it.
-@case "RUN-12" 4 :multiqueue begin
+@case "RUN-12" 4 :multicompute begin
     fd = capsdevice(; crossqueuecost = 0.0); n = 1024
     data = Int32.(1:n)
     w = MantleArray(fd, Int32, n)
@@ -482,7 +482,7 @@ end
     @test Array(a) == fill(Int32(5), 2n)
 end
 
-# plan, Ordering (nothing can fail between claiming tokens and submitting), api.md 4.2: no allocation between claiming tokens and submitting (submitnative!, bindpages!). No hook counts allocations inside a verb; the closest observable: with a bandwidth of 1 byte/s every kernel is its own segment, and 200 steady-state runs of an 8-segment graph allocate no more Julia memory than those of a 1-segment graph (the per-segment path, submitnative! included, allocates nothing).
+# plan, Ordering (fallible preparation precedes claim; native enqueue failures poison), api.md 4.2: no allocation between claiming tokens and submitting (submitnative!, bindpages!). No hook counts allocations inside a verb; the closest observable: with a bandwidth of 1 byte/s every kernel is its own segment, and 200 steady-state runs of an 8-segment graph allocate no more Julia memory than those of a 1-segment graph (the per-segment path, submitnative! included, allocates nothing).
 @case "RUN-17" 3 begin
     fd = capsdevice(; bandwidth = 1.0); n = 256
     g1, out1 = chaingraph(fd, n, 1)
@@ -493,4 +493,29 @@ end
     b8 = runbytes(g8, 200)
     @test b8 <= b1 + 1024
     @test Array(out8) == Int32.(8:n+7)
+end
+
+# RUN-18: the first segment remains a live writer when preparation of the
+# second fails. Freeing that plan must preserve the accepted prefix's tokens.
+@case "RUN-18" 3 begin
+    fd = capsdevice(; bandwidth = 1.0)
+    a = MantleArray(fd, Int32[-1])
+    out = MantleArray(fd, Int32[-1])
+    g = Graph(fd)
+    slowwrite!(g, a, 7; ms = 200)
+    dispatch!(g, run_add!, (out, a, Int32(1)), 1)
+    run!(g)
+    @test segmentcount(g) == 2
+    @test Array(out) == Int32[8]
+    fill!(a, Int32(-1)); fill!(out, Int32(-1))
+    faultat = calls(fd, :preparesubmit) + 2
+    failsubmit!(fd, faultat, ErrorException("second segment preparation"))
+    @test thrown(() -> run!(g)) isa ErrorException
+    @test calls(fd, :preparesubmit) == faultat
+    free!(g)
+    @test withtimeout(() -> Array(a), 30) == Int32[7]
+    @test Array(out) == Int32[-1] # second segment never accepted
+    fill!(a, Int32(11))
+    @test Array(a) == Int32[11]   # preparation failure did not poison the queue
+    foreach(free!, (a, out))
 end

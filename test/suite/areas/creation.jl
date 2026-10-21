@@ -40,7 +40,7 @@ end
 """Caps `d`'s budget at what its pool holds now plus `headroom` bytes; returns the cap."""
 function limit!(d, headroom)
     cap = Mantle.reserved(d) + headroom
-    inject!(d, :budget, Answer(calls(d, :budget) + 1, cap))
+    inject!(d, :budget, BudgetLimit(calls(d, :budget) + 1, d, cap))
     return cap
 end
 

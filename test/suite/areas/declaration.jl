@@ -89,16 +89,16 @@ end
 
 # internals.jl section 2 (join): a graph on one device and a GPURef of
 # another: "two devices".
-@case "DECL-03" 6 :lavapipe begin
+@case "DECL-03" 6 :twodevices begin
     dev = testdevice()
-    other = first(d for d in devices() if d !== dev)
+    other = first(d for d in SUITE.fixtures[].devices if d !== dev)
     x = MantleArray(Graph(dev), Float32, 16)
     @test_throws ArgumentError location(x, GPURef(other, 1f0))
 end
 
 # api.md 2.2 (KA.get_backend on a graph array), 2.5 (per-run host data) and
-# section 7: getindex, iterate, Array, collect and show on a graph array throw,
-# and so does a store into it (error types unspecified); per-run host data is a
+# section 7: getindex, iterate, Array and collect on a graph array throw;
+# show prints metadata without a submission. A store into it throws; per-run host data is a
 # device array written by a store, which the graph copies in.
 @case "DECL-04" 6 begin
     dev = testdevice(); n = 16
@@ -108,7 +108,10 @@ end
     @test_throws Exception iterate(x)
     @test_throws Exception Array(x)
     @test_throws Exception collect(x)
-    @test_throws Exception sprint(show, MIME"text/plain"(), x)
+    shown, d = counted(() -> sprint(show, MIME"text/plain"(), x), dev)
+    @test !isempty(shown)
+    @test submitcount(d) == 0
+    @test d.hostwaits == 0
     data = testdata(Float32, n)
     @test_throws Exception (x[:] = data)
     h = MantleArray(dev, Float32, n)                # per-run host data: a device array written by stores
@@ -269,4 +272,42 @@ end
     run!(g)
     @test Array(a) == fill(7, n)
     @test Array(counter) == [2]
+end
+
+# A callable's fields are arguments too: captured resources need graph holds
+# and ordering even when the explicit args tuple contains only the output.
+@case "DECL-12" 6 begin
+    dev = testdevice()
+    hidden = MantleArray(dev, Int32[3, 5, 7, 9])
+    out = MantleArray(dev, Int32, 4)
+    kernel = let source = hidden
+        function (dst)
+            i = KI.get_global_id().x
+            i <= length(dst) || return nothing
+            dst[i] = source[i] + Int32(1)
+            nothing
+        end
+    end
+    g = Graph(dev)
+    dispatch!(g, kernel, (out,), 4)
+    free!(hidden)
+    run!(g)
+    @test Array(out) == Int32[4, 6, 8, 10]
+    free!(g); free!(out)
+end
+
+@case "DECL-13" 6 :twodevices begin
+    dev = testdevice()
+    other = first(d for d in SUITE.fixtures[].devices if d !== dev)
+    foreign = MantleArray(other, Int32[99])
+    kernel = let source = foreign
+        dst -> (dst[1] = source[1]; nothing)
+    end
+    out = MantleArray(dev, Int32[0])
+    g = Graph(dev)
+    @test_throws ArgumentError dispatch!(g, kernel, (out,), 1)
+    dispatch!(g, decl_inc!, (out,), 1)
+    run!(g)
+    @test Array(out) == Int32[1]
+    free!(g); free!(out); free!(foreign)
 end

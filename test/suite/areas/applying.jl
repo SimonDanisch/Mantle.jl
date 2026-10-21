@@ -208,7 +208,7 @@ end
     foreach(free!, (a, s))
 end
 
-# AP-05 resizing-and-raytracing.jl B.4 (bindnow!: bound pages are marked and not bound again): the submission after the page bind throws (injected at submitnative!, the first point after bindnow! a FaultDevice reaches): the next submitter maps no more than an unfaulted twin, and free! unmaps everything.
+# AP-05 resizing-and-raytracing.jl B.4 (bindnow!: bound pages are marked and not bound again): the submission after the page bind throws before claim (injected at preparesubmit after bindnow!): the next submitter maps no more than an unfaulted twin, and free! unmaps everything.
 @case "AP-05" 4 :sparse begin
     fd = FaultDevice(testdevice())
     n = pagecount(testdevice(), 4)
@@ -221,8 +221,10 @@ end
     x = testdata(Float32, n; seed = 2)
     a = MantleArray(fd, x)
     resize!(a, 2n)
-    failsubmit!(fd, calls(fd, :submitnative!) + 1, InjectedFault())
+    faultat = calls(fd, :preparesubmit) + 1
+    failsubmit!(fd, faultat, InjectedFault())
     @test_throws InjectedFault applypending!(s, a)
+    @test calls(fd, :preparesubmit) == faultat
     applypending!(s, a)
     @test memory(fd).mapped - base == 2twinpages
     @test firstof(a, n) == x
@@ -232,7 +234,7 @@ end
 end
 
 # AP-06 internals.jl section 6, recording-plan.md, The graph and its plan (later segments of the stage wait on the first segment's token): a store applied in the prefix of a run's first segment is seen by every later part of the run, on whichever queue core puts it (the negative control, removing that wait, has no hook).
-@case "AP-06" 4 :multiqueue begin
+@case "AP-06" 4 :multicompute begin
     dev = testdevice()
     n = 4096
     a = MantleArray(dev, testdata(Float32, n))
@@ -251,7 +253,7 @@ end
 end
 
 # AP-07 resizing-and-raytracing.jl B.4 (the changes' uses wait for every earlier access), recording-plan.md, Ordering across graphs and queues: graph g reads `a` and is in flight; a store into `a` applied by an eager host read waits for g: g still reads the old values (no write-after-read hazard).
-@case "AP-07" 4 :multiqueue begin
+@case "AP-07" 4 :multicompute begin
     dev = testdevice()
     n = 4096
     x, y = testdata(Float32, n), testdata(Float32, n; seed = 2)

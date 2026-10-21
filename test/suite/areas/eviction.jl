@@ -41,11 +41,11 @@ end
 """Caps `d`'s budget at what its pool holds now plus `headroom` bytes; returns the cap."""
 function limit!(d, headroom)
     cap = Mantle.reserved(d) + headroom
-    inject!(d, :budget, Answer(calls(d, :budget) + 1, cap))
+    inject!(d, :budget, BudgetLimit(calls(d, :budget) + 1, d, cap))
     return cap
 end
 
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
+
 
 """`f()` and the prefix steps applied while it ran (the step log restarted around it)."""
 function stepsduring(f, dev = testdevice())

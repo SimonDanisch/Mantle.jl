@@ -56,7 +56,7 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
     x = testdata(Float32, 1024)
     a, b = MantleArray(d, x), MantleArray(d, Float32, 1024)
     singles = (() -> fill!(b, 1f0), () -> (b .= a .* 2f0), () -> copyto!(b, a),
-               () -> (KI.@kernel d ndrange = 1024 ea_scale!(b, 2f0)), () -> dispatch!(d, ea_scale!, (b, 2f0), 1024))
+               () -> (KI.@launch d ndrange = 1024 ea_scale!(b, 2f0)), () -> dispatch!(d, ea_scale!, (b, 2f0), 1024))
     for op in singles
         k = calls(d, :compilekernel)
         _, diag = counted(op, d)

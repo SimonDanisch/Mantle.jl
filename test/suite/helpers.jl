@@ -7,7 +7,8 @@
 # hooks"; none of them is user API):
 #   Mantle.diagnostics(dev) -> Diagnostics   counters since the last reset:
 #       plancompiles, pipelinecompiles, kernelcompiles, records (recorded
-#       parts, BuildRecordings and pieces included), submissions (per channel),
+#       parts, BuildRecordings, profile variants and pieces included),
+#       prefixrecords, eagerrecords (temporary native encodings), submissions (per channel),
 #       allocations (acquire! calls), hostwaits
 #   Mantle.resetdiagnostics!(dev)
 #   Mantle.reserved(dev), Mantle.mapped(dev)  pool bytes
@@ -15,6 +16,8 @@
 #   Mantle.pendingof(x) -> Vector{Change}     a resource's pending requests
 #   Mantle.steplog!(dev, on) / Mantle.steplog(dev)   prefix steps applied:
 #       (kind, target, seq, token) per step, in emission order
+#   Mantle.checkrecord!(dev, on), withrecordguard(f, dev), readresourcesnapshot(a)
+#       reject semantic resource reads during recording; cellaccesses(g) is a compiled-origin audit
 #   Mantle.checklocks!(dev, on)               assert the lock order and that
 #       no sync-state, channel, pool or window lock is held in a host wait
 
@@ -26,16 +29,18 @@ struct SuiteConfig
     phase::Base.RefValue{Int}
     long::Base.RefValue{Bool}
     device::Base.RefValue{Union{Nothing,Mantle.Device}}
+    executed::Base.RefValue{Int}
+    fixtures::Base.RefValue{NamedTuple}
 end
-const SUITE = SuiteConfig(Ref(0), Ref(false), Ref{Union{Nothing,Mantle.Device}}(nothing))
+const SUITE = SuiteConfig(Ref(0), Ref(false), Ref{Union{Nothing,Mantle.Device}}(nothing), Ref(0),
+                          Ref{NamedTuple}((; devices = (), driverpairs = ())))
 
 testdevice() = SUITE.device[]
 devicename(dev) = string(nameof(typeof(dev)))
 
-# The API every case uses (MantleArray, Graph(dev), run!(g)) arrives in ledger
-# phase 6 (P6.A1). A case keeps the phase of the contract it checks, and runs
-# from phase 6 on at the earliest.
-const APIPHASE = 6
+# The phase-1 vertical slice supplies Device/MantleArray/Graph/run! and the
+# diagnostics hooks. Every case runs at its own phase: a missing foundation
+# must fail visibly instead of making the first five phase gates empty.
 
 """
     @case id phase [needs...] begin … end
@@ -50,14 +55,16 @@ macro case(id, phase, args...)
     body = last(args)
     needs = collect(args[1:end-1])
     quote
+        local _id = $(esc(id))
         local _needs = Symbol[$(map(esc, needs)...)]
-        if max($(esc(phase)), APIPHASE) > SUITE.phase[] || (:long in _needs && !SUITE.long[]) ||
+        if $(esc(phase)) > SUITE.phase[] || (:long in _needs && !SUITE.long[]) ||
            !all(n -> n === :long || has(testdevice(), n), _needs)
-            @testset $(esc(id)) begin
+            @testset "$_id" begin
                 @test_skip $(string(id))
             end
         else
-            @testset $(esc(id)) begin
+            SUITE.executed[] += 1
+            @testset "$_id" begin
                 $(esc(body))
             end
         end
@@ -68,15 +75,37 @@ end
 has(dev, ::Val{:rt}) = caps(dev).raytracing
 has(dev, ::Val{:graphics}) = caps(dev).graphics       # render passes and draws (not CUDA, HIP)
 has(dev, ::Val{:sparse}) = caps(dev).sparseresidency
-has(dev, ::Val{:multiqueue}) = length(Mantle.queuekinds(dev)) > 1
+has(dev, ::Val{:multiqueue}) = length(unique(q.state for q in Mantle.channelinfo(dev))) > 1
+has(dev, ::Val{:multicompute}) = length(unique(q.state for q in Mantle.channelinfo(dev) if q.compute)) > 1
+has(dev, ::Val{:transferqueue}) = any(Mantle.channelinfo(dev)) do q
+    q.transfer && any(c -> c.compute && c.state !== q.state, Mantle.channelinfo(dev))
+end
 has(dev, ::Val{:window}) = caps(dev).display
-has(dev, ::Val{:vendorview}) = dev isa Mantle.CudaDevice
-has(dev, ::Val{:metal}) = dev isa Mantle.MetalDevice
+has(dev, ::Val{:vendorview}) = caps(dev).api === :cuda
+has(dev, ::Val{:metal}) = caps(dev).api === :metal
 has(dev, ::Val{:lavapipe}) = occursin("llvmpipe", lowercase(Mantle.name(dev)))
+# Fixture requirements are distinct from device features. A CPU-only pass
+# cannot satisfy the default-hardware-device or paired-driver cases.
+defaultcandidate(dev) = caps(dev).api in (:vulkan, :metal) && !caps(dev).software
+has(dev, ::Val{:defaultgpu}) = any(defaultcandidate, SUITE.fixtures[].devices)
+has(dev, ::Val{:nodefaultgpu}) = !has(dev, :defaultgpu)
+has(dev, ::Val{:twodevices}) = length(SUITE.fixtures[].devices) > 1
+vulkanpeers(dev) = [v for (cu, v) in SUITE.fixtures[].driverpairs if cu === dev]
+has(dev, ::Val{:vulkanpeer}) = !isempty(vulkanpeers(dev))
+
 has(dev, n::Symbol) = has(dev, Val(n))
 
 """The devices the suite runs on: every GPU, and lavapipe where it is installed."""
 suitedevices() = collect(Mantle.devices())
+
+# One replacement helper for immutable caps. Unknown overrides must fail:
+# silently ignoring a misspelled field invalidates fault/queue policy tests.
+function withcaps(c; kw...)
+    all(k -> k in propertynames(c), keys(kw)) || throw(ArgumentError("unknown capability override"))
+    return replacecaps(c, (; kw...))
+end
+replacecaps(c::NamedTuple, replacements) = merge(c, replacements)
+replacecaps(c, replacements) = typeof(c)((get(replacements, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 # ── Counters ──
 
@@ -93,6 +122,7 @@ function memory(dev = testdevice())
     GC.gc(true)
     Mantle.waitidle(dev)
     Mantle.sweep!(dev)
+    Mantle.trim!(dev)  # empty native caches, not trim!(array) live-page unmapping
     return (; reserved = Mantle.reserved(dev), mapped = Mantle.mapped(dev),
             uploads = Mantle.liveuploads(dev), cells = Mantle.livecells(dev))
 end

@@ -7,7 +7,7 @@
 #
 # Pixels are Int32, so every result compares exactly with a host model.
 # Phase: the latest ledger phase among the contracts a case relies on: stores
-# and resize! are phase 4 (the suite runs nothing before APIPHASE).
+# and resize! are phase 4.
 
 const ED_W = 64
 const ED_H = 48

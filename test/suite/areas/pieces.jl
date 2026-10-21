@@ -306,7 +306,7 @@ end
     end
 end
 
-# api.md 6; recording-plan.md, Graphics (the gate). Passes of 100, 1 000, 5 000 groups of draws, one made and deleted per frame: make and delete time flat in the count; a visibility store records nothing.
+# api.md 6; recording-plan.md, Graphics (the gate). Passes of 100, 1 000, 5 000 groups of draws, one made and deleted per frame: make/delete latency within the finite bound below; a visibility store records nothing.
 @case "PIECE-08" 6 :graphics begin
     dev = testdevice()
     rects = MantleArray(dev, [Vec4f(-1, -1, -0.9, -0.9)])
@@ -621,4 +621,43 @@ end
     @test iscolour(stripepixel(A, 4, 4), Vec3f(0.5, 0.75, 0.5))
     @test iscolour(stripepixel(B, 1, 2), Vec3f(0.5, 0.5, 0.5))
     @test iscolour(stripepixel(B, 2, 2), BLUE)
+end
+
+# A clear after a draw cannot become the load operation preceding that draw.
+# The host read is outside the node list, so the final persistent target must
+# be stored even though this graph has no later reader of it.
+@case "PIECE-23" 6 :graphics begin
+    dev = testdevice()
+    g = Graph(dev)
+    img = Image(dev, RGBA{N0f8}, 64, 64)
+    left, right = MantleArray(dev, [stripe(1, 2)]), MantleArray(dev, [stripe(2, 2)])
+    red, blue = MantleArray(dev, [opaque(RED)]), MantleArray(dev, [opaque(BLUE)])
+    clear!(g, img, BACKGROUND)
+    drawrects!(g, img, left, red)
+    clear!(g, img, Tuple(opaque(GREEN)))
+    drawrects!(g, img, right, blue)
+    run!(g)
+    A = Array(img)
+    @test iscolour(stripepixel(A, 1, 2), GREEN)
+    @test iscolour(stripepixel(A, 2, 2), BLUE)
+    free!(g)
+    foreach(free!, (img, left, right, red, blue))
+end
+
+# AlphaBlend must blend RGB with source alpha, but output alpha uses One and
+# OneMinusSrcAlpha. Multiplying source alpha by itself is a rendering bug.
+@case "PIECE-24" 6 :graphics begin
+    dev = testdevice()
+    img = Image(dev, RGBA{N0f8}, 32, 32)
+    rects = MantleArray(dev, [stripe(1, 1)])
+    colours = MantleArray(dev, [Vec4f(1, 0, 0, 0.5)])
+    g = Graph(dev)
+    clear!(g, img, (0f0, 0f0, 1f0, 0.25f0))
+    drawrects!(g, img, rects, colours; blend = Mantle.AlphaBlend())
+    run!(g)
+    px = Array(img)[16, 16]
+    @test iscolour(px, Vec3f(0.5, 0, 0.5))
+    @test abs(Float32(px.alpha) - 0.625f0) < 0.02f0
+    free!(g)
+    foreach(free!, (img, rects, colours))
 end

@@ -85,18 +85,24 @@ function plot_vertex(rects, colours, scene)
 end
 rects_fragment(inputs, args...) = inputs.colour
 
-# A text plot's vertex stage: also takes the glyph atlas, an Image (its index in
-# the device's texture table). The device-side call that samples a table
-# texture is not named in api.md, so the shader takes the atlas and does not
-# sample it.
-glyph_vertex(rects, colours, scene, atlas) = plot_vertex(rects, colours, scene)
+# The glyph path really samples the atlas. Index-only tests cannot catch stale
+# bindings, missing upload visibility or sampling the wrong native allocation.
+glyph_vertex(rects, colours, scene, atlas, sampler) = plot_vertex(rects, colours, scene)
+function glyph_fragment(inputs, rects, colours, scene, atlas, sampler)
+    uv = (0.5f0 / size(atlas, 1), 0.5f0 / size(atlas, 2))
+    px = Mantle.sample(atlas, sampler, uv)
+    return Vec4f(px.r, px.g, px.b, px.alpha)
+end
 
 pipelineof(vertex; blend = Mantle.Opaque()) =
     Rasterizer(; vertex = Mantle.VertexShader(vertex; outputs = (colour = Vec4f,)),
                fragment = Mantle.FragmentShader(rects_fragment), topology = TriangleList(),
                blend, cull = Mantle.NoCull(), depth = Mantle.DepthOff())
 plotpipeline(blend = Mantle.Opaque()) = pipelineof(plot_vertex; blend)
-glyphpipeline() = pipelineof(glyph_vertex)
+glyphpipeline() = Rasterizer(;
+    vertex = Mantle.VertexShader(glyph_vertex; outputs = (colour = Vec4f,)),
+    fragment = Mantle.FragmentShader(glyph_fragment), topology = TriangleList(),
+    blend = Mantle.Opaque(), cull = Mantle.NoCull(), depth = Mantle.DepthOff())
 
 # A mesh: vertices[i] a 2D position, drawn indexed with 0-based indices, so
 # vertex_index() is the index plus one; one colour.
@@ -369,7 +375,7 @@ end
     end
 end
 
-# resizing-and-raytracing.jl D.3 (insertplot!, deleteplot!); recording-plan.md, Graphics (the gate). Insert and delete one plot in screens of 100, 1 000, 5 000 plots: no plan compile; one piece compiled and recorded; insert time flat in the count.
+# resizing-and-raytracing.jl D.3 (insertplot!, deleteplot!); recording-plan.md, Graphics (the gate). Insert and delete one plot in screens of 100, 1 000, 5 000 plots: no plan compile; one piece compiled and recorded; insert/delete latency within the finite bound below.
 @case "RM-06" 6 :graphics begin
     dev = testdevice()
     rects = MantleArray(dev, [Vec4f(-1, -1, -0.9, -0.9)])
@@ -573,7 +579,8 @@ end
     atlas = Image(dev, RGBA{N0f8}, 16, 16)
     copyto!(atlas, glyphs)
     text = RenderObject(dev, [stripe(1, 2)], [opaque(RED)])
-    draw!(Group(s.plots, "text"), s.img, glyphpipeline(), (text.attributes.rects, text.attributes.colours, s.scene, atlas), 6;
+    draw!(Group(s.plots, "text"), s.img, glyphpipeline(), (text.attributes.rects, text.attributes.colours, s.scene, atlas,
+           Sampler(; filter = :nearest)), 6;
           instances = launchrange(text.attributes.rects))
     insertplot!(s, RenderObject(dev, [stripe(2, 2)], [opaque(GREEN)]))
     run!(s.graph)
@@ -585,6 +592,12 @@ end
     @test d.records == 0
     @test Array(s.img) == before
     @test Array(atlas)[1:16, 1:16] == glyphs
+    # A same-size upload must reach the already-recorded fragment shader.
+    copyto!(atlas, fill(RGBA{N0f8}(0, 0, 1, 1), 32, 32))
+    _, uploaded = counted(() -> run!(s.graph))
+    @test uploaded.plancompiles == 0 && uploaded.pipelinecompiles == 0
+    @test iscolour(stripepixel(Array(s.img), 1, 2), BLUE)
+    @test iscolour(stripepixel(Array(s.img), 2, 2), GREEN)
 end
 
 # recording-plan.md, Graphics; resizing-and-raytracing.jl D.3 (one recorded when! draw per variant). Toggling transparency: two draws in the plot's group, opaque and blended, each under a flag; a toggle is two flag stores, no compile or record.

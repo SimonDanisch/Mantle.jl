@@ -380,3 +380,19 @@ end
     @test r == [y; x[5:end]]
     free!(a)
 end
+
+# Strided-store coverage is the actual elements, not their bounding span.
+# The second store's bounding span covers the first, but their elements are
+# disjoint: coalescing must preserve both, with packed upload sizes.
+@case "ST-21" 4 begin
+    dev = testdevice()
+    a = MantleArray(dev, zeros(Int32, 12))
+    evens, odds = view(a, 2:2:10), view(a, 1:2:11)
+    _, d = counted(() -> begin
+        evens[1:5] = Int32.(21:25)
+        odds[1:6] = Int32.(11:16)
+    end, dev)
+    @test submitcount(d) == 0
+    @test Array(a) == Int32[11, 21, 12, 22, 13, 23, 14, 24, 15, 25, 16, 0]
+    free!(a)
+end

@@ -55,11 +55,9 @@ function peakgraph(dev, n)
     return g, out
 end
 
-"""`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 """Lowers `fd`'s budget to `bytes` from its next `budget` call on."""
-lowerbudget!(fd, bytes) = inject!(fd, :budget, Answer(calls(fd, :budget) + 1, bytes))
+lowerbudget!(fd, bytes) = inject!(fd, :budget, BudgetLimit(calls(fd, :budget) + 1, fd, bytes))
 
 """Waits for `t` (a watchdog fails the test after `timeout` s) and returns what it threw, or `nothing`."""
 function thrownby(t::Task; timeout = 30)

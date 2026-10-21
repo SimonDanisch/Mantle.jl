@@ -342,3 +342,34 @@ end
     end
     # VAL: clean; software traversal reads no node of the empty structure
 end
+
+# HK-10: the real per-material closest-hit path remains expressible. Resources
+# written only in a hit callback must be discovered and kept by the graph.
+function hk_group_raygen(out)
+    Mantle.traceray(Point3f(0, 0, -1), Vec3f(0, 0, 1); tmax = 10f0)
+    nothing
+end
+hk_group_one(out) = (out[1] = Int32(11); nothing)
+hk_group_two(out) = (out[1] = Int32(22); nothing)
+hk_group_miss(out) = (out[1] = Int32(-1); nothing)
+@case "HK-10" 5 :rt begin
+    dev = testdevice()
+    t = TLAS(dev)
+    range = push!(t, ownedblas(dev), translation(0, 0, 0); hitgroup = 1)
+    out = MantleArray(dev, Int32[0])
+    p = RayTracingPipeline(; raygen = hk_group_raygen,
+        closest_hit = (hk_group_one, hk_group_two), miss = hk_group_miss)
+    g = Graph(dev)
+    trace!(g, p, t, (out,), 1)
+    run!(g)
+    @test Array(out) == Int32[11]
+    Mantle.hitgroup!(t, range, 2)
+    _, changed = counted(() -> run!(g))
+    @test Array(out) == Int32[22]
+    @test changed.plancompiles == 0 && changed.pipelinecompiles == 0
+    # The graph still owns the callback-only output after its creator frees it.
+    free!(out)
+    @test_throws ArgumentError Array(out)
+    @test run!(g) isa Submitted
+    free!(g); free!(t)
+end

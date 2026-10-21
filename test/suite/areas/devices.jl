@@ -28,8 +28,6 @@ end
 
 islavapipe(name) = occursin("llvmpipe", lowercase(name))
 
-"""`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 # submissions(g) lists stages (cut by host nodes), each with its segments (cut
 # by budget and queue). api.md 2.3 leaves the shape open; this is the one the
@@ -60,7 +58,7 @@ checkinline(c, ::Mantle.Device) = @test c.inlinestore >= 0
 # ── Devices and caps (DEV) ──
 
 # api.md 2.1 (Device() returns the same object on every call), plan, Devices (one object per hardware device): Device() twice, then from 8 threads at once: the same object every time.
-@case "DEV-01" 8 begin
+@case "DEV-01" 8 :defaultgpu begin
     d = Device()
     @test Device() === d
     fromthreads = withtimeout(() -> fetch.([Threads.@spawn(Device()) for _ in 1:8]), 60)
@@ -86,7 +84,7 @@ end
 # api.md 2.1 (Device(): GPU 0, never a CPU driver), plan, Devices: lavapipe
 # enumerated first (Mesa's device-select layer, lavapipe's vendor id 0x10005);
 # Device() is still a GPU.
-@case "DEV-03" 8 :lavapipe begin
+@case "DEV-03" 8 :lavapipe :defaultgpu begin
     @test any(d -> !has(d, :lavapipe), devices())  # a GPU exists to be the default
     firstname, defaultname = split(freshjulia(
         """using Mantle; print(Mantle.name(first(devices())), "|", Mantle.name(Device()))""";
@@ -103,16 +101,16 @@ end
 @case "DEV-04" 8 :lavapipe begin
     listed = "print(any(d -> occursin(\"llvmpipe\", lowercase(Mantle.name(d))), devices()))"
     @test freshjulia("using Lavapipe_jll, Mantle; " * listed) == "true"
-    late = freshjulia("using Mantle; Device(); using Lavapipe_jll; " * listed)
+    late = freshjulia("using Mantle; devices(); using Lavapipe_jll; " * listed)
     @test late == freshjulia("using Mantle; " * listed)
 end
 
 # api.md 2.1 (one GPU through two drivers is two devices with two pools), 2.4
 # (location): one GPU through LavaDevice and CudaDevice: two devices, two
-# pools; mixing their arrays throws at location. Pairs the two by name.
-@case "DEV-05" 10 :vendorview begin
+# pools; mixing their arrays throws at location. The suite supplies a physically verified driver pair; display names are not identities.
+@case "DEV-05" 10 :vendorview :vulkanpeer begin
     cu = testdevice()
-    lv = only(filter(d -> d !== cu && Mantle.name(d) == Mantle.name(cu), devices()))
+    lv = first(vulkanpeers(cu))
     a, b = MantleArray(cu, Float32, 16), MantleArray(lv, Float32, 16)
     before = Mantle.reserved(lv)
     large = MantleArray(cu, UInt8, 256 << 20)
@@ -150,9 +148,9 @@ end
 # api.md 2.4 (location: arguments from two devices throw), 7, examples.jl
 # "Threads and devices": a broadcast across two devices, and a graph on one
 # device given an array of the other: ArgumentError, the graph unchanged.
-@case "DEV-08" 6 :lavapipe begin
+@case "DEV-08" 6 :twodevices begin
     dev = testdevice()
-    other = first(d for d in devices() if d !== dev)
+    other = first(d for d in SUITE.fixtures[].devices if d !== dev)
     a1, a2 = MantleArray(dev, fill(1f0, 16)), MantleArray(other, fill(5f0, 16))
     @test_throws ArgumentError (a2 .= a1)
     @test Array(a2) == fill(5f0, 16)
@@ -166,7 +164,7 @@ end
     @test Array(out) == fill(2f0, 16)               # the refused broadcast left no node
 end
 
-# api.md 4.1 (caps), 10 (field names open): caps(dev) is immutable and has
+# api.md 4.1 and execution-contracts.md §6 (fixed capability schema): caps(dev) is immutable and has
 # the fields api.md 4.1 and helpers.jl name; Vulkan reports inlinestore 65536,
 # inlinealign 4.
 @case "DEV-09" 8 begin
@@ -174,19 +172,32 @@ end
     c = caps(dev)
     @test !ismutable(c)
     @test c == caps(dev)
-    for f in (:sparseresidency, :accelbyaddress, :raytracing, :display,
-              :throughput, :bandwidth, :transfer, :crossqueuecost, :inlinestore, :inlinealign)
+    for f in (:api, :kernel, :scalars, :atomicfeatures, :software,
+              :sparseresidency, :sparsepage, :sparseaddressspace, :maxalloc,
+              :maxinstances, :accelbyaddress, :raytracing, :rayquery,
+              :display, :displayattached, :throughput, :bandwidth, :transfer,
+              :crossqueuecost, :inlinestore, :inlinealign)
         @test f in propertynames(c)
+    end
+    @test c.kernel isa KI.DeviceCaps
+    @test KI.matrix_shapes(c) == KI.matrix_shapes(c.kernel)
+    @test KI.wggranularity(c, 32) == KI.wggranularity(c.kernel, 32)
+    @test KI.bestshape(c, Float16, Float32) == KI.bestshape(c.kernel, Float16, Float32)
+    @test KI.supports_float64(dev) == (Float64 in c.scalars)
+    for shape in KI.matrix_shapes(c)
+        @test KI.supports(c, shape)
     end
     checkinline(c, dev)
 end
 
 # api.md 4 (a verb never throws to signal "not supported"; capabilities are
-# answered by caps), 2.2 (resize!): lavapipe has no sparse residency and no RT;
+# answered by caps), 2.2 (resize!): the fault device disables sparse residency and native RT;
 # arrays that would move into a reserve, arena transients and a TLAS work
 # without a "not supported".
-@case "DEV-10" 4 :lavapipe begin
-    dev = testdevice()
+@case "DEV-10" 5 begin
+    dev = FaultDevice(testdevice())
+    inject!(dev, :caps, Answer(1, withcaps(caps(testdevice());
+        sparseresidency = false, raytracing = false, rayquery = false)))
     @test !caps(dev).sparseresidency
     @test !caps(dev).raytracing
     a = MantleArray(dev, Int32, 1024)
@@ -205,18 +216,28 @@ end
 end
 
 # api.md 4.1 (caps: whether the device drives a display), plan, "Submission
-# split: estimated": the same estimated work with caps.display true and false
+# split: estimated": the same estimated work with caps.displayattached true and false
 # (FaultDevice): the display device gets the smaller budget, so more segments;
 # the results are the same.
 @case "DEV-11" 1 begin
     c = caps(testdevice())
     headless, shown = FaultDevice(testdevice()), FaultDevice(testdevice())
-    inject!(headless, :caps, Answer(1, withcaps(c; display = false)))
-    inject!(shown, :caps, Answer(1, withcaps(c; display = true)))
+    inject!(headless, :caps, Answer(1, withcaps(c; displayattached = false)))
+    inject!(shown, :caps, Answer(1, withcaps(c; displayattached = true)))
     gh, outh, k = costlychain(headless, 0.3)        # about 0.3 s of estimated work
     gs, outs, _ = costlychain(shown, 0.3)
     run!(gh); run!(gs)
     @test segmentcount(gs) > segmentcount(gh)
     @test all(==(Float32(k)), Array(outh))
     @test all(==(Float32(k)), Array(outs))
+end
+
+# A software Vulkan device remains explicitly usable on CPU-only hosts; the
+# hardware-only default must give an actionable failure, never choose it silently.
+@case "DEV-12" 8 :lavapipe :nodefaultgpu begin
+    @test !isempty(devices())
+    @test_throws Mantle.NoDefaultGPU Device()
+    a = MantleArray(testdevice(), Int32[4])
+    @test Array(a) == Int32[4]
+    free!(a)
 end

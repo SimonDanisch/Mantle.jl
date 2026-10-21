@@ -582,7 +582,7 @@ end
     @test iscolour(stripepixel(windowimage(s3.g, other), 1, 1), BLUE)
 end
 
-# plan, Windows and present (a generation is retired with the tokens of its last run; when its images are free is still open). 20 resizes, each retiring a swapchain: memory back at its baseline (validation runs with the suite's layers).
+# plan, Windows and present (generation retirement needs both GPU and independent presentation evidence, execution-contracts.md §4). 20 resizes, each retiring a swapchain: memory back at its baseline (validation runs with the suite's layers).
 @case "WIN-25" 7 :graphics :window begin
     onvulkan(testdevice()) do dev
         win = Window(dev, 64, 64; capacity = (128, 128))
@@ -681,4 +681,41 @@ end
     build!(g2, tlas2)
     drawrects!(g2, win2, right, green)
     @test_throws ArgumentError run!(g2)              # a compile error, raised by the first run!
+end
+
+# WIN-30: a not-enqueued OOM is safe to inject on a borrowed native device.
+# Rendering/all stages succeeded; retry must neither acquire nor signal/render
+# the same image again. Pending resize/edit work belongs to the next frame.
+function win_increment!(a)
+    KI.get_global_id().x == 1 || return nothing
+    @inbounds a[1] += Int32(1)
+    return nothing
+end
+@case "WIN-30" 7 :graphics :window begin
+    fd = FaultDevice(testdevice())
+    counter = MantleArray(fd, Int32[0])
+    win = Window(fd, 64, 64; capacity = (128, 128))
+    s = presenting(win, fd; before = g -> dispatch!(g, win_increment!, (counter,), 1))
+    try
+        run!(s.g)
+        @test Array(counter) == Int32[1]
+        presents = calls(fd, :presentnative!)
+        inject!(fd, :presentnative!, AnswerOnce(presents + 1,
+            Mantle.PresentOutcome(Mantle.PresentHostOOM, false, nothing)))
+        @test_throws Mantle.PresentationRetry run!(s.g)
+        @test calls(fd, :presentnative!) == presents + 1 # prove interception fired
+        @test Array(counter) == Int32[2]               # accepted work was retained
+        acquires = calls(fd, :acquirenext)
+        resize!(win, 96, 80)                           # must not discard pending present
+        result, delta = counted(() -> run!(s.g), fd)
+        @test result isa Mantle.Submitted
+        @test calls(fd, :presentnative!) == presents + 2
+        @test calls(fd, :acquirenext) == acquires
+        @test submitcount(delta) == 0                  # presentation-only retry
+        @test Array(counter) == Int32[2]
+        @test run!(s.g) isa Mantle.Submitted           # fresh frame applies resize
+        @test Array(counter) == Int32[3]
+    finally
+        foreach(free!, (s.g, win, s.rects, s.colours, counter))
+    end
 end

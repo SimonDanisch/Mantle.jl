@@ -256,6 +256,39 @@ end
     @test !thr_reaches(ch, b1) && !thr_reaches(ch, b2)
 end
 
+# Recording consumes an already compiled plan. This checks the executable
+# P0.T3: counters plus the checking-resource guard and its negative control.
+@case "THR-04" 1 begin
+    dev = testdevice()
+    g = Graph(dev)
+    out = MantleArray(dev, Int32, 64)
+    t = MantleArray(g, Int32, 64)
+    dispatch!(g, thr_fill!, (t, Int32(3)), 64)
+    dispatch!(g, thr_copy!, (out, t), 64)
+    Mantle.checkrecord!(dev, true)
+    try
+        @test_throws Mantle.RecordStateRead Mantle.withrecordguard(dev) do
+            Mantle.readresourcesnapshot(out) # negative control: a live-state read must be detected
+        end
+        Mantle.lockgraph(g) do
+            pl = Mantle.compile(g)
+            try
+                _, d = counted(() -> Mantle.record!(pl), dev)
+                @test d.kernelcompiles == 0
+                @test d.pipelinecompiles == 0
+                @test d.allocations == 0
+                @test submitcount(d) == 0
+            finally
+                Mantle.discard!(pl)
+            end
+        end
+    finally
+        Mantle.checkrecord!(dev, false)
+        free!(g)
+        free!(out)
+    end
+end
+
 # plan, Ordering (host waits are GC-safe), api.md 4.2 (waitfor): task T1 waits for a 1.2 s GPU job (Array of its output); meanwhile GC.gc() on another task returns at once: the host wait is GC-safe.
 @case "THR-05" 3 begin
     dev = testdevice()
@@ -346,9 +379,11 @@ end
     thr_garbage(d, a, 8)
     Mantle.waitidle(d)
     gate = Channel{Nothing}(1)
-    inject!(d, :submitnative!, Block(calls(d, :submitnative!) + 1, gate))
+    blockedat = calls(d, :submitnative!) + 1
+    inject!(d, :submitnative!, Block(blockedat, gate))
     writer = Threads.@spawn dispatch!(d, thr_fill!, (a, Int32(1)), n)
     sleep(0.3)
+    @test calls(d, :submitnative!) == blockedat
     @test !istaskdone(writer)                         # blocked, a's sync state locked
     withtimeout(() -> GC.gc(true), 30)
     @test !istaskdone(writer)

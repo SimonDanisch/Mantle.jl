@@ -1,7 +1,10 @@
+# These are target API examples. Execution/failure and presentation ownership
+# obey execution-contracts.md; preparation errors are retryable, native device
+# loss is terminal. Consumer migration sketches live in the review evidence.
 # One short example per problem `recording-plan.md` solves, written in the API
 # after the refactor.
 #
-# Names the plan has not decided are marked "(name open)" or "(form open)".
+# Application helpers are illustrative; Mantle entry signatures are in api.md.
 # Functions that are not Mantle's (`shade!`, `lookat`, `samgraph`, model
 # loaders, kernels) belong to the application. Every array an example uses is
 # created in that example, where its location matters.
@@ -38,14 +41,14 @@ fill!(a, 1f0)
 b = a .* 2f0                    # b: a new MantleArray on dev
 
 # 6. A kernel is a plain Julia function using KernelInterface's intrinsics.
-#    The device is the KA backend, so KI.@kernel runs it now, as dispatch! does.
+#    The device is the KA backend, so KI.@launch runs it now, as dispatch! does.
 #    ndrange is rounded up to whole work-groups: the kernel checks its bounds.
 function scale!(x, s)
     i = KI.get_global_id().x
     i <= length(x) && (@inbounds x[i] *= s)
     return
 end
-KI.@kernel dev ndrange = length(a) scale!(a, 2f0)
+KI.@launch dev ndrange = length(a) scale!(a, 2f0)
 dispatch!(dev, scale!, (a, 2f0), length(a))        # the same launch through Mantle's verb
 
 # 7. Calls on the same memory are ordered by that memory's sync state; calls
@@ -82,7 +85,7 @@ kvcache = MantleArray(dev, zeros(Float16, 64, 20, 32, 448))  # a transformer's k
 fill!(kvcache, 0f0)             # only dev arrays: runs now, once
 out = MantleArray(dev, Float32, 512)
 copyto!(out, y)                 # y lives on g: a copy kernel node; every run writes `out`
-prev = MantleArray(dev, Float32, 512)          # kept between runs: a device array g names
+prev = MantleArray(dev, zeros(Float32, 512))   # kept between runs: a device array g names
 prev .= 0.9f0 .* prev .+ 0.1f0 .* y
 
 # 13. A raw kernel in a graph: argument tuple plus an ndrange.
@@ -113,7 +116,7 @@ end
 #     broadcast is merged into the GEMM where the selected candidate implements
 #     exactly bias + gelu, so yd is written once. A graph that asks for nothing
 #     (RayMakie's) runs no rewrite.
-gd   = Graph(dev; rewrites = (FuseEpilogues(),))  # (names open)
+gd   = Graph(dev; rewrites = (FuseEpilogues(),))  # explicit opt-in rewriter
 xd   = MantleArray(dev, Float32, 1024)        # per-run host data: a device array written by stores
 yd   = MantleArray(gd, Float32, 512)
 bias = MantleArray(dev, zeros(Float32, 512))
@@ -158,7 +161,7 @@ phonemes[:] = embedphonemes("hello"); run!(gh)
 #     argument slots of the group's launches that take it. A group is not a
 #     location: allocations belong to the graph, not the group, so the
 #     transformer's output and temporaries are gq's transients.
-textencoder, transformer, vae = loadqwen(dev)   # models with weights on dev (name open)
+textencoder, transformer, vae = loadqwen(dev)   # application loader; models with weights on dev
 gq     = Graph(dev)
 ids    = MantleArray(dev, Int32, 77)            # per-run host data: a device array written by stores
 noise  = MantleArray(dev, randn(Float16, 64, 64, 16))
@@ -167,7 +170,7 @@ h      = textencoder(adapt(Mantle.Device(gq), ids))   # ids aliased into gq, so 
 lat    = MantleArray(gq, Float16, 64, 64, 16)
 copyto!(lat, noise)
 step   = Group(gq, "step")                      # a value; its place in gq's order is here
-i      = iteration(step)                        # the loop index the loop head writes (name open)
+i      = iteration(step)                        # the loop index the loop head writes
 v      = transformer(step, lat, h, sigmas, i)   # its launches go into step; v is gq's
 eulerstep!(step, lat, v, sigmas, i)
 repeat!(step, 50)                               # 50 iterations per run of gq
@@ -197,7 +200,7 @@ hits = MantleArray(gr0, Hit, 0; capacity = 1920 * 1080)
 film = MantleArray(dev, RGBA{Float32}, 1920, 1080)
 generaterays!(rays)
 intersect!(hits, rays)          # writes length(hits) on the device
-shade!(film, hits)              # launches over launchrange(hits): indirect, from the prepare kernel
+shade!(film, hits)              # launches over launchrange(hits): dynamic extents from the prepare kernel
 run!(gr0)
 
 gv    = Graph(dev)
@@ -288,7 +291,7 @@ run!(encode); run!(decode)      # decode reads what encode wrote
 # ── Memory ────────────────────────────────────────────────────────────────────
 #
 # Byte counts in these examples are illustrations, not measurements.
-# Introspection names (reserved, mapped, peakbytes, naivebytes, budget) are open.
+# Introspection names and accounting are specified in api.md section 2.8.
 
 # 30. One pool per device; everything comes from it. The device type only
 #     allocates raw blocks of a kind; the pool hands out regions of them.
@@ -317,7 +320,7 @@ run!(sam); run!(ray)            # the arena part needs 900 MB, not 1200 MB
 run!(ray)                       # ray waits on sam's work in the shared arena part
 
 # 33. Graphs core expects to run at the same time (the editor's frame beside a
-#     DNN, by priority; open) get separate arena parts: 1200 MB then, in
+#     DNN, from relative priority hints) may get separate arena parts: 1200 MB then, in
 #     exchange for overlap. Core decides; either is correct.
 
 # 34. Sparse arenas grow by mapping pages and never move anything.
@@ -392,8 +395,8 @@ run!(dnn_2)                     # works: dnn_1's weights evicted if both do not 
 run!(dnn_1)                     # works: restored before the run, in the same submission
 
 # 41. A weight that does not have to stay resident is placed like a transient
-#     and uploaded before its first use in each run (open).
-Wbig = MantleArray(dev, rand(Float16, 4096, 4096); streamed = true)   # (form open)
+#     and uploaded for its live intervals under the core streamed-weight protocol.
+Wbig = MantleArray(dev, rand(Float16, 4096, 4096); streamed = true)
 
 # ── Vendor code ───────────────────────────────────────────────────────────────
 
@@ -405,9 +408,10 @@ Wbig = MantleArray(dev, rand(Float16, 4096, 4096); streamed = true)   # (form op
 #     and the hold is dropped with the stream's token. While lent, Mantle calls
 #     on the array throw. Vendor allocations come from the vendor's pool;
 #     Mantle sees them only through the device's budget.
-cud = devices()[4]                               # a CudaDevice
+using CUDA
+cud = first(d for d in devices() if caps(d).api === :cuda) # explicit vendor interop
 xin = MantleArray(cud, Float32, 32, 32, 3, 1)
-withview(CuArray, xin, CUDA.stream()) do ca     # (name open)
+withview(CuArray, xin, CUDA.stream()) do ca     # scoped explicit-stream lease
     NNlib.conv(ca, CUDA.rand(Float32, 3, 3, 3, 8))
 end
 
@@ -461,7 +465,7 @@ scatterpipeline() = Rasterizer(; vertex = VertexShader(scatter_vertex; outputs =
                                  topology = PointList(), blend = Additive(), depth = DepthOff())
 gs      = Graph(dev)
 win2    = Window(dev, 1200, 800)
-pts     = MantleArray(dev, rand(Point3f, 100_000); capacity = 1 << 18)
+pts     = MantleArray(dev, rand(Point3f, 100_000); capacity = 1 << 19)
 colors  = MantleArray(dev, [Vec4f(1, 0, 0, 1)])                     # one colour for all points
 sizes   = MantleArray(dev, rand(Float32, 100_000) .* 4f0)           # one size per point
 camera  = MantleArray(dev, [Mat4f(I)])                              # a uniform: a one-element array
@@ -516,7 +520,7 @@ run!(gwin)                      # acquire, submit that image's segment, present
 
 # 46. Resize comes from the window's event and only marks the graph. Its next
 #     run makes the new swapchain generation (the old one retired by its last
-#     run's tokens; open), recreates blur at the new size on the
+#     rendering tokens AND presentation completion; execution-contracts.md §4), recreates blur at the new size on the
 #     same arena memory, and re-records the segments that draw into blur and
 #     the per-image present segments. Beyond the window's capacity (the
 #     largest monitor's size) the graph recompiles at that run.
@@ -534,4 +538,4 @@ wait(task)
 d1, d2 = devices()[1], devices()[2]
 a1 = MantleArray(d1, Float32, 10); a2 = MantleArray(d2, Float32, 10)
 a2 .= a1                        # error: arguments from two devices
-copyto!(a2, a1)                 # explicit cross-device copy (open)
+devicecopy!(a2, a1)             # explicit synchronous snapshot/read-store baseline

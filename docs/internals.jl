@@ -2,9 +2,11 @@
 #
 # Not runnable. It shows which function owns which decision, what it reads and
 # what it writes, and which lock protects what. Helper functions that are not
-# the point are left undefined. "(open)" marks names or details the plan has
-# not decided.
+# the point are left undefined. Native qualification gates remain in the ledger;
+# an omitted helper is not an undecided public API.
 #
+# Normative failure/retirement rules and proof arguments: execution-contracts.md.
+# This pseudocode omits helper definitions, not those obligations.
 # Sections follow the life of a graph: types, declaration, selection,
 # compile, record, run, changes, ordering, memory, holds, eager calls,
 # device-type verbs, devices, vendor views.
@@ -55,6 +57,8 @@ mutable struct Graph
     unnamed::Vector{Resource}       # resources no node names any more; their holds drop after the plan naming them retires
     declarer::Union{Nothing,Task}   # the task declaring under the graph lock (nested declarations reuse it)
     rewrites::Tuple                 # opted-in rewriters, empty by default
+    const profile::Bool             # opt-in sampled timestamps (execution-contracts.md section 10)
+    const priority::Int             # relative scheduling hint; no preemption guarantee
     plan::Union{Nothing,Plan}       # compiled state; its next run applies declarations and deletes (section 5), the graph stays
     @atomic recompile::Bool         # set by markstale! (resizing-and-raytracing.jl B.6), a graph array or window
                                     # beyond its placed size, a failed compile, nodes declared or deleted after compile
@@ -64,9 +68,9 @@ end
 # No mode state: groups are values and places in the order (Group, below),
 # and when! takes one launch or one draw.
 
-# Graph arrays point at this, never at the Graph: a graph is not a device, but
-# it is a KernelAbstractions backend (section 2).
-struct GraphDevice <: KA.Backend
+# Graph arrays point at this, never at the Graph. GraphDevice is their
+# KernelAbstractions backend; the Graph itself is not a backend (section 2).
+struct GraphDevice{D<:Device} <: KA.Backend
     graph::WeakRef
 end
 
@@ -82,17 +86,23 @@ end
 struct MantleArray{T,N,L} <: AbstractGPUArray{T,N}
     location::L
     state::ArrayState
-    offset::Int                         # a view's static offset into its parent, in elements; 0 for a root array
-    dims::Union{Nothing,NTuple{N,Int}}  # a view's own dims; nothing for a root array, whose dims are its state's
+    view::Union{Nothing,ArrayView{N}}    # nothing for a root; a view's static offset, dims and strides
+end
+struct ArrayView{N}
+    offset::Int                         # in elements of the root state
+    dims::NTuple{N,Int}
+    strides::NTuple{N,Int}              # in elements; nested views compose against the root
 end
 # A view, reshape or transpose (GPUArrays' `derive`) is the same type and
 # shares its parent's state: a store through a view is ordered like one into
 # the parent, and a freed parent makes its views unusable. A view has no hold
-# of its own; free! and resize! on a view throw (a check of `dims`). Its slot
-# entries carry its static offset and its own dims. Shrinking never unmaps an
+# of its own; free! and resize! on a view throw (a check of `view`). Its slot
+# entries carry its static offset, dims and strides. Conjugating adjoints
+# retain their conjugation wrapper; strides alone do not conjugate values.
+# Shrinking never unmaps an
 # array's pages, so a view never reads unmapped memory
 # (resizing-and-raytracing.jl B.2).
-Base.size(a::MantleArray) = a.dims === nothing ? size(a.state) : a.dims
+Base.size(a::MantleArray) = a.view === nothing ? size(a.state) : a.view.dims
 Base.size(st::ArrayState) = size(st, st.lengthsource)
 Base.size(st::ArrayState, ::HostLength) = st.dims       # the requested dims (a pending resize! included)
 # A length a kernel writes follows Julia's array API:
@@ -135,12 +145,13 @@ end
 
 mutable struct KernelNode{K,A,R,W,O} <: Node  # dispatch!(location, kernel, args, ndrange)
     const kernel::K; const args::A; const ndrange::R
-    const when::W                           # nothing, or a when! flag: launched indirect, count × flag (section 2)
+    const group::Union{Nothing,Int,Tuple}   # requested workgroup dimensions, retained through compile
+    const when::W                           # nothing, or a when! flag: indirect count / capacity predication (section 2)
     const origin::O                         # an Origin
     compiled::Union{Nothing,CompiledNode}
 end
-mutable struct TraceNode{P,A,R,W,O} <: Node  # trace!(g, pipeline, accel, args, ndrange)
-    const pipeline::P; const args::A; const ndrange::R; const when::W
+mutable struct TraceNode{P,T,A,R,W,O} <: Node  # trace!(g, pipeline, accel, args, ndrange)
+    const pipeline::P; const accel::T; const args::A; const ndrange::R; const when::W
     const origin::O                         # an Origin
     compiled::Union{Nothing,CompiledNode}
 end
@@ -245,6 +256,7 @@ mutable struct SyncState
     deferred::Vector{HoldDrop}      # hold drops due once the submission applying `pending` is made
                                     #   (resizing-and-raytracing.jl B.4); not changes, so coalescing never drops them
     lent::Bool                      # inside a withview block (section 14)
+    transfer::Union{Nothing,HostCopyJob} # internal pageable-copy transaction, distinct from a foreign lease
     freed::Bool                     # an array's creator hold was dropped (section 10); the only `freed` of an array
 end
 
@@ -265,13 +277,13 @@ join(g::GraphDevice, d::Device) = device(g) === d ? g : throw(ArgumentError("arg
 join(d::Device, g::GraphDevice) = join(g, d)
 join(a::GraphDevice, b::GraphDevice) = a === b ? a : throw(ArgumentError("arguments from two graphs"))
 
-# A graph is a KernelAbstractions backend: KA launches, broadcasting,
+# GraphDevice is a KernelAbstractions backend: KA launches, broadcasting,
 # GPUArrays' generic code and KA libraries run on graph arrays and declare
 # into the graph. Only host reads
 # and writes of contents throw, at their line: during declaration no run has
 # produced them, and data the host supplies per run is a device array (section 7).
-Base.getindex(::MantleArray{T,N,GraphDevice}, i...) where {T,N} = nodata()
-Base.setindex!(::MantleArray{T,N,GraphDevice}, v, i...) where {T,N} = nodata()
+Base.getindex(::MantleArray{T,N,<:GraphDevice}, i...) where {T,N} = nodata()
+Base.setindex!(::MantleArray{T,N,<:GraphDevice}, v, i...) where {T,N} = nodata()
 KA.get_backend(a::MantleArray) = a.location         # the array's device, or its graph's GraphDevice
 KA.allocate(l::GraphDevice, ::Type{T}, dims::Tuple) where {T} = MantleArray(l, T, dims...)   # a transient of the graph
 # A KA launch over graph arrays (a kernel object built for a GraphDevice) adds
@@ -281,8 +293,9 @@ KA.allocate(l::GraphDevice, ::Type{T}, dims::Tuple) where {T} = MantleArray(l, T
 # the host code that computed the range does not run again (checkrange,
 # section 4). What the host computes from its own values cannot be detected
 # and becomes a constant of the plan; values that change per run are GPURefs.
-(k::KA.Kernel{GraphDevice})(args...; ndrange, workgroupsize = nothing) =
-    dispatch!(KA.backend(k), k.f, args, HostRange(ndrange, hostdims(args)); origin = Origin(k, args))
+(k::KA.Kernel{<:GraphDevice})(args...; ndrange, workgroupsize = nothing) =
+    dispatch!(KA.backend(k), k.f, args, HostRange(ndrange, hostdims(args));
+              group = launchgroupsize(k, workgroupsize), origin = Origin(k, args))
 struct HostRange{R}
     ndrange::R
     dims::Vector{Pair{ArrayState,NTuple}}   # each argument array's requested dims when the range was computed
@@ -291,8 +304,12 @@ end
 # The one launch verb. On a graph device it adds a node; on a group, a launch
 # of that group; on a device it runs now (section 11). An operation's method
 # calls it and does not know which.
-dispatch!(l::Union{GraphDevice,Group}, kernel, args::Tuple, ndrange; origin = Origin(kernel, args)) =
-    declare!(l, KernelNode(kernel, args, ndrange, nothing, origin, nothing))
+dispatch!(l::Union{GraphDevice,Group}, kernel, args::Tuple, ndrange;
+          group = nothing, origin = Origin(kernel, args)) =
+    declare!(l, KernelNode(kernel, args, ndrange, group, nothing, origin, nothing))
+# The KA adapter
+# resolves the size fixed in k's type when no launch-time override is given;
+# compile consults config(dev, f) only if neither supplied a size.
 dispatch!(g::Graph, args...; kw...) = dispatch!(g.location, args...; kw...)
 function declare!(l::Union{GraphDevice,Group}, p::KernelNode)
     declaring(graph(l)) do
@@ -351,6 +368,8 @@ nodelist(g::Graph) = g.nodes
 nodelist(gr::Group) = gr.nodes
 islive(::Graph) = true
 islive(gr::Group) = gr.live && islive(gr.parent)
+isgroup(::Group) = true
+isgroup(::Node) = false
 # A node joins the end of its parent's order and names its resources. With a
 # plan, the change is recorded for the next run, which decides whether it is
 # a piece change or a recompile (applychanges!, section 5).
@@ -393,7 +412,7 @@ end
 # groups of draws in one pass, and recompiles otherwise (section 5).
 function Base.sort!(gr::Group; by = identity, lt = isless, rev = false)
     declaring(gr.graph) do
-        slots = findall(n -> n isa Group, gr.nodes)
+        slots = findall(isgroup, gr.nodes)
         gr.nodes[slots] = sort(gr.nodes[slots]; by, lt, rev)
         gr.graph.plan === nothing || push!(gr.graph.plan.changes, Reordered(gr))
         return gr
@@ -452,9 +471,13 @@ function Base.copyto!(dest::MantleArray, bc::Broadcast.Broadcasted)
 end
 
 # copyto! between arrays in a graph is a copy kernel, so it may be declared into
-# a Group (a launch, not a copy node; how an operation reaches a group is open).
+# a Group (a launch, not a copy node). Mantle operations also have an explicit
+# leading-Group method; it passes the group through every internal launch and
+# filters selection to kernels. Allocations still use the graph's location.
 Base.copyto!(dst::MantleArray, src::MantleArray) =
-    (dispatch!(location(dst, src), copy_kernel!, (dst, src), launchrange(src)); dst)
+    copyto!(location(dst, src), dst, src)
+Base.copyto!(l::Union{Device,GraphDevice,Group}, dst::MantleArray, src::MantleArray) =
+    (dispatch!(l, copy_kernel!, (dst, src), launchrange(src)); dst)
 
 # repeat!(group, n; while_nonzero): the group runs n times per run at its
 # place, or until while_nonzero, an integer count on the device (a queue's
@@ -465,7 +488,7 @@ Base.copyto!(dst::MantleArray, src::MantleArray) =
 # be the same on the way in and out of every iteration, and loops do not
 # nest. A trace in it is indirect, and the loop head zeroes its count once
 # the loop ends. Before each iteration a loop-head kernel writes the index
-# into the slots of the launches that take iteration(group) (name open).
+# into the slots of the launches that take iteration(group).
 # Compile makes the group's LoopNode (section 4).
 iteration(gr::Group) = LoopIndex(gr)   # a placeholder argument; the loop head writes i into its slots
 function repeat!(gr::Group, count::Int; while_nonzero = nothing)
@@ -497,20 +520,20 @@ when!(g::Graph, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel::Function,
     when!(g.location, flag, kernel, args, ndrange; kw...)
 when!(l::Union{GraphDevice,Group}, flag::Union{GPURef{Bool},MantleArray{Bool,1}}, kernel::Function, args::Tuple, ndrange;
       origin = Origin(kernel, args)) =
-    declare!(l, KernelNode(kernel, args, ndrange, flag, origin, nothing))   # named through the node, like its arguments
+    declare!(l, KernelNode(kernel, args, ndrange, nothing, flag, origin, nothing))   # named through the node, like its arguments
 # A draw's visibility is a store into its flag, never a new plan. The
-# mechanism repeat!'s loop head uses: every when! launch and draw is indirect,
-# and whoever writes its indirect command multiplies the count by the flag
+# mechanism repeat!'s loop head uses: on Vulkan/Metal a when! launch/draw
+# uses an indirect command/range whose count is multiplied by the flag
 # (values other than 0 and 1 cannot exist). That is the head for a flag the
 # host writes (a store or a GPURef), and a PrepareNode(flag,
 # FlagPrepare()) right after the kernel that writes it otherwise (compile
 # inserts it, section 4). No conditional rendering: the flag is read by
 # address like any argument, so it may move and is never a handle dependence,
 # and Metal, which has no conditional rendering, needs nothing else. The
-# meaning is the same on every device type; CUDA and HIP reach it with
-# their own mechanism, from the same flag (phase 10, plan's device-type table):
-# CUDA can set a kernel node's grid from the device or use a conditional node,
-# HIP 7.1 has neither and checks the flag at kernel entry.
+# meaning is the same on every device type. CUDA/HIP use the fixed-capacity
+# recorded launch with entry predication as the portable baseline; optional
+# native conditional nodes require separate qualification (execution-contracts.md
+# section 3). Core expands bounded repeated groups before DAG analysis.
 
 # A host function inside a call is a node; Mantle schedules it (section 6).
 # No method for a Group, and not a when! launch.
@@ -532,12 +555,20 @@ end
 candidatesfor(::Union{Device,GraphDevice}) = AnyCandidate()
 candidatesfor(::Group) = KernelsOnly()
 function select(dev::Device, allowed, f, args...)
-    key = SelectionKey(f, args...)            # function, element types, shapes (capacity for a resizable array), layout, alignment
-    measured = get(selectiontable(dev), (key, allowed), nothing)
-    measured === nothing || return measured
-    cands = [k for k in candidates(dev, f) if supports(k, key) && qualifies(k, allowed)]
+    key = SelectionKey(f, args...; config = config(dev, f))   # types, shapes/capacities, layout, alignment, implementation version
+    eligible = k -> supports(k, key) && satisfies(caps(dev), requires(k)) && qualifies(k, allowed)
+    measured = lock(selectionlock(dev)) do
+        get(selectiontable(dev), (key, allowed), nothing)      # immutable, versioned entry
+    end
+    measured === nothing || !eligible(measured) || return measured
+    cands = filter(eligible, allcandidates(dev, f))
+    isempty(cands) && throw(ArgumentError("no eligible implementation for this operation"))
     return argmin(k -> estimate(dev, k, key), cands)
 end
+# allcandidates combines core's portable candidates with candidates(dev, f).
+# Measured entries are validated against the same requirements and compiler
+# configuration before returning them. Tuning is explicit, outside run! and
+# outside the graph being declared; it uses private inputs and output/workspace.
 qualifies(k, ::AnyCandidate) = true
 qualifies(k::KernelCandidate, ::KernelsOnly) = true
 qualifies(k, ::KernelsOnly) = false
@@ -550,6 +581,7 @@ qualifies(k, ::KernelsOnly) = false
 # (flatten): the plan owns them and their compiled data.
 function compile(g::Graph)
     s = CompileState(g, flatten(g.nodes, g))
+    lowerloops!(s)                  # core expansion, before dependencies/costs/placement
     pushfirst!(s.nodes, HeadNode(nothing, nothing))
     for h in hostnodes(s.nodes)     # each later stage copies the cells again
         insertafter!(s.nodes, h, HeadNode(h, nothing))
@@ -562,7 +594,7 @@ function compile(g::Graph)
     isempty(g.rewrites) || (dependencies!(s); foreach(r -> r(s), g.rewrites))
     dependencies!(s)
     foreach(n -> compile!(s, n), s.nodes)
-    foreach(f! -> f!(s), (costs!, schedule!, hostcuts!, presentspan!, liveness!, place!, sharing!,
+    foreach(f! -> f!(s), (costs!, schedule!, hostcuts!, presentspan!, liveness!, renderstores!, place!, sharing!,
                           barriers!, submissions!, summary!, bindings!))
     return Plan(s)      # stages, placement, argument block, tables; starts marked: unmapped,
 end                     #   restore; running = false; compiles = 1 (recompile! carries the count)
@@ -577,12 +609,40 @@ flatten(gr::Group, holder) = flatten(gr, gr.loop)
 flatten(gr::Group, ::Nothing) = flatten(gr.nodes, gr)
 flatten(gr::Group, l::Loop) = (LoopNode(l.count, l.while_nonzero, flatten(gr.nodes, gr), Origin(repeat!, (gr, l.count)), nothing),)
 
+# LoopNode is compile-time syntax only. The baseline adds ordinary prepare/
+# dispatch nodes to the SAME DAG; drivers never walk or choose a loop algorithm.
+function lowerloops!(s)
+    s.nodes = Node[q for p in s.nodes for q in lowerloop(s, p)]
+end
+lowerloop(s, p::Node) = (p,)
+function lowerloop(s, p::LoopNode)
+    p.count == 0 && return ()
+    control = loopcontrol!(s, p)   # plan-owned Bound state/slots, no source Cell
+    nodes = Node[PrepareNode(control, LoopStartPrepare(), nothing)]
+    for i in 1:p.count
+        head = PrepareNode(control, LoopHeadPrepare(i, p.while_nonzero), nothing)
+        body = iterationcopy(p.body, control, i) # shared resources; distinct argument/command slots
+        append!(nodes, (head, body...))
+        loopuses!(s, control, head, body) # head writes control; EVERY body node reads it
+    end
+    return nodes
+end
+# Start clears the stopped latch once per run. Each head reads the device count,
+# latches stop once it is zero and writes its body's iteration/predicate slots.
+# Subsequent heads cannot revive a stopped loop. Prepare uses describe control
+# slots and count reads; bodies keep their real uses/origins. Loop-control uses
+# are included in uses(p,s), so dependencies! derives head→body→next-head
+# after rebuilding the DAG, even for a body that ignores iteration(). Recompute hazards,
+# lifetimes and costs after expansion. Cutter prefers retained iteration boundaries;
+# indivisible over-budget work follows execution-contracts.md §3.
+
 # What each node touches. The Bound resources are the plan's argument slots.
 # A GPURef argument is a read of its slot (argumentuses), a shared
 # resource whose address the plan bakes.
-uses(p::KernelNode, s) = (argumentuses(p.args)..., (Bound(r) => Read() for r in bound(p.args))..., flaguses(p.when)...)
-uses(p::TraceNode, s) = uses(p, s, p.args)
-uses(p::LoopNode, s) = (flaguses(p.while_nonzero)..., (u for q in p.body for u in uses(q, s))...)   # the count is read like a flag
+uses(p::KernelNode, s) = (loopuses(p, s)..., argumentuses((p.kernel, p.args...))..., (Bound(r) => Read() for r in bound((p.kernel, p.args...)))..., flaguses(p.when)...)
+uses(p::TraceNode, s) = (loopuses(p, s)..., argumentuses((p.accel,))...,
+    (Bound(r) => Read() for r in bound((p.accel,)))...,
+    programuses(p.pipeline, p.args, s)..., flaguses(p.when)...) # slots/captures across all stages
 uses(p::HeadNode, s) = (                    # everything a head reads and writes
     headafter(p.after)...,                                 # a later stage's head runs after its host node
     (Bound(r) => Write() for r in boundresources(s))...,   # addresses, sizes, launch commands
@@ -590,7 +650,9 @@ uses(p::HeadNode, s) = (                    # everything a head reads and writes
     (f => Read() for f in hostflags(s))...)                # the when! flags the host writes: their counts × flag
 headafter(::Nothing) = ()
 headafter(h::HostNode) = (HostDone(h) => Read(),)
-uses(p::PrepareNode, s) = uses(p, s, p.kind)
+uses(p::PrepareNode, s) = (loopuses(p, s)..., uses(p, s, p.kind)...)
+uses(p::PrepareNode, s, ::LoopStartPrepare) = (p.array => Write(),)
+uses(p::PrepareNode, s, k::LoopHeadPrepare) = (p.array => Write(), flaguses(k.count)...)
 uses(p::PrepareNode, s, ::LengthPrepare) = (p.array => CellRead(), Bound(p.array) => Write())
 uses(p::PrepareNode, s, ::FlagPrepare) = (p.array => Read(), (Bound(q) => Write() for q in conditionedby(s, p.array))...)
 uses(p::HostNode, s) = (hostreads(p.args)..., (w => Write() for w in p.writes)..., HostDone(p) => Write())
@@ -606,6 +668,10 @@ uses(p::HostNode, s) = (hostreads(p.args)..., (w => Write() for w in p.writes)..
 # and records.
 uses(p::BuildNode, s) = (p.structure => BuildUse(), AnyWrite() => Read())
 argumentuse(t::TLAS, ::Read) = (t => Read(), AnyWrite() => Read())   # traces and ray queries, inside argumentuses
+uses(p::RenderNode, s) = (renderuses(p, s)..., AnyWrite() => Read())
+# renderuses unions the actual targets and shader accesses of all pieces.
+# AnyWrite reserves the ordering needed by future read-only pieces, including
+# edges to producers on other queues; it does not perform layout transitions.
 
 # ── dependencies!: an edge "q before p" wherever two nodes conflict ──
 # One hazard function, shared with barriers! and the ordering across graphs.
@@ -614,11 +680,16 @@ hazard(before::Use, after::Use) =
 
 function dependencies!(s)
     last = Dict{Resource,Vector{Tuple{Node,Use}}}()
-    for p in s.nodes, (r, u) in uses(p, s)
-        for (q, v) in earlier(last, r)
+    for p in s.nodes
+        us = mergeduses(p, s)      # union aliases' accesses; a write is not lost to a read
+        for (r, u) in us, (q, v) in earlier(last, r)
             hazard(v, u) && addedge!(s.dag, q, p)
         end
-        push!(get!(last, r, []), (p, u))
+        # Publish only after checking every use: alias arguments and AnyWrite
+        # must never produce an edge from a node to itself.
+        for (r, u) in us
+            push!(get!(last, r, []), (p, u))
+        end
     end
     # The head writes every Bound and every launch reads its own, so the head
     # precedes every root without a special case. Keep only direct predecessors
@@ -641,7 +712,7 @@ earlier(last, ::AnyWrite) = [e for es in values(last) for e in es]
 function compile!(s, p::KernelNode)
     checkrange(p.ndrange)
     p.compiled = CompiledNode()
-    p.compiled.command = CompiledDispatch(kernel!(s.device, p.kernel, argtypes(p.args)),
+    p.compiled.command = CompiledDispatch(kernel!(s.device, p.kernel, argtypes(p.args); group = p.group),
                                           launchextents(s.device, p), InBlock())
 end
 # A KA launch's ndrange came from the host (HostRange, section 2): an
@@ -651,31 +722,21 @@ checkrange(r::HostRange) = all(((st, dims),) -> st.dims == dims, r.dims) ||
 checkrange(_) = nothing
 function compile!(s, p::TraceNode)
     p.compiled = CompiledNode()
-    p.compiled.command = CompiledTrace(compiletrace(s.device, p.pipeline, argtypes(p.args)),
+    p.compiled.command = CompiledTrace(pipeline!(compiletrace, s.device, p.pipeline, argtypes(p.args)),
                                        launchextents(s.device, p), InBlock())
 end
 # A render pass (formed by formpasses!): the compiled render keeps its
 # targets and their load and store operations; each piece of p.pieces is
 # compiled on its own with compilepiece!, the same call a new group of draws
 # gets at run (section 5): its pipelines, argument region and cell-copy
-# entries, into the plan's list for the pass. Pipelines are values; the device type compiles each for the
-# argument types and the target formats (cached by the device type, like
-# kernels).
+# entries, into the plan's list for the pass. It calls core's
+# pipeline!(compiledraw, dev, pipeline, argtypes, formats); native compilation
+# happens on a cache miss. Shader code identity and configuration are in the
+# key. The cache algorithm belongs to core for every device type (api.md 4.4).
 function compile!(s, p::RenderNode)
     p.compiled = CompiledNode()
-    p.compiled.command = CompiledRender(p.targets, p.loads, storeops(s, p))   # storeops: Discard where no later node reads
+    p.compiled.command = CompiledRender(p.targets, p.loads, ())   # renderstores! resolves stores after liveness!
     setpieces!(s, p, [compilepiece!(s, piece) for piece in p.pieces])   # recorded with the plan (recordpiece)
-end
-function compile!(s, p::LoopNode)
-    p.compiled = CompiledNode()
-    foreach(q -> compile!(s, q), p.body)
-    # The loop start restores the body's launch commands (a previous run's loop
-    # head may have zeroed them); the loop head reads while_nonzero, zeroes the
-    # body's indirect counts once it is 0, and writes i into the body slots
-    # that take it.
-    p.compiled.command = CompiledLoop(kernel!(s.device, loopstart_kernel!, loopstarttypes(p)),
-                                      kernel!(s.device, loophead_kernel!, loopheadtypes(p)), p.count, p.while_nonzero)
-    derivebodyhazards!(s, p)        # last body node → first body node of the next iteration
 end
 compile!(s, p::HeadNode) = (p.compiled = CompiledNode(); p.compiled.command = CompiledHead(headkernels(s.device)...))
 compile!(s, p::PrepareNode) = (p.compiled = CompiledNode(); p.compiled.command = CompiledDispatch(kernel!(s.device, prepare_kernel!, preparetypes(p)), 1, InBlock()))
@@ -684,12 +745,14 @@ compile!(s, p::HostNode) = (p.compiled = CompiledNode(); p.compiled.command = Co
 # The `Kernel` lives at the kernel's CodeInstance: `kernelfor` finds it
 # through `GPUCompiler.cached_results` (one per compiler configuration), with the
 # access per argument set at declaration. compilekernel fills its code if
-# missing and its entry for `dev` (native handle and KernelInfo), each once under
-# the kernel's lock, and says whether this call compiled, for the per-device
+# missing and its entry for `dev` (native handle and KernelInfo) under the
+# kernel's lock. Idle entries can be dropped/recreated by core's bounded native
+# cache (execution-contracts.md section 13). It reports whether this call compiled for the per-device
 # compile counter. No other kernel table exists, in core or in a device type.
-function kernel!(dev, f, types)
-    k = kernelfor(dev, f, types)                       # the Kernel at the CodeInstance; access already set
-    native, compiled = compilekernel(dev, k, config(dev, f))
+function kernel!(dev, f, types; group = nothing)
+    cfg = withgroup(config(dev, f), group)             # explicit size wins; part of the compiler/cache configuration
+    k = kernelfor(dev, f, types, cfg)                  # the Kernel at the CodeInstance; access already set
+    native, compiled = compilekernel(dev, k, cfg)
     compiled && increment!(dev.compiles)
     return entry(k, dev)                               # the DeviceKernel: native and KernelInfo
 end
@@ -737,6 +800,11 @@ function liveness!(s)
     end
     # a repeated group's transients live for one iteration unless read before written
 end
+function renderstores!(s)
+    for p in rendernodes(s.order)
+        p.compiled.command = CompiledRender(p.targets, p.loads, storeops(s, p))
+    end
+end
 function place!(s)
     items = [Item(r, s.first[r], s.last[r], bytes(capacity(r))) for r in keys(s.first)]
     # Transients a host node reads or writes go to a host-visible arena part,
@@ -776,7 +844,7 @@ end
 # A stage is the segments between two host nodes, and the host node after them.
 function submissions!(s)
     c = Cutter(submissionbudget(caps(s.device)))    # core's policy from the device's facts: a smaller target
-                                                     #   where caps(dev).display
+                                                     #   where caps(dev).displayattached
     foreach(p -> addnode!(s, c, p), s.order)
     finish!(s, c)                                    # closes the last stage, also after a trailing host node
     # Within a run, a segment waits on the segments holding its predecessors on
@@ -830,8 +898,8 @@ end
 notinpresent(::Union{BuildNode,HostNode}) = true
 notinpresent(_) = false
 
-# A loop is cut between iterations when one iteration fits the budget and the
-# loop does not (open).
+# Expanded loop nodes retain iteration boundaries; core cuts between iterations
+# before an estimated budget overrun. No opaque loop remains for a backend to split.
 
 # ── summary!: every access of every stage to what the plan shares ──
 function summary!(s)
@@ -928,10 +996,6 @@ emit!(b, pl, p::PrepareNode) = emitdispatch!(b, p, p.compiled.command, deps(p))
 emit!(b, pl, p::CopyNode)    = emitcopy!(b, p, p.compiled.command, deps(p))
 emit!(b, pl, p::ForeignNode) = emitlibrary!(b, p, p.compiled.command, deps(p))
 emit!(b, pl, p::RegionNode)  = emitlibrary!(b, p, p.compiled.command, deps(p))   # a region compiler's output
-emit!(b, pl, p::LoopNode)    =
-    emitloop!(b, p, p.compiled.command, deps(p)) do
-        foreach(q -> emit!(b, pl, q), p.body)
-    end
 # Draws inside a render pass carry no barrier: the pass's barrier (target
 # layouts, and everything its draws read) is beginrender!'s. The pass is its
 # list of pieces, in draw order (below).
@@ -948,7 +1012,9 @@ end
 # RenderNode. Other nodes between them are scheduled before or after the pass.
 # A target's load operation is Clear(v) when a clear of it comes before its
 # draws in the pass and Keep() otherwise; its store operation is Discard()
-# when no later node reads it (liveness) and Store() otherwise. The pass's
+# only for a graph transient with no later read or Keep() load. Device images
+# and windows always Store(): host reads, other graphs and presentation are
+# observable even when absent from this graph's node list. The pass's
 # draws are cut into pieces by their holder: each run of draws one group (or
 # the graph itself) holds is one piece.
 mutable struct RenderNode{T<:Tuple,L<:Tuple} <: Node
@@ -987,10 +1053,14 @@ end
 #     the plan: the head launches over its length (indirect), so new entries
 #     record nothing; a deleted piece's entries are blanked and reused, and
 #     the table is compacted at the next recompile;
-#   - a fixed barrier at the start of every pass (compute, copy and build
-#     writes before it -> vertex, index, indirect and fragment reads), so a
-#     new draw adds no dependency inside the graph that compile would have
-#     to place;
+#   - a pass that accepts new pieces has an AnyWrite read in dependencies!
+#     and barriers!: it follows every earlier writer and precedes every later
+#     writer, on all queues. crossqueuewaits! retains these edges. Its barrier
+#     includes every supported producer stage and every draw-input stage;
+#   - fast-path draws only read non-attachment resources. A shader storage
+#     write, a new image-layout transition, an attachment feedback dependency
+#     or a required change of queue/placement recompiles the plan. A memory
+#     barrier cannot replace a queue wait or an image-layout transition;
 #   - its own registration: the piece's resources join the namers,
 #     holds and dependents, as register! does for a plan, for these uses only.
 # Core Vulkan inherits no state into a secondary command buffer ("No state,
@@ -1046,15 +1116,18 @@ applychanges!(g::Graph) = all(c -> piecechange(g.plan, c), g.plan.changes) ? upd
 # A piece change touches only draws in passes the plan has: a group made
 # (empty, or of draws whose place is inside a pass of the plan with their
 # targets), a draw declared into such a group, a deleted group of draws, a
-# sort! of groups of draws in one pass. A launch, a clear, a trace, a draw
+# sort! of groups of draws in one pass, provided piececompatible verifies the
+# read-only inputs, already valid image layouts and placement/queue contract
+# above from compiled shader access. Otherwise recompile. A launch, a clear, a trace, a draw
 # into the graph itself, a group of draws that would start a new pass: a
 # recompile.
 piecechange(pl, c::Added) = piecechange(pl, c.parent, c.node)
-piecechange(pl, ::Union{Graph,Group}, gr::Group) = gr.loop === nothing && drawsonly(gr) && (isempty(gr.nodes) || passof(pl, gr) !== nothing)
-piecechange(pl, gr::Group, ::DrawNode) = drawsonly(gr) && passof(pl, gr) !== nothing
+piecechange(pl, ::Union{Graph,Group}, gr::Group) = gr.loop === nothing && drawsonly(gr) &&
+    (isempty(gr.nodes) || (passof(pl, gr) !== nothing && all(d -> piececompatible(pl, gr, d), gr.nodes)))
+piecechange(pl, gr::Group, d::DrawNode) = drawsonly(gr) && passof(pl, gr) !== nothing && piececompatible(pl, gr, d)
 piecechange(pl, ::Union{Graph,Group}, ::Node) = false
 piecechange(pl, c::Deleted) = drawsonly(c.group)
-piecechange(pl, c::Reordered) = (gs = filter(n -> n isa Group, c.group.nodes); all(drawsonly, gs) && onepass(pl, gs))
+piecechange(pl, c::Reordered) = (gs = filter(isgroup, c.group.nodes); all(drawsonly, gs) && onepass(pl, gs))
 drawsonly(gr::Group) = all(isdraw, gr.nodes)
 isdraw(::DrawNode) = true
 isdraw(::Node) = false
@@ -1063,7 +1136,7 @@ isdraw(::Node) = false
 # clear before or after the place in the order belongs to it) whose targets
 # are the targets of the group's draws; nothing otherwise.
 
-# An added or changed group: pipelines from the device type's cache, the
+# An added or changed group: pipelines from core's device-owned cache, the
 # argument region (acquire!, before any lock, like prepare!), the cell-copy
 # entries (a store into the plan's table, applied by the run's first stage),
 # the piece's recording (recordpiece) and its registration; a group recorded
@@ -1077,9 +1150,9 @@ isdraw(::Node) = false
 # (a pipeline error, memory) is deleted as delete! does, its resources
 # unnamed, and run! throws; the rest of the graph keeps running.
 function updatepieces!(pl::Plan)
-    added = unique(changedgroup(c) for c in pl.changes if c isa Added)
-    deleted = [c.group for c in pl.changes if c isa Deleted]
-    sorted = [x for c in pl.changes if c isa Reordered for x in c.group.nodes if x isa Group]
+    added, deleted, sorted = Group[], Group[], Group[]
+    foreach(c -> collectpiecechanges!(added, deleted, sorted, c), pl.changes)
+    unique!(added)
     passes = unique(filter(!isnothing, [passof(pl, gr) for gr in [added; deleted; sorted]]))
     try
         foreach(gr -> deleted!(pl, gr), deleted)
@@ -1092,6 +1165,9 @@ function updatepieces!(pl::Plan)
         end
     end
 end
+collectpiecechanges!(added, deleted, sorted, c::Added) = push!(added, changedgroup(c))
+collectpiecechanges!(added, deleted, sorted, c::Deleted) = push!(deleted, c.group)
+collectpiecechanges!(added, deleted, sorted, c::Reordered) = append!(sorted, filter(isgroup, c.group.nodes))
 changedgroup(c::Added{<:Union{Graph,Group},Group}) = c.node   # a group made
 changedgroup(c::Added{Group,<:DrawNode}) = c.parent           # a draw declared into a group
 function recordgroup!(pl::Plan, gr::Group)
@@ -1128,9 +1204,9 @@ end
 recompiled!(g, c::Deleted) = unname!(g, declared(c.group))
 recompiled!(g, ::Union{Added,Reordered}) = nothing
 # A PresentNode records only its barrier (the image to the present layout);
-# the present itself is submitnative!'s (section 8). A VideoDecodeNode
+# the present itself is presentnative! after record-lock publication. A VideoDecodeNode
 # records through the decode verbs of the plan's video section.
-emit!(b, pl, p::PresentNode) = emitcopy!(b, p, NoCopy(), deps(p))   # the barrier, no copy
+emit!(b, pl, p::PresentNode) = emitcopy!(b, p, CompiledCopy(NoCopy()), deps(p))   # explicit barrier-only copy command
 # The head: copies cells into the Bound slots, writes the launch commands and
 # ndrange values over resizable arrays, and multiplies each when! launch's
 # count by its flag where the host writes the flag (section 2). It writes no
@@ -1192,6 +1268,7 @@ function run!(g::Graph)
         r = lockgraph(g) do
             (@atomic g.freed) && throw(ArgumentError("run! of a freed graph"))
             while true
+                (g.plan !== nothing && hasrenderedpending(g.plan.window)) && return retrypresent!(g.plan.window) # before edits/recompile; presentation only
                 applywindows!(g)    # a resize! of a window this graph renders to: generation, cell writes, mark (section 7)
                 (g.plan === nothing || @atomic g.recompile) && recompile!(g)
                 isempty(g.plan.changes) || applychanges!(g)      # declarations and deletes since the last run (section 5)
@@ -1224,14 +1301,18 @@ function recompile!(g::Graph)
     try
         new = compile(g)            # fallible work, all before any token is claimed
         record!(new)
-        while !done(register!(new)) # a dependency changed during compile (B.6)
-            discard!(new); new = nothing   # retired once: the finally below must not see it
+        while true
+            registered = register!(new)
+            done(registered) && break
+            discard!(new); new = nothing
+            waitabletransfer(registered) && waitfortransfers(registered) # no record/arena locks at compile
             new = compile(g); record!(new)
         end
         for (w, sc, size) in currentgenerations(g)   # each captured under its window's lock (section 7)
             recordwindows!(new, w, sc, size)
         end
         old, g.plan = g.plan, new
+        old === nothing || (new.lastrun = copy(old.lastrun))   # graph-wide order survives plan replacement, even for disjoint resources
         ok = true                             # new is the graph's plan now: a throw below must not discard it
         old === nothing || (new.compiles = old.compiles + 1)   # carried: the count a test asserts did not move
         old === nothing || retireplan!(old, new)   # B.6: off the dependents and
@@ -1264,9 +1345,10 @@ discard!(pl::Plan) = (unregister!(pl);
 # (resizing-and-raytracing.jl B.4, change!).
 mutable struct RunState
     pages::IdDict{Arena,Vector{PageRun}}   # per arena part of the plan: pages for its unmapped range (section 9)
+    present::Union{Nothing,PendingPresent}
     prepared::Prepared                  # what applying the pending changes and restores needs (B.4 step 1)
     image::Union{Nothing,Image,WindowChanged,Minimized}
-    generation::Int                     # the swapchain generation this run's window-sized segments use
+    generation::Union{Nothing,Swapchain} # the swapchain generation this run's window-sized segments use
     waits::Vector{Token}                # other graphs' work found by earlier stages (section 8); later stages wait too
 end
 
@@ -1293,7 +1375,7 @@ end
 function run!(pl::Plan)
     sweep!(pool(pl.device))         # release what has passed (section 9)
     @atomic pl.running = true       # unmapidle! and eviction leave what this plan names alone until the run ends
-    rs = RunState(IdDict(), Prepared(), nothing, nothing, Token[])
+    rs = RunState(IdDict(), nothing, Prepared(), nothing, nothing, Token[])
     held = false
     try
         # The image before the arena parts: its acquire may block (vsync, a
@@ -1302,6 +1384,14 @@ function run!(pl::Plan)
         rs.image = acquireimage!(pl)     # before any lock (section 7)
         skip(rs.image) && return Skipped()
         again(rs.image) && return Again()
+        if renderedpending(rs.image)
+            # Previous rendering succeeded but present was not enqueued (OOM).
+            # Retry ONLY that present; do not replay device-side sample counters.
+            rs.generation = generationof(rs.image)
+            rs.present = pendingpresent(rs.image)
+            finishpresent!(rs)
+            return Submitted()
+        end
         holdparts!(pl); held = true # before any lock: waits while another run holds a shared arena part
         acquireunmapped!(rs, pl)    # per arena part, fallible, so before any lock (section 9)
         # The image's generation: held by the image until the present, then
@@ -1336,18 +1426,23 @@ function run!(pl::Plan)
                     done(r) && i == length(pl.stages) && endbetween!(pl)   # still under the locks
                     r
                 end
-                done(r) && break
+                if done(r)
+                    break
+                end
                 i == 1 && return r                   # Again or WaitFor: run!(g) starts over (waiting outside its lock)
-                # A later stage never gets WaitFor (takepending leaves such
-                # changes for after this run); Again: prepare and lock again.
+                # Stale-making changes stay deferred after stage 1. An internal
+                # copy transfer may still be busy: wait outside record locks,
+                # then retry THIS stage, preserving previous accepted stages.
+                waitabletransfer(r) && waitfortransfers(r)
             end
-            pendreaders!(pl, r.written)               # after the stage is submitted
         end
+        finishpresent!(rs)                   # ALL stages accepted; outside plan/resource locks
         return Submitted()
     finally
         endbetween!(pl)                               # a throw between stages; nothing if already cleared
         foreach(((part, pages),) -> release!(pool(pl.device), pages), rs.pages)   # pages no change took
         release!(rs.prepared)                         # what no step took
+        abandonunattemptedpresent!(rs)                # partial failure: retire signal semaphore; do not mark complete-frame retry
         keepimage!(pl.window, rs.image)               # an image not presented goes back to its owner, the window
         # A presented image's generation is released with every token this
         # run submitted; an image not presented goes back to the window with
@@ -1370,7 +1465,11 @@ end
 # Again or WaitFor leaves them, so its retry, or the next run, handles them.
 function lockstage(f, pl, i, snap, extra)
     stage = pl.stages[i]
-    res = expanded([snap; extra])
+    res = expanded([snap; extra; writtenwithreaders(pl.stages[i])])
+    # Include written arrays and their transitive readers, from immutable
+    # membership snapshots checked below. Updates must be pended before these
+    # locks are released, so another run cannot observe new geometry without
+    # the corresponding pending BLAS/TLAS update.
     plans = lockset(pl, stage, res)
     r = lockplans(plans) do
         recs = [[syncstate(r) for r in res]; (i == 1 ? [a.sync for a in arenaparts(pl)] : []);
@@ -1378,6 +1477,9 @@ function lockstage(f, pl, i, snap, extra)
         locked(recs) do
             inboxsnapshot(pl) === snap || return Retry()
             lockset(pl, stage, res) ⊆ plans || return Retry()
+            readerscurrent(res) || return Retry()
+            busy = transferwaits(recs, nothing)
+            isempty(busy) || return Done(WaitForTransfers(busy)) # before any stage segment
             v = f(recs, snap)
             done(v) && dropinbox!(pl, snap)  # lock-free: a compare-and-swap that keeps later pushes
             Done(v)
@@ -1436,15 +1538,16 @@ function submitstage!(pl, stage, recs, items, rs)
             touched(seg, changed) && push!(ownwaits, first(stage.segments).token)   # reads what the changes wrote
             seg.token = submit!(seg.channel, map(p -> commandbuffer(p, ()), parts); waits = ownwaits, present)
         end
+        # All publication below uses pre-reserved bookkeeping capacity.
+        # Do this per accepted segment: a later preparation/native enqueue may fail.
+        pl.lastrun[channelstate(seg.channel)] = seg.token
         foreach(p -> submitted!(p, seg.token), parts)
-        pl.lastrun[seg.channel] = seg.token          # the latest per channel covers the earlier ones
-        present === nothing || (rs.image = nothing)  # presented: no longer the window's to keep; the generation
-                                                     #   is released at the run's end (run!'s finally)
+        foreach(r -> notifyreaders!(r, pl), namedwrites(seg))
+        pendreaders_locked!(pl, writtenresources(seg))
+        present === nothing || (rs.present = PendingPresent(present, seg.token))
+        # Native presentation is deferred until ALL run stages have been accepted,
+        # outside record locks. The PresentNode only finalizes the image layout.
     end
-    # Still under the locks: what the stage wrote goes into the inboxes of
-    # the other plans reading it (section 8).
-    foreach(r -> notifyreaders!(r, pl), namedwrites(stage))
-    # The shared arrays the stage writes, from compile.
     return StageDone(writtenresources(stage))
 end
 
@@ -1487,8 +1590,8 @@ releasepart!(part::Arena) = lock(part.cond) do
     notify(part.cond)
 end
 
-# A stage that wrote arrays something else is built from pends the readers'
-# updates once it is submitted: a TLAS Update,
+# Each accepted segment that wrote arrays something else is built from pends
+# the readers’ updates before another segment can fail: a TLAS Update,
 # a BLAS Update (a Build when the array is its index array), applied by the
 # next submission that touches the structure, which waits for this stage's
 # write through the sync states (B.4); a screen's redraw mark. `written`
@@ -1496,12 +1599,17 @@ end
 # (immutable, replaced under its lock; resizing-and-raytracing.jl B.2), so a
 # structure built after compile counts too, and iterating needs no lock. A
 # structure this plan builds or refits itself has its own command and is
-# skipped. One method of pendupdate! per reader type; each goes through
-# change!.
-pendreaders!(pl, written) =
+# skipped. One pendupdate_locked! method per reader type appends its requests
+# under the stage's already expanded locks.
+pendreaders_locked!(pl, written) =
     for a in written, r in readers(a)
-        r in builtby(pl) || pendupdate!(r, a)
+        r in builtby(pl) || pendupdate_locked!(r, a)
     end
+# pendupdate_locked! appends/coalesces the request and notifies naming plans,
+# using the transitive reader locks already held by lockstage. It takes no
+# new lock and allocates no device storage. Non-run writers use the same
+# publication rule in submitwith!: writes and their reader updates become
+# visible atomically under the expanded record locks.
 readers(st::ArrayState) = st.readers   # the snapshot
 readers(x) = ()                        # a structure, an image, an arena part: nothing is built from them here
 
@@ -1608,8 +1716,8 @@ end
 # it is current, one from a run that acquired an image from it and has not
 # yet submitted its last stage (the image until the present, the run after
 # it; window-sized segments after the present use the generation's
-# recordings); that run's tokens release it, and its per-image recordings
-# with it. A new generation retires the current swapchain (created with it as
+# recordings). Present requests retain independent completion holds
+# (execution-contracts.md §4); rendering tokens alone never destroy a generation. A new generation retires the current swapchain (created with it as
 # oldSwapchain); an image a failed run kept of the old generation is dropped
 # with the generation (a destroyed swapchain releases its acquired images;
 # presenting it would draw the old size). A zero size (minimized) makes no
@@ -1651,10 +1759,22 @@ function recordwindows!(g::Graph)
 end
 function newgeneration!(w::Window)   # under w.lock; no acquire in progress (the graph lock is held)
     old = w.swapchain
-    w.size, w.pendingsize = w.pendingsize, nothing
-    w.swapchain = createswapchain(w, w.size...; oldswapchain = old.native)
+    size = w.pendingsize
+    # Native creation can fail and can retire oldSwapchain even on failure.
+    # Publish size/current only on success; record old as retired if native
+    # creation retired it, so no retry acquires from a retired swapchain.
+    result = try
+        createswapchain(w, size...; oldswapchain = nativeof(old))
+    catch err
+        if oldretired(err)
+            w.swapchain = nothing
+            retireoldgeneration!(w, old) # drop kept/current holds; preserve all completion records
+        end
+        rethrow()                       # pending size and changed mark remain for retry
+    end
+    w.swapchain, w.size, w.pendingsize = result, size, nothing
     foreach(i -> drophold!(i.swapchain), w.kept); empty!(w.kept)   # kept images of the old generation go with it
-    drophold!(old)                   # retired with its runs' tokens once they have submitted
+    old === nothing || drophold!(old) # GPU and presentation retirement holds remain independent
 end
 
 # In run!(pl), before any record lock. An image a failed run of this graph
@@ -1699,7 +1819,43 @@ again(::WindowChanged) = true
 again(_) = false
 skip(::Minimized) = true
 skip(_) = false
+# This releases the RUN hold only. Each enqueued present has its own hold and
+# independent completion record; tokens alone never destroy the generation.
 releasegeneration!(sc::Swapchain, tokens) = retirehold!(sc, tokens)
+function finishpresent!(rs)
+    rs.present === nothing && return
+    req = rs.present
+    outcome = try
+        r = lock(channelstate(req.channel).lock) do
+            presentnative!(req.channel, req.native) # may block in WSI; no record/window lock
+        end
+        # Retention/ownership publication has pre-reserved storage. A failure
+        # here is terminal too: native presentation may already be accepted.
+        if r.enqueued
+            retainpresent!(req.generation, nativeowner(req.channel, r.retirement))
+            rs.image = nothing                    # acquisition consumed, even on OUT_OF_DATE
+        elseif presentationretry(r)
+            keeprendered!(rs.image, req)            # not-enqueued OOM: retry present only
+        else
+            releaseunpresented!(req)                # token-safe acquired release
+            rs.image = nothing
+        end
+        rs.present = nothing
+        r
+    catch err
+        poison!(channelstate(req.channel).domain, err)
+        quarantinepresent!(channelstate(req.channel).domain, req)
+        rs.image = nothing                        # cannot return ambiguous acquisition
+        rs.present = nothing                      # quarantine owns it; finally cannot recycle
+        rethrow()
+    end
+    handlepresentstatus!(req.window, outcome.status) # resize/closed mark or deferred error
+end
+# presentationretry accepts only !enqueued with PresentHostOOM/PresentDeviceOOM.
+# handlepresentstatus! throws PresentationRetry for those statuses AFTER keeping
+# the request; the next run!(g) retries before edits. Other errors retain their
+# accepted GPU prefix. abandonunattemptedpresent! never frees live semaphore uses.
+nativeowner(ch, record) = record               # test wrappers retain their owner here
 generationof(i::Image) = i.swapchain
 generationof(_) = nothing                 # no window
 
@@ -1715,12 +1871,25 @@ keepimage!(w, _) = nothing           # no window, no image, WindowChanged(), Min
 # A token names one submission: its channel and the value the channel's
 # counter reaches when it completes. Core's one-argument forms wrap the
 # device type's verbs, which take the channel and the value.
+# Native endpoint aliases share state. Tokens retain their endpoint for native
+# dispatch, but equality/hash and latest-per-channel use state identity.
+abstract type SubmitChannel end
+mutable struct ChannelState
+    lock::ReentrantLock
+    next::UInt64
+    domain::FailureDomain   # shared by ALL channels of the same native device
+    timeline               # native completion source; one per physical queue
+end
 struct Token
+    state::ChannelState
     channel::SubmitChannel
     value::UInt64
 end
-passed(t::Token) = passed(t.channel, t.value)    # device-type verb: passed(ch, value)
-waitfor(t::Token) = waitfor(t.channel, t.value)  # device-type verb: waitfor(ch, value)
+Token(ch::SubmitChannel, value) = Token(channelstate(ch), ch, value)
+Base.:(==)(a::Token, b::Token) = a.state === b.state && a.value == b.value
+Base.hash(t::Token, h::UInt) = hash((objectid(t.state), t.value), h)
+passed(t::Token) = (checkhealthy(t.state.domain); passed(t.channel, t.value))    # device-type verb: passed(ch, value)
+waitfor(t::Token) = (checkhealthy(t.state.domain); waitfor(t.channel, t.value))  # device-type verb: waitfor(ch, value)
 waitfor(ts) = foreach(waitfor, ts)               # a collection of tokens
 # A host wait is a driver call made with `@ccall gc_safe = true` (Julia 1.12,
 # base/c.jl:278), so a thread waiting on the GPU does not hold up a GC another
@@ -1858,13 +2027,29 @@ lasttokens(s::SyncState, r) = filter(!passed, [[a.token for a in eageraccesses(s
 # under its sync lock).
 function submit!(ch::SubmitChannel, parts; eager = (), waits = waitsfor(eager),
                  signals = (), present = nothing, self = nothing)
-    lock(ch.lock) do
-        token = Token(ch, nexttoken!(ch))
-        recordeager!(eager, token; self)
-        submitnative!(ch, token.value, parts, waits, signals, present)   # the device type's verb
-        return token
+    checkhealthy(channelstate(ch).domain)
+    packet = preparesubmit(ch, parts, waits, signals)  # fallible, BEFORE claim
+    st = channelstate(ch)
+    lock(st.lock) do
+        checkhealthy(st.domain)
+        token = Token(ch, nexttoken!(st))
+        try
+            recordeager!(eager, token; self)   # pre-reserved publication storage
+            submitnative!(ch, token.value, packet)
+        catch err
+            poison!(st.domain, err)           # native acceptance may be ambiguous
+            quarantine!(st.domain, packet, eager, token) # no recycle/forged completion
+            rethrow()
+        end
+        return token                          # accepted, not completed
     end
 end
+# Caller commits changes, publishes plan tokens and reader updates under its
+# expanded locks. A post-accept bookkeeping failure also poisons the domain.
+# `present` is prepared run metadata only; finishpresent! enqueues it after
+# releasing record locks, after ALL stages were accepted. No run continuation
+# is needed for an OOM present retry. A pre-WSI partial failure instead retires
+# its signal semaphore and keeps/releases the acquired image for a fresh run.
 
 # ── Locks ──
 # A plan's sync lock orders its submissions against those of the plans it
@@ -1885,12 +2070,14 @@ end
 # first, checked under the locks), then its SyncState (and its composites'
 # members', lockexpanded). Eager calls, host reads, vendor views and eviction
 # copies lock this way (submitapplying).
-function lockresources(f, uses)
+function lockresources(f, uses; lent = false, transfer = nothing, queued = false)
     while true
         plans = namingplanssnapshot(uses)
         r = lockplans(plans) do
-            lockexpanded(uses) do recs, x
+            lockexpanded(uses; lent) do recs, x
                 namingplanssnapshot(uses) === plans || return Retry()
+                waits = queued ? () : transferwaits(recs, transfer)
+                isempty(waits) || return Done(WaitForTransfers(waits))
                 Done(f(recs, x))
             end
         end
@@ -1927,28 +2114,43 @@ end
 # submitter's own commands once the steps of the pending changes are known:
 # after(st) is the storage an array has after them, so an eager call packs
 # the addresses its arguments will have. Returns the token.
-function submitapplying(own, uses; ch = channel(device(first(first(uses))), Main()))   # uses: (resource, use) pairs
+function submitapplying(own, uses; ch = channel(device(first(first(uses))), Main()),
+                        validate = Returns(true), transfer = nothing)   # uses: (resource, use) pairs
     while true
         prepared = Prepared()
         r = nothing
         try
             prepare!(prepared, uses)                  # storage, pages, capacity, command objects, restores
-            r = lockresources(uses) do recs, x       # the naming plans' sync locks, then the SyncStates
-                submitwith!(ch, recs, prepared, expand(x, uses), OwnWork(own))   # records eager accesses
+            r = lockresources(uses; transfer) do recs, x
+                submitwith!(ch, recs, prepared, expand(x, uses), OwnWork(own, validate))   # records eager accesses
             end
         finally
             release!(prepared)                        # what no committed step took
         end
+        needsdestination(r) && return r  # caller must allocate a larger fixed destination
         done(r) && return first(r)
         waitforruns(r)                                # WaitFor: outside every lock; Again: nothing
     end
 end
+struct OwnWork{F,V}
+    own::F
+    validate::V
+end
+OwnWork(f) = OwnWork(f, Returns(true))
+struct NeedDestination end
+needsdestination(::NeedDestination) = true
+needsdestination(_) = false
+validateown(parts::Vector, after) = true
+validateown(w::OwnWork, after) = w.validate(after)
+waitforruns(w::WaitForTransfers) = waitfortransfers(w) # outside all record locks
 recordown(parts::Vector, steps) = map(p -> commandbuffer(p, steps), parts)   # a run's recorded parts
 recordown(w::OwnWork, steps) = w.own(storageafter(steps))            # an eager call, a copy of its own
 # A submission whose own work is a copy (a host read, an eviction copy): the
 # same path, the copy emitted by `emit(b, after)`.
-submitnow!(emit, uses; ch = channel(device(first(first(uses))), Main())) =
-    submitapplying(after -> (b = Builder(device(ch), ch); emit(b, after); [finish(b)]), uses; ch)
+submitnow!(emit, uses; ch = channel(device(first(first(uses))), Main()),
+           validate = Returns(true), transfer = nothing) =
+    submitapplying(after -> (b = Builder(device(ch), ch); emit(b, after); [finish(b)]),
+                   uses; ch, validate, transfer)
 
 # ══ 9. Memory: pool, kinds, arenas, release ═══════════════════════════════════
 
@@ -1959,7 +2161,9 @@ function acquire!(pool::Pool, kind, bytes; constraint = nothing)
     r === nothing || return r
     # Pressure is handled here and only here. It submits only the unmapping of
     # idle arena pages and eviction copies, and never flushes a queue.
-    for relieve in (unmapidle!, trimblocks!, collectgarbage!)
+    # dropidlecache! drops idle native holds for pool.device (section 13 of
+    # execution-contracts.md); destruction still follows retirement tokens.
+    for relieve in (dropidlecache!, unmapidle!, trimblocks!, collectgarbage!)
         relieve(pool)
         sweep!(pool)
         r = tryacquire!(pool, kind, bytes, constraint)
@@ -1988,10 +2192,13 @@ end
 
 # The contents of an evicted writable array: pageable host memory, not pool
 # memory, so the OS may compress it or swap it to disk (Mantle writes no
-# files). Page-aligned, so a device type may write it directly (plan, open
-# decision 14).
-struct HostCopy
+# files). Core owns suitably aligned/importable backing for HostCopy; an
+# arbitrary Vector alone does not establish that property. Bounded HostCopyJob
+# below describes eviction. Restore uses prepared native access to these same
+# bytes; a staged restore path requires the debug-first evidence gate (section 12).
+mutable struct HostCopy
     bytes::Vector{UInt8}
+    shape::Dims                     # original extent; finishhostshape! applies a copied device length
 end
 struct Evicted{H}
     host::H                       # a HostCopy with the contents, valid once `token` passed;
@@ -2012,7 +2219,7 @@ end
 # tokens. A structure's own arrays (records, range table, offsets, software
 # storage) are held by it with composite holds, so they are never evicted.
 evictable(st) = st.composites[] == 0 && !any(d -> d.handle, values(st.dependents)) &&
-                !any(running, keys(st.dependents)) && !st.sync.lent &&
+                !any(running, keys(st.dependents)) && !st.sync.lent && st.sync.transfer === nothing &&
                 isempty(st.sync.pending) && evictablestorage(st.storage)
 evictablestorage(::Union{Region,Reserve,Committed}) = true
 evictablestorage(::Union{Evicted,Released}) = false
@@ -2028,51 +2235,53 @@ evictablestorage(::Union{Evicted,Released}) = false
 function evictfor!(pool, need)
     tokens = Token[]
     freed = 0
-    for st in leastrecentlyused(pool)                 # weak references, a snapshot; each rechecked under its lock
+    for st in leastrecentlyused(pool)
         freed >= need && break
-        host = evictionhost!(pool, st)                # before the lock; nothing evicted if this fails
-        retired = nothing
+        snap = evictionsnapshot(st) # immutable storage/shape/bytes/source captured under expanded locks
+        snap === nothing && continue
+        host = evictionhost!(pool, snap, snap.source) # allocate outside locks
+        job = nothing
         try
-            # The naming plans' sync locks first, then st's (section 8): runs
-            # lock only their inbox, so this is what keeps a run from starting
-            # its submission while st is evicted under it. The eviction is an
-            # eager access: it puts st into those plans' inboxes, so a run
-            # that already looked locks st, finds it Evicted and restores it.
-            retired = lockresources(((st, Read()),); lent = true) do recs, x
-                evictable(st) || return nothing
-                # Nothing is pending on st (evictable), so prepare! allocates
-                # nothing for it: no acquire! under this record lock.
-                copy = copyout!(st, host)
-                last = lasttokens(st.sync, st)      # the accesses in flight, the naming plans' last runs, the copy
-                retire!(pool, st.storage, last)
-                st.storage = Evicted(host, copy)
-                foreach(markrestore!, keys(st.dependents))   # @atomic plan.restore = true, through the weak reference
-                last
-            end
+            # Readonly eviction commits directly. Writable eviction freezes the
+            # physical source under expanded locks and returns a held HostCopyJob.
+            job = begineviction!(st, host, snap) # eligibility + snapshot + transfer publication
+            job === nothing && continue
+            copyeviction!(job)            # bounded chunk copies; all waits/memcpy OUTSIDE locks
+            last, reclaimed = commiteviction!(job) # same expanded locks; preserve pending requests
+            append!(tokens, last)
+            freed += reclaimed
         finally
-            retired === nothing && release!(pool, host)   # not evictable after all, or a throw
+            # Abort leaves old storage usable; native failure quarantines holds.
+            # Complete/abort wakes transfer waiters; no graph lock is needed.
+            job === nothing ? release!(pool, host) : finisheviction!(job)
         end
-        retired === nothing || (append!(tokens, retired); freed += bytes(st))
     end
     return tokens
 end
-# Where an evicted array's contents go, by a runtime property of the resource:
-# a read-only array keeps the caller's host array, from
-# which a restore uploads again, so nothing is acquired and nothing is copied
-# out; any other array gets a HostCopy and an eviction copy.
-evictionhost!(pool, st) = evictionhost!(pool, st, st.source)
-evictionhost!(pool, st, ::Nothing) = HostCopy(pagealigned(UInt8, bytes(st)))
-evictionhost!(pool, st, source::AbstractArray) = source
-# Under the locks. The copy waits for the last write, and a later write waits
-# for it. A read-only array has no copy; it tells the naming plans itself, as
-# the eager access of a copy would have.
-# How the copy reaches pageable memory is the device type's (emitcopy! into a
-# HostCopy: imported host memory released after the copy, or a staging region
-# and a memcpy after the token; plan, open decision 14).
-copyout!(st, host::HostCopy) = submitnow!(((st, Read()),)) do b, after
-    emitcopy!(b, nothing, copyof(after(st) => host), Deps((), ()))
+# Pageable copy job, synchronous only inside pressure. Native submissions read
+# the frozen source directly: NEVER apply pending stores/resizes in this job.
+function copyeviction!(job::HostCopyJob)
+    for chunk in chunks(job.snapshot, job.staging; limit = 8 << 20)
+        b = Builder(job.device, job.channel)
+        emitcopy!(b, nothing, copyof(chunk.source => job.staging), chunk.deps)
+        native = finish(b)
+        token = lockresources(((job.state, Read()),); transfer = job) do recs, x
+            matchestransfer(job) || throw(ArgumentError("eviction snapshot lost"))
+            t = submit!(job.channel, [native]; eager = ((job.state, Read()),), waits = job.writers)
+            remember!(job, t) # pre-reserved token/command bookkeeping
+            t
+        end
+        waitfor(token)                     # no Mantle record/channel/pool/window lock
+        invalidatehost!(job.device, job.staging, chunk.stagingrange)
+        copyto!(job.host.bytes, chunk.hostrange, hostview(job.staging), chunk.stagingrange)
+    end
+    finishhostshape!(job) # copied length cell if device-written; validate <= copied capacity
 end
-copyout!(st, ::AbstractArray) = (notifyplans!(st); nothing)
+# commiteviction! publishes Evicted(host,nothing), old-use retirement, restore
+# marks and transfer completion together. Readonly jobs have no GPU copy.
+# Complete protocol and staging-lease order: execution-contracts.md §12.
+evictionhost!(pool, snap, ::Nothing) = HostCopy(pagealigned(UInt8, snap.bytes), snap.shape)
+evictionhost!(pool, snap, source::AbstractArray) = source
 release!(pool, ::HostCopy) = nothing                # Julia memory: the GC frees it once the Evicted is gone
 release!(pool, ::AbstractArray) = nothing           # the caller's host array is never Mantle's to release
 
@@ -2087,23 +2296,30 @@ release!(pool, ::AbstractArray) = nothing           # the caller's host array is
 # evicted resource locked, a Restore step and a cell write with the prepared
 # storage, in front of the changes pending on it: the Restore writes the
 # resource, so it waits for the eviction copy (recorded as a read). Both
-# sources are pageable host memory, a HostCopy or the host array a read-only
-# array keeps (no copy to wait for), so the Restore uploads from upload
-# memory prepare! acquires and fills before the locks, like a store's copy at
-# its call (how a large one is staged is open); a HostCopy is dropped once the
-# submission's token has passed. Storage missing or too small
-# (evicted after the submitter looked, or resized meanwhile): Again, nothing
-# emitted. No eviction can happen while the locks are held.
+# sources are retained host memory: a HostCopy or the immutable source a
+# read-only array keeps. Before record locks, prepare! either acquires a native
+# source view/registration or initializes the private CPU-visible final storage
+# directly and finishes host visibility/flush. It creates no intermediate upload
+# allocation. RestoreStorage retains the destination and any native source lease.
+# On retry/preclaim failure, release unused preparation and retain Evicted state;
+# accepted native copies retain their source view until their copy token passes.
+# Both preparations remain one logical resource write at acceptance/publication.
+# A direct-path failure must be debugged before proposing any design change;
+# staged restore is not an assumed alternative (F74, execution-contracts.md 12).
+# Storage missing/too small after locking: Again, nothing emitted. No eviction
+# can happen while these locks are held.
 restoresteps(st, ::Union{Region,Reserve,Committed}, _) = ()   # not evicted, or restored meanwhile
 restoresteps(st, ::Evicted, ::Missing) = Again()
-# new: the restore storage prepare! allocated, with the upload region it
-# filled from the host copy before the locks (restoreupload).
-restoresteps(st, ev::Evicted, new) = sizeof(new) >= bytes(st) ?        # bytes(st): the requested size
-    (Restore(st, restoreupload(new), new, min(sizeof(ev.host), bytes(st))), CellWrite(st, address(new), st.dims)) : Again()
+# restorecopies(st,new,n): core's prepared GPU copy steps over the held source
+# view, or () if prepare! already initialized the unpublished final allocation
+# on the CPU. Snapshot/capacity validation is required on both paths (section 12).
+restoresteps(st, ev::Evicted, new::RestoreStorage) = sizeof(new.storage) >= bytes(st) ?
+    (restorecopies(st, new, min(sizeof(ev.host), bytes(st)))...,
+     CellWrite(st, address(new.storage), st.dims)) : Again()
 Base.sizeof(h::HostCopy) = sizeof(h.bytes)
 isevicted(::Evicted) = true
 isevicted(_) = false
-emitstep!(b, s::Restore) = emitcopy!(b, nothing, copyof(s.upload => s.new, s.bytes), Deps((), ()))
+emitstep!(b, s::Restore) = emitcopy!(b, nothing, copyof(s.source => s.new, s.bytes), Deps((), ()))
 
 # Everything else that meets an evicted array, by dispatch on the storage:
 # - an eager call, a store, a resize!, becoming a composite's member: the
@@ -2126,18 +2342,25 @@ emitstep!(b, s::Restore) = emitcopy!(b, nothing, copyof(s.upload => s.new, s.byt
 # The budget check and the new block happen under one lock, so two threads
 # cannot both pass it. rawalloc is a driver call, not a GPU wait.
 tryacquire!(pool, kind, bytes, constraint) = lock(pool.lock) do
-    r = suballocate!(pool, kind, bytes, constraint)
+    class = allocationclass(pool, kind, constraint)   # core chooses from immutable memory-class facts
+    c = withclass(constraint, class)
+    r = suballocate!(pool, kind, bytes, c)
     r === nothing || return r
-    used(pool) + blocksize(bytes) > budget(pool.device) && return nothing
-    addblock!(pool, rawalloc(pool.device, kind, blocksize(bytes), constraint))   # device-type verb
-    suballocate!(pool, kind, bytes, constraint)
+    # budget is ADDITIONAL available bytes; never add used(pool) again.
+    blocksize(bytes) > budget(pool.device, class.heap) && return nothing
+    addblock!(pool, rawalloc(pool.device, kind, blocksize(bytes), c))
+    suballocate!(pool, kind, bytes, c)
 end
-# budget(dev): the device's budget minus other processes' usage. One meaning.
+# Vulkan: heapBudget-heapUsage; CUDA/HIP: free bytes; Metal: recommended headroom
+# estimate. The native normalization and quality are execution-contracts.md §12.
 
 # Retired with the tokens of its last uses; released once all have passed.
+# Every release!/raw-free path also checks pool.domain: failed-domain objects
+# are quarantined even when the caller has no token after an enqueue throw.
 retire!(pool, x, tokens) = push!(pool.inbox, Retired(x, tokens))   # lock-free: safe in a finalizer
 
 function sweep!(pool)
+    healthy(pool.domain) || return quarantineall!(pool) # includes tokenless cleanup after native failure
     for x in drain!(pool.inbox)                      # lock-free
         settle!(pool, x)     # DropCreator, Release and finalizers' hold drops do their work here, outside
     end                      #   the pool lock; a Retired or a DropAfter joins pool.retiring
@@ -2175,17 +2398,23 @@ function unmapidle!(pool)           # a pressure step; acquire! holds no record 
     end
 end
 
-# Sparse binding is a queue operation (vkQueueBindSparse, Metal's sparse
-# mapping update, cuMemMap), not a recorded command. Core claims a token on the
+# QueueMapping is a real queue operation (vkQueueBindSparse or a supported
+# Metal buffer mapping update), not CUDA/HIP host MemMap or a recorded command. Core claims a token on the
 # sparse channel and records the access under the channel lock; the device
 # type's verb binds or unbinds and signals the token. Callers hold the
 # records' locks.
 function sparsesubmit!(ch, verb!, ranges, accesses)
     waits = waitsfor(accesses)
-    lock(ch.lock) do
-        token = Token(ch, nexttoken!(ch))
+    lock(channelstate(ch).lock) do
+        token = Token(ch, nexttoken!(channelstate(ch)))
         recordeager!(accesses, token)            # binding and unbinding are not runs: recorded on the SyncState
-        verb!(ch, token.value, ranges, waits)    # bindpages! or unbindpages!
+        try
+            verb!(ch, token.value, ranges, waits) # pre-prepared bind/unbind packet
+        catch err
+            poison!(channelstate(ch).domain, err)
+            quarantine!(channelstate(ch).domain, ranges, accesses, token)
+            rethrow()
+        end
         token
     end
 end
@@ -2311,7 +2540,7 @@ end
 # threads; the state's finalizer does the same through the inbox. A view is
 # the same type, told apart by its own dims.
 function free!(a::MantleArray)
-    a.dims === nothing || throw(ArgumentError("free! of a view; free its parent"))
+    a.view === nothing || throw(ArgumentError("free! of a view; free its parent"))
     dropcreator!(a.state)
 end
 dropcreator!(st) = locked(() -> st.sync.freed ? false : (st.sync.freed = true), (st.sync,); lent = true) &&
@@ -2365,7 +2594,7 @@ function dispatch!(dev::Device, kernel, args::Tuple, ndrange; origin = nothing)
         token = submitapplying(uses(k, args); ch) do after   # under the locks, after the pending changes' steps
             foreach(usable, resources(args))         # freed through the creator's handle: throws, under the lock
             packarguments!(packed, k, args, after)   # each array's storage after the pending changes, its requested dims
-            ext = launchextents(dev, k, resolve(ndrange, args))   # requested lengths; a kernel-written length launches indirect
+            ext = launchextents(dev, k, resolve(ndrange, args))   # requested lengths; device lengths use indirect / capacity predication
             b = Builder(dev, ch)
             emitdispatch!(b, nothing, CompiledDispatch(k, ext, packed), Deps((), ()))
             [finish(b)]
@@ -2390,29 +2619,72 @@ Base.Array(a::MantleArray{T,N,<:Device}) where {T,N} = Array(a, memorykind(a))
 # submission of their own only if there are any), then a wait for every write
 # to it, eager or by a run (waitsfor: the runs' last tokens are read under the
 # naming plans' sync locks; the wait happens outside the locks), and a memcpy.
-function Base.Array(a::MantleArray, ::Unified)
-    usable(a)
-    haspending(a) && submitnow!((b, after) -> nothing, ((a.state, Read()),))
-    waitfor(lockresources(((a.state, Read()),)) do recs, x
-        waitsfor(((a.state, Read()),))
-    end)
-    return copy(hostview(a))
+function Base.Array(a::MantleArray{T,N}, ::Unified) where {T,N}
+    uses = ((a.state, Read()),)
+    while true
+        usable(a)
+        pending = lockresources(uses) do recs, x
+            usable(a)
+            !isempty(a.state.sync.pending)
+        end
+        pending && submitnow!((b, after) -> nothing, uses)
+        waits, snap = lockresources(uses) do recs, x
+            usable(a)
+            isempty(a.state.sync.pending) || return (Token[], nothing)
+            w = waitsfor(uses)
+            all(passed, w) ? (Token[], hostreadsnapshot(a)) : (w, nothing)
+        end
+        if snap === nothing
+            waitfor(waits)                       # outside every record/plan/channel lock
+            continue
+        end
+        out = Array{T,N}(undef, snap.dims)           # host allocation outside the locks
+        result = lockresources(uses) do recs, x
+            usable(a)
+            matcheshostread(a, snap) || return Again()
+            copyto!(out, hostview(snap))             # CPU memcpy only, no GPU wait or allocation
+            out
+        end
+        again(result) || return result
+    end
 end
+# hostreadsnapshot captures storage, applied dims, view mapping, pending-change
+# version and every naming writer's tokens while they are passed and locked.
+# matcheshostread rechecks them under the same expanded locks. Every writer
+# submits under those locks, so none can start during the CPU copy. A wait
+# followed by an unlocked memcpy would race the next run/move/free.
+# For a kernel-written length, snapshot dims come from the now-idle mapped
+# cell, under the locks. This direct path serializes submissions for the
+# duration of its CPU copy; callers can use staged output when that cost
+# outweighs avoiding a GPU copy.
 function Base.Array(a::MantleArray{T,N}, _) where {T,N}
-    usable(a)                                        # a host read through a freed handle throws, as other calls do
-    bytes = readbackbytes(a)                         # size(a), or the capacity for a device-written length
-    staging = acquire!(pool(a), Readback(), bytes + cellbytes(a))
-    token = nothing
-    try
-        token = submitnow!(((a.state, Read()),)) do b, after   # the pending changes first, then the copy
-            emitcopy!(b, nothing, copyof(region(after(a.state), a) => staging, bytes), Deps((), ()))
-            foreach(c -> emitcopy!(b, nothing, c, Deps((), ())), cellcopies(a, staging))   # the cell, for a
-        end                                          #   kernel-written length; none for a length the host knows
-        waitfor(token)
-        dims = readdims(a, staging)                  # from the copied cell, or size(a)
-        return copyto!(Array{T,N}(undef, dims), hostview(staging, T, dims))
-    finally
-        retire!(pool(a), staging, token === nothing ? () : (token,))
+    uses = ((a.state, Read()),)
+    while true
+        bytes = lockresources(uses) do recs, x
+            usable(a)
+            projectedreadbackbytes(a)   # immutable pending snapshot; not size() readback
+        end
+        staging = acquire!(pool(a), Readback(), bytes + cellbytes(a))
+        shape = Ref{Union{Dims{N},DeviceLength}}()
+        token = nothing
+        try
+            r = submitnow!(uses;
+                validate = after -> readbackbytes(a, after(a.state)) <= bytes) do b, after
+                # validate runs against the post-change state BEFORE bind/claim;
+                # a raced growth returns NeedDestination and retires unused staging, then retries.
+                nbytes = readbackbytes(a, after(a.state))
+                shape[] = copyshape(a, after(a.state))
+                emitcopy!(b, nothing, copyof(region(after(a.state), a) => staging, nbytes), Deps((), ()))
+                foreach(c -> emitcopy!(b, nothing, c, Deps((), ())), cellcopies(a, staging))
+            end
+            needsdestination(r) && continue
+            token = r
+            waitfor(token)
+            dims = readdims(staging, shape[]) # validate copied device length <= copied capacity
+            return copyto!(Array{T,N}(undef, dims), hostview(staging, T, dims))
+        finally
+            retire!(pool(a), staging, token === nothing ? () : (token,))
+        end
     end
 end
 # An evicted array: Array(a, kind, ::Evicted) waits for the eviction token and
@@ -2462,14 +2734,17 @@ function emitdispatch!(b::CudaBuilder, p, cmd::CompiledDispatch, deps::Deps)
     b.handles[p] = cuGraphAddKernelNode(b.graph, preds, kernelparams(cmd))
 end
 
-# Called by core's submit! under the channel lock. Present needs binary
-# semaphores: the segment writing the image waits on the acquire semaphore and
-# signals the image's rendered semaphore, which the present waits on.
-function submitnative!(ch::VulkanChannel, value, parts, waits, signals, present)
-    vkQueueSubmit2(ch.queue, submitinfo(parts;
-        wait = [timelinewaits(waits); binarywaits(present)],   # waits: Tokens, one per channel
-        signal = [(ch.timeline, value); signals; binarysignals(present)]))
-    present === nothing || vkQueuePresentKHR(ch.queue, presentinfo(present))
+# The prepared packet already owns native arrays; no submitinfo allocation
+# after claim. Its acquire wait and rendered signal are ordinary native fields.
+function submitnative!(ch::VulkanChannel, value, packet)
+    setpreparedsignal!(packet, value)
+    checkresult(vkQueueSubmit2(ch.queue, packet.native))
+end
+# Separate WSI operation, outside plan/resource locks. Native queue external
+# synchronization still requires the canonical ChannelState lock.
+function presentnative!(ch::VulkanChannel, request)
+    result = vkQueuePresentKHR(ch.queue, request.info)
+    presentoutcome(result, request) # distinguish not-enqueued OOM from enqueued OUT_OF_DATE
 end
 passed(ch::VulkanChannel, value) = vkGetSemaphoreCounterValue(ch.timeline) >= value
 
@@ -2490,7 +2765,8 @@ end
 const REGISTRY = DeviceRegistry(ReentrantLock(), Type[], Dict{HardwareKey,Device}(), Ref{Union{Nothing,VkInstance}}(nothing))
 # livegraphs(REGISTRY): the graphs of every opened device, held weakly by the
 # device (for inhostfunction, resizing-and-raytracing.jl B.3).
-# Mantle's __init__: push!(REGISTRY.types, LavaDevice). MantleCUDAExt's: CudaDevice.
+# Mantle registers the platform native type (MetalDevice on macOS, otherwise
+# LavaDevice); package extensions register CudaDevice and ROCmDevice.
 
 devices() = lock(REGISTRY.lock) do
     [get!(() -> T(key), REGISTRY.opened, key) for T in REGISTRY.types for key in hardwarekeys(T, REGISTRY)]
@@ -2508,10 +2784,12 @@ Device() = defaultdevice(devices())   # LavaDevice on GPU 0; MetalDevice on macO
 # applying the pending changes and lending happen in one locked section, so
 # no change, move or eviction lands between them (eviction skips lent
 # records): the vendor code sees the array's current contents at a bound,
-# current address.
-function withview(f, ::Type{CuArray}, a::MantleArray{T,N,CudaDevice}, stream) where {T,N}   # (name open)
+# current address. Caller exclusively owns the foreign stream during this scope;
+# signal/enqueue failures poison the domain and quarantine the lease hold, never
+# drop it with an empty token set. The same rule covers errors in the callback.
+function withview(f, ::Type{CuArray}, a::MantleArray{T,N,CudaDevice}, stream) where {T,N}   # scoped vendor lease
     st = a.state
-    ch = foreignchannel(stream)                          # before the hold: nothing to undo if it throws
+    ch = foreignchannel(device(a), stream)                          # before the hold: nothing to undo if it throws
     addhold!(st)                                         # throws for a released array
     token = nothing
     try
@@ -2527,8 +2805,8 @@ function withview(f, ::Type{CuArray}, a::MantleArray{T,N,CudaDevice}, stream) wh
                                             nothing      # nothing pending, not evicted: no submission
                     s === nothing || done(s) || return s # Again or WaitFor: nothing submitted
                     ready = s === nothing ? Token[] : [first(s)]
-                    streamwaits!(stream, [ready; waitsfor(((st, Write()),))])   # the stream waits for Mantle's accesses
-                    w = unsafe_wrap(CuArray, CuPtr{T}(address(st.storage)), size(a); own = false)   # applied storage
+                    streamwaits!(ch, [ready; waitsfor(((st, Write()),))])   # the stream waits for Mantle's accesses
+                    w = vendorview(device(a), st.storage, T, applieddims(st), strides(a))   # applied storage
                     st.sync.lent = true                # nothing after it can throw
                     notifyplans!(st)                   # lock-free: a plan naming it locks it at its next stage
                     Lent(w)                            #   and finds it lent (locked throws), as the contract says
@@ -2542,10 +2820,10 @@ function withview(f, ::Type{CuArray}, a::MantleArray{T,N,CudaDevice}, stream) wh
             GC.@preserve a f(v)     # no Mantle lock held while vendor code runs
         finally
             token = locked((st.sync,); lent = true) do # claim, record and signal in one step, in order
-                t = lock(ch.lock) do
-                    t = Token(ch, nexttoken!(ch))
+                t = lock(channelstate(ch).lock) do
+                    t = Token(ch, nexttoken!(channelstate(ch)))
                     recordeager!(((st, Write()),), t)    # Mantle's later uses wait for the block's work; tells the plans
-                    signal!(stream, t.value)             # written by the stream after the block's work
+                    signal!(ch, t.value)             # written by the stream after the block's work
                     t
                 end
                 st.sync.lent = false
@@ -2553,6 +2831,8 @@ function withview(f, ::Type{CuArray}, a::MantleArray{T,N,CudaDevice}, stream) wh
             end
         end
     finally
-        token === nothing ? drophold!(st) : dropafter!(st, (token,))
+        healthy(channelstate(ch).domain) ?
+            (token === nothing ? drophold!(st) : dropafter!(st, (token,))) :
+            quarantinehold!(channelstate(ch).domain, st)
     end
 end

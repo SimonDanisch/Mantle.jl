@@ -3,21 +3,10 @@
 # resizing-and-raytracing.jl B.9). descriptorsets.adoc is the Vulkan
 # specification's chapter.
 #
-# What this file assumes where the docs name nothing:
-#   An Image argument a kernel samples reaches it as its table index, a UInt32
-#   (resizing-and-raytracing.jl B.9: "a texture's index is a value in its cell;
-#   shaders read it from their slots"; KernelInterface's sample_texture_2d
-#   takes that index). A kernel that writes it out shows which index a
-#   submission used.
-#   Uploads: copyto!(tex, data) of the same size (as raymakie_patterns.jl), and
-#   copy!(tex, data) of a new size (Base's copy!: the destination takes the
-#   data's size, as for arrays; api.md 2.6 names no upload call).
-#   Mantle.steplog(dev): entries with `kind` and `target`; a new index is a
-#   :CellWrite on the texture (resizing-and-raytracing.jl B.9: "the cell write
-#   is a step").
-# Contents are read with Array(tex) (api.md 2.6b, Image). Validation-layer
-# expectations are comments marked VAL.
-
+# Image arguments are typed SampledImage values. Mantle.textureindex is the
+# suite's internal device projection; actual sampled contents are checked by
+# RayMakie's RM-15, not inferred from index equality.
+#
 using ColorTypes: RGBA
 using FixedPointNumbers: N0f8
 
@@ -47,7 +36,7 @@ after a slowwrite!.
 """
 function tx_index!(out, tex, gate)
     KI.get_global_id().x == 1 || return nothing
-    out[1] = tex + (gate[1] == Int32(-1) ? UInt32(1) : UInt32(0))
+    out[1] = Mantle.textureindex(tex) + (gate[1] == Int32(-1) ? UInt32(1) : UInt32(0))
     return nothing
 end
 

@@ -3,7 +3,7 @@
 #
 # withview's name and form are open (api.md 2.9, 10); written here as
 # `withview(f, CuArray | MtlArray, a, stream)`.
-# Vendor kernels are plain functions launched with `KI.@kernel` on the view's
+# Vendor kernels are plain functions launched with `KI.@launch` on the view's
 # backend, which uses the task's stream (CUDA) or the device's global queue
 # (Metal): the stream passed to withview.
 
@@ -28,7 +28,7 @@ cudamodule() = Base.require(Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b6
 metalmodule() = Base.require(Base.PkgId(Base.UUID("dde4c033-4e86-420c-a63e-0dd931031962"), "Metal"))
 
 """Writes 7 into `v[1]` on `v`'s stream after about `ms` milliseconds."""
-spinwrite!(v, dev; ms = 500) = KI.@kernel KI.get_backend(v) ndrange = 1 vw_spinwrite!(v, Int32(7), Int32(calibratedspin(dev, ms)))
+spinwrite!(v, dev; ms = 500) = KI.@launch KI.get_backend(v) ndrange = 1 vw_spinwrite!(v, Int32(7), Int32(calibratedspin(dev, ms)))
 
 """Waits for `t` (a watchdog fails the test after `timeout` s) and returns what it threw, or `nothing`."""
 function thrownby(t::Task; timeout = 30)
@@ -48,7 +48,7 @@ end
 """Caps `d`'s budget at what its pool holds now plus `headroom` bytes; returns the cap."""
 function limit!(d, headroom)
     cap = Mantle.reserved(d) + headroom
-    inject!(d, :budget, Answer(calls(d, :budget) + 1, cap))
+    inject!(d, :budget, BudgetLimit(calls(d, :budget) + 1, d, cap))
     return cap
 end
 

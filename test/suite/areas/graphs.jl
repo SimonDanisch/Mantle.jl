@@ -321,7 +321,7 @@ end
     out = MantleArray(fd, Float32, 1)
     Array(out)                                      # the host read's staging exists before the budget is set
     dropgarbage(fd, 4, 64 << 20)
-    inject!(fd, :budget, Answer(1, Mantle.reserved(fd)))
+    inject!(fd, :budget, BudgetLimit(1, fd, Mantle.reserved(fd)))
     g = Graph(fd)
     t = MantleArray(g, Float32, n)
     dispatch!(g, gr_fill!, (t, 2f0), n)

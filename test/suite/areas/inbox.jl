@@ -131,7 +131,7 @@ end
 end
 
 # plan, Ordering (who waits for what: only where uses conflict): an eager read of a while reader C (second queue) spins 500 ms reading a: read after read, so the eager call waits for nothing.
-@case "INBOX-04" 3 :multiqueue begin
+@case "INBOX-04" 3 :multicompute begin
     dev = testdevice()
     a, out = MantleArray(dev, Int32[3, 3]), MantleArray(dev, Int32[0])
     b = MantleArray(dev, Int32, 2; unified = true)

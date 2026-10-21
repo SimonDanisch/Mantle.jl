@@ -118,8 +118,6 @@ accelbuilds(log, x) = count(==(:BuildAccel), stepkinds(log, x))
 
 const TL_STOREKINDS = (:InlineStore, :StagedStore)
 
-"""`c` with the fields in `kw` replaced (caps(dev) is immutable)."""
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
 
 """The first `n` grid positions into `alive`, and `n` as its length (a length a kernel writes)."""
 function tl_spawn!(alive, len, n)
@@ -627,7 +625,7 @@ end
 end
 
 # resizing-and-raytracing.jl B.8 (capacity, MoveAccel): the old AS is retired with the token of the submission that replaced it, after the traces in flight. A trace in flight; push! past the capacity; another graph's run.
-@case "TL-29" 5 :rt :multiqueue begin
+@case "TL-29" 5 :rt :multicompute begin
     dev = testdevice()
     t = TLAS(dev); b = ownedblas(dev)
     push!(t, b, MantleArray(dev, instancegrid(64)))
@@ -851,4 +849,38 @@ end
     free!(b)
     GC.gc()
     @test isonerange(queryhits(dev, t, instancegrid(4)))
+end
+
+# TL-43: numeric hit/interval/mask/filter semantics, on native selection and
+# forced software traversal. Hit IDs alone cannot prove equivalent traversal.
+struct RejectAllHits end
+(::RejectAllHits)(hit) = false
+function rt_contract!(distances, flags, ids, bary, t, reject)
+    KI.get_global_id().x == 1 || return nothing
+    q = Mantle.rayquery(t, Point3f(0, 0, -1), Vec3f(0, 0, 2))
+    near = Mantle.rayquery(t, Point3f(0, 0, -1), Vec3f(0, 0, 2); tmax = 0.25f0)
+    masked = Mantle.rayquery(t, Point3f(0, 0, -1), Vec3f(0, 0, 2); mask = 0x00)
+    filtered = Mantle.rayquery(t, Point3f(0, 0, -1), Vec3f(0, 0, 2); accept = reject)
+    distances[1] = q.distance
+    flags[1] = q.hit; flags[2] = near.hit; flags[3] = masked.hit; flags[4] = filtered.hit
+    ids[1] = q.primitiveid; ids[2] = q.geometryid
+    bary[1] = q.barycentrics[1]; bary[2] = q.barycentrics[2]
+end
+@case "TL-43" 5 begin
+    dev = testdevice()
+    for hardware in (true, false)
+        # true means automatic native selection where supported, else software.
+        t = hardware ? TLAS(dev) : TLAS(dev; hardware = false)
+        push!(t, ownedblas(dev), translation(0, 0, 0))
+        distances = MantleArray(dev, Float32, 1)
+        flags = MantleArray(dev, Bool, 4)
+        ids = MantleArray(dev, UInt32, 2)
+        bary = MantleArray(dev, Float32, 2)
+        dispatch!(dev, rt_contract!, (distances, flags, ids, bary, t, RejectAllHits()), 1)
+        @test Array(flags) == [true, false, false, false]
+        @test only(Array(distances)) ≈ 0.5f0
+        @test Array(ids) == UInt32[1, 1]
+        @test Array(bary) ≈ Float32[0.25, 0.5]
+        foreach(free!, (t, distances, flags, ids, bary))
+    end
 end

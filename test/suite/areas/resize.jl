@@ -90,7 +90,7 @@ storekind(dev, offset, bytes) = (c = caps(dev);
     bytes <= c.inlinestore && offset % c.inlinealign == 0 && bytes % c.inlinealign == 0 ? :InlineStore : :StagedStore)
 
 """`c` (an immutable caps record) with the fields in `kw` replaced."""
-withcaps(c; kw...) = typeof(c)((get(kw, f, getfield(c, f)) for f in fieldnames(typeof(c)))...)
+
 
 """A graph that spins about `ms` ms, then copies `n` elements of `src` into `dst`: a run that reads `src` late."""
 function slowcopygraph(dev, dst, src, n; ms = 300)
@@ -340,12 +340,19 @@ end
     a[1:1] = [7f0]
     applypending!(s, a)
     resize!(a, 1); applypending!(s, a)
-    m = memory(fd)
-    inject!(fd, :budget, Answer(calls(fd, :budget) + 1, m.reserved + m.mapped + 2^20))
-    @test_throws Mantle.OutOfDeviceMemory MantleArray(fd, Float32, 2^24)
-    @test memory(fd).mapped == m.mapped
-    @test Array(a) == [7f0]
-    foreach(free!, (a, s))
+    # A composite hold makes the whole allocation ineligible for eviction;
+    # otherwise freeing it completely would be legal and this is no trim test.
+    Mantle.addcompositehold!(a.state)
+    try
+        m = memory(fd)
+        inject!(fd, :budget, BudgetLimit(calls(fd, :budget) + 1, fd, m.reserved + 2^20))
+        @test_throws Mantle.OutOfDeviceMemory MantleArray(fd, Float32, 2^24)
+        @test memory(fd).mapped == m.mapped
+        @test Array(a) == [7f0]
+    finally
+        Mantle.dropcompositehold!(a.state)
+        foreach(free!, (a, s))
+    end
 end
 
 # RZ-14 api.md 2.2 (resize!), recording-plan.md, The graph and its plan: resize!(a, 7) of a 4×5 array sets the last dimension: (4, 7), the first 20 elements kept as linear memory.
@@ -477,7 +484,7 @@ end
 end
 
 # RZ-22 resizing-and-raytracing.jl B.4, B.5: graph A reads `a` and is in flight; an eager resize! and fill! move `a`: the move waits for A, and A's storage is not reused before A's token.
-@case "RZ-22" 4 :multiqueue begin
+@case "RZ-22" 4 :multicompute begin
     dev = testdevice()
     n = smallcount(dev)
     x = testdata(Float32, n)
@@ -501,7 +508,7 @@ end
     x = testdata(Float32, n)
     a, s = MantleArray(fd, x), MantleArray(fd, Float32, 1024)
     m = memory(fd)
-    inject!(fd, :budget, Answer(calls(fd, :budget) + 1, m.reserved + bytes + bytes ÷ 4))
+    inject!(fd, :budget, BudgetLimit(calls(fd, :budget) + 1, fd, m.reserved + bytes + bytes ÷ 4))
     b = MantleArray(fd, Float32, 2n)                 # fits only once `a` (idle, nothing pending) is evicted
     free!(b)
     resize!(a, 2n)

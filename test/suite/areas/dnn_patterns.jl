@@ -8,7 +8,7 @@
 #
 # Phase: the latest ledger phase among the contracts a case relies on. Every
 # case here uses stores, resize!, creation from data or eviction, which are
-# phase 4 (the suite runs nothing before APIPHASE). Per-run host data is a
+# phase 4. Per-run host data is a
 # device array the graph names, written by stores (api.md 2.5).
 #
 # What this file assumes beyond helpers.jl:
@@ -379,7 +379,7 @@ end
 @case "DNN-06" 4 begin
     budget = 1 << 30
     dev = FaultDevice(testdevice())
-    inject!(dev, :budget, Answer(1, budget))
+    inject!(dev, :budget, BudgetLimit(1, dev, budget))
     n = (6 * budget ÷ 10) ÷ sizeof(Float32)
     m1 = residentmodel(dev, n, 1)
     m2 = residentmodel(dev, n, 2)
@@ -558,4 +558,42 @@ end
     run!(g)
     @test Array(y) == callmodel(hw, hb, later)
     free!(g)
+end
+
+# DNN-12: composing a module into a repeated Group must keep all of the
+# module's internal launches in that Group. Scratch belongs to the graph;
+# recurrent state belongs to the model and survives both iterations and runs.
+# Source evidence: DNNKernels.emitgraph!, MatAnyone's repeated warmup calls.
+function dnn_composedmodule!(target, graph, x, w, b)
+    h = MantleArray(graph, Float32, length(x))
+    y = MantleArray(graph, Float32, length(x))
+    dispatch!(target, dnn_affine!, (h, x, w, b), length(x))
+    dispatch!(target, dnn_relu!, (y, h), length(x))
+    return y
+end
+@case "DNN-12" 4 begin
+    dev = testdevice()
+    n = 128
+    hx = Float32.(mod.(1:n, 7) .- 3)
+    x = MantleArray(dev, hx)
+    w = MantleArray(dev, Float32[2])
+    b = MantleArray(dev, Float32[1])
+    state = MantleArray(dev, zeros(Float32, n))
+    out = MantleArray(dev, Float32, n)
+    g = Graph(dev)
+    body = Group(g, "two modules and recurrent update")
+    first = dnn_composedmodule!(body, g, x, w, b)
+    second = dnn_composedmodule!(body, g, first, w, b)
+    dispatch!(body, dnn_accumulate!, (state, second), n)
+    repeat!(body, 3)
+    dispatch!(g, dnn_scale!, (out, state, 1f0), n)
+    expected = layermodel(Float32[2], Float32[1], layermodel(Float32[2], Float32[1], hx))
+    run!(g)
+    @test Array(out) == 3f0 .* expected
+    _, steady = counted(() -> run!(g))
+    @test Array(out) == 6f0 .* expected
+    @test steady.plancompiles == 0 && steady.kernelcompiles == 0 && steady.records == 0
+    free!(g)
+    @test Array(state) == 6f0 .* expected
+    foreach(free!, (x, w, b, state, out))
 end

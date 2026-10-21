@@ -151,7 +151,7 @@ end
     dev = testdevice()
     rounds = 10^4
     for second in (false, true)
-        second && !has(dev, :multiqueue) && continue
+        second && !has(dev, :multicompute) && continue
         a, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
         p = Graph(dev); dispatch!(p, ord_bump!, (a,), ORDN)
         c = ord_graph(dev, second); dispatch!(c, ord_accumulate!, (sums, a), ORDN)
@@ -196,7 +196,7 @@ end
 end
 
 # plan, Ordering (two plans overlap on the GPU unless one writes what the other uses): R1 and R2 only read a, each spinning 400 ms, on two queues: neither waits for the other, so both finish in about the time of one.
-@case "ORD-04" 3 :multiqueue begin
+@case "ORD-04" 3 :multicompute begin
     dev = testdevice()
     a = MantleArray(dev, Int32[3, 3])
     o1, o2 = ord_unified(dev), ord_unified(dev)
@@ -273,7 +273,7 @@ end
     rounds = 10^4
     want = rounds * (rounds + 1) ÷ 2
     for second in (false, true), control in (false, true)
-        second && !has(dev, :multiqueue) && continue
+        second && !has(dev, :multicompute) && continue
         s, sums = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
         kw = control ? (; ordering = Mantle.Unordered()) : (;)
         g1, g2 = ord_crossgraphs(dev, s, sums, second; kw...)
@@ -346,7 +346,7 @@ end
 end
 
 # plan, Ordering (tokens per segment; a later stage's accesses are not recorded in advance): gx writes x from y, gy (second queue) writes y from x, 10^4 rounds: no GPU deadlock and exact (validation is the session's: the suite runs with the validation layers on).
-@case "ORD-13" 3 :multiqueue :long begin
+@case "ORD-13" 3 :multicompute :long begin
     dev = testdevice()
     rounds = 10^4
     x, y = MantleArray(dev, zeros(Int32, ORDN)), MantleArray(dev, zeros(Int32, ORDN))
@@ -365,7 +365,7 @@ end
 # api.md 2.3 (delete! of a group: a resource no remaining node names loses the graph's hold once the plan that names it has retired), plan, Ordering: delete! drops g's only (slow) read of a while g's old plan is in flight: P's write of a waits for it; after g recompiled, P does not wait for g (timed where there are two queues).
 @case "ORD-14" 3 begin
     dev = testdevice()
-    mq = has(dev, :multiqueue)
+    mq = has(dev, :multicompute)
     a, out, z = MantleArray(dev, Int32[1, 1]), MantleArray(dev, Int32[0]), MantleArray(dev, Int32[0])
     pdone = ord_unified(dev)
     g = ord_graph(dev, mq)
@@ -404,7 +404,7 @@ end
 end
 
 # plan, Queues (independent graphs on different queues, with priorities), plan, open decision 11 (priorities): a priority frame graph beside a background graph busy for 500 ms: the frame's result is ready without waiting for the background.
-@case "ORD-16" 3 :multiqueue begin
+@case "ORD-16" 3 :multicompute begin
     dev = testdevice()
     w, src, fout = MantleArray(dev, Int32[0]), MantleArray(dev, Int32[5, 5]), ord_unified(dev)
     background = Graph(dev); slowwrite!(background, w, 1; ms = 500)

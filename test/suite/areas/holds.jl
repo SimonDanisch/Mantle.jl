@@ -284,7 +284,7 @@ end
     s = cuda.stream()
     a = MantleArray(dev, Int32, HO_LEN)
     withview(cuda.CuArray, a, s) do v
-        KI.@kernel KI.get_backend(v) ndrange = 1 ho_spinwrite!(v, Int32(7), Int32(calibratedspin(dev, 500)))
+        KI.@launch KI.get_backend(v) ndrange = 1 ho_spinwrite!(v, Int32(7), Int32(calibratedspin(dev, 500)))
         free!(a)
     end
     cs = [canary(dev, HO_LEN) for _ in 1:4]
