@@ -1206,8 +1206,12 @@ function find_memory_type_optional(ctx::VkContext, type_bits::UInt32, required_f
     return nothing
 end
 
-function find_memory_type(ctx::VkContext, type_bits::UInt32, required_flags)
-    i = find_memory_type_optional(ctx, type_bits, required_flags)
+function find_memory_type(ctx::VkContext, type_bits::UInt32, required_flags;
+                          preferred_flags=required_flags)
+    i = find_memory_type_optional(ctx, type_bits, required_flags | preferred_flags)
+    if i === nothing && preferred_flags != required_flags
+        i = find_memory_type_optional(ctx, type_bits, required_flags)
+    end
     i === nothing && throw(LavaError(
         "memory allocation",
         "No suitable memory type found for flags $required_flags",

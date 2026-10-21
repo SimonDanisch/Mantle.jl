@@ -539,6 +539,7 @@ include(joinpath(@__DIR__, "test_tlas_mutation.jl"))
 include(joinpath(@__DIR__, "test_collection_policy.jl"))
 include(joinpath(@__DIR__, "test_compilation_cache.jl"))
 include(joinpath(@__DIR__, "test_kernel_preparation.jl"))
+isdefined(Mantle, :VideoDecode) && include(joinpath(@__DIR__, "test_video_bitstream.jl"))
 if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_collection_policy.jl"))
     check_pressure_collection(Mantle.vk_context())
@@ -548,6 +549,8 @@ if _VULKAN_OK
     check_pipeline_publication(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_tlas_mutation.jl"))
     check_tlas_mutation_allocations(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_video_sessions.jl"))
+    check_video_sessions(Mantle.vk_context())
 end
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin

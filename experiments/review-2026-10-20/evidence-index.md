@@ -158,3 +158,5 @@ review conclusion. This does not turn unexecuted replacement paths into passes.
 audits into an initial verified cleanup batch and ties larger consolidations to
 one owner and explicit deletion gates. P0.A10 tracks implementation; the audit
 and disposition map do not mean those deletions are already complete.
+
+[Shared video sessions](consolidation-video.md) records native AMD/NVIDIA byte comparisons, mapped-input growth, cleanup, allocation measurements and remaining video limitations.
