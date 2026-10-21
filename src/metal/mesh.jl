@@ -320,8 +320,6 @@ struct MetalCompiledMeshPipeline
     libs::Vector{Any}
 end
 
-const MESH_CACHE = Dict{Any,Any}()
-const MESH_CACHE_LOCK = ReentrantLock()
 
 """The mesh stage body, handed its arguments with `PackedArgs` splatted back out."""
 struct MetalMeshStage{F} end
@@ -336,7 +334,7 @@ struct MetalMeshStage{F} end
 end
 
 """
-    compile_pipeline(p::MeshPipeline, color_formats, depth_format, mesh_bufs, frag_bufs)
+    compile_pipeline(device, p::MeshPipeline, color_formats, depth_format, mesh_bufs, frag_bufs)
 
 Compile a portable [`MeshPipeline`](@ref) into a Metal render pipeline state.
 
@@ -347,7 +345,7 @@ caller does not bind it, and its type is the pipeline's to derive.
 
 Cached on everything baked in, as the graphics one is.
 """
-function compile_pipeline(p::Mantle.MeshPipeline,
+function compile_pipeline(d::MetalDevice, p::Mantle.MeshPipeline,
                           color_formats::Vector{MTLm.MTLPixelFormat},
                           depth_format::Union{Nothing,MTLm.MTLPixelFormat},
                           mesh_bufs::Type, frag_bufs::Type)
@@ -356,7 +354,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
               "program, so a MeshPipeline's mesh threadgroups are dispatched by the " *
               "host. Build the pipeline without one and pass the group count to `draw!`.")
 
-    dev = Metal.device()
+    dev = d.dev
     cfg = Mantle.meshconfig(p)
     Obj = mesh_object_of(p)
 
@@ -365,7 +363,7 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     # shape, so there is nothing else to translate.
     mesh_tt = Tuple{mesh_stage_lead(p)..., mesh_bufs.parameters...}
     mfn = MetalMeshStage{typeof(Mantle.stagefunction(p.mesh))}()
-    mstage = compile_stage_function(mfn, mesh_tt, :mesh,
+    mstage = compile_stage_function(dev, mfn, mesh_tt, :mesh,
                                     stagename(Mantle.stagefunction(p.mesh), "_ms"))
 
     isempty(color_formats) &&
@@ -378,38 +376,33 @@ function compile_pipeline(p::Mantle.MeshPipeline,
     ffn = MetalFragmentStage{typeof(Mantle.stagefunction(p.fragment)), VIn, FOut, ntex}()
     frag_tt = Tuple{frag_bufs.parameters..., varying_markers(VIn)...,
                     texture_markers(ntex)..., StageOut{FOut}}
-    fstage = compile_stage_function(ffn, frag_tt, :fragment,
+    fstage = compile_stage_function(dev, ffn, frag_tt, :fragment,
                                     stagename(Mantle.stagefunction(p.fragment), "_fs"))
 
     # The compiled stage functions by identity, as the graphics pipeline's key:
     # a stage compiled again after an edit is a new one.
-    key = (p.mesh, p.fragment, objectid(mstage), objectid(fstage), mesh_bufs, frag_bufs,
-           color_formats, depth_format, typeof(p.blend), typeof(p.cull), typeof(p.depth))
-    Base.@lock MESH_CACHE_LOCK begin
-        cached = get(MESH_CACHE, key, nothing)
-        cached === nothing || return cached::MetalCompiledMeshPipeline
-    end
-    mfun, mlib = mstage
-    ffun, flib = fstage
+    key = (:mesh, CacheIdentity((mstage, fstage)), Tuple(color_formats),
+           depth_format, pipeline_state_key(p), cfg.threads)
+    return get!(d.pipelines, key) do
+        mfun, mlib = mstage
+        ffun, flib = fstage
 
-    desc = MTLm.MTLMeshRenderPipelineDescriptor()
-    desc.meshFunction = mfun
-    desc.fragmentFunction = ffun
-    apply_attachments!(desc, color_formats, depth_format, p.blend)
-    # The declared threadgroup width. Metal compares this against what the shader
-    # says and refuses a mismatch, which is why it comes from the `MeshConfig`
-    # rather than from the draw.
-    desc.maxTotalThreadsPerMeshThreadgroup = cfg.threads
-    state = MTLm.MTLRenderPipelineState(dev, desc)
+        desc = MTLm.MTLMeshRenderPipelineDescriptor()
+        desc.meshFunction = mfun
+        desc.fragmentFunction = ffun
+        apply_attachments!(desc, color_formats, depth_format, p.blend)
+        # The declared threadgroup width. Metal compares this against what the shader
+        # says and refuses a mismatch, which is why it comes from the `MeshConfig`
+        # rather than from the draw.
+        desc.maxTotalThreadsPerMeshThreadgroup = cfg.threads
+        state = MTLm.MTLRenderPipelineState(dev, desc)
 
-    dstate = depthstate(dev, p.depth, depth_format)
+        dstate = depthstate(dev, p.depth, depth_format)
 
-    compiled = MetalCompiledMeshPipeline(state, dstate, mtl_cull(p.cull), cfg.threads,
-                                         Any[mlib, flib])
-    Base.@lock MESH_CACHE_LOCK begin
-        MESH_CACHE[key] = compiled
-    end
-    return compiled
+        compiled = MetalCompiledMeshPipeline(state, dstate, mtl_cull(p.cull), cfg.threads,
+                                             Any[mlib, flib])
+        return compiled
+    end::MetalCompiledMeshPipeline
 end
 
 # `draw!` is CORE's, in `src/graphics/record.jl`. This backend used to shadow it
@@ -440,6 +433,7 @@ Mantle.supports_mesh_pipeline(::MetalDevice) = true
 
 """One draw of a lowered geometry pipeline: the description, and the baked arguments."""
 mutable struct MetalCompiledGeometryDraw
+    const device::MetalDevice
     const pipeline::Mantle.GraphicsPipeline
     const color_formats::Vector{MTLm.MTLPixelFormat}
     const depth_format::Union{Nothing,MTLm.MTLPixelFormat}
@@ -457,8 +451,8 @@ mutable struct MetalCompiledGeometryDraw
     lowered_indexed::Any
 end
 
-MetalCompiledGeometryDraw(p, cf, df, mesh, frag) =
-    MetalCompiledGeometryDraw(p, cf, df, mesh, frag, nothing, nothing)
+MetalCompiledGeometryDraw(dev, p, cf, df, mesh, frag) =
+    MetalCompiledGeometryDraw(dev, p, cf, df, mesh, frag, nothing, nothing)
 
 """The lowered mesh pipeline for this draw, lowered once."""
 function loweredmesh(d::MetalCompiledGeometryDraw, indexed::Bool)
@@ -495,7 +489,7 @@ function Mantle.compile_draw(d::MetalDevice, p::Mantle.MeshPipeline,
     frag = StageArgs(frag_args)
     cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
     dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
-    pipeline = compile_pipeline(p, cfmts, dfmt, buffer_types(mesh), buffer_types(frag))
+    pipeline = compile_pipeline(d, p, cfmts, dfmt, buffer_types(mesh), buffer_types(frag))
     return MetalCompiledMeshDraw(pipeline, mesh, frag)
 end
 
@@ -561,7 +555,7 @@ function Mantle.compile_draw(d::MetalDevice,
     Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), bodytypes(buffer_types(mesh)))
     cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
     dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
-    return MetalCompiledGeometryDraw(p, cfmts, dfmt, mesh, frag)
+    return MetalCompiledGeometryDraw(d, p, cfmts, dfmt, mesh, frag)
 end
 
 """
@@ -597,7 +591,7 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
     ix = indices === nothing ? nothing : bakearg(indices)
     mesh_bufs = ix === nothing ? buffer_types(d.mesh) :
         Tuple{map(argdevtype, d.mesh.device)..., argdevtype(ix)}
-    c = compile_pipeline(lowered, d.color_formats, d.depth_format,
+    c = compile_pipeline(d.device, lowered, d.color_formats, d.depth_format,
                          mesh_bufs, buffer_types(d.frag))
 
     enc = h.encoder

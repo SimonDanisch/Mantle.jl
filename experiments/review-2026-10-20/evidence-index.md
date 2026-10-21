@@ -82,6 +82,13 @@ assertions. Its host table benchmark reduces temporary allocation from 1.30 MB
 to 388 KB. Remaining cache retention and TLAS mutation owners are explicitly
 distinguished from the algorithms already consolidated.
 
+The [pipeline-publication batch](consolidation-publication.md) gives native
+raster/mesh/ray pipeline creation one core publication algorithm and removes
+Metal's process-global raster/mesh cache owners. It records 888 passing targeted
+assertions, including actual concurrent native creation and AMD/NVIDIA rendering
+and tracing. The 52-line net source increase and remaining idle/hold/compute
+ownership work are explicit.
+
 The [2026-10-21 similarity experiment](similarity-2026-10-21/README.md) provides
 local semantic code-to-code and responsibility-based search across 1,987
 methods/regions from all 111 source files. It compares Qwen and Jina embeddings

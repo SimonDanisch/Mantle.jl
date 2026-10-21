@@ -18,29 +18,15 @@ get_or_compile_gfx(@nospecialize(f), @nospecialize(tt), stage::Symbol; config=no
     cached_gfx_shader(f, tt, stage; config)
 
 """
-Everything that changes the created `VkPipeline` but is not the shader pair.
-
-Blend, cull, topology and depth mode are singletons, so `typeof(pipeline)` carries
-them exactly. The stages are hashed as values, because each one now carries its
-function, its configuration and its interface together — three things that used
-to be keyed separately and could disagree about which pipeline they belonged to.
-Leaving state out of the key made two pipelines that differ only in, say, blend
-mode or depth mode share one compiled pipeline — whichever was compiled first
-won, and the second draw silently rendered with the wrong state.
-"""
-pipeline_state_key(p::GraphicsPipeline) =
-    (typeof(p), p.vertex, p.fragment, p.geometry, p.tess_control)
-
-pipeline_state_key(p::MeshPipeline) = (typeof(p), p.mesh, p.fragment, p.object)
-
-"""
 The key of a compiled pipeline: the shaders it is made of, by identity, and the
 state baked in with them. The shaders, not their functions: a stage compiled
 again after an edit is a new shader, and the pipeline has to follow it.
 """
-pipeline_cache_key(shaders::Tuple, pipeline, color_format, depth_format, descriptor_set_layout) =
-    hash((map(objectid, shaders), color_format, depth_format, pipeline_state_key(pipeline),
-          descriptor_set_layout !== nothing))
+function pipeline_cache_key(shaders::Tuple, pipeline, color_format, depth_format, descriptor_set_layout)
+    formats = color_format isa Union{Tuple,AbstractVector} ? Tuple(color_format) : (color_format,)
+    return (CacheIdentity(shaders), formats, depth_format, pipeline_state_key(pipeline),
+            descriptor_set_layout !== nothing)
+end
 
 """Return (vert_shader::LavaGfxShader, compiled::VulkanCompiledGraphicsPipeline)."""
 function ensure_compiled_with_shader!(pipeline::GraphicsPipeline,
@@ -88,22 +74,20 @@ function ensure_compiled!(pipeline::GraphicsPipeline, vert_fn, frag_fn, tt_verte
 
     cache_key = pipeline_cache_key((vert, frag, geom, tc, te), pipeline, color_format,
                                    depth_format, descriptor_set_layout)
-    cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
-    cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
+    return get!(ctx.caches.gfx_pipelines, cache_key) do
+        compiled = create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
+            ctx, blend=pipeline.blend, cull=pipeline.cull,
+            topology=pipeline.topology, depth=pipeline.depth,
+            color_format=color_format, depth_format=depth_format,
+            push_constant_size=max(vert.push_info.push_size, frag.push_info.push_size),
+            geometry_spirv=geom === nothing ? nothing : geom.spirv_bytes,
+            tess_ctrl_spirv=tc === nothing ? nothing : tc.spirv_bytes,
+            tess_eval_spirv=te === nothing ? nothing : te.spirv_bytes,
+            tess_config=tess_cfg,
+            descriptor_set_layout=descriptor_set_layout)
 
-    compiled = create_graphics_pipeline(vert.spirv_bytes, frag.spirv_bytes;
-        ctx, blend=pipeline.blend, cull=pipeline.cull,
-        topology=pipeline.topology, depth=pipeline.depth,
-        color_format=color_format, depth_format=depth_format,
-        push_constant_size=max(vert.push_info.push_size, frag.push_info.push_size),
-        geometry_spirv=geom === nothing ? nothing : geom.spirv_bytes,
-        tess_ctrl_spirv=tc === nothing ? nothing : tc.spirv_bytes,
-        tess_eval_spirv=te === nothing ? nothing : te.spirv_bytes,
-        tess_config=tess_cfg,
-        descriptor_set_layout=descriptor_set_layout)
-
-    ctx.caches.gfx_pipelines[cache_key] = compiled
-    return compiled
+        return compiled
+    end
 end
 
 """
@@ -139,21 +123,19 @@ function ensure_compiled!(pipeline::MeshPipeline, mesh_fn, frag_fn, tt_mesh, tt_
 
     cache_key = pipeline_cache_key((mesh, frag), pipeline, color_format, depth_format,
                                    descriptor_set_layout)
-    cached = get(ctx.caches.gfx_pipelines, cache_key, nothing)
-    cached !== nothing && return cached::VulkanCompiledGraphicsPipeline
+    return get!(ctx.caches.gfx_pipelines, cache_key) do
+        # No `topology`: a mesh stage has no input stream to assemble, and what it
+        # EMITS is an execution mode of its own entry point rather than pipeline
+        # state — `MeshConfig` carries it and the compile above reads it there.
+        compiled = create_graphics_pipeline(nothing, frag.spirv_bytes;
+            ctx, mesh_spirv=mesh.spirv_bytes,
+            blend=pipeline.blend, cull=pipeline.cull, depth=pipeline.depth,
+            color_format=color_format, depth_format=depth_format,
+            push_constant_size=max(mesh.push_info.push_size, frag.push_info.push_size),
+            descriptor_set_layout=descriptor_set_layout)
 
-    # No `topology`: a mesh stage has no input stream to assemble, and what it
-    # EMITS is an execution mode of its own entry point rather than pipeline
-    # state — `MeshConfig` carries it and the compile above reads it there.
-    compiled = create_graphics_pipeline(nothing, frag.spirv_bytes;
-        ctx, mesh_spirv=mesh.spirv_bytes,
-        blend=pipeline.blend, cull=pipeline.cull, depth=pipeline.depth,
-        color_format=color_format, depth_format=depth_format,
-        push_constant_size=max(mesh.push_info.push_size, frag.push_info.push_size),
-        descriptor_set_layout=descriptor_set_layout)
-
-    ctx.caches.gfx_pipelines[cache_key] = compiled
-    return compiled
+        return compiled
+    end
 end
 
 # ── Draw API ──

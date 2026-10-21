@@ -43,6 +43,8 @@ mutable struct MetalDevice{Q} <: Device
     # signature. `Dag` asks per dispatch per build, and the answer is a property
     # of the code rather than of the graph.
     accesses::AccessCache
+    # Native raster/mesh publication is shared core policy, owned by this device.
+    pipelines::CompilationCache{Any,Any}
     # Metal.jl's ownership record of each pool buffer, keyed by its handle: one per
     # buffer, so that every view of it shares it (`managedbuffer`).
     managed::Dict{UInt,Metal.Managed}
@@ -293,7 +295,7 @@ metalqueue(dev::MTL.MTLDevice) = LegacyQueue(dev)
 
 function MetalDevice(mtldev::MTL.MTLDevice, q, debug::DebugConfig = DebugConfig())
     checkdebug(mtldev, debug)
-    d = MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache(),
+    d = MetalDevice(mtldev, q, Pool(), nothing, nothing, AccessCache(), CompilationCache{Any,Any}(),
                     Dict{UInt,Metal.Managed}(), debug, false, Metal.ConcreteBatchedQueue[], 0)
     # Registered before anything can allocate on it, so the exit hook reaches it.
     push!(METAL.live, WeakRef(d))
