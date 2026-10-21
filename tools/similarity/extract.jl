@@ -27,7 +27,8 @@ function extract_chunks(root)
             function add(code, lo, hi, kind)
                 length(strip(code)) < 80 && return
                 push!(chunks, Dict("file" => relpath(path, root), "start" => lo,
-                    "end" => hi, "kind" => kind, "signature" => signature,
+                    "end" => hi, "owner_start" => first, "owner_end" => first + length(lines) - 1,
+                    "kind" => kind, "signature" => signature,
                     "declaration" => declaration,
                     "code" => code, "sha256" => bytes2hex(sha256(code))))
             end

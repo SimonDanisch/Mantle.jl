@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+from candidates import rank_pairs
+
 MODELS = {
     "qwen": ("Qwen/Qwen3-Embedding-0.6B", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"),
     "jina": ("jinaai/jina-code-embeddings-0.5b", "4db235132dafbe56a8b9c5f59b59795ecf58a4a7"),
@@ -165,19 +167,15 @@ def main():
         scores = qvec[len(selected) + k] @ vectors.T
         query_results.append({"query": query, "top": [{"location": location(chunks[i]),
                               "score": float(scores[i])} for i in top(scores)]})
-    # Symmetric document similarity supplies a broad all-pairs candidate list.
-    # Query-prefixed retrieval above is evaluated separately and used for search.
-    similarities = vectors @ vectors.T
-    candidates = []
-    for a in range(len(chunks)):
-        for b in top(similarities[a], 12, exclude=(a,)):
-            if a < b and chunks[a]["file"] != chunks[b]["file"]:
-                candidates.append((float(similarities[a, b]), a, b))
-    candidates.sort(reverse=True)
+    # Group windows by owning method; also search non-overlapping methods in one file.
+    def pairs(**kwargs):
+        return [{"score": s, "a": location(chunks[a]), "b": location(chunks[b])}
+                for s, a, b in rank_pairs(chunks, vectors, **kwargs)]
+
     report = {"model": model_id, "revision": revision, "index_sha256": identity,
               "chunks": len(chunks), "calibration": rows, "queries": query_results,
-              "candidates": [{"score": s, "a": location(chunks[a]), "b": location(chunks[b])}
-                             for s, a, b in candidates[:100]]}
+              "candidates": pairs(), "same_file_candidates": pairs(same_file=True, per_file_pair=3, min_lines=6),
+              "diverse_candidates": pairs(per_file_pair=3, min_lines=6)}
     dest = base / f".cache/{args.model}-report.json"
     dest.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(rows, indent=2))

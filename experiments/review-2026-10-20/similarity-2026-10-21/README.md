@@ -87,3 +87,12 @@ code-to-code task and a CC-BY-NC-4.0 model license. Neither model card proves
 Julia abstraction-discovery quality. Keep the tested model and lexical
 baseline, broaden checks as additional independently reviewed groups emerge,
 and inspect ownership, synchronization and errors before implementing merges.
+
+## Refreshed discovery after consolidation
+
+[Source a021c67, 1,985 chunks](refresh-a021c67.json): all-pairs ranking now
+includes separate methods in one file, groups each method's overlapping windows,
+and supplies substantial/diverse views. Previously, cross-file-only nearest-12
+selection could hide candidates behind self-windows and thin wrappers. Six host
+regressions cover those discovery failures. Scores still require contract review;
+GEMM variants lead the same-file list and are not interchangeable implementations.

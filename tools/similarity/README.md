@@ -31,8 +31,8 @@ python tools/similarity/search.py --model qwen --query 'GPU memory pressure and 
 ```
 
 The full run caches embeddings and emits a JSON report containing calibrated
-code-to-code ranks, natural-language retrieval examples, and 100 cross-file
-candidate pairs. Subsequent searches reuse the vectors. Changes to chunks,
+code-to-code ranks, natural-language retrieval examples, and three ranked views: cross-file pairs, substantial same-file pairs,
+and substantial cross-file pairs capped at three per file pair. Subsequent searches reuse the vectors. Changes to chunks,
 model revision or source locations invalidate the cache. Model loading still
 requires GPU memory; this implementation uses CUDA and BF16.
 Calibration selectors use method signatures, so ordinary line movement does
@@ -56,7 +56,12 @@ after consolidation; compare model quality on the same source snapshot.
 - Search uses query embeddings against normalized document embeddings.
   The broad candidate list uses symmetric document-to-document cosine
   similarity. These are distinct retrieval modes; calibration evaluates
-  the former. Region overlap can create several hits for one implementation.
+  the former. Candidate ranking covers all chunk pairs, rather than truncating
+  each chunk to its nearest 12 neighbors. Overlapping/nested same-file methods
+  are excluded; windows of the same method pair produce one candidate.
+  Substantial views require six nonblank code lines and cap each file pair
+  at three hits, preventing thin wrappers or one subsystem from filling the list.
+  The uncapped cross-file view still includes short methods.
 - The lexical baseline is TF-IDF over identifiers and punctuation, without
   AST normalization. The six curated pairs are a small engineering check,
   not a held-out benchmark proving a universally best model.
@@ -67,6 +72,15 @@ after consolidation; compare model quality on the same source snapshot.
 The source index and model weights are deliberately excluded from commits.
 Store reviewed findings and a dated report in `experiments/`, not the vector
 cache. Rebuild after source changes before relying on file locations.
+
+## Check candidate discovery
+
+```sh
+python -m unittest discover -s tools/similarity -p 'test_candidates.py'
+```
+
+These host checks cover same-file discovery, window grouping, nesting, file-pair
+diversity and wrapper filtering. They do not validate semantic equivalence.
 
 ## Size accounting
 
