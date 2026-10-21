@@ -15,6 +15,7 @@ similar names or historical findings. No implementation deletion is claimed yet.
 | Vulkan memory-type search | `src/vulkan/runtime/memory.jl:1346` and `:1359` | Keep one search. The throwing entry point calls the optional selector and retains its existing error on no match. Preserve type-bit eligibility, required flags, first-match ordering and zero-based result. |
 | Borrowed Metal array construction | `src/metal/memory.jl:33` and `src/metal/ka.jl:111` | Have `deviceview` use the existing `deviceslice` constructor. Preserve the non-owning DataRef, shared Managed buffer, byte offset, dimensions and remaining capacity. Verify on Metal, including the recorded indirect-slot caller. |
 | Metal attachment/depth setup in raster and mesh pipeline compilation | `src/metal/graphics.jl:665` and `src/metal/mesh.jl:350` | Share the attachment/blend/depth setup and depth-state construction. Keep stage compilation, descriptor types and stage-specific cache keys distinct. Different native descriptors do not justify copying identical attachment policy. |
+| Fragment input type construction | `src/graphics/mesh.jl:76` and `src/graphics/pipeline.jl:89` | Share the identical type construction using the existing distinct `fragmentinputs` dispatch. Preserve the stage-specific choice of outputs. |
 
 Use existing tests for each affected path and add checks only for uncovered
 behavior. Report actual net source lines removed after each batch, with the
@@ -62,3 +63,8 @@ consolidations are the first replacement work, with paired deletion obligations.
 This pass supplies a concrete first batch. The larger source-disposition map is
 not evidence that those consolidations have already been implemented, nor does
 it prove that the complete project can fit in 10,000 lines.
+
+The [semantic similarity experiment](similarity-2026-10-21/README.md) now adds
+a reproducible discovery channel across 1,987 methods/regions, comparing two
+embedding models with lexical retrieval. It includes ranked cross-file results
+and manually checked distinctions; candidate scores are not deletion approval.

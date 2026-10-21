@@ -64,6 +64,13 @@ The canonical debug-first rule remains in the plan and execution-contracts.md §
 
 ## Deletion and ownership maps already exist
 
+The [2026-10-21 similarity experiment](similarity-2026-10-21/README.md) provides
+local semantic code-to-code and responsibility-based search across 1,987
+methods/regions from all 111 source files. It compares Qwen and Jina embeddings
+against lexical matching, retains ranked reports, and records false positives
+and reviewed candidate contracts. It supplements the audits; it does not prove
+complete duplication coverage or approve automatic consolidation.
+
 The seven source audits have per-file inventory/disposition tables, duplication
 pairs, named ownership violations and minimal-form estimates:
 

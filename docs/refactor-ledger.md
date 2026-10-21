@@ -142,7 +142,7 @@ Every comment and docstring checked against the code and the plan (plan,
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P0.A10 | consolidate verified duplicate implementation bodies before the foundation; map larger duplicated algorithms/state and every caller to one core owner and a deletion gate; each replacement slice supersedes named old copies rather than reproducing them | seven source audits and source-disposition.tsv exist | doing | experiments/review-2026-10-20/consolidation-order.md verifies the first current-code batch at 45021c6; no source deletions claimed yet; record actual net deletions and affected-path validation per batch |
+| P0.A10 | consolidate verified duplicate implementation bodies before the foundation; map larger duplicated algorithms/state and every caller to one core owner and a deletion gate; each replacement slice supersedes named old copies rather than reproducing them | seven source audits and source-disposition.tsv exist | doing | experiments/review-2026-10-20/consolidation-order.md verifies the first current-code batch at 45021c6; similarity-2026-10-21/README.md adds local semantic retrieval across 1,987 methods/regions with two model comparisons and reviewed candidate contracts; no source deletions claimed yet; record actual net deletions and affected-path validation per batch |
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
