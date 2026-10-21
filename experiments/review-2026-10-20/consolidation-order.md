@@ -77,6 +77,10 @@ migrated.
   not duplicated decoder bodies. Native API encoding differences stay native.
 
 The first batch is implemented and its tested scope is recorded separately.
+The [TLAS/cache follow-up](consolidation-tlas-cache.md) also shares triangle-table
+preparation and gives compute-cache invalidation one owner. It records real
+native-pipeline content reuse, so the target cache replacement must preserve
+deduplication while removing the remaining independent retention policies.
 The larger source-disposition map is not evidence that the larger consolidations
 have already been implemented, nor does
 it prove that the complete project can fit in 10,000 lines.

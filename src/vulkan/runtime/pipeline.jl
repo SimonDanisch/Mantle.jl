@@ -160,18 +160,8 @@ and retried without the flag, so a workload finishes and reports every miss.
 function no_pipeline_compilation(f; ctx::VkContext = vk_context())
     old = PIPELINE_NO_COMPILE[]
     old_refused = PIPELINE_COMPILES_REFUSED[]
-    # Otherwise a hit on the Julia-side dict would mask a cold VkPipelineCache.
-    # The default device unless told otherwise: this wrapper exists to prove a
-    # cache is warm on the device the caller is already using, and every caller
-    # is a test.
-    let c = ctx.caches
-        empty!(c.pipelines)
-        empty!(c.pipeline_order)
-    end
-    # And the two caches that hold a kernel's pipeline above that dict. A kernel
-    # launched before this call found its pipeline there and created none, so
-    # the driver was never asked: measured 2026-10-07, 0 creations inside the
-    # wrapper for a kernel launched once before it.
+    # One invalidation owner clears native pipelines, linked kernels and launch
+    # plans, so no Julia-side lookup can mask a cold driver VkPipelineCache.
     clear_kernel_cache!(ctx)
     PIPELINE_NO_COMPILE[] = true
     PIPELINE_COMPILES_REFUSED[] = 0

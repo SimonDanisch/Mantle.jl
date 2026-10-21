@@ -539,6 +539,8 @@ include(joinpath(@__DIR__, "test_collection_policy.jl"))
 if _VULKAN_OK
     include(joinpath(@__DIR__, "vulkan", "test_collection_policy.jl"))
     check_pressure_collection(Mantle.vk_context())
+    include(joinpath(@__DIR__, "vulkan", "test_cache_invalidation.jl"))
+    check_cache_invalidation(Mantle.vk_context())
 end
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin

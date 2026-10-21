@@ -632,15 +632,7 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     # One TLAS instance per record, each naming its batch's BLAS by index into
     # `blas_list`. A batch with no triangles gets `NOTRIANGLES` as its offset, so
     # its hits answer the empty triangle instead of the next batch's.
-    all_tris = Tri[]
-    per_inst_offsets = UInt32[]
-    tri_offset = UInt32(0)
-    for b in t.instances
-        append!(all_tris, b.triangles)
-        off = isempty(b.triangles) ? NOTRIANGLES : tri_offset
-        append!(per_inst_offsets, Iterators.repeated(off, b.n))
-        tri_offset += UInt32(length(b.triangles))
-    end
+    metadata = Mantle.trianglemetadata(Tri, t.instances)
 
     # One element at least, as on Vulkan: a kernel binds these whatever the
     # scene holds.
@@ -648,8 +640,8 @@ function Raycore.sync!(t::MetalHWTLAS{Tri}) where {Tri}
     t.records = MtlArray{Raycore.InstanceRecord}(undef, max(total, 1))
     writeinstances!(t, descriptors, t.records)
     t.built = build_accel!(t.device, t.blas_list, descriptors, total; refittable = true)
-    t.tri_gpu = MtlArray(all_tris)
-    t.off_gpu = MtlArray(per_inst_offsets)
+    t.tri_gpu = MtlArray(metadata.triangles)
+    t.off_gpu = MtlArray(metadata.hits)
 
     # The argument buffer the kernel dereferences. One resource ID for a
     # triangles-only scene; three slots when there is procedural geometry, laid

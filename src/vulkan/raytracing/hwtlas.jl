@@ -769,26 +769,9 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         build_tlas(ctx, native, total; allow_update=true, blases=hwtlas.blas_list)
     end
 
-    # Concatenate triangle metadata across batches.  Each batch's instances all
-    # reference one BLAS, so all instances of batch i share the same offset
-    # into all_tris (= the running tri_offset where batch i's triangles begin).
-    # A batch with none gets `NOTRIANGLES` in the array a hit reads, so its hits
-    # answer the empty triangle instead of reading the next batch's.
-    all_tris = Tri[]
-    per_inst_offsets = UInt32[]
-    hit_offsets = UInt32[]
-    blas_offsets = UInt32[]
-    tri_offset = UInt32(0)
-    for batch in hwtlas.instances
-        push!(blas_offsets, tri_offset)
-        append!(all_tris, batch.triangles)
-        hit_offset = isempty(batch.triangles) ? NOTRIANGLES : tri_offset
-        for _ in 1:batch.n
-            push!(per_inst_offsets, tri_offset)
-            push!(hit_offsets, hit_offset)
-        end
-        tri_offset += UInt32(length(batch.triangles))
-    end
+    metadata = trianglemetadata(Tri, hwtlas.instances, Val(true))
+    all_tris, hit_offsets = metadata.triangles, metadata.hits
+    blas_offsets, per_inst_offsets = metadata.starts, metadata.raw
 
     hw_accel = if hwtlas.hw_accel isa HardwareAccel
         accel_prev = hwtlas.hw_accel

@@ -76,6 +76,12 @@ coordination in core, and records 9,110 passing targeted assertions, including
 AMD/NVIDIA native validation. It removes another 73 physical source lines.
 Unified token retirement and the other ownership groups remain open.
 
+The [TLAS/cache follow-up](consolidation-tlas-cache.md) shares batch triangle
+tables, removes duplicated cache invalidation and records 240 passing targeted
+assertions. Its host table benchmark reduces temporary allocation from 1.30 MB
+to 388 KB. Remaining cache retention and TLAS mutation owners are explicitly
+distinguished from the algorithms already consolidated.
+
 The [2026-10-21 similarity experiment](similarity-2026-10-21/README.md) provides
 local semantic code-to-code and responsibility-based search across 1,987
 methods/regions from all 111 source files. It compares Qwen and Jina embeddings
