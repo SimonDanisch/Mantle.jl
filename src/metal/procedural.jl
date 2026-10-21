@@ -286,7 +286,7 @@ The table is built against a PIPELINE because a function handle is only
 meaningful for the pipeline that linked the function — so the pipeline here is
 the traversal's own, and the table it yields is what every shading kernel binds.
 """
-function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
+@autoreleasepool function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
     P = procedural_device_type(payload)
     fn = compile_procedural_candidate(d, P, B)
     # A pipeline whose only job is to own the handle. `__metal_linked_closest_proc`
@@ -307,6 +307,9 @@ function procedural_table(d::MetalDevice, payload, ::Type{B}) where {B}
               "an unset table entry is a GPU fault, not an error")
     table = MTL.MTLVisibleFunctionTable(pipe, MTL.MTLVisibleFunctionTableDescriptor(1))
     MTL.set_function!(table, handle, 0)
+    # `sync!` makes the table resident; see `newstructure` for why it has to
+    # leave the set on its own when it is collected.
+    finalizer(Metal.forget_resident!, table)
     return (table, pipe)
 end
 
