@@ -37,7 +37,7 @@ A warm 16×4096-byte host packing check allocates 128 bytes versus 69,168 bytes
 for the previous staging/offset-copy body; this is not an end-to-end speed claim.
 
 All 115 source files parse. Source shrinks 54,828 → 54,533 physical lines;
-implementation lines shrink 23,347 → 23,340. The small implementation-line delta
+implementation lines shrink 23,346 → 23,339. The small implementation-line delta
 reflects expansion of formerly compressed native initialization into shared,
 reviewable helpers; the physical reduction includes prose cleanup. These are
 not claims of hundreds of deleted implementation lines. Replacement fault

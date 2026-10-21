@@ -1,39 +1,11 @@
-# One model of "work handed to the device", and one way to ask whether it is
-# done.
-#
-# Several records of that one fact is several chances to read the wrong one: a
-# `flush!` that returns before a replay has run, because the replay put nothing
-# in the list it reads, or a wait on a timeline value nothing will ever signal,
-# because the frame that reserved it was never submitted. Neither can be fixed
-# where it is caused unless one place knows what is outstanding.
-#
-# This is that place. Core keeps the list; the backend answers three questions
-# about a token, which is exactly the contract `Pool` already asks of it —
-# `fence`/`passed`/`waitfor` in `memory/pool.jl`. The queue path was the odd one
-# out, not the memory path.
-#
-# A token is opaque here on purpose. Vulkan's is a timeline value, Metal's is a
-# committed `MTLCommandBuffer`, a synchronous backend's is `nothing`. Core never
-# compares two tokens or does arithmetic on one; it asks `passed` and `waitfor`.
-# That is what stopped `UInt64` timeline values from being a portable concept the
-# moment a second backend arrived.
+# One outstanding list per queue. Tokens are opaque; ask passed/waitfor on their
+# originating queue rather than comparing or doing arithmetic on them.
 
 """
     Outstanding(token, payload, tag)
 
-One submission the device has been given and may not have finished.
-
-`token` is what the backend answers `passed` and `waitfor` about. `payload` is
-what the backend wants back once it has passed — the closed command buffers the
-submission carried, with their pins and scratch — and the sweep hands it to
-[`recycle!`](@ref). A backend whose submissions own nothing passes `nothing`.
-
-`tag` is for diagnostics only — a name, a frame number, whatever the submitter
-wants in an error message. Nothing dispatches on it.
-
-The payload lives here and not in a second list on the queue holding the same
-submissions in the same order, swept by a second function against the same
-counter. See this file's opening paragraph.
+One submitted token and its retained payload. Completion hands the payload to recycle!.
+Tag is diagnostic only. This is the single outstanding list for the queue.
 """
 struct Outstanding{T,P}
     token::T
@@ -44,13 +16,8 @@ end
 """
     submitted!(queue, token, payload; tag = nothing) -> token
 
-Record that `token` covers work now on its way to the device, and that
-`payload` is what to give back once it has passed.
-
-Every path that hands work over calls this and nothing else records it: a
-recorded batch, a run of a recorded plan, a one-off upload. A path that skips it
-is invisible to `flush!`, and the fix for that is a caller here rather than a
-second field somewhere else.
+Track successfully submitted work and retain payload until completion. All submission
+paths, including plan replays and one-shot uploads, must register here.
 """
 function submitted!(q, token, payload; tag = nothing)
     push!(outstanding(q), Outstanding(token, payload, tag))
@@ -60,11 +27,8 @@ end
 """
     recycle!(queue, payload)
 
-Give a passed submission's payload back: its command buffers to the queue's
-pool, and everything they pinned or borrowed released. [`sweep!`](@ref) calls
-it, oldest first, once `passed` says so; a backend calls it directly for a
-buffer that never reached the device. A backend whose submissions own nothing
-records `nothing` and needs no method.
+Return a completed payload's recordings/scratch and release its holds. Sweep calls this
+oldest first; never-submitted recordings use their release path.
 """
 function recycle! end
 recycle!(q, ::Nothing) = nothing
@@ -72,37 +36,17 @@ recycle!(q, ::Nothing) = nothing
 """
     newest(queue) -> token or nothing
 
-The most recent submission, or `nothing` when the queue is idle.
-
-What [`flush!`](@ref) waits for. Completion is monotone on a queue — a backend's
-tokens are ordered by submission — so waiting for the newest waits for all of
-them, and no caller has to fold over the list to find a maximum. `flush!` used
-to do exactly that fold, over two different lists, and get it wrong for replays.
+Newest outstanding token, or nothing. Queue completion follows submission order,
+so waiting for this token covers every older submission on the same queue.
 """
 newest(q) = isempty(outstanding(q)) ? nothing : last(outstanding(q)).token
 
 """
     sweep!(queue) -> Int
 
-Give back the submissions the device has finished on THIS queue, and say how
-many.
-
-The question is asked of the queue — `passed(queue, token)` — and not of the
-device, because a token is a value on the queue's own timeline. A device with
-several queues (Vulkan: RayMakie's graphics queue beside the default one)
-answers `passed(device, token)` from its default queue's counter, which runs
-far ahead of a queue that carries three submissions a frame; asked that way,
-this swept the second queue's submissions the moment they were made, gave
-their command buffers back to the pool while the GPU was still executing
-them, and the next one-shot on that queue began the same buffer again
-mid-flight. `test_sweep_per_queue.jl` pins it.
-
-`sweep!` and not `retire!`: `retire!` is already `Pool`'s, for giving a region
-back, and one name meaning two things is how the five records got here.
-
-Called wherever the queue is already doing bookkeeping — opening a batch,
-flushing — rather than on a timer. Cheap: it stops at the first token that has
-not passed, since completion is in order.
+Recycle the completed prefix and return its length. Query passed(queue,token), never
+the default device timeline: tokens from separate queues are not interchangeable.
+Stop at the first unfinished submission; see test_sweep_per_queue.jl.
 """
 function sweep!(q)
     out = outstanding(q)
@@ -119,13 +63,13 @@ end
 """
     idle(queue) -> Bool
 
-Has everything submitted to this queue finished?
+Sweep completed work and report whether the queue has outstanding submissions.
 """
 idle(q) = (sweep!(q); isempty(outstanding(q)))
 
 """
     outstanding(queue) -> Vector{Outstanding}
 
-The submissions in flight, oldest first. A backend's queue type answers this.
+Return this queue's outstanding submissions, oldest first.
 """
 function outstanding end

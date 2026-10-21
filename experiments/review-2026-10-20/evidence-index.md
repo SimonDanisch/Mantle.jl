@@ -160,3 +160,5 @@ one owner and explicit deletion gates. P0.A10 tracks implementation; the audit
 and disposition map do not mean those deletions are already complete.
 
 [Shared video sessions](consolidation-video.md) records native AMD/NVIDIA byte comparisons, mapped-input growth, cleanup, allocation measurements and remaining video limitations.
+
+Graph backend, packing, lifetime, submission and queue comments/docs now state current contracts concisely. JuliaSyntax comparison confirms identical implementation trees excluding docstrings; the cleanup removes 884 prose lines, including stale Metal and hold-frame claims.
