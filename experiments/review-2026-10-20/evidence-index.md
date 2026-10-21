@@ -175,3 +175,12 @@ The guard's historical prose is condensed; its checking syntax is unchanged.
 The memory report also records shared Vulkan arena-buffer construction and 200 native assertions across AMD/NVIDIA; required coherent/local flags, cached placement, BDA flags and block ownership remain explicit.
 
 [Shared GEMM generation](consolidation-gemm-generator.md) records 171 removed implementation lines across two batches, native before/after output and shader comparisons, 2,486 suite assertions and interleaved timing preservation.
+
+Core entry-point and GEMM prose now describe current dispatch, precision,
+staging and ownership contracts. Removed switch descriptions, resolved-bug
+narratives and benchmark tables remain in git history (`df21128`). JuliaSyntax
+confirms identical definitions; Project.toml parses to identical data. Three
+unused top-level prose strings are deleted and a fourth is attached as method
+documentation. The inventory's resulting 40-line implementation decrease is
+prose reclassification, not algorithm deletion. Source decreases 53,085 → 51,636
+physical lines; all 115 source files still parse.

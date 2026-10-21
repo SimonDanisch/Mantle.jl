@@ -2,23 +2,7 @@ name = "Mantle"
 uuid = "8f4c1f2e-6a3d-4b71-9c05-2e7d8a1b6f34"
 version = "0.1.0"
 
-# Lava's runtime moved into `src/vulkan/` on 2026-08-27, so what were weak
-# dependencies behind `MantleLavaExt` are hard ones: the backend is part of this
-# package now. `MantleLavaExt` is gone with them — an extension exists so a
-# package can depend on something optionally, and this no longer does.
-#
-# The HOST backend is not an extension either: it is `src/host/host.jl`,
-# included like any other file, because it needs nothing that is not already a
-# hard dependency.
-#
-# The ROCm backend IS one, and it is the only one. AMDGPU.jl is a 2.8 GB install
-# with a HIP runtime behind it, so a machine with no AMD GPU should not pay for
-# it, and that is what an extension is for. It was missing from this file
-# entirely — `ext/MantleROCmExt.jl` existed, `test/rocm/` ran against it, and
-# nothing ever loaded it, because `[weakdeps]` and `[extensions]` were both
-# absent. Every session that used the ROCm backend had `include`d the file by
-# hand into `Main`, which defines its methods in the wrong module and leaves
-# `Base.get_extension(Mantle, :MantleROCmExt)` answering `nothing`.
+# Vulkan and host backends are built in; ROCm is optional.
 [deps]
 Lava = "3a680b1f-cb25-4bee-9cf7-bc880b76dc8c"
 Vulkan = "9f14b124-c50e-4008-a7d4-969b3a6cd68a"
@@ -45,15 +29,6 @@ Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 UnsafeAtomics = "013be700-e6cd-48c3-b4a1-df204f14c38f"
 
-# `KernelAbstractions` was in BOTH `[deps]` and `[weakdeps]`, to make the CPU
-# backend an extension. It is not legal in practice: Pkg records such a package
-# as weak-only in the manifest, so `using KernelAbstractions` inside Mantle
-# raised "Package Mantle does not have KernelAbstractions in its dependencies"
-# — and core needs it unconditionally, since `gemv.jl`, `fft.jl` and
-# `narrow_phase.jl` all write `@kernel`. KA is a plain dependency now and the
-# host backend is `src/host/host.jl`, included like any other file.
-
-
 [weakdeps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 
@@ -64,22 +39,8 @@ MantleROCmExt = "AMDGPU"
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}
 
 [compat]
-# The matrix vocabulary and `DeviceCaps`, which Mantle and Lava share, used to be
-# a package of its own — `KernelInterfaces`, plural, UUID ce25d451, kept here
-# under `lib/`. It was separate because Lava needed the same names and could not
-# depend on Mantle while Mantle weak-depended on Lava.
-#
-# `KernelInterface` (singular) is where every backend already meets, so both
-# moved there and the package was deleted. Metal and CUDA get the names without
-# depending on either of us, which is the whole point.
-#
-# It is NOT registered yet: it lives in `KernelAbstractions/lib/KernelInterface`,
-# and the matrix half is on a branch pending upstream. There is deliberately no
-# `[sources]` entry for it — a URL pointing at KA's `main` would resolve to a
-# `KernelInterface` without `MatrixShape` and fail at load with an
-# `UndefVarError` instead of failing here, where the message is legible. Until it
-# is upstreamed, `dev` the local checkout. Lava is unregistered for the same
-# reason and takes the same treatment.
+# KernelInterface needs the local matrix-vocabulary branch until registered;
+# develop KernelAbstractions/lib/KernelInterface and Lava locally.
 GPUCompiler = "1, 2"
 KernelInterface = "0.4"
 SPIRV_LLVM_Backend_jll = "21.1.4, 22"
@@ -87,10 +48,7 @@ StaticArrays = "1.9.17"
 julia = "1.12"
 
 [extras]
-# What the 128 test files that arrived from Lava on 2026-08-27 need beyond the
-# package's own dependencies. Everything else they use — GLFW, GeometryBasics,
-# KernelAbstractions, Lava, Vulkan, ColorTypes, StaticArrays, LinearAlgebra — is
-# a hard dependency now, which is what moving the runtime here means.
+# Additional test-only dependencies.
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 Lavapipe_jll = "89601188-ea2b-501d-a121-fa144db6cabf"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
