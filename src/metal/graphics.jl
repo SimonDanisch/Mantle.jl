@@ -73,6 +73,25 @@ function apply_blend!(att, ::Mantle.Additive)
     return att
 end
 
+function apply_attachments!(desc, color_formats, depth_format, blend)
+    for (i, fmt) in enumerate(color_formats)
+        att = desc.colorAttachments[i]
+        att.pixelFormat = fmt
+        apply_blend!(att, Mantle.attachmentblend(blend, i,
+                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
+    end
+    depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
+    return desc
+end
+
+function depthstate(dev, depth, depth_format)
+    (depth_format === nothing || depth isa Mantle.DepthOff) && return nothing
+    dd = MTLm.MTLDepthStencilDescriptor()
+    dd.depthCompareFunction = mtl_depth_compare(depth)
+    dd.depthWriteEnabled = depth_writes(depth)
+    return MTLm.MTLDepthStencilState(dev, dd)
+end
+
 # ── resources ────────────────────────────────────────────────────────────────
 
 """A 2D texture on Metal. The element type is Mantle's spelling of the format."""
@@ -717,23 +736,10 @@ function compile_pipeline(p::Mantle.GraphicsPipeline,
     ffun === nothing || (desc.fragmentFunction = ffun)
     # One descriptor slot per attachment, in the order the pass declared them,
     # which is the order `air.render_target <i>` numbers the fragment's outputs.
-    for (i, fmt) in enumerate(color_formats)
-        att = desc.colorAttachments[i]
-        att.pixelFormat = fmt
-        apply_blend!(att, Mantle.attachmentblend(p.blend, i,
-                     fmt in (MTLm.MTLPixelFormatR32Uint, MTLm.MTLPixelFormatRG32Uint)))
-    end
     Mantle.checkdepthtarget(p.depth, depth_format !== nothing)
-    depth_format === nothing || (desc.depthAttachmentPixelFormat = depth_format)
+    apply_attachments!(desc, color_formats, depth_format, p.blend)
     state = MTLm.MTLRenderPipelineState(dev, desc)
-
-    dstate = nothing
-    if depth_format !== nothing && !(p.depth isa Mantle.DepthOff)
-        dd = MTLm.MTLDepthStencilDescriptor()
-        dd.depthCompareFunction = mtl_depth_compare(p.depth)
-        dd.depthWriteEnabled    = depth_writes(p.depth)
-        dstate = MTLm.MTLDepthStencilState(dev, dd)
-    end
+    dstate = depthstate(dev, p.depth, depth_format)
 
     compiled = MetalCompiledGraphicsPipeline(state, dstate, mtl_primitive(p.topology),
                                              mtl_cull(p.cull), ffun !== nothing,

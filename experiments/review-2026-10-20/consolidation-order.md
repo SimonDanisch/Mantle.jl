@@ -1,14 +1,15 @@
 # Implementation consolidation before the foundation
 
 Checked against Mantle `45021c6`, including the recently merged Metal fixes.
-Current `src/` plus `ext/` contains 111 Julia files and 55,115 physical lines.
+The initial `src/` plus `ext/` inventory contained 111 Julia files and 55,115 physical lines.
 These are inventory counts, not an estimate of removable code. The existing
 seven audits and `source-disposition.tsv` remain the broad ownership map.
 
 ## First consolidation batch
 
-These are current implementation bodies, verified in source, rather than
-similar names or historical findings. No implementation deletion is claimed yet.
+These bodies were verified before the first implementation batch. Locations in
+the table refer to that baseline; the [batch report](consolidation-first-batch.md)
+records the changes and their qualification, including the untested Metal path.
 
 | Duplicated implementation | Current locations | Consolidation and preserved behavior |
 |---|---|---|
@@ -16,6 +17,7 @@ similar names or historical findings. No implementation deletion is claimed yet.
 | Borrowed Metal array construction | `src/metal/memory.jl:33` and `src/metal/ka.jl:111` | Have `deviceview` use the existing `deviceslice` constructor. Preserve the non-owning DataRef, shared Managed buffer, byte offset, dimensions and remaining capacity. Verify on Metal, including the recorded indirect-slot caller. |
 | Metal attachment/depth setup in raster and mesh pipeline compilation | `src/metal/graphics.jl:665` and `src/metal/mesh.jl:350` | Share the attachment/blend/depth setup and depth-state construction. Keep stage compilation, descriptor types and stage-specific cache keys distinct. Different native descriptors do not justify copying identical attachment policy. |
 | Fragment input type construction | `src/graphics/mesh.jl:76` and `src/graphics/pipeline.jl:89` | Share the identical type construction using the existing distinct `fragmentinputs` dispatch. Preserve the stage-specific choice of outputs. |
+| TLAS mesh preparation and vertex expansion | `src/vulkan/raytracing/hwtlas.jl:312` and `src/metal/hwtlas.jl:374` | Now shared in `src/raytracing/geometry.jl`; preserve face order, degenerate filtering, metadata, normals, UVs and packed Float32 vertices. Native buffer creation and AS build calls remain in the backends. |
 
 Use existing tests for each affected path and add checks only for uncovered
 behavior. Report actual net source lines removed after each batch, with the
@@ -47,6 +49,20 @@ in the separately runnable baseline; replacement core/backends may not reproduce
 them. Small independent consolidations happen first. Architecture-dependent
 consolidations are the first replacement work, with paired deletion obligations.
 
+### Active paths and replacement gates
+
+These checks supplement the full file/caller dispositions in the existing
+audits. They do not mark P0.A10 complete or assert that every caller has been
+migrated.
+
+| Group | Active ownership and callers checked | Existing target owner and deletion gate |
+|---|---|---|
+| Memory pressure | `memory/pool.jl` has `autotrim!` and `autocollect!`; Vulkan `runtime/memory.jl` has `maybe_collect`, called by both `vk_alloc` and `pool_alloc`. `pool_alloc` can also invoke core `autocollect!` after the Vulkan pressure check, so two independent GC rate policies are reachable in one allocation path. | P2.A10: one pressure sequence in core acquisition, using the documented cache/block/GC/retirement steps. Remove Vulkan's independent GC budget/statistics when both allocation paths use it. Preserve soft-cap behavior and compare with existing pool-trim and allocation baselines before deleting either policy. Native memory-budget queries stay native. |
+| Lifetime | Regions retire through `memory/pool.jl`; native objects retire through `graph/lifetime.jl` channel lists; `vk_free!` enqueues native buffers and `quiesce_before_reclaim!` bridges channel draining and pool reclaim. These are distinct object domains, not identical functions. | P2.A5/P2.D13: one token-based core release engine. Replace all enqueue/drain/reclaim callers together, retaining recording holds, cross-queue last uses, finalizer-safe enqueue and exactly-once native destruction. Backend `rawfree` remains the actual driver destructor. Existing `test_hold_lifetime`, `test_batch_queue_lifetime`, memory-safety and recorded-pool-trim cases are regression gates. |
+| Compilation caches | Vulkan `DeviceCaches.pipelines`/`pipeline_order`, `linked`, and `launchplans` are separate layers. Recorded `compile_dispatch` and eager `ka_backend.jl` both reach `launch_plan`; the latter reaches `get_compiled_kernel_and_pipeline` and `get_compute_pipeline`. `clear_kernel_cache!` clears two upper layers; `no_pipeline_compilation` additionally clears native pipelines. Metal stage code already follows `CodeInstance`, but raster/mesh native caches are separate globals. | P1.A1 and execution-contracts.md §13: compute ownership at `Kernel`/`CodeInstance`, one native entry per device, and shared core publication/idle-object policy for graphics/ray pipelines. Replace the stores and invalidation callers together. Preserve compiler configuration, workgroup/ray-query/layout keys, shader edit invalidation, warm reuse, in-flight holds and dispatch allocation baselines. Driver disk-cache serialization is a native primitive, not a second core ownership policy. |
+| Eager/recorded execution | `array/launch.jl` already chooses kernels once through `ArrayLaunch`; `runlaunches!` and `dispatchlaunches!` consume those choices differently. The legacy `Immediate` emitter also handles front-of-run work on Metal: `openrun`/`closerun!` use it around recorded submissions. Deleting it because Metal has recordings would break that caller. | The existing one-dispatch/Builder contract in api.md §§2.4/4.5: share compilation, resource accesses, pending changes and emission; location selects declaration or eager submission. Remove `Immediate` and old front-of-run walkers only after their pending-change work has an equivalent Builder path. Preserve `test_recorded_run_semantics`, recorded-plan replay, eager/graph numerical baselines and zero warm-path allocation expectations. |
+| TLAS state | `InstanceBatches` and record-update kernels are already shared. Mesh preparation/vertex expansion are now shared too. Vulkan still queues transform updates in `pending_updates` until `sync!`; Metal dispatches the record-write kernel from `update_transforms!`. Their return values also differ. Low-level `MetalTLAS` and mutable `MetalHWTLAS` both subtype `HWTLAS`, with different field contracts, so generic field-based mutation methods on every `HWTLAS` would be wrong. | Existing `TLAS{P}`/`MemberSet`/`InstanceRange`/`RangeEntry` owners and pending-change application; device-specific instance packing and `emitbuild!` only. Migrate mutation callers to that state before deleting backend dirty/pending/update walkers. Preserve per-instance id/mask, stale handles, whole-range validation, count/build/refit rules and lifetime through replay. Native TLAS batch tests qualify this batch's preparation, not that remaining replacement. |
+
 ## Avoid false duplication claims
 
 - GEMM, GEMV and FFT kernel families already live in shared `src/array/` files.
@@ -60,8 +76,9 @@ consolidations are the first replacement work, with paired deletion obligations.
 - Generic video refusal methods and Vulkan implementations are dispatch layers,
   not duplicated decoder bodies. Native API encoding differences stay native.
 
-This pass supplies a concrete first batch. The larger source-disposition map is
-not evidence that those consolidations have already been implemented, nor does
+The first batch is implemented and its tested scope is recorded separately.
+The larger source-disposition map is not evidence that the larger consolidations
+have already been implemented, nor does
 it prove that the complete project can fit in 10,000 lines.
 
 The [semantic similarity experiment](similarity-2026-10-21/README.md) now adds

@@ -534,6 +534,7 @@ include(joinpath(@__DIR__, "test_basealignment.jl"))
 # arithmetic those names lower to is tested in KernelInterface, over its host
 # output object.
 include(joinpath(@__DIR__, "test_pipeline_stages.jl"))
+include(joinpath(@__DIR__, "test_raytracing_geometry.jl"))
 # Also needs no GPU, and that is the point of the design rather than a happy
 # accident: everything the geometry-to-mesh lowering does except read one builtin
 # is portable code over an output object, so `runprimitive` plus

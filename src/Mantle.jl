@@ -262,6 +262,7 @@ include("raytracing/pipeline.jl")
 # reindex on delete. Portable; a backend supplies only the batch type.
 include("raytracing/batches.jl")
 include("raytracing/accel.jl")
+include("raytracing/geometry.jl")
 include("raytracing/instances.jl")
 include("raytracing/api.jl")
 

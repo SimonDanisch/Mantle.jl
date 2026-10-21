@@ -64,6 +64,12 @@ The canonical debug-first rule remains in the plan and execution-contracts.md §
 
 ## Deletion and ownership maps already exist
 
+The [first implementation batch](consolidation-first-batch.md) now removes six
+duplicated steps, including shared TLAS mesh preparation and vertex expansion.
+It records 42 net source lines removed, 224 passing targeted assertions and
+the outstanding Metal native qualification. The larger ownership/deletion
+gates remain open in [consolidation-order.md](consolidation-order.md).
+
 The [2026-10-21 similarity experiment](similarity-2026-10-21/README.md) provides
 local semantic code-to-code and responsibility-based search across 1,987
 methods/regions from all 111 source files. It compares Qwen and Jina embeddings

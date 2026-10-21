@@ -31,11 +31,8 @@ makes the suballocation invisible to the consumer, so nothing downstream has to
 learn about regions.
 """
 function deviceview(d::MetalDevice, a::DeviceArray{T,N}) where {T,N}
-    r = region(a)
-    buf = memoryof(r)::MTL.MTLBuffer
-    off = offset(a)
-    ref = GPUArrays.DataRef(_ -> nothing, managedbuffer(d, buf))
-    return MtlArray{T,N}(ref, size(a); maxsize = Int(buf.length) - off, offset = off)
+    buf = memoryof(region(a))::MTL.MTLBuffer
+    return deviceslice(d, T, size(a), buf, offset(a))
 end
 
 """

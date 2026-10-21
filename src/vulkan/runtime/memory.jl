@@ -1357,18 +1357,10 @@ function find_memory_type_optional(ctx::VkContext, type_bits::UInt32, required_f
 end
 
 function find_memory_type(ctx::VkContext, type_bits::UInt32, required_flags)
-    mem_props = ctx.memory_properties
-
-    for i in 0:(length(mem_props.memory_types) - 1)
-        if (type_bits & (UInt32(1) << i)) != 0
-            mt = mem_props.memory_types[i + 1]
-            if (mt.property_flags & required_flags) == required_flags
-                return UInt32(i)
-            end
-        end
-    end
-    throw(LavaError(
+    i = find_memory_type_optional(ctx, type_bits, required_flags)
+    i === nothing && throw(LavaError(
         "memory allocation",
         "No suitable memory type found for flags $required_flags",
         "Check GPU memory capabilities"))
+    return i
 end

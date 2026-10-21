@@ -81,12 +81,13 @@ fragmentinputs(p::GraphicsPipeline) = stageoutputs(lastgeometrystage(p))
 
 """
     fragmentinputtype(p::GraphicsPipeline) -> Type
+    fragmentinputtype(p::MeshPipeline) -> Type
 
 [`fragmentinputs`](@ref) as the NamedTuple TYPE a backend types its fragment
 stage against, with every `Flat` removed — flatness decides how a value is
 delivered, never what it is.
 """
-function fragmentinputtype(p::GraphicsPipeline)
+function fragmentinputtype(p)
     v = valuetypes(fragmentinputs(p))
     return NamedTuple{keys(v), Tuple{values(v)...}}
 end
