@@ -35,6 +35,9 @@ code-to-code ranks, natural-language retrieval examples, and 100 cross-file
 candidate pairs. Subsequent searches reuse the vectors. Changes to chunks,
 model revision or source locations invalidate the cache. Model loading still
 requires GPU memory; this implementation uses CUDA and BF16.
+Calibration selectors use method signatures, so ordinary line movement does
+not break the report. Removed methods are skipped explicitly. Results change
+after consolidation; compare model quality on the same source snapshot.
 
 ## Method and limits
 

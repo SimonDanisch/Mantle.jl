@@ -17,12 +17,19 @@ MODELS = {
     "jina": ("jinaai/jina-code-embeddings-0.5b", "4db235132dafbe56a8b9c5f59b59795ecf58a4a7"),
 }
 PAIRS = [
-    ("memory selector", "src/vulkan/runtime/memory.jl", 1346, "src/vulkan/runtime/memory.jl", 1359),
-    ("borrowed Metal array", "src/metal/memory.jl", 33, "src/metal/ka.jl", 111),
-    ("raster/mesh shared setup", "src/metal/graphics.jl", 665, "src/metal/mesh.jl", 350),
-    ("TLAS batch transforms", "src/metal/hwtlas.jl", 529, "src/vulkan/raytracing/hwtlas.jl", 521),
-    ("TLAS single transform", "src/metal/hwtlas.jl", 550, "src/vulkan/raytracing/hwtlas.jl", 611),
-    ("GC pressure policy", "src/memory/pool.jl", 1051, "src/vulkan/runtime/memory.jl", 253),
+    ("memory selector", "src/vulkan/runtime/memory.jl", "function find_memory_type_optional(",
+     "src/vulkan/runtime/memory.jl", "function find_memory_type("),
+    ("borrowed Metal array", "src/metal/memory.jl", "function deviceview(",
+     "src/metal/ka.jl", "function deviceslice("),
+    ("raster/mesh shared setup", "src/metal/graphics.jl", "function compile_pipeline(p::Mantle.GraphicsPipeline,",
+     "src/metal/mesh.jl", "function compile_pipeline(p::Mantle.MeshPipeline,"),
+    ("TLAS batch transforms", "src/metal/hwtlas.jl", "transforms::MtlVector{Mat3x4f}",
+     "src/vulkan/raytracing/hwtlas.jl", "transforms::LavaArray{Mat3x4f, 1}"),
+    ("TLAS single transform", "src/metal/hwtlas.jl", "function Raycore.update_transform!(",
+     "src/vulkan/raytracing/hwtlas.jl",
+     "Raycore.update_transform!(hwtlas::VulkanTLAS, handle::Raycore.TLASHandle, transform::Mat3x4f)"),
+    ("GC pressure policy", "src/memory/pool.jl", "function autocollect!(",
+     "src/vulkan/runtime/memory.jl", "function maybe_collect("),
 ]
 QUESTIONS = [
     "Find code that chooses the first GPU memory type allowed by a bit mask and required property flags.",
@@ -60,6 +67,8 @@ def main():
     args = p.parse_args()
     base = Path(__file__).resolve().parent
     chunks = tomllib.loads((base / ".cache/chunks.toml").read_text())["chunks"]
+    if any("declaration" not in c for c in chunks):
+        raise SystemExit("Source index predates signature selectors; rerun extract.jl")
     model_id, revision = MODELS[args.model]
     identity = hashlib.sha256(json.dumps([model_id, revision, chunks], sort_keys=True).encode()).hexdigest()
     cache = base / f".cache/{args.model}-{identity[:16]}.npz"
@@ -120,11 +129,21 @@ def main():
             print(f"{scores[i]:.4f} {location(chunks[i])}\n  {chunks[i]['signature']}")
         return
 
-    def index(path, line):
-        return next(i for i, c in enumerate(chunks)
-                    if c["file"] == path and c["start"] == line and c["kind"] == "method")
+    def index(path, signature):
+        matches = [i for i, c in enumerate(chunks) if c["file"] == path
+                   and c["kind"] == "method"
+                   and signature.removeprefix("function ") in c["declaration"]]
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous calibration selector: {path}: {signature}")
+        return matches[0] if matches else None
 
-    selected = [(name, index(a, al), index(b, bl)) for name, a, al, b, bl in PAIRS]
+    selected = []
+    for name, a, signature_a, b, signature_b in PAIRS:
+        source, target = index(a, signature_a), index(b, signature_b)
+        if source is None or target is None:
+            print(f"Skipping removed calibration method: {name}", flush=True)
+        else:
+            selected.append((name, source, target))
     queries = [query_prefix(chunks[a]["code"], code=True) for _, a, _ in selected]
     qvec = embed(queries + [query_prefix(q) for q in QUESTIONS])
     lex = lexical_vectors(chunks)

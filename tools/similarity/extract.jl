@@ -23,10 +23,12 @@ function extract_chunks(root)
             first = JuliaSyntax.source_line(node)
             lines = split(code, '\n')
             signature = String(lines[1])
+            declaration = String(JuliaSyntax.sourcetext(JuliaSyntax.children(node)[1]))
             function add(code, lo, hi, kind)
                 length(strip(code)) < 80 && return
                 push!(chunks, Dict("file" => relpath(path, root), "start" => lo,
                     "end" => hi, "kind" => kind, "signature" => signature,
+                    "declaration" => declaration,
                     "code" => code, "sha256" => bytes2hex(sha256(code))))
             end
             # Keep complete methods. Windows also expose repeated substeps in
