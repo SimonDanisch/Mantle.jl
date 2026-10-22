@@ -1,79 +1,20 @@
-# What core asks a backend, outside the graph.
-#
-# `graph/backend.jl` holds the graph's own list and says why it is short. These
-# two are not graph questions — one is the compiled-kernel cache, the other is
-# which matrix kernels this build has — and they are here for the same reason
-# that list exists: `src/vulkan/` and `src/metal/` are `@static include`d, so a
-# name defined under one of them does not EXIST under the other. It is not an
-# empty table or a disabled feature; there is no binding.
-#
-# Same shape as `initbackend!`, deliberately: **declared here, answered in
-# `src/vulkan/` or `src/metal/`.** A core file that instead wrote the answer
-# would have to name the backend's types to write it, which is what
-# `test_core_names_no_backend.jl` catches.
-#
-# ── The alternative, and why it is not this ───────────────────────────────────
-#
-# A caller can reach into this module by name instead — `isdefined(Mantle,
-# :GEMM_TILINGS)` — and that is what `DNNKernels.coopmatkernels` and fifteen
-# runners' `__init__` did. It works. It also keeps working through a rename, a
-# split of the table, or a second backend that implements the same feature at a
-# different width and is then silently admitted, because the consumer is
-# spelling the provider's internal names and nobody agreed to that contract.
-#
-# A backend that forgets one of these gets a `MethodError` naming the function
-# it did not answer, which is the failure worth having: the `isdefined` version
-# fails instead at `Mantle.GEMM_TILINGS`, two frames into a kernel, as an
-# `UndefVarError` on a name the caller was never supposed to know.
+# Backend capability/refusal vocabulary available on every platform.
 
+"""staged_gemm_tile() -> Union{Int,Nothing}
 
-"""
-    staged_gemm_tile() -> Union{Int,Nothing}
-
-The square cooperative-matrix extent this BUILD's staged GEMM is emitted at, or
-`nothing` if this build has no staged GEMM.
-
-A caller that wants those kernels needs two answers and this is the second. The
-first is about the machine and `KernelInterface.DeviceCaps` gives it: `coopmat`
-says the driver has cooperative matrices, `tile` says how wide its square is.
-Neither says whether MANTLE has kernels for that width, and neither can — a
-`DeviceCaps` is a record of a device and carries no backend identity, which is
-what makes it portable and what stops this being a dispatch. So both halves, and
-the tile makes them one comparison:
-
-    dev.coopmat && (t = Mantle.staged_gemm_tile()) !== nothing && dev.tile == t
-
-Answering with the tile rather than with a `Bool` is the point of the `Int`: the
-caller had grown its own copy of `16` to compare `dev.tile` against, and a
-restated constant is a second place for the two to disagree.
-"""
+Square cooperative-matrix extent supported by this build's staged GEMM, or
+nothing. Eligibility also requires caps(device).coopmat and a matching device tile."""
 function staged_gemm_tile end
 
-"""
-    videodecodes(dev) -> Bool
+"""videodecodes(dev) -> Bool
 
-Whether `dev` has a hardware video decode session that `VideoDecode` drives.
-
-What a caller asks before it opens a GPU decode stream. Only the Vulkan backend has
-a decoder, and only on a device created with video decode; every other device
-answers `false` here. Before this was declared the editor asked
-`Mantle.vk_context().video_decode_available`, which on a build without the Vulkan
-backend is an `UndefVarError`. Its export path caught that and fell back to the
-CPU reader with a warning on every source, so on Metal the lane was chosen by an
-exception instead of by the device.
-
-`dev` is whatever the caller launches on: a device, or the KernelAbstractions
-backend that stands for one.
-"""
+Whether this device/backend exposes a hardware video-decode session. Currently
+only video-enabled Vulkan devices implement it; other devices return false."""
 videodecodes(dev) = false
 
-"""
-    decode_h264_gpu(annexb::AbstractVector{UInt8}; maxframes) -> (width, height, frames)
+"""decode_h264_gpu(annexb::AbstractVector{UInt8}; maxframes) -> (width, height, frames)
 
-Hardware-decode an H.264 Annex-B elementary stream, keeping every decoded luma (Y)
-plane on the device: each frame is a device array of `UInt8`, cropped to the display
-size. Only on a device that [`videodecodes`](@ref); everywhere else this refuses.
-"""
+Decode Annex-B H.264 into display-sized GPU luma planes. Requires videodecodes."""
 decode_h264_gpu(annexb::AbstractVector{UInt8}; kw...) = throw(ArgumentError(
     "decode_h264_gpu: this device has no hardware video decode; ask `videodecodes(device)` first"))
 
@@ -88,17 +29,11 @@ function decode_h264_luma(annexb::AbstractVector{UInt8}; kw...)
     return (w, h, Matrix{UInt8}[Array(f) for f in frames])
 end
 
-"""
-    h264decoder(dev, paramnals::AbstractVector{UInt8}; chroma = false) -> decoder
+"""h264decoder(dev, paramnals::AbstractVector{UInt8}; chroma=false) -> decoder
 
-A persistent H.264 decode session on `dev`, for a stream decoded a few frames at a
-time rather than in one call: [`feed!`](@ref) it an Annex-B chunk that starts at an
-IDR, [`decodemore!`](@ref) it up to `n` access units at a time — each call returns
-the frames that are safe to display, in display order — ask [`remaining`](@ref) how
-many it has not returned yet, and `close` it. `paramnals` is any chunk holding the
-stream's SPS and PPS. Only on a device that [`videodecodes`](@ref); everywhere else
-this refuses.
-"""
+Open a hardware session from SPS/PPS NALs. Feed chunks beginning at an IDR,
+use decodemore! to receive display-order frames, and close when finished.
+Requires videodecodes(dev)."""
 h264decoder(dev, paramnals::AbstractVector{UInt8}; kw...) = throw(ArgumentError(
     "h264decoder: this device has no hardware video decode; ask `videodecodes(device)` first"))
 
@@ -110,14 +45,10 @@ Queue an Annex-B chunk, typically one GOP starting at an IDR, on a decoder from
 """
 function feed! end
 
-"""
-    decodemore!(decoder, n) -> Vector{(Y, UV)}
+"""decodemore!(decoder, n) -> Vector{(Y, UV)}
 
-Decode up to `n` access units of what was fed, and return every frame that is safe
-to display, in display order. B-frames decode before frames they display after, so
-some decoded frames are held back until the chunk runs out. Each call costs about
-`n` frames of decode time.
-"""
+Decode up to n queued access units. Return display-ready frames in order;
+reordered frames may be held until the chunk ends."""
 function decodemore! end
 
 """
@@ -127,43 +58,19 @@ How many frames of what was fed [`decodemore!`](@ref) has not returned yet.
 """
 function remaining end
 
-"""
-    supports_float64(dev) -> Bool
+"""supports_float64(dev) -> Bool
 
-Whether kernels and arrays on `dev` can hold `Float64` (and `ComplexF64`).
-
-Apple GPUs have no double precision and Metal refuses to allocate a `Float64`
-array, so a caller choosing an element type, or a test looping over element
-types, asks this instead of naming a backend. Every Vulkan device Mantle builds
-enables `shaderFloat64` at creation, so the Vulkan backend answers `true`.
-
-`dev` is a device or the KernelAbstractions backend that stands for one.
-"""
+Whether the device/backend supports Float64 and ComplexF64 arrays and kernels."""
 supports_float64(dev) = false
 
-"""
-    supports_int64_atomics(dev) -> Bool
+"""supports_int64_atomics(dev) -> Bool
 
-Whether a kernel on `dev` can update a 64-bit integer in device memory atomically:
-`Atomix.@atomic` add, sub, and the rest on an `Int64` or `UInt64` element.
-
-Apple GPUs cannot; Metal has 64-bit `umin` and `umax` on device memory and only
-without the result, so a kernel that adds to an `Int64` fails to compile there. A
-Vulkan device answers what its `shaderBufferInt64Atomics` feature says.
-
-`dev` is a device or the KernelAbstractions backend that stands for one.
-"""
+Whether device-memory Int64/UInt64 atomic updates are supported. The default is
+false; backends answer from their enabled native capabilities."""
 supports_int64_atomics(dev) = false
 
-"""
-    isoutofmemory(err) -> Bool
+"""isoutofmemory(err) -> Bool
 
-Whether `err` is a device refusing an allocation for lack of memory, as opposed
-to any other failure.
-
-The pool asks before it gives up on growing (see `acquire!`): an out-of-memory
-there is first a request to collect and trim, and anything else — a lost device,
-a bad usage flag — is the answer and propagates. Julia's `OutOfMemoryError` is
-what Metal's allocation throws; the Vulkan backend adds the driver's two codes.
-"""
+Recognize an allocation refusal that core may collect/trim/retry. Other errors
+propagate. Backends extend Julia's OutOfMemoryError with native OOM codes."""
 isoutofmemory(err) = err isa OutOfMemoryError

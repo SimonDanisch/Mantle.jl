@@ -255,3 +255,9 @@ importer and ordinary build API pass the same 86 checks, including fresh loading
 deletes another 140 implementation lines. Native bytes, offset inputs, moved hits,
 refit stress, lifetime and fresh loading pass. Full warm refit host allocation
 falls 599,224 → 9,328 bytes for a 589,824-byte input on each qualified GPU.
+
+Runtime/device/dispatch/manual-render documentation now states current contracts
+without resolved-bug narratives or embedded benchmark histories. Device defaults
+are distinguished from backend priority; profiling counts completed samples.
+All 115 sources parse and definition trees are unchanged. The cleanup removes
+892 physical lines; six inventory “code” lines were unattached prose, not algorithms.
