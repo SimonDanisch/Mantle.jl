@@ -847,8 +847,6 @@ of today's names.
 | `indirectindex` | goes: launch commands are slots core lays out |
 | `indirectslot` | goes: as indirectindex |
 | `initbackend!` | goes: hooks take the device |
-| `initial_state` | core: image layouts decided by barriers! |
-| `initial_usage` | core: as initial_state |
 | `intrinsic_usage` | stays: part of the access walk at declaration |
 | `isdevicearray` | goes: dispatch on MantleArray |
 | `kakernelaccesssignature` | stays: the signature the access walk infers a KA kernel with |

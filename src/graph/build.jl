@@ -399,12 +399,6 @@ target_format(s::WindowSurface) = target_format(s.win)
 # window can name it.
 Base.eltype(s::WindowSurface) = eltype(s.win)
 
-initial_usage(::WindowSurface) = Present
-
-initial_state(::Any) = nothing
-
-initial_state(s::WindowSurface) = initial_usage(s)
-
 DrawCall(shader, args, count) =
     DrawCall(shader, args, count, (), nothing, nothing, nothing, 1)
 
@@ -567,9 +561,6 @@ target_image(t::TransientImage) = t.image
 isdepth(::TransientImage{T}) where {T} = isdepth(T)
 target_extent(t::TransientImage) = (Int(t.width), Int(t.height))
 target_format(t::TransientImage) = t.format
-# Undefined at first use, and again after aliasing.
-initial_usage(::TransientImage) = Undefined
-initial_state(t::TransientImage) = initial_usage(t)
 
 """
     Transient.Image(graph, T, (width, height); srgb = false, usage = imageusage(dev, T))

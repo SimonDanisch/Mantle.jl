@@ -601,13 +601,8 @@ function run!(::Barriers, c)
         final[sid] = U
     end
 
-    state(id) = get!(states, id) do
-        r = g.ids.by_id[id]
-        u = get(final, id, nothing)
-        u === nothing && (u = initial_state(r))
-        u === nothing ? ResourceState(resourcekind(r)) :
-                        ResourceState(resourcekind(r), u)
-    end
+    # A replayed plan starts each segment where the previous run left it.
+    state(id) = get!(() -> ResourceState(resourcekind(g.ids.by_id[id]), final[id]), states, id)
 
     for (i, p) in enumerate(ordered(c))
         pre = Transition[]

@@ -524,7 +524,7 @@ const BACKEND_VOCABULARY = (
     :allocate_batch_queue!, :release_batch_queue!, :submit!, :flush!, :waitidle,
     :waitfor, :waitfor!, :passed, :fence, :reset_device!, :awaitwrites,
     # sync lowering
-    :access, :stages, :layout, :needs_transition, :initial_state, :initial_usage,
+    :access, :stages, :layout, :needs_transition,
     # Vendor verbs (`vkformat`, `mtlformat`) are backend-private and not listed.
     # compile: the phases are core's, a backend answers these
     :syncbackend,

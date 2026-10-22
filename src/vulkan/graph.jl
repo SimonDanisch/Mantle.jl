@@ -235,14 +235,6 @@ target_image(fb::VulkanFramebuffer) = fb.color_image
 target_extent(fb::VulkanFramebuffer) = (Int(fb.width), Int(fb.height))
 target_format(fb::VulkanFramebuffer) = fb.color_format
 
-# An offscreen target was last read by its copy to the window. Only a loading
-# pass depends on this; a clearing pass discards it.
-initial_usage(::VulkanFramebuffer) = CopySrc
-
-# State at the start of a replay. Not `nothing`, which emits no transition and
-# suits buffers: an image still needs its layout transition.
-initial_state(fb::VulkanFramebuffer) = initial_usage(fb)
-
 loadop(::KeepOp) = VK.ATTACHMENT_LOAD_OP_LOAD
 loadop(::DiscardOp) = VK.ATTACHMENT_LOAD_OP_DONT_CARE
 loadop(::Clear) = VK.ATTACHMENT_LOAD_OP_CLEAR
