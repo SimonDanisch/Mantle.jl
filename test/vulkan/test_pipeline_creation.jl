@@ -38,4 +38,13 @@ function check_pipeline_creation(ctx)
         @test out == fill(Float32(K), 64)
         @test_throws Mantle.LavaError Mantle.check_validation_errors!("probe", ctx)
     end
+    @testset "mesh support is answered by the backend's own device" begin
+        old = other.mesh_shader_available
+        other.mesh_shader_available = false
+        try
+            @test !Mantle.supports_mesh_pipeline(Mantle.LavaBackend(other))
+        finally
+            other.mesh_shader_available = old
+        end
+    end
 end

@@ -196,6 +196,5 @@ end
 Mantle.supports_geometry_stage(::LavaBackend) = true
 Mantle.supports_tessellation(::LavaBackend) = true
 
-# A device property, not a backend one: `VK_EXT_mesh_shader` is optional, so the
-# live context's probe answers.
-Mantle.supports_mesh_pipeline(::LavaBackend) = vk_context().mesh_shader_available
+# `VK_EXT_mesh_shader` is optional, so the backend's own device answers.
+Mantle.supports_mesh_pipeline(b::LavaBackend) = vk_context(b).mesh_shader_available

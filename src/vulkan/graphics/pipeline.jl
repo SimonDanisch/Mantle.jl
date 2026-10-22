@@ -40,7 +40,7 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
     if mesh_spirv !== nothing
         ctx.mesh_shader_available || throw(ArgumentError(
             "this device has no VK_EXT_mesh_shader, so a mesh pipeline cannot " *
-            "be created on it. Ask `supports_mesh_stage(backend)` first — the " *
+            "be created on it. Ask `supports_mesh_pipeline(backend)` first: the " *
             "classic vertex chain is still there on hardware without it."))
         geometry_spirv === nothing && tess_ctrl_spirv === nothing || throw(ArgumentError(
             "a mesh pipeline has no geometry or tessellation stage: the mesh " *
