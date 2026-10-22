@@ -488,6 +488,8 @@ function Base.copyto!(dest::LavaArray{T},doffs::Integer,
         offset=dest.offset+(Int(doffs)-1)*sizeof(T))
     return dest
 end
+Base.copyto!(dest::LavaArray{T},src::HostReinterpretArray{T}) where T =
+    copyto!(dest,firstindex(dest),src,firstindex(src),length(src))
 
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T

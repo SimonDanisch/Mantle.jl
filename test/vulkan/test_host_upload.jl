@@ -52,9 +52,10 @@ function check_host_upload(ctx)
         try
             fill!(gpu,UInt32(0x12345678))
             target=GPUArrays.derive(UInt32,gpu,(length(words),),1)
-            Mantle.upload!(target,words);copyto!(target,1,words,1,length(words))
+            Mantle.upload!(target,words);copyto!(target,1,words,1,length(words));copyto!(target,words)
             @test (@allocated Mantle.upload!(target,words))<1024*1024
             @test (@allocated copyto!(target,1,words,1,length(words)))<1024*1024
+            @test (@allocated copyto!(target,words))<1024*1024
             @test_throws BoundsError copyto!(target,1,words,0,1)
             @test_throws BoundsError copyto!(target,length(target)+1,words,1,1)
             GC.gc()
