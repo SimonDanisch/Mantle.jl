@@ -6,13 +6,19 @@ using Mantle, Test, Random, Statistics
 const TABLES = (:GEMM_STAGED_V2_KERNELS,:GEMM_STAGED_V2N_KERNELS,:GEMM_STAGED_ABL_KERNELS)
 const STAGED_TABLES = (:GEMM_STAGED_KERNELS,TABLES...,:GEMM_STAGED_PREFETCH_KERNELS,
                        :GEMM_STAGED_DB_KERNELS,:GEMM_STAGED_V4_KERNELS,:GEMM_STAGED_GATHER_KERNELS)
-const ORIGINAL_KEYS = Dict(n=>Set(keys(getproperty(Mantle,n))) for n in STAGED_TABLES)
+const FAMILIES = (:scalar,:vec2,:narrow,:ablation,:prefetch,:doublebuf,:vec4,:gather)
+schedule(table) = FAMILIES[findfirst(==(table),STAGED_TABLES)]
+tilings(table) = isdefined(Mantle,:staged_gemm_tilings) ?
+    Mantle.staged_gemm_tilings(schedule(table)) : keys(getproperty(Mantle,table))
+kernel(table,cfg) = isdefined(Mantle,:staged_gemm_kernel) ?
+    Mantle.staged_gemm_kernel(cfg,schedule(table)) : getproperty(Mantle,table)[cfg]
+const ORIGINAL_KEYS = Dict(n=>Set(tilings(n)) for n in STAGED_TABLES)
 
 function plan(ctx,cfg,family,K,M,N,A,B,out;profile=false,ablation=:all)
     args=(out,A,B,nothing,identity,Val(M),Val(N),Val(K))
     family===:GEMM_STAGED_GATHER_KERNELS && (args=(out,A,B,nothing,identity,nothing,Val(M),Val(N),Val(K)))
     family===:GEMM_STAGED_ABL_KERNELS && (args=(args...,Val(ablation)))
-    kern=getproperty(Mantle,family)[cfg]
+    kern=kernel(family,cfg)
     wg=Mantle.gemm_wg(cfg)
     g=Mantle.Graph(Mantle.lavadevice(ctx))
     Mantle.dispatch!(g,kern,args,(M÷Mantle.gemm_bm(cfg))*(N÷Mantle.gemm_bn(cfg))*wg;group=wg)
@@ -41,7 +47,7 @@ function baseline(contexts;tables=TABLES)
     fixtures=Any[]
     @testset "baseline staged generator families" begin
         for ctx in contexts
-            for family in tables, cfg in sort(collect(keys(getproperty(Mantle,family))))
+            for family in tables, cfg in sort(collect(tilings(family)))
                 f=fixture(ctx,cfg,family,2Mantle.gemm_bk(cfg))
                 @test size(f.result)==(f.M,f.N)
                 push!(fixtures,f)
@@ -65,7 +71,7 @@ function compare(fixtures)
     after=Any[]
     @testset "shared GEMM generator preserves every output byte" begin
         for family in unique(f.family for f in fixtures)
-            @test ORIGINAL_KEYS[family]==Set(keys(getproperty(Mantle,family)))
+            @test ORIGINAL_KEYS[family]==Set(tilings(family))
         end
         for f in fixtures
             Mantle.defaultdevice!(Mantle.lavadevice(f.ctx))

@@ -7,8 +7,10 @@ Complex adjoints still require conjugation and are refused by stride projection.
 This also fixes ROCm gemmlaunch!, whose missing stride method previously returned
 nothing even after densification. A direct scalar product regression pins it.
 
-3,987 GEMM assertions pass across ROCm, AMD Vulkan and NVIDIA Vulkan, including
-all staged families. Both Vulkan validation/synchronization drains are empty.
+2,658 GEMM assertions pass across AMD/NVIDIA Vulkan, including all staged families.
+Both Vulkan validation/synchronization drains are empty. The initial extra 1,329
+“ROCm” assertions used Vulkan; [explicit ROCm qualification](consolidation-gemm-catalogs.md)
+supersedes that count and passes 1,341 native GEMM checks.
 The staged-count fixture now uses core's portable KI compile/launch protocol;
 constructing an uncompiled KI.Kernel directly was Vulkan-specific.
 

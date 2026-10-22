@@ -21,7 +21,9 @@ Head, compute and transfer barriers share one native memory-barrier encoder,
 retaining their different masks and the head-barrier counter.
 
 656 AMD/NVIDIA Vulkan regression assertions, 32 native encoding assertions and
-74 ROCm assertions pass. Coverage includes overlapping/mixed small and >64 KiB
+70 explicitly selected ROCm assertions pass. The earlier 74-check “ROCm” label
+used Vulkan; [qualification](consolidation-gemm-catalogs.md) corrects the harness.
+Coverage includes overlapping/mixed small and >64 KiB
 stores, canaries, empty/unaligned stores, discarded encoding, callback failure,
 concurrent setters, replay and allocation-free runs. Validation/synchronization
 drains are empty. A fresh process passes 46 store checks. Paired 10,000-cycle

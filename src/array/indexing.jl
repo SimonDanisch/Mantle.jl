@@ -126,7 +126,7 @@ out of the image inside the k-loop for the same reason.
 The pair is along `m`, which for a convolution is the pixel axis, so the two
 elements are adjacent output pixels and normally adjacent input pixels too.
 
-Only `GEMM_STAGED_GATHER_KERNELS` takes a loader today; see the note there.
+Only the :gather staged GEMM schedule takes a loader today.
 
 **Declared here, in portable code, and not beside the kernel that calls it.**
 `src/vulkan/` is `@static include`d — on a Mac `src/metal/` is loaded instead

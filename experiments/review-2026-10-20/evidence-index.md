@@ -202,12 +202,13 @@ backend field walks while preserving their distinct scene conversions; 126 host
 and native assertions pass. Native Metal qualification remains outstanding.
 
 [Shared dense GPU strides](consolidation-dense-strides.md) removes backend
-metadata copies and fixes the absent ROCm method. 3,987 shared GEMM and 77 ROCm
-backend assertions pass; the required existing SDK source is pinned explicitly.
+metadata copies and fixes the absent ROCm method. Native GEMM and 77 ROCm backend
+assertions pass; the required existing SDK source is pinned explicitly. The
+initial numerical ROCm count is corrected in the explicit qualification below.
 
 [Shared pending stores](consolidation-stores.md) removes range-store and barrier
 encoding copies, fixing Vulkan overlap ordering and early large-store submission.
-656 Vulkan regression, 32 encoding and 74 ROCm assertions pass; fresh loading and
+656 Vulkan regression, 32 encoding and 70 explicitly selected ROCm assertions pass; fresh loading and
 paired zero-allocation store/drain checks also pass.
 
 [Redundant native argument packers](consolidation-argument-packers.md) deletes
@@ -227,3 +228,9 @@ paired byte/allocation checks pass across the qualified targets.
 catalogs and the shared-ID counter. 509 native assertions, 88 paired byte checks,
 fresh consumer precompilation and allocation comparisons pass. The generic
 executor retains its world-age boundary for consumers that still generate code.
+
+[Generated GEMM configurations](consolidation-gemm-catalogs.md) deletes nine
+mutable catalogs and shares staging eligibility with DNNKernels. Native output,
+shader, timing, convolution and fresh-precompilation checks pass. An explicit
+backend assertion corrects the earlier mislabeled manual ROCm runs; 2,019 actual
+ROCm/host assertions now pass, with one capability-based graphics skip.

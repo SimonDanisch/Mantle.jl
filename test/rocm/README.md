@@ -14,13 +14,16 @@ and Mantle normally; never include the extension by hand. Then select a device:
 using AMDGPU, Mantle
 AMDGPU.device!(first(AMDGPU.devices()))
 Mantle.defaultdevice!(Mantle.Device(Mantle.ROCmAPI()))
-global MANTLE_TEST_BACKEND = Mantle.defaultbackend()
+global MANTLE_TEST_BACKEND = Mantle.backend(Mantle.Device(Mantle.ROCmAPI()))
+@assert MANTLE_TEST_BACKEND isa AMDGPU.ROCBackend
 include("test/rocm/test_rocm.jl")
 ```
 
-Qualified 2026-10-22 on Linux, Julia 1.12.7, RX 7900 XTX/gfx1100: 77 backend
-assertions and 1,329 shared GEMM assertions across test_gemm_staged_scalar.jl,
-test_gemm_staged.jl and test_coopmat_epilogue.jl. Recording/replay, stream and
-argument ownership, borrowed offsets, allocation-free replay, hipBLASLt and
-portable GEMM/GEMV/FFT/STFT pass. MIOpen was unavailable; these results do not
-qualify MIOpen or other GPU/OS combinations.
+defaultbackend() still chooses the platform's preferred API. Select ROCBackend
+explicitly for qualification. The [qualification script](../../experiments/review-2026-10-20/qualify-rocm.jl)
+asserts its backend and runs the backend, array and recording checks together.
+The earlier 1,329 “ROCm” GEMM count accidentally exercised Vulkan and is withdrawn.
+Qualified 2026-10-22 on Linux, Julia 1.12.7, RX 7900 XTX/gfx1100: 2,019 assertions
+pass, including all staged GEMM families, GEMV, FFT/STFT and recording/store
+ownership. One graphics case skips through supports_graphics.
+MIOpen was unavailable; qualification does not cover MIOpen or other GPU/OS combinations.

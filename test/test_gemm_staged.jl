@@ -6,6 +6,13 @@ const KA = KernelAbstractions
 import KernelInterface
 include(joinpath(@__DIR__, "testbackend.jl"))
 
+@testset "unsupported GEMM configurations fail before launch" begin
+    @test_throws ArgumentError Mantle.blocked_gemm_kernel(3)
+    @test_throws ArgumentError Mantle.staged_gemm_kernel(first(Mantle.GEMM_TILINGS),:missing)
+    @test_throws ArgumentError Mantle.staged_gemm_kernel((1,1,1,1,16,0))
+    @test_throws ArgumentError Mantle.staged_gemm_kernel(first(Mantle.CONV_GATHER_TILINGS))
+end
+
 "Relative error of `matmul!` against a Float32 CPU reference, over a slice."
 function gemmerr(backend, ws, M, N, K; staged::Bool, withbias::Bool, gemmkw...)
     ctx = DNNKernels.Ctx(backend; ws)
@@ -36,7 +43,7 @@ end
 """Count accumulated products using all-one operands: every output must equal K.
 This catches missing terms directly, including across k-block boundaries."""
 function stagedcount(backend, cfg, K; blocks = 2,
-                     kernels = Mantle.GEMM_STAGED_KERNELS, gather::Bool = false)
+                     family = :scalar, gather::Bool = false)
     M = Mantle.gemm_bm(cfg) * blocks
     N = Mantle.gemm_bn(cfg) * blocks
     A = KA.allocate(backend, Float16, M, K); fill!(A, one(Float16))
@@ -47,7 +54,7 @@ function stagedcount(backend, cfg, K; blocks = 2,
     # kernel takes its loader after the epilogue; nothing is a plain A read.
     args = gather ? (C, A, B, nothing, identity, nothing, Val(M), Val(N), Val(K)) :
                     (C, A, B, nothing, identity, Val(M), Val(N), Val(K))
-    Mantle.kilaunch!(backend, kernels[cfg], args...;
+    Mantle.kilaunch!(backend, Mantle.staged_gemm_kernel(cfg,family), args...;
         ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg,
         workgroupsize = wg)
     KA.synchronize(backend)
@@ -88,7 +95,7 @@ if hasstagedgemm()
                 for cfg in Mantle.GEMM_TILINGS,
                     K in (32, 64, 96, 128, 288, 576, 2304)
                     K % Mantle.gemm_bk(cfg) == 0 || continue
-                    v2 && !haskey(Mantle.GEMM_STAGED_V2_KERNELS, cfg) && continue
+                    v2 && !Mantle.staged_gemm_supported(cfg,:vec2) && continue
                     @test gemmerr(backend, ws, Mantle.gemm_bm(cfg) * 2,
                                   Mantle.gemm_bn(cfg) * 2, K;
                                   staged = true, withbias = false, vec2 = v2) < 2.0f-2
@@ -116,19 +123,19 @@ if hasstagedgemm()
             # larger values cover odd/even loop counts and the long SAM2 products.
             for cfg in Mantle.GEMM_TILINGS,
                 K in (32, 64, 96, 288, 576, 1152, 2304)
-                haskey(Mantle.GEMM_STAGED_PREFETCH_KERNELS, cfg) || continue
+                Mantle.staged_gemm_supported(cfg,:prefetch) || continue
                 K % Mantle.gemm_bk(cfg) == 0 || continue
                 r = stagedcount(backend, cfg, K;
-                                kernels = Mantle.GEMM_STAGED_PREFETCH_KERNELS)
+                                family = :prefetch)
                 r.correct || @info "prefetched tiling $cfg lost k-terms" K = r.K seen = r.seen
                 @test r.correct
             end
         end
 
         @testset "vec4 staging accumulates every k-term" begin
-            for cfg in keys(Mantle.GEMM_STAGED_V4_KERNELS), blocks in (1,2,3,9)
+            for cfg in Mantle.staged_gemm_tilings(:vec4), blocks in (1,2,3,9)
                 K = blocks * Mantle.gemm_bk(cfg)
-                r = stagedcount(backend,cfg,K; kernels=Mantle.GEMM_STAGED_V4_KERNELS)
+                r = stagedcount(backend,cfg,K; family=:vec4)
                 @test r.correct
             end
         end
@@ -138,11 +145,11 @@ if hasstagedgemm()
             # it takes the same count. `CONV_GATHER_TILINGS` are compiled ONLY as
             # gathering kernels, so this is where Mantle runs them at all;
             # DNNKernels' `test_conv_coopmat_chunk.jl` runs them as convolutions.
-            @test all(c -> haskey(Mantle.GEMM_STAGED_GATHER_KERNELS, c), Mantle.CONV_GATHER_TILINGS)
-            for cfg in keys(Mantle.GEMM_STAGED_GATHER_KERNELS),
+            @test all(c -> Mantle.staged_gemm_supported(c,:gather), Mantle.CONV_GATHER_TILINGS)
+            for cfg in Mantle.staged_gemm_tilings(:gather),
                 K in (32, 64, 96, 288, 576, 1152, 2304)
                 K % Mantle.gemm_bk(cfg) == 0 || continue
-                r = stagedcount(backend, cfg, K; kernels = Mantle.GEMM_STAGED_GATHER_KERNELS,
+                r = stagedcount(backend, cfg, K; family = :gather,
                                 gather = true)
                 r.correct || @info "gathering tiling $cfg lost k-terms" K = r.K seen = r.seen
                 @test r.correct
@@ -196,7 +203,7 @@ if hasstagedgemm()
                 @test Mantle.gemm_padn(M, 1500, K) == 1536
                 c = Mantle.gemm_tiling(M, Mantle.gemm_padn(M, 1500, K), K)
                 @test c !== nothing
-                @test haskey(Mantle.GEMM_STAGED_KERNELS, c)
+                @test Mantle.staged_gemm_supported(c,:scalar)
                 # The old rounding is what it must beat, and it is only 32 columns away.
                 @test Mantle.gemm_tiling(M, cld(1500, 16) * 16, K) === nothing
             end
@@ -387,7 +394,7 @@ if hasstagedgemm()
     end
 
     @testset "the double-buffered kernel is bit-identical to the single-buffered one" begin
-        # It is off by default (it measures no faster — see `GEMM_STAGED_DB_KERNELS`),
+        # It is off by default (it measures no faster — see `staged_gemm_kernel(cfg,:doublebuf)`),
         # so nothing else in the suite reaches it and it would rot silently. What has
         # to hold is EQUALITY, not closeness: the two differ only in which staging
         # buffer a k-block lands in, so any difference at all is an indexing bug.
@@ -400,7 +407,7 @@ if hasstagedgemm()
                           (576, 512, 576), (96, 128, 32))
             for c in Mantle.GEMM_TILINGS
                 (Mantle.gemm_divides(c, M, N, K) && !Mantle.gemm_aliasing(c, K)) || continue
-                haskey(Mantle.GEMM_STAGED_DB_KERNELS, c) || continue
+                Mantle.staged_gemm_supported(c,:doublebuf) || continue
                 a = Float16.(0.05f0 .* randn(Float32, M, K))
                 b = Float16.(0.05f0 .* randn(Float32, K, N))
                 A = KA.allocate(back, Float16, M, K); copyto!(A, a)

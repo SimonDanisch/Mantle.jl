@@ -4,14 +4,8 @@
 # scalar staged and strided kernels cover other supported types/shapes.
 # Staging/blocking derives from reference/mul_mm (llama.cpp, MIT).
 const GEMM_TILE = 16
-const GEMM_BLOCK = 4       # register block: 4×4 accumulators per subgroup
 const GEMM_WORKGROUP = 64  # two subgroups for the register-blocked kernel
 const GEMM_MAXBLOCK = 4    # largest register block `@nexprs` is unrolled for
-
-# Staged products keep one A and one B fragment live. Hoisting all fragments
-# increased registers and spilled accumulators; retain the stagedmma load order.
-const GEMM_BK = 32
-const GEMM_PAD = 4                  # bank-conflict padding, in elements
 
 """Staged tiling `(STM, STN, WM, WN, BK, PAD)`: `WM*WN` subgroups each own
 `STM*STN` 16×16 output tiles. The workgroup covers `(16*STM*WM, 16*STN*WN)`
@@ -25,10 +19,10 @@ const GemmTiling = NTuple{6,Int}
 @inline gemm_lda(c::GemmTiling) = gemm_bm(c) + c[6]
 @inline gemm_ldb(c::GemmTiling) = gemm_bk(c) + c[6]
 
-"""Compiled staged tilings in selection order. `gemm_tiling` takes the first
+"""Supported staged tilings in selection order. `gemm_tiling` takes the first
 exactly dividing, non-aliasing entry; forced tilings still require exact extents.
 BK=16 covers reductions that cannot use BK=32. See `test_gemm_staged.jl`."""
-const GEMM_TILINGS = GemmTiling[
+const GEMM_TILINGS = (
     # Prefer the measured 128×128 block; BK=16 also covers K not divisible by 32.
     (4, 2, 2, 4, 32, 8),    # 128 x 128 x 32, 8 warps — the reference block
     (4, 2, 2, 4, 16, 8),    # 128 x 128 x 16, 8 warps — llama.cpp's own BK
@@ -37,14 +31,10 @@ const GEMM_TILINGS = GemmTiling[
     (2, 2, 2, 2, 32, 8),    #  64 x  64, 4 warps
     (1, 2, 2, 4, 32, 8),    #  32 x 128, 8 warps
     (1, 1, 2, 4, 32, 8),    #  32 x  64, 8 warps — one tile per warp, widest reach
-]
+)
 
 # Core owns the staged tile capability beside its implementation.
 staged_gemm_tile() = GEMM_TILE
-
-"""Historical tuning marker; results are device/workload-specific, not a proof of optimality."""
-const GEMM_TILING_SWEEP_DONE = true
-
 
 """Whether the staged block exactly divides M, N and K. Its loads are unmasked."""
 @inline gemm_divides(c::GemmTiling, M::Int, N::Int, K::Int) =
@@ -77,12 +67,12 @@ const GEMM_NARROW_DEFAULT = true
 end
 
 """Choose a gathering tiling, or nothing. Forced tilings may also select
-CONV_GATHER_TILINGS, which exist only in the gathering kernel table."""
+CONV_GATHER_TILINGS, which only the gathering schedule supports."""
 @inline function gather_gemm_tiling(M::Int, N::Int, K::Int, nbatch::Int, splitk::Int;
                                     staged::Bool = GEMM_STAGED_DEFAULT, tiling = nothing)
     tiling === nothing && return staged_gemm_tiling(M, N, K, nbatch, splitk; staged)
     staged && nbatch == 1 && splitk == 1 || return nothing
-    gemm_divides(tiling, M, N, K) && haskey(GEMM_STAGED_GATHER_KERNELS, tiling) || return nothing
+    gemm_divides(tiling, M, N, K) && staged_gemm_supported(tiling,:gather) || return nothing
     return tiling
 end
 
@@ -94,7 +84,7 @@ end
     splitk == 1 || return nothing
     c = gemm_tiling(M, N, K; forced = tiling)
     c === nothing && return nothing
-    return haskey(GEMM_STAGED_KERNELS, c) ? c : nothing
+    return staged_gemm_supported(c) ? c : nothing
 end
 
 """Maximum extra padded width relative to tile-rounded N; raising it requires small-N measurements."""
@@ -112,7 +102,7 @@ function gemm_padn(M::Int, N::Int, K::Int;
     widths = Int[]
     for c in GEMM_TILINGS
         M % gemm_bm(c) == 0 && K % gemm_bk(c) == 0 && !gemm_aliasing(c, K) || continue
-        haskey(GEMM_STAGED_KERNELS, c) || continue
+        staged_gemm_supported(c) || continue
         push!(widths, cld(N, gemm_bn(c)) * gemm_bn(c))
     end
     isempty(widths) && return base
@@ -162,139 +152,125 @@ identity skips the component walk."""
     copyto!(pointer(C), off, ld, m)
 end
 
-const GEMM_BLOCK_KERNELS = Dict{Int,Any}()
+struct BlockedGEMM{BLK} <: Function end
 
-for BLK in (1, 2, 4)
-    kname = Symbol("coopmat_gemm_kernel_", BLK, "!")
-    @eval begin
-        function $kname(C, A, B, bias, epi,
-                                ::Val{M}, ::Val{N}, ::Val{K},
-                                ::Val{KPER}) where {M,N,K,KPER}
-            lane = KI.get_global_id().x - 1
-            g = lane ÷ 32
-            tiles_m = M ÷ (GEMM_TILE * $BLK)
-            ntiles = tiles_m * (N ÷ (GEMM_TILE * $BLK))
-            # Batch is outermost so consecutive subgroups walk one matrix's tiles.
-            splitk = (K ÷ GEMM_TILE) ÷ KPER
-            per = ntiles * splitk
-            bat = g ÷ per
-            r = g % per
-            t = r % ntiles
-            sk = r ÷ ntiles
-            tm = (t % tiles_m) * (GEMM_TILE * $BLK)
-            tn = (t ÷ tiles_m) * (GEMM_TILE * $BLK)
-            aoff = bat * M * K
-            boff = bat * K * N
-            coff = bat * M * N * splitk
+function blocked_gemm_kernel(blk::Int)
+    blk in (1,2,4) || throw(ArgumentError("gemm: unsupported register block $blk"))
+    return BlockedGEMM{blk}()
+end
 
-            # KPER is static and divides K into equal tile counts, allowing fixed-trip loops.
-            klo = sk * KPER * GEMM_TILE
+@generated function (::BlockedGEMM{BLK})(C,A,B,bias,epi,
+        ::Val{M},::Val{N},::Val{K},::Val{KPER}) where {BLK,M,N,K,KPER}
+    return quote
+        lane = KI.get_global_id().x - 1
+        g = lane ÷ 32
+        tiles_m = M ÷ (GEMM_TILE * $BLK)
+        ntiles = tiles_m * (N ÷ (GEMM_TILE * $BLK))
+        # Batch is outermost so consecutive subgroups walk one matrix's tiles.
+        splitk = (K ÷ GEMM_TILE) ÷ KPER
+        per = ntiles * splitk
+        bat = g ÷ per
+        r = g % per
+        t = r % ntiles
+        sk = r ÷ ntiles
+        tm = (t % tiles_m) * (GEMM_TILE * $BLK)
+        tn = (t ÷ tiles_m) * (GEMM_TILE * $BLK)
+        aoff = bat * M * K
+        boff = bat * K * N
+        coff = bat * M * N * splitk
 
-            # Zero, or the bias broadcast down the tile's rows — `bias` is
-            # indexed by the output ROW, so the offset follows `tm` and `i` and
-            # is independent of `j`.
-            bp = bias === nothing ? bias : pointer(bias)
-            Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
-                c_i_j = accinit(bias, bp, 1 + tm + (i - 1) * GEMM_TILE)
+        # KPER is static and divides K into equal tile counts, allowing fixed-trip loops.
+        klo = sk * KPER * GEMM_TILE
 
-            # Two-way unroll overlaps independent loads; the tail handles odd KPER.
-            kt = 0
-            while kt + 2 <= KPER
-                Base.Cartesian.@nexprs 2 u -> begin
-                    k0_u = klo + (kt + (u - 1)) * GEMM_TILE
-                    Base.Cartesian.@nexprs $BLK i -> a_i_u =
-                        AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                            pointer(A), 1 + aoff + tm + (i - 1) * GEMM_TILE + k0_u * M, M)
-                    Base.Cartesian.@nexprs $BLK j -> b_j_u =
-                        AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                            pointer(B), 1 + boff + k0_u + (tn + (j - 1) * GEMM_TILE) * K, K)
-                    Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
-                        c_i_j = muladd(a_i_u, b_j_u, c_i_j)
-                end
-                kt += 2
-            end
-            while kt < KPER
-                k0 = klo + kt * GEMM_TILE
-                Base.Cartesian.@nexprs $BLK i -> a_i =
+        # Zero, or the bias broadcast down the tile's rows — `bias` is
+        # indexed by the output ROW, so the offset follows `tm` and `i` and
+        # is independent of `j`.
+        bp = bias === nothing ? bias : pointer(bias)
+        Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
+            c_i_j = accinit(bias, bp, 1 + tm + (i - 1) * GEMM_TILE)
+
+        # Two-way unroll overlaps independent loads; the tail handles odd KPER.
+        kt = 0
+        while kt + 2 <= KPER
+            Base.Cartesian.@nexprs 2 u -> begin
+                k0_u = klo + (kt + (u - 1)) * GEMM_TILE
+                Base.Cartesian.@nexprs $BLK i -> a_i_u =
                     AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
-                        pointer(A), 1 + aoff + tm + (i - 1) * GEMM_TILE + k0 * M, M)
-                Base.Cartesian.@nexprs $BLK j -> b_j =
+                        pointer(A), 1 + aoff + tm + (i - 1) * GEMM_TILE + k0_u * M, M)
+                Base.Cartesian.@nexprs $BLK j -> b_j_u =
                     AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
-                        pointer(B), 1 + boff + k0 + (tn + (j - 1) * GEMM_TILE) * K, K)
+                        pointer(B), 1 + boff + k0_u + (tn + (j - 1) * GEMM_TILE) * K, K)
                 Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
-                    c_i_j = muladd(a_i, b_j, c_i_j)
-                kt += 1
+                    c_i_j = muladd(a_i_u, b_j_u, c_i_j)
             end
-
-            Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
-                accstore!(C, 1 + coff + tm + (i - 1) * GEMM_TILE +
-                             (tn + (j - 1) * GEMM_TILE) * M + sk * M * N,
-                          M, c_i_j, epi)
-            return nothing
+            kt += 2
         end
-        GEMM_BLOCK_KERNELS[$BLK] = $kname
+        while kt < KPER
+            k0 = klo + kt * GEMM_TILE
+            Base.Cartesian.@nexprs $BLK i -> a_i =
+                AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixA}(
+                    pointer(A), 1 + aoff + tm + (i - 1) * GEMM_TILE + k0 * M, M)
+            Base.Cartesian.@nexprs $BLK j -> b_j =
+                AcceleratedMatrix{Float16,GEMM_TILE,GEMM_TILE,MatrixB}(
+                    pointer(B), 1 + boff + k0 + (tn + (j - 1) * GEMM_TILE) * K, K)
+            Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
+                c_i_j = muladd(a_i, b_j, c_i_j)
+            kt += 1
+        end
+
+        Base.Cartesian.@nexprs $BLK j -> Base.Cartesian.@nexprs $BLK i ->
+            accstore!(C, 1 + coff + tm + (i - 1) * GEMM_TILE +
+                         (tn + (j - 1) * GEMM_TILE) * M + sk * M * N,
+                      M, c_i_j, epi)
+        return nothing
     end
 end
 
-# Staging fills one A/B tile per workgroup. Consecutive lanes read consecutive
-# global addresses. Shared packing widens stores and matrix loads together;
-# widening global loads alone did not improve measured streaming throughput.
-const GEMM_STAGED_KERNELS = Dict{GemmTiling,Any}()
-
-
-"""Vec2-staged twins of GEMM_STAGED_KERNELS. A packs along m, B along k;
-shared leading dimensions count packed pairs, preserving global coalescing."""
-const GEMM_STAGED_V2_KERNELS = Dict{GemmTiling,Any}()
-
-"""Whether all staging/store indices fit Int32. Products widen before comparison
-to avoid host overflow; strict < leaves room for 1-based end indices."""
-@inline gemm_fits32(M::Integer, N::Integer, K::Integer) =
-    widemul(Int(M), Int(K)) < typemax(Int32) && widemul(Int(K), Int(N)) < typemax(Int32) &&
-    widemul(Int(M), Int(N)) < typemax(Int32)
-
-"""Int32-index variants of vec2 staging, generated from the shared wide/narrow body.
-The selector uses gemm_fits32; larger extents retain Int indexing."""
-const GEMM_STAGED_V2N_KERNELS = Dict{GemmTiling,Any}()
-
-"""Double-buffered narrow vec2 kernels. Alternating shared tiles allow one
-barrier per k-block, at twice the shared storage and additional phase registers.
-Selected explicitly with doublebuf; default off after native comparisons."""
-const GEMM_STAGED_DB_KERNELS = Dict{GemmTiling,Any}()
-
-"""Register-prefetched, single-shared-buffer narrow vec2 kernels. Read the next
-tile before consuming the current tile, then retire, overwrite and publish it.
-Plain GEMM retains MVector queues; gathering needs explicit SSA bindings.
-Keep these encodings distinct unless native and consumer measurements support a change."""
-const GEMM_STAGED_PREFETCH_KERNELS = Dict{GemmTiling,Any}()
-
-"""Vec4-staged twins, generated only when all packed dimensions and per-lane
-loads divide exactly by four. Selected explicitly with vec4; default off.
-`test_coopmat_shared.jl` covers vector shared-memory size/alignment."""
-const GEMM_STAGED_V4_KERNELS = Dict{GemmTiling,Any}()
-
-"""Diagnostic variants: :nostage reuses only the first k-block (intentionally wrong);
-:all stages every block. Never selected by normal GEMM dispatch. ABI retained for
-JuliaVision/tools/gemm_ablate.jl."""
-const GEMM_STAGED_ABL_KERNELS = Dict{GemmTiling,Any}()
-
-"A 2-wide fp16 vector, i.e. `f16vec2`; see `Lava.coopmat_vecwidth`."
+"Two/four packed fp16 components for cooperative-matrix shared accesses."
 const GemmV2 = NTuple{2,VecElement{Float16}}
-
-"""Four packed fp16 components for 64-bit shared accesses."""
 const GemmV4 = NTuple{4,VecElement{Float16}}
 
-# `apair` itself is declared in `src/array/indexing.jl`: DNNKernels extends it.
-# The kernels that read through it are below.
+"""Gather-only 192×144 and 96×288 blocks. Plain GEMM never selects these;
+loaders avoid materializing the convolution's im2col matrix."""
+const CONV_GATHER_TILINGS = (
+    (3,3,4,3,32,8),
+    (3,3,2,6,32,8),
+)
 
-"""
-Gathering twins of `GEMM_STAGED_PREFETCH_KERNELS`: the same schedule, with the
-A operand computed by an [`apair`](@ref) loader instead of read from a matrix.
-"""
-const GEMM_STAGED_GATHER_KERNELS = Dict{GemmTiling,Any}()
+"""Whether a shipped tiling supports this schedule and packed staging width.
+Keep transfer divisibility beside selection; generated kernels mask no bounds."""
+function staged_gemm_supported(cfg::GemmTiling, family::Symbol=:scalar)
+    family in (:scalar,:vec2,:narrow,:ablation,:prefetch,:doublebuf,:vec4,:gather) || return false
+    cfg in GEMM_TILINGS || (family === :gather && cfg in CONV_GATHER_TILINGS) || return false
+    bm,bn,bk,wg = gemm_bm(cfg),gemm_bn(cfg),gemm_bk(cfg),gemm_wg(cfg)
+    width = family === :scalar ? 1 : family === :vec4 ? 4 : 2
+    return bm % width == 0 && bk % width == 0 &&
+           gemm_lda(cfg) % width == 0 && gemm_ldb(cfg) % width == 0 &&
+           (bm*bk) % (width*wg) == 0 && (bk*bn) % (width*wg) == 0
+end
+
+staged_gemm_tilings(family::Symbol=:scalar) =
+    filter(c -> staged_gemm_supported(c,family),
+           family === :gather ? (GEMM_TILINGS...,CONV_GATHER_TILINGS...) : GEMM_TILINGS)
+
+struct StagedGEMM{FAMILY,CFG} <: Function end
+
+"Whether all addressed matrix extents fit Int32, leaving room for end indices."
+@inline gemm_fits32(M::Integer,N::Integer,K::Integer) =
+    widemul(Int(M),Int(K)) < typemax(Int32) && widemul(Int(K),Int(N)) < typemax(Int32) &&
+    widemul(Int(M),Int(N)) < typemax(Int32)
+
+"""Select a configuration-specialized callable without a mutable kernel catalog.
+Schedules preserve their distinct measured shared/register storage and barriers.
+:ablation is diagnostic only; :nostage deliberately computes an incorrect result."""
+function staged_gemm_kernel(cfg::GemmTiling, family::Symbol=:scalar)
+    staged_gemm_supported(cfg,family) || throw(ArgumentError(
+        "gemm: unsupported $family tiling $cfg"))
+    return StagedGEMM{family,cfg}()
+end
 
 """Quote staged products with one live A/B fragment. Caller supplies sA/sB, sm/sn
-and c_mt_nt; optional offsets select the active half of a double buffer.
-This runs at definition time; regenerate the @eval kernels after editing it."""
+and c_mt_nt; optional offsets select the active half of a double buffer."""
 function stagedmma(STM, STN, NKT, LDA, LDB, width; aoffset=0, boffset=0)
     return quote
         Base.Cartesian.@nexprs $NKT u -> begin
@@ -312,23 +288,17 @@ function stagedmma(STM, STN, NKT, LDA, LDB, width; aoffset=0, boffset=0)
     end
 end
 
-for (ci, cfg) in enumerate(GEMM_TILINGS)
-    STM, STN, WM, WN, BK, PAD = cfg
-    BM, BN = GEMM_TILE * STM * WM, GEMM_TILE * STN * WN
-    WG = WM * WN * COOPMAT_SUBGROUP
-    LDA, LDB = BM + PAD, BK + PAD
-    NKT = BK ÷ GEMM_TILE
-    (BM * BK) % WG == 0 && (BK * BN) % WG == 0 ||
-        error("gemm tiling $cfg: staging does not divide the workgroup")
-    # splitidx avoids native integer-division defects for non-power-of-two blocks;
-    # BM need not divide WG. See test_shared_index_division.jl.
-    AREPS, BREPS = (BM * BK) ÷ WG, (BK * BN) ÷ WG
-    kname = Symbol("coopmat_gemm_staged_kernel_", ci, "!")
-    @eval begin
-        # Launches use exact whole workgroups and derive indices from group/local IDs.
-        function $kname(
-                                          C, A, B, bias, epi,
-                                          ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
+function staged_gemm_body(family, cfg)
+    STM,STN,WM,WN,BK,PAD = cfg
+    BM,BN,WG = GEMM_TILE*STM*WM,GEMM_TILE*STN*WN,WM*WN*COOPMAT_SUBGROUP
+    LDA,LDB,NKT = BM+PAD,BK+PAD,BK÷GEMM_TILE
+    AREPS,BREPS = BM*BK÷WG,BK*BN÷WG
+    LDA2,LDB2,BM2,BK2 = LDA÷2,LDB÷2,BM÷2,BK÷2
+    AREPS2,BREPS2 = BM*BK÷2÷WG,BK*BN÷2÷WG
+    LDA4,LDB4,BM4,BK4 = LDA÷4,LDB÷4,BM÷4,BK÷4
+    AREPS4,BREPS4 = BM*BK÷4÷WG,BK*BN÷4÷WG
+    if family === :scalar
+        return quote
             sA = KI.localmemory(Float16, Val(($LDA * $BK,)), Val(1))
             sB = KI.localmemory(Float16, Val(($LDB * $BN,)), Val(2))
 
@@ -378,388 +348,301 @@ for (ci, cfg) in enumerate(GEMM_TILINGS)
                           M, c_mt_nt, epi)
             return nothing
         end
-        GEMM_STAGED_KERNELS[$cfg] = $kname
-    end
-
-    # Packed pairs halve staging counts and cooperative-load strides. The guard
-    # keeps every pair, tile offset and workgroup transfer divisible by two.
-    if iseven(BM) && iseven(BK) && iseven(LDA) && iseven(LDB) &&
-       ((BM * BK) ÷ 2) % WG == 0 && ((BK * BN) ÷ 2) % WG == 0
-        LDA2, LDB2 = LDA ÷ 2, LDB ÷ 2
-        AREPS2, BREPS2 = (BM * BK) ÷ 2 ÷ WG, (BK * BN) ÷ 2 ÷ WG
-        BM2, BK2 = BM ÷ 2, BK ÷ 2
-        # Index width and optional ablation change code generation, not the schedule.
-        for (suffix, Index, table, ablation) in (
-            ("_v2!", Int, :GEMM_STAGED_V2_KERNELS, false),
-            ("_v2n!", Int32, :GEMM_STAGED_V2N_KERNELS, false),
-            ("_abl!", Int32, :GEMM_STAGED_ABL_KERNELS, true))
-            vname = Symbol("coopmat_gemm_staged_kernel_", ci, suffix)
-            extra_args = ablation ? (:(::Val{ABL}),) : ()
-            parameters = ablation ? (:M,:N,:K,:ABL) : (:M,:N,:K)
-            staging = quote
-                @inbounds for r in $Index(0):$Index($AREPS2 - 1)
-                    idx = tid + r * $Index($WG)
-                    p, kk = splitidx(idx, Val($BM2))
-                    g = $Index(1) + (tm + $Index(2) * $Index(p)) +
-                        (k0 + $Index(kk)) * $Index(M)
-                    sA[1 + Int(p) + Int(kk) * $LDA2] =
-                        (VecElement(A[g]), VecElement(A[g + $Index(1)]))
-                end
-                @inbounds for r in $Index(0):$Index($BREPS2 - 1)
-                    idx = tid + r * $Index($WG)
-                    q, j = splitidx(idx, Val($BK2))
-                    g = $Index(1) + (k0 + $Index(2) * $Index(q)) +
-                        (tn + $Index(j)) * $Index(K)
-                    sB[1 + Int(q) + Int(j) * $LDB2] =
-                        (VecElement(B[g]), VecElement(B[g + $Index(1)]))
-                end
+    elseif family in (:vec2,:narrow,:ablation)
+        Index = family === :vec2 ? Int : Int32
+        ablation = family === :ablation
+        staging = quote
+            @inbounds for r in $Index(0):$Index($AREPS2 - 1)
+                idx = tid + r * $Index($WG)
+                p, kk = splitidx(idx, Val($BM2))
+                g = $Index(1) + (tm + $Index(2) * $Index(p)) +
+                    (k0 + $Index(kk)) * $Index(M)
+                sA[1 + Int(p) + Int(kk) * $LDA2] =
+                    (VecElement(A[g]), VecElement(A[g + $Index(1)]))
             end
-            if ablation
-                staging = :(if ABL !== :nostage || kb == $Index(0); $staging; end)
-            end
-            @eval begin
-                function $vname(C, A, B, bias, epi, ::Val{M}, ::Val{N}, ::Val{K},
-                                $(extra_args...)) where {$(parameters...)}
-                    sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-                    sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
-
-                    tid = $Index(KI.get_local_id().x - 1)
-                    blk = $Index(KI.get_group_id().x - 1)
-                    nblk_m = $Index(M ÷ $BM)
-                    tm = (blk % nblk_m) * $Index($BM)
-                    tn = (blk ÷ nblk_m) * $Index($BN)
-
-                    s = tid ÷ $Index(32)
-                    sm = (s % $Index($WM)) * $Index($STM)
-                    sn = (s ÷ $Index($WM)) * $Index($STN)
-
-                    bp = bias === nothing ? bias : pointer(bias)
-                    Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                        c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-                    for kb in $Index(0):$Index(K ÷ $BK - 1)
-                        k0 = kb * $Index($BK)
-                        $staging
-                        KI.barrier()
-
-                        $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
-                        KI.barrier()
-                    end
-
-                    Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                        accstore!(C,
-                                  1 + Int(tm + (sm + mt - 1) * $Index(GEMM_TILE)) +
-                                      (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                                  M, c_mt_nt, epi)
-                    return nothing
-                end
-                $table[$cfg] = $vname
+            @inbounds for r in $Index(0):$Index($BREPS2 - 1)
+                idx = tid + r * $Index($WG)
+                q, j = splitidx(idx, Val($BK2))
+                g = $Index(1) + (k0 + $Index(2) * $Index(q)) +
+                    (tn + $Index(j)) * $Index(K)
+                sB[1 + Int(q) + Int(j) * $LDB2] =
+                    (VecElement(B[g]), VecElement(B[g + $Index(1)]))
             end
         end
-
-        # ── ncnn schedule: register prefetch + one shared tile ─────────────
-        kp = Symbol("coopmat_gemm_staged_kernel_", ci, "_prefetch!")
-        @eval begin
-            function $kp(
-                                              C, A, B, bias, epi,
-                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
-                sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
-
-                tid = Int32(KI.get_local_id().x - 1)
-                blk = Int32(KI.get_group_id().x - 1)
-                nblk_m = Int32(M ÷ $BM)
-                tm = (blk % nblk_m) * Int32($BM)
-                tn = (blk ÷ nblk_m) * Int32($BN)
-
-                s = tid ÷ Int32(32)
-                sm = (s % Int32($WM)) * Int32($STM)
-                sn = (s ÷ Int32($WM)) * Int32($STN)
-
-                bp = bias === nothing ? bias : pointer(bias)
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-                # Function-storage arrays are scalar-replaced by Lava's normal
-                # pipeline. They are the one-tile register queue, not another
-                # workgroup allocation.
-                nextA = MVector{$AREPS2,GemmV2}(undef)
-                nextB = MVector{$BREPS2,GemmV2}(undef)
-
-                # Prologue: fetch block zero to registers, then publish it to
-                # the sole shared-memory tile.
-                @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                    idx = tid + r * Int32($WG)
-                    p, kk = splitidx(idx, Val($BM2))
-                    g = Int32(1) + tm + Int32(2) * Int32(p) + Int32(kk) * Int32(M)
-                    nextA[Int(r) + 1] = (VecElement(A[g]), VecElement(A[g + Int32(1)]))
-                end
-                @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                    idx = tid + r * Int32($WG)
-                    q, j = splitidx(idx, Val($BK2))
-                    g = Int32(1) + Int32(2) * Int32(q) + (tn + Int32(j)) * Int32(K)
-                    nextB[Int(r) + 1] = (VecElement(B[g]), VecElement(B[g + Int32(1)]))
-                end
-                @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                    idx = tid + r * Int32($WG)
-                    p, kk = splitidx(idx, Val($BM2))
-                    sA[1 + Int(p) + Int(kk) * $LDA2] = nextA[Int(r) + 1]
-                end
-                @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                    idx = tid + r * Int32($WG)
-                    q, j = splitidx(idx, Val($BK2))
-                    sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
-                end
-                KI.barrier()
-
-                nkb = Int32(K ÷ $BK)
-                for kb in Int32(0):(nkb - Int32(1))
-                    # Issue the following tile's global reads before the MMAs.
-                    # Their values remain live while the current shared tile is
-                    # consumed, giving the scheduler independent memory work.
-                    if kb + Int32(1) < nkb
-                        k0 = (kb + Int32(1)) * Int32($BK)
-                        @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                            idx = tid + r * Int32($WG)
-                            p, kk = splitidx(idx, Val($BM2))
-                            g = Int32(1) + tm + Int32(2) * Int32(p) +
-                                (k0 + Int32(kk)) * Int32(M)
-                            nextA[Int(r) + 1] =
-                                (VecElement(A[g]), VecElement(A[g + Int32(1)]))
-                        end
-                        @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                            idx = tid + r * Int32($WG)
-                            q, j = splitidx(idx, Val($BK2))
-                            g = Int32(1) + k0 + Int32(2) * Int32(q) +
-                                (tn + Int32(j)) * Int32(K)
-                            nextB[Int(r) + 1] =
-                                (VecElement(B[g]), VecElement(B[g + Int32(1)]))
-                        end
-                    end
-
-                    $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
-
-                    # The last product has no successor to publish.
-                    if kb + Int32(1) < nkb
-                        KI.barrier()
-                        @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                            idx = tid + r * Int32($WG)
-                            p, kk = splitidx(idx, Val($BM2))
-                            sA[1 + Int(p) + Int(kk) * $LDA2] = nextA[Int(r) + 1]
-                        end
-                        @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                            idx = tid + r * Int32($WG)
-                            q, j = splitidx(idx, Val($BK2))
-                            sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
-                        end
-                        KI.barrier()
-                    end
-                end
-
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    accstore!(C,
-                              1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
-                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                              M, c_mt_nt, epi)
-                return nothing
-            end
-            GEMM_STAGED_PREFETCH_KERNELS[$cfg] = $kp
+        if ablation
+            staging = :(if ABL !== :nostage || kb == $Index(0); $staging; end)
         end
+        return quote
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
-        # Alternate shared halves: fill the next tile while multiplying the current one.
-        # One barrier both publishes writes and retires reads before halves swap.
-        kdb = Symbol("coopmat_gemm_staged_kernel_", ci, "_db!")
-        @eval begin
-            function $kdb(
-                                              C, A, B, bias, epi,
-                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = KI.localmemory(GemmV2, Val((2 * $LDA2 * $BK,)), Val(1))
-                sB = KI.localmemory(GemmV2, Val((2 * $LDB2 * $BN,)), Val(2))
+            tid = $Index(KI.get_local_id().x - 1)
+            blk = $Index(KI.get_group_id().x - 1)
+            nblk_m = $Index(M ÷ $BM)
+            tm = (blk % nblk_m) * $Index($BM)
+            tn = (blk ÷ nblk_m) * $Index($BN)
 
-                tid = Int32(KI.get_local_id().x - 1)
-                blk = Int32(KI.get_group_id().x - 1)
-                nblk_m = Int32(M ÷ $BM)
-                tm = (blk % nblk_m) * Int32($BM)
-                tn = (blk ÷ nblk_m) * Int32($BN)
+            s = tid ÷ $Index(32)
+            sm = (s % $Index($WM)) * $Index($STM)
+            sn = (s ÷ $Index($WM)) * $Index($STN)
 
-                s = tid ÷ Int32(32)
-                sm = (s % Int32($WM)) * Int32($STM)
-                sn = (s ÷ Int32($WM)) * Int32($STN)
+            bp = bias === nothing ? bias : pointer(bias)
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
 
-                bp = bias === nothing ? bias : pointer(bias)
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-                nkb = Int32(K ÷ $BK)
-
-                # Prologue: block 0 into buffer 0, so the loop always has a tile
-                # to compute on and only ever stages the NEXT one.
-                @inbounds for r in Int32(0):Int32($AREPS2 - 1)
-                    idx = tid + r * Int32($WG)
-                    p, kk = splitidx(idx, Val($BM2))
-                    g = Int32(1) + (tm + Int32(2) * Int32(p)) + Int32(kk) * Int32(M)
-                    sA[1 + Int(p) + Int(kk) * $LDA2] =
-                        (VecElement(A[g]), VecElement(A[g + Int32(1)]))
-                end
-                @inbounds for r in Int32(0):Int32($BREPS2 - 1)
-                    idx = tid + r * Int32($WG)
-                    q, j = splitidx(idx, Val($BK2))
-                    g = Int32(1) + Int32(2) * Int32(q) + (tn + Int32(j)) * Int32(K)
-                    sB[1 + Int(q) + Int(j) * $LDB2] =
-                        (VecElement(B[g]), VecElement(B[g + Int32(1)]))
-                end
+            for kb in $Index(0):$Index(K ÷ $BK - 1)
+                k0 = kb * $Index($BK)
+                $staging
                 KI.barrier()
 
-                for kb in Int32(0):(nkb - Int32(1))
-                    rda = (kb & Int32(1)) * Int32($LDA2 * $BK)
-                    rdb = (kb & Int32(1)) * Int32($LDB2 * $BN)
-                    wra = (Int32(1) - (kb & Int32(1))) * Int32($LDA2 * $BK)
-                    wrb = (Int32(1) - (kb & Int32(1))) * Int32($LDB2 * $BN)
-                    # Unconditional staging keeps all invocations at the barrier. On the last step,
-                    # repeat the final tile into the unused half rather than branch around the loads.
-                    k0 = min(kb + Int32(1), nkb - Int32(1)) * Int32($BK)
+                $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
+                KI.barrier()
+            end
 
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                accstore!(C,
+                          1 + Int(tm + (sm + mt - 1) * $Index(GEMM_TILE)) +
+                              (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                          M, c_mt_nt, epi)
+            return nothing
+        end
+    elseif family === :prefetch
+        return quote
+            sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
+            sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
+
+            tid = Int32(KI.get_local_id().x - 1)
+            blk = Int32(KI.get_group_id().x - 1)
+            nblk_m = Int32(M ÷ $BM)
+            tm = (blk % nblk_m) * Int32($BM)
+            tn = (blk ÷ nblk_m) * Int32($BN)
+
+            s = tid ÷ Int32(32)
+            sm = (s % Int32($WM)) * Int32($STM)
+            sn = (s ÷ Int32($WM)) * Int32($STN)
+
+            bp = bias === nothing ? bias : pointer(bias)
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
+
+            # Function-storage arrays are scalar-replaced by Lava's normal
+            # pipeline. They are the one-tile register queue, not another
+            # workgroup allocation.
+            nextA = MVector{$AREPS2,GemmV2}(undef)
+            nextB = MVector{$BREPS2,GemmV2}(undef)
+
+            # Prologue: fetch block zero to registers, then publish it to
+            # the sole shared-memory tile.
+            @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                idx = tid + r * Int32($WG)
+                p, kk = splitidx(idx, Val($BM2))
+                g = Int32(1) + tm + Int32(2) * Int32(p) + Int32(kk) * Int32(M)
+                nextA[Int(r) + 1] = (VecElement(A[g]), VecElement(A[g + Int32(1)]))
+            end
+            @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                idx = tid + r * Int32($WG)
+                q, j = splitidx(idx, Val($BK2))
+                g = Int32(1) + Int32(2) * Int32(q) + (tn + Int32(j)) * Int32(K)
+                nextB[Int(r) + 1] = (VecElement(B[g]), VecElement(B[g + Int32(1)]))
+            end
+            @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                idx = tid + r * Int32($WG)
+                p, kk = splitidx(idx, Val($BM2))
+                sA[1 + Int(p) + Int(kk) * $LDA2] = nextA[Int(r) + 1]
+            end
+            @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                idx = tid + r * Int32($WG)
+                q, j = splitidx(idx, Val($BK2))
+                sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
+            end
+            KI.barrier()
+
+            nkb = Int32(K ÷ $BK)
+            for kb in Int32(0):(nkb - Int32(1))
+                # Issue the following tile's global reads before the MMAs.
+                # Their values remain live while the current shared tile is
+                # consumed, giving the scheduler independent memory work.
+                if kb + Int32(1) < nkb
+                    k0 = (kb + Int32(1)) * Int32($BK)
                     @inbounds for r in Int32(0):Int32($AREPS2 - 1)
                         idx = tid + r * Int32($WG)
                         p, kk = splitidx(idx, Val($BM2))
-                        g = Int32(1) + (tm + Int32(2) * Int32(p)) +
+                        g = Int32(1) + tm + Int32(2) * Int32(p) +
                             (k0 + Int32(kk)) * Int32(M)
-                        sA[1 + Int(wra) + Int(p) + Int(kk) * $LDA2] =
+                        nextA[Int(r) + 1] =
                             (VecElement(A[g]), VecElement(A[g + Int32(1)]))
                     end
                     @inbounds for r in Int32(0):Int32($BREPS2 - 1)
                         idx = tid + r * Int32($WG)
                         q, j = splitidx(idx, Val($BK2))
-                        g = Int32(1) + (k0 + Int32(2) * Int32(q)) +
+                        g = Int32(1) + k0 + Int32(2) * Int32(q) +
                             (tn + Int32(j)) * Int32(K)
-                        sB[1 + Int(wrb) + Int(q) + Int(j) * $LDB2] =
+                        nextB[Int(r) + 1] =
                             (VecElement(B[g]), VecElement(B[g + Int32(1)]))
                     end
-
-                    $(stagedmma(STM,STN,NKT,LDA2,LDB2,2; aoffset=:(Int(rda)),boffset=:(Int(rdb))))
-                    # ONE barrier: it both publishes the tile just staged and
-                    # retires the reads of the tile just consumed.
-                    KI.barrier()
                 end
 
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    accstore!(C,
-                              1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
-                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                              M, c_mt_nt, epi)
-                return nothing
-            end
-            GEMM_STAGED_DB_KERNELS[$cfg] = $kdb
-        end
-    end
+                $(stagedmma(STM,STN,NKT,LDA2,LDB2,2))
 
-    # Vec4 staging requires exact packed dimensions and per-lane tile coverage.
-    # Cooperative-matrix strides count vectors, not scalar components.
-    if LDA % 4 == 0 && LDB % 4 == 0 && BM % 4 == 0 && BK % 4 == 0 &&
-       (BM * BK) % (4 * WG) == 0 && (BK * BN) % (4 * WG) == 0
-        LDA4, LDB4 = LDA ÷ 4, LDB ÷ 4
-        AREPS4, BREPS4 = (BM * BK) ÷ 4 ÷ WG, (BK * BN) ÷ 4 ÷ WG
-        BM4, BK4 = BM ÷ 4, BK ÷ 4
-        kv4 = Symbol("coopmat_gemm_staged_kernel_", ci, "_v4!")
-        @eval begin
-            function $kv4(
-                                              C, A, B, bias, epi,
-                                              ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
-                sA = KI.localmemory(GemmV4, Val(($LDA4 * $BK,)), Val(1))
-                sB = KI.localmemory(GemmV4, Val(($LDB4 * $BN,)), Val(2))
-
-                tid = Int32(KI.get_local_id().x - 1)
-                blk = Int32(KI.get_group_id().x - 1)
-                nblk_m = Int32(M ÷ $BM)
-                tm = (blk % nblk_m) * Int32($BM)
-                tn = (blk ÷ nblk_m) * Int32($BN)
-
-                s = tid ÷ Int32(32)
-                sm = (s % Int32($WM)) * Int32($STM)
-                sn = (s ÷ Int32($WM)) * Int32($STN)
-
-                bp = bias === nothing ? bias : pointer(bias)
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
-
-                for kb in Int32(0):Int32(K ÷ $BK - 1)
-                    k0 = kb * Int32($BK)
-                    # A: quads along `m`, the contiguous axis, so consecutive
-                    # lanes still read consecutive global addresses.
-                    @inbounds for r in Int32(0):Int32($AREPS4 - 1)
-                        idx = tid + r * Int32($WG)
-                        p, kk = splitidx(idx, Val($BM4))
-                        g = Int32(1) + (tm + Int32(4) * Int32(p)) +
-                            (k0 + Int32(kk)) * Int32(M)
-                        sA[1 + Int(p) + Int(kk) * $LDA4] =
-                            (VecElement(A[g]), VecElement(A[g + Int32(1)]),
-                             VecElement(A[g + Int32(2)]), VecElement(A[g + Int32(3)]))
-                    end
-                    # B: quads along `k`, contiguous here for the same reason.
-                    @inbounds for r in Int32(0):Int32($BREPS4 - 1)
-                        idx = tid + r * Int32($WG)
-                        q, j = splitidx(idx, Val($BK4))
-                        g = Int32(1) + (k0 + Int32(4) * Int32(q)) +
-                            (tn + Int32(j)) * Int32(K)
-                        sB[1 + Int(q) + Int(j) * $LDB4] =
-                            (VecElement(B[g]), VecElement(B[g + Int32(1)]),
-                             VecElement(B[g + Int32(2)]), VecElement(B[g + Int32(3)]))
-                    end
+                # The last product has no successor to publish.
+                if kb + Int32(1) < nkb
                     KI.barrier()
-
-                    $(stagedmma(STM,STN,NKT,LDA4,LDB4,4))
+                    @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                        idx = tid + r * Int32($WG)
+                        p, kk = splitidx(idx, Val($BM2))
+                        sA[1 + Int(p) + Int(kk) * $LDA2] = nextA[Int(r) + 1]
+                    end
+                    @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                        idx = tid + r * Int32($WG)
+                        q, j = splitidx(idx, Val($BK2))
+                        sB[1 + Int(q) + Int(j) * $LDB2] = nextB[Int(r) + 1]
+                    end
                     KI.barrier()
                 end
-
-                Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
-                    accstore!(C,
-                              1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
-                                  (tn + (sn + nt - 1) * GEMM_TILE) * M,
-                              M, c_mt_nt, epi)
-                return nothing
             end
-            GEMM_STAGED_V4_KERNELS[$cfg] = $kv4
+
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                accstore!(C,
+                          1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
+                              (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                          M, c_mt_nt, epi)
+            return nothing
         end
-    end
+    elseif family === :doublebuf
+        return quote
+            sA = KI.localmemory(GemmV2, Val((2 * $LDA2 * $BK,)), Val(1))
+            sB = KI.localmemory(GemmV2, Val((2 * $LDB2 * $BN,)), Val(2))
 
+            tid = Int32(KI.get_local_id().x - 1)
+            blk = Int32(KI.get_group_id().x - 1)
+            nblk_m = Int32(M ÷ $BM)
+            tm = (blk % nblk_m) * Int32($BM)
+            tn = (blk ÷ nblk_m) * Int32($BN)
 
-end
+            s = tid ÷ Int32(32)
+            sm = (s % Int32($WM)) * Int32($STM)
+            sn = (s ÷ Int32($WM)) * Int32($STN)
 
-"""Gather-only tilings for output channels divisible by 144: 192×144 and 96×288
-blocks, twelve subgroups with 3×3 tiles each. Wider column blocks avoid repeated
-im2col gathering and excessive output padding. Plain GEMM does not select these."""
-const CONV_GATHER_TILINGS = GemmTiling[
-    (3, 3, 4, 3, 32, 8),    # 192 x 144, 12 subgroups
-    (3, 3, 2, 6, 32, 8),    #  96 x 288, 12 subgroups
-]
+            bp = bias === nothing ? bias : pointer(bias)
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
 
-# The gathering kernels, for the product's tilings and for the convolution-only
-# ones above. Numbered through both lists so the product's keep their names.
-for (ci, cfg) in enumerate(vcat(GEMM_TILINGS, CONV_GATHER_TILINGS))
-    STM, STN, WM, WN, BK, PAD = cfg
-    BM, BN = GEMM_TILE * STM * WM, GEMM_TILE * STN * WN
-    WG = WM * WN * COOPMAT_SUBGROUP
-    LDA, LDB = BM + PAD, BK + PAD
-    NKT = BK ÷ GEMM_TILE
-    vec2 = iseven(BM) && iseven(BK) && iseven(LDA) && iseven(LDB) &&
-           ((BM * BK) ÷ 2) % WG == 0 && ((BK * BN) ÷ 2) % WG == 0
-    if !vec2
-        ci > length(GEMM_TILINGS) &&
-            error("CONV_GATHER_TILINGS entry $cfg does not stage in vec2 pairs")
-        continue
-    end
-    LDA2, LDB2 = LDA ÷ 2, LDB ÷ 2
-    AREPS2, BREPS2 = (BM * BK) ÷ 2 ÷ WG, (BK * BN) ÷ 2 ÷ WG
-    BM2, BK2 = BM ÷ 2, BK ÷ 2
+            nkb = Int32(K ÷ $BK)
 
-    # Gather uses an explicitly unrolled register queue. Plain prefetch keeps
-    # MVector storage: sharing that queue encoding regressed its measured path.
-    # Their cooperative-matrix products share stagedmma without changing queues.
-    kg = Symbol("coopmat_gemm_staged_kernel_", ci, "_gather!")
-    @eval begin
-        function $kg(
-                                          C, A, B, bias, epi, ald,
-                                          ::Val{M}, ::Val{N}, ::Val{K}) where {M,N,K}
+            # Prologue: block 0 into buffer 0, so the loop always has a tile
+            # to compute on and only ever stages the NEXT one.
+            @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                idx = tid + r * Int32($WG)
+                p, kk = splitidx(idx, Val($BM2))
+                g = Int32(1) + (tm + Int32(2) * Int32(p)) + Int32(kk) * Int32(M)
+                sA[1 + Int(p) + Int(kk) * $LDA2] =
+                    (VecElement(A[g]), VecElement(A[g + Int32(1)]))
+            end
+            @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                idx = tid + r * Int32($WG)
+                q, j = splitidx(idx, Val($BK2))
+                g = Int32(1) + Int32(2) * Int32(q) + (tn + Int32(j)) * Int32(K)
+                sB[1 + Int(q) + Int(j) * $LDB2] =
+                    (VecElement(B[g]), VecElement(B[g + Int32(1)]))
+            end
+            KI.barrier()
+
+            for kb in Int32(0):(nkb - Int32(1))
+                rda = (kb & Int32(1)) * Int32($LDA2 * $BK)
+                rdb = (kb & Int32(1)) * Int32($LDB2 * $BN)
+                wra = (Int32(1) - (kb & Int32(1))) * Int32($LDA2 * $BK)
+                wrb = (Int32(1) - (kb & Int32(1))) * Int32($LDB2 * $BN)
+                # Unconditional staging keeps all invocations at the barrier. On the last step,
+                # repeat the final tile into the unused half rather than branch around the loads.
+                k0 = min(kb + Int32(1), nkb - Int32(1)) * Int32($BK)
+
+                @inbounds for r in Int32(0):Int32($AREPS2 - 1)
+                    idx = tid + r * Int32($WG)
+                    p, kk = splitidx(idx, Val($BM2))
+                    g = Int32(1) + (tm + Int32(2) * Int32(p)) +
+                        (k0 + Int32(kk)) * Int32(M)
+                    sA[1 + Int(wra) + Int(p) + Int(kk) * $LDA2] =
+                        (VecElement(A[g]), VecElement(A[g + Int32(1)]))
+                end
+                @inbounds for r in Int32(0):Int32($BREPS2 - 1)
+                    idx = tid + r * Int32($WG)
+                    q, j = splitidx(idx, Val($BK2))
+                    g = Int32(1) + (k0 + Int32(2) * Int32(q)) +
+                        (tn + Int32(j)) * Int32(K)
+                    sB[1 + Int(wrb) + Int(q) + Int(j) * $LDB2] =
+                        (VecElement(B[g]), VecElement(B[g + Int32(1)]))
+                end
+
+                $(stagedmma(STM,STN,NKT,LDA2,LDB2,2; aoffset=:(Int(rda)),boffset=:(Int(rdb))))
+                # ONE barrier: it both publishes the tile just staged and
+                # retires the reads of the tile just consumed.
+                KI.barrier()
+            end
+
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                accstore!(C,
+                          1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
+                              (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                          M, c_mt_nt, epi)
+            return nothing
+        end
+    elseif family === :vec4
+        return quote
+            sA = KI.localmemory(GemmV4, Val(($LDA4 * $BK,)), Val(1))
+            sB = KI.localmemory(GemmV4, Val(($LDB4 * $BN,)), Val(2))
+
+            tid = Int32(KI.get_local_id().x - 1)
+            blk = Int32(KI.get_group_id().x - 1)
+            nblk_m = Int32(M ÷ $BM)
+            tm = (blk % nblk_m) * Int32($BM)
+            tn = (blk ÷ nblk_m) * Int32($BN)
+
+            s = tid ÷ Int32(32)
+            sm = (s % Int32($WM)) * Int32($STM)
+            sn = (s ÷ Int32($WM)) * Int32($STN)
+
+            bp = bias === nothing ? bias : pointer(bias)
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                c_mt_nt = accinit(bias, bp, 1 + tm + (sm + mt - 1) * GEMM_TILE)
+
+            for kb in Int32(0):Int32(K ÷ $BK - 1)
+                k0 = kb * Int32($BK)
+                # A: quads along `m`, the contiguous axis, so consecutive
+                # lanes still read consecutive global addresses.
+                @inbounds for r in Int32(0):Int32($AREPS4 - 1)
+                    idx = tid + r * Int32($WG)
+                    p, kk = splitidx(idx, Val($BM4))
+                    g = Int32(1) + (tm + Int32(4) * Int32(p)) +
+                        (k0 + Int32(kk)) * Int32(M)
+                    sA[1 + Int(p) + Int(kk) * $LDA4] =
+                        (VecElement(A[g]), VecElement(A[g + Int32(1)]),
+                         VecElement(A[g + Int32(2)]), VecElement(A[g + Int32(3)]))
+                end
+                # B: quads along `k`, contiguous here for the same reason.
+                @inbounds for r in Int32(0):Int32($BREPS4 - 1)
+                    idx = tid + r * Int32($WG)
+                    q, j = splitidx(idx, Val($BK4))
+                    g = Int32(1) + (k0 + Int32(4) * Int32(q)) +
+                        (tn + Int32(j)) * Int32(K)
+                    sB[1 + Int(q) + Int(j) * $LDB4] =
+                        (VecElement(B[g]), VecElement(B[g + Int32(1)]),
+                         VecElement(B[g + Int32(2)]), VecElement(B[g + Int32(3)]))
+                end
+                KI.barrier()
+
+                $(stagedmma(STM,STN,NKT,LDA4,LDB4,4))
+                KI.barrier()
+            end
+
+            Base.Cartesian.@nexprs $STN nt -> Base.Cartesian.@nexprs $STM mt ->
+                accstore!(C,
+                          1 + Int(tm + (sm + mt - 1) * Int32(GEMM_TILE)) +
+                              (tn + (sn + nt - 1) * GEMM_TILE) * M,
+                          M, c_mt_nt, epi)
+            return nothing
+        end
+    elseif family === :gather
+        return quote
             sA = KI.localmemory(GemmV2, Val(($LDA2 * $BK,)), Val(1))
             sB = KI.localmemory(GemmV2, Val(($LDB2 * $BN,)), Val(2))
 
@@ -836,8 +719,23 @@ for (ci, cfg) in enumerate(vcat(GEMM_TILINGS, CONV_GATHER_TILINGS))
                           M, c_mt_nt, epi)
             return nothing
         end
-        GEMM_STAGED_GATHER_KERNELS[$cfg] = $kg
     end
+    error("unknown staged GEMM family $family")
+end
+
+@generated function (::StagedGEMM{FAMILY,CFG})(C,A,B,bias,epi,
+        ::Val{M},::Val{N},::Val{K}) where {FAMILY,CFG,M,N,K}
+    return staged_gemm_body(FAMILY,CFG)
+end
+
+@generated function (::StagedGEMM{:ablation,CFG})(C,A,B,bias,epi,
+        ::Val{M},::Val{N},::Val{K},::Val{ABL}) where {CFG,M,N,K,ABL}
+    return staged_gemm_body(:ablation,CFG)
+end
+
+@generated function (::StagedGEMM{:gather,CFG})(C,A,B,bias,epi,ald,
+        ::Val{M},::Val{N},::Val{K}) where {CFG,M,N,K}
+    return staged_gemm_body(:gather,CFG)
 end
 
 """    gemmaccum(T) -> Type
@@ -1177,32 +1075,29 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
             (narrow_ok && widemul(K, N) < typemax(Int32) && widemul(M, N) < typemax(Int32)) ||
                 throw(ArgumentError("coopmat_gemm!: a loader needs 32-bit indexing \
                                      of B and C, got M=$M N=$N K=$K"))
-            haskey(GEMM_STAGED_GATHER_KERNELS, c) ||
+            staged_gemm_supported(c,:gather) ||
                 throw(ArgumentError("coopmat_gemm!: no gathering kernel for tiling $c"))
             wgg = gemm_wg(c)
-            return [ArrayLaunch(GEMM_STAGED_GATHER_KERNELS[c],
+            return [ArrayLaunch(staged_gemm_kernel(c,:gather),
                                (C, A, B, bias, epilogue, aload, Val(M), Val(N), Val(K)),
                                (M ÷ gemm_bm(c)) * (N ÷ gemm_bn(c)) * wgg, wgg)]
         end
-        kern = if !vec2
-            GEMM_STAGED_KERNELS[c]
-        elseif vec4 && haskey(GEMM_STAGED_V4_KERNELS, c)
-            GEMM_STAGED_V4_KERNELS[c]
-        elseif narrow && doublebuf
-            # The double-buffered kernel is a narrow-index one, so it needs both
-            # gates; falling back through the narrow kernel keeps a shape that
-            # only fails `doublebuf` on the next-best path rather than the worst.
-            get(GEMM_STAGED_DB_KERNELS, c,
-                get(GEMM_STAGED_V2N_KERNELS, c,
-                    get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c])))
-        elseif narrow && prefetch && haskey(GEMM_STAGED_PREFETCH_KERNELS, c)
-            GEMM_STAGED_PREFETCH_KERNELS[c]
-        elseif narrow
-            get(GEMM_STAGED_V2N_KERNELS, c,
-                get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c]))
+        family = if !vec2
+            :scalar
+        elseif vec4 && staged_gemm_supported(c,:vec4)
+            :vec4
+        elseif narrow && doublebuf && staged_gemm_supported(c,:doublebuf)
+            :doublebuf
+        elseif narrow && !doublebuf && prefetch && staged_gemm_supported(c,:prefetch)
+            :prefetch
+        elseif narrow && staged_gemm_supported(c,:narrow)
+            :narrow
+        elseif staged_gemm_supported(c,:vec2)
+            :vec2
         else
-            get(GEMM_STAGED_V2_KERNELS, c, GEMM_STAGED_KERNELS[c])
+            :scalar
         end
+        kern = staged_gemm_kernel(c,family)
         return [ArrayLaunch(kern, (C, A, B, bias, epilogue, Val(M), Val(N), Val(K)),
                            (M ÷ gemm_bm(c)) * (N ÷ gemm_bn(c)) * wg, wg)]
     end
@@ -1215,7 +1110,7 @@ function coopmat_gemm_launches(C, A, B, M::Int, N::Int, K::Int;
     # The epilogue belongs to whoever reduces the planes.
     epilogue === identity || splitk == 1 ||
         throw(ArgumentError("coopmat_gemm!: an epilogue needs splitk == 1, got $splitk"))
-    block = ArrayLaunch(GEMM_BLOCK_KERNELS[blk],
+    block = ArrayLaunch(blocked_gemm_kernel(blk),
                        (dst, A, B, bias, epilogue, Val(M), Val(N), Val(K),
                         Val((K ÷ GEMM_TILE) ÷ splitk)),
                        ntiles * splitk * 32 * nbatch, GEMM_WORKGROUP)

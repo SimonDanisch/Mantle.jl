@@ -1,29 +1,9 @@
-# Which plans can be recorded, and that both answers are right.
-#
-# `run!` records on the first run of any plan it can record, so "can it" has to be
-# decided somewhere and be right. ONE thing says no: a SURFACE, since a
-# swapchain image is a different image every frame and a recording names one.
-#
-# The other candidate is an `Update`. A whole-buffer one landing by RENAMING is
-# what a recording cannot follow, because it holds the address it was written
-# with, so a ranged update would record and a whole-buffer one would not. Both
-# write in place,
-# and the two testsets below pin that from the outside: same numbers, same
-# recording, and the store the plan was compiled against is still the store.
-#
-# The render pass here is also the only coverage the emitter's `begin_pass!` /
-# `set_viewport!` / `draw_in_pass!` / `end_pass!` have. `test_window.jl` is where
-# they belong and it cannot reach them: it aborts in its first testset compiling
-# `scatter_vertex` (`KernelError: kernel returns a value of type Any`, identical at
-# HEAD — verified by stashing), which takes every testset after it down too.
-
+# Headless rendering records on graphics devices; stores preserve addresses
+# and replay on every recording backend.
 using Test, Mantle, KernelAbstractions
-import Lava, Vulkan   # the extension trigger; `import`, since Lava exports names Mantle does
 using GeometryBasics: Vec4f
 using ColorTypes: RGBA
 include(joinpath(@__DIR__, "testbackend.jl"))
-# `KA` and `M` are `const` in whichever test file gets there first, and a `const`
-# re-bound to what it already holds is not a redefinition.
 const KA = KernelAbstractions
 const M = Mantle
 
@@ -34,9 +14,6 @@ function tri_vertex()
     (position = Vec4f(x, y, 0f0, 1f0), color = Vec4f(0.25f0, 0.5f0, 0.75f0, 1f0))
 end
 tri_fragment(inputs) = inputs.color
-# `Mantle.vertex_index`, QUALIFIED: `runtests.jl` says `using Mantle` and this
-# file is included into the same Main, where Lava may also be `using`ed — and two
-# modules exporting one name leaves the bare form resolving to neither.
 const TRI = M.Rasterizer(; vertex = M.VertexShader(tri_vertex; outputs = (color = Vec4f,)),
                            fragment = M.FragmentShader(tri_fragment),
                            topology = M.TriangleList(),
@@ -51,39 +28,33 @@ end
 
 @testset "a headless render pass records and runs" begin
     dev = M.Device(TESTBACKEND)
-    N = 64
-    g = M.Graph(dev)
-    img = M.Transient.Image(g, RGBA{Float16}, (N, N))
-    out = M.Buffer(dev, zeros(RGBA{Float16}, N * N))
-    M.render!(g, "tri", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
-        M.draw!(p, TRI, (), 3)
+    if !M.supports_graphics(dev)
+        @test_skip M.supports_graphics(dev)
+    else
+        N = 64
+        g = M.Graph(dev)
+        img = M.Transient.Image(g, RGBA{Float16}, (N, N))
+        out = M.Buffer(dev, zeros(RGBA{Float16}, N * N))
+        M.render!(g, "tri", img => M.Clear((0f0, 0f0, 0f0, 1f0))) do p
+            M.draw!(p, TRI, (), 3)
+        end
+        M.copy!(g, "read", out, img)
+        pl = M.Plan(g)
+        M.record!(pl)
+        @test M.recorded(pl) == M.recordable(dev, pl)
+        M.run!(pl)
+        KA.synchronize(M.backend(dev))
+        px = Array(M.storage(out))
+        @test all(p -> Float32(p.r) ≈ 0.25f0 && Float32(p.g) ≈ 0.5f0, px)
+        fill!(M.storage(out), RGBA{Float16}(0, 0, 0, 0))
+        KA.synchronize(M.backend(dev))
+        M.run!(pl)
+        KA.synchronize(M.backend(dev))
+        @test Array(M.storage(out)) == px
+        M.free!(pl)
     end
-    M.copy!(g, "read", out, img)
-    pl = M.Plan(g)
-    M.record!(pl)
-    # Recorded wherever this device records a render pass; walked per run where it
-    # does not, and the same pixels either way.
-    @test M.recorded(pl) == M.recordable(dev, pl)
-    M.run!(pl)
-    KA.synchronize(M.backend(dev))
-    px = Array(M.storage(out))
-    @test all(p -> Float32(p.r) ≈ 0.25f0 && Float32(p.g) ≈ 0.5f0, px)
-    fill!(M.storage(out), RGBA{Float16}(0, 0, 0, 0))
-    KA.synchronize(M.backend(dev))
-    M.run!(pl)
-    KA.synchronize(M.backend(dev))
-    @test Array(M.storage(out)) == px
-    M.free!(pl)
 end
 
-# A whole-buffer store that RENAMES — the contents landing in a fresh store with
-# the resource pointed at it — is what a recording cannot follow, because it
-# holds the address it was written with. That would make this plan unrecordable,
-# and it
-# was one of the two reasons `record!` could refuse one.
-#
-# Both routes are in place now — see `emitstore!` — so the plan records and
-# every value reaches the recording that reads it.
 @testset "a whole-buffer store writes in place, so its plan records" begin
     dev = M.Device(TESTBACKEND)
     n = 128
@@ -94,8 +65,6 @@ end
                                    src), n; name = "copy")
     pl = M.record!(M.Plan(g))
     @test Mantle.recordable(pl)
-    # The store the plan was compiled against, so a rename would show up as a
-    # different object rather than as a wrong number.
     store = src.store
     for v in (3f0, 7f0, 11f0, 13f0)
         src[:] = fill(v, n)
@@ -128,9 +97,6 @@ end
     M.free!(pl)
 end
 
-# Two stores to different ranges before one run are two writes, in order: a
-# `Buffer` keeps a LIST of what is waiting, where a `GPURef` keeps the last
-# value. The second range overlaps the first, so the order is visible.
 @testset "two ranged stores before one run both land, in order" begin
     dev = M.Device(TESTBACKEND)
     n = 128
@@ -153,7 +119,3 @@ end
     @test !M.isdirty(src)
     M.free!(pl)
 end
-
-# The SURFACE half of `recordable` is not asserted here: it needs a real window,
-# and a window in the main suite is what `test_window.jl` runs in its own process
-# with a deadline for. `record!`'s refusal names it.

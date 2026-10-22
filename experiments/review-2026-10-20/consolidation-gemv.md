@@ -13,7 +13,7 @@ emit no dispatch. Eager and recorded numerical behavior remains shared.
 
 Qualification:
 
-- Existing baseline GEMV suites pass on AMD/NVIDIA Vulkan and ROCm before edits.
+- Existing baseline GEMV suites pass on AMD/NVIDIA Vulkan before edits.
 - 88 paired old/new output-byte and validation checks cover 43 configurations
   on both Vulkan GPUs, including partial subgroups and nonstandard unrolling.
 - 509 numerical, replay, configuration and cache-key assertions pass across the
