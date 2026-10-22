@@ -288,15 +288,10 @@ end
 copy (queued under DISTINCT), and append its display-order entry. Return the
 aligned bytes used. The caller submits and waits."""
 function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
-    w=dec.ctx; sps=dec.sps; pps=dec.pps
-    SESSION=dec.SESSION; PARAMS=dec.PARAMS; PIN=dec.PIN; imgs=dec.imgs
-    bbuf=dec.bbuf; bmap=dec.bmap; cbh=dec.cbh; CB=dec.cbh.vks
-    CW=dec.CW; CH=dec.CH; DW=dec.DW; DH=dec.DH; chroma=dec.chroma
+    sps=dec.sps; pps=dec.pps; imgs=dec.imgs
+    bbuf=dec.bbuf; bmap=dec.bmap
+    CW=dec.CW; CH=dec.CH
     dpb=dec.dpb; freeslots=dec.freeslots
-    # A decode writes reference pixels the next decode reads, even when no layout changes.
-    mb=Ref(C.VkMemoryBarrier(C.VK_STRUCTURE_TYPE_MEMORY_BARRIER,C_NULL,UInt32(C.VK_ACCESS_MEMORY_WRITE_BIT),UInt32(C.VK_ACCESS_MEMORY_READ_BIT)|UInt32(C.VK_ACCESS_MEMORY_WRITE_BIT)))
-    DPBLAYOUT=UInt32(C.VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR); TSRC=UInt32(C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-    DSTLAYOUT=UInt32(C.VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR)   # DISTINCT decode target
     begin
         sh=parse_slice(au[1],sps)
         if sh.idr
@@ -324,14 +319,14 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
         isref = sh.nrid!=0
         outslot=popfirst!(freeslots)
         outvimg,outviewhl=imgs[outslot]     # DPB slot of the setup reference picture
-        outimg=outvimg.image.vks; outview=outviewhl.vks; outlay=outvimg.layout
+        outview=outviewhl.vks
         # Decode target; under COINCIDE the DPB slot itself.
         distinct = dec.mkoutimg !== nothing
         if distinct
             while length(dec.outimgs) < slot; push!(dec.outimgs, dec.mkoutimg()); end
         end
         dstvimg,dstviewhl = distinct ? dec.outimgs[slot] : (outvimg,outviewhl)
-        dstimg=dstvimg.image.vks; dstview=dstviewhl.vks; dstlay=dstvimg.layout
+        dstview=dstviewhl.vks
         sliceoffs, bitrange = uploadbitstream!(bmap+bufbase, au, dec.bsalign)
         # Reference slots of the active DPB.
         refpr=Ref{C.VkVideoPictureResourceInfoKHR}[]; refri=Ref{C.StdVideoDecodeH264ReferenceInfo}[]; refds=Ref{C.VkVideoDecodeH264DpbSlotInfoKHR}[]
@@ -357,37 +352,8 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
         soff=sliceoffs
         h264pi=Ref(C.VkVideoDecodeH264PictureInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PICTURE_INFO_KHR,C_NULL,rp(stdpic),UInt32(length(soff)),pointer(soff)))
         decinfo=Ref(C.VkVideoDecodeInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR,pc(h264pi),UInt32(0),bbuf,UInt64(bufbase),UInt64(bitrange),dstpr[],rp(setup),UInt32(length(decref)),isempty(decref) ? Ptr{C.VkVideoReferenceSlotInfoKHR}(C_NULL) : pointer(decref)))
-        beginfo=Ref(C.VkVideoBeginCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR,C_NULL,UInt32(0),SESSION,PARAMS,UInt32(length(begref)),pointer(begref)))
-        ctl=Ref(C.VkVideoCodingControlInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR,C_NULL,UInt32(C.VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR)))
-        endinfo=Ref(C.VkVideoEndCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR,C_NULL,UInt32(0)))
-        isfirst=dec.isfirst
-        dst=LavaArray{UInt8,2}(undef,(DW,DH); bq=dec.ctx.default_bq, extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
-        dstbuf=dst.buf[]
-        duv = chroma ? LavaArray{UInt8,2}(undef,(DW,DH÷2); bq=dec.ctx.default_bq, extra_usage=UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
-        GC.@preserve PIN dst duv cbh outvimg dstvimg mb refpr refri refds decref begref outpr dstpr outri outds setup stdpic soff h264pi decinfo beginfo ctl endinfo imgs begin
-            for (slot,_,_) in dpb; lay=imgs[slot][1].layout; if lay[]!=DPBLAYOUT; videobarrier!(w,CB;image=videolayoutbarrier(imgs[slot][1].image.vks,lay[],DPBLAYOUT)); lay[]=DPBLAYOUT; end; end
-            videobarrier!(w,CB;image=videolayoutbarrier(outimg,outlay[],DPBLAYOUT)); outlay[]=DPBLAYOUT
-            # DISTINCT has a separate target; COINCIDE already uses DPB layout.
-            if distinct
-                videobarrier!(w,CB;image=videolayoutbarrier(dstimg,dstlay[],DSTLAYOUT)); dstlay[]=DSTLAYOUT
-            end
-            ccall(dfp(w,"vkCmdBeginVideoCodingKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(beginfo))
-            isfirst && ccall(dfp(w,"vkCmdControlVideoCodingKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(ctl))
-            ccall(dfp(w,"vkCmdDecodeVideoKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(decinfo))
-            ccall(dfp(w,"vkCmdEndVideoCodingKHR"),Cvoid,(C.VkCommandBuffer,Ptr{Cvoid}),CB,pc(endinfo))
-            videobarrier!(w,CB;memory=mb)   # DPB writes before the next decode's reads
-            videobarrier!(w,CB;image=videolayoutbarrier(dstimg,dstlay[],TSRC)); dstlay[]=TSRC
-            if distinct
-                # A video-only queue cannot copy to buffers; DISTINCT copies run on the main queue.
-                push!(dec.copyq, (dstvimg, dst, duv))
-            else
-                record_luma_copy!(cbh, dstvimg, dstbuf.buffer, pool_offset(dstbuf) + dst.offset)
-                if chroma
-                    uvbuf = duv.buf[]
-                    record_chroma_copy!(cbh, dstvimg, uvbuf.buffer, pool_offset(uvbuf) + duv.offset)
-                end
-            end
-        end
+        dst, duv = recorddecode!(dec, (slot for (slot,_,_) in dpb), outvimg, dstvimg, decinfo, begref,
+                                 (refpr, refri, refds, decref, outpr, dstpr, outri, outds, setup, stdpic, soff, h264pi))
         push!(dec.pending,(dec.gop,poc,dst,duv))   # completes at the chunk's queue wait
         if isref
             adaptive, mmops = parse_mmco(au[1], sps, pps)
@@ -411,8 +377,6 @@ function decodeau!(dec::H264Decoder, au, bufbase::Integer, slot::Integer=1)
                 while length(dpb)>sps.maxref; old=popfirst!(dpb); push!(freeslots,old[1]); end
             end
         else; push!(freeslots,outslot); end
-        dec.isfirst=false
-        dec.decoded+=1
     end
     return bitrange
 end

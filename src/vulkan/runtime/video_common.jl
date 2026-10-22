@@ -247,6 +247,63 @@ picture_resource(view, width, height) = C.VkVideoPictureResourceInfoKHR(
     C.VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR, C_NULL, C.VkOffset2D(0,0),
     C.VkExtent2D(width,height), UInt32(0), view)
 
+"""
+    recorddecode!(dec, refslots, out, target, decinfo, begref, keep) -> (y, uv)
+
+Record one decode into `dec`'s command buffer: the DPB slots in `refslots` and the
+setup slot `out` to DPB layout, the coding scope around `decinfo`, then the decoded
+picture `target` (`out` itself under COINCIDE) to TRANSFER_SRC and its copy into
+new luma and chroma arrays. A DISTINCT target is copied later on the main queue
+(`drain_copies!`). `keep` holds the codec structs `decinfo` points into.
+"""
+function recorddecode!(dec, refslots, out::VideoImage, target::VideoImage, decinfo, begref, keep)
+    w = dec.ctx; CB = dec.cbh.vks; imgs = dec.imgs
+    DPB = UInt32(C.VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR)
+    distinct = target !== out
+    beginfo = Ref(C.VkVideoBeginCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR, C_NULL, UInt32(0),
+        dec.SESSION, dec.PARAMS, UInt32(length(begref)), pointer(begref)))
+    ctl = Ref(C.VkVideoCodingControlInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR, C_NULL,
+        UInt32(C.VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR)))
+    endinfo = Ref(C.VkVideoEndCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR, C_NULL, UInt32(0)))
+    # A decode writes reference pixels the next decode reads, even when no layout changes.
+    mb = Ref(C.VkMemoryBarrier(C.VK_STRUCTURE_TYPE_MEMORY_BARRIER, C_NULL, UInt32(C.VK_ACCESS_MEMORY_WRITE_BIT),
+        UInt32(C.VK_ACCESS_MEMORY_READ_BIT) | UInt32(C.VK_ACCESS_MEMORY_WRITE_BIT)))
+    usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)
+    y = LavaArray{UInt8,2}(undef, (dec.DW, dec.DH); bq = w.default_bq, extra_usage = usage)
+    uv = dec.chroma ? LavaArray{UInt8,2}(undef, (dec.DW, dec.DH ÷ 2); bq = w.default_bq, extra_usage = usage) : nothing
+    tolayout!(img, new) = (videobarrier!(w, CB; image = videolayoutbarrier(img.image.vks, img.layout[], new));
+                           img.layout[] = new)
+    GC.@preserve dec keep decinfo begref beginfo ctl endinfo mb y uv out target imgs begin
+        for slot in refslots
+            img = imgs[slot][1]
+            img.layout[] == DPB || tolayout!(img, DPB)
+        end
+        tolayout!(out, DPB)
+        # COINCIDE already has the target in DPB layout.
+        distinct && tolayout!(target, UInt32(C.VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR))
+        ccall(dfp(w, "vkCmdBeginVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(beginfo))
+        dec.isfirst && ccall(dfp(w, "vkCmdControlVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(ctl))
+        ccall(dfp(w, "vkCmdDecodeVideoKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(decinfo))
+        ccall(dfp(w, "vkCmdEndVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(endinfo))
+        videobarrier!(w, CB; memory = mb)
+        tolayout!(target, UInt32(C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL))
+        if distinct
+            # A video-only queue cannot copy to buffers.
+            push!(dec.copyq, (target, y, uv))
+        else
+            yb = y.buf[]
+            record_luma_copy!(dec.cbh, target, yb.buffer, pool_offset(yb) + y.offset)
+            if uv !== nothing
+                ub = uv.buf[]
+                record_chroma_copy!(dec.cbh, target, ub.buffer, pool_offset(ub) + uv.offset)
+            end
+        end
+    end
+    dec.isfirst = false
+    dec.decoded += 1
+    return y, uv
+end
+
 """Write each slice of `au` with a 3-byte Annex-B start code to `dst`. Return the
 slice offsets and the total size rounded up to `alignment`."""
 function uploadbitstream!(dst::Ptr{UInt8}, au, alignment::Integer)

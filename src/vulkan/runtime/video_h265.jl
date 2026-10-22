@@ -348,12 +348,10 @@ end
 
 # The decode-target index is unused: H.265 requires COINCIDE, so the target is the DPB slot.
 function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
-    w = dec.ctx; sps = dec.sps; pps = dec.pps
-    SESSION = dec.SESSION; PARAMS = dec.PARAMS; PIN = dec.PIN; imgs = dec.imgs
-    bbuf = dec.bbuf; bmap = dec.bmap; cbh = dec.cbh; CB = dec.cbh.vks
-    CW = dec.CW; CH = dec.CH; DW = dec.DW; DH = dec.DH; chroma = dec.chroma
+    sps = dec.sps; pps = dec.pps; imgs = dec.imgs
+    bbuf = dec.bbuf; bmap = dec.bmap
+    CW = dec.CW; CH = dec.CH
     dpb = dec.dpb; freeslots = dec.freeslots
-    DPBLAYOUT = UInt32(C.VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR); TSRC = UInt32(C.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
     sh = parse_slice_h265(au[1], sps, pps)
     if sh.idr
         for (slot, _) in dpb; push!(freeslots, slot); end; empty!(dpb)
@@ -380,7 +378,7 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
     end
     outslot = popfirst!(freeslots)
     outvimg, outviewhl = imgs[outslot]
-    outimg = outvimg.image.vks; outview = outviewhl.vks; outlay = outvimg.layout
+    outview = outviewhl.vks
     sliceoffs, bitrange = uploadbitstream!(bmap+bufbase, au, dec.bsalign)
     # Reference slots in DPB order. The Std picture info's RPS lists hold DPB slot
     # indices, mapped from POC by `pocpos`.
@@ -413,35 +411,14 @@ function decodeau!(dec::H265Decoder, au, bufbase::Integer, ::Integer = 1)
     soff = sliceoffs
     h265pi = Ref(C.VkVideoDecodeH265PictureInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PICTURE_INFO_KHR, C_NULL, rp(stdpic), UInt32(length(soff)), pointer(soff)))
     decinfo = Ref(C.VkVideoDecodeInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_INFO_KHR, pc(h265pi), UInt32(0), bbuf, UInt64(bufbase), UInt64(bitrange), outpr[], rp(setup), UInt32(length(decref)), isempty(decref) ? Ptr{C.VkVideoReferenceSlotInfoKHR}(C_NULL) : pointer(decref)))
-    beginfo = Ref(C.VkVideoBeginCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR, C_NULL, UInt32(0), SESSION, PARAMS, UInt32(length(begref)), pointer(begref)))
-    ctl = Ref(C.VkVideoCodingControlInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR, C_NULL, UInt32(C.VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR)))
-    endinfo = Ref(C.VkVideoEndCodingInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR, C_NULL, UInt32(0)))
-    isfirst = dec.isfirst
-    dst = LavaArray{UInt8, 2}(undef, (DW, DH); bq = dec.ctx.default_bq, extra_usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT))
-    dstbuf = dst.buf[]
-    duv = chroma ? LavaArray{UInt8, 2}(undef, (DW, DH ÷ 2); bq = dec.ctx.default_bq, extra_usage = UInt32(Vk.BUFFER_USAGE_TRANSFER_DST_BIT)) : nothing
-    GC.@preserve PIN dst duv cbh outvimg refpr refri refds decref begref outpr outri outds setup stdpic soff h265pi decinfo beginfo ctl endinfo imgs begin
-        for (slot, _) in dpb; lay = imgs[slot][1].layout; if lay[] != DPBLAYOUT; videobarrier!(w,CB;image=videolayoutbarrier(imgs[slot][1].image.vks, lay[], DPBLAYOUT)); lay[] = DPBLAYOUT; end; end
-        videobarrier!(w,CB;image=videolayoutbarrier(outimg, outlay[], DPBLAYOUT)); outlay[] = DPBLAYOUT
-        ccall(dfp(w, "vkCmdBeginVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(beginfo))
-        isfirst && ccall(dfp(w, "vkCmdControlVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(ctl))
-        ccall(dfp(w, "vkCmdDecodeVideoKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(decinfo))
-        ccall(dfp(w, "vkCmdEndVideoCodingKHR"), Cvoid, (C.VkCommandBuffer, Ptr{Cvoid}), CB, pc(endinfo))
-        videobarrier!(w,CB;image=videolayoutbarrier(outimg, DPBLAYOUT, TSRC)); outlay[] = TSRC
-        record_luma_copy!(cbh, outvimg, dstbuf.buffer, pool_offset(dstbuf) + dst.offset)
-        if chroma
-            uvbuf = duv.buf[]
-            record_chroma_copy!(cbh, outvimg, uvbuf.buffer, pool_offset(uvbuf) + duv.offset)
-        end
-    end
+    dst, duv = recorddecode!(dec, (slot for (slot, _) in dpb), outvimg, outvimg, decinfo, begref,
+                             (refpr, refri, refds, decref, outpr, outri, outds, setup, stdpic, soff, h265pi))
     push!(dec.pending, (dec.gop, poc, dst, duv))
     if sh.isref
         push!(dpb, (outslot, poc))
     else
         push!(freeslots, outslot)
     end
-    dec.isfirst = false
-    dec.decoded += 1
     return bitrange
 end
 
