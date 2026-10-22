@@ -1,5 +1,47 @@
 using Test, Mantle, GPUArrays, StaticArrays
 
+function check_bounded_staging(ctx)
+    @testset "large host uploads reuse bounded staging" begin
+        bq=ctx.default_bq
+        dev=Mantle.lavadevice(ctx)
+        cap=Mantle.MAX_UPLOAD_STAGING_BYTES
+        source=UInt32.(1:(2cap÷sizeof(UInt32)+7))
+        gpu=Mantle.LavaArray{UInt32}(undef,(length(source)+6,);bq)
+        try
+            sentinel=fill(UInt32(0x12345678),3)
+            copyto!(gpu,1,sentinel,1,3)
+            copyto!(gpu,length(gpu)-2,sentinel,1,3)
+            before=copy(get(Mantle.pool(dev).blocks,Mantle.Readback(),Mantle.Block[]))
+            GC.@preserve source Mantle.copy_buffer!(:upload,gpu.buf[],
+                Ptr{UInt8}(pointer(source)),sizeof(source);offset=3sizeof(UInt32))
+            # Check staging before downloading: a full download deliberately
+            # needs its own large readback region, unlike a streaming upload.
+            blocks=get(Mantle.pool(dev).blocks,Mantle.Readback(),Mantle.Block[])
+            created=filter(b->all(old->b!==old,before),blocks)
+            if gpu.buf[].mapped_ptr==C_NULL
+                @test !isempty(blocks)
+                @test maximum((b.bytes for b in created);init=0)<=cap
+                @test sum((b.bytes for b in created);init=0)<=cap+Mantle.READBACK_BLOCK_SIZE
+            end
+            outer=Mantle.oneshot(bq) do _
+                depth=length(bq.holds);held=last(bq.holds)
+                GC.@preserve source Mantle.copy_buffer!(:upload,gpu.buf[],
+                    Ptr{UInt8}(pointer(source)),sizeof(source);offset=3sizeof(UInt32))
+                @test length(bq.holds)==depth
+                @test last(bq.holds)===held
+            end
+            Mantle.release!(bq,outer)
+            result=Array(gpu)
+            @test result[4:end-3]==source
+            @test result[1:3]==result[end-2:end]==sentinel
+            @test isempty(Mantle.validationmessages!(dev))
+        finally
+            Mantle.unsafe_free!(gpu)
+            Mantle.waitidle(dev);Mantle.drain!(bq)
+        end
+    end
+end
+
 function check_host_upload(ctx)
     @testset "typed uploads preserve shape order, bits and offsets" begin
         bq = ctx.default_bq

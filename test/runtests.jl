@@ -552,6 +552,7 @@ if _VULKAN_OK
     check_draw_argument_lifetime(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_host_upload.jl"))
     check_host_upload(Mantle.vk_context())
+    check_bounded_staging(Mantle.vk_context())
     check_extent_refusal(Mantle.vk_context())
     check_copy_bounds(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))

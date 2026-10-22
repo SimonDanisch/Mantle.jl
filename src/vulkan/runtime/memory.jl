@@ -1084,6 +1084,10 @@ end
 """Largest download read straight out of mapped BAR memory; see `copy_buffer!`."""
 const BAR_DIRECT_READ_BYTES = 4096
 
+# Large native grids must not require a second grid-sized allocation in pinned
+# system RAM on discrete GPUs. BAR uploads still copy directly.
+const MAX_UPLOAD_STAGING_BYTES = 64 * 1024 * 1024
+
 """copy_buffer!(direction, managed, host_ptr, nbytes; offset=0)
 
 Copy host/device bytes, with direction :upload or :download. Mapped uploads and
@@ -1123,6 +1127,26 @@ function copy_buffer!(direction::Symbol, managed::VkManagedBuffer,
     end
     # `Mantle.offset`, qualified: this function's `offset` keyword shadows it.
     if direction === :upload
+        if nbytes > MAX_UPLOAD_STAGING_BYTES
+            copied = 0
+            while copied < nbytes
+                count = min(Int(nbytes) - copied, MAX_UPLOAD_STAGING_BYTES)
+                token = oneshot!(bq; tag = :upload) do e
+                    r = scratch!(e.owner, count, Readback())
+                    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
+                    unsafe_copyto!(mb.mapped_ptr + Mantle.offset(r), host_ptr + copied, count)
+                    cmd_copy_buffer!(e, mb, managed, count;
+                        src_off = pool_offset(mb) + Mantle.offset(r), dst_off = buf_offset + copied)
+                end
+                # Completion and recycling return this chunk's staging region
+                # before the next one acquires it. Waiting without sweeping
+                # would retain every chunk and reproduce the same memory peak.
+                waitfor!(bq, token)
+                sweep!(bq)
+                copied += count
+            end
+            return
+        end
         # The upload one-shot owns scratch until its copy completes.
         oneshot!(bq; tag = :upload) do e
             # Staged in host memory and moved by the copy engine; see `scratch!`.
