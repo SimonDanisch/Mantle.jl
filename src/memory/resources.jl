@@ -380,36 +380,16 @@ update!(s::GPURef{T}, x) where {T} = (upload!(s.dev, s.store, 1, T[x]); s)
     buf[range] = data
     buf[:] = data
 
-Store a value into a resource, to be landed by the next plan that reads it.
+Pend a store for the next plan that reads the resource. Setters may run on any
+thread and never submit commands. GPURef converts one value; the latest wins,
+including stores equal to the old value. Buffers/transients retain ordered linear
+range stores, converting data to Vector{T} when needed. A Vector{T} is retained
+without copying: pass copy(data) if the caller will mutate it before the run.
+Transient stores require hostwritten=true at declaration so placement covers them.
 
-A `Buffer` or a `GPURef`, and a `TransientBuffer` too: a per-frame plane is an
-ordinary resource of the graph, and its bytes land in the arena slice the placer
-gave it.
-
-A store retains what it is given and marks the resource dirty. It copies
-nothing, touches no command buffer and may be made from any thread, which is
-what lets an observable's handler or a render loop's caller feed a plan without
-holding a queue. The bytes land at the update pass of the next `run!` of any
-plan that declares the resource — a dispatch argument, an `Attribute`, a
-slice — as a command in that run's own submission, ordered ahead of every pass
-that reads them by the barriers the graph derives from the `CopyDst` the plan
-registered for it (see `hostwritten!`).
-
-A `GPURef` holds one pending value and the last store wins, which is what a
-scalar means. A `Buffer` holds a LIST of pending `(range, data)` stores and
-lands them in order, so two stores to different ranges before one run are two
-writes and the second does not drop the first. `data` is retained, not copied:
-a caller who means to mutate it before the next run passes `copy(data)`.
-`buf[:] = data` is `buf[1:length(data)] = data`, as `update!` reads it.
-
-Nothing is compared against the last store. A ref the device also writes — a
-counter the host resets — must land a store of an equal value, so a caller who
-wants to skip unchanged values compares on their side, where they know what
-changed. There is no `getindex`: reading a device value is a download, and it
-is spelled as one (`Array(buf)`).
-
-`update!` is the other verb and not the same one: it uploads NOW, on the
-calling thread, for a resource that is not in a graph.
+The update pass lands stores before readers in the run's own submission;
+overlapping ranges preserve store order. buf[:] means 1:length(data).
+update! uploads immediately. Array(buf) explicitly downloads device contents.
 """
 function Base.setindex!(r::GPURef{T}, x) where {T}
     v = convert(T, x)
@@ -427,17 +407,24 @@ function Base.setindex!(r::GPURef{T}, x) where {T}
     return r
 end
 
-function Base.setindex!(b::Buffer{T,N}, data::AbstractVector, r::AbstractUnitRange) where {T,N}
+function Base.setindex!(b::Union{Buffer{T},TransientBuffer{T}}, data::AbstractVector,
+                        r::AbstractUnitRange) where {T}
+    # Transient stores must participate in placement before any bytes are shared.
+    if b isa TransientBuffer
+        b.hostwritten || throw(ArgumentError(
+            "setindex!: this transient was not declared host-written, so the placer " *
+            "may have aliased its bytes against something still live at the update " *
+            "pass. Build it with `Transient.Buffer(g, T, dims...; hostwritten = true)`."))
+    end
     rng = UnitRange{Int}(r)
     length(data) == length(rng) || throw(DimensionMismatch(
         "setindex!: $(length(data)) elements were given for a range of $(length(rng))"))
     first(rng) >= 1 || throw(ArgumentError("setindex!: a range starts at 1 or later, not $(first(rng))"))
-    last(rng) <= b.capacity || throw(ArgumentError(
-        "setindex!: a store to $(last(rng)) elements into a capacity of $(b.capacity)"))
+    limit = b isa Buffer ? b.capacity : length(b)
+    last(rng) <= limit || throw(ArgumentError(
+        "setindex!: a store to $(last(rng)) elements into " *
+        (b isa Buffer ? "a capacity of $limit" : "a transient of $limit")))
     v = data isa Vector{T} ? data : convert(Vector{T}, data)
-    # Any rank, and the range is LINEAR: a shaped buffer is shaped so a kernel
-    # gets extents, and a store is the run of elements it is. Same as the
-    # transient's, for the same reason.
     lock(b.pendinglock) do
         push!(b.pending, (rng, v))
         @atomic :release b.dirty = true
@@ -445,55 +432,14 @@ function Base.setindex!(b::Buffer{T,N}, data::AbstractVector, r::AbstractUnitRan
     return b
 end
 
-Base.setindex!(b::Buffer{T,N}, data::AbstractVector, ::Colon) where {T,N} =
+Base.setindex!(b::Union{Buffer,TransientBuffer}, data::AbstractVector, ::Colon) =
     setindex!(b, data, 1:length(data))
-
-# The same store, into a transient. Identical because it IS the same protocol —
-# the difference is only where the bytes end up, which `landstores!`' caller
-# decides. Capacity is the shape the transient was declared with; there is no
-# `len` to carry, because a transient holds nothing between runs and every
-# reader of it takes its extents from `size(t)`.
-#
-# ANY RANK, where `Buffer`'s store is rank-1: a transient carries its shape so a
-# kernel gets extents (see the note on the struct), and a 3D colour table or a
-# 2D plane is stored as the linear run of elements it is. The range is linear
-# for the same reason the byte offset below is — `landhost!` and `emitstore!`
-# both address the slice from its start, and a shaped store would need a
-# strided copy neither the arena nor `vkCmdCopyBuffer` has.
-function Base.setindex!(t::TransientBuffer{T,N}, data::AbstractVector, r::AbstractUnitRange) where {T,N}
-    # Declared, not discovered. A store into a transient the graph did not
-    # register is not late — it is unsafe: `hostwritten!` ran at `Plan` time and
-    # these bytes were placed as if nothing wrote them before the first pass
-    # that reads them, so the placer may have given them to something still
-    # live. Refused here, where the caller is, rather than corrupting a frame.
-    t.hostwritten || throw(ArgumentError(
-        "setindex!: this transient was not declared host-written, so the placer " *
-        "may have aliased its bytes against something still live at the update " *
-        "pass. Build it with `Transient.Buffer(g, T, dims...; hostwritten = true)`."))
-    rng = UnitRange{Int}(r)
-    length(data) == length(rng) || throw(DimensionMismatch(
-        "setindex!: $(length(data)) elements were given for a range of $(length(rng))"))
-    first(rng) >= 1 || throw(ArgumentError("setindex!: a range starts at 1 or later, not $(first(rng))"))
-    last(rng) <= prod(t.dims) || throw(ArgumentError(
-        "setindex!: a store to $(last(rng)) elements into a transient of $(prod(t.dims))"))
-    v = data isa Vector{T} ? data : convert(Vector{T}, data)
-    lock(t.pendinglock) do
-        push!(t.pending, (rng, v))
-        @atomic :release t.dirty = true
-    end
-    return t
-end
-
-Base.setindex!(t::TransientBuffer{T,N}, data::AbstractVector, ::Colon) where {T,N} =
-    setindex!(t, data, 1:length(data))
 
 """Whether a resource holds a store not yet landed: one flag read."""
 isdirty(r::Union{Buffer,GPURef,TransientBuffer}) = @atomic :acquire r.dirty
 
-"""Whether any resource in the tuple does — a plan's `hostwritten`. Unrolled at
-compile time (`@generated`), so a heterogeneous tuple costs no `Base.tail` box
-on a run's allocation-free path; the plain recursion left 48 bytes on Hikari's
-five-element sample tuple."""
+"""Whether any resource has pending stores. Unrolled to avoid heterogeneous-tuple
+boxing on the allocation-free run path."""
 @generated function anydirty(rs::T) where {T<:Tuple}
     n = fieldcount(T)
     n == 0 && return :(false)
@@ -508,14 +454,11 @@ end
     landstores!(f, r)
     landstores!(f, rs::Tuple)
 
-Hand what is waiting on `r` to `f` and clear it; nothing but the flag read when
-nothing is.
-
-For a `GPURef`, `f(r, ptr::Ptr{T})` with a pointer to the pending value, read
-in place under the seqlock — no copy of the value exists on the way, and `f`
-runs again if a store lands mid-read, so it must be safe to repeat. For a
-`Buffer`, `f(b, data, from)` once per pending `(range, data)`, in order, under
-the store lock. The tuple form walks a plan's `hostwritten`.
+Consume pending stores; a clean resource reads only its dirty flag.
+GPURef calls f(r,ptr::Ptr{T}) under its seqlock and may repeat the callback.
+Buffers/transients call f(resource,data,first) in store order under their lock;
+a throwing callback leaves the pending list dirty for retry. The tuple form
+walks a plan's hostwritten resources.
 """
 function landstores!(f, r::GPURef{T}) where {T}
     isdirty(r) || return nothing
@@ -531,13 +474,19 @@ function landstores!(f, r::GPURef{T}) where {T}
     end
 end
 
-function landstores!(f, b::Buffer{T}) where {T}
+function landstores!(f, b::Union{Buffer,TransientBuffer})
     isdirty(b) || return nothing
     lock(b.pendinglock) do
-        for (rng, data) in b.pending
+        lo, hi = typemax(Int), typemin(Int)
+        for (i, (rng, data)) in enumerate(b.pending)
+            if !isempty(rng)
+                # Sorted disjoint updates avoid rescanning their predecessors.
+                first(rng) <= hi && last(rng) >= lo && orderstore!(f, b, i)
+                lo, hi = min(lo,first(rng)), max(hi,last(rng))
+            end
             f(b, data, first(rng))
-            # What a draw covers, as `update!` keeps it.
-            b.len = max(b.len, last(rng))
+            # Persistent draws cover the stored prefix; transients keep their shape.
+            b isa Buffer && (b.len = max(b.len, last(rng)))
         end
         empty!(b.pending)
         @atomic :release b.dirty = false
@@ -545,18 +494,18 @@ function landstores!(f, b::Buffer{T}) where {T}
     return nothing
 end
 
-# A transient's, which is `Buffer`'s without the `len`: what a draw covers comes
-# from the declared shape here, not from how much of it was last written.
-function landstores!(f, t::TransientBuffer{T}) where {T}
-    isdirty(t) || return nothing
-    lock(t.pendinglock) do
-        for (rng, data) in t.pending
-            f(t, data, first(rng))
-        end
-        empty!(t.pending)
-        @atomic :release t.dirty = false
+# Synchronous callbacks already execute in order; command emitters may need a dependency.
+orderstore!(f, b, i) = nothing
+
+function overlappingstore(b, i)
+    rng = b.pending[i][1]
+    isempty(rng) && return false
+    for j in 1:i-1
+        prev = b.pending[j][1]
+        isempty(prev) && continue
+        max(first(prev),first(rng)) <= min(last(prev),last(rng)) && return true
     end
-    return nothing
+    return false
 end
 
 # Unrolled for the same reason as `anydirty`: a plan's `hostwritten` is walked

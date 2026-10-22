@@ -479,52 +479,25 @@ resourcekind(::VulkanFramebuffer) = ImageKind()
 Base.length(a::Attr) = length(a.resource)
 
 
-"""
-Bytes into a TRANSIENT's arena slice: `vkCmdUpdateBuffer` while it can carry
-them, and a staged copy recorded into THIS run past that.
-
-Not the `DeviceArray` method below, and the difference is the staged branch. A
-frame is the case this exists for — 1920x1080 RGBA is 8 MB, so every store of
-one takes the staged path — and routing it through `upload!` would stall the
-queue at the update pass, which is the cost the whole arrangement is here to
-avoid: measured on the lego project, a timeline with a scene played at 10.6 fps
-with the upload inside a pass body against 32.4 with it staged here.
-
-So the staging region comes from the run's own `scratch!` and the copy is a
-command in the run's submission, ordered ahead of every reader by the barriers
-`hostwritten!`'s `CopyDst` made the graph derive. Offsets are relative to the
-managed buffer, which is what `cmd_copy_buffer!` and `cmd_update_buffer` both
-take: `pool_offset` puts it in its block, `t.offset` in the arena.
-"""
-function storebytes!(e::Emitter, t::TransientBuffer, off::Int, p::Ptr{Cvoid}, n::Int)
-    dst = (t.block::BufferBlock).ref[]::VkManagedBuffer
-    dst_off = pool_offset(dst) + t.offset + off
+"""Record host bytes into this run: inline when Vulkan permits it, otherwise
+through submission-owned host-visible scratch. Both persistent and transient
+stores retain their destination until completion; neither submits work early."""
+function storebytes!(e::Emitter, target::Union{TransientBuffer,DeviceArray},
+                     off::Int, p::Ptr{Cvoid}, n::Int)
+    n == 0 && return nothing
+    block = (target isa DeviceArray ? memoryof(target) : target.block)::BufferBlock
+    dst = block.ref[]::VkManagedBuffer
+    base = target isa DeviceArray ? offset(target) : target.offset
+    dst_off = pool_offset(dst) + base + off
     if n <= 65536 && n % 4 == 0 && dst_off % 4 == 0
         VK.cmd_update_buffer(e.cmd, dst.buffer, UInt64(dst_off), UInt64(n), p)
         hold!(e, dst)
     else
-        r = scratch!(e.owner, n, Readback())   # staged in host memory, see `scratch!`
+        r = scratch!(e.owner, n, Readback())
         src = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
         unsafe_copyto!(src.mapped_ptr + offset(r), Ptr{UInt8}(p), n)
         cmd_copy_buffer!(e, src, dst, n;
                          src_off = pool_offset(src) + offset(r), dst_off = dst_off)
-    end
-    return nothing
-end
-
-"""
-Bytes into a resource's store: inside the command buffer when
-`vkCmdUpdateBuffer` can carry them — 64 KB, offset and size multiples of four —
-and a staged upload past that, which stalls. Rare: every store the graph makes
-is a whole struct or a range of them, and those are four-byte multiples.
-"""
-function storebytes!(e::Emitter, a::DeviceArray, off::Int, p::Ptr{Cvoid}, n::Int)
-    if n <= 65536 && n % 4 == 0 && (offset(a) + off) % 4 == 0
-        emitinline!(e, a, off, p, n)
-    else
-        bytes = DeviceArray{UInt8}(a.region, (length(a.region),))
-        upload!(lavadevice(e.ctx), bytes, off + 1,
-                unsafe_wrap(Vector{UInt8}, Ptr{UInt8}(p), n))
     end
     return nothing
 end
@@ -1272,6 +1245,14 @@ function emitupdate!(e::Emitter{<:OneShot}, pl::Plan, pp::PassPlan)
     anydirty(pl.hostwritten) || return nothing
     emitbarriers!(e, pp)
     landstores!(StoreEmitter(e), pl.hostwritten)
+    return nothing
+end
+
+function orderstore!(s::StoreEmitter{<:Emitter}, b, i)
+    overlappingstore(b,i) || return nothing
+    # Inline updates and staged copies are transfer writes; command order alone is insufficient.
+    memorybarrier!(s.e.cmd,s.e.ctx,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_TRANSFER_WRITE_BIT)
     return nothing
 end
 

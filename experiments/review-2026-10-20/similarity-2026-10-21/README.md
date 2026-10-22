@@ -102,3 +102,9 @@ Refreshing at `32d387d` yields 1,964 chunks. Same-file discovery led to shared
 GEMM generators; cross-file discovery also found GJK/EPA support-pair duplication.
 The implemented deletions and native checks are in consolidation-gemm-generator.md
 and consolidation-geometry.md. Rankings remain candidate evidence, not equivalence proofs.
+
+Refreshing at `ec0caa9` yields 1,959 chunks. Range-store copies now share core
+validation and consumption; qualification also found missing overlap dependencies
+and early large-store submission (consolidation-stores.md). Video codec picture
+assembly, native GEMM eligibility and device-specific compiler contexts remain
+similar candidates with different contracts; their scores do not justify merging.

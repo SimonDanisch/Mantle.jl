@@ -204,3 +204,8 @@ and native assertions pass. Native Metal qualification remains outstanding.
 [Shared dense GPU strides](consolidation-dense-strides.md) removes backend
 metadata copies and fixes the absent ROCm method. 3,987 shared GEMM and 77 ROCm
 backend assertions pass; the required existing SDK source is pinned explicitly.
+
+[Shared pending stores](consolidation-stores.md) removes range-store and barrier
+encoding copies, fixing Vulkan overlap ordering and early large-store submission.
+656 Vulkan regression, 32 encoding and 74 ROCm assertions pass; fresh loading and
+paired zero-allocation store/drain checks also pass.

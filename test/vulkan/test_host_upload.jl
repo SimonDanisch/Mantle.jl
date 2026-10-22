@@ -49,3 +49,33 @@ function check_host_upload(ctx)
         @test isempty(Mantle.validationmessages!(Mantle.lavadevice(ctx)))
     end
 end
+
+function check_store_submission(ctx)
+    @testset "host stores stay in the caller's submission" begin
+        dev = Mantle.lavadevice(ctx)
+        for (off,n) in ((0,0),(4,16),(4,65536),(4,65540),(1,7))
+            dst = Mantle.Buffer(dev,zeros(UInt8,n+8))
+            src = fill(UInt8(0x73),n)
+            try
+                before = Mantle.submissions(dev)
+                o = Mantle.oneshot(dev.bq) do e
+                    GC.@preserve src Mantle.storebytes!(e,dst.store,off,
+                                                        Ptr{Cvoid}(pointer(src)),n)
+                end
+                @test Mantle.submissions(dev) == before
+                Mantle.release!(dev.bq,o)
+                @test all(iszero,Array(dst)) # discarding the unsubmitted store writes nothing
+                Mantle.oneshot!(dev.bq) do e
+                    GC.@preserve src Mantle.storebytes!(e,dst.store,off,
+                                                        Ptr{Cvoid}(pointer(src)),n)
+                end
+                expected = zeros(UInt8,n+8); expected[off+1:off+n] = src
+                @test Array(dst) == expected
+            finally
+                Mantle.free!(dst)
+            end
+        end
+        Mantle.waitidle(dev); Mantle.drain!(dev.bq)
+        @test isempty(Mantle.validationmessages!(dev))
+    end
+end

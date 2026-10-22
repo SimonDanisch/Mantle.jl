@@ -319,58 +319,31 @@ function finishrecording!(bq::SubmitChannel{<:VulkanQueue}, o::OneShot)
     return nothing
 end
 
-"""
-The one barrier that is never derived: everything before, against everything
-after, over all memory. At the head of every one-shot and every recording,
-because a closed command buffer knows nothing about what ran before it on the
-queue, and the queue keeps no memory of it either: a cross-plan hazard cannot be
-derived, and a barrier decided at record time from who ran last is wrong the
-moment two plans alternate. This is the honest answer, and it is one barrier per
-closed buffer rather than one per launch.
-
-Raw `vkCmdPipelineBarrier` through the context's function pointer, with an
-isbits `VkMemoryBarrier`: the VK.jl wrapper allocates ~1.2 KB per call.
-Counted on the context, so a test can say a launch began with it.
-"""
-# The barrier BETWEEN two dispatches in one command buffer.
-#
-# Narrower than `headbarrier!` on both axes and deliberately: a head barrier has
-# to assume anything at all ran before this buffer, so it names ALL_COMMANDS and
-# MEMORY_READ|MEMORY_WRITE. Between two compute dispatches the only hazard is a
-# shader write followed by a shader access, and saying so is much cheaper —
-# using the head barrier here instead cost 4.71 tok/s against 6.3 on a 64-layer
-# decode.
-@inline function computebarrier!(cmd::VK.CommandBuffer, ctx::VkContext)
-    dst = VkAccessFlags(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
+"""Emit an allocation-free memory dependency with caller-supplied stage/access
+masks. One-shots use the all-command head barrier for unknown prior work;
+compute dispatches and overlapping stores use their narrower domains."""
+@inline function memorybarrier!(cmd::VK.CommandBuffer, ctx::VkContext,
+                               srcstage, dststage, srcaccess, dstaccess)
     barrier_ref = Ref(VkMemoryBarrier(VK_STRUCTURE_TYPE_MEMORY_BARRIER, C_NULL,
-                                      VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT), dst))
+                                      VkAccessFlags(srcaccess), VkAccessFlags(dstaccess)))
     GC.@preserve barrier_ref begin
         ccall(ctx.cmd_pipeline_barrier_fptr, Cvoid,
               (Ptr{Nothing}, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
                UInt32, Ptr{VkMemoryBarrier}, UInt32, Ptr{Nothing}, UInt32, Ptr{Nothing}),
-              cmd.vks,
-              VkPipelineStageFlags(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
-              VkPipelineStageFlags(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT),
-              VkDependencyFlags(0),
-              UInt32(1), barrier_ref, UInt32(0), C_NULL, UInt32(0), C_NULL)
+              cmd.vks, VkPipelineStageFlags(srcstage), VkPipelineStageFlags(dststage),
+              VkDependencyFlags(0), UInt32(1), barrier_ref,
+              UInt32(0), C_NULL, UInt32(0), C_NULL)
     end
     return nothing
 end
 
+@inline computebarrier!(cmd::VK.CommandBuffer, ctx::VkContext) =
+    memorybarrier!(cmd,ctx,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
+
 @inline function headbarrier!(cmd::VK.CommandBuffer, ctx::VkContext)
-    both = VkAccessFlags(VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT)
-    barrier_ref = Ref(VkMemoryBarrier(VK_STRUCTURE_TYPE_MEMORY_BARRIER, C_NULL, both, both))
-    GC.@preserve barrier_ref begin
-        ccall(ctx.cmd_pipeline_barrier_fptr, Cvoid,
-              (Ptr{Nothing}, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
-               UInt32, Ptr{VkMemoryBarrier}, UInt32, Ptr{Nothing}, UInt32, Ptr{Nothing}),
-              cmd.vks,
-              VkPipelineStageFlags(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT),
-              VkPipelineStageFlags(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT), VkDependencyFlags(0),
-              UInt32(1), barrier_ref,
-              UInt32(0), C_NULL,
-              UInt32(0), C_NULL)
-    end
+    both = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
+    memorybarrier!(cmd,ctx,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,both,both)
     Threads.atomic_add!(ctx.diag.head_barriers, 1)
     return nothing
 end
