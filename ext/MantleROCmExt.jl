@@ -167,7 +167,6 @@ Mantle.awaitwrites(d::ROCmDevice) = Mantle.waitidle(d)
 Mantle.constraintof(::ROCmDevice, ::Union{Buffers,Images,Persistent}, ts) = nothing
 Mantle.compatible(::ROCmDevice, blk, req) = true
 Mantle.mergeconstraints(::ROCmDevice, kind, a, b) = nothing
-Mantle.bufferusage(::ROCmDevice, ::Type) = nothing
 
 """
     rawalloc(dev, kind, bytes, constraint) -> Managed{HIPBuffer}
@@ -193,8 +192,6 @@ bytes back to `memory_stats`, so `AMDGPU.info()` agrees with `Mantle.capacity`.
 """
 Mantle.rawfree(d::ROCmDevice, mg::Managed) = (adopt!(d); AMDGPU.pool_free(mg); nothing)
 
-"""64 MiB, as on Vulkan and Metal."""
-Mantle.blocksize(::ROCmDevice) = 64 << 20
 
 """Free device memory now (`hipMemGetInfo`), the bound the placer checks an arena against."""
 Mantle.capacity(::ROCmDevice) = AMDGPU.free()
@@ -588,14 +585,6 @@ struct Widen end
 Mantle.argument_usage(::Type{Widen}, ::Type{<:Tuple{Any,Any}}) = (Mantle.WRITE, Mantle.READ)
 (::Widen)(out, y) = (out .= y; nothing)
 
-"""
-    denseoperands(xs...) -> Bool
-
-Whether every operand is a graph resource a library call can be handed, or absent.
-"""
-denseoperands(xs...) =
-    all(x -> x === nothing || x isa Union{Mantle.Buffer,Mantle.TransientBuffer,Mantle.ResourceView}, xs)
-
 """A dense MIOpen descriptor for an array of size `dims`, in the reversed (WHCN) layout."""
 function miodesc(::Type{T}, dims::Dims{N}) where {T,N}
     strides = cumprod((1, dims[1:end-1]...))
@@ -617,7 +606,7 @@ function Mantle.native_conv2d_dispatch!(d::ROCmDevice, g, out, x, w; bias = noth
     T = eltype(x)
     (T === Float16 || T === Float32) && eltype(w) === T || return nothing
     (eltype(out) === Float16 || eltype(out) === Float32) || return nothing
-    denseoperands(out, x, w) || return nothing
+    Mantle.denseoperands(out, x, w) || return nothing
     ndims(out) == ndims(x) == ndims(w) == 4 || return nothing
     y = eltype(out) === T ? out : Mantle.Transient.Buffer(g, T, size(out))
     xd, wd, yd = miodesc(T, size(x)), miodesc(T, size(w)), miodesc(T, size(out))
@@ -679,7 +668,7 @@ function Mantle.native_batched_gemm_dispatch!(d::ROCmDevice, g, out, A, B;
     T = eltype(out)
     T === Float32 && eltype(A) === T && eltype(B) === T || return false
     coldiv === nothing || eltype(coldiv) === T || return false
-    denseoperands(out, A, B, coldiv) || return false
+    Mantle.denseoperands(out, A, B, coldiv) || return false
     batch(x) = prod(size(x)[3:end]; init = 1)
     batch(out) == batch(A) == batch(B) || return false
     call = RocBLASBatched(transpose_a ? 'T' : 'N', transpose_b ? 'T' : 'N', T(alpha))

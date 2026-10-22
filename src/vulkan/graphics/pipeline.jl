@@ -443,25 +443,12 @@ end_pass!(e::Emitter) = VK.cmd_end_rendering(e.cmd)
     set_viewport!(e, x, y, w, h)
 
 The portable viewport verb (`graphics/commands.jl`): sets the viewport and the
-scissor it implies. The scissor is clamped to non-negative offsets, which Vulkan
-requires, and a flipped viewport (negative `h`, for Y-down clip space) puts its
-origin at `y + h`.
+scissor it implies ([`scissorrect`](@ref)).
 """
 function set_viewport!(e::Emitter, x::Real, y::Real, w::Real, h::Real)
-    cmd = e.cmd
-    VK.cmd_set_viewport(cmd, [VK.Viewport(Float32(x), Float32(y), Float32(w), Float32(h), 0f0, 1f0)])
-
-    sx = Int32(floor(x))
-    sy = h < 0 ? Int32(floor(y + h)) : Int32(floor(y))
-    sw = Int32(ceil(abs(w)))
-    sh = Int32(ceil(abs(h)))
-    if sx < Int32(0)
-        sw = max(Int32(0), sw + sx); sx = Int32(0)
-    end
-    if sy < Int32(0)
-        sh = max(Int32(0), sh + sy); sy = Int32(0)
-    end
-    VK.cmd_set_scissor(cmd, [VK.Rect2D(VK.Offset2D(sx, sy), VK.Extent2D(UInt32(sw), UInt32(sh)))])
+    VK.cmd_set_viewport(e.cmd, [VK.Viewport(Float32(x), Float32(y), Float32(w), Float32(h), 0f0, 1f0)])
+    sx, sy, sw, sh = scissorrect(x, y, w, h)
+    VK.cmd_set_scissor(e.cmd, [VK.Rect2D(VK.Offset2D(sx, sy), VK.Extent2D(UInt32(sw), UInt32(sh)))])
     return nothing
 end
 

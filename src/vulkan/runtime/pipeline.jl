@@ -196,22 +196,36 @@ function can_require_subgroup_size(ctx::VkContext, n::Integer)
     c.compute && c.min <= n <= c.max
 end
 
+"""
+    spirvinstructions(spirv) -> iterator of (opcode, words)
+
+The instructions of a SPIR-V module after its 5-word header, each as its opcode
+and its words, the first included (`(WordCount << 16) | Opcode`; SPIR-V spec
+§2.3). Empty for bytes that are not a module in this byte order; stops at a zero
+word count rather than loop forever.
+"""
+struct SPIRVInstructions{W<:AbstractVector{UInt32}}
+    words::W
+end
+function spirvinstructions(spirv::AbstractVector{UInt8})
+    ismodule = length(spirv) >= 20 && length(spirv) % 4 == 0 &&
+               reinterpret(UInt32, spirv)[1] == 0x07230203
+    return SPIRVInstructions(reinterpret(UInt32, ismodule ? spirv : UInt8[]))
+end
+function Base.iterate(s::SPIRVInstructions, i = 6)
+    i <= length(s.words) || return nothing
+    n = Int(s.words[i] >> 16)
+    n == 0 && return nothing
+    return (UInt16(s.words[i] & 0xffff), view(s.words, i:min(i + n - 1, length(s.words)))), i + n
+end
+Base.IteratorSize(::Type{<:SPIRVInstructions}) = Base.SizeUnknown()
+
 # Whether the module declares `cap` via OpCapability. Capabilities precede
 # OpMemoryModel in a valid module, so the scan stops there.
 function spirv_declares_capability(spirv::Vector{UInt8}, cap::UInt32)
-    length(spirv) >= 20 && length(spirv) % 4 == 0 || return false
-    w = reinterpret(UInt32, spirv)
-    w[1] == 0x07230203 || return false          # magic, matching our byte order
-    i = 6                                       # first word after the 5-word header
-    @inbounds while i <= length(w)
-        count = w[i] >> 16
-        count == 0 && break                     # malformed; refuse to loop forever
-        opcode = UInt16(w[i] & 0xffff)
-        opcode == Op.OpMemoryModel && break      # past the capability section
-        if opcode == Op.OpCapability && count >= 2 && i + 1 <= length(w)
-            w[i+1] == cap && return true
-        end
-        i += count
+    for (op, w) in spirvinstructions(spirv)
+        op == Op.OpMemoryModel && break
+        op == Op.OpCapability && length(w) >= 2 && w[2] == cap && return true
     end
     return false
 end
@@ -224,22 +238,12 @@ when not stated literally (e.g. `OpExecutionModeId` with specialisation
 constants). Callers must treat `0` as unknown, not small.
 """
 function spirv_local_size(spirv::Vector{UInt8})
-    length(spirv) >= 20 && length(spirv) % 4 == 0 || return 0
-    w = reinterpret(UInt32, spirv)
-    w[1] == 0x07230203 || return 0
-    i = 6
-    @inbounds while i <= length(w)
-        count = w[i] >> 16
-        count == 0 && break
-        opcode = UInt16(w[i] & 0xffff)
+    for (op, w) in spirvinstructions(spirv)
         # Past the debug/annotation sections there are no more execution modes.
-        opcode == Op.OpTypeVoid && break
+        op == Op.OpTypeVoid && break
         # OpExecutionMode <entry> LocalSize x y z: mode 17, 6 words.
-        if opcode == Op.OpExecutionMode && count >= 6 && i + 5 <= length(w) &&
-           w[i+2] == UInt32(17)
-            return Int(w[i+3]) * Int(w[i+4]) * Int(w[i+5])
-        end
-        i += count
+        op == Op.OpExecutionMode && length(w) >= 6 && w[3] == UInt32(17) &&
+            return Int(w[4]) * Int(w[5]) * Int(w[6])
     end
     return 0
 end

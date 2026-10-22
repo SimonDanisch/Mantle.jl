@@ -65,14 +65,28 @@ Bind `textures` as one indexable table for a pipeline to sample from.
 function bind_textures end
 
 """
-    upload_texture_data!(texture, data)
+    upload_texture_data!(texture, data) -> texture
 
 Write new pixels into an existing texture. A recorded draw bakes the descriptor
 set naming the image, so replacing the texture would leave the recording on the
-old one. `data` must match the texture's `size` and `eltype`. Backends implement
-it and `Base.size` for their texture type; `Base.eltype` is answered here.
+old one. `data` must match the texture's `size` and `eltype`: the copy covers the
+texture's extent and would read past the end of smaller data. Backends implement
+[`copytexels!`](@ref) and `Base.size` for their texture type.
 """
-function upload_texture_data! end
+function upload_texture_data!(t::Texture2D, data::AbstractMatrix)
+    size(data) == size(t) || throw(DimensionMismatch(
+        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+    copytexels!(t, data)
+    return t
+end
+
+"""
+    copytexels!(texture, data)
+
+The backend's copy of a host or device matrix of the texture's size and element
+type into its first mip level, rebuilding the rest of the chain.
+"""
+function copytexels! end
 
 # From the type parameter, for every backend. Without it `eltype` is `Any`, no
 # upload fits, and every update rebuilds the texture, its bindings and the plan.

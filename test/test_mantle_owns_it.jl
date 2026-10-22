@@ -84,7 +84,7 @@ const UNIMPLEMENTED_BACKEND_FUNCS = Set{Symbol}([
     :access, :acquire_next_image!, :allocate_batch_queue!, :batchqueue,
     :begin_pass!, :begin_render_pass!, :beginframe!, :bind_textures,
     # These native graphics/RT operations are not implemented by the ROCm backend.
-    :build_blas_aabb, :build_blas, :upload_texture_data!,
+    :build_blas_aabb, :build_blas, :copytexels!,
     :build_accel!, :colorimage, :compile_draw, :currentimage,
     :depthimage, :destroyrecording!, :deviceof, :draw_in_pass!,
     :draw_indexed_in_pass!, :draw_indirect_in_pass!, :emitkernel!, :end_pass!,

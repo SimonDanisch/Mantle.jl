@@ -458,32 +458,17 @@ fftmixed_kernel(RS::Tuple, sign::Int) = MixedFFTKernel{RS,sign}()
 end
 
 """
-    fftmixed!(dst, src, RS; inverse = false) -> dst
-
-Batched transform over the radix sequence `RS`, for lengths the power-of-two
-kernel cannot take; `prod(RS)` must equal `size(src, 1)`. One transform per
-workgroup, without skew or batch grouping.
-"""
-function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32},
-                   RS::Tuple; inverse::Bool = false)
-    be = get_backend(src)
-    T,nbatch = fftmixed_config(dst,src,RS,caps(be))
-    nbatch == 0 && return dst
-    kern = fftmixed_kernel(RS,inverse ? 1 : -1)
-    kilaunch!(be,kern,dst,src;ndrange=T*nbatch,workgroupsize=T)
-    return dst
-end
-
-"""
     fftany!(dst, src; inverse = false, skew = FFT_SKEW) -> dst
 
-Select the tuned power-of-two kernel or a supported mixed-radix sequence. `skew`
-applies to the power-of-two kernel only.
+Select the tuned power-of-two kernel or a supported mixed-radix sequence
+(one transform per workgroup, without skew or batch grouping). `skew` applies to
+the power-of-two kernel only.
 """
 function fftany!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
                  inverse::Bool = false, skew::Bool = FFT_SKEW)
-    RS = fft_radices(size(src,1))
-    return RS === nothing ? fft!(dst,src;inverse,skew) : fftmixed!(dst,src,RS;inverse)
+    be = get_backend(src)
+    runlaunches!(be, fftany_launches(dst, src, caps(be); inverse, skew))
+    return dst
 end
 
 function rfft_geometry(dst,src)
@@ -522,17 +507,17 @@ end
 function fftmixed_config(dst,src,RS::Tuple,c)
     N = size(src,1)
     !isempty(RS) && all(r->r isa Integer && r>=2,RS) && prod(RS) == N || throw(ArgumentError(
-        "fftmixed!: radix sequence $RS must contain radices >= 2 and multiply to $N"))
+        "fftany!: radix sequence $RS must contain radices >= 2 and multiply to $N"))
     size(dst) == size(src) || throw(DimensionMismatch(
-        "fftmixed!: destination $(size(dst)) does not match source $(size(src))"))
+        "fftany!: destination $(size(dst)) does not match source $(size(src))"))
     nbatch = length(src) ÷ N
     nbatch == 0 && return (0,0)
     T = N ÷ maximum(RS)
     T <= c.workgrouplimit || throw(ArgumentError(
-        "fftmixed!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
+        "fftany!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
     shared = 2sizeof(Float32)*N
     shared <= c.sharedbudget || throw(ArgumentError(
-        "fftmixed!: N=$N needs $shared shared bytes, above this device's budget of $(c.sharedbudget)"))
+        "fftany!: N=$N needs $shared shared bytes, above this device's budget of $(c.sharedbudget)"))
     return T,nbatch
 end
 

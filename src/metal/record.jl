@@ -344,29 +344,16 @@ end
 """
 The one-thread command that writes a gated segment's run. Its last two arguments
 are patched when the segment closes (`patchwriter!`): the writer is encoded before
-the commands it counts.
-"""
-abstract type MetalWriter end
-
-mutable struct MetalRangeWriter <: MetalWriter
-    kernel::Metal.HostKernel
-    args::Vector{RecordedArg}
-    adapted::Tuple
-    state::Metal.KernelState
-    slot::Int
-end
-
-"""
-The writer for a queue that encodes a recording: a gated dispatch reads its
+the commands it counts. The kernel `F` is `metal_write_range!` for a replayed recording, or
+`metal_write_grids!` for a queue that encodes one: a gated dispatch then reads its
 threadgroup count from memory (`dispatchThreadgroupsWithIndirectBuffer:`), and a
-closed gate writes zero. Same fields as `MetalRangeWriter`, a different kernel and patch.
+closed gate writes zero.
 """
-mutable struct MetalGridWriter <: MetalWriter
+mutable struct MetalWriter{F}
     kernel::Metal.HostKernel
     args::Vector{RecordedArg}
     adapted::Tuple
     state::Metal.KernelState
-    slot::Int
 end
 
 """A recorded dispatch's buffer bindings for a legacy encoder: `(buffer, offset, index)`."""
@@ -807,20 +794,31 @@ runs for a discarded iteration and writes zero groups.
 """
 function Mantle.emitkernel!(e::MetalRecorder, f, args...; ndrange, workgroup_size)
     e.pred === nothing || closesegment!(e)
-    adapted = map(Metal.mtlconvert, args)
-    tt = Tuple{map(Core.Typeof, adapted)...}
-    kernel = Metal.mtlfunction(f, tt; name = icb_name(string(nameof(f))), indirect = true)
+    threads = prod(workgroup_size)
+    auxcommand!(e, f, map(Metal.mtlconvert, args), icb_name(string(nameof(f)));
+                groups = cld(ndrange, threads), threads)
+    return nothing
+end
+
+"""
+    auxcommand!(e, f, adapted, name; groups = 1, threads = 1, pack = true) -> (kernel, args, state)
+
+Compile `f` for `adapted`, lay its arguments out in the recording's auxiliary
+memory and encode it as the next command. `pack = false` leaves the bytes to a
+later `patchwriter!`.
+"""
+function auxcommand!(e::MetalRecorder, f, adapted::Tuple, name::String;
+                     groups::Integer = 1, threads::Integer = 1, pack::Bool = true)
+    kernel = Metal.mtlfunction(f, Tuple{map(Core.Typeof, adapted)...}; name, indirect = true)
     state = recorded_state(e.dev, kernel)
-    recargs, nbytes = recorded_args((state, f, adapted...), e.auxcursor)
+    args, nbytes = recorded_args((state, f, adapted...), e.auxcursor)
     e.auxcursor += Mantle.argalign(nbytes)
     e.auxcursor <= Int(e.aux.length) || error(
         "record!: the recording's auxiliary memory holds $(Int(e.aux.length)) bytes and " *
         "its writers and prepares need $(e.auxcursor); `planshape` sized it short.")
-    pack_recorded!(e.auxptr, recargs, (state, f, adapted...))
-    threads = prod(workgroup_size)
-    encode!(e, kernel.pipeline, recargs, e.aux, MTL.MTLSize(cld(ndrange, threads)),
-            MTL.MTLSize(threads))
-    return nothing
+    pack && pack_recorded!(e.auxptr, args, (state, f, adapted...))
+    encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(groups), MTL.MTLSize(threads))
+    return kernel, args, state
 end
 
 """
@@ -909,59 +907,30 @@ Encode the command that decides on the device whether a gated segment runs: an
 execution range writer for a replay, a threadgroup-count writer when the queue
 `encodes`.
 """
-emitwriter!(e::MetalRecorder, pred::Tuple{Any,Int}) =
-    encodes(e.dev.queue) ? emitgridwriter!(e, pred) : emitrangewriter!(e, pred)
-
-function emitrangewriter!(e::MetalRecorder, pred::Tuple{Any,Int})
+# The last two arguments, `base` and `n`, are patched when the segment closes; zero
+# until then, which writes nothing.
+function emitwriter!(e::MetalRecorder, pred::Tuple{Any,Int})
     slot = length(e.writers)
-    adapted = (Metal.mtlconvert(e.ranges),
-               Metal.mtlconvert(Mantle.storage(pred[1])),
-               Int32(pred[2]), Int32(2 * slot), UInt32(0), UInt32(0))
-    tt = Tuple{map(Core.Typeof, adapted)...}
-    kernel = Metal.mtlfunction(metal_write_range!, tt;
-                               name = icb_name("write_range", slot), indirect = true)
-    state = recorded_state(e.dev, kernel)
-    args, nbytes = recorded_args((state, metal_write_range!, adapted...), e.auxcursor)
-    e.auxcursor += Mantle.argalign(nbytes)
-    w = MetalRangeWriter(kernel, args, adapted, state, slot)
+    cond = (Metal.mtlconvert(Mantle.storage(pred[1])), Int32(pred[2]))
+    f, adapted, name = encodes(e.dev.queue) ?
+        (metal_write_grids!, (Metal.mtlconvert(e.grids), Metal.mtlconvert(e.templ), cond...,
+                              Int32(0), Int32(0)), icb_name("write_grids", slot)) :
+        (metal_write_range!, (Metal.mtlconvert(e.ranges), cond..., Int32(2 * slot),
+                              UInt32(0), UInt32(0)), icb_name("write_range", slot))
+    kernel, args, state = auxcommand!(e, f, adapted, name; pack = false)
+    w = MetalWriter{typeof(f)}(kernel, args, adapted, state)
     push!(e.writers, w)
-    encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(1), MTL.MTLSize(1))
     return w
 end
 
-function emitgridwriter!(e::MetalRecorder, pred::Tuple{Any,Int})
-    slot = length(e.writers)
-    # `base` and `n` are patched when the segment closes; zero until then, which
-    # writes nothing.
-    adapted = (Metal.mtlconvert(e.grids), Metal.mtlconvert(e.templ),
-               Metal.mtlconvert(Mantle.storage(pred[1])),
-               Int32(pred[2]), Int32(0), Int32(0))
-    tt = Tuple{map(Core.Typeof, adapted)...}
-    kernel = Metal.mtlfunction(metal_write_grids!, tt;
-                               name = icb_name("write_grids", slot), indirect = true)
-    state = recorded_state(e.dev, kernel)
-    args, nbytes = recorded_args((state, metal_write_grids!, adapted...), e.auxcursor)
-    e.auxcursor += Mantle.argalign(nbytes)
-    w = MetalGridWriter(kernel, args, adapted, state, slot)
-    push!(e.writers, w)
-    encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(1), MTL.MTLSize(1))
-    return w
-end
+# The run a writer writes, as its last two arguments.
+writertail(::MetalWriter{typeof(metal_write_range!)}, e, first, last) = (UInt32(first - 1), UInt32(last - first + 1))
+writertail(::MetalWriter{typeof(metal_write_grids!)}, e, first, last) = (Int32(3 * e.gridfirst), Int32(last - first + 1))
 
 """Give a writer the run it writes, and pack its arguments."""
-function patchwriter!(e::MetalRecorder, w::MetalRangeWriter, first::Int, last::Int)
-    adapted = (w.adapted[1], w.adapted[2], w.adapted[3], w.adapted[4],
-               UInt32(first - 1), UInt32(last - first + 1))
-    w.adapted = adapted
-    pack_recorded!(e.auxptr, w.args, (w.state, metal_write_range!, adapted...))
-    return nothing
-end
-
-function patchwriter!(e::MetalRecorder, w::MetalGridWriter, first::Int, last::Int)
-    adapted = (w.adapted[1], w.adapted[2], w.adapted[3], w.adapted[4],
-               Int32(3 * e.gridfirst), Int32(last - first + 1))
-    w.adapted = adapted
-    pack_recorded!(e.auxptr, w.args, (w.state, metal_write_grids!, adapted...))
+function patchwriter!(e::MetalRecorder, w::MetalWriter{F}, first::Int, last::Int) where {F}
+    w.adapted = (w.adapted[1:end-2]..., writertail(w, e, first, last)...)
+    pack_recorded!(e.auxptr, w.args, (w.state, F.instance, w.adapted...))
     return nothing
 end
 
@@ -976,15 +945,7 @@ function Mantle.emithead!(e::MetalRecorder, pl::Mantle.Plan)
     # Same kernel for ranges and grids.
     arr = encodes(e.dev.queue) ? e.grids : e.ranges
     n = encodes(e.dev.queue) ? Int32(length(e.grids)) : Int32(2 * e.nwriters)
-    adapted = (Metal.mtlconvert(arr), n)
-    tt = Tuple{map(Core.Typeof, adapted)...}
-    kernel = Metal.mtlfunction(metal_reset_ranges!, tt;
-                               name = icb_name("reset_ranges", 0), indirect = true)
-    state = recorded_state(e.dev, kernel)
-    args, nbytes = recorded_args((state, metal_reset_ranges!, adapted...), e.auxcursor)
-    e.auxcursor += Mantle.argalign(nbytes)
-    pack_recorded!(e.auxptr, args, (state, metal_reset_ranges!, adapted...))
-    encode!(e, kernel.pipeline, args, e.aux, MTL.MTLSize(1), MTL.MTLSize(1))
+    auxcommand!(e, metal_reset_ranges!, (Metal.mtlconvert(arr), n), icb_name("reset_ranges", 0))
     return nothing
 end
 

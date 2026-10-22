@@ -311,6 +311,10 @@ function loweredmesh(d::MetalCompiledGeometryDraw, indexed::Bool)
     return d.lowered_plain
 end
 
+"""`groups` mesh threadgroups of `threads` threads each."""
+drawmesh!(enc, groups, threads) = MTLm.draw_mesh_threadgroups!(enc, MTLm.MTLSize(groups, 1, 1),
+    MTLm.MTLSize(1, 1, 1), MTLm.MTLSize(threads, 1, 1))
+
 """What `compile_draw` returns for a `MeshPipeline` and `record_draw!` binds: the
 pipeline and both stages' baked arguments, which outlive the pass. The draw count
 is a threadgroup count.
@@ -324,10 +328,8 @@ end
 function Mantle.compile_draw(d::MetalDevice, p::Mantle.MeshPipeline,
                              color_formats, depth_format, mesh_args, frag_args;
                              bindings = nothing)
-    mesh = StageArgs(mesh_args)
-    frag = StageArgs(frag_args)
-    cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
-    dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
+    mesh, frag = StageArgs(mesh_args), StageArgs(frag_args)
+    cfmts, dfmt = mtlformats(color_formats, depth_format)
     pipeline = compile_pipeline(d, p, cfmts, dfmt, buffer_types(mesh), buffer_types(frag))
     return MetalCompiledMeshDraw(pipeline, mesh, frag)
 end
@@ -346,20 +348,12 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledMeshDraw, args,
     instances == 1 || throw(ArgumentError(
         "record_draw!: this backend dispatches mesh threadgroups directly, so there " *
         "is no instance count to multiply them by; got instances = $(instances)."))
-    isempty(d.mesh.device) || rebake!(d.mesh, args)
-    isempty(d.frag.device) || rebake!(d.frag, args)
+    rebakestages!(args, d.mesh, d.frag)
     c = d.pipeline
-    MTLm.set_pipeline!(h.encoder, c.state)
-    c.depth_state === nothing ||
-        MTLm.set_depth_stencil_state!(h.encoder, c.depth_state)
-    MTLm.set_cull_mode!(h.encoder, c.cull)
-    # Counter-clockwise: `flip_clip` mirrors y, reversing every primitive's winding.
-    MTLm.set_front_facing_winding!(h.encoder, MTLm.MTLWindingCounterClockwise)
+    setdrawstate!(h.encoder, c)
     bind_stage!(h.encoder, d.mesh, MTLm.set_mesh_bytes!, MTLm.MTLRenderStageMesh)
     bind_stage!(h.encoder, d.frag, MTLm.set_fragment_bytes!, MTLm.MTLRenderStageFragment)
-    MTLm.draw_mesh_threadgroups!(h.encoder, MTLm.MTLSize(groups, 1, 1),
-                                            MTLm.MTLSize(1, 1, 1),
-                                            MTLm.MTLSize(c.threads, 1, 1))
+    drawmesh!(h.encoder, groups, c.threads)
     return nothing
 end
 
@@ -375,12 +369,9 @@ function Mantle.compile_draw(d::MetalDevice,
                              p::Mantle.GeometryPipeline,
                              color_formats, depth_format, vert_args, frag_args;
                              bindings = nothing)
-    mesh = StageArgs(vert_args)
-    frag = StageArgs(frag_args)
+    mesh, frag = StageArgs(vert_args), StageArgs(frag_args)
     Mantle.requirevertexindex(Mantle.stagefunction(p.vertex), bodytypes(buffer_types(mesh)))
-    cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
-    dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
-    return MetalCompiledGeometryDraw(d, p, cfmts, dfmt, mesh, frag)
+    return MetalCompiledGeometryDraw(d, p, mtlformats(color_formats, depth_format)..., mesh, frag)
 end
 
 """
@@ -401,8 +392,7 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
 
     # Bind this frame's arguments, not the ones baked at compile (Makie `lines!`
     # and `scatter!` draw through here).
-    isempty(d.mesh.device) || rebake!(d.mesh, args)
-    isempty(d.frag.device) || rebake!(d.frag, args)
+    rebakestages!(args, d.mesh, d.frag)
 
     lowered = loweredmesh(d, indices !== nothing)
     # The index buffer is the mesh stage's last argument (`GeometryAsMesh`),
@@ -414,19 +404,10 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
                          mesh_bufs, buffer_types(d.frag))
 
     enc = h.encoder
-    MTLm.set_pipeline!(enc, c.state)
-    c.depth_state === nothing || MTLm.set_depth_stencil_state!(enc, c.depth_state)
-    MTLm.set_cull_mode!(enc, c.cull)
-    # Counter-clockwise: `flip_clip` mirrors y, reversing every primitive's winding.
-    MTLm.set_front_facing_winding!(enc, MTLm.MTLWindingCounterClockwise)
+    setdrawstate!(enc, c)
     bind_stage!(enc, d.mesh, MTLm.set_mesh_bytes!, MTLm.MTLRenderStageMesh)
     if ix !== nothing
-        ibuf = metal_buffer(indices)
-        ibuf === nothing && error(
-            "an indexed draw needs a device buffer of indices, got $(typeof(indices))")
-        # Resident for the mesh stage, which reads the indices; a non-resident
-        # buffer reads as zeros.
-        MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageMesh)
+        useindices!(enc, indices, MTLm.MTLRenderStageMesh)
         # `scratchsize` covered only the stage's own arguments, so grow the
         # scratch to fit the index argument.
         length(d.mesh.scratch) < sizeof(typeof(ix)) &&
@@ -438,10 +419,7 @@ function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledGeometryDraw, a
     groups = Mantle.primitivecount(d.pipeline.topology, count)
     # No primitives (e.g. a one-point `lines`) draws nothing; Metal refuses a
     # zero grid.
-    groups == 0 && return nothing
-    MTLm.draw_mesh_threadgroups!(enc, MTLm.MTLSize(groups, 1, 1),
-                                      MTLm.MTLSize(1, 1, 1),
-                                      MTLm.MTLSize(c.threads, 1, 1))
+    groups == 0 || drawmesh!(enc, groups, c.threads)
     return nothing
 end
 

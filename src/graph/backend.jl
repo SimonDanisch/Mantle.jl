@@ -493,7 +493,7 @@ const BACKEND_VOCABULARY = (
     :initbackend!,
     :devicename,
     # Runtime hooks outside the graph (runtime/backendhooks.jl).
-    :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :feed!, :decodemore!, :remaining, :build_blas_aabb, :upload_texture_data!,
+    :staged_gemm_tile, :videodecodes, :decode_h264_gpu, :h264decoder, :feed!, :decodemore!, :remaining, :build_blas_aabb, :copytexels!,
     :isoutofmemory,
     # devices, memory, resources
     :Device, :backend, :kibackend, :batchqueue, :capacity, :caps, :maxalloc, :pool,

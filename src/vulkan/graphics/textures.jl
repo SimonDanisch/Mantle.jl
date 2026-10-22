@@ -164,10 +164,7 @@ end
 
 """Upload host pixel data through staging scratch the one-shot owns; `data` is free
 again when this returns."""
-function upload_texture_data!(tex::VulkanTexture2D{T}, data::AbstractMatrix{T}) where T
-    # The copy covers the texture's extent; smaller data would be read past its end.
-    size(data) == size(tex) || throw(DimensionMismatch(
-        "upload_texture_data!: $(size(data)) texels for a $(size(tex)) texture"))
+function copytexels!(tex::VulkanTexture2D{T}, data::AbstractMatrix{T}) where T
     bytes = reinterpret(UInt8, vec(collect(data)))
     nbytes = length(bytes)
     copy_into_texture!(tex) do e
@@ -185,10 +182,7 @@ array's own buffer, contiguous because a `LavaArray` has an offset and no stride
 The array is held, not its `VkManagedBuffer`: its `DataRef` refcount keeps the
 memory alive.
 """
-function upload_texture_data!(tex::VulkanTexture2D{T}, data::LavaArray{T,2}) where T
-    # Otherwise the GPU reads past the array's end.
-    size(data) == size(tex) || throw(DimensionMismatch(
-        "upload_texture_data!: $(size(data)) texels for a $(size(tex)) texture"))
+function copytexels!(tex::VulkanTexture2D{T}, data::LavaArray{T,2}) where T
     copy_into_texture!(tex) do e
         mb = data.buf[]::VkManagedBuffer
         hold!(e, data)

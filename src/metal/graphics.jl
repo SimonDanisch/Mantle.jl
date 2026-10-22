@@ -101,16 +101,14 @@ function Mantle.Texture2D(be::Metal.MetalBackend, data::AbstractMatrix{T}; mipma
 end
 
 """
-    upload_texture_data!(tex::MetalTexture2D, data)
+    copytexels!(tex::MetalTexture2D, data)
 
 New texels for an existing texture, from the host or the device, through a
 blit on Mantle's queue rather than `replace_region!`, so a frame still sampling
 the texture is not overwritten. The matrix's column-major bytes are uploaded as
 they are: one Julia column is one image row. Waits for completion.
 """
-function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where {T}
-    size(data) == size(t) || throw(DimensionMismatch(
-        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+function Mantle.copytexels!(t::MetalTexture2D{T}, data::AbstractMatrix{T}) where {T}
     # `collect` for anything without a dense host pointer (views, adjoints).
     rows = data isa Matrix{T} ? data : collect(data)
     nbytes = length(rows) * sizeof(T)
@@ -122,9 +120,7 @@ end
 
 # Device source: blit from the array's own buffer. A separate method because an
 # `MtlArray` is a `DenseMatrix` whose `pointer` is a device address.
-function Mantle.upload_texture_data!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) where {T}
-    size(data) == size(t) || throw(DimensionMismatch(
-        "upload_texture_data!: $(size(data)) texels for a $(size(t)) texture"))
+function Mantle.copytexels!(t::MetalTexture2D{T}, data::Metal.MtlMatrix{T}) where {T}
     # The kernel that wrote `data` may be on this task's own Metal.jl queue (no
     # `adoptqueue!`), which `framebuffer!` does not order against.
     Metal.synchronize()
@@ -796,16 +792,34 @@ buffer_types(a::StageArgs) = Tuple{map(argdevtype, a.device)...}
 
 # `bindings` is ignored: textures bind to encoder slots, so they do not affect
 # pipeline compilation (Vulkan needs the layout at compile).
+"""The attachment formats as Metal pixel formats, through `mtlformat` so a pipeline
+matches the attachments it draws into."""
+mtlformats(color_formats, depth_format) =
+    (MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats],
+     depth_format === nothing ? nothing : mtlformat(depth_format))
+
 function Mantle.compile_draw(d::MetalDevice, p::Mantle.GraphicsPipeline,
                              color_formats, depth_format, vert_args, frag_args;
                              bindings = nothing)
-    cfmts = MTLm.MTLPixelFormat[mtlformat(T) for T in color_formats]
-    vert = StageArgs(vert_args)
-    frag = StageArgs(frag_args)
-    # Through `mtlformat`, so the pipeline matches the attachment's format.
-    dfmt = depth_format === nothing ? nothing : mtlformat(depth_format)
+    vert, frag = StageArgs(vert_args), StageArgs(frag_args)
+    cfmts, dfmt = mtlformats(color_formats, depth_format)
     pipeline = compile_pipeline(d, p, cfmts, dfmt, buffer_types(vert), buffer_types(frag))
     return MetalCompiledDraw(pipeline, vert, frag)
+end
+
+"""Re-bake every stage that has arguments from this frame's resolved `args`."""
+rebakestages!(args, stages::StageArgs...) =
+    foreach(s -> isempty(s.device) || rebake!(s, args), stages)
+
+"""Set the pipeline state a draw needs. Front faces are counter-clockwise:
+`flip_clip` mirrors y, reversing every primitive's winding, and back-face culling
+would otherwise drop the front faces."""
+function setdrawstate!(enc, c)
+    MTLm.set_pipeline!(enc, c.state)
+    c.depth_state === nothing || MTLm.set_depth_stencil_state!(enc, c.depth_state)
+    MTLm.set_cull_mode!(enc, c.cull)
+    MTLm.set_front_facing_winding!(enc, MTLm.MTLWindingCounterClockwise)
+    return nothing
 end
 
 function Mantle.begin_render_pass!(d::MetalDevice, targets, loads, depth, depth_load)
@@ -869,18 +883,10 @@ end
 
 function Mantle.record_draw!(h::MetalPassHandle, d::MetalCompiledDraw, args, count;
                              instances::Integer = 1, indices = nothing)
-    # `args` is this frame's resolved list, shared by both stages; a stage with
-    # arguments re-bakes from it every draw (`rebake!`).
-    isempty(d.vert.device) || rebake!(d.vert, args)
-    isempty(d.frag.device) || rebake!(d.frag, args)
+    # `args` is this frame's resolved list, shared by both stages.
+    rebakestages!(args, d.vert, d.frag)
     c = d.pipeline
-    MTLm.set_pipeline!(h.encoder, c.state)
-    c.depth_state === nothing ||
-        MTLm.set_depth_stencil_state!(h.encoder, c.depth_state)
-    MTLm.set_cull_mode!(h.encoder, c.cull)
-    # Counter-clockwise: `flip_clip` mirrors y, reversing every triangle's
-    # winding; otherwise back-face culling drops the front faces.
-    MTLm.set_front_facing_winding!(h.encoder, MTLm.MTLWindingCounterClockwise)
+    setdrawstate!(h.encoder, c)
     bind_stage!(h.encoder, d.vert, MTLm.set_vertex_bytes!, MTLm.MTLRenderStageVertex)
     # Metal rejects fragment bindings on a depth-only pipeline.
     c.has_fragment &&
@@ -895,15 +901,14 @@ end
 The viewport for the following draws, and a scissor over the same rectangle.
 A negative `height` (Vulkan's flipped viewport, `y` naming the bottom edge) is
 passed to `MTLViewport` unchanged, which interprets it the same way and undoes
-the vertex stage's `flip_clip`. Only the scissor is normalised.
+the vertex stage's `flip_clip`. The scissor is core's `scissorrect`, at least a
+pixel wide, since Metal refuses an empty one.
 """
 function Mantle.setviewport!(h::MetalPassHandle, x::Real, y::Real, w::Real, hgt::Real)
-    top = min(y, y + hgt)
     MTLm.set_viewport!(h.encoder,
         MTLm.MTLViewport(Float64(x), Float64(y), Float64(w), Float64(hgt), 0.0, 1.0))
-    MTLm.set_scissor!(h.encoder,
-        MTLm.MTLScissorRect(UInt(max(0, floor(Int, x))), UInt(max(0, floor(Int, top))),
-                            UInt(max(1, ceil(Int, w))), UInt(max(1, ceil(Int, abs(hgt))))))
+    sx, sy, sw, sh = Mantle.scissorrect(x, y, w, hgt)
+    MTLm.set_scissor!(h.encoder, MTLm.MTLScissorRect(UInt(sx), UInt(sy), UInt(max(1, sw)), UInt(max(1, sh))))
     return nothing
 end
 
@@ -970,16 +975,22 @@ function draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Integer,
     if indices === nothing
         MTLm.draw_primitives!(enc, c.primitive, 0, n, instances)
     else
-        ibuf = metal_buffer(indices)
-        ibuf === nothing &&
-            error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
-        # Already an `MTLRenderStages`; wrapping it is a `MethodError`.
-        MTLm.use!(enc, ibuf, MTLm.ReadUsage, MTLm.MTLRenderStageVertex)
+        ibuf = useindices!(enc, indices, MTLm.MTLRenderStageVertex)
         MTLm.draw_indexed_primitives!(enc, c.primitive, n,
                                       MTLm.MTLIndexTypeUInt32, ibuf,
                                       byteoffset(indices), instances)
     end
     return nothing
+end
+
+"""The `MTLBuffer` of `indices`, made resident for `stage`, which reads them although
+no shader names them; a non-resident buffer reads as zeros."""
+function useindices!(enc, indices, stage)
+    ibuf = metal_buffer(indices)
+    ibuf === nothing && error("an indexed draw needs a device buffer of indices, got $(typeof(indices))")
+    # `stage` is already an `MTLRenderStages`; wrapping it is a `MethodError`.
+    MTLm.use!(enc, ibuf, MTLm.ReadUsage, stage)
+    return ibuf
 end
 
 draw_with_count!(enc, c::MetalCompiledGraphicsPipeline, n::Mantle.Commands,

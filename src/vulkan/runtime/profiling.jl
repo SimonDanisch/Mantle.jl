@@ -29,25 +29,14 @@ binary, parsed directly (5-word header, then instructions whose first word is
 """
 function spirv_op_stats(bytes::AbstractVector{UInt8})
     n_bytes = length(bytes)
-    n_bytes >= 20 || error("SPIR-V too short: $(n_bytes) bytes (header is 20)")
-    n_bytes % 4 == 0 || error("SPIR-V byte length not word-aligned: $(n_bytes)")
-    words = reinterpret(UInt32, bytes)
-    # Header: magic (0), version (1), generator (2), bound (3), schema (4)
-    words[1] == 0x07230203 || error("Bad SPIR-V magic: $(string(words[1]; base=16))")
-    n_instructions = 0
-    n_functions = 0
+    n_bytes >= 20 && n_bytes % 4 == 0 && reinterpret(UInt32, bytes)[1] == 0x07230203 ||
+        error("not a SPIR-V module in this byte order: $(n_bytes) bytes")
+    n_instructions = n_functions = 0
     hist = Dict{UInt16,Int}()
-    i = 6                              # 1-based, skip 5-word header
-    while i <= length(words)
-        word0 = words[i]
-        wc = UInt16(word0 >> 16)
-        op = UInt16(word0 & 0xFFFF)
-        wc >= 1 || error("Zero word-count instruction at word index $(i-1)")
+    for (op, _) in spirvinstructions(bytes)
         n_instructions += 1
         hist[op] = get(hist, op, 0) + 1
-        # OpFunction = 54 in SPIR-V core spec
-        op == 0x36 && (n_functions += 1)
-        i += Int(wc)
+        op == Op.OpFunction && (n_functions += 1)
     end
     return SPIRVOpStats(n_bytes, n_instructions, n_functions, hist)
 end

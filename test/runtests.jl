@@ -934,6 +934,11 @@ foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
 # `_glfwCreateWindowX11`, uninterruptible (a SIGINT cannot land inside a C call),
 # with everything before it still in the stdout buffer. One child per FILE, so a
 # hang in one does not hide what the other would have said.
+# `MANTLE_TEST_WINDOWS=0` skips them on a machine someone is working at, where a
+# window opening mid-work is the interruption; run them where windows may appear.
+if get(ENV, "MANTLE_TEST_WINDOWS", "1") == "0"
+    @info "window tests skipped (MANTLE_TEST_WINDOWS=0)"
+else
 @testset "windows (separate process): $(nameof(typeof(WINDOW_BE)))" for WINDOW_BE in Mantle.eachbackend()
     # Both files on every backend, each in a child of its own with a deadline, so a
     # hang in the long one does not hide the short one's results.
@@ -978,6 +983,7 @@ foreachbackend(joinpath(@__DIR__, "test_stored_device_array.jl"))
         ok || println(read(log, String))
         @test ok
     end
+end
 end
 
 # ── the Metal backend ─────────────────────────────────────────────────────────

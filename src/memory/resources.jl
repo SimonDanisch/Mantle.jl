@@ -140,10 +140,11 @@ end
     bufferusage(dev, T) -> constraint
 
 What memory a persistent buffer of `T` needs, in the form [`compatible`](@ref)
-reads. Some element types need more than the ordinary bits: draw commands need
-`INDIRECT_BUFFER_BIT`, or the draw fails validation.
+reads. Some element types need more than the ordinary bits: on Vulkan draw
+commands need `INDIRECT_BUFFER_BIT`, or the draw fails validation. `nothing`, no
+constraint, where a buffer's use is decided at bind time (Metal, ROCm).
 """
-function bufferusage end
+bufferusage(dev, ::Type) = nothing
 
 """Which arena persistent buffers live in. Separate from the transient arenas so
 a long-lived allocation does not fragment the space plans reuse every frame."""

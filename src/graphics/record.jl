@@ -15,6 +15,21 @@ viewport!(p::PassRecorder, x::Real, y::Real, w::Real, h::Real) =
 """Set viewport and derived scissor on an open backend pass."""
 function setviewport! end
 
+"""
+    scissorrect(x, y, w, h) -> (x, y, w, h)
+
+The integer scissor a viewport implies. A flipped viewport (negative `h`, `y`
+naming the bottom edge) has its origin at `y + h`, and whatever lies left of or
+above the target is cut off, since scissor offsets cannot be negative.
+"""
+function scissorrect(x::Real, y::Real, w::Real, h::Real)
+    sx, sy = floor(Int, x), floor(Int, h < 0 ? y + h : y)
+    sw, sh = ceil(Int, abs(w)), ceil(Int, abs(h))
+    sx < 0 && ((sw, sx) = (max(0, sw + sx), 0))
+    sy < 0 && ((sh, sy) = (max(0, sh + sy), 0))
+    return sx, sy, sw, sh
+end
+
 """draw!(p::PassRecorder, compiled, args, count; instances=1, indices=nothing)
 
 Record a compiled draw. count is vertices, indices when indexed, or mesh workgroups."""

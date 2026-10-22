@@ -847,9 +847,6 @@ bound the placer checks against, not a reservation.
 """
 capacity(d::MetalDevice) = Int(d.dev.recommendedMaxWorkingSetSize)
 
-"""Suballocator block size: 64 MiB, as on Vulkan."""
-blocksize(::MetalDevice) = 64 << 20
-
 """Wait for everything submitted to the device: its queue and every channel."""
 waitidle(b::Metal.MetalBackend) = waitidle(Device(b))
 waitidle(d::MetalDevice) = (waitidle(d.queue); foreach(Metal.synchronize, d.channels); nothing)

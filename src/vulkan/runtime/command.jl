@@ -109,9 +109,7 @@ the previous run is still pending.
 """
 function recording!(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
-    device_lost(ctxof(bq)) && throw(LavaError(
-        "recording!", "Vulkan device is lost — cannot record",
-        "Call reset_device!() to reinitialize, or restart Julia."))
+    refuselost(ctxof(bq), "recording!")
     # Same pool as a one-shot: core's `acquire!` sweeps, returns a reset buffer
     # and opens the hold frame this recording takes at `seal!`. The `OneShot`
     # shell is dropped here and rebuilt by `release!`.
@@ -264,10 +262,7 @@ several calls (a run's front one-shot, a windowed frame) and seals it itself."""
 function openoneshot(bq::SubmitChannel{<:VulkanQueue})
     ownthread(bq)
     ctx = ctxof(bq)
-    device_lost(ctx) && throw(LavaError(
-        "oneshot", "Vulkan device is lost — cannot record",
-        "Call reset_device!() to reinitialize, or restart Julia. " *
-        "All existing LavaArrays are invalid after reset and must be re-allocated."))
+    refuselost(ctx, "oneshot")
     # `acquire!` drains, then returns a reset buffer with a hold frame open.
     return begin!(acquire!(bq), BEGIN_INFO_ONE_TIME)
 end
@@ -347,9 +342,7 @@ function submitlist!(bq::SubmitChannel{<:VulkanQueue}, front::Union{Nothing,Clos
     ownthread(bq)
     ctx = ctxof(bq)
     q = driver(bq)
-    device_lost(ctx) && throw(LavaError(
-        "submit!", "Vulkan device is lost — cannot submit",
-        "Call reset_device!()"))
+    refuselost(ctx, "submit!")
     # Submitting is when nothing more can be added; `seal!` is idempotent.
     front === nothing || seal!(front)
     for c in closed
@@ -485,7 +478,8 @@ queueof(e::Emitter{O}) where {O<:Closed} = queueof(e.owner)
 
 """
     emit_dispatch!(emitter, pipeline, argaddr, groups, tlas = nothing, name = "")
-    emit_dispatch_indirect!(emitter, pipeline, argaddr, indirect, tlas = nothing, name = "")
+
+`groups` is three workgroup counts, or the `LavaArray` the device reads them from.
 
 Write one compute dispatch: bind, push the argument address, dispatch. No
 barrier: a plan emits its derived hazards (`emitpass!`), and a one-shot opens
@@ -494,36 +488,26 @@ with [`headbarrier!`](@ref). The acceleration structure goes through
 emitter's owner ([`tlasset!`](@ref)).
 """
 @inline function emit_dispatch!(e::Emitter, pipeline::LavaComputePipeline, argaddr::UInt64,
-                        groups::NTuple{3,<:Integer}, tlas = nothing,
-                        name::AbstractString = "")
-    cmd = e.cmd
-    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
+                                groups, tlas = nothing, name::AbstractString = "")
+    VK.cmd_bind_pipeline(e.cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
     hold!(e, pipeline)
     bindtlas!(e, pipeline, tlas)
     pushargs!(e, pipeline, argaddr)
-    ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
-    VK.cmd_dispatch(cmd, UInt32(groups[1]), UInt32(groups[2]), UInt32(groups[3]))
-    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
+    ts = maybe_write_dispatch_start_timestamp!(e.ctx, e.cmd, name)
+    dispatchcommand!(e, groups)
+    maybe_write_dispatch_end_timestamp!(e.ctx, e.cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
     emitted!(e, name)
     return nothing
 end
 
-@inline function emit_dispatch_indirect!(e::Emitter, pipeline::LavaComputePipeline,
-                                 argaddr::UInt64, indirect, tlas = nothing,
-                                 name::AbstractString = "")
-    cmd = e.cmd
-    VK.cmd_bind_pipeline(cmd, VK.PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline)
-    hold!(e, pipeline)
-    bindtlas!(e, pipeline, tlas)
-    pushargs!(e, pipeline, argaddr)
+dispatchcommand!(e::Emitter, g::NTuple{3,<:Integer}) =
+    VK.cmd_dispatch(e.cmd, UInt32(g[1]), UInt32(g[2]), UInt32(g[3]))
+# A `LavaArray` of three counts (defined after this file).
+function dispatchcommand!(e::Emitter, indirect)
     mb = indirect.buf[]::VkManagedBuffer
-    ts = maybe_write_dispatch_start_timestamp!(e.ctx, cmd, name)
-    VK.cmd_dispatch_indirect(cmd, mb.buffer, UInt64(indirect.offset))
-    maybe_write_dispatch_end_timestamp!(e.ctx, cmd, ts, e.ctx.cmd_pipeline_barrier_fptr)
+    VK.cmd_dispatch_indirect(e.cmd, mb.buffer, UInt64(pool_offset(mb) + indirect.offset))
     # The device reads the workgroup counts from this buffer.
     hold!(e, indirect)
-    emitted!(e, name)
-    return nothing
 end
 
 """
@@ -807,8 +791,7 @@ loss between them; throws on device loss or after `driver(bq).flush_timeout_ns`.
 """
 function flush!(bq::SubmitChannel{<:VulkanQueue}, ::Device)
     ownthread(bq)
-    device_lost(ctxof(bq)) && throw(LavaError("command flush", "Vulkan device lost",
-        "Call reset_device!() to reinitialize, or restart Julia session."))
+    refuselost(ctxof(bq), "command flush")
     target = something(newest(bq), UInt64(0))
     # Nothing in flight still drains: regions dropped since the last submission
     # are given back only at a drain.
@@ -907,13 +890,12 @@ end
 """Throw a `LavaError` with recent validation messages and the dispatch log."""
 function throw_with_validation_context(call_name::String, err_result,
         bq::Union{Nothing,SubmitChannel{<:VulkanQueue}}=nothing)
-    # Re-enable dispatch logging so the next run records names: on `bq`'s
-    # context, or the bound one without `bq`.
-    let c = bq === nothing ? VK_CONTEXT_REF[] : ctxof(bq)
-        c === nothing || (c.diag.dispatch_logging = true)
-    end
+    # `bq`'s context, or the bound one without `bq`: its messages, and dispatch
+    # logging re-enabled so the next run records names.
+    ctx = bq === nothing ? VK_CONTEXT_REF[] : ctxof(bq)
+    ctx === nothing || (ctx.diag.dispatch_logging = true)
     vk_err = unwrap_error(err_result)
-    msgs = get_validation_messages()
+    msgs = get_validation_messages(ctx)
     validation_detail = if isempty(msgs)
         "No validation messages captured. Install vulkan-validationlayers for GPU error diagnostics."
     else

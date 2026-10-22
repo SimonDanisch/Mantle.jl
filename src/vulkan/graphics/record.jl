@@ -114,25 +114,10 @@ setviewport!(h::VulkanPassHandle, x::Real, y::Real, w::Real, hgt::Real) =
 use_bindings!(h::VulkanPassHandle, d::VulkanDraw, bindings) =
     use_bindings!(h.e, d.pipeline, bindings)
 
-function record_draw!(h::VulkanPassHandle, d::VulkanDraw, args, count::Integer;
+# The graph's draw command (`emit_draw!`), after packing this draw's arguments.
+function record_draw!(h::VulkanPassHandle, d::VulkanDraw, args, count;
                       instances::Integer = 1, indices = nothing)
-    e = h.e
-    addr = pack_gfx_args_bda(e.owner, args, d.shader.push_info)
-    if ismeshpipeline(d.pipeline)
-        indices === nothing || throw(ArgumentError(
-            "record_draw!: a mesh pipeline takes no index buffer — the mesh stage " *
-            "writes its own primitive indices. `count` is its workgroup count."))
-        draw_mesh_in_pass!(e, d.pipeline, count; push_bda = addr)
-    elseif indices === nothing
-        draw_in_pass!(e, d.pipeline, count; push_bda = addr, instances)
-    else
-        # Held because the device reads the indices; the offset is the view's,
-        # since an index buffer may be a slice.
-        hold!(e, indices)
-        mb = indices.buf[]::VkManagedBuffer
-        draw_indexed_in_pass!(e, d.pipeline, count; push_bda = addr, instances,
-                              indices_buffer = mb.buffer,
-                              indices_offset = UInt64(pool_offset(mb) + indices.offset))
-    end
+    addr = pack_gfx_args_bda(h.e.owner, args, d.shader.push_info)
+    emit_draw!(h.e, d.pipeline, count, addr, indices, Int(instances))
     return nothing
 end

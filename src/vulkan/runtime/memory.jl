@@ -225,10 +225,7 @@ function vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
                   extra_usage::UInt32=UInt32(0), unified::Bool=false)
     # On a lost device a Vulkan call may succeed against torn-down state and
     # return garbage addresses.
-    device_lost(ctxof(bq)) && throw(LavaError(
-        "vk_alloc",
-        "Vulkan device is lost — cannot allocate new buffers",
-        "Call reset_device!() to reinitialize, or restart Julia."))
+    refuselost(ctxof(bq), "vk_alloc")
     drain!(bq)
     maybe_collect(ctxof(bq))
     result = try_vk_alloc(bq, nbytes; extra_usage, unified)
@@ -269,20 +266,6 @@ function quiesce_before_reclaim!(bq::SubmitChannel{<:VulkanQueue})
     device_lost(ctx) && return false
     dev = lavadevice(ctx)
     return quiesce_pool!(() -> flush!(bq), () -> drain!(bq), pool(dev), dev)
-end
-
-"""
-    discardvalidation!(ctx)
-
-Drop the validation messages of an expected, handled allocation refusal
-(`try_vk_alloc`). Drains the ring before emptying `.messages`: messages left in
-the ring are raised by the next `check_validation_errors!` against an unrelated
-caller.
-"""
-function discardvalidation!(ctx::VkContext)
-    drain_validation_messages!(ctx)
-    empty!(ctx.validation.messages)
-    return
 end
 
 """Attempt GPU buffer allocation, returning an `AllocFailure` on OOM."""
@@ -327,7 +310,7 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
         mem_type_idx_local = Int(mem_type_idx)
         # Over budget is out of memory (`overbudget`), with the same retry.
         if overbudget(ctx, mem_type_idx, mem_reqs.size)
-            discardvalidation!(ctx)      # creating `buf` may already have complained
+            clear_validation_messages!(ctx)      # creating `buf` may already have complained
             return AllocFailure(VK.ERROR_OUT_OF_DEVICE_MEMORY, :budget, Int(nbytes), mem_type_idx_local)
         end
 
@@ -348,7 +331,7 @@ function try_vk_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer;
         if e isa VK.VulkanError &&
            (e.code == VK.ERROR_OUT_OF_DEVICE_MEMORY ||
             e.code == VK.ERROR_OUT_OF_HOST_MEMORY)
-            discardvalidation!(ctxof(bq))
+            clear_validation_messages!(ctxof(bq))
             return AllocFailure(e.code, op, Int(nbytes), mem_type_idx_local)
         end
         # Mark the device lost, so later calls refuse with a clear error.
@@ -604,10 +587,7 @@ block with those bits is grown when none does.
 function pool_alloc(bq::SubmitChannel{<:VulkanQueue}, nbytes::Integer; extra_usage::UInt32=UInt32(0))
     ctx = ctxof(bq)
     # Even reusing a free span: the blocks of a lost device give garbage addresses.
-    device_lost(ctx) && throw(LavaError(
-        "pool_alloc",
-        "Vulkan device is lost — cannot allocate new buffers",
-        "Call reset_device!() to reinitialize, or restart Julia."))
+    refuselost(ctx, "pool_alloc")
     p = mempolicy(ctx)
     nbytes = max(Int(nbytes), POOL_MIN_SIZE)
     drain!(bq)

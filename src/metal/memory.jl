@@ -46,13 +46,7 @@ Copy `n` elements device-to-device through the mapped bytes, after `awaitwrites`
 devicecopy!(d::MetalDevice, dst::DeviceArray{T}, src::DeviceArray{T}, n::Integer) where {T} =
     Mantle.hostdevicecopy!(d, dst, src, n)
 
-"""
-    bufferusage(dev, T) -> nothing
 
-Always `nothing`: Metal decides a buffer's use at bind time, so no creation flag
-such as Vulkan's `INDIRECT_BUFFER_BIT` exists.
-"""
-bufferusage(::MetalDevice, ::Type) = nothing
 
 # The only part of a move core asks of a backend; which recorded plans hold an
 # address in the moved range, and patching them, is core's.

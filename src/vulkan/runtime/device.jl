@@ -525,6 +525,12 @@ Whether this context's device has been marked lost.
 """
 device_lost(ctx::VkContext) = ctx.device_lost
 
+"""Refuse `call` on a lost or retired device: nothing on it works again, and every
+array allocated on it is invalid."""
+refuselost(ctx::VkContext, call::String) = device_lost(ctx) && throw(LavaError(call,
+    "the Vulkan device is lost or retired",
+    "Call reset_device!() and allocate again on the device it returns, or restart Julia."))
+
 """
     mark_device_lost!(ctx)
 

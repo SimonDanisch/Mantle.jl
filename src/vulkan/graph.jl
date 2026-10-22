@@ -95,13 +95,8 @@ supports_hwtlas(dev::LavaDevice) = dev.ctx.ray_query_available
 
 validating(dev::LavaDevice) = dev.ctx.validating
 
-function validationmessages!(dev::LavaDevice)
-    ctx = dev.ctx
-    drain_validation_messages!(ctx)
-    msgs = copy(ctx.validation.messages)
-    empty!(ctx.validation.messages)
-    return msgs
-end
+validationmessages!(dev::LavaDevice) =
+    (msgs = get_validation_messages(dev.ctx); empty!(dev.ctx.validation.messages); msgs)
 
 # Counts every `vkQueueSubmit2` on any of the context's queues.
 submissions(dev::LavaDevice) = dev.ctx.diag.flush_counter[]
@@ -355,7 +350,7 @@ function argbytes(dev::LavaDevice, nbytes::Int)
 end
 
 """The indirect command `off` bytes into a plan's argument region, as the
-`LavaArray` a prepare kernel writes and `emit_dispatch_indirect!` reads."""
+`LavaArray` a prepare kernel writes and `emit_dispatch!` reads."""
 indirectslot(::LavaDevice, region::Region, off::Int) =
     LavaArray{UInt32,1}(copy((memoryof(region)::BufferBlock).ref), (3,);
                         offset = offset(region) + off)
@@ -1253,10 +1248,14 @@ end
 
 # `emit_draw!` dispatches on the count and index buffer types, fixed when the
 # plan is recorded; an indirect count needs no readback. Whether a draw is a
-# mesh draw comes from the pipeline, not the count type.
-emit_draw!(e, pipe, n::Integer, addr::UInt64, ::Nothing, inst::Int) =
-    ismeshpipeline(pipe) ? draw_mesh_in_pass!(e, pipe, n; push_bda = addr) :
-                           draw_in_pass!(e, pipe, n; push_bda = addr, instances = inst)
+# mesh draw comes from the pipeline, not the count type: `n` is then its
+# workgroup count, and a mesh stage has neither instances nor an index buffer.
+function emit_draw!(e, pipe, n::Integer, addr::UInt64, ::Nothing, inst::Int)
+    ismeshpipeline(pipe) || return draw_in_pass!(e, pipe, n; push_bda = addr, instances = inst)
+    inst == 1 || throw(ArgumentError(
+        "a mesh draw dispatches workgroups directly; there is no instance count to multiply them by, got $inst"))
+    draw_mesh_in_pass!(e, pipe, n; push_bda = addr)
+end
 
 emit_draw!(e, pipe, x, addr::UInt64, ::Nothing, inst::Int) =
     emit_draw!(e, pipe, count(x), addr, nothing, inst)
@@ -1269,6 +1268,8 @@ emit_draw!(e, pipe, c::Commands, addr::UInt64, ::Nothing, ::Int) =
 # lifetime. The view offset matters: an index buffer may be a pool slice.
 # `drawcount` (core) converts the count like a vertex count.
 function emit_draw!(e, pipe, n, addr::UInt64, indices, inst::Int)
+    ismeshpipeline(pipe) && throw(ArgumentError(
+        "a mesh pipeline takes no index buffer: the mesh stage writes its own primitive indices"))
     hold!(e, indices)
     mb = indices.buf[]::VkManagedBuffer
     draw_indexed_in_pass!(e, pipe, drawcount(n); push_bda = addr, instances = inst,
@@ -1310,6 +1311,5 @@ dispatch through its `indirectcount!` `Indirect` read.
 """
 emitlaunch!(e::Emitter, ::Any, lp, argaddr, it, tlas, ::Nothing, name) =
     emit_dispatch!(e, lp.pipeline, argaddr, it.block_dims, tlas, name)
-
 emitlaunch!(e::Emitter, ::DeviceRange, lp, argaddr, it, tlas, indirect, name) =
-    emit_dispatch_indirect!(e, lp.pipeline, argaddr, indirect, tlas, name)
+    emit_dispatch!(e, lp.pipeline, argaddr, indirect, tlas, name)

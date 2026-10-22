@@ -83,12 +83,9 @@ supports_int64_atomics(ctx::VkContext) =
     VK.get_physical_device_features_2(ctx.physical_device,
         VK.PhysicalDeviceVulkan12Features).next.shader_buffer_int_64_atomics
 supports_int64_atomics(b::LavaBackend) = supports_int64_atomics(vk_context(b))
-# A view is on its parent's device. One method per `AnyLavaArray` wrapper.
-vk_context(a::SubArray) = vk_context(parent(a))
-vk_context(a::Base.ReshapedArray) = vk_context(parent(a))
-vk_context(a::Base.PermutedDimsArray) = vk_context(parent(a))
-vk_context(a::LinearAlgebra.Transpose) = vk_context(parent(a))
-vk_context(a::LinearAlgebra.Adjoint) = vk_context(parent(a))
+# A view is on its parent's device, for every `AnyLavaArray` wrapper.
+vk_context(a::Union{SubArray, Base.ReshapedArray, PermutedDimsArray,
+                     LinearAlgebra.Transpose, LinearAlgebra.Adjoint}) = vk_context(parent(a))
 
 # Backends are equal when they drive the same device; the channel is a
 # scheduling choice. Raycore and RayMakie compare backends to check that data
@@ -610,7 +607,7 @@ function ka_launch_indirect!(e::Emitter, obj, args, ndrange_buf::LavaArray, work
     prepare_indirect_dispatch!(e, indirect_view, ndrange_buf, ws_prod)
     indirectbarrier!(e, VK.PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK.PIPELINE_STAGE_DRAW_INDIRECT_BIT,
                      VK.ACCESS_INDIRECT_COMMAND_READ_BIT)
-    emit_dispatch_indirect!(e, pipeline, arg_buf.address, indirect_view, tlas, name)
+    emit_dispatch!(e, pipeline, arg_buf.address, indirect_view, tlas, name)
 
     end # GC.@preserve
 

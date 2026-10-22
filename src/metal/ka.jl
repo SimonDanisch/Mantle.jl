@@ -136,19 +136,6 @@ function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
     return MPSGraphGemm(act)
 end
 
-"""
-    denseoperands(xs...) -> Bool
-
-Whether operands have native dense storage or are graph resources that become it.
-Shape and type do not suffice: packed weight wrappers expose a matrix shape over
-encoded `UInt32` words.
-"""
-denseoperands(xs...) = all(xs) do x
-    x === nothing && return true
-    x isa Mantle.Buffer || x isa Mantle.TransientBuffer ||
-        x isa Mantle.ResourceView || x isa Metal.MtlArray
-end
-
 """MPSGraph 2-D convolution, `out = act.(conv(x, w) .+ bias)`, as a pass member.
 Geometry and activation are fixed at declaration and live on the callable."""
 struct MPSGraphConv2D

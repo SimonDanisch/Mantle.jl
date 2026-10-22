@@ -172,6 +172,16 @@ Backends answer for their own array type.
 isdevicearray(@nospecialize(x)) = false
 
 """
+    denseoperands(xs...) -> Bool
+
+Whether every operand is absent, a graph resource a library call can be handed,
+or the backend's own dense device array. Shape and type do not suffice: packed
+weight wrappers expose a matrix shape over encoded `UInt32` words.
+"""
+denseoperands(xs...) = all(x -> x === nothing || isdevicearray(x) ||
+                               x isa Union{Buffer,TransientBuffer,ResourceView}, xs)
+
+"""
     repeat!(f, graph, n) -> passes
     repeat!(f, graph, maxiters, count) -> passes
     repeat!(f, graph, maxiters; while_nonzero = flag) -> passes
