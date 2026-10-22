@@ -1,0 +1,9 @@
+device	path	baseline	launches	old_bytes	new_bytes
+AMD Radeon RX 7900 XTX (RADV NAVI31)	fft-power2	9b008fa	100	95872	95872
+AMD Radeon RX 7900 XTX (RADV NAVI31)	fft-mixed	9b008fa	100	105472	95872
+AMD Radeon RX 7900 XTX (RADV NAVI31)	gemv-k	a367c3b	100	123008	105408
+AMD Radeon RX 7900 XTX (RADV NAVI31)	gemv-n	a367c3b	100	179008	175808
+NVIDIA RTX 4000 Ada Generation	fft-power2	9b008fa	100	94080	92224
+NVIDIA RTX 4000 Ada Generation	fft-mixed	9b008fa	100	100928	91328
+NVIDIA RTX 4000 Ada Generation	gemv-k	a367c3b	100	115232	98304
+NVIDIA RTX 4000 Ada Generation	gemv-n	a367c3b	100	172288	169088

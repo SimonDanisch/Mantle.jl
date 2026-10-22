@@ -209,6 +209,54 @@ end
                                                   KA.allocate(backend, Float32, 9), B)
     end
 
+    @testset "configuration and empty outputs" begin
+        for limit in (1,7,16,31,32,64,96,128,256,384,512,768,1024)
+            tm,bl,u = Mantle.gemv_ncontig_config(79,131,limit)
+            @test 0 < tm <= bl <= limit
+            @test bl % tm == 0 && ispow2(bl÷tm)
+            nr,kbl = Mantle.gemv_config(129,4097,limit)
+            @test 0 < nr <= kbl <= limit
+        end
+        for args in ((0,128,32),(8,4,32),(4,128,0))
+            @test_throws ArgumentError Mantle.gemv_kcontig_kernel(args...)
+        end
+        for args in ((0,128,4),(32,128,0),(32,96,4),(32,129,4))
+            @test_throws ArgumentError Mantle.gemv_ncontig_kernel(args...)
+        end
+        @test_throws DimensionMismatch Mantle.gemv_ncontig_launches(
+            zeros(Float32,3),zeros(Float32,4),zeros(Float32,2),3,4,128)
+        A = KA.allocate(backend,Float32,7)
+        B = KA.allocate(backend,Float32,7,0)
+        C = KA.allocate(backend,Float32,0)
+        @test Mantle.gemv!(C,A,B) === C
+        @test Mantle.gemv!(C,A,transpose(KA.allocate(backend,Float32,0,7))) === C
+    end
+
+    @testset "recorded GEMV shares generated kernels and keeps range tails" begin
+        dev = Mantle.Device(backend)
+        for (tm,bl,u) in ((24,192,3),(16,64,2))
+            M,K = 79,131
+            hw = randn(Float32,M,K); hx = randn(Float32,K); hb = randn(Float32,M)
+            W = Mantle.Buffer(dev,hw); x = Mantle.Buffer(dev,hx)
+            bias = Mantle.Buffer(dev,hb); out = Mantle.Buffer(dev,Float32,M)
+            g = Mantle.Graph(dev)
+            Mantle.gemv_dispatch!(g,out,x,W,M,K;bias,epilogue=abs,tm,block=bl,unroll=u)
+            pl = Mantle.Plan(g;budget=Inf)
+            try
+                Mantle.record!(pl)
+                for factor in (1f0,2f0)
+                    x[:] = factor .* hx
+                    Mantle.run!(pl); Mantle.waitfor!(pl)
+                    want = abs.(Float64.(hw)*(factor .* Float64.(hx)) .+ hb)
+                    @test relerr(Float64.(Array(out)),want) < 1f-5
+                end
+            finally
+                Mantle.free!(pl)
+                foreach(Mantle.free!,(W,x,bias,out))
+            end
+        end
+    end
+
     @testset "it is not slower than mul! at M = 1" begin
         # The reason the kernel exists. Interleaved, both live kernels, same
         # allocation — a sequential A/B on this box drifts by 5-10%.

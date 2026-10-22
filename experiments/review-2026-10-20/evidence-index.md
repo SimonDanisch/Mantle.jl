@@ -222,3 +222,8 @@ deletes Metal's repeated KA context setup through the existing argtype hook.
 selection and the runtime-generated-kernel cache/list. It fixes incomplete
 forced-group launches and consumer precompilation; 1,013 native assertions and
 paired byte/allocation checks pass across the qualified targets.
+
+[Generated GEMV kernels](consolidation-gemv.md) removes both mutable kernel
+catalogs and the shared-ID counter. 509 native assertions, 88 paired byte checks,
+fresh consumer precompilation and allocation comparisons pass. The generic
+executor retains its world-age boundary for consumers that still generate code.

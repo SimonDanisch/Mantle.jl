@@ -1,4 +1,4 @@
-name = "FFTPrecompileProbe"
+name = "ArrayKernelPrecompileProbe"
 uuid = "9f2935b4-e51e-40da-b233-ed013916f73a"
 version = "0.1.0"
 

@@ -1725,8 +1725,9 @@ The specific patterns to remove are multiple plan walkers
 (`graph/kalaunch.jl`, `vulkan/graph.jl`, `metal/record.jl`), paired eager and
 declared operation bodies (`src/array`), duplicate HWTLAS member/range logic
 in Vulkan and Metal, duplicate host transfer/readback paths, and mutable
-kernel/pipeline globals (`GEMM_BLOCK_KERNELS`, `SHARED_ID`, `GFX_CACHE`,
-`MESH_CACHE`). Core owns one algorithm; device methods contain driver ABI
+kernel catalogs or process-wide native-pipeline dictionaries. Numerical
+configuration belongs in specialization keys, not shadow maps or mutable ID
+counters. Core owns one algorithm; device methods contain driver ABI
 translation. Specialized numerical kernels remain candidates with explicit
 requirements and measured wins. An unselected variant can be deleted only
 after its supported shapes/types have another tested candidate.

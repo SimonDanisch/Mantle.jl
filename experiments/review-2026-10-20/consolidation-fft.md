@@ -23,16 +23,16 @@ and synchronization drains are empty. Thirty paired old/new checks preserve
 mixed-transform output bytes across 14 configurations on both Vulkan devices;
 23 source-portability checks and 12 paired output/allocation checks pass.
 
-[Allocation probe](fft-config-probe.jl) and [results](fft-config-allocations.tsv):
+[Allocation probe](array-kernel-probe.jl) and [results](array-kernel-allocations.tsv):
 100 warm calls, minimum of three samples. Power-of-two allocation is unchanged
 within queue-pool variation; mixed calls save about 96 host bytes/call. GPU
 throughput/native driver allocation is not measured. Native Metal is unqualified.
 
-The [consumer fixture](../../test/fixtures/FFTPrecompileProbe/Project.toml) requests
+The [consumer fixture](../../test/fixtures/ArrayKernelPrecompileProbe/Project.toml) requests
 the previously unlisted 125-point transform during package precompilation. The
 old implementation fails with evaluation into closed module Mantle; the new one
 passes. In a disposable workspace environment, develop this fixture with
-Pkg.PRESERVE_ALL and run Pkg.precompile(["FFTPrecompileProbe"]).
+Pkg.PRESERVE_ALL and run Pkg.precompile(["ArrayKernelPrecompileProbe"]).
 A fresh process passes 338 fixture/native FFT assertions.
 
 All 115 source files parse. Prose edits preserve definitions. Source falls

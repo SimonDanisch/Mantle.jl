@@ -1,26 +1,5 @@
-"""
-Two kernels are two pipelines, even when nothing about their arguments differs.
-
-`launch_plan` caches a compiled pipeline under `typeof(all_args)`. That was
-sufficient for as long as every kernel came from `@kernel`, whose launch puts a
-`CompilerMetadata` in `all_args[1]` — but a macro-free `KernelInterface` kernel
-is a plain function and that slot is `nothing`. Two such kernels with the same
-signature and the same workgroup size then shared one cache entry, and whichever
-compiled second was handed the first one's pipeline.
-
-It is silent, and it is not silent in a small way. Mantle's own `gemv` generates
-one kernel per `(nrows, block, subgroup)`, all of them
-`(C, A, B, K::Int, N::Int)`: `gemvk_8_128_64` ran `gemvk_4_128_64`'s pipeline,
-which writes four outputs per workgroup instead of eight, so **half the result
-was never written** and came back as whatever the caller had left in it. It
-reproduced only once both kernels had been compiled, which is what made it look
-like a launch-ordering bug rather than a cache collision.
-
-The two kernels below are the smallest thing that has that shape: identical
-signatures, identical launch geometry, different bodies. If the key ever loses
-the kernel again, the second assertion reads `1` where it wants `2`.
-"""
-
+# Same-signature kernels and different parameters of one callable template must
+# keep distinct pipeline entries. Partial writes expose reuse of the wrong variant.
 using Test, Mantle, KernelAbstractions
 include(joinpath(@__DIR__, "testbackend.jl"))
 const KI = Mantle.KI
@@ -65,7 +44,7 @@ end
     run(f) = begin
         o = KernelAbstractions.allocate(backend, Float32, n)
         fill!(o, 0.0f0)
-        KI.Kernel(backend, f)(o, n; ndrange = n, workgroupsize = wg)
+        Mantle.kilaunch!(backend, f, o, n; ndrange = n, workgroupsize = wg)
         KernelAbstractions.synchronize(backend)
         Array(o)
     end
@@ -85,4 +64,17 @@ end
     @test count(==(1.0f0), few) == 4 * (n ÷ wg)
     @test count(==(1.0f0), many) == 8 * (n ÷ wg)
     @test count(==(1.0f0), many) == 2 * count(==(1.0f0), few)
+
+    # One callable template with different parameters must keep distinct entries too.
+    A = KernelAbstractions.allocate(backend,Float32,32); fill!(A,1f0)
+    B = KernelAbstractions.allocate(backend,Float32,32,8); fill!(B,1f0)
+    C = KernelAbstractions.allocate(backend,Float32,8)
+    for nr in (4,8,4)
+        fill!(C,-1f0)
+        kern = Mantle.gemv_kcontig_kernel(nr,128,Mantle.subgroupwidth(A))
+        Mantle.kilaunch!(backend,kern,C,A,B,32,8;ndrange=128,workgroupsize=128)
+        got = Array(C)
+        @test count(==(32f0),got) == nr
+        @test count(==(-1f0),got) == 8-nr
+    end
 end

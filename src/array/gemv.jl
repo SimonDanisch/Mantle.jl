@@ -1,440 +1,196 @@
-# GEMV, and it is not the Vulkan backend's.
-#
-# This file lived in `src/vulkan/array/` and named nothing Vulkan has: the
-# kernels are `KernelAbstractions`, the tilings are arithmetic, and the two
-# device facts it needs — the workgroup limit for `gemv_config`, and which
-# backend to launch on — come from `workgrouplimit` and
-# `KernelAbstractions.get_backend`. Both take the array, not a `VkContext`.
-#
-# So it lives in core, where a second backend inherits it rather than
-# reimplementing it.
-#
-# The dispatch widened with it, from `::LavaArray` to `::AbstractGPUArray`, and
-# that is safe **here** in a way it is not everywhere: `gemv`/`gemv!` are
-# Mantle's own functions, so widening them claims nothing from anybody.
-# `gemm.jl`'s entry point is `LinearAlgebra.mul!`, which is Base's — widening
-# THAT would have Mantle answering for every GPU array package in the session,
-# which is why its kernels move and its `mul!` does not.
+# Portable GEMV with separate kernels for the two contiguous axes.
+# K-contiguous reads/reduction arrangement derives from llama.cpp's
+# mul_mat_vec.comp / mul_mat_vec_base.glsl (MIT).
+# K-contiguous: reuse a vector slice across NROWS columns, reduce within subgroups,
+# then sum their shared partials. N-contiguous: split K across row groups and use
+# a uniform shared-memory tree. Bias/epilogue fuse into the N-contiguous store.
+# Julia specializes the callable types; buffer IDs derive from their parameters.
 
-# Matrix-vector multiply. Two kernels, because there are two layouts.
-#
-# ## The layout decides the kernel, and it is not a detail
-#
-# A GEMV reads the matrix exactly once, so the only thing that matters is that
-# the read coalesces and that there are enough threads in flight to cover the
-# latency. Which decomposition achieves that is the *opposite* in the two
-# layouts, so this file has two kernels and `gemv!` dispatches on the type:
-#
-#   * **`gemv_kcontig_kernel`** — matrix `(K, N)`, contiguous along the
-#     reduction axis. Ported from llama.cpp's Vulkan backend
-#     (`dev/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vec.comp`,
-#     MIT). Threads split `K`, the read coalesces along `K`, and the partial sums
-#     come back through `sub_group_reduce_add` plus a shared-memory tail.
-#
-#   * **`gemv_ncontig_kernel`** — matrix `(M, K)`, contiguous along the *output*
-#     axis, reached as `gemv!(C, x, transpose(W))`. Here consecutive **outputs**
-#     are consecutive addresses, so the coalesced decomposition is one thread per
-#     output row and the reduction over `K` happens *inside* a thread. A
-#     workgroup still splits `K` across `BLOCK / TM` groups, purely to have
-#     enough threads resident — with one thread per row, `M = 1280` is 1280
-#     threads, which is 5 workgroups on a 48-core device.
-#
-# **DNNKernels' graphs produce the second layout, not the first.** `hoistpermutes`
-# materialises every weight as torch `(K, N)` — Julia `(N, K)` — because that is
-# what `coopmat_gemm!` wants. So the ported llama.cpp kernel, on its own, does
-# not apply to the model it was ported for: pointing it at these weights would
-# need a 634 MB transpose per model. "The kernel is ported" and "the kernel fits
-# our data" are different claims.
-#
-# ## What this kernel does NOT fix
-#
-# Whisper's decoder step went from 13.58 ms to 13.50 ms when these kernels
-# replaced `mul!` in it — no change — even though an interleaved same-session A/B
-# has them 1.9-3.0x faster on the shapes that step runs. The reason is that the
-# step is not GPU-bound:
-#
-#     a (64, 64) GEMV — 16 KiB — costs   0.0553 ms
-#     a (1280, 1280) GEMV — 6.4 MiB —    0.0555 ms
-#
-# Flat, four hundredfold apart in size. Timing the dispatch loop without waiting
-# for the device puts ~89% of that on the host, and a broadcast and a `mul!`
-# measure the same, so it is not this code path: **Lava costs ~63 us of host time
-# per dispatch**, and the decoder's 96 ops are a 6.1 ms floor under an 11.2 ms
-# step. Kernel tuning cannot reach it; `capture` / `replay!` can, which is
-# what it already did for SAM 2's decode.
-#
-# Recorded here because these kernels look like the fix for the decoder and are
-# not — they are the fix for the *arithmetic*, which was the smaller half.
-#
-# ## Why this is not `mul!`
-#
-# `coopmat_gemm!` needs `M >= 16` — a cooperative matrix *is* a 16x16 tile — so
-# at `M = 1` fifteen sixteenths of every tile is padding. Measured on Whisper's
-# decoder shapes, fp32, against the 307 GB/s DRAM roofline this card sustains:
-#
-#     shape                      mul! ms   GB/s    % of roof
-#     (1,1280)@(1280,1280)        0.6146   10.7      3.5%
-#     (1,1280)@(1280,5120)        0.5263   49.8     16.2%
-#     (1,5120)@(5120,1280)        0.2473  106.0     34.5%
-#     (1,1280)@(1280,51866)       2.5908  102.5     33.4%
-#
-# One Whisper decoder token is ~20.4 ms of that against a 2.07 ms bandwidth
-# floor. llama.cpp ships `mul_mat_vec.comp` separately from `mul_mm.comp` for
-# exactly this reason: batch-1 decode is a different kernel, not a tuning of the
-# same one.
-#
-# ## The structure that was ported
-#
-# **`NROWS` output columns per workgroup.** This is the whole trick and it is not
-# obvious: a GEMV reads `K*N` matrix elements and only `K` vector elements, so it
-# is hopelessly bandwidth-bound *unless* the vector read is amortised. Handling
-# several output columns per workgroup reads the vector slice once into registers
-# and reuses it `NROWS` times. llama.cpp's `NUM_ROWS`.
-#
-# **Four elements of K per thread per step** (`K_PER_ITER = 4` there for the
-# non-quantised types). Wide enough for the loads to coalesce, narrow enough that
-# `NROWS` accumulators still fit in registers.
-#
-# **Reduce with `sub_group_reduce_add`, then across subgroups through shared memory** —
-# `reduce_result` in `mul_mat_vec_base.glsl`. The comment there is worth keeping:
-# the subgroup path wins *particularly when the workgroup has more than one
-# subgroup*, because it collapses a log2(BLOCK) shared-memory tree into one
-# instruction plus a log2(nsubgroups) tail.
-#
-# Not ported: the quantised paths (`dequantize4`, `QUANT_K`/`QUANT_R`) — we have
-# no quantised weights — and the 4/2/1 manual unroll ladder, which exists to
-# handle `ncols` not dividing the block. Ours takes a bounds check on the tail;
-# whether the ladder pays here is a measurement nobody has made.
-#
-# Constants are NOT llama.cpp's. Per `feedback-port-sota-kernels` the structure
-# ports and every number is re-measured — see `gemv_config`.
-#
-# ## Why this is `@eval`-generated
-#
-# The first version wrote the accumulators as an `NTuple` rebound inside the
-# `K` loop. That does not compile: the tuple is a mutable local captured by the
-# `ntuple` closure, so it boxes, and the failure arrives as thirty lines of
-# `unsupported dynamic function invocation` naming `ntuple`, `to_indices` and
-# `_typeof_captured_variable` — nowhere near the cause. The same trap the
-# mixed-radix FFT hit.
-#
-# With `NROWS`/`BLOCK` fixed at generation time the accumulators are plain
-# scalars from `Base.Cartesian.@nexprs`, every index is a literal, and there is
-# no closure anywhere.
-
-"Generated K-contiguous GEMV kernels, keyed by (NROWS, BLOCK, SUB). Compiled once each."
-const GEMV_KERNELS = Dict{Tuple{Int,Int,Int},Any}()
-
-# Lava names a workgroup buffer `lava_shared_$Id` and that name is the whole of
-# its identity, so an id is unique to a BUFFER, not to a buffer within a kernel.
-# Every generated kernel here asked for `Val(1)`: the `nrows = 4` kernel wants 8
-# floats and the `nrows = 8` kernel 16, and once both had been compiled the
-# wider one was silently handed the narrower one's global — half its partials
-# landed nowhere and half the outputs came back at whatever `fill!` left. It
-# reproduced only when both kernels had run, which is what made it look like a
-# launch bug for an afternoon.
-const SHARED_ID = Ref(0)
-nextsharedid!() = (SHARED_ID[] += 1)
+struct KContiguousGEMV{NROWS,BLOCK,SUB} <: Function end
 
 """
     gemv_kcontig_kernel(NROWS, BLOCK, SUB) -> kernel
 
 `C[n] = sum_k A[k] * B[k, n]`, one workgroup per `NROWS` output columns.
 
-Column-major is what makes this coalesce: `B[:, n]` is contiguous in `k`, so
-lanes reading `k, k+1, ...` for one `n` touch one cache line. llama.cpp's matrix
-is row-major and its "rows" are our columns; the memory pattern is the same.
-
-The name is deterministic, not a `gensym`: one shape is one function in every
-session, so the code a package image holds for it is found again.
+Lanes split contiguous K reads, sharing each vector load across NROWS columns.
+SUB is the device's reported subgroup width; partial groups use cld(BLOCK,SUB).
+The generated body uses scalar accumulators and literal shared extents.
 """
 function gemv_kcontig_kernel(NROWS::Int, BLOCK::Int, SUB::Int)
-    get!(GEMV_KERNELS, (NROWS, BLOCK, SUB)) do
-        # CEIL, and at least one: a workgroup narrower than a subgroup is still one
-        # subgroup, partly filled. `BLOCK ÷ SUB` gives zero there, which sizes
-        # `parts` to nothing and makes the final loop run zero times — C stays at
-        # whatever it was.
-        nsub = cld(BLOCK, SUB)
-        kname = Symbol("gemvk_", NROWS, "_", BLOCK, "_", SUB)
-        shid = nextsharedid!()
-        @eval begin
-            function $kname(C, A, B, K::Int, N::Int)
-                # one partial per (subgroup, output column)
-                parts = KI.localmemory(Float32, Val(($(NROWS * nsub),)), Val($shid))
+    0 < NROWS <= BLOCK && SUB > 0 || throw(ArgumentError(
+        "gemv: require 0 < NROWS <= BLOCK and SUB > 0"))
+    return KContiguousGEMV{NROWS,BLOCK,SUB}()
+end
 
-                tid = KI.get_local_id().x - 1
-                grp = KI.get_group_id().x - 1
-                n0 = grp * $NROWS
-                # The HARDWARE's subgroup width, not 32. `sub_group_reduce_add`
-                # below reduces over whatever the device actually uses, so
-                # partitioning by any other number makes several lanes think they
-                # are leaders of the same subgroup and each write the whole sum.
-                lane = tid % $SUB
-                sub = tid ÷ $SUB
+@generated function (kernel::KContiguousGEMV{NROWS,BLOCK,SUB})(
+        C,A,B,K::Int,N::Int) where {NROWS,BLOCK,SUB}
+    nsub = cld(BLOCK,SUB)
+    shid = Symbol(:mantle_gemvk_,NROWS,:_,BLOCK,:_,SUB)
+    return quote
+        # one partial per (subgroup, output column)
+        parts = KI.localmemory(Float32, Val(($(NROWS * nsub),)), Val($(QuoteNode(shid))))
 
-                Base.Cartesian.@nexprs $NROWS r -> acc_r = 0.0f0
+        tid = KI.get_local_id().x - 1
+        grp = KI.get_group_id().x - 1
+        n0 = grp * $NROWS
+        # The HARDWARE's subgroup width, not 32. `sub_group_reduce_add`
+        # below reduces over whatever the device actually uses, so
+        # partitioning by any other number makes several lanes think they
+        # are leaders of the same subgroup and each write the whole sum.
+        lane = tid % $SUB
+        sub = tid ÷ $SUB
 
-                # Walk K in steps of 4*BLOCK. The A slice is read ONCE per step
-                # and reused for all NROWS columns — the whole point.
-                k = tid * 4
-                @inbounds while k < K
-                    a_1 = A[k + 1]
-                    a_2 = k + 1 < K ? A[k + 2] : 0.0f0
-                    a_3 = k + 2 < K ? A[k + 3] : 0.0f0
-                    a_4 = k + 3 < K ? A[k + 4] : 0.0f0
-                    Base.Cartesian.@nexprs $NROWS r -> begin
-                        n_r = n0 + r
-                        if n_r <= N
-                            s_r = a_1 * B[k + 1, n_r]
-                            if k + 1 < K
-                                s_r += a_2 * B[k + 2, n_r]
-                            end
-                            if k + 2 < K
-                                s_r += a_3 * B[k + 3, n_r]
-                            end
-                            if k + 3 < K
-                                s_r += a_4 * B[k + 4, n_r]
-                            end
-                            acc_r += s_r
-                        end
+        Base.Cartesian.@nexprs $NROWS r -> acc_r = 0.0f0
+
+        # Walk K in steps of 4*BLOCK. The A slice is read ONCE per step
+        # and reused for all NROWS columns — the whole point.
+        k = tid * 4
+        @inbounds while k < K
+            a_1 = A[k + 1]
+            a_2 = k + 1 < K ? A[k + 2] : 0.0f0
+            a_3 = k + 2 < K ? A[k + 3] : 0.0f0
+            a_4 = k + 3 < K ? A[k + 4] : 0.0f0
+            Base.Cartesian.@nexprs $NROWS r -> begin
+                n_r = n0 + r
+                if n_r <= N
+                    s_r = a_1 * B[k + 1, n_r]
+                    if k + 1 < K
+                        s_r += a_2 * B[k + 2, n_r]
                     end
-                    k += $(4 * BLOCK)
-                end
-
-                # subgroup first, then across subgroups through shared memory
-                Base.Cartesian.@nexprs $NROWS r -> red_r = sub_group_reduce_add(acc_r)
-                @inbounds if lane == 0
-                    Base.Cartesian.@nexprs $NROWS r -> begin
-                        parts[sub * $NROWS + r] = red_r
+                    if k + 2 < K
+                        s_r += a_3 * B[k + 3, n_r]
                     end
-                end
-                KI.barrier()
-                @inbounds if tid < $NROWS
-                    n = n0 + tid + 1
-                    if n <= N
-                        t = 0.0f0
-                        for s in 0:$(nsub - 1)
-                            t += parts[s * $NROWS + tid + 1]
-                        end
-                        C[n] = t
+                    if k + 3 < K
+                        s_r += a_4 * B[k + 4, n_r]
                     end
+                    acc_r += s_r
                 end
-                return nothing
             end
-            $kname
+            k += $(4 * BLOCK)
         end
+
+        # subgroup first, then across subgroups through shared memory
+        Base.Cartesian.@nexprs $NROWS r -> red_r = sub_group_reduce_add(acc_r)
+        @inbounds if lane == 0
+            Base.Cartesian.@nexprs $NROWS r -> begin
+                parts[sub * $NROWS + r] = red_r
+            end
+        end
+        KI.barrier()
+        @inbounds if tid < $NROWS
+            n = n0 + tid + 1
+            if n <= N
+                t = 0.0f0
+                for s in 0:$(nsub - 1)
+                    t += parts[s * $NROWS + tid + 1]
+                end
+                C[n] = t
+            end
+        end
+        return nothing
     end
 end
 
-"Generated N-contiguous GEMV kernels, keyed by (TM, BLOCK, UNROLL)."
-const GEMVN_KERNELS = Dict{Tuple{Int,Int,Int},Any}()
+struct NContiguousGEMV{TM,BLOCK,UNROLL} <: Function end
 
 """
     gemv_ncontig_kernel(TM, BLOCK, UNROLL) -> kernel
 
-`C[m] = epilogue(bias[m] + sum_k W[m, k] * x[k])` for `W` stored `(M, K)`, i.e.
-contiguous along `m`.
-
-**One thread per output row.** `W[m, k]` for consecutive `m` and fixed `k` are
-consecutive addresses, so a warp covering `TM = 32` rows reads one full 128-byte
-transaction per step. That is the whole reason this kernel is shaped the way it
-is, and it is why the reduction is *not* a subgroup reduction: the values a
-subgroup holds belong to 32 different outputs, and adding them would be adding
-unrelated numbers.
-
-**`BLOCK / TM` threads per row, to have any threads at all.** One thread per
-output on a `(1280, 1280)` weight is 1280 threads — 5 workgroups on a device with
-48 shader cores, so the kernel would be latency-bound at a few percent of
-bandwidth no matter how well it coalesced. That is exactly the failure `mul!`
-shows on this shape (3.5% of roofline). Splitting `K` across `BLOCK / TM` groups
-and reducing through shared memory brings `M = 1280` to 40 workgroups.
-
-`UNROLL` accumulators, because the `K` loop is otherwise a single dependency
-chain of `K / (BLOCK / TM)` fused multiply-adds — 160 of them at the shapes here,
-each waiting on the last.
-
-**The cross-group reduction is a tree, and that is what makes a large `BLOCK`
-usable.** Summing the `BLOCK / TM` partials serially in the `kg == 0` threads
-costs `BLOCK / TM` dependent adds performed by `TM` threads while the other
-`BLOCK - TM` sit idle — so raising `BLOCK` to get occupancy paid for itself with
-a longer tail, and `(5120, 1280)` measured *fastest* at `BLOCK = 128` for exactly
-that reason. The tree is `log2(BLOCK / TM)` steps with every thread working, so
-the tail stops growing with `BLOCK`.
-
-Bias and epilogue are folded into the store for the same reason the GEMM folds
-them: the alternative is a second kernel that reads and writes `M` elements to
-add one number to each.
+C[m] = epilogue(bias[m] + sum_k W[m,k]*x[k]), with W contiguous along m.
+TM rows share BLOCK/TM reduction groups, a power of two. Positive UNROLL uses
+independent scalar accumulators; a uniform shared tree combines the groups.
 """
 function gemv_ncontig_kernel(TM::Int, BLOCK::Int, UNROLL::Int)
-    get!(GEMVN_KERNELS, (TM, BLOCK, UNROLL)) do
-        BLOCK % TM == 0 || throw(ArgumentError("gemv: BLOCK $BLOCK not a multiple of TM $TM"))
-        ng = BLOCK ÷ TM                      # K-groups per workgroup
-        ispow2(ng) || throw(ArgumentError(
-            "gemv: BLOCK/TM = $ng must be a power of two for the reduction tree"))
-        kname = Symbol("gemvn_", TM, "_", BLOCK, "_", UNROLL)
-        shid = nextsharedid!()
-        # Built rather than written: `@nexprs` gives the accumulators, and their
-        # final sum has to name all `UNROLL` of them in one expression.
-        accsum = Expr(:call, :+, (Symbol("acc_", u) for u in 1:UNROLL)...)
-        # …and the tree is unrolled here rather than written as a loop, so that
-        # every `KI.barrier()` sits at the kernel's top level. A barrier inside a
-        # loop is uniform here and would probably be fine; "probably fine" is not
-        # what barriers are for.
-        tree = Expr(:block)
-        let s = ng ÷ 2
-            while s > 0
-                push!(tree.args, quote
-                    if kg < $s
-                        @inbounds parts[kg * $TM + tm + 1] +=
-                            parts[(kg + $s) * $TM + tm + 1]
-                    end
-                    KI.barrier()
-                end)
-                s ÷= 2
-            end
-        end
-        @eval begin
-            function $kname(C, W, x, bias, epi, M::Int, K::Int)
-                parts = KI.localmemory(Float32, Val(($BLOCK,)), Val($shid))
+    TM > 0 && BLOCK > 0 && UNROLL > 0 || throw(ArgumentError(
+        "gemv: TM, BLOCK and UNROLL must be positive"))
+    BLOCK % TM == 0 || throw(ArgumentError("gemv: BLOCK $BLOCK not a multiple of TM $TM"))
+    ispow2(BLOCK÷TM) || throw(ArgumentError(
+        "gemv: BLOCK/TM = $(BLOCK÷TM) must be a power of two for the reduction tree"))
+    return NContiguousGEMV{TM,BLOCK,UNROLL}()
+end
 
-                tid = KI.get_local_id().x - 1
-                grp = KI.get_group_id().x - 1
-                tm = tid % $TM
-                kg = tid ÷ $TM
-                m = grp * $TM + tm + 1
-
-                Base.Cartesian.@nexprs $UNROLL u -> acc_u = 0.0f0
-                if m <= M
-                    k = kg + 1
-                    @inbounds while k + $(ng * (UNROLL - 1)) <= K
-                        Base.Cartesian.@nexprs $UNROLL u -> begin
-                            kk_u = k + $ng * (u - 1)
-                            acc_u += W[m + M * (kk_u - 1)] * x[kk_u]
-                        end
-                        k += $(ng * UNROLL)
-                    end
-                    @inbounds while k <= K
-                        acc_1 += W[m + M * (k - 1)] * x[k]
-                        k += $ng
-                    end
+@generated function (kernel::NContiguousGEMV{TM,BLOCK,UNROLL})(
+        C,W,x,bias,epi,M::Int,K::Int) where {TM,BLOCK,UNROLL}
+    ng = BLOCK÷TM
+    shid = Symbol(:mantle_gemvn_,TM,:_,BLOCK,:_,UNROLL)
+    # Literal accumulator names avoid captured tuple state in the reduction loop.
+    accsum = Expr(:call, :+, (Symbol("acc_", u) for u in 1:UNROLL)...)
+    # Unroll the tree so every barrier remains outside the lane guards.
+    tree = Expr(:block)
+    let s = ng ÷ 2
+        while s > 0
+            push!(tree.args, quote
+                if kg < $s
+                    @inbounds parts[kg * $TM + tm + 1] +=
+                        parts[(kg + $s) * $TM + tm + 1]
                 end
-                @inbounds parts[kg * $TM + tm + 1] = $accsum
                 KI.barrier()
-                $tree
-                @inbounds if kg == 0 && m <= M
-                    t = parts[tm + 1]
-                    bias === nothing || (t += Float32(bias[m]))
-                    C[m] = epi(t)
-                end
-                return nothing
-            end
-            $kname
+            end)
+            s ÷= 2
         end
+    end
+    return quote
+        parts = KI.localmemory(Float32, Val(($BLOCK,)), Val($(QuoteNode(shid))))
+
+        tid = KI.get_local_id().x - 1
+        grp = KI.get_group_id().x - 1
+        tm = tid % $TM
+        kg = tid ÷ $TM
+        m = grp * $TM + tm + 1
+
+        Base.Cartesian.@nexprs $UNROLL u -> acc_u = 0.0f0
+        if m <= M
+            k = kg + 1
+            @inbounds while k + $(ng * (UNROLL - 1)) <= K
+                Base.Cartesian.@nexprs $UNROLL u -> begin
+                    kk_u = k + $ng * (u - 1)
+                    acc_u += W[m + M * (kk_u - 1)] * x[kk_u]
+                end
+                k += $(ng * UNROLL)
+            end
+            @inbounds while k <= K
+                acc_1 += W[m + M * (k - 1)] * x[k]
+                k += $ng
+            end
+        end
+        @inbounds parts[kg * $TM + tm + 1] = $accsum
+        KI.barrier()
+        $tree
+        @inbounds if kg == 0 && m <= M
+            t = parts[tm + 1]
+            bias === nothing || (t += Float32(bias[m]))
+            C[m] = epi(t)
+        end
+        return nothing
     end
 end
 
 """
     gemv_ncontig_config(M, K, limit) -> (TM, BLOCK, UNROLL)
 
-`TM = 32` is the warp width and is not a free parameter: it is what makes one
-warp read one contiguous 128-byte line.
-
-**`(32, 1024, 4)`, measured 2026-10-07 on the same Radeon 8060S under two
-drivers**: RADV on Linux and AMD's own driver on Windows. GPU time from
-`with_dispatch_timing`, µs per call, after a clock spin-up, two sweeps each:
-
-    shape            driver    (32,512,8)   (32,512,4)   (32,1024,4)   (32,1024,8)
-    (1280, 1280)     RADV      8.7-10.3     10.2-10.8    9.9           9.7
-    (1280, 1280)     Windows   15.5-16.1    9.0-11.2     10.1-10.2     11.2-13.0
-    (5120, 1280)     RADV      28.1         29.3-29.4    30.5-30.6     29.8
-    (5120, 1280)     Windows   30.8-34.6    34.7         36.6-36.8     36.3
-    (1280, 5120)     RADV      30.7-31.2    37.0-37.9    30.1-35.3     27.9-28.2
-    (1280, 5120)     Windows   60.3-61.7    34.3         35.6-36.2     38.9
-    (51866, 1280)    both      1152-1213 for every configuration
-
-`(32, 512, 8)` was chosen on RADV alone, and the Windows driver runs it at
-nearly twice the time of every neighbour on the two small-`M` shapes. The driver
-reports no spills for it (`scratchMemUsageInBytes = 0`) and nothing else, so the
-cause is not visible from here. Summed over one Whisper decoder layer (six
-`(1280, 1280)`, one each of the other two), `(32, 1024, 4)` is 28% faster than
-`(32, 512, 8)` on Windows and within the run-to-run spread of it on RADV. Four
-accumulators rather than eight is also the choice that asks less of a compiler
-nobody has measured yet.
-
-An Apple M5 is bandwidth-bound at every one of these shapes and barely cares.
-Host-timed over a recorded plan of 50 passes, one run, µs per call:
-
-    shape            (32,512,8)   (32,512,4)   (32,1024,4)   (32,1024,8)
-    (1280, 1280)     47.4         47.0         48.9          48.9
-    (5120, 1280)     210.1        206.1        224.5         218.0
-    (1280, 5120)     203.0        210.5        205.7         209.6
-    (51866, 1280)    2318.6       2256.0       2352.3        2357.8
-
-The decoder layer costs 3.7% more there under `(32, 1024, 4)` than under
-`(32, 512, 8)`, from a single run. NVIDIA is not measured.
-
-**`(32, 512, 8)`, measured 2026-09-26 on RADV (Radeon 8060S, 40 CUs)**, clock
-spun up first, µs per call:
-
-    shape            (32,256,4)   (32,512,8)   (32,1024,8)
-    (1280, 1280)     26.5         18.5         18.0
-    (5120, 1280)     41.0         37.1         39.0
-    (1280, 5120)     78.5         45.1         42.2
-    (51866, 1280)    1238.5       1246.8       1218.4
-
-Twice the K-groups per row block and twice the accumulators: at small `M` the
-grid is one workgroup per core, and more threads and more loads in flight per
-thread is what fills it. `(1280, 1280)` went from 47% to about two thirds of a
-`copyto!` of the same cache-resident matrix, and `test_gemv.jl`'s "it beats mul!
-at one column", which had fallen to 1.3x as `mul!`'s scalar GEMM got faster,
-measures 1.96x. Large `M` does not care. The table below is the earlier sweep, on a
-48-core card, where `(32, 256, 4)` was the choice:
-
-**`BLOCK` and `UNROLL` barely matter, measured.** Swept over `TM ∈ {16, 32}`,
-`BLOCK ∈ {128 … 1024}`, `UNROLL ∈ {2, 4, 8}` on the four shapes Whisper's decoder
-runs, `(32, 256, 4)` is within 8% of the best configuration on every one of them:
-
-    shape            best        (32,256,4)   spread over 24 configs
-    (1280, 1280)     0.0538 ms   0.0586 ms    1.17x
-    (5120, 1280)     0.0548 ms   0.0549 ms    1.04x
-    (1280, 5120)     0.0545 ms   0.0582 ms    2.18x
-    (51866, 1280)    0.8007 ms   0.8108 ms    1.64x
-
-An earlier sweep said `BLOCK = 512` was **2.7x** better than `BLOCK = 256`. It
-was not: this card idles at 450 MHz of 3105, a 50 us kernel never boosts it, and
-the ranking was the clock ramp. Every row above is measured after spinning the
-device for 0.25 s, and the same shape measured 0.030, 0.048 and 0.122 ms in one
-session before that was understood.
-
-The other thing that table shows: three shapes differing by 4x in bytes all land
-on ~0.055 ms. That is not bandwidth, it is **Lava's ~63 us host cost per
-dispatch**, which a 16 KiB GEMV pays in full — see the header.
+Default TM=32, block<=1024 and unroll=4 retain the measured configurations.
+Round smaller/unusual device limits down to a valid power-of-two reduction
+size; every returned block fits the limit. Device-specific retuning needs data.
 """
 function gemv_ncontig_config(M::Int, K::Int, limit::Int)
-    tm = 32
-    block = min(limit, 1024)
-    block = max(block - block % tm, tm)
+    limit > 0 || throw(ArgumentError("gemv: workgroup limit must be positive"))
+    tm = min(32,prevpow(2,limit))
+    block = tm*prevpow(2,min(limit,1024)÷tm)
     return (tm, block, 4)
 end
 
 """
     gemv_config(K, N, limit) -> (NROWS, BLOCK)
 
-Rows per workgroup and threads per workgroup.
-
-`NROWS` trades the vector re-read against register pressure and against having
-enough workgroups to fill the device: at `N = 1280`, `NROWS = 32` leaves 40
-workgroups for 48 shader cores, which starves it. `BLOCK` wants enough threads to
-cover `K` in a few steps without the tail check dominating.
-
-**Provisional.** These are starting points for the sweep in `test_gemv.jl`, not
-measured optima, and llama.cpp's own values are per-architecture and per-
-quantisation and do not transfer. Until that sweep runs, treat this function as
-the thing under test.
+Rows and threads per workgroup. Defaults balance vector reuse against occupancy;
+rows never exceed the block, including on small workgroup limits. These are
+starting points for device/workload measurements, not universal optima.
 """
 function gemv_config(K::Int, N::Int, limit::Int)
-    nrows = N >= 4096 ? 8 : 4
+    limit > 0 || throw(ArgumentError("gemv: workgroup limit must be positive"))
     block = min(limit, K >= 4096 ? 256 : 128)
+    nrows = min(N >= 4096 ? 8 : 4,block)
     return (nrows, block)
 end
 
@@ -443,11 +199,8 @@ end
 
 `C = A * B` for `A` a length-`K` vector and `B` a `K x N` matrix, `C` length `N`.
 
-The batch-1 path. `mul!` is correct at these shapes and roughly ten times slower
-(see the table at the top of this file), so this is a separate entry point rather
-than a branch inside `mul!` — a caller that knows it is decoding asks for it.
-
-`nrows`/`block` override the plan, for the sweep.
+nrows/block override selection for tuning. These kernels are distinct from
+matrix-matrix products; compare them on the consuming device/workload.
 """
 function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::AbstractGPUArray{Float32,2};
                nrows::Union{Nothing,Int} = nothing, block::Union{Nothing,Int} = nothing)
@@ -456,15 +209,15 @@ function gemv!(C::AbstractGPUArray{Float32}, A::AbstractGPUArray{Float32}, B::Ab
         "gemv!: A has $(length(A)) elements, expected K = $K"))
     length(C) == N || throw(DimensionMismatch(
         "gemv!: C has $(length(C)) elements, expected N = $N"))
+    N == 0 && return C
     backend = get_backend(B)
-    pn, pb = gemv_config(K, N, workgrouplimit(B))
+    limit = workgrouplimit(B)
+    pn, pb = gemv_config(K, N, limit)
     nr = nrows === nothing ? pn : nrows
     bl = block === nothing ? pb : block
+    bl <= limit || throw(ArgumentError("gemv: block $bl exceeds this device's limit of $limit"))
     kern = gemv_kcontig_kernel(nr, bl, subgroupwidth(B))
-    # `kilaunch!`, which is KernelInterface's launch on every backend.
-    # `invokelatest` because the function is `@eval`ed on demand, so it can be
-    # newer than this method.
-    Base.invokelatest(kilaunch!, backend, kern, C, A, B, K, N;
+    kilaunch!(backend, kern, C, A, B, K, N;
                       ndrange = cld(N, nr) * bl, workgroupsize = bl)
     return C
 end
@@ -475,13 +228,8 @@ end
 `C[m] = epilogue(bias[m] + sum_k W[m, k] * x[k])`, for `Wt = transpose(W)` with
 `W` stored `(M, K)`.
 
-Same function, other layout — the `Transpose` in the signature is not a
-formality, it is *the* dispatch. `W` here is contiguous along `m`, and a kernel
-written for a `(K, N)` matrix reading that one would stride the reduction axis by
-`M` and lose every coalesced read. See the header for the two decompositions.
-
-`C` and `x` may be any shape whose linear order is right — `(M, 1)` and `(K, 1)`
-are what a graph hands over, and reshaping them to vectors first would allocate.
+Transpose selects this layout without copying the weight. C and x may have
+any shape with the required linear length; no temporary vector view is needed.
 """
 function gemv!(C, x, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}}; kw...)
     W = parent(Wt)
@@ -493,16 +241,9 @@ end
 """
     gemv_ncontig_launches(C, x, W, M, K, limit; bias, epilogue, tm, block, unroll)
 
-What the `(M, K)`-layout GEMV IS for this shape, as one launch and no side
-effects. [`gemv!`](@ref) submits it; [`gemv_dispatch!`](@ref) declares it. See
-`array/launch.jl` for why those are two consumers of one function.
-
-`W` is the `(M, K)` matrix ITSELF, not the `Transpose` wrapper: the wrapper is
-the immediate call's dispatch between the two layouts (see the header), and a
-graph's operand is a resource that has no transpose. `M`, `K` and the workgroup
-`limit` are passed rather than read off `W` for the same reason — a resource
-answers neither `size` in the array sense nor `get_backend`, and the limit is a
-property of the device the plan is being built for.
+One launch selected for eager submission or graph declaration. W is the dense
+(M,K) storage, without a Transpose wrapper. Explicit extents/limit also support
+resources before placement. Selection validates lengths and kernel constraints.
 """
 function gemv_ncontig_launches(C, x, W, M::Int, K::Int, limit::Int;
                                bias = nothing, epilogue = identity,
@@ -513,26 +254,24 @@ function gemv_ncontig_launches(C, x, W, M::Int, K::Int, limit::Int;
         "gemv: x has $(length(x)) elements, expected K = $K"))
     length(C) == M || throw(DimensionMismatch(
         "gemv: C has $(length(C)) elements, expected M = $M"))
+    length(W) == M*K || throw(DimensionMismatch(
+        "gemv: W has $(length(W)) elements, expected M*K = $(M*K)"))
     bias === nothing || length(bias) == M || throw(DimensionMismatch(
         "gemv: bias has $(length(bias)) elements, expected M = $M"))
+    M == 0 && return ()
     ptm, pbl, pun = gemv_ncontig_config(M, K, limit)
     t = tm === nothing ? ptm : tm
     bl = block === nothing ? pbl : block
+    bl <= limit || throw(ArgumentError("gemv: block $bl exceeds this device's limit of $limit"))
     un = unroll === nothing ? pun : unroll
-    return [ArrayLaunch(gemv_ncontig_kernel(t, bl, un),
-                        (C, W, x, bias, epilogue, M, K), cld(M, t) * bl, bl)]
+    return (ArrayLaunch(gemv_ncontig_kernel(t, bl, un),
+                        (C, W, x, bias, epilogue, M, K), cld(M, t) * bl, bl),)
 end
 
 """
     gemv_dispatch!(g, C, x, W, M, K; name, …) -> C
 
-DECLARE the `(M, K)`-layout GEMV into a graph: one pass, with the bias and the
-epilogue folded into its store.
-
-This is the declared form of `MMGemvPlan` — the matrix-vector product every
-autoregressive decoder step is made of, and both of SAM 2's mask-token heads.
-Without it a graph containing one fell to the scalar split-K GEMV and paid two
-further passes for the bias and the activation.
+Declare the (M,K)-layout product with bias and epilogue fused into its store.
 """
 function gemv_dispatch!(g, C, x, W, M::Int, K::Int;
                         name::AbstractString = "gemv", kw...)
@@ -551,48 +290,3 @@ gemv(A::AbstractGPUArray{Float32}, B::AbstractGPUArray{Float32,2}) =
 
 gemv(x::AbstractGPUArray{Float32}, Wt::Transpose{Float32,<:AbstractGPUArray{Float32,2}}; kw...) =
     gemv!(similar(x, Float32, size(Wt, 1)), x, Wt; kw...)
-
-"""
-    GEMV_PREGENERATED_LIMITS
-
-Workgroup-size limits to pre-generate GEMV kernels for, at Lava load.
-
-Both GEMV families are `@eval`-generated (see the two "Why this is
-`@eval`-generated" notes above), and **an `@eval` on the runtime path cannot be
-precompiled**: a downstream package whose `@compile_workload` reaches one dies
-with
-
-    Evaluation into the closed module `Lava` breaks incremental compilation
-
-so the workload silently skips and every first call in a fresh process pays the
-compile the Runner packages exist to remove. That is not hypothetical and it is
-not new — `FFT_PREGENERATED` exists for exactly this, found by `KokoroRunner`.
-The GEMV port reintroduced it, and `SAM2Runner` is where it showed up: its
-workload skipped with that message, so nothing SAM 2 runs was precompiled.
-
-Generating at load moves the `@eval` to ordinary top-level code. The set is small
-and derived — the loop below asks `gemv_config` and `gemv_ncontig_config`
-themselves rather than restating their answers, so a change to either is followed
-automatically. `(1, 4096)` are the two sides of every branch those functions take.
-
-The limit is a *device* property and there is no device at load time, so the
-plausible values are enumerated instead. A device outside this list still
-works, at the cost of compiling its variant on first use.
-"""
-const GEMV_PREGENERATED_LIMITS = (64, 128, 256, 512, 1024)
-
-"""
-Subgroup widths worth pregenerating for, same reasoning as the limits above: it
-is a device property and there is no device at load time.
-
-Both real values, and BOTH are needed — 32 on NVIDIA, Metal and Intel, 64 on
-AMD. A kernel that assumes 32 returns exactly twice the right answer on AMD.
-"""
-const GEMV_PREGENERATED_SUBGROUPS = (32, 64)
-
-for L in GEMV_PREGENERATED_LIMITS
-    for K in (1, 4096), N in (1, 4096), S in GEMV_PREGENERATED_SUBGROUPS
-        gemv_kcontig_kernel(gemv_config(K, N, L)..., S)
-    end
-    gemv_ncontig_kernel(gemv_ncontig_config(1, 1, L)...)
-end
