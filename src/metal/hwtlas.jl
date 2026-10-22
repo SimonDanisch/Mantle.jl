@@ -105,7 +105,7 @@ end
 
 const DeviceU8Ptr = Core.LLVMPtr{UInt8, Metal.AS.Device}
 
-@inline function _unpack(accel, h::MetalHit)
+@inline function unpack(accel, h::MetalHit)
     if h.hit == UInt32(0)
         return (false, accel.empty, h.t, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
     end
@@ -136,7 +136,7 @@ const MetalAdaptedProc = AdaptedAccel{<:Any, <:Metal.MtlDeviceArray, <:Any, <:An
               p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
               Float32(d[1]), Float32(d[2]), Float32(d[3]),
               Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return _unpack(accel, h)
+    return unpack(accel, h)
 end
 
 @propagate_inbounds function Raycore.closest_hit(accel::MetalAdaptedProc, ray::Raycore.AbstractRay, mask::Integer)
@@ -148,22 +148,22 @@ end
               p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
               Float32(d[1]), Float32(d[2]), Float32(d[3]),
               Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return _unpack_procedural(accel, h)
+    return unpack_procedural(accel, h)
 end
 
 """
-    _unpack_procedural(accel, h::MetalHit)
+    unpack_procedural(accel, h::MetalHit)
 
 A committed procedural hit as a `closest_hit` tuple. The payload's
 `procedural_commit` rebuilds the primitive from the best hit's four floats, so
 the tuple shape and primitive type match a triangle hit.
 """
-@inline function _unpack_procedural(accel, h::MetalHit)
+@inline function unpack_procedural(accel, h::MetalHit)
     if h.hit == UInt32(0)
         return (false, accel.empty, h.t, SVector{3,Float32}(1f0, 0f0, 0f0), UInt32(0))
     end
     B = typeof(procedural_miss(accel.procedural))
-    best = unpackbest(B, (h.t, h.bu, h.bv, _as_f32(h.inst)))
+    best = unpackbest(B, (h.t, h.bu, h.bv, as_f32(h.inst)))
     prim = procedural_commit(accel.procedural, best, h.prim, h.t, accel.empty)
     return (true, prim, h.t, procedural_bary(accel.procedural, best), h.user)
 end
@@ -177,7 +177,7 @@ end
               p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
               Float32(d[1]), Float32(d[2]), Float32(d[3]),
               Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return _unpack(accel, h)
+    return unpack(accel, h)
 end
 
 @propagate_inbounds function Raycore.any_hit(accel::MetalAdaptedProc, ray::Raycore.AbstractRay, mask::Integer)
@@ -189,7 +189,7 @@ end
               p, Float32(o[1]), Float32(o[2]), Float32(o[3]),
               Float32(d[1]), Float32(d[2]), Float32(d[3]),
               Float32(ray.t_min), Float32(ray.t_max), mask % UInt32)
-    return _unpack_procedural(accel, h)
+    return unpack_procedural(accel, h)
 end
 
 """One batch of instances that all reference the same BLAS."""

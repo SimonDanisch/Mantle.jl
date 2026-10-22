@@ -69,11 +69,11 @@ is deleted and an empty cache returned.
 """
 function create_lava_pipeline_cache(device::VK.Device, path::String, phys_device)
     initial = load_pipeline_cache_data(path, phys_device)
-    function _create_empty()
+    function create_empty()
         ci = VK.PipelineCacheCreateInfo(Ptr{Cvoid}(C_NULL); initial_data_size=UInt64(0))
         return VK.PipelineCache(device, ci)
     end
-    isempty(initial) && return _create_empty()
+    isempty(initial) && return create_empty()
     try
         return GC.@preserve initial begin
             ptr = Ptr{Cvoid}(pointer(initial))
@@ -89,7 +89,7 @@ function create_lava_pipeline_cache(device::VK.Device, path::String, phys_device
             rmex isa Union{SystemError, Base.IOError} || rethrow()
             @warn "Lava: could not delete the unusable pipeline cache; it will fail again next session" path exception=rmex
         end
-        return _create_empty()
+        return create_empty()
     end
 end
 
@@ -129,7 +129,7 @@ end
 # Save the current context's cache at exit; registered once. Guarded, since the
 # device or loader may already be gone at shutdown.
 const _PIPELINE_CACHE_ATEXIT_REGISTERED = Ref(false)
-function _register_pipeline_cache_atexit!()
+function register_pipeline_cache_atexit!()
     _PIPELINE_CACHE_ATEXIT_REGISTERED[] && return
     _PIPELINE_CACHE_ATEXIT_REGISTERED[] = true
     atexit() do

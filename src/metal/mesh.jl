@@ -20,7 +20,7 @@ is skipped: it is `air.position`, which has no index.
 end
 
 # Splits the vertex by name at compile time, so the per-vertex write has no lookup.
-@generated function _write_mesh_vertex!(out::Metal.MeshPtr{V,P,NV,NP,T},
+@generated function write_mesh_vertex!(out::Metal.MeshPtr{V,P,NV,NP,T},
                                         slot::Int32, v::NamedTuple) where {V,P,NV,NP,T}
     calls = Expr[]
     hasfield(v, :position) ||
@@ -28,7 +28,7 @@ end
     # `flip_clip` as in `MetalVertexStage`: Mantle's clip space is Vulkan's
     # (+y down), Metal's is mirrored.
     push!(calls, :(Metal.set_position_mesh(out, slot,
-                       flip_clip(_mesh_vec4(Base.getfield(v, :position))))))
+                       flip_clip(mesh_vec4(Base.getfield(v, :position))))))
     # Portable shaders write `Flat` outputs per vertex, as on Vulkan, but AIR
     # has no flat mesh vertex data: flat varyings are per-primitive data
     # (`air.mesh_primitive_data`), so they are routed to the `P` plane here.
@@ -39,7 +39,7 @@ end
             # Field before slot for the data intrinsics, unlike `set_position_mesh`.
             push!(calls, :(Metal.set_vertex_data_mesh(
                 out, $(mesh_field_index(V, n)), slot,
-                _mesh_component(Base.getfield(v, $(QuoteNode(n)))))))
+                mesh_component(Base.getfield(v, $(QuoteNode(n)))))))
         elseif hasfield(P, n)
             push!(flat, n)
         else
@@ -54,7 +54,7 @@ end
         vpp = mesh_verts_per_primitive(T)
         writes = [:(Metal.set_primitive_data_mesh(
                         out, $(mesh_field_index(P, n)), prim,
-                        _mesh_component(Base.getfield(v, $(QuoteNode(n))))))
+                        mesh_component(Base.getfield(v, $(QuoteNode(n))))))
                   for n in flat]
         push!(calls, quote
             if slot % $vpp == Int32(0)
@@ -66,41 +66,41 @@ end
     return Expr(:block, Expr(:meta, :inline), calls..., :(return nothing))
 end
 
-@generated function _write_mesh_primitive!(out::Metal.MeshPtr{V,P,NV,NP,T},
+@generated function write_mesh_primitive!(out::Metal.MeshPtr{V,P,NV,NP,T},
                                            slot::Int32, d::NamedTuple) where {V,P,NV,NP,T}
     calls = Expr[:(Metal.set_primitive_data_mesh(
                        out, $(mesh_field_index(P, n)), slot,
-                       _mesh_component(Base.getfield(d, $(QuoteNode(n))))))
+                       mesh_component(Base.getfield(d, $(QuoteNode(n))))))
                  for n in fieldnames(d)]
     return Expr(:block, Expr(:meta, :inline), calls..., :(return nothing))
 end
 
 # AIR takes plain `Float32` tuples; `Vec4f` and other spellings are converted.
-@inline _mesh_vec4(p::NTuple{4,Float32}) = p
-@inline _mesh_vec4(p) = (Float32(p[1]), Float32(p[2]), Float32(p[3]), Float32(p[4]))
-@inline _mesh_component(x::Union{Float32,NTuple{2,Float32},NTuple{3,Float32},
+@inline mesh_vec4(p::NTuple{4,Float32}) = p
+@inline mesh_vec4(p) = (Float32(p[1]), Float32(p[2]), Float32(p[3]), Float32(p[4]))
+@inline mesh_component(x::Union{Float32,NTuple{2,Float32},NTuple{3,Float32},
                                  NTuple{4,Float32}}) = x
-@inline _mesh_component(x::Real) = Float32(x)
+@inline mesh_component(x::Real) = Float32(x)
 # `ntuple(..., Val(N))`, not a generator: a generator's iteration error path needs
 # `kernel_state`, which a mesh stage lacks (`unsupported call to
 # julia.gpu.state_getter` at shader compile).
-@inline _mesh_component(x) = ntuple(i -> Float32(@inbounds x[i]), Val(length(x)))
+@inline mesh_component(x) = ntuple(i -> Float32(@inbounds x[i]), Val(length(x)))
 
 # No `@inline` before `@device_override`: it registers an ordinary method instead
 # of an overlay, which fails at shader compile with a `MethodError`.
 Metal.@device_override KI.set_mesh_vertex!(out::Metal.MeshPtr, slot::Integer,
                                            v::NamedTuple) =
-    _write_mesh_vertex!(out, Int32(slot) - Int32(1), v)
+    write_mesh_vertex!(out, Int32(slot) - Int32(1), v)
 
 Metal.@device_override KI.set_mesh_primitive_data!(out::Metal.MeshPtr, slot::Integer,
                                                    d::NamedTuple) =
-    _write_mesh_primitive!(out, Int32(slot) - Int32(1), d)
+    write_mesh_primitive!(out, Int32(slot) - Int32(1), d)
 
 # AIR has one flat index list: zero-based primitive `p` of arity `k` starts at `k*p`.
 # Indices are `UInt8`; `MeshConfig` enforces `MAX_MESH_VERTICES = 256`, so the
 # truncation here is safe.
 
-@inline function _write_mesh_indices!(out::Metal.MeshPtr, base::Int32, idx::Vararg{Int32,N}) where {N}
+@inline function write_mesh_indices!(out::Metal.MeshPtr, base::Int32, idx::Vararg{Int32,N}) where {N}
     ntuple(Val(N)) do k
         Metal.set_index_mesh(out, base + Int32(k) - Int32(1),
                              unsafe_trunc(UInt8, idx[k] - Int32(1)))
@@ -110,16 +110,16 @@ end
 
 Metal.@device_override KI.set_mesh_triangle!(out::Metal.MeshPtr, slot::Integer,
                                              i0::Integer, i1::Integer, i2::Integer) =
-    _write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(3),
+    write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(3),
                          Int32(i0), Int32(i1), Int32(i2))
 
 Metal.@device_override KI.set_mesh_line!(out::Metal.MeshPtr, slot::Integer,
                                          i0::Integer, i1::Integer) =
-    _write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(2), Int32(i0), Int32(i1))
+    write_mesh_indices!(out, (Int32(slot) - Int32(1)) * Int32(2), Int32(i0), Int32(i1))
 
 Metal.@device_override KI.set_mesh_point!(out::Metal.MeshPtr, slot::Integer,
                                           i0::Integer) =
-    _write_mesh_indices!(out, Int32(slot) - Int32(1), Int32(i0))
+    write_mesh_indices!(out, Int32(slot) - Int32(1), Int32(i0))
 
 # Metal takes only the primitive count; the vertex bound is in the object type.
 # A threadgroup declaring zero primitives is discarded with its side effects.
@@ -171,7 +171,7 @@ mesh_topology_symbol(::Mantle.PointList)                                = :point
     mesh_verts_per_primitive(kind::Symbol) -> Int32
 
 Vertices per primitive of AIR's `kind`. Takes the symbol because
-`_write_mesh_vertex!` only has the `MeshObject`'s type parameter.
+`write_mesh_vertex!` only has the `MeshObject`'s type parameter.
 """
 mesh_verts_per_primitive(kind::Symbol) =
     kind === :triangle ? Int32(3) :

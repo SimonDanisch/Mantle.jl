@@ -98,7 +98,7 @@ end
 
 # The `MTLBuffer` behind an `MtlArray` and the byte offset into it. Views over
 # pool regions share a buffer; binding at offset 0 reads another region's bytes.
-_mtlbuffer(a::MtlArray) = (a.data[].buffer, a.offset * sizeof(eltype(a)))
+mtlbuffer(a::MtlArray) = (a.data[].buffer, a.offset * sizeof(eltype(a)))
 
 """
     trace_closest_hits!(hits, rays, tlas, n_rays; cull_mask = 0xFF)
@@ -121,8 +121,8 @@ function trace_closest_hits!(hits::MtlArray, rays::MtlArray, tlas::MetalTLAS,
 
     d = Device(MetalAPI())
     pip = trace_pipeline(d)
-    rbuf, roff = _mtlbuffer(rays)
-    hbuf, hoff = _mtlbuffer(hits)
+    rbuf, roff = mtlbuffer(rays)
+    hbuf, hoff = mtlbuffer(hits)
     n = UInt32(n_rays)
     cm = cull_mask
 

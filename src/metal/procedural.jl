@@ -7,12 +7,12 @@
 # The running best hit crosses back as four floats, packed per field because
 # `reinterpret` refuses non-primitive structs on the GPU.
 
-@inline _as_f32(x::Float32) = x
-@inline _as_f32(x::UInt32)  = reinterpret(Float32, x)
-@inline _as_f32(x::Int32)   = reinterpret(Float32, x)
-@inline _from_f32(::Type{Float32}, x::Float32) = x
-@inline _from_f32(::Type{UInt32},  x::Float32) = reinterpret(UInt32, x)
-@inline _from_f32(::Type{Int32},   x::Float32) = reinterpret(Int32, x)
+@inline as_f32(x::Float32) = x
+@inline as_f32(x::UInt32)  = reinterpret(Float32, x)
+@inline as_f32(x::Int32)   = reinterpret(Float32, x)
+@inline from_f32(::Type{Float32}, x::Float32) = x
+@inline from_f32(::Type{UInt32},  x::Float32) = reinterpret(UInt32, x)
+@inline from_f32(::Type{Int32},   x::Float32) = reinterpret(Int32, x)
 
 """
     packbest(b) -> NTuple{4,Float32}
@@ -23,7 +23,7 @@ A payload's running best hit, as the four floats a visible function returns.
     n = fieldcount(B)
     n <= 4 || error("a procedural payload's best hit must have at most 4 fields " *
                     "to cross a visible function's return; `$B` has $n")
-    vals = [i <= n ? :(_as_f32(getfield(b, $i))) : :(0f0) for i in 1:4]
+    vals = [i <= n ? :(as_f32(getfield(b, $i))) : :(0f0) for i in 1:4]
     return Expr(:block, Expr(:meta, :inline), Expr(:tuple, vals...))
 end
 
@@ -33,7 +33,7 @@ end
 The inverse of [`packbest`](@ref).
 """
 @generated function unpackbest(::Type{B}, v::NTuple{4,Float32}) where {B}
-    args = [:(_from_f32($(fieldtype(B, i)), v[$i])) for i in 1:fieldcount(B)]
+    args = [:(from_f32($(fieldtype(B, i)), v[$i])) for i in 1:fieldcount(B)]
     return Expr(:block, Expr(:meta, :inline), Expr(:call, B, args...))
 end
 

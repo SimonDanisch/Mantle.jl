@@ -18,14 +18,14 @@ end
 
 # A function, tuple or vector of closest-hits, stored as a Tuple so each one's
 # identity is part of the cache key.
-_normalise_chit(f) = (f,)
-_normalise_chit(t::Tuple) = t
-_normalise_chit(v::AbstractVector) = tuple(v...)
+normalise_chit(f) = (f,)
+normalise_chit(t::Tuple) = t
+normalise_chit(v::AbstractVector) = tuple(v...)
 
 function RayTracingPipeline(; raygen, closest_hit, miss, any_hit=nothing,
                               payload_type::Symbol=:f32,
                               chit_miss_take_args::Bool=false)
-    chits = _normalise_chit(closest_hit)
+    chits = normalise_chit(closest_hit)
     isempty(chits) && throw(ArgumentError("RayTracingPipeline: at least one closest_hit shader is required"))
     RayTracingPipeline(raygen, chits, miss, any_hit, payload_type,
                        chit_miss_take_args)

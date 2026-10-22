@@ -173,7 +173,7 @@ end
 # Reuse `prev` for `data` by resize and copy, else allocate on `bq` (the TLAS's
 # queue). At least one element: a trace binds these, a zero-length buffer has no
 # device address, and an empty scene is valid (the element is never read).
-function _reuse_or_alloc(prev, data::AbstractArray{T}, bq) where T
+function reuse_or_alloc(prev, data::AbstractArray{T}, bq) where T
     n = max(length(data), 1)
     if prev isa LavaArray{T}
         resize!(prev, n)
@@ -241,7 +241,7 @@ end
 
 # Drop BLASes no batch references (by identity) and return them. Built
 # `LavaTLAS`es keep their own copy of the list until their uses retire.
-function _compact_blas_list!(t::VulkanTLAS)
+function compact_blas_list!(t::VulkanTLAS)
     used = Base.IdSet{LavaBLAS}()
     for batch in t.instances
         push!(used, batch.blas)
@@ -257,7 +257,7 @@ end
 
 function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
     # Drop unused BLASes (deleted batches may have left some unreferenced).
-    dropped_blases = _compact_blas_list!(hwtlas)
+    dropped_blases = compact_blas_list!(hwtlas)
 
     # No early return when empty: a zero-instance TLAS is valid and every ray
     # misses it. A ray query with no TLAS bound is undefined and loses the device.
@@ -292,8 +292,8 @@ function rebuild_hw_tlas_from_batch!(hwtlas::VulkanTLAS{Tri}) where {Tri}
         HardwareAccel(hw_tlas, all_tris, blas_offsets, per_inst_offsets; bq=hwtlas.bq)
     end
 
-    tri_gpu = _reuse_or_alloc(hwtlas.tri_gpu, all_tris, hwtlas.bq)
-    off_gpu = _reuse_or_alloc(hwtlas.off_gpu, hit_offsets, hwtlas.bq)
+    tri_gpu = reuse_or_alloc(hwtlas.tri_gpu, all_tris, hwtlas.bq)
+    off_gpu = reuse_or_alloc(hwtlas.off_gpu, hit_offsets, hwtlas.bq)
 
     return (hw_tlas, hw_accel, tri_gpu, off_gpu, native, shading, dropped_blases)
 end

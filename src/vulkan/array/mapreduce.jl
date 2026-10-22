@@ -6,7 +6,7 @@
 using KernelAbstractions
 using Atomix
 
-function _vk_reduce_fadd_kernel!(out, src, total_threads::Int32)
+function vk_reduce_fadd_kernel!(out, src, total_threads::Int32)
     gi = KI.get_global_id().x
     n = length(src)
     # Grid-stride loop, so atomics scale with the thread count, not with `n`.
@@ -63,7 +63,7 @@ function vk_reduce_sum(A::LavaArray{Float32})
     nblocks = min(cld(n, wgsize), 2048)
     total_threads = Int32(nblocks * wgsize)
     ndr = Int(total_threads)
-    KI.Kernel(KA.get_backend(A), _vk_reduce_fadd_kernel!)(
+    KI.Kernel(KA.get_backend(A), vk_reduce_fadd_kernel!)(
         out, A, total_threads; ndrange=ndr, workgroupsize=wgsize)
     bq = ctx.default_bq
     flush!(bq)

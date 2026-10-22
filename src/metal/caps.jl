@@ -8,12 +8,12 @@ Threads per SIMD group, read from a compiled pipeline's `threadExecutionWidth`
 rather than assumed to be 32.
 """
 function simd_width(d::MetalDevice)
-    kernel = Metal.@metal launch = false _caps_probe()
+    kernel = Metal.@metal launch = false caps_probe()
     return Int(kernel.pipeline.threadExecutionWidth)
 end
 
 # Empty kernel, compiled only to read the pipeline's SIMD width and threadgroup limit.
-_caps_probe() = return
+caps_probe() = return
 
 """
     max_threads(d) -> Int
@@ -23,7 +23,7 @@ which a launch is checked against and which falls as register use grows, not the
 device's per-dimension `maxThreadsPerThreadgroup`.
 """
 function max_threads(d::MetalDevice)
-    kernel = Metal.@metal launch = false _caps_probe()
+    kernel = Metal.@metal launch = false caps_probe()
     return Int(kernel.pipeline.maxTotalThreadsPerThreadgroup)
 end
 

@@ -163,7 +163,7 @@ function lower_geometry_to_mesh(p::GraphicsPipeline; indexed::Bool = false)
     g === nothing && throw(ArgumentError(
         "lower_geometry_to_mesh: this pipeline has no geometry stage, so there is " *
         "nothing to lower. Draw it as it is."))
-    (p.tess_control === nothing && p.tess_eval === nothing) && return _lower(p, g, indexed)
+    (p.tess_control === nothing && p.tess_eval === nothing) && return lower_geometry_to_mesh(p, g, indexed)
     throw(ArgumentError(
         "lower_geometry_to_mesh: this pipeline has a tessellation stage as well as " *
         "a geometry stage, and only the geometry stage can be lowered onto a mesh " *
@@ -172,7 +172,7 @@ function lower_geometry_to_mesh(p::GraphicsPipeline; indexed::Bool = false)
         "itself, which is a different translation and not this one."))
 end
 
-function _lower(p::GraphicsPipeline, g::GeometryShader, indexed::Bool)
+function lower_geometry_to_mesh(p::GraphicsPipeline, g::GeometryShader, indexed::Bool)
     cfg = stageconfig(g)
     # The assembler's topology decides how vertices are walked, the geometry
     # stage what it expects; a mismatch would silently gather the wrong vertices.

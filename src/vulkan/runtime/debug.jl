@@ -4,7 +4,7 @@
 
 # The probe kernel. Kernels are compiled by function, so this cannot be a closure
 # inside `verify_gpu_av`.
-function _lava_gpuav_check_kernel!(out, bad_idx::Int)
+function gpuav_check_kernel!(out, bad_idx::Int)
     i = KI.get_global_id().x
     if i == 1
         @inbounds out[bad_idx] = Int32(0xBAD)
@@ -39,7 +39,7 @@ function verify_gpu_av(; timeout::Float64=30.0, ctx::VkContext = vk_context())
     # when no tracked VkBuffer contains it; an offset of a few KB can land in a
     # neighbouring buffer and go unreported.
     bad_idx = 100_000
-    Base.invokelatest(KI.Kernel(LavaBackend(bq), _lava_gpuav_check_kernel!),
+    Base.invokelatest(KI.Kernel(LavaBackend(bq), gpuav_check_kernel!),
                       arr, bad_idx; ndrange=4, workgroupsize=1)
     # GPU-AV reports only after a host wait on the dispatch. Poll with short
     # semaphore waits: `KA.synchronize` blocks forever if a faulting submission

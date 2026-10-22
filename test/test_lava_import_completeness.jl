@@ -317,8 +317,8 @@ end
     # LLVM.jl 10's loop analysis and pass-manager names (`Loop`, `access`,
     # `disjoint`, `invalidate!`) against the graph's own; KernelAbstractions 0.10's
     # launch configuration against the graph's `Launch` record (`graph/kalaunch.jl`);
-    # AcceleratedKernels 0.5's sort helpers `slice` and `_lower` against the graph's
-    # sub-range and the geometry-stage lowering; and Metal.jl's `claim!`, its
+    # AcceleratedKernels 0.5's sort helper `slice` against the graph's sub-range;
+    # and Metal.jl's `claim!`, its
     # buffer-ownership step, against the lifetime claim in `graph/lifetime.jl`.
     # `src/metal/` takes ownership through `Metal.take_ownership!`, qualified.
     #
@@ -344,7 +344,7 @@ end
     known = [(:bind_buffer!, :Metal), (:dispatch!, :Metal), (:make_resident!, :Metal),
              (:retire!, :Metal),
              (:stage_output_type, :Metal), (:link_kernel, :Metal), (:declare!, :GPUCompiler), (:Attribute, :LLVM), (:Backend, :KernelAbstractions),
-             (:Launch, :KernelAbstractions), (:Loop, :LLVM), (:_lower, :AcceleratedKernels),
+             (:Launch, :KernelAbstractions), (:Loop, :LLVM),
              (:access, :LLVM), (:claim!, :Metal), (:disjoint, :LLVM),
              (:invalidate!, :LLVM), (:slice, :AcceleratedKernels),
              (:Mat4f, :GeometryBasics), (:Pass, :LLVM), (:Window, :GLFW),

@@ -313,7 +313,7 @@ function build_accel!(d::MetalDevice, blases::Vector{MetalBLAS}, descriptors::Mt
         "build_accel!: $n instances but $(length(descriptors)) descriptors"))
     # Concretely typed: `NSArray` takes a `Vector{<:ObjectiveC.Object}`.
     handles = MTL.MTLAccelerationStructure[b.handle for b in blases]
-    buf, off = _mtlbuffer(descriptors)
+    buf, off = mtlbuffer(descriptors)
     desc = MTL.MTLInstanceAccelerationStructureDescriptor()
     # The user-ID descriptor: MSL reads `userID` as `user_instance_id`, Vulkan's
     # instance custom index.

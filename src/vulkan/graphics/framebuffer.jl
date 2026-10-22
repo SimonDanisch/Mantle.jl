@@ -69,13 +69,6 @@ function VulkanFramebuffer(width::Integer, height::Integer;
                           color_format::Union{VK.Format,Type}=VK.FORMAT_B8G8R8A8_SRGB,
                           srgb::Bool=false)
     color_format isa Type && (color_format = vkformat(VulkanAPI(), color_format; srgb))
-    return _vulkan_framebuffer(width, height, ctx, depth, color_format)
-end
-
-function _vulkan_framebuffer(width::Integer, height::Integer, ctx::VkContext,
-                             depth::Bool, color_format::VK.Format)
-    dev = ctx.device
-
     color_image = image_2d(ctx, width, height, color_format, COLOR_USAGE)
     color_memory = alloc_image_memory(ctx, color_image)
     color_view = image_view(ctx, color_image, color_format)

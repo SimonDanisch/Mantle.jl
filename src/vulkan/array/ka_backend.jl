@@ -246,7 +246,7 @@ KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
 # compile time, so kernels without one pay nothing. Later arguments win.
 @generated function find_tlas_in_args(args::Tuple)
     ts = fieldtypes(args)
-    all(isconcretetype, ts) || return :(_find_tlas(args, nothing))
+    all(isconcretetype, ts) || return :(find_tlas(args, nothing))
     expr = :(nothing)
     for (i, T) in enumerate(ts)
         if T <: Tuple
@@ -263,11 +263,11 @@ KA.argconvert(::KA.Kernel{LavaBackend}, x) = x
     end
     expr
 end
-@inline _find_tlas(::Tuple{}, acc) = acc
-@inline _find_tlas(args::Tuple, acc) = _find_tlas(Base.tail(args), _maybe_tlas(first(args), acc))
+@inline find_tlas(::Tuple{}, acc) = acc
+@inline find_tlas(args::Tuple, acc) = find_tlas(Base.tail(args), maybe_tlas(first(args), acc))
 # Fallback for non-concrete argument tuples: a field check, so any value with
 # an `hwtlas` field counts.
-@inline function _maybe_tlas(x, acc)
+@inline function maybe_tlas(x, acc)
     if hasfield(typeof(x), :hwtlas)
         h = getfield(x, :hwtlas)
         h !== nothing && return h
@@ -294,7 +294,7 @@ function get_or_build_iter_plan(obj::KA.Kernel{LavaBackend}, ndrange, workgroups
         end
     end
 
-    ndr_canon, _ws, iterspace, _dyn = KA.launch_config(obj, ndrange, workgroupsize)
+    ndr_canon, _, iterspace, _ = KA.launch_config(obj, ndrange, workgroupsize)
     ka_ctx  = KA.mkcontext(obj, ndr_canon, iterspace)
     blocks  = KA.blocks(iterspace)
     nblocks = length(blocks)

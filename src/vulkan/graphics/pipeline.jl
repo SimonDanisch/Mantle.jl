@@ -231,76 +231,33 @@ vk_cull(::NoCull)    = VK.CULL_MODE_NONE
 vk_cull(::CullBack)  = VK.CULL_MODE_BACK_BIT
 vk_cull(::CullFront) = VK.CULL_MODE_FRONT_BIT
 
-function vk_depth(::DepthLess)
-    (true, VK.COMPARE_OP_LESS)
-end
-function vk_depth(::DepthLessEq)
-    (true, VK.COMPARE_OP_LESS_OR_EQUAL)
-end
-function vk_depth(::DepthGreater)
-    (true, VK.COMPARE_OP_GREATER)
-end
-function vk_depth(::DepthAlways)
-    (true, VK.COMPARE_OP_ALWAYS)
-end
-function vk_depth(::DepthLessEqReadOnly)
-    (true, VK.COMPARE_OP_LESS_OR_EQUAL)
-end
-function vk_depth(::DepthOff)
-    (false, VK.COMPARE_OP_ALWAYS)
-end
+vk_depth(::DepthLess)           = (true, VK.COMPARE_OP_LESS)
+vk_depth(::DepthLessEq)         = (true, VK.COMPARE_OP_LESS_OR_EQUAL)
+vk_depth(::DepthGreater)        = (true, VK.COMPARE_OP_GREATER)
+vk_depth(::DepthAlways)         = (true, VK.COMPARE_OP_ALWAYS)
+vk_depth(::DepthLessEqReadOnly) = (true, VK.COMPARE_OP_LESS_OR_EQUAL)
+vk_depth(::DepthOff)            = (false, VK.COMPARE_OP_ALWAYS)
 
 vk_depth_write(::DepthMode) = true
 vk_depth_write(::DepthLessEqReadOnly) = false
 
-function vk_blend(::Opaque)
-    VK.PipelineColorBlendAttachmentState(
-        false,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
-        VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
-        VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT,
-    )
-end
+# Additive blending of colour and alpha with the given factors.
+blendstate(enable, src, dst, srcalpha, dstalpha,
+           mask = VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
+                  VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT) =
+    VK.PipelineColorBlendAttachmentState(enable, src, dst, VK.BLEND_OP_ADD,
+                                         srcalpha, dstalpha, VK.BLEND_OP_ADD, mask)
 
-function vk_blend(::AlphaBlend)
-    VK.PipelineColorBlendAttachmentState(
-        true,
-        VK.BLEND_FACTOR_SRC_ALPHA, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK.BLEND_OP_ADD,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
-        VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
-        VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT,
-    )
-end
-
-function vk_blend(::Additive)
-    VK.PipelineColorBlendAttachmentState(
-        true,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE, VK.BLEND_OP_ADD,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE, VK.BLEND_OP_ADD,
-        VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
-        VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT,
-    )
-end
-
-function vk_blend(::NoWrite)
-    VK.PipelineColorBlendAttachmentState(
-        false,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.BLEND_OP_ADD,
-        VK.ColorComponentFlag(0),
-    )
-end
-
-function vk_blend(::Premultiplied)
-    VK.PipelineColorBlendAttachmentState(
-        true,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK.BLEND_OP_ADD,
-        VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK.BLEND_OP_ADD,
-        VK.COLOR_COMPONENT_R_BIT | VK.COLOR_COMPONENT_G_BIT |
-        VK.COLOR_COMPONENT_B_BIT | VK.COLOR_COMPONENT_A_BIT,
-    )
-end
+vk_blend(::Opaque) = blendstate(false, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO,
+                                VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO)
+vk_blend(::AlphaBlend) = blendstate(true, VK.BLEND_FACTOR_SRC_ALPHA, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                                    VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO)
+vk_blend(::Additive) = blendstate(true, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE,
+                                  VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE)
+vk_blend(::NoWrite) = blendstate(false, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO,
+                                 VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ZERO, VK.ColorComponentFlag(0))
+vk_blend(::Premultiplied) = blendstate(true, VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+                                       VK.BLEND_FACTOR_ONE, VK.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
 
 """Record a layout transition of `image`'s first color mip level and layer."""
 function imagebarrier!(cmd, image::VK.Image,

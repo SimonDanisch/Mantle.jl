@@ -128,16 +128,10 @@ function build_blas(ctx::VulkanAccelBuildContext,
                                      opaque, allow_update)
 end
 
-function build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Float32}}, indices::Vector{UInt32};
-                    opaque::Bool=true, allow_update::Bool=false)
-    bq = ctx.bq
-    vertex_arr = reinterpret(UInt8,LavaArray(vertices; bq, extra_usage=AS_INPUT_USAGE))
-    index_arr  = LavaArray(indices; bq, extra_usage=AS_INPUT_USAGE)
-    return build_blas_from_addresses(ctx, vertex_arr, index_arr,
-                                     vertex_arr.buf[].address, index_arr.buf[].address,
-                                     length(vertices), length(indices);
-                                     opaque, allow_update)
-end
+build_blas(ctx::VulkanAccelBuildContext, vertices::Vector{NTuple{3,Float32}}, indices::Vector{UInt32};
+           kw...) =
+    build_blas(ctx, LavaArray(vertices; ctx.bq, extra_usage=AS_INPUT_USAGE),
+               LavaArray(indices; ctx.bq, extra_usage=AS_INPUT_USAGE); kw...)
 
 function build_blas_from_addresses(ctx::VulkanAccelBuildContext, vertex_arr, index_arr,
                                    vertex_addr::UInt64, index_addr::UInt64,

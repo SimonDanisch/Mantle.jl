@@ -492,7 +492,7 @@ mutable struct VkContext
         # a mismatch.
         ctx.pipeline_cache = create_lava_pipeline_cache(
             device, lava_pipeline_cache_path(device_name, driver_version), physical_device)
-        _register_pipeline_cache_atexit!()
+        register_pipeline_cache_atexit!()
         ctx.default_bq = SubmitChannel(device, primary_queue, queue_family_index, ctx)
         return ctx
     end
