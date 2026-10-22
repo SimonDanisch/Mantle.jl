@@ -6,7 +6,7 @@
 # `x * (1/m)`, so for `maxabs` near `floatmax` the reciprocal `1/maxabs` is
 # subnormal and is flushed to zero under FTZ (the default on lavapipe AND RDNA3),
 # collapsing the whole norm to 0.0. Fixed by dividing by `sqrt(maxabs)` twice
-# (`1/sqrt(m)` is always normal) in `lava_norm_p2_rescale`.
+# (`1/sqrt(m)` is always normal).
 #
 # These are exactly the cases that failed in the GPUArrays `linalg/norm` suite
 # (2-norm, sizes (2,) and (2,2,2), Float64 and ComplexF64, overflow + underflow
@@ -36,7 +36,9 @@ include(joinpath(@__DIR__, "testbackend.jl"))
 
             # Normal magnitudes must remain exact.
             arr_n = rand(T, sz)
-            @test norm(Mantle.devicearray(TESTBACKEND, arr_n), 2) ≈ norm(arr_n, 2)
+            for p in (0, 1, 2, 3, Inf, -Inf)
+                @test norm(Mantle.devicearray(TESTBACKEND, arr_n), p) ≈ norm(arr_n, p)
+            end
         end
     end
 

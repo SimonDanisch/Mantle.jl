@@ -444,41 +444,9 @@ function Base.append!(a::LavaArray{T,1}, items::AbstractVector) where T
 end
 
 # GPUArrays' `norm` captures variables in `Core.Box` closures, which fail to
-# compile for the GPU; these helpers capture only isbits values.
+# compile for the GPU; the reductions here capture only isbits values.
 
 import LinearAlgebra
-
-# Float16/Float32: accumulate in Float64, which cannot overflow, so no rescaling.
-function lava_norm_p2_widen(v::LavaArray{T}) where T
-    s = sum(x -> Float64(abs(x))^2, v; init=Float64(0))
-    return typeof(float(LinearAlgebra.norm(zero(T))))(sqrt(s))
-end
-
-function lava_norm_p1_widen(v::LavaArray{T}) where T
-    s = sum(x -> Float64(abs(x)), v; init=Float64(0))
-    return typeof(float(LinearAlgebra.norm(zero(T))))(s)
-end
-
-function lava_norm_pp_widen(v::LavaArray{T}, spp::Float64) where T
-    # Use exp2(p*log2(x)) instead of x^p to avoid ^ operator dispatch issues on GPU
-    s = sum(x -> exp2(spp * log2(Float64(abs(x)))), v; init=Float64(0))
-    return typeof(float(LinearAlgebra.norm(zero(T))))(exp2(inv(spp) * log2(s)))
-end
-
-# Float64: rescale by `maxabs`, dividing by `sqrt(maxabs)` twice. Drivers lower
-# `x / m` to `x * (1/m)`; for `m` near `floatmax` that reciprocal is subnormal
-# and flushed to zero (lavapipe, RADV), and the norm comes out 0.
-function lava_norm_p2_rescale(v::LavaArray{T}, maxabs::Float64) where T
-    sm = sqrt(maxabs)
-    s = sum(x -> ((abs(x) / sm) / sm)^2, v; init=Float64(0))
-    return typeof(float(LinearAlgebra.norm(zero(T))))(maxabs * sqrt(s))
-end
-
-function lava_norm_pp_rescale(v::LavaArray{T}, maxabs::Float64, spp::Float64) where T
-    # Use exp2(p*log2(x)) instead of x^p to avoid ^ operator dispatch issues on GPU
-    s = sum(x -> exp2(spp * log2(abs(x) / maxabs)), v; init=Float64(0))
-    return typeof(float(LinearAlgebra.norm(zero(T))))(maxabs * exp2(inv(spp) * log2(s)))
-end
 
 function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     RT = typeof(float(LinearAlgebra.norm(zero(T))))
@@ -490,26 +458,22 @@ function LinearAlgebra.norm(v::LavaArray{T}, p::Real=2) where T
     # Other p-norms need transcendental math that is inaccurate on some Vulkan
     # drivers (RDNA3.5), so they run on the host.
     (p != 1 && p != 2) && return convert(RT, LinearAlgebra.norm(Array(v), p))
-
-    # Float16/Float32 and their complex types: accumulate in Float64.
+    # Float16/Float32 and their complex types accumulate in Float64, which cannot overflow.
     if RT === Float32 || RT === Float16
-        p == 2 && return lava_norm_p2_widen(v)
-        p == 1 && return lava_norm_p1_widen(v)
-        return lava_norm_pp_widen(v, Float64(p))
+        p == 1 && return RT(sum(x -> Float64(abs(x)), v; init = 0.0))
+        return RT(sqrt(sum(x -> Float64(abs(x))^2, v; init = 0.0)))
     end
-
+    p == 1 && return convert(RT, sum(abs, v; init = 0.0))
     maxabs = convert(Float64, maximum(abs, v))
     (iszero(maxabs) || isinf(maxabs)) && return convert(RT, maxabs)
-
     # Unscaled when the sum of squares can neither overflow nor underflow.
-    if p == 2 && isfinite(length(v) * maxabs^2) && !iszero(maxabs^2)
-        s = sum(abs2, v; init=Float64(0))
-        return convert(RT, sqrt(s))
-    end
-
-    p == 2 && return lava_norm_p2_rescale(v, maxabs)
-    p == 1 && return convert(RT, sum(abs, v; init=Float64(0)))
-    return lava_norm_pp_rescale(v, maxabs, Float64(p))
+    isfinite(length(v) * maxabs^2) && !iszero(maxabs^2) &&
+        return convert(RT, sqrt(sum(abs2, v; init = 0.0)))
+    # Rescaled by `maxabs`, dividing by `sqrt(maxabs)` twice: drivers lower `x / m`
+    # to `x * (1/m)`, and for `m` near `floatmax` that reciprocal is subnormal and
+    # flushed to zero (lavapipe, RADV).
+    sm = sqrt(maxabs)
+    return convert(RT, maxabs * sqrt(sum(x -> ((abs(x) / sm) / sm)^2, v; init = 0.0)))
 end
 
 # Two methods, matching GPUArrays' `NTuple` and general signatures to avoid ambiguity.
