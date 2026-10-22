@@ -98,3 +98,26 @@ function check_store_submission(ctx)
         @test isempty(Mantle.validationmessages!(dev))
     end
 end
+
+function check_extent_refusal(ctx)
+    dev = Mantle.lavadevice(ctx)
+    be = Mantle.backend(dev)
+    huge = 1 << (Sys.WORD_SIZE-2)
+    @testset "invalid native shapes never submit or allocate" begin
+        before = Mantle.submissions(dev)
+        reserved = Mantle.reserved(Mantle.pool(dev))
+        for (T,dims) in ((UInt8,(huge,4)),(Float64,(huge,)))
+            @test_throws OverflowError Mantle.LavaArray{T}(undef,dims;bq=dev.bq)
+            @test_throws OverflowError Mantle.KA.allocate(be,T,dims)
+            @test Mantle.trydevicearray(dev,T,dims) === nothing
+        end
+        @test_throws ArgumentError Mantle.LavaArray{String}(undef,(0,);bq=dev.bq)
+        @test_throws ArgumentError Mantle.LavaArray{Base.RefValue{Int}}(undef,(1,);bq=dev.bq)
+        @test_throws ArgumentError Mantle.LavaArray{UInt8}(undef,(-1,-1);bq=dev.bq)
+        @test_throws ArgumentError Mantle.KA.allocate(be,UInt8,(-1,-1))
+        @test_throws ArgumentError Mantle.trydevicearray(dev,UInt8,(-1,-1))
+        @test Mantle.submissions(dev) == before
+        @test Mantle.reserved(Mantle.pool(dev)) == reserved
+        @test isempty(Mantle.validationmessages!(dev))
+    end
+end

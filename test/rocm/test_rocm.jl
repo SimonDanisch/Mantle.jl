@@ -110,6 +110,9 @@ end
         @test Array(v) == fill(val, 10)
         # Alignment is still required: 258 is not a multiple of 4.
         @test_throws ArgumentError RE.rocview(mg, T, (10,), 258)
+        @test_throws ArgumentError RE.rocview(mg,T,(1,),-4)
+        @test_throws ArgumentError RE.rocview(mg,T,(1,),typemax(Int))
+        @test_throws OverflowError RE.rocview(mg,UInt8,(1 << (Sys.WORD_SIZE-2),4),0)
     end
     # And through the pool, wherever it puts them.
     dev = M.Device(M.ROCmAPI())

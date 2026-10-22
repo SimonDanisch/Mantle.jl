@@ -136,32 +136,14 @@ queue, which is a different operation and not a longer version of this one.
 """
 function hostspan end
 
-"""
-    hostview(T, base, nbytes, offset, dims) -> Array{T}
-    hostview(dev, a::DeviceArray)           -> Array{T}
+"""hostview(T, base, nbytes, offset, dims) -> Array{T}
+    hostview(dev, a::DeviceArray) -> Array{T}
 
-`dims` elements of `T` over host-addressable memory, starting at byte `offset`.
-No copy.
-
-A typed `unsafe_wrap`, NOT `reinterpret` over a byte view. `reinterpret` refuses
-a struct with padding — "Padding of type X is not compatible with type UInt8" —
-and Hikari's `LightBVHNode` is 60 bytes holding 54 of fields, so every scene with
-a light BVH failed on that once, on each backend that wrote this separately.
-
-`own = false`: the `Block` owns the memory, as everywhere else in Mantle. It is
-reachable from whatever handed us this offset — a `DeviceArray` holds its region,
-which holds the block — so it outlives any wrapper a live handle can make.
-
-The bounds check is the reason this is one function rather than an `unsafe_wrap`
-at each call site: two regions the placer put at overlapping offsets corrupt each
-other here loudly and deterministically, instead of each quietly getting storage
-that runs off the end of the block.
-"""
+Borrow a bounded host span without copying, including padded plain-bit elements.
+The caller must keep its backing pool region alive while using the returned Array."""
 function hostview(::Type{T}, base::Ptr{UInt8}, nbytes::Integer, offset::Integer,
                   dims::Dims) where {T}
-    need = prod(dims) * sizeof(T)
-    offset + need <= nbytes || throw(ArgumentError(
-        "$(join(dims, "x")) $T at offset $offset needs $need bytes, memory has $nbytes"))
+    checkspan(nbytes,offset,checkedbytes(T,dims))
     return unsafe_wrap(Array, Ptr{T}(base + offset), dims; own = false)
 end
 

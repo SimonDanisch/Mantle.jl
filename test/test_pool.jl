@@ -132,6 +132,9 @@ end
     r = M.acquire!(p, d, :buf, nothing, 16; blocksize = 4096)
     @test_throws ArgumentError M.DeviceArray{Float32}(r, (16,))   # needs 64, has 16
     @test M.DeviceArray{Float32}(r, (4,)) isa M.DeviceArray{Float32,1}
+    @test_throws ArgumentError M.DeviceArray{Float32,1}(r,(16,))
+    @test_throws ArgumentError M.DeviceArray{UInt8,2}(r,(-1,-1))
+    @test_throws OverflowError M.DeviceArray{UInt8,2}(r,(1 << (Sys.WORD_SIZE-2),4))
 end
 
 # ── persistent resources: one implementation, no backend ──────────────────────

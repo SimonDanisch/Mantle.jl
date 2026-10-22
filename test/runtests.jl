@@ -521,6 +521,7 @@ end
 #
 # Outside the driver gate on purpose: that they need no GPU is the assertion.
 include(joinpath(@__DIR__, "test_pool.jl"))
+include(joinpath(@__DIR__, "test_memory_extents.jl"))
 # `DebugConfig`'s rules: core's, and a device is not needed to hold them.
 include(joinpath(@__DIR__, "test_debug_config.jl"))
 # The Vulkan half is gated inside on `_VULKAN_OK`.
@@ -551,6 +552,7 @@ if _VULKAN_OK
     check_draw_argument_lifetime(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_host_upload.jl"))
     check_host_upload(Mantle.vk_context())
+    check_extent_refusal(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_recording_trim.jl"))
     check_recording_trim(Mantle.defaultbackend())
     check_store_submission(Mantle.vk_context())

@@ -352,6 +352,11 @@ KernelInterface's capability tables.
 | `jobtimeout` | Seconds or Inf when no bound is known; an unknown watchdog bound is not proof of unlimited execution. Core applies its documented conservative submission estimate. |
 | `devicekey`, `compilerkey`, `enabledfeatures` | Immutable native identity/architecture, compiler+ABI version key, sorted enabled feature tuple. Compilation requires equality of relevant keys; device type identity alone is insufficient. |
 
+Core owns dimension and byte-span validation before allocation, placement or
+wrapping: reject negative dimensions and checked-product overflow, and test
+subranges without overflowing offset + length. Native verbs retain their
+API-specific alignment/usage requirements rather than copying this policy.
+
 Scalar numeric support is `scalars::Tuple` of supported scalar types;
 `atomicfeatures::Tuple` carries operation/type/scope/ordering combinations using
 the compiler's existing atomic operation/scope/order vocabulary. Fences have

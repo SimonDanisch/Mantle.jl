@@ -59,7 +59,7 @@ function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
     Base.isbitsunion(T) &&
         throw(ArgumentError("LavaArray does not support isbits-union element types like $T: their type-selector bytes are not stored"))
     ctx = ctxof(bq)
-    nbytes = prod(dims) * sizeof(T)
+    nbytes = checkedbytes(T,dims)
 
     # AS-build scratch buffers need a specific BDA alignment
     # (`ctx.as_scratch_align`).  Other buffers default to 1.  We over-allocate
@@ -73,9 +73,10 @@ function LavaArray{T,N}(::UndefInitializer, dims::NTuple{N,Int};
     # BAR-mapped (unified) memory bypasses the pool since those buffers need
     # specific flags at VkBuffer/DeviceMemory creation time.
     use_pool = extra_usage == UInt32(0) && !scratch && !unified
+    allocation_bytes = max(Base.checked_add(nbytes,slack),16)
     managed_buf = use_pool ?
-        pool_alloc(bq, max(nbytes + slack, 16)) :
-        vk_alloc(bq, max(nbytes + slack, 16); extra_usage, unified)
+        pool_alloc(bq, allocation_bytes) :
+        vk_alloc(bq, allocation_bytes; extra_usage, unified)
 
     byte_offset = 0
     if align > UInt64(1)

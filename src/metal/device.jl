@@ -1505,7 +1505,7 @@ told does not want to be rescued.
 """
 function tryallocate(d::MetalDevice, ::Type{T}, dims::Dims{N}) where {T,N}
     buf = try
-        MTL.MTLBuffer(d.dev, max(prod(dims) * sizeof(T), 4); storage = Metal.SharedStorage)
+        MTL.MTLBuffer(d.dev, max(checkedbytes(T,dims),4); storage = Metal.SharedStorage)
     catch err
         err isa OutOfMemoryError || rethrow()
         return nothing

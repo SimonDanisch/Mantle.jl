@@ -706,7 +706,7 @@ count(t::TransientBuffer) = prod(t.dims)
 
 stride(::TransientBuffer) = 1
 
-nbytes(t::TransientBuffer{T}) where {T} = prod(t.dims) * sizeof(T)
+nbytes(t::TransientBuffer{T}) where {T} = checkedbytes(T,t.dims)
 
 # Asked of the device, not of the transient: both backends place the same
 # `TransientBuffer`, and what they need it aligned to differs. 256 is Vulkan's
@@ -1612,14 +1612,8 @@ Transient.Buffer(g::Graph, ::Type{T}, dims::Integer...; kw...) where {T} =
     Transient.Buffer(g, T, map(Int, dims); kw...)
 function Transient.Buffer(g::Graph, ::Type{T}, dims::Dims{N};
                           hostwritten::Bool = false) where {T,N}
-    # An EMPTY transient has nothing to place and nothing can read it: a kernel
-    # over it would have a zero ndrange, which `refuseempty` refuses, so the
-    # declaration can only ever be an orphan. `Liveness` does report it, as
-    # "never used by any pass" -- which is a message about the allocator for a
-    # mistake made here, and does not say the shape was empty. torch produces
-    # empty tensors legitimately (SAM 2's decoder concatenates a `(1, 0, 256)` on
-    # the branch with no boxes), so the caller has to skip, and this is where it
-    # finds out.
+    checkedbytes(T,dims)
+    # Empty transients have no dispatch or placement; skip them at the shape decision.
     prod(dims) == 0 && throw(ArgumentError(
         "Transient.Buffer: $(dims) has no elements. An empty result needs no " *
         "buffer and no pass -- skip it where the shape is decided."))

@@ -187,11 +187,12 @@ KA.supports_unified(::LavaBackend) = true
 # `unified = nothing` is KernelInterface's generic spelling of "no preference".
 function KA.allocate(backend::LavaBackend, ::Type{T}, dims::Tuple; unified::Union{Nothing,Bool}=nothing) where T
     bq = backend.dispatch_bq
-    nbytes = prod(dims) * sizeof(T)
+    dims = Int.(dims)
+    nbytes = checkedbytes(T,dims)
     # Auto-unified for tiny allocations (≤ 64 bytes, e.g. WorkQueue.size
     # counters) — BAR memory enables direct CPU readback without staging.
     want_unified = something(unified, false) || nbytes <= 64
-    return LavaArray{T,length(dims)}(undef, Int.(dims); bq, unified=want_unified)
+    return LavaArray{T,length(dims)}(undef, dims; bq, unified=want_unified)
 end
 KA.unsafe_free!(x::LavaArray) = unsafe_free!(x)
 

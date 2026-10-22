@@ -116,8 +116,13 @@ and unrelated failures throw. x is a Device or KernelAbstractions backend."""
 function trydevicearray(x, ::Type{T}, dims::Dims) where {T}
     dev = todevice(x)
     refuseretired(dev)
-    bytes, overflow = Base.mul_with_overflow(prod(dims), sizeof(T))
-    (overflow || bytes > maxalloc(dev)) && return nothing
+    bytes = try
+        checkedbytes(T,dims)
+    catch err
+        err isa OverflowError || rethrow()
+        return nothing
+    end
+    bytes > maxalloc(dev) && return nothing
     return tryallocate(dev, T, dims)
 end
 trydevicearray(x, ::Type{T}, dims::Integer...) where {T} = trydevicearray(x, T, Dims(dims))

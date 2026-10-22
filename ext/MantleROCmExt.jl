@@ -414,38 +414,14 @@ end
 
 # ── regions as arrays ────────────────────────────────────────────────────────
 
-"""
-    rocview(mg, T, dims, byteoffset) -> ROCArray{T}
+"""rocview(mg, T, dims, byteoffset) -> ROCArray{T}
 
-A **borrowed** `ROCArray` over `dims` elements of `T` at `byteoffset` in a pool
-block. No copy, and no second owner: the `DataRef`'s destructor frees nothing,
-because the `HIPBuffer` belongs to the pool and a block that two owners free is
-freed out from under every other tenant of it. `AMDGPU.unsafe_wrap` builds the
-same shape for the same reason.
-
-**`ROCArray`'s `offset` field is checked and not assumed.** Its unit differs
-between versions: AMDGPU 2.8.0 as installed says "offset of the data in memory,
-in bytes", and the 2.2.1 checkout beside it says "Offset is in number of
-elements (not bytes)". Dividing by `sizeof(T)` for the second placed every view
-at a quarter of its intended offset on the first, which is not an error
-anywhere — the chain in `bench/rocm_vs_vulkan.jl` came back holding 8.0, 9.0,
-10.0 and 11.0 in the four quarters of a buffer that should have been all 8.0,
-because the views overlapped each other rather than the slots the placer chose.
-So the address is computed independently and compared, and a unit flip is a
-throw at the first view instead of arithmetic nobody checks.
-"""
+Borrow a bounded, naturally aligned pool span; the DataRef never frees it.
+Keep the owning region live. Check the resulting pointer against the requested
+byte address so incompatible AMDGPU offset units fail immediately."""
 function rocview(mg::Managed, ::Type{T}, dims::Dims{N}, byteoffset::Int) where {T,N}
-    need = prod(dims) * sizeof(T)
-    bytes = Int(sizeof(mg))
-    byteoffset + need <= bytes || throw(ArgumentError(
-        "$(join(dims, "x")) $T at offset $byteoffset needs $need bytes, block has $bytes"))
-    # Not a driver requirement but an arithmetic one: a `T` load from an address
-    # that is not a multiple of `T`'s ALIGNMENT is misaligned. `alignment` below
-    # and `persistentarray`'s 256 both guarantee it, so this is a claim about the
-    # allocator rather than a recoverable case. Its alignment and not its size:
-    # this asked for `sizeof(T)`, and a 256-byte placement is a multiple of a
-    # 48-byte struct's size one time in three, so a `Buffer` of `EPAResult` was
-    # refused or not depending on where the pool happened to put it.
+    Mantle.checkspan(Int(sizeof(mg)),byteoffset,Mantle.checkedbytes(T,dims))
+    # Element alignment, rather than element size, constrains the offset.
     byteoffset % Base.datatype_alignment(T) == 0 || throw(ArgumentError(
         "offset $byteoffset is not a multiple of $T's alignment, " *
         "$(Base.datatype_alignment(T))"))

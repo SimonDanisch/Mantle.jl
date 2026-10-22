@@ -1,44 +1,37 @@
-# A typed handle on a region of a pool block. Backend-independent, on purpose.
-#
-# Reaching for a backend's array type and suballocating inside it stacks two
-# allocators AND makes the ownership question unanswerable from here: whether an
-# array built over an existing buffer frees that buffer on GC is the backend's
-# business, and the answer decides whether Mantle's memory is handed back to the
-# backend's pool by the finalizer thread.
-#
-# Owning the type removes the question rather than answering it. Ownership is
-# stated here, once, and it is not negotiable per backend:
-#
-#   the Block owns the memory, the Pool owns the Block, `trim!` frees.
-#
-# A `DeviceArray` owns NOTHING. Dropping one does not free anything, has no
-# finalizer, and cannot race the GC thread — which is the failure mode this
-# codebase has already paid for three times.
-#
-# Lava's high-level surface moves here over time and Lava becomes the mechanism
-# underneath, so this is where the array type belongs.
+# Typed pool-region handles and shared size/span validation.
 
-"""
-    DeviceArray{T,N}(region, dims)
+"""Plain-bit byte extent; reject negative dimensions and element-count/byte overflow."""
+@inline function checkedbytes(::Type{T}, dims::Dims) where {T}
+    isbitstype(T) || throw(ArgumentError("device storage requires an isbits element type, got $T"))
+    all(d -> d >= 0,dims) || throw(ArgumentError("dimensions must be nonnegative: $dims"))
+    any(iszero,dims) && return 0
+    return Base.checked_mul(sizeof(T),foldl(Base.checked_mul,dims;init=1))
+end
 
-`dims` elements of `T`, living in `region`.
+"""Validate a byte span without overflowing offset + bytes."""
+@inline function checkspan(capacity::Integer, offset::Integer, bytes::Integer)
+    (0 <= offset <= capacity && 0 <= bytes <= capacity-offset) ||
+        throw(ArgumentError("$bytes bytes at offset $offset exceed $capacity-byte storage"))
+    return nothing
+end
 
-A handle, not an array: it is not `AbstractArray` and does not index, because the
-bytes are wherever the backend put them and reading them from the host is a
-transfer rather than a `getindex`. What a kernel actually receives is the
-backend's business — see [`storage`](@ref).
-"""
+"""DeviceArray{T,N}(region, dims)
+
+A typed, non-owning view of a pool region. The pool owns its memory; retire the
+region explicitly after use. storage supplies the backend-native array view."""
 struct DeviceArray{T,N}
     region::Region
     dims::NTuple{N,Int}
+    function DeviceArray{T,N}(region::Region, dims::NTuple{N,Int}) where {T,N}
+        need = checkedbytes(T,dims)
+        need <= length(region) || throw(ArgumentError(
+            "$(join(dims, "x")) $T needs $need bytes, region has $(length(region))"))
+        new{T,N}(region,dims)
+    end
 end
 
-function DeviceArray{T}(region::Region, dims::NTuple{N,Int}) where {T,N}
-    need = prod(dims) * sizeof(T)
-    need <= length(region) ||
-        throw(ArgumentError("$(join(dims, "x")) $T needs $need bytes, region has $(length(region))"))
-    DeviceArray{T,N}(region, dims)
-end
+DeviceArray{T}(region::Region, dims::NTuple{N,Int}) where {T,N} =
+    DeviceArray{T,N}(region,dims)
 DeviceArray{T}(region::Region, dims::Integer...) where {T} =
     DeviceArray{T}(region, Int.(dims))
 
@@ -58,26 +51,21 @@ Base.show(io::IO, a::DeviceArray{T,N}) where {T,N} =
     print(io, "DeviceArray{", T, ",", N, "}(", join(a.dims, "x"),
           " @ ", offset(a), ")")
 
-"""
-    allocate(pool, dev, kind, T, dims; align) -> DeviceArray
+"""allocate(pool, dev, kind, T, dims; align) -> DeviceArray
 
-Suballocate `dims` elements of `T` out of the pool.
-
-The counterpart to [`acquire!`](@ref) for callers that want a typed handle rather
-than raw bytes. Handing it back is `retire!(pool, dev, region(a))` — explicit, like
-everything else here, and released by `reclaim!` once the device is done rather
-than on the spot, so no caller has to know what is in flight.
-"""
+Validate size, apply pool pressure policy and acquire a typed region. Retire
+region(a) through the pool; reclaim! releases it after the device finishes."""
 function allocate(pool::Pool, dev, kind, ::Type{T}, dims::NTuple{N,Int};
                   align::Int = 256, blocksize::Int = 64 << 20,
                   constraint = nothing) where {T,N}
+    bytes = checkedbytes(T,dims)
     # The pool's own policy, on every backend: hand dead capacity back, and past
     # the soft cap collect before growing. See `PoolPolicy`.
     autotrim!(pool, dev)
     let cap = pool.policy.soft_cap
         cap > 0 && reserved(pool) >= cap && autocollect!(() -> reclaim!(pool, dev), pool)
     end
-    r = acquire!(pool, dev, kind, nothing, prod(dims) * sizeof(T);
+    r = acquire!(pool, dev, kind, nothing, bytes;
                  align, blocksize, constraint)
     return DeviceArray{T}(r, dims)
 end
@@ -86,89 +74,21 @@ allocate(pool::Pool, dev, kind, ::Type{T}, dims::Integer...; kw...) where {T} =
 
 # ── Backend-generic device queries ────────────────────────────────────────────
 
-"""
-    workgrouplimit(x) -> Int
-
-The largest workgroup the backend behind `x` will launch, where `x` is a device
-array or anything `KernelAbstractions.get_backend` accepts.
-
-Here rather than in the Vulkan backend because the ALGORITHMS that need it are
-portable and their coupling to Vulkan was this query and nothing else. `gemv.jl`
-and `fft.jl` reached it as `workgroup_limit(vk_context(A))` — array to context to
-caps — and a context is the one step in that chain a second backend does not
-have. Array to backend to `KernelInterface.caps` is the same three fields with
-no Vulkan in the middle, and it is already what `caps(::LavaBackend)` answers.
-
-This is the shape the rest of `src/vulkan/array/` has to take before it can move
-out of the backend: `gemm.jl`, `fft.jl`, `gemv.jl` and `gemm_cm2.jl` are ~4000
-lines of KernelAbstractions with a single-digit number of Vulkan references each,
-and every one of them is a capability query like this. What is NOT ready is the
-dispatch: they are written on `::LavaArray`, and widening that to
-`::AbstractGPUArray` would make Mantle pirate `LinearAlgebra.mul!` for every GPU
-array package in the session. Widening it wants a second backend to be designed
-against.
-"""
+"""Maximum workgroup invocations for the backend of x."""
 workgrouplimit(x) = caps(KernelAbstractions.get_backend(x)).workgrouplimit
 
-"""
-    sharedbudget(x) -> Int
-
-Workgroup-memory bytes a kernel on `x`'s backend may declare.
-
-The companion of [`workgrouplimit`](@ref) and the other half of what a tiled
-kernel needs to size itself: `fft.jl`'s `fftgroup` takes both, and between them
-they were that file's ENTIRE dependency on Vulkan. It has none now.
-"""
+"""Workgroup-memory budget in bytes for the backend of x."""
 sharedbudget(x) = caps(KernelAbstractions.get_backend(x)).sharedbudget
 
-"""
-    subgroupwidth(x) -> Int
-
-How many lanes a subgroup reduction on `x`'s backend covers.
-
-The third device fact a portable kernel needs, beside [`workgrouplimit`](@ref)
-and [`sharedbudget`](@ref), and it is not optional. A kernel that reduces within
-a subgroup and then across subgroups has to partition its threads the same way
-the hardware does: `gemv.jl` assumed 32, which is right on NVIDIA and Metal and
-wrong on AMD, where it is 64 — so every lane 32..63 was treated as the leader of
-a second subgroup that does not exist, wrote the WHOLE subgroup's sum as its
-partial, and the answer came back exactly doubled.
-
-Doubled, not garbage, which is why it survived: the shapes still had the right
-magnitude and only an exact reference caught it.
-"""
+"""Actual subgroup width for x; reductions must use this device fact."""
 subgroupwidth(x) = caps(KernelAbstractions.get_backend(x)).subgroup
 
-"""
-    coopmatgemm(x) -> Bool
-
-Whether a cooperative-matrix GEMM is usable on `x`'s backend.
-
-`DeviceCaps.coopmat` is exactly this — the Vulkan backend fills that field from
-`coopmat_gemm_available(ctx)`, which probes the shape table and the subgroup
-width — so reading the field is the portable way to ask, and it is cached where
-the probe is not.
-
-The PROBE stays in the backend and should: "does this device implement a 16x16x16
-Float16 cooperative matrix, at a subgroup width the kernel was tuned for" is
-answered out of Vulkan's shape table and `VK_EXT_subgroup_size_control`. What is
-portable is the question, not the way it is answered.
-"""
+"""Whether the backend of x supports the cooperative-matrix GEMM shape."""
 coopmatgemm(x) = caps(KernelAbstractions.get_backend(x)).coopmat
 
+"""devicearray(backend, data) -> AbstractGPUArray
 
-
-"""
-    devicearray(backend, data) -> AbstractGPUArray
-
-A mutable device array holding a copy of `data`.
-
-The portable spelling, for the call sites that have no business naming one
-backend's array type. A backend that has
-something better than "allocate and copy" — pooled storage, a capacity-aware
-`resize!` — provides its own method; this fallback is correct for any KA
-backend and is what a new one gets before it bothers.
-"""
+Allocate and copy data on the chosen backend. Backends may specialize allocation."""
 function devicearray(backend, data::AbstractArray)
     a = KernelAbstractions.allocate(backend, eltype(data), size(data))
     copyto!(a, data)
@@ -177,28 +97,14 @@ end
 
 devicearray(d::Device, data::AbstractArray) = devicearray(backend(d), data)
 
-"""
-    devicearray(x, T, dims...) -> AbstractGPUArray
+"""devicearray(x, T, dims...; unified) -> AbstractGPUArray
 
-An uninitialised device array, on a device or on the backend under one.
-
-The other half of the pair: the form above copies what it is given, this one
-allocates and leaves the contents to the kernel that fills them. It is what
-`KernelAbstractions.allocate(backend, T, dims)` was being used for at call sites
-that had a device to hand — and those call sites then had to know the backend,
-which is the coupling this removes.
-
-`unified` is forwarded, for a backend that can hand back host-visible storage.
-"""
+Allocate uninitialized storage on a device/backend; forward allocation keywords."""
 devicearray(x, ::Type{T}, dims::Dims; kw...) where {T} =
     KernelAbstractions.allocate(backend(x), T, dims; kw...)
 
 devicearray(x, ::Type{T}, dims::Integer...; kw...) where {T} =
     devicearray(x, T, Dims(dims); kw...)
 
-"""
-A device is accepted wherever the backend under it is, `Adapt` included: a scene
-adapted for `dev` and one adapted for `backend(dev)` are the same conversion,
-and a caller holding either handle should not have to convert to ask for it.
-"""
+"""Forward device adaptation to the backend belonging to that device."""
 Adapt.adapt_storage(d::Device, x) = Adapt.adapt_storage(backend(d), x)

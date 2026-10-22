@@ -193,7 +193,7 @@ end
 # A pool-free attempt: `try_vk_alloc` returns its refusal instead of throwing, and
 # discards the validation messages the refused `vkCreateBuffer` produced.
 function tryallocate(dev::LavaDevice, ::Type{T}, dims::Dims{N}) where {T,N}
-    buf = try_vk_alloc(dev.bq, max(prod(dims) * sizeof(T), 16))
+    buf = try_vk_alloc(dev.bq, max(checkedbytes(T,dims),16))
     buf isa AllocFailure && return nothing
     return LavaArray{T,N}(GPUArrays.DataRef(vk_free!, buf), dims)
 end

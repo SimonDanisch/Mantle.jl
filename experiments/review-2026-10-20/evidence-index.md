@@ -261,3 +261,8 @@ without resolved-bug narratives or embedded benchmark histories. Device defaults
 are distinguished from backend priority; profiling counts completed samples.
 All 115 sources parse and definition trees are unchanged. The cleanup removes
 892 physical lines; six inventory “code” lines were unattached prose, not algorithms.
+
+[Shared memory extents](consolidation-extents.md) fixes reproduced dimension
+overflow and negative-offset escapes. Core owns checked shape/span policy; native
+refusal, valid views, pool behavior and warm replay pass. The type-union reflection
+fixture is repaired without weakening the core/backend boundary guard.

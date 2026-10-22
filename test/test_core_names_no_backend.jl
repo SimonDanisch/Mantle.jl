@@ -1,23 +1,5 @@
-"""
-Core names nothing that only a backend defines.
-
-The plan's first rule (`docs/recording-plan.md`, Rules) in one direction: a file outside `src/vulkan/` and
-`src/metal/` may not reach for a name the backend owns. Core calling into a
-backend is the violation that a green single-device suite cannot see, because
-on that machine the name resolves.
-
-There is no `import Mantle: …` list at the top of a backend extension to
-police: the backend is `@static include`d into `Mantle`, which leaves no room
-for three bug classes: an import naming something Mantle does not declare, a
-method landing on a new local function
-instead of extending core's, and a backend name shadowing a core one. None of
-them can happen inside one module. This one can, so it is what is left — and it
-got stricter in the move: "only a backend defines it" was module membership and
-is now a question about where the METHODS are, which is the thing the rule was
-always about.
-
-Source-level and device-free on purpose, so it runs everywhere.
-"""
+# Core references must resolve to shared vocabulary or external packages.
+# Inspect method source paths because backends are included in Mantle itself.
 
 using Test, Mantle
 
@@ -93,7 +75,12 @@ end
 function backendonly(s::Symbol)
     s in Mantle.BACKEND_VOCABULARY && return false
     isdefined(Mantle, s) || return false
-    v = getglobal(Mantle, s)
+    return backendonlyvalue(getglobal(Mantle,s))
+end
+
+function backendonlyvalue(v)
+    body = v isa UnionAll ? Base.unwrap_unionall(v) : v
+    body isa Union && return any(backendonlyvalue,Base.uniontypes(body))
     (v isa Function || v isa Type) || return false
     # A name Mantle merely IMPORTED belongs to whoever declared it, and core is
     # free to call it: `get_backend` is KernelAbstractions' vocabulary, and that
@@ -105,6 +92,16 @@ function backendonly(s::Symbol)
     ms = collect(methods(v))
     return any(m -> isbackendfile(string(m.file)), ms) &&
           !any(m -> iscorefile(string(m.file)), ms)
+end
+
+@testset "boundary reflection handles union type aliases" begin
+    @test !backendonlyvalue(Union{Vector{T},Matrix{T}} where T)
+    @test !backendonlyvalue(Union{Mantle.DeviceArray{T,1},Mantle.DeviceArray{T,2}} where T)
+    for name in (:LavaArray,:MetalDevice)
+        isdefined(Mantle,name) || continue
+        type = getglobal(Mantle,name)
+        @test backendonlyvalue(Union{Vector{Float32},type})
+    end
 end
 
 @testset "core names nothing that only a backend defines" begin
