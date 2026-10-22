@@ -65,14 +65,14 @@ function create_rt_pipeline(ctx::VkContext,
     n_chits >= 1 || throw(ArgumentError("create_rt_pipeline: at least one closest-hit shader required"))
 
     raygen_mod = create_shader_module(dev, raygen_spirv)
-    check_validation_errors!("vkCreateShaderModule (raygen)")
+    check_validation_errors!("vkCreateShaderModule (raygen)", ctx)
     miss_mod = create_shader_module(dev, miss_spirv)
-    check_validation_errors!("vkCreateShaderModule (miss)")
+    check_validation_errors!("vkCreateShaderModule (miss)", ctx)
     shader_modules = [raygen_mod, miss_mod]
     chit_mods = VK.ShaderModule[]
     for (i, chit_spirv) in enumerate(chit_spirvs)
         m = create_shader_module(dev, chit_spirv)
-        check_validation_errors!("vkCreateShaderModule (closest-hit $i)")
+        check_validation_errors!("vkCreateShaderModule (closest-hit $i)", ctx)
         push!(chit_mods, m)
         push!(shader_modules, m)
     end
@@ -100,7 +100,7 @@ function create_rt_pipeline(ctx::VkContext,
     anyhit_stage_index = VK_SHADER_UNUSED_KHR
     if has_anyhit
         anyhit_mod = create_shader_module(dev, anyhit_spirv)
-        check_validation_errors!("vkCreateShaderModule (any-hit)")
+        check_validation_errors!("vkCreateShaderModule (any-hit)", ctx)
         push!(stages, VK.PipelineShaderStageCreateInfo(
             VK.SHADER_STAGE_ANY_HIT_BIT_KHR, anyhit_mod, "main"))
         push!(shader_modules, anyhit_mod)
@@ -110,7 +110,7 @@ function create_rt_pipeline(ctx::VkContext,
     isect_stage_index = VK_SHADER_UNUSED_KHR
     if has_isect
         isect_mod = create_shader_module(dev, intersection_spirv)
-        check_validation_errors!("vkCreateShaderModule (intersection)")
+        check_validation_errors!("vkCreateShaderModule (intersection)", ctx)
         push!(stages, VK.PipelineShaderStageCreateInfo(
             VK.SHADER_STAGE_INTERSECTION_BIT_KHR, isect_mod, "main"))
         push!(shader_modules, isect_mod)
@@ -177,24 +177,18 @@ function create_rt_pipeline(ctx::VkContext,
 
     layout = VK.PipelineLayout(dev, [ds_layout], push_ranges)
 
-    # With PIPELINE_NO_COMPILE the driver refuses to compile, as on the compute
-    # path, so a completed run did no driver compilation.
-    rt_flags = VK.PipelineCreateFlag(0)
-    if PIPELINE_NO_COMPILE[]
-        rt_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
-                    VK.PipelineCreateFlag(VK.PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+    pipeline = createpipeline(ctx, VK.PipelineCreateFlag(0), "ray tracing", raygen_spirv) do flags
+        rt_ci = VK.RayTracingPipelineCreateInfoKHR(
+            stages, groups,
+            UInt32(1),  # max_pipeline_ray_recursion_depth
+            layout,
+            Int32(-1);  # base_pipeline_index
+            flags,
+        )
+        pipelines, code = @vk_checked ctx "vkCreateRayTracingPipelinesKHR" VK.create_ray_tracing_pipelines_khr(
+            dev, [rt_ci]; pipeline_cache=ctx.pipeline_cache)
+        pipelines[1], code
     end
-    rt_ci = VK.RayTracingPipelineCreateInfoKHR(
-        stages, groups,
-        UInt32(1),  # max_pipeline_ray_recursion_depth
-        layout,
-        Int32(-1);  # base_pipeline_index
-        flags = rt_flags,
-    )
-
-    pipelines, _ = @vk_checked "vkCreateRayTracingPipelinesKHR" VK.create_ray_tracing_pipelines_khr(
-        dev, [rt_ci]; pipeline_cache=ctx.pipeline_cache)
-    pipeline = pipelines[1]
 
     # SBT: raygen, miss, N hit groups; any-hit and intersection belong to the
     # hit groups, not separate entries.
@@ -220,7 +214,7 @@ function get_rt_descriptor_set(pipeline::LavaRTPipeline, tlas::LavaTLAS)
         return cached[2]
     end
 
-    desc_pool, desc_set = alloc_tlas_descriptor_set(pipeline.ctx.device,
+    desc_pool, desc_set = alloc_tlas_descriptor_set(pipeline.ctx,
                                                    pipeline.descriptor_set_layout, tlas.accel)
     tlas.desc_sets[layout_handle] = (desc_pool, desc_set)
     return desc_set

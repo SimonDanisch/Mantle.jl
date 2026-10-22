@@ -450,7 +450,7 @@ end
 end
 
 """
-    tlasset!(owner, dev, pipeline, tlas) -> VkDescriptorSet
+    tlasset!(owner, ctx, pipeline, tlas) -> VkDescriptorSet
 
 The descriptor set binding `tlas` for `pipeline`'s layout, owned by the owner of
 the commands that bind it. A [`Recording`](@ref), whose commands bake the set,
@@ -459,18 +459,18 @@ one-shot allocates one per dispatch and holds its pool. Not a keyed cache:
 `Raycore.sync!` makes a new `LavaTLAS` per rebuild, so one would grow without
 bound or evict pools still in flight. Only `release!` frees.
 """
-function tlasset!(rec::Recording, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
+function tlasset!(rec::Recording, ctx::VkContext, pipeline::LavaComputePipeline, tlas)
     layout = pipeline.descriptor_set_layout::VK.DescriptorSetLayout
     for (l, t, _, set) in rec.sets
         (l === layout && t === tlas) && return set
     end
-    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, tlas)
+    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(ctx, pipeline, tlas)
     push!(rec.sets, (layout, tlas, desc_pool, desc_set))
     return desc_set
 end
 
-function tlasset!(o::OneShot, dev::VK.Device, pipeline::LavaComputePipeline, tlas)
-    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(dev, pipeline, tlas)
+function tlasset!(o::OneShot, ctx::VkContext, pipeline::LavaComputePipeline, tlas)
+    desc_pool, desc_set = alloc_compute_tlas_descriptor_set(ctx, pipeline, tlas)
     # The pool must outlive the submission that binds the set.
     hold!(o, desc_pool)
     return desc_set
@@ -478,7 +478,7 @@ end
 
 function bindtlas!(e::Emitter, pipeline::LavaComputePipeline, tlas::VulkanTLAS)
     lava_tlas = tlas.hw_tlas::LavaTLAS
-    set = tlasset!(e.owner, e.ctx.device, pipeline, lava_tlas)
+    set = tlasset!(e.owner, e.ctx, pipeline, lava_tlas)
     VK.cmd_bind_descriptor_sets(e.cmd, VK.PIPELINE_BIND_POINT_COMPUTE,
         pipeline.pipeline_layout, UInt32(0), [set], UInt32[])
     # One hold covers both levels: the `LavaTLAS` references every `LavaBLAS`,

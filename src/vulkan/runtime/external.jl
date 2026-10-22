@@ -24,7 +24,7 @@ function VulkanExternalImage(ctx::VkContext, width::Integer, height::Integer;
     ctx.external_memory_available ||
         error("this device was created without VK_KHR_external_memory_fd support")
     handle_types = VK.EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
-    image = @vk_checked "external_image_create" VK.create_image(ctx.device, VK.IMAGE_TYPE_2D, format,
+    image = @vk_checked ctx "external_image_create" VK.create_image(ctx.device, VK.IMAGE_TYPE_2D, format,
         VK.Extent3D(width, height, 1), 1, 1, VK.SAMPLE_COUNT_1_BIT,
         VK.IMAGE_TILING_OPTIMAL,
         VK.IMAGE_USAGE_TRANSFER_DST_BIT | VK.IMAGE_USAGE_SAMPLED_BIT,
@@ -37,11 +37,11 @@ function VulkanExternalImage(ctx::VkContext, width::Integer, height::Integer;
             VK.MEMORY_PROPERTY_DEVICE_LOCAL_BIT != VK.MemoryPropertyFlag(0)
     end
     mtype === nothing && error("no device-local memory type for external image")
-    memory = @vk_checked "external_image_alloc" VK.allocate_memory(ctx.device, req.size, mtype - 1;
+    memory = @vk_checked ctx "external_image_alloc" VK.allocate_memory(ctx.device, req.size, mtype - 1;
         next = VK.ExportMemoryAllocateInfo(;
             next = VK.MemoryDedicatedAllocateInfo(; image),
             handle_types))
-    @vk_checked "external_image_bind" VK.bind_image_memory(ctx.device, image, memory, 0)
+    @vk_checked ctx "external_image_bind" VK.bind_image_memory(ctx.device, image, memory, 0)
     return VulkanExternalImage(image, memory, Int(width), Int(height), Int(req.size), false, ctx)
 end
 
@@ -86,11 +86,11 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
     src_offset = UInt64(pool_offset(managed) + a.offset)
     # VK.jl handles destroy themselves in finalizers; a manual destroy here
     # would destroy them twice and segfault.
-    pool = @vk_checked "external_copy_pool" VK.create_command_pool(ctx.device, ctx.queue_family_index)
+    pool = @vk_checked ctx "external_copy_pool" VK.create_command_pool(ctx.device, ctx.queue_family_index)
     let
-        cb = first(@vk_checked "external_copy_cb" VK.allocate_command_buffers(ctx.device,
+        cb = first(@vk_checked ctx "external_copy_cb" VK.allocate_command_buffers(ctx.device,
             VK.CommandBufferAllocateInfo(pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)))
-        @vk_checked "external_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
+        @vk_checked ctx "external_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
         range = VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1)
         oldlayout = img.layout_initialized ? VK.IMAGE_LAYOUT_GENERAL :
                                              VK.IMAGE_LAYOUT_UNDEFINED
@@ -111,9 +111,9 @@ function Base.copyto!(img::VulkanExternalImage, a::LavaArray)
                 VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED, img.image, range)];
             src_stage_mask = VK.PIPELINE_STAGE_TRANSFER_BIT,
             dst_stage_mask = VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)
-        @vk_checked "external_copy_end" VK.end_command_buffer(cb)
-        @vk_checked "external_copy_submit" VK.queue_submit(ctx.compute_queue, [VK.SubmitInfo([], [], [cb], [])])
-        @vk_checked "external_copy_wait" VK.queue_wait_idle(ctx.compute_queue)
+        @vk_checked ctx "external_copy_end" VK.end_command_buffer(cb)
+        @vk_checked ctx "external_copy_submit" VK.queue_submit(ctx.compute_queue, [VK.SubmitInfo([], [], [cb], [])])
+        @vk_checked ctx "external_copy_wait" VK.queue_wait_idle(ctx.compute_queue)
         img.layout_initialized = true
     end
     return img

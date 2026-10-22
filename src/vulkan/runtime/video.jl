@@ -70,15 +70,15 @@ function Base.copyto!(dst::LavaArray{UInt8}, img::VideoImage)
     mbuf = dst.buf[]
     ctx = mbuf.ctx::VkContext
     dev = ctx.device
-    pool = @vk_checked "video_copy_pool" VK.create_command_pool(dev, ctx.video_decode_queue_family_index)
-    cb = first(@vk_checked "video_copy_cb" VK.allocate_command_buffers(dev,
+    pool = @vk_checked ctx "video_copy_pool" VK.create_command_pool(dev, ctx.video_decode_queue_family_index)
+    cb = first(@vk_checked ctx "video_copy_cb" VK.allocate_command_buffers(dev,
         VK.CommandBufferAllocateInfo(pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)))
-    @vk_checked "video_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
+    @vk_checked ctx "video_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
     transition_transfer_src!(cb, img)
     record_luma_copy!(cb, img, mbuf.buffer, pool_offset(mbuf) + dst.offset)
-    @vk_checked "video_copy_end" VK.end_command_buffer(cb)
-    @vk_checked "video_copy_submit" VK.queue_submit(ctx.video_decode_queue, [VK.SubmitInfo([], [], [cb], [])])
-    @vk_checked "video_copy_wait" VK.queue_wait_idle(ctx.video_decode_queue)
+    @vk_checked ctx "video_copy_end" VK.end_command_buffer(cb)
+    @vk_checked ctx "video_copy_submit" VK.queue_submit(ctx.video_decode_queue, [VK.SubmitInfo([], [], [cb], [])])
+    @vk_checked ctx "video_copy_wait" VK.queue_wait_idle(ctx.video_decode_queue)
     return dst
 end
 

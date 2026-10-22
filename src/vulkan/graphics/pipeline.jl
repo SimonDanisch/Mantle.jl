@@ -167,30 +167,26 @@ function create_graphics_pipeline(vertex_spirv::Union{Vector{UInt8}, Nothing},
         VK.FORMAT_UNDEFINED,  # stencil format
     )
 
-    gfx_flags = VK.PipelineCreateFlag(0)
-    if PIPELINE_NO_COMPILE[]
-        gfx_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
-                     VK.PipelineCreateFlag(VK.PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+    pipeline = createpipeline(ctx, VK.PipelineCreateFlag(0), "graphics", fragment_spirv) do flags
+        ci = VK.GraphicsPipelineCreateInfo(
+            stages,
+            rasterization,
+            layout, UInt32(0), Int32(-1);
+            flags,
+            vertex_input_state=vertex_input,
+            input_assembly_state=input_assembly,
+            tessellation_state=tess_state,
+            viewport_state=viewport_state,
+            multisample_state=multisample,
+            depth_stencil_state=depth_stencil,
+            color_blend_state=color_blend,
+            dynamic_state=dynamic_state,
+            next=rendering_info,
+        )
+        pipelines, code = @vk_checked ctx "vkCreateGraphicsPipelines" VK.create_graphics_pipelines(
+            dev, [ci]; pipeline_cache=ctx.pipeline_cache)
+        pipelines[1], code
     end
-    ci = VK.GraphicsPipelineCreateInfo(
-        stages,
-        rasterization,
-        layout, UInt32(0), Int32(-1);
-        flags=gfx_flags,
-        vertex_input_state=vertex_input,
-        input_assembly_state=input_assembly,
-        tessellation_state=tess_state,
-        viewport_state=viewport_state,
-        multisample_state=multisample,
-        depth_stencil_state=depth_stencil,
-        color_blend_state=color_blend,
-        dynamic_state=dynamic_state,
-        next=rendering_info,
-    )
-
-    pipelines, _ = @vk_checked "vkCreateGraphicsPipelines" VK.create_graphics_pipelines(
-        dev, [ci]; pipeline_cache=ctx.pipeline_cache)
-    pipeline = pipelines[1]
 
     return VulkanCompiledGraphicsPipeline(
         pipeline, layout, modules,

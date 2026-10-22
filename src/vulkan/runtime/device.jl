@@ -1846,15 +1846,13 @@ clear_printf_output!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
         (drain_validation_messages!(ctx); empty!(ctx.validation.printf))
 
 """
-    check_validation_errors!(context::String, ctx = <bound context>)
+    check_validation_errors!(context::String, ctx::VkContext)
 
 Throw a `LavaError` listing up to five validation errors captured since the
 last check, and clear them. Call after operations that may trigger validation
 errors (shader module or pipeline creation, dispatch recording).
 """
-function check_validation_errors!(context::String,
-                                 ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[])
-    ctx === nothing && return
+function check_validation_errors!(context::String, ctx::VkContext)
     drain_validation_messages!(ctx)
     msgs = ctx.validation.messages
     isempty(msgs) && return

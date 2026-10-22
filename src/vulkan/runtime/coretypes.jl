@@ -181,7 +181,8 @@ mutable struct Diagnostics
     batch_wait_times::Vector{Float64}
     batch_wait_info::Vector{String}
     batch_wait_dispatches::Vector{Int}
-    # Pipelines this device compiled or refused to.
+    # Set inside `no_pipeline_compilation`; the pipelines the driver then refused to compile.
+    no_pipeline_compile::Bool
     pipeline_compile_misses::Vector{String}
     pipeline_compiles_refused::Int
     # Atomics: `submit!` may run off the main thread.
@@ -198,7 +199,7 @@ Diagnostics() = Diagnostics(false, false, false, true, false, false, false, fals
                             NamedTuple[], NamedTuple[], NamedTuple[], NamedTuple[],
                             Dict{Symbol,Tuple{Int,Int}}(), ReentrantLock(),
                             String[], Float64[], String[], Int[],
-                            String[], 0,
+                            false, String[], 0,
                             Threads.Atomic{Int}(0), Threads.Atomic{Int}(0),
                             Threads.Atomic{Int}(0))
 

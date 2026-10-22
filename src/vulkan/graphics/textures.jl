@@ -274,7 +274,7 @@ function bind_textures(textures::Vector{<:SampledTexture{<:Any,<:Any,<:VulkanTex
         [VK.DescriptorPoolSize(VK.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, UInt32(n))])
 
     alloc_info = VK.DescriptorSetAllocateInfo(pool, [layout])
-    sets = @vk_checked "vkAllocateDescriptorSets (textures)" VK.allocate_descriptor_sets(dev, alloc_info)
+    sets = @vk_checked ctx "vkAllocateDescriptorSets (textures)" VK.allocate_descriptor_sets(dev, alloc_info)
     dset = sets[1]
 
     writes = VK.WriteDescriptorSet[]

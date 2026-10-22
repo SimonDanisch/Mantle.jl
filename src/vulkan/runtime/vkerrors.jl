@@ -31,19 +31,18 @@ its own trailing newline.
     ccall(:jl_safe_printf, Cvoid, (Cstring, Cstring), "%s", msg)
 
 """
-    @vk_checked site vk_call
+    @vk_checked ctx site vk_call
 
-`unwrap` the `Result` of `vk_call`, throwing on a failed `VkResult`, then call
-`check_validation_errors!(site)`, which throws if the default context captured
-validation errors, so an error is reported at the call that produced it.
-`check_validation_errors!` is not escaped and resolves in this module.
+`unwrap` the `Result` of `vk_call`, throwing on a failed `VkResult`, then throw
+any validation errors `ctx` captured (`check_validation_errors!`), so an error
+is reported at the call that produced it.
 
-    pipelines, _ = @vk_checked "vkCreateGraphicsPipelines" VK.create_graphics_pipelines(dev, [ci])
+    pipelines, _ = @vk_checked ctx "vkCreateGraphicsPipelines" VK.create_graphics_pipelines(dev, [ci])
 """
-macro vk_checked(site, call)
+macro vk_checked(ctx, site, call)
     quote
         r = unwrap($(esc(call)))
-        check_validation_errors!($(esc(site)))
+        check_validation_errors!($(esc(site)), $(esc(ctx)))
         r
     end
 end

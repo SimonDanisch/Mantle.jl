@@ -50,7 +50,7 @@ else
 init_pipeline_thread!() = nothing
 end
 
-function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
+function create_compute_pipeline_large_stack(ctx::VkContext, device::Ptr{Cvoid},
                                                pipeline_cache::Ptr{Cvoid},
                                                create_info_ptr::Ptr{Cvoid},
                                                p_pipelines::Ptr{Cvoid})
@@ -79,8 +79,7 @@ function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
                 (Ptr{Cvoid}, UInt32), handle, UInt32(1))
             ccall((:CloseHandle, "kernel32"), Cint, (Ptr{Cvoid},), handle)
             # Best effort: the driver is in an unknown state.
-            ctx = VK_CONTEXT_REF[]
-            ctx === nothing || mark_device_lost!(ctx)
+            mark_device_lost!(ctx)
             error("vkCreateComputePipelines timed out after 600s — AMD Windows " *
                   "driver shader compiler hung. Device marked DEVICE_LOST; " *
                   "call reset_device!() to recover.")
@@ -91,53 +90,60 @@ function create_compute_pipeline_large_stack(device::Ptr{Cvoid},
     end
 end
 
-"""
-    PIPELINE_NO_COMPILE
-
-When set, compute pipelines are created with
-`PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, so the driver returns
-`VK_PIPELINE_COMPILE_REQUIRED` instead of compiling. Needs
-`pipelineCreationCacheControl`, enabled with the Vulkan 1.3 features at device
-creation. Use through `no_pipeline_compilation`.
-"""
-const PIPELINE_NO_COMPILE = Ref(false)
-
-"How many pipeline creations were refused because they would have compiled."
-const PIPELINE_COMPILES_REFUSED = Ref(0)
-
-"Entry names of pipelines that would have compiled while PIPELINE_NO_COMPILE was set."
-const PIPELINE_COMPILE_MISSES = String[]
-
 # Success-class (positive) VkResult, so `result != 0` alone would report it as
 # a generic failure.
 const VK_PIPELINE_COMPILE_REQUIRED = 1000297000
 
+# Forbid the driver to compile; EARLY_RETURN_ON_FAILURE alongside, as the spec pairs them.
+const NO_COMPILE_FLAGS = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
+                         VK.PipelineCreateFlag(VK.PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
+
+"""
+    createpipeline(create, ctx, flags, name, spirv) -> pipeline
+
+`create(flags)` returns `(pipeline, VkResult)`. Inside
+[`no_pipeline_compilation`](@ref) the driver is first forbidden to compile; a
+refusal is counted in `ctx.diag`, `name` and the SPIR-V's hash are recorded, and
+the pipeline is created with `flags`, so the workload finishes and reports
+every miss.
+"""
+function createpipeline(create, ctx::VkContext, flags::VK.PipelineCreateFlag, name, spirv::Vector{UInt8})
+    d = ctx.diag
+    if d.no_pipeline_compile
+        pipeline, code = create(flags | NO_COMPILE_FLAGS)
+        code == VK.PIPELINE_COMPILE_REQUIRED || return pipeline
+        d.pipeline_compiles_refused += 1
+        # `spirv_content_hash`, not `Base.hash`, which samples large vectors.
+        push!(d.pipeline_compile_misses, string(name, " spirv=", string(spirv_content_hash(spirv), base=16),
+                                                " (", length(spirv), " bytes)"))
+    end
+    return first(create(flags))
+end
+
 """
     no_pipeline_compilation(f; ctx = vk_context()) -> f()
 
-Run `f` with the driver forbidden to compile compute pipelines, which proves the
+Run `f` with `ctx`'s driver forbidden to compile pipelines, which proves the
 `VkPipelineCache` seeded from disk serves them (a fast run alone could be the
-in-memory caches). Clears `ctx`'s kernel caches first (`clear_kernel_cache!`)
-and restores the flag after. A refusal does not throw: it is counted, recorded
-in `PIPELINE_COMPILE_MISSES` and retried without the flag.
+in-memory caches). Clears `ctx`'s kernel caches and its refusal counters first.
+A refusal does not throw: [`createpipeline`](@ref) records it and compiles.
 
     no_pipeline_compilation() do
         run_the_workload()
     end
-    PIPELINE_COMPILES_REFUSED[] == 0    # nothing needed the driver's compiler
+    vk_context().diag.pipeline_compiles_refused == 0    # nothing needed the driver's compiler
 """
 function no_pipeline_compilation(f; ctx::VkContext = vk_context())
-    old = PIPELINE_NO_COMPILE[]
-    old_refused = PIPELINE_COMPILES_REFUSED[]
+    d = ctx.diag
+    old = d.no_pipeline_compile
     clear_kernel_cache!(ctx)
-    PIPELINE_NO_COMPILE[] = true
-    PIPELINE_COMPILES_REFUSED[] = 0
-    empty!(PIPELINE_COMPILE_MISSES)
+    d.pipeline_compiles_refused = 0
+    empty!(d.pipeline_compile_misses)
+    d.no_pipeline_compile = true
     try
         return f()
     finally
-        PIPELINE_NO_COMPILE[] = old
-        PIPELINE_COMPILES_REFUSED[] += old_refused
+        d.no_pipeline_compile = old
     end
 end
 
@@ -260,7 +266,7 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
     dev = ctx.device
 
     shader_mod = create_shader_module(dev, spirv_bytes)
-    check_validation_errors!("vkCreateShaderModule (compute)")
+    check_validation_errors!("vkCreateShaderModule (compute)", ctx)
 
     push_ranges = if push_constant_size > 0
         [VK.PushConstantRange(
@@ -329,44 +335,13 @@ function get_compute_pipeline(ctx::VkContext, spirv_bytes::Vector{UInt8}, entry_
         next = stage_next
     )
     # The capture bits give `pipeline_exec_stats` / `pipeline_exec_ir` data to read.
-    pipeline_flags = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_DISPATCH_BASE_BIT)
+    flags = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_DISPATCH_BASE_BIT)
     if ctx.pipeline_exec_props_available
-        pipeline_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) |
-                          VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR)
+        flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) |
+                 VK.PipelineCreateFlag(VK.PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR)
     end
-    if PIPELINE_NO_COMPILE[]
-        # EARLY_RETURN_ON_FAILURE alongside, as the spec pairs them.
-        pipeline_flags |= VK.PipelineCreateFlag(VK.PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) |
-                          VK.PipelineCreateFlag(VK.PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT)
-    end
-    ci = VK.ComputePipelineCreateInfo(stage, layout, -1; flags=pipeline_flags)
-
-    pipeline = try
-        create_compute_pipeline(dev, ci; pipeline_cache=ctx.pipeline_cache)
-    catch e
-        # Record the miss and retry without the flag, so the workload finishes
-        # and reports every miss; throwing mid-render left a partly recorded
-        # batch and lost the device.
-        if PIPELINE_NO_COMPILE[] && occursin("PIPELINE_COMPILE_REQUIRED", sprint(showerror, e))
-            # Every entry point is "main", so identify the module by content
-            # hash and size. `spirv_content_hash`, not `Base.hash`, which
-            # samples large vectors.
-            push!(PIPELINE_COMPILE_MISSES,
-                  string(entry_name, " spirv=",
-                         string(spirv_content_hash(spirv_bytes), base=16),
-                         " (", length(spirv_bytes), " bytes)"))
-            old_flag = PIPELINE_NO_COMPILE[]
-            PIPELINE_NO_COMPILE[] = false
-            try
-                ci_retry = VK.ComputePipelineCreateInfo(stage, layout, -1;
-                    flags = VK.PipelineCreateFlag(VK.PIPELINE_CREATE_DISPATCH_BASE_BIT))
-                create_compute_pipeline(dev, ci_retry; pipeline_cache=ctx.pipeline_cache)
-            finally
-                PIPELINE_NO_COMPILE[] = old_flag
-            end
-        else
-            rethrow()
-        end
+    pipeline = createpipeline(ctx, flags, entry_name, spirv_bytes) do flags
+        create_compute_pipeline(ctx, VK.ComputePipelineCreateInfo(stage, layout, -1; flags))
     end
 
     result = LavaComputePipeline(shader_mod, layout, pipeline, UInt32(push_constant_size),
@@ -384,16 +359,17 @@ end
 
 """Allocate a compute binding for tlas.accel. The caller must hold the pool through
 submission completion (or reusable-recording release); this path does not cache it."""
-alloc_compute_tlas_descriptor_set(dev::VK.Device, pipeline::LavaComputePipeline, tlas) =
-    alloc_tlas_descriptor_set(dev, pipeline.descriptor_set_layout::VK.DescriptorSetLayout, tlas.accel)
+alloc_compute_tlas_descriptor_set(ctx::VkContext, pipeline::LavaComputePipeline, tlas) =
+    alloc_tlas_descriptor_set(ctx, pipeline.descriptor_set_layout::VK.DescriptorSetLayout, tlas.accel)
 
 """Allocate and write a binding-0 acceleration-structure descriptor; caller owns pool/set lifetime."""
-function alloc_tlas_descriptor_set(dev::VK.Device, ds_layout::VK.DescriptorSetLayout, accel)
+function alloc_tlas_descriptor_set(ctx::VkContext, ds_layout::VK.DescriptorSetLayout, accel)
+    dev = ctx.device
     desc_pool = VK.DescriptorPool(dev, UInt32(1), [
         VK.DescriptorPoolSize(
             VK.DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, UInt32(1)),
     ])
-    desc_sets = @vk_checked "vkAllocateDescriptorSets (TLAS)" VK.allocate_descriptor_sets(dev,
+    desc_sets = @vk_checked ctx "vkAllocateDescriptorSets (TLAS)" VK.allocate_descriptor_sets(dev,
         VK.DescriptorSetAllocateInfo(desc_pool, [ds_layout]))
     desc_set = desc_sets[1]
 
@@ -412,51 +388,32 @@ function alloc_tlas_descriptor_set(dev::VK.Device, ds_layout::VK.DescriptorSetLa
     return desc_pool, desc_set
 end
 
-function create_compute_pipeline(dev::VK.Device, ci::VK.ComputePipelineCreateInfo;
-                                   pipeline_cache=C_NULL)
-    # Raw handle for the LARGE_STACK ccall: `.vks` holds the non-dispatchable
-    # handle's UInt64, passed as a Ptr{Cvoid} on 64-bit systems.
-    cache_handle = if pipeline_cache === C_NULL
-        C_NULL
-    else
-        raw = pipeline_cache.vks
-        raw isa Ptr ? raw : Ptr{Cvoid}(UInt(raw))
-    end
+"""
+    create_compute_pipeline(ctx, ci) -> (pipeline, VkResult)
+
+One compute pipeline through `ctx`'s pipeline cache. The result is
+`PIPELINE_COMPILE_REQUIRED`, with no usable pipeline, when `ci` forbids
+compilation and the cache misses.
+"""
+function create_compute_pipeline(ctx::VkContext, ci::VK.ComputePipelineCreateInfo)
+    dev = ctx.device
     if LARGE_STACK_PIPELINE
+        # `.vks` holds the non-dispatchable handle's UInt64, passed as a pointer.
+        raw = ctx.pipeline_cache.vks
+        cache_handle = raw isa Ptr ? raw : Ptr{Cvoid}(UInt(raw))
         ci_low = convert(VK._ComputePipelineCreateInfo, ci)
         vk_ci_ref = Ref(ci_low.vks)
         pipeline_out = Ref(Ptr{Cvoid}(C_NULL))
-
-        GC.@preserve ci_low vk_ci_ref pipeline_out pipeline_cache begin
-            vk_result = create_compute_pipeline_large_stack(
-                dev.vks,
-                cache_handle,
-                Ptr{Cvoid}(pointer_from_objref(vk_ci_ref)),
-                Ptr{Cvoid}(pointer_from_objref(pipeline_out)))
-            if vk_result == VK_PIPELINE_COMPILE_REQUIRED
-                PIPELINE_COMPILES_REFUSED[] += 1
-                error("vkCreateComputePipelines returned VK_PIPELINE_COMPILE_REQUIRED: this " *
-                      "pipeline is NOT in the cache and would have been compiled. " *
-                      "(PIPELINE_NO_COMPILE is set; see no_pipeline_compilation.)")
-            end
-            vk_result != 0 && error("vkCreateComputePipelines failed with VkResult $vk_result")
-        end
-
-        raw_pipeline = pipeline_out[]
+        vk_result = GC.@preserve ci_low vk_ci_ref pipeline_out create_compute_pipeline_large_stack(
+            ctx, dev.vks, cache_handle,
+            Ptr{Cvoid}(pointer_from_objref(vk_ci_ref)),
+            Ptr{Cvoid}(pointer_from_objref(pipeline_out)))
+        vk_result == VK_PIPELINE_COMPILE_REQUIRED && return nothing, VK.PIPELINE_COMPILE_REQUIRED
+        vk_result != 0 && error("vkCreateComputePipelines failed with VkResult $vk_result")
         parent = VK.handle(dev)
-        destructor = x -> VK._destroy_pipeline(parent, x)
-        return VK.Pipeline(raw_pipeline, destructor, dev)
-    else
-        # Check the code: VK_PIPELINE_COMPILE_REQUIRED is success-class, so VK.jl
-        # does not raise and pPipelines[1] stays VK_NULL_HANDLE, which segfaults
-        # later at vkCmdBindPipeline.
-        pipelines, code = @vk_checked "vkCreateComputePipelines" VK.create_compute_pipelines(dev, [ci]; pipeline_cache)
-        if code == VK.PIPELINE_COMPILE_REQUIRED
-            PIPELINE_COMPILES_REFUSED[] += 1
-            error("vkCreateComputePipelines returned VK_PIPELINE_COMPILE_REQUIRED: this " *
-                  "pipeline is NOT in the cache and would have been compiled. " *
-                  "(PIPELINE_NO_COMPILE is set; see no_pipeline_compilation.)")
-        end
-        return pipelines[1]
+        return VK.Pipeline(pipeline_out[], x -> VK._destroy_pipeline(parent, x), dev), VK.SUCCESS
     end
+    pipelines, code = @vk_checked ctx "vkCreateComputePipelines" VK.create_compute_pipelines(
+        dev, [ci]; pipeline_cache = ctx.pipeline_cache)
+    return pipelines[1], code
 end

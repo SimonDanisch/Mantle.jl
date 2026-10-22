@@ -2224,7 +2224,7 @@ goes (everything under "Devices"). `Lavapipe_jll` becomes an extension.
 Deletes: `HostDevice` and `src/host/`, `DEVICES`, `lavadevice(ctx)`,
 `VK_CONTEXT_REF` reads inside Mantle, `METAL_DEVICE`, `ROCM_DEVICE`,
 `adopt!`/`adoptqueue!`, `LIVE_CONTEXTS`, `LAYER_SETTING_STORAGE`,
-`PIPELINE_NO_COMPILE`, `WORKGROUP_FALLBACK`, `KERNEL_RECORDERS`,
+`WORKGROUP_FALLBACK`, `KERNEL_RECORDERS`,
 `BACKEND_PROBES`, `FROZEN_*` as process globals, `COMMITTED`/`COLLECT`,
 `Metal.device()`/`Metal.synchronize()` reads, graphics constructors keyed on a
 KA backend, hooks without a device argument.

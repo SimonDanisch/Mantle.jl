@@ -720,7 +720,6 @@ Every comment and docstring checked against the code and the plan (plan,
 | P8.D7 | delete `adoptqueue!` | 16 hits, 4 files | open | |
 | P8.D8 | delete `LIVE_CONTEXTS` | 4 hits, 1 files | open | |
 | P8.D9 | delete `LAYER_SETTING_STORAGE` | 3 hits, 1 files | open | |
-| P8.D10 | delete `PIPELINE_NO_COMPILE` | 16 hits, 3 files | open | |
 | P8.D11 | delete `WORKGROUP_FALLBACK` | 15 hits, 2 files | done | the fault was NVIDIA's 64-bit division; Lava's `lower_wide_divisions!` removes it; Mantle 28a58dc, `test_static_workgroup.jl` |
 | P8.D12 | delete `KERNEL_RECORDERS` | 5 hits, 1 files | open | |
 | P8.D13 | delete `BACKEND_PROBES` | 7 hits, 1 files | open | |
