@@ -1,25 +1,5 @@
-# GPU Memory Safety & GC Correctness Regression Tests
-#
-# What this file guards against — every section corresponds to a class of bug
-# we have actually hit or are likely to hit:
-#
-#   1. Use-after-free at dispatch time
-#   2. Double-free safety
-#   3. GPU memory leak across many dispatch cycles (the 40 GiB bug)
-#   4. `GC.gc()` with dispatches in flight does not crash or UAF
-#   5. Atomic add + subgroup reduce produce correct results under contention
-#   6. A reduction does not leak per call (its scratch is reused)
-#   7. Pool-block growth is bounded
-#   8. Deferred frees actually drain
-#   9. Derived arrays (views/reshape) keep parent alive via DataRef refcount
-#  11. Launch bookkeeping (argument memory) stays bounded over a long session
-#
-# Written against the Vulkan backend (`vk_context()`, its batch queue's lists,
-# `gpu_live_bytes`, `live_buffer_count`, `poolblocks`), and asserted now through
-# what those stood for: the bytes the device's pool has handed out, and the
-# blocks it holds. A backend array is the pool's on Vulkan and Metal.jl's own on
-# Metal, so the allocator sections also run on `Mantle.Buffer`, which is the
-# pool's on every backend.
+# Lifetime, GC, pool reuse and dispatch bookkeeping under GPU work in flight.
+# Exercise backend arrays and core Buffer ownership, including atomic reduction.
 
 using Test
 using Mantle
@@ -117,7 +97,8 @@ end
     x = 1f0
     s = KI.sub_group_reduce_add(x)
     if KI.get_sub_group_local_id(UInt32) == UInt32(1)
-        Atomix.@atomic out[1] += s
+        # Only the atomic sum is shared; the host reads after synchronize.
+        Atomix.@atomic :monotonic out[1] += s
     end
 end
 
