@@ -236,6 +236,11 @@ end
 @testset "GEMM stride wrappers preserve conjugation rules" begin
     for T in (Float32,ComplexF32)
         a = KA.allocate(back,T,3,5)
+        @test Mantle.gemmstrides(a) === (a,1,1,3)
+        vector = KA.allocate(back,T,15)
+        @test Mantle.gemmstrides(vector) === (vector,1,1,15)
+        wrapped = Base.ReshapedArray(vector,(3,5),())
+        @test Mantle.gemmstrides(wrapped) === (vector,1,1,3)
         swapped = (a,1,3,1)
         @test Mantle.gemmstrides(transpose(a)) === swapped
         @test Mantle.gemmstrides(PermutedDimsArray(a,(2,1))) === swapped

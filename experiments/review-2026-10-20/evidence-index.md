@@ -200,3 +200,7 @@ assertions. Adaptation comments now consistently require explicit leaf retention
 [Shared acceleration projection](consolidation-accel-projection.md) deletes both
 backend field walks while preserving their distinct scene conversions; 126 host
 and native assertions pass. Native Metal qualification remains outstanding.
+
+[Shared dense GPU strides](consolidation-dense-strides.md) removes backend
+metadata copies and fixes the absent ROCm method. 3,987 shared GEMM and 77 ROCm
+backend assertions pass; the required existing SDK source is pinned explicitly.

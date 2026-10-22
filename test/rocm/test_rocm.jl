@@ -1,33 +1,5 @@
-# The ROCm backend: the same graph, the same five analyses, on HIP.
-#
-# Beside `test/vulkan/` and `test/metal/`, and it is the same kind of file — what
-# one backend answers differently, checked against what core decided. The three
-# things pinned here are the three that were WRONG in the first version of
-# `ext/MantleROCmExt.jl` and that nothing else would have caught:
-#
-#   1. A view's address. `ROCArray.offset` is in bytes in AMDGPU 2.2.1 as
-#      installed and in elements in a 2.2.1 checkout beside it, so a backend
-#      that picks one silently places every transient at a quarter of its
-#      offset on the other. The symptom was a chain that came back holding
-#      8.0, 9.0, 10.0 and 11.0 in the four quarters of a buffer.
-#   2. That a run's work lands on the stream the waits use. It did not, because
-#      `AMDGPU.stream!(f, s)` never binds `s` (see `onstream`), and a wait on an
-#      empty stream returns at once — which reported 5.7 TB/s on a part whose
-#      measured rate is 279 GB/s.
-#   3. That a captured graph holds ADDRESSES and not values. A `hipGraph` is the
-#      submit baked; if it baked the data instead, every run after the first
-#      would be a replay of the first one's answer.
-#
-# Requires AMDGPU.jl, which Mantle weak-depends on: `import AMDGPU` loads
-# `MantleROCmExt` and there is nothing else to do.
-#
-# `include`ing the extension file by hand is what a missing `[weakdeps]` /
-# `[extensions]` pair in `Project.toml` forces, since nothing loads
-# it otherwise. That include is not a substitute: it defines the extension's
-# methods in `Main`, so `Base.get_extension(Mantle, :MantleROCmExt)` answers
-# `nothing` and `Mantle.openrecording` ends up with TWO methods for two
-# `ROCmDevice` types that are not the same type. With the extension declared,
-# asking for it by name is the whole of it.
+# ROCm graph/capture, borrowed-view offsets, stream ownership and portable kernels.
+# Load the supported AMDGPU source described in test/rocm/README.md.
 
 using Test, LinearAlgebra
 import Mantle, AMDGPU, KernelAbstractions, KernelInterface
@@ -551,22 +523,8 @@ end
 
 @testset "ROCm: a compiled dispatch is partitioned the way an eager launch is" begin
     dev = M.Device(M.ROCmAPI())
-    # A 2-D iteration space, which is what makes this visible. `compile_dispatch`
-    # has to reproduce the partition `ROCKernels` picks per launch: occupancy
-    # gives a thread count, and `threads_to_workgroupsize` SHAPES it to the
-    # ndrange. `KA.launch_config` has a fallback of its own for a kernel launched
-    # without a workgroup size — `min(prod(ndrange), _max_group_size)` in the
-    # first dimension and 1 in the rest — and it returns that in place of the
-    # `nothing` it was given. A backend that then asks "was a size requested?" by
-    # looking at the RETURNED value never sees `nothing` and never tunes.
-    #
-    # It is not a small difference, because the fallback's shape ignores the
-    # extent of the first dimension: for (64, 1024) it groups 1024 threads along
-    # an axis 64 long, so 1,048,576 workitems run for a 65,536-element space and
-    # fifteen out of sixteen exit on the bounds check. SAM 2.1's encoder is 1,014
-    # broadcast kernels launched exactly this way and it cost 29% of the whole
-    # graph — 647.3 ms replayed against 454.9 ms eager, which read as "baking a
-    # plan makes it slower" until this was the reason.
+    # Occupancy determines a thread count; KI must shape it to both dimensions.
+    # Flattening 1024 threads onto a 64-wide axis launches 16 times too much work.
     dims = (64, 1024)
     n = prod(dims)
     g = M.Graph(dev)
@@ -579,7 +537,7 @@ end
                  if d isa RE.ROCmCompiledDispatch])
     # The contract, against the kernel that will actually run rather than against
     # a number: the same two calls `ROCKernels` makes.
-    tuned = AMDGPU.ROCKernels.threads_to_workgroupsize(
+    tuned = KI.threads_to_workgroupsize(
         AMDGPU.launch_configuration(disp.kernel).groupsize, dims)
     @test disp.groupsize == prod(tuned)
     # …and the consequence. Every dimension of this ndrange divides its group, so
@@ -602,6 +560,10 @@ naivedft(x) = [sum(x[n + 1] * cispi(-2k * n / length(x)) for n in 0:length(x)-1)
 @testset "ROCm: the portable array routines launch here" begin
     dev = M.Device(M.ROCmAPI())
     roc(a) = AMDGPU.ROCArray(a)
+    A = rand(Float16,8,8); B = rand(Float16,8,8)
+    scalar = AMDGPU.zeros(Float32,8,8)
+    M.gemmlaunch!(scalar,roc(A),roc(B),8,8,8,1f0,0f0)
+    @test Array(scalar) ≈ Float32.(A)*Float32.(B) rtol=1f-5
     K, N = 96, 80
     a = rand(Float32, K); B = rand(Float32, K, N)
     C = AMDGPU.zeros(Float32, N)

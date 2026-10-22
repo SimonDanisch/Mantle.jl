@@ -1039,6 +1039,11 @@ gemmstrides(A::PermutedDimsArray{T,2,(1,2)}) where {T} = gemmstrides(parent(A))
 # Complex adjoints also conjugate, which cannot be expressed by strides alone.
 
 
+# AbstractGPUArray inherits DenseArray: its own linear indexing includes view offsets.
+gemmstrides(A::AbstractGPUVecOrMat) = (A, 1, 1, size(A, 1))
+gemmstrides(A::Base.ReshapedArray{T,2,<:AbstractGPUArray}) where {T} =
+    (parent(A), 1, 1, size(A, 1))
+
 gemmstrides(::AbstractArray) = nothing
 
 # Declared resources are contiguous; placement resolves storage later.

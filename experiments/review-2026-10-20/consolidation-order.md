@@ -16,6 +16,7 @@ error behavior and native requirements. Measure implementation and prose separat
 | [Compilation publication](consolidation-publication.md) | Core publication for native graphics/mesh/ray pipelines; device-owned Metal caches replace process globals. |
 | [Kernel preparation](consolidation-kernel-preparation.md) | Eager and declared KI preparation, KA construction and capture validation. |
 | [Geometry/strides](consolidation-geometry.md) | Shared support pairs, simplex reductions, contact interpolation/reservation, transform construction and stride swapping. Native geometry, contention, tails and numerical checks preserve contracts. |
+| [Dense GPU strides](consolidation-dense-strides.md) | Dense vectors/matrices/reshapes share core metadata; backend copies deleted and missing ROCm support fixed. 3,987 GEMM assertions pass across ROCm/AMD Vulkan/NVIDIA Vulkan. |
 | [GEMM generation](consolidation-gemm-generator.md) | One wide/narrow/ablation body and one tile-product generator for all eight staged families; distinct measured schedules remain. Native output, shader and timing checks preserve behavior. |
 | [Draw preparation/packing](consolidation-draw.md) | Graph/manual shader preparation and argument packing; unused legacy packer deleted. Shared retention fixes manual nested-array lifetime, qualified by freeing before submission. |
 | [Trace packing/setup](consolidation-trace.md) | Eager/recorded argument packing, direct/indirect native bindings/timestamps, shader modules and TLAS descriptor writes. |

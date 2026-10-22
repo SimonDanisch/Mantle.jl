@@ -1,20 +1,4 @@
-# `mul!` for LavaArray: the entry point into core's GEMM (`src/array/gemm.jl`).
-#
-# Only what names this backend's array is here. The kernels, their tilings and the
-# choice between them are core's; `mul!` is Base's function, so the method that
-# routes a `LavaArray` into them belongs to the backend that owns the array type,
-# and `gemmstrides` for it describes the one array whose density this tree vouches
-# for. The split-K scratch is cached on the context because Lava's pool can
-# reclaim a dropped buffer before a queued dispatch has retired; see
-# `splitscratch` in core for the portable form.
-
-gemmstrides(A::LavaArray{T,2}) where {T} = (A, 1, 1, size(A, 1))
-gemmstrides(A::LavaArray{T,1}) where {T} = (A, 1, 1, length(A))
-
-# A reshape is free only when the thing underneath is dense; `LavaArray` is the
-# only parent for which that holds unconditionally.
-gemmstrides(A::Base.ReshapedArray{T,2,<:LavaArray}) where {T} =
-    (parent(A), 1, 1, size(A, 1))
+# LavaArray mul! routes to core GEMM; split-K scratch stays device-owned until retirement.
 
 """
     mul!(C, A, B, α, β) -> C

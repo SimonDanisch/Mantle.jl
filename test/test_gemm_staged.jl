@@ -43,14 +43,11 @@ function stagedcount(backend, cfg, K; blocks = 2,
     B = KA.allocate(backend, Float16, K, N); fill!(B, one(Float16))
     C = KA.allocate(backend, Float16, M, N); fill!(C, Float16(-1))
     wg = Mantle.gemm_wg(cfg)
-    # `KI.Kernel(backend, f)`: these kernels are plain functions over
-    # `KernelInterface`'s intrinsics, so there is no constructor to call.
-    # A gathering kernel takes its loader after the epilogue; `nothing` is the
-    # plain matrix read, see `Mantle.apair`.
+    # Compile through core's KI launch protocol on every backend. A gathering
+    # kernel takes its loader after the epilogue; nothing is a plain A read.
     args = gather ? (C, A, B, nothing, identity, nothing, Val(M), Val(N), Val(K)) :
                     (C, A, B, nothing, identity, Val(M), Val(N), Val(K))
-    KernelInterface.Kernel(backend, kernels[cfg])(
-        args...;
+    Mantle.kilaunch!(backend, kernels[cfg], args...;
         ndrange = (M ÷ Mantle.gemm_bm(cfg)) * (N ÷ Mantle.gemm_bn(cfg)) * wg,
         workgroupsize = wg)
     KA.synchronize(backend)
