@@ -2,8 +2,7 @@
 # stream state are shared (video_common.jl); each codec builds its own picture
 # and reference structures and applies its own reference marking.
 
-"""NV12 GPU image with coded/display extents. `size` is the cropped display size;
-`copyto!(::LavaArray{UInt8}, img)` and `Array(img)` read its luma plane."""
+"""A decoder's NV12 image with coded and cropped display extents."""
 mutable struct VideoImage
     image::VK.Image
     memory::VK.DeviceMemory
@@ -12,12 +11,9 @@ mutable struct VideoImage
     width::Int      # display (cropped) width
     height::Int     # display (cropped) height
     format::VK.Format
-    # Current `VkImageLayout` as raw `UInt32`, shared by the raw decode barriers
-    # and the VK.jl copy path.
+    # Current `VkImageLayout` as raw `UInt32`, tracked by the decode barriers.
     layout::Base.RefValue{UInt32}
 end
-Base.size(img::VideoImage) = (img.width, img.height)
-Base.eltype(::VideoImage) = UInt8
 Base.show(io::IO, img::VideoImage) = print(io, "VideoImage($(img.width)×$(img.height), NV12)")
 
 # Record a copy of `img`'s luma plane (display size, tightly packed) to byte
@@ -40,60 +36,6 @@ function record_chroma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Int
             VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1),
             VK.Offset3D(0, 0, 0), VK.Extent3D(img.width ÷ 2, img.height ÷ 2, 1))])
     return cb
-end
-
-# `img.layout` is updated when the barrier is recorded, not when it executes.
-function transition_transfer_src!(cb, img::VideoImage)
-    img.layout[] == UInt32(VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) && return cb
-    VK.cmd_pipeline_barrier(cb, [], [],
-        [VK.ImageMemoryBarrier(VK.ACCESS_MEMORY_WRITE_BIT,
-            VK.ACCESS_TRANSFER_READ_BIT, VK.ImageLayout(img.layout[]),
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK.QUEUE_FAMILY_IGNORED, VK.QUEUE_FAMILY_IGNORED, img.image,
-            VK.ImageSubresourceRange(VK.IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1))];
-        src_stage_mask = VK.PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        dst_stage_mask = VK.PIPELINE_STAGE_TRANSFER_BIT)
-    img.layout[] = UInt32(VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-    return cb
-end
-
-"""
-    copyto!(dst::LavaArray{UInt8}, img::VideoImage) -> dst
-
-Copy the frame's luma plane into `dst`, which must hold at least
-`prod(size(img))` bytes and have TRANSFER_DST usage. Submits on the video-decode
-queue and waits for it to go idle.
-"""
-function Base.copyto!(dst::LavaArray{UInt8}, img::VideoImage)
-    need = img.width * img.height
-    length(dst) >= need || error("VideoImage copyto!: dst holds $(length(dst)) < $need bytes")
-    mbuf = dst.buf[]
-    ctx = mbuf.ctx::VkContext
-    dev = ctx.device
-    pool = @vk_checked ctx "video_copy_pool" VK.create_command_pool(dev, ctx.video_decode_queue_family_index)
-    cb = first(@vk_checked ctx "video_copy_cb" VK.allocate_command_buffers(dev,
-        VK.CommandBufferAllocateInfo(pool, VK.COMMAND_BUFFER_LEVEL_PRIMARY, 1)))
-    @vk_checked ctx "video_copy_begin" VK.begin_command_buffer(cb, VK.CommandBufferBeginInfo())
-    transition_transfer_src!(cb, img)
-    record_luma_copy!(cb, img, mbuf.buffer, pool_offset(mbuf) + dst.offset)
-    @vk_checked ctx "video_copy_end" VK.end_command_buffer(cb)
-    @vk_checked ctx "video_copy_submit" VK.queue_submit(ctx.video_decode_queue, [VK.SubmitInfo([], [], [cb], [])])
-    @vk_checked ctx "video_copy_wait" VK.queue_wait_idle(ctx.video_decode_queue)
-    return dst
-end
-
-"""
-    Array(img::VideoImage) -> Matrix{UInt8}
-
-Download the frame's luma plane as a `width × height` `Matrix{UInt8}`.
-"""
-function Base.Array(img::VideoImage)
-    # `VideoImage` carries no device; assumes it was decoded on the default
-    # context. ambient-allocation-ok
-    dst = LavaArray{UInt8,2}(undef, (img.width, img.height);
-                             extra_usage = UInt32(VK.BUFFER_USAGE_TRANSFER_DST_BIT))
-    copyto!(dst, img)
-    return Array(dst)
 end
 
 module VideoDecode
