@@ -506,20 +506,10 @@ function bind_for_draw!(e::Emitter, pipeline::VulkanCompiledGraphicsPipeline;
 end
 
 """
-    indirect_buffer(bq, n = 1) -> LavaArray{DrawIndirectCommand,1}
-
-Room for `n` draw commands, with the `BUFFER_USAGE_INDIRECT_BUFFER_BIT` ordinary
-allocations lack; without it the error only surfaces at the draw.
-"""
-indirect_buffer(bq::SubmitChannel{<:VulkanQueue}, n::Integer=1) =
-    LavaArray{DrawIndirectCommand,1}(undef, (Int(n),);
-        bq, extra_usage=UInt32(VK.BUFFER_USAGE_INDIRECT_BUFFER_BIT))
-
-"""
     draw_indirect_in_pass!(e, pipeline, commands; first = 1, count = 1, push_bda)
 
 Record `count` draws whose parameters are in device memory, from `commands` (a
-`LavaArray{DrawIndirectCommand}` made by [`indirect_buffer`](@ref)) starting at the
+`LavaArray{DrawIndirectCommand}`) starting at the
 1-based `first`, inside an active rendering pass. The host never reads them, so a
 compute pass of the same frame can write them.
 """

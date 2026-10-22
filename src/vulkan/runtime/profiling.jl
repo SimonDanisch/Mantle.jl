@@ -91,20 +91,6 @@ function kernel_stats(ctx::VkContext, linked::LavaLinkedKernel)
     return KernelStats(c.entry_name, kernel_source_name(c), c.workgroup_size, spirv, regs, scratch)
 end
 
-"""
-    list_compiled_kernels(ctx = vk_context()) -> Vector{KernelStats}
-
-Stats for every kernel `ctx` has a pipeline for.
-
-```julia
-render!(vp, scene, film, camera)
-sort(list_compiled_kernels(); by=k -> -k.spirv.bytes)  # biggest first
-```
-"""
-function list_compiled_kernels(ctx::VkContext = vk_context())
-    return KernelStats[kernel_stats(ctx, linked) for linked in values(ctx.caches.linked)]
-end
-
 # Per-dispatch GPU timing: with timing on, each dispatch is bracketed by two
 # timestamps in the device's query pool (created on first use,
 # `TIMESTAMP_POOL_SIZE[]` slots); `dispatch_timing_report` converts them with
@@ -122,17 +108,6 @@ end
 # Two slots per dispatch. A device's pool is sized from it once, so change it
 # only before that pool exists.
 const TIMESTAMP_POOL_SIZE = Ref(MAX_DISPATCH_LOG * 2)
-
-"""
-    enable_dispatch_timing!(enable::Bool=true, ctx = vk_context())
-
-Turn timestamp queries around every dispatch on or off; off leaves the dispatch
-path unchanged. The query pool is created on the first timed dispatch.
-"""
-function enable_dispatch_timing!(enable::Bool=true, ctx::VkContext = vk_context())
-    ctx.diag.dispatch_timing = enable
-    return enable
-end
 
 """
     reset_dispatch_timing!(ctx = vk_context())

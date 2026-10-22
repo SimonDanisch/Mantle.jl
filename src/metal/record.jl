@@ -582,8 +582,8 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
         "command reaches is reached by address — without one nothing it reads is " *
         "resident. Run the plan without recording it."))
     (; ndispatch, nwriters, ncalls, nprepares, prepbytes) = planshape(pl, passes)
-    # Only the whole plan must have dispatches: a graph opening on a `when!` region
-    # gets an empty head piece for `emithead!`, recorded like any other.
+    # Only the whole plan must have dispatches: a graph opening on a loop gets an
+    # empty head piece for `emithead!`, recorded like any other.
     ndispatch + ncalls > 0 || passes != eachindex(pl.passes) ||
         throw(ArgumentError("record!: the plan has no dispatches to record."))
     nslots = maximum(pp -> maximum(d -> maxslot(d), pp.dispatches; init = 0),
@@ -606,7 +606,7 @@ function Mantle.openrecording(d::MetalDevice, pl::Mantle.Plan,
         "the first piece of the partition. A piece owns the range array its gates " *
         "write, and only the first is given the reset that clears it — so a later " *
         "gated piece would replay stale counts. Keep the gated passes in its first " *
-        "$(first(passes) - 1), or no `when!` region before them."))
+        "$(first(passes) - 1) passes."))
     ncommands = ndispatch + nwriters + nprepares + (head ? 1 : 0)
     # `ray_tracing` always: in a buffer that did not declare it every traced ray
     # misses silently, and whether a kernel traces is not visible from the dispatch.

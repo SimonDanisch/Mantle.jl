@@ -775,13 +775,7 @@ function recordplan!(dev, pl::Plan)
     pl.stamped = pl.profiler !== nothing && (pl.profile || measuring(pl))
     e = openrecording(dev, pl, first(ranges))
     if e === nothing
-        # No recording: `run!` walks the plan. `when!` needs recorded pieces to
-        # skip, so it is refused here.
-        any(pp -> pp.pass.hostcond !== nothing, pl.passes) && throw(ArgumentError(
-            "record!: this plan has a `when!` condition and this backend does " *
-            "not record: a conditional region is a recorded piece that the run " *
-            "may omit, and `openrecording` declined the plan. Branch on the " *
-            "host and declare the graph you want."))
+        # No recording: `run!` walks the plan.
         pl.stamped = pl.profile
         return pl
     end
@@ -808,7 +802,6 @@ to learn whether the backend records). On a throw every piece is released.
 """
 function recordparts!(dev, pl::Plan, emitter, ranges)
     parts = Any[]
-    conds = Any[]
     e = emitter
     heads = Set(first(r) for (r, _) in pl.loops)
     try
@@ -820,7 +813,6 @@ function recordparts!(dev, pl::Plan, emitter, ranges)
                 emitloophead!(e, pl, only(r for (r, _) in pl.loops if first(r) == first(chunk)))
             emitpasses!(e, pl, chunk)
             push!(parts, closerecording!(e, pl))
-            push!(conds, isempty(chunk) ? nothing : pl.passes[first(chunk)].pass.hostcond)
             e = nothing
         end
     catch
@@ -831,20 +823,19 @@ function recordparts!(dev, pl::Plan, emitter, ranges)
     end
     # Narrow to the backend's piece type so `submitrecording!` specialises.
     parts = identity.(parts)
-    batches, batchconds = submissionbatches(pl, ranges, parts, conds)
-    return RecordingParts(parts, conds, batches, batchconds)
+    return RecordingParts(parts, submissionbatches(pl, ranges, parts))
 end
 
 """
-    submissionbatches(plan, ranges, parts, conds) -> (batches, conds)
+    submissionbatches(plan, ranges, parts) -> batches
 
 The pieces in submission order (a loop body's repeated per iteration), grouped
 into submissions while their measured cost fits the budget. An unmeasured piece
-and a `when!` piece are each submitted alone. At a finite budget each iteration
+is submitted alone. At a finite budget each iteration
 of a gated loop starts a new submission, because its timestamps describe only
 the last, possibly discarded, iteration.
 """
-function submissionbatches(pl::Plan, ranges, parts::Vector{R}, conds) where {R}
+function submissionbatches(pl::Plan, ranges, parts::Vector{R}) where {R}
     loopof(r) = isempty(r) ? nothing : pl.passes[first(r)].pass.loop
     order = Int[]
     gatedheads = Set{Int}()
@@ -872,20 +863,17 @@ function submissionbatches(pl::Plan, ranges, parts::Vector{R}, conds) where {R}
     timed = measurable(pl)
     cost(k) = timed ? sum(i -> isnan(pl.passcost[i]) ? Inf : pl.passcost[i], ranges[k]; init = 0.0) : 0.0
     batches = Vector{R}[]
-    bconds = Any[]
     t = Inf
     for k in order
         c = cost(k)
-        if k in gatedheads || conds[k] !== nothing || !isempty(bconds) && bconds[end] !== nothing ||
-           isempty(batches) || t + c > pl.budget
+        if k in gatedheads || isempty(batches) || t + c > pl.budget
             push!(batches, R[])
-            push!(bconds, conds[k])
             t = 0.0
         end
         push!(batches[end], parts[k])
         t += c
     end
-    return batches, bconds
+    return batches
 end
 
 """
@@ -895,28 +883,25 @@ The pass ranges of the recorded pieces. A piece ends where the next pass would
 exceed the plan's `budget` of measured GPU time (unmeasured passes count as
 unbounded, so an unmeasured plan is cut per pass and timed, since a
 watchdog-killed submission fails silently; no cut without timestamps or with
-`budget = Inf`), where the [`when!`](@ref) condition changes, and at
-[`repeat!`](@ref) body edges. The first range is unconditional because it
-carries the head barrier and query-pool reset; a graph opening on a condition or
-loop gets an empty leading piece.
+`budget = Inf`), and at [`repeat!`](@ref) body edges. The first range carries
+the head barrier and query-pool reset, so a graph opening on a loop gets an empty
+leading piece.
 """
 function partitionranges(pl::Plan)
     n = length(pl.passes)
     out = UnitRange{Int}[]
     n == 0 && return push!(out, 1:0)
-    cond(i) = pl.passes[i].pass.hostcond
     loop(i) = pl.passes[i].pass.loop
     budget = pl.budget
     timed = measurable(pl)
     cost(i) = timed ? (isnan(pl.passcost[i]) ? Inf : pl.passcost[i]) : 0.0
-    (cond(1) === nothing && loop(1) === nothing) || push!(out, 1:0)
+    loop(1) === nothing || push!(out, 1:0)
     i = 1
     while i <= n
-        c = cond(i)
         l = loop(i)
         j = i
         t = cost(i)
-        while j < n && cond(j + 1) === c && loop(j + 1) === l && t + cost(j + 1) <= budget
+        while j < n && loop(j + 1) === l && t + cost(j + 1) <= budget
             j += 1
             t += cost(j)
         end
@@ -930,21 +915,14 @@ end
 measurable(pl::Plan) =
     pl.profiler !== nothing && !isnan(pl.profiler.period_ns) && isfinite(pl.budget)
 
-"""Whether the plan still has an untimed unconditional pass."""
-function measuring(pl::Plan)
-    measurable(pl) || return false
-    for i in eachindex(pl.passcost)
-        isnan(pl.passcost[i]) && pl.passes[i].pass.hostcond === nothing && return true
-    end
-    return false
-end
+"""Whether the plan still has an untimed pass."""
+measuring(pl::Plan) = measurable(pl) && any(isnan, pl.passcost)
 
 """
     measure!(plan) -> plan
 
 Store the worst sampled time of each untimed pass in `passcost` (a budget is a
-bound, and first runs are often slowest). Once every unconditional pass is
-timed, invalidate the recording if the partition changes or its timestamps are
+bound, and first runs are often slowest). Once every pass is timed, invalidate the recording if the partition changes or its timestamps are
 no longer wanted, so `run!` re-records once. A `repeat!` body's time is its last
 iteration's, which `submissionbatches` accounts for.
 """
@@ -971,14 +949,9 @@ the graph's, and pieces are submitted in order. Backends implement
 """
 struct RecordingParts{R}
     parts::Vector{R}
-    # Per piece: `nothing`, or the [`when!`](@ref) condition read at submit time.
-    # Parallel to `parts` because a piece is an opaque backend object.
-    conds::Vector{Any}
     # Submissions in order, a loop body's pieces repeated per iteration
     # (`submissionbatches`); each goes to the backend as one vector.
     batches::Vector{Vector{R}}
-    # Per batch: `nothing`, or the condition of its single conditional piece.
-    batchconds::Vector{Any}
 end
 
 release!(rec::RecordingParts) = (foreach(release!, rec.parts); nothing)
@@ -987,21 +960,14 @@ release!(rec::RecordingParts) = (foreach(release!, rec.parts); nothing)
     submitrecording!(ctx, recording, emitter) -> token
 
 Submit a recording; backends answer for their own piece type, this method
-submits a partition's batches, skipping those whose condition is false. The
-run's emitter, carrying host stores and patches, goes with the first submission.
+submits a partition's batches in order. The run's emitter, carrying host stores
+and patches, goes with the first submission.
 """
 function submitrecording!(ctx, rec::RecordingParts, e)
-    tok = nothing
-    pending = e
-    for k in eachindex(rec.batches)
-        c = rec.batchconds[k]
-        c === nothing || c[] || continue
-        tok = submitrecording!(ctx, rec.batches[k], pending)
-        pending = nothing
+    tok = submitrecording!(ctx, rec.batches[1], e)
+    for k in 2:length(rec.batches)
+        tok = submitrecording!(ctx, rec.batches[k], nothing)
     end
-    # Every batch was skipped: submit the unconditional head piece alone so the
-    # run's stores and patches land and a token exists.
-    pending === nothing || (tok = submitrecording!(ctx, first(rec.parts), pending))
     return tok
 end
 
@@ -1051,12 +1017,7 @@ declined plan is walked by `run!` instead of refused.
 recordable(::Device, pl::Plan) = recordable(pl)
 
 """Whether any draw takes its arguments from a `DrawBinding`."""
-function hasrebindable(pl::Plan)
-    for p in pl.graph.passes, d in p.draws
-        d.args isa DrawBinding && return true
-    end
-    return false
-end
+hasrebindable(pl::Plan) = any(d -> d.args isa DrawBinding, (d for p in pl.graph.passes for d in p.draws))
 
 # The `Immediate` emitter: primitives do their work at once, through the verbs in
 # `graphics/commands.jl` and the baked dispatch callables.

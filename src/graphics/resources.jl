@@ -8,16 +8,9 @@
     Texture{T,N}
 
 An `N`-dimensional image of element type `T`, owned by a device. Backends
-subtype [`Texture1D`](@ref) or [`Texture2D`](@ref), not this.
+subtype [`Texture2D`](@ref), not this.
 """
 abstract type Texture{T, N} end
-
-"""
-    Texture1D{T}
-
-A one-dimensional texture; backends provide the concrete type (`VulkanTexture1D`).
-"""
-abstract type Texture1D{T} <: Texture{T, 1} end
 
 """
     Texture2D{T}

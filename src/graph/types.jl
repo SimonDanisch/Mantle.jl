@@ -134,10 +134,6 @@ mutable struct Pass
     # skipped iteration keeps the ordering intact. A pass property because the
     # graph is a flat list the scheduler reorders.
     predicate::Any
-    # `nothing`, or a condition the host evaluates at submit time (see
-    # [`when!`](@ref)). Unlike `predicate`, which dispatches and discards, a false
-    # condition omits the pass's partition from the submission at no cost.
-    hostcond::Any
     # `nothing`, or the [`Loop`](@ref) whose body this pass is in. The scheduler
     # keeps a loop's passes together.
     loop::Any

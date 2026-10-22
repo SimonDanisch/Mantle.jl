@@ -39,9 +39,6 @@ function GraphicsPipeline(;
                      blend, cull, topology, depth)
 end
 
-TrianglePipeline(; kw...) = GraphicsPipeline(; kw...)
-LinePipeline(; kw...) = GraphicsPipeline(; topology = LineList(), kw...)
-
 """Fixed native pipeline state; shader identities/configuration are keyed separately."""
 pipeline_state_key(p::GraphicsPipeline) = (p.blend, p.cull, p.topology, p.depth)
 

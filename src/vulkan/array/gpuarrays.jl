@@ -382,8 +382,9 @@ function Base.resize!(a::LavaArray{T,N}, new_dims::Dims{N}) where {T,N}
     new_len = prod(new_dims)
 
     buf = a.buf[]
-    capacity_bytes = buf.size - a.offset
-    if new_len * sizeof(T) <= capacity_bytes
+    # In place only for the buffer's sole owner: a derived array (a view or a
+    # reshape) shares its parent's buffer and would grow into the parent.
+    if a.buf.rc.count[] == 1 && new_len * sizeof(T) <= buf.size - a.offset
         a.dims = new_dims
         return a
     end
@@ -417,14 +418,9 @@ Base.resize!(a::LavaArray{T,N}, new_dims::Vararg{Integer,N}) where {T,N} =
 Base.resize!(a::LavaArray{T,1}, n::Integer) where T = resize!(a, (Int(n),))
 
 function Base.append!(a::LavaArray{T,1}, items::AbstractVector) where T
-    items_arr = collect(T, items)
-    old_len = length(a)
-    new_len = old_len + length(items_arr)
-    resize!(a, new_len)
-    if !isempty(items_arr)
-        bytes = Vector{UInt8}(reinterpret(UInt8, vec(items_arr)))
-        upload!(a.buf[], bytes; offset=old_len * sizeof(T))
-    end
+    n = length(a)
+    resize!(a, n + length(items))
+    isempty(items) || copyto!(a, n + 1, collect(T, items), 1, length(items))
     return a
 end
 

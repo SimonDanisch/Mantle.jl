@@ -231,10 +231,6 @@ masks."""
     return nothing
 end
 
-@inline computebarrier!(cmd::VK.CommandBuffer, ctx::VkContext) =
-    memorybarrier!(cmd,ctx,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                   VK_ACCESS_SHADER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
-
 @inline function headbarrier!(cmd::VK.CommandBuffer, ctx::VkContext)
     both = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
     memorybarrier!(cmd,ctx,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,both,both)
@@ -613,20 +609,6 @@ const FLUSH_WAIT_QUANTUM_NS = UInt64(2) * 1_000_000_000
 
 
 """
-    push_constants!(cmd, layout, stage_flags, push_data)
-
-Record a push constant update; a no-op for empty `push_data`.
-"""
-function push_constants!(cmd::VK.CommandBuffer, layout::VK.PipelineLayout,
-                          stage_flags, push_data::Vector{UInt8})
-    isempty(push_data) && return
-    GC.@preserve push_data begin
-        VK.cmd_push_constants(cmd, layout, stage_flags,
-            UInt32(0), UInt32(length(push_data)), Ptr{Nothing}(pointer(push_data)))
-    end
-end
-
-"""
     pushargs!(emitter, pipeline, argaddr)
 
 A compute dispatch's push constants: the address of its argument block, and for a
@@ -680,17 +662,6 @@ escape, so this allocates nothing.
             UInt32(0), UInt32(8),
             Ptr{Nothing}(Base.unsafe_convert(Ptr{UInt64}, ref)))
     end
-end
-
-"""
-What to log and label a timestamp with, or `""` when neither dispatch logging
-nor timing is on. Takes the pieces unbuilt so a dispatch pays nothing for a name
-nobody reads (835 bytes per dispatch otherwise, `test_dispatch_allocation.jl`).
-"""
-@inline function dispatchinfo(bq::SubmitChannel{<:VulkanQueue}, suffix...)
-    d = (ctxof(bq)).diag
-    (d.dispatch_logging || d.dispatch_timing) || return ""
-    return Base.invokelatest(dispatch_log_string, driver(bq).last_dispatch_info, suffix...)::String
 end
 
 """
@@ -1040,18 +1011,3 @@ $dispatch_detail""",
     ))
 end
 
-"""
-    set_dispatch_logging!(enabled::Bool, ctx = vk_context())
-
-Enable or disable logging each dispatch's name for crash reports. Off by default
-because it allocates per dispatch; a failed `flush!` wait turns it on.
-"""
-set_dispatch_logging!(enabled::Bool, ctx::VkContext = vk_context()) =
-    (ctx.diag.dispatch_logging = enabled)
-
-"""
-    get_dispatch_log(ctx = vk_context()) -> Vector{String}
-
-A copy of the recent dispatch log (up to $MAX_DISPATCH_LOG entries).
-"""
-get_dispatch_log(ctx::VkContext = vk_context()) = copy(ctx.diag.dispatch_log)

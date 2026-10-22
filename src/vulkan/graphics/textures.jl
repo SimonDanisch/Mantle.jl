@@ -18,16 +18,6 @@ Base.size(t::VulkanTexture2D) = (t.width, t.height)
 Base.eltype(::VulkanTexture2D{T}) where {T} = T
 mipmapped(t::VulkanTexture2D) = t.levels > 1
 
-"""1D texture backed by VkImage."""
-struct VulkanTexture1D{T} <: Texture1D{T}
-    image::VK.Image
-    memory::VK.DeviceMemory
-    view::VK.ImageView
-    width::Int
-    format::VK.Format
-    ctx::VkContext
-end
-
 """Reusable sampler configuration."""
 struct VulkanSampler <: Sampler
     handle::VK.Sampler
@@ -82,7 +72,7 @@ function VulkanTexture2D(data::AbstractMatrix{T}; ctx::VkContext, filter=:linear
     # The first index is horizontal (as on Metal and in GLMakie): the upload copies
     # the column-major bytes as they are, so a Julia column is one image row.
     w, h = size(data)
-    format = julia_to_vk_format(T)
+    format = vksampledformat(T)
     levels = mipmap ? floor(Int, log2(max(w, h))) + 1 : 1
     mipmap && checkmipmappable(ctx, format)
 
@@ -236,16 +226,6 @@ function upload_texture_data!(tex::VulkanTexture2D{T}, data::LavaArray{T,2}) whe
     end
 end
 
-function julia_to_vk_format(::Type{T}) where T
-    T == Float32      ? VK.FORMAT_R32_SFLOAT :
-    T == NTuple{4, Float32} ? VK.FORMAT_R32G32B32A32_SFLOAT :
-    T == NTuple{3, Float32} ? VK.FORMAT_R32G32B32_SFLOAT :
-    T == NTuple{2, Float32} ? VK.FORMAT_R32G32_SFLOAT :
-    T == UInt8        ? VK.FORMAT_R8_UNORM :
-    T == NTuple{4, UInt8} ? VK.FORMAT_R8G8B8A8_UNORM :
-    error("No VkFormat mapping for Julia type: $T")
-end
-
 struct VulkanTextureBindings <: TextureBindings
     layout::VK.DescriptorSetLayout
     pool::VK.DescriptorPool
@@ -299,4 +279,3 @@ function bind_textures(textures::Vector{<:SampledTexture{<:Any,<:Any,<:VulkanTex
 end
 
 Base.:*(tex::Texture, sam::VulkanSampler) = SampledTexture(tex, sam)
-LavaTexture(data::Matrix{T}; kw...) where T = VulkanTexture2D(data; kw...)

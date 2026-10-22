@@ -76,13 +76,6 @@ payload can combine a per-run recording with reusable plan recordings.
 payloadtype(::SubmitChannel{Q,R,T,P}) where {Q,R,T,P} = P
 
 """
-    channelof(ch) -> the backend's submission channel
-
-Return the opaque native submission channel; core does not inspect it.
-"""
-channelof(ch::SubmitChannel) = ch.channel
-
-"""
     deviceof(ch) -> device
 
 Return the owning device used for rawfree and flush!. Backend implementations resolve

@@ -189,7 +189,7 @@ Gated-off iterations are discarded at execution but still cost their barriers,
 gate dispatch and predicate test, so `maxiters` should be a tight bound. Each
 iteration starts behind a full barrier. A transient the body reads before
 writing, or shares with surrounding passes, lives across the whole loop; others
-are scoped to one iteration. The body may not touch an image, contain `when!` or
+are scoped to one iteration. The body may not touch an image or
 nest another loop; `maxiters = 1` is a plain gated region without these limits.
 Iteration boundaries are submission cut points (see `partitionranges`). The
 kernel form uses one `dispatch!` as the body.
@@ -200,35 +200,6 @@ function repeat!(g::Graph, kernel, args::Tuple, ndrange;
     repeat!(g, max, count; while_nonzero) do _
         dispatch!(g, kernel, args, ndrange; group, name)
     end
-end
-
-"""
-    when!(f, g::Graph, cond)
-
-Make the passes `f` creates conditional on `cond[]` (usually a `Ref{Bool}`),
-read on the host at every submission. The graph is recorded once with every
-branch; a region whose condition is false is not submitted, whereas a `repeat!`
-device predicate still executes the discarded commands.
-
-The region's passes stay contiguous in the recording. Barriers are unchanged: a
-barrier waiting on a skipped write is already satisfied. Regions do not nest and
-cannot be combined with `repeat!` loops.
-"""
-function when!(f, g::Graph, cond)
-    first_new = length(passes(g)) + 1
-    f()
-    for k in first_new:length(passes(g))
-        pp = passes(g)[k]
-        pp.hostcond === nothing || throw(ArgumentError(
-            "when!: pass \"$(pp.name)\" already has a host condition — nested " *
-            "`when!` is not supported, because a pass carries one condition and " *
-            "nesting needs their conjunction."))
-        pp.loop === nothing || throw(ArgumentError(
-            "when!: pass \"$(pp.name)\" is in a `repeat!` loop. A conditional " *
-            "region around or inside a loop is not supported."))
-        pp.hostcond = cond
-    end
-    return nothing
 end
 
 function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
@@ -261,9 +232,6 @@ function repeat!(f, g::Graph, maxiters::Integer, count = nothing;
             pp.loop === nothing || throw(ArgumentError(
                 "repeat!: pass \"$(pp.name)\" is already in a loop. Nested `repeat!` " *
                 "is not supported: a pass belongs to one loop."))
-            pp.hostcond === nothing || throw(ArgumentError(
-                "repeat!: pass \"$(pp.name)\" has a `when!` condition. A conditional " *
-                "region inside a loop is not supported."))
             for (id, _) in pp.usages
                 resourcekind(g.ids.by_id[id]) isa ImageKind && throw(ArgumentError(
                     "repeat!: pass \"$(pp.name)\" touches an image. A loop body runs " *
@@ -408,7 +376,7 @@ asviewport(::Nothing) = nothing
 asviewport(v) = NTuple{4,Float32}(v)
 
 Pass(name, kind) = Pass(String(name), kind, Any[], LoadOp[], nothing, nothing, nothing, nothing,
-                        DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing, nothing)
+                        DrawCall[], Pair{Int,Type}[], Any[], nothing, nothing)
 
 first_target(p::Pass) = isempty(p.targets) ? p.depth : first(p.targets)
 
@@ -917,8 +885,6 @@ pool(c::Compile) = c.graph.dev.pool
 
 # `nbytes`, `arena` and `describe` have no `TransientResource` fallback, so a new
 # transient kind without them is a `MethodError`.
-
-writes_it(U) = writes(U)
 
 """
     overlapping(graph, a, b) -> Bool

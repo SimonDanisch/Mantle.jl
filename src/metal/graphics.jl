@@ -265,7 +265,7 @@ function mtlformat(@nospecialize(T::Type); srgb::Bool = false)
     T === RGBA{Float16} && return MTLm.MTLPixelFormatRGBA16Float
     T === RGBA{Float32} && return MTLm.MTLPixelFormatRGBA32Float
 
-    # Tuple spellings, as portable shaders and Vulkan's `julia_to_vk_format` use.
+    # Tuple spellings, as portable shaders write them.
     T === NTuple{4,Float32} && return MTLm.MTLPixelFormatRGBA32Float
     T === NTuple{2,Float32} && return MTLm.MTLPixelFormatRG32Float
     T === NTuple{4,Float16} && return MTLm.MTLPixelFormatRGBA16Float

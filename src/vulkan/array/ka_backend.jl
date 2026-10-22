@@ -355,36 +355,6 @@ function (obj::KA.Kernel{LavaBackend})(args...; ndrange=nothing, workgroupsize=n
     return launch_planned!(bq, obj, args, plan, tlas)
 end
 
-"""
-    lavakernel(kernel, ndrange; workgroupsize = nothing) -> LavaKernel
-
-`kernel` with its iteration plan resolved and concretely typed, so a launch is
-a static call with no cache lookup and no allocation; the plain call pays one
-dynamic dispatch. The plan's type depends only on the kernel type, its values on
-`ndrange`. Store it in a concretely typed field (`struct MyOp{KK}; kern::KK; end`);
-a `::LavaKernel` field falls back to dynamic dispatch.
-"""
-struct LavaKernel{K,P,Q}
-    inner::K
-    plan::P
-    # Concrete, so the call the plan feeds is static: a dynamic call would box
-    # the isbits plan on every launch.
-    bq::Q
-end
-
-function lavakernel(obj::KA.Kernel{LavaBackend}, ndrange; workgroupsize = nothing)
-    bq = obj.backend.dispatch_bq
-    plan = get_or_build_iter_plan(obj, ndrange, workgroupsize, ctxof(bq))
-    # `P` and `Q` come from the runtime types here, once, off the hot path.
-    return LavaKernel(obj, plan, bq)
-end
-
-"""Launch a [`lavakernel`](@ref): no lookup, no barrier, static dispatch."""
-function (lk::LavaKernel)(args...)
-    tlas = find_tlas_in_args(args)
-    return launch_planned!(lk.bq, lk.inner, args, lk.plan, tlas)
-end
-
 @noinline function launch_planned!(bq::SubmitChannel{<:VulkanQueue}, obj::KA.Kernel{LavaBackend},
                                    args::Tuple, plan::IterPlan, tlas)
     plan.nblocks == 0 && return nothing

@@ -5,20 +5,6 @@
 # write `Raycore.InstanceRecord`s; [`MetalInstanceDescriptor`](@ref) converts.
 
 """
-    packedtransform(m::Mat3x4f) -> MTL._MTLPackedFloat4x3
-
-Convert Mantle's row-major 3×4 affine into Metal's four columns of three. The
-two 48-byte layouts are transposes; reinterpreting shears every instance.
-"""
-function packedtransform(m::Mat3x4f)
-    # `m` is a column-major 4×3 whose bytes read as a row-major 3×4: element
-    # (row, col) of the affine is `m[col, row]`.
-    col(j) = MTL._MTLPackedFloat3(reinterpret(NTuple{12,UInt8},
-                                              (m[j, 1], m[j, 2], m[j, 3])))
-    MTL._MTLPackedFloat4x3((col(1), col(2), col(3), col(4)))
-end
-
-"""
     MetalInstanceDescriptor
 
 `MTLAccelerationStructureUserIDInstanceDescriptor` byte for byte, with plain

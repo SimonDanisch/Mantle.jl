@@ -67,7 +67,7 @@ const E = Mantle
     arena = M.pool(dev).arenas[E.Buffers()]
     @test arena.bytes == max(held, ps, pb)
     # Both are tenants; others may be, if an earlier file still holds a plan.
-    @test count(wr -> wr.value === small.plan || wr.value === big.plan, M.tenants!(arena)) == 2
+    @test count(t -> t === small.plan || t === big.plan, M.tenants!(arena)) == 2
     @test M.sharing(M.pool(dev), E.Buffers())
 
     # Interleaved, a hundred times: two plans alternating on one arena, each

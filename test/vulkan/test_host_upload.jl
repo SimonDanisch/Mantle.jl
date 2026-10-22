@@ -232,3 +232,19 @@ function check_copy_bounds(ctx)
         @test isempty(Mantle.validationmessages!(dev))
     end
 end
+
+function check_append_view(ctx)
+    @testset "append! to a view keeps the parent intact" begin
+        bq = ctx.default_bq
+        parent = Mantle.LavaArray(Int32.(1:10); bq)
+        v = view(parent, 3:5)
+        @test v isa Mantle.LavaArray && v.offset > 0
+        append!(v, Int32[100, 200])
+        @test Array(v) == Int32[3, 4, 5, 100, 200]
+        @test Array(parent) == Int32.(1:10)
+        own = Mantle.LavaArray(Int32.(1:4); bq)
+        resize!(own, 2)
+        append!(own, Int32[7, 8, 9])
+        @test Array(own) == Int32[1, 2, 7, 8, 9]
+    end
+end

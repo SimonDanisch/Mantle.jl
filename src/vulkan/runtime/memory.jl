@@ -23,8 +23,7 @@ const BUF_STATE_DEAD     = UInt8(2)
 # gate is `buf.state`.
 const BDA_POISON = UInt64(0)
 
-# Everything here is per `VkContext`, so `reset_device!`'s new context starts
-# fresh; `reset_memory_stats!` clears the heap estimate of a live one.
+# Everything here is per `VkContext`, so `reset_device!`'s new context starts fresh.
 
 """
     eager_gc!([ctx,] flag::Bool)
@@ -34,13 +33,6 @@ keep allocator GC out of a benchmark.
 """
 eager_gc!(ctx::VkContext, flag::Bool) = (mempolicy(ctx).eager_gc = flag)
 eager_gc!(flag::Bool) = eager_gc!(vk_context(), flag)
-
-function reset_memory_stats!(ctx::VkContext = vk_context())
-    st = mempolicy(ctx).stats
-    @atomic st.size = 0
-    @atomic st.last_updated = 0.0
-    return
-end
 
 """Sum of device-local heap sizes in bytes for `ctx`'s physical device."""
 function probe_device_local_heap(ctx::VkContext)
@@ -123,8 +115,7 @@ function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bo
         foreach(flush!,ctx.extra_queues)
         waitidle(lavadevice(ctx))
         seen=IdDict{Any,Nothing}()
-        for arena in values(spans(ctx).arenas), weak in tenants!(arena)
-            plan=weak.value
+        for arena in values(spans(ctx).arenas), plan in tenants!(arena)
             plan isa Plan && recorded(plan) || continue
             haskey(seen,plan) && continue
             seen[plan]=nothing
@@ -666,19 +657,9 @@ function destroy_pool!(ctx::VkContext)
     return nothing
 end
 
-"""Pool collection count and seconds spent, from the pool's `PoolPolicy`."""
-pool_gc_stats(ctx::VkContext = vk_context()) =
-    (; count = spans(ctx).policy.gc_count, seconds = spans(ctx).policy.gc_seconds)
-
-function reset_pool_gc_stats!(ctx::VkContext = vk_context())
-    p = spans(ctx).policy
-    p.gc_count = 0; p.gc_seconds = 0.0
-    return
-end
-
 # With `mempolicy(ctx).track_allocs`, every allocation adds its first four user
 # frames, as one call-site key, to `ctx.diag.alloc_trace` (site => (count,
-# bytes)); `dump_alloc_trace` sorts by bytes, which ranks sites unlike counts.
+# bytes)).
 function record_alloc_site!(ctx::VkContext, nbytes::Int)
     bt = stacktrace(backtrace())
     user_frames = String[]
@@ -701,26 +682,6 @@ function record_alloc_site!(ctx::VkContext, nbytes::Int)
     lock(d.alloc_trace_lock) do
         c, b = get(d.alloc_trace, site, (0, 0))
         d.alloc_trace[site] = (c + 1, b + nbytes)
-    end
-end
-
-function dump_alloc_trace(ctx::VkContext = vk_context())
-    d = ctx.diag
-    lock(d.alloc_trace_lock) do
-        sorted = sort(collect(d.alloc_trace), by = x -> x[2][2], rev = true)
-        tot = sum(x -> x[2][2], sorted; init = 0)
-        for (site, (count, bytes)) in sorted
-            println("  ", lpad(string(round(bytes / 1e6, digits = 1)), 8), " MB  ",
-                    lpad(string(count), 4), " ×  $site")
-        end
-        println("  ", lpad(string(round(tot / 1e6, digits = 1)), 8), " MB  total")
-    end
-end
-
-function clear_alloc_trace!(ctx::VkContext = vk_context())
-    d = ctx.diag
-    lock(d.alloc_trace_lock) do
-        empty!(d.alloc_trace)
     end
 end
 
@@ -908,11 +869,6 @@ end
 """Upload host bytes to `dst` at byte `offset`."""
 function upload!(dst::VkManagedBuffer, host_data::Vector{UInt8}; offset::Int=0)
     upload_typed!(dst, host_data; offset)
-end
-
-"""Fill `host_data` from `src` at byte `offset`."""
-function download!(host_data::Vector{UInt8}, src::VkManagedBuffer; offset::Int=0)
-    GC.@preserve host_data copy_buffer!(:download, src, pointer(host_data), length(host_data); offset)
 end
 
 const HostArrayView = SubArray{T,N,P} where {T,N,P<:Array}

@@ -160,16 +160,17 @@ mutable struct Arena
 end
 Arena() = Arena(nothing, 0, nothing, WeakRef[])
 
-"""Live tenants, pruning collected ones on the way past."""
+"""The live tenants as strong references, pruning collected ones. A `WeakRef` can
+clear at any allocation, so callers hold these instead of rereading `.value`."""
 function tenants!(a::Arena)
-    n = 0
-    for wr in a.tenants
-        wr.value === nothing && continue
-        n += 1
-        a.tenants[n] = wr
+    live = Any[]
+    filter!(a.tenants) do wr
+        t = wr.value
+        t === nothing && return false
+        push!(live, t)
+        return true
     end
-    resize!(a.tenants, n)
-    return a.tenants
+    return live
 end
 
 """
@@ -216,6 +217,7 @@ end
 
 # Everything pushed so far, newest first, leaving the inbox empty.
 takeall!(ib::Inbox) = @atomicswap ib.head = nothing
+Base.isempty(ib::Inbox) = (@atomic ib.head) === nothing
 
 """
     PoolPolicy()
@@ -312,7 +314,7 @@ once any plan holds a recording, whose commands name the current blocks; the
 automatic and pressure trims refuse to run then.
 """
 movable(p::Pool) =
-    all(a -> all(wr -> remappable(wr.value), tenants!(a)), values(p.arenas))
+    all(a -> all(remappable, tenants!(a)), values(p.arenas))
 
 blocksof(p::Pool, kind) = get!(() -> Block[], p.blocks, kind)
 
@@ -883,9 +885,9 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     # below patches the plan's BDAs. Images: the commands name image handles,
     # so the recording is invalidated and the next `run!` records again. Any
     # other tenant cannot be patched and refuses; the arena stays unchanged.
-    for wr in tenants!(a)
-        t = wr.value
-        (t === nothing || remappable(t)) && continue
+    live = tenants!(a)
+    for t in live
+        remappable(t) && continue
         if t isa Plan
             basekind(kind) isa Images && invalidate!(t)
         else
@@ -899,8 +901,8 @@ function reserve!(pool::Pool, dev, kind, transients, bytes::Int;
     fresh = carveorgrow!(pool, dev, kind, max(bytes, a.bytes), align, blocksize, want, true)
     old = a.region
     a.region, a.bytes, a.constraint = fresh, max(bytes, a.bytes), want
-    for wr in tenants!(a)
-        remap!(wr.value, kind, fresh)
+    for t in live
+        remap!(t, kind, fresh)
     end
     # Retired, not released: the remap's copies out of these bytes are recorded,
     # not yet executed.
@@ -923,7 +925,7 @@ Idempotent, since recompiling a plan registers it again.
 function tenant!(pool::Pool, kind, x)
     lock(pool.lock) do
         a = arenaof(pool, kind)
-        any(wr -> wr.value === x, tenants!(a)) || push!(a.tenants, WeakRef(x))
+        any(t -> t === x, tenants!(a)) || push!(a.tenants, WeakRef(x))
     end
     return x
 end

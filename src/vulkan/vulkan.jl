@@ -66,7 +66,7 @@ include("array/gpuarrays.jl")
 include("array/gemm.jl")
 include("array/mapreduce.jl")
 include("runtime/debug.jl")
-include("runtime/diagnostics.jl")   # gpu_memory_usage, dump_state
+include("runtime/diagnostics.jl")   # gpu_memory_usage
 include("runtime/external.jl")
 include("runtime/video.jl")
 include("runtime/videoapi.jl")   # decode_h264_gpu and friends

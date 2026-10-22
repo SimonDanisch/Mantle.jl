@@ -291,12 +291,7 @@ function recorddecode!(dec, refslots, out::VideoImage, target::VideoImage, decin
             # A video-only queue cannot copy to buffers.
             push!(dec.copyq, (target, y, uv))
         else
-            yb = y.buf[]
-            record_luma_copy!(dec.cbh, target, yb.buffer, pool_offset(yb) + y.offset)
-            if uv !== nothing
-                ub = uv.buf[]
-                record_chroma_copy!(dec.cbh, target, ub.buffer, pool_offset(ub) + uv.offset)
-            end
+            copyplanes!(dec.cbh, target, y, uv)
         end
     end
     dec.isfirst = false
@@ -372,14 +367,8 @@ function drain_copies!(dec::CodecDecoder)
     isempty(dec.copyq) && return nothing
     ctx = dec.ctx
     tok = oneshot!(ctx.default_bq; tag = :video) do e
-        cb = e.cmd
         for (vimg, y, uv) in dec.copyq
-            yb = y.buf[]
-            record_luma_copy!(cb, vimg, yb.buffer, pool_offset(yb) + y.offset)
-            if uv !== nothing
-                ub = uv.buf[]
-                record_chroma_copy!(cb, vimg, ub.buffer, pool_offset(ub) + uv.offset)
-            end
+            copyplanes!(e.cmd, vimg, y, uv)
         end
     end
     waitfor!(ctx.default_bq, tok)

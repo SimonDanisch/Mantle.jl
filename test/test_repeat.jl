@@ -406,20 +406,6 @@ end
             Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "inner")
         end
     end
-    # A `when!` region inside a body, and a body inside one.
-    g = Mantle.Graph(dev)
-    flag = Ref(true)
-    @test_throws ArgumentError Mantle.repeat!(g, 2) do i
-        Mantle.when!(g, flag) do
-            Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "conditional")
-        end
-    end
-    g = Mantle.Graph(dev)
-    @test_throws ArgumentError Mantle.when!(g, flag) do
-        Mantle.repeat!(g, 2) do i
-            Mantle.dispatch!(g, loop_zero!, (x,), 4; name = "looped")
-        end
-    end
 end
 
 # One iteration is a gated region: no loop in the plan, no index to reset or

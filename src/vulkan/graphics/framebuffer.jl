@@ -180,45 +180,64 @@ The color attachment as a `(width, height)` host matrix of
 x, so an image indexed `(row, column)` needs `permutedims`.
 """
 function readback_framebuffer(fb::VulkanFramebuffer)
-    ctx = fb.ctx
-    bq = ctx.default_bq
+    bq = fb.ctx.default_bq
+    return readbackimage(lavadevice(fb.ctx), bq, eltypeof(fb.color_format), fb.width, fb.height) do mb, off
+        oneshot!(bq; tag = :readback) do e
+            copyattachment!(e.cmd, fb, mb.buffer, off)
+            hold!(e, mb)
+            hold!(e, fb)
+        end
+    end
+end
 
-    T = eltypeof(fb.color_format)
-    bpp = pixelbytes(T)
-    nbytes = fb.width * fb.height * bpp
-    # `Readback` is host-cached; reading the BAR-backed `Unified` arena runs at
-    # write-combined speed.
-    dev = lavadevice(ctx)
+"""
+    readbackimage(f, dev, bq, T, w, h) -> Matrix{T}
+
+Read a `w × h` image of `T` back through a host-cached `Readback` region (reading
+the BAR-backed `Unified` arena runs at write-combined speed). `f(buffer, offset)`
+records the copy into the region and returns the token `bq` waits on.
+"""
+function readbackimage(f, dev, bq, ::Type{T}, w::Integer, h::Integer) where {T}
+    nbytes = w * h * pixelbytes(T)
     r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
                  align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
     mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
-
-    tok = oneshot!(bq; tag = :readback) do e
-        cmd = e.cmd
-        imagebarrier!(cmd, fb.color_image,
-            VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
-            VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
-
-        region = VK.BufferImageCopy(
-            UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
-            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
-                UInt32(0), UInt32(0), UInt32(1)),
-            VK.Offset3D(0, 0, 0),
-            VK.Extent3D(UInt32(fb.width), UInt32(fb.height), UInt32(1)),
-        )
-        VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
-        # Both are named by the copy until the wait below.
-        hold!(e, mb)
-        hold!(e, fb)
-    end
-    waitfor!(bq, tok)
-
-    pixels = Matrix{T}(undef, fb.width, fb.height)
+    waitfor!(bq, f(mb, pool_offset(mb) + offset(r)))
+    pixels = Matrix{T}(undef, w, h)
     unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
     release!(r)
     return pixels
+end
+
+"""
+    copyimage!(cmd, buffer, offset, image, (x, y, w, h); aspect = COLOR)
+
+Record a tightly packed copy of a region of `image`'s first mip level and layer,
+which must be in `TRANSFER_SRC_OPTIMAL`, to `buffer` at byte `offset`.
+"""
+function copyimage!(cmd, buffer::VK.Buffer, offset::Integer, image::VK.Image, (x, y, w, h);
+                    aspect::VK.ImageAspectFlag = VK.IMAGE_ASPECT_COLOR_BIT)
+    region = VK.BufferImageCopy(UInt64(offset), UInt32(0), UInt32(0),
+        VK.ImageSubresourceLayers(aspect, UInt32(0), UInt32(0), UInt32(1)),
+        VK.Offset3D(Int32(x), Int32(y), Int32(0)), VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)))
+    VK.cmd_copy_image_to_buffer(cmd, image, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, [region])
+    return nothing
+end
+
+# Copy `fb`'s colour attachment out and return it to `COLOR_ATTACHMENT_OPTIMAL`, the
+# layout a pass that loads it expects.
+function copyattachment!(cmd, fb::VulkanFramebuffer, buffer::VK.Buffer, offset::Integer)
+    imagebarrier!(cmd, fb.color_image,
+        VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+        VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
+    copyimage!(cmd, buffer, offset, fb.color_image, (0, 0, fb.width, fb.height))
+    imagebarrier!(cmd, fb.color_image,
+        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK.ACCESS_TRANSFER_READ_BIT,
+        VK.ACCESS_COLOR_ATTACHMENT_READ_BIT | VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+    return nothing
 end
 
 """
@@ -231,30 +250,10 @@ are tightly packed rows, so `(x, y)` of a `(width, height)` view is at linear
 index `(y - 1) * width + x`.
 """
 function copy_framebuffer!(dst::LavaArray{UInt8, 1}, fb::VulkanFramebuffer)
-    ctx = fb.ctx
-    bq = ctx.default_bq
     nbytes = fb.width * fb.height * pixelbytes(eltypeof(fb.color_format))
-    length(dst) >= nbytes ||
-        error("destination holds $(length(dst)) bytes, need $nbytes")
-
-    oneshot!(bq; tag = :copy) do e
-        cmd = e.cmd
-        imagebarrier!(cmd, fb.color_image,
-            VK.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
-            VK.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK.ACCESS_TRANSFER_READ_BIT)
-
-        managed = dst.buf[]
-        region = VK.BufferImageCopy(
-            UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
-            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
-                UInt32(0), UInt32(0), UInt32(1)),
-            VK.Offset3D(0, 0, 0),
-            VK.Extent3D(UInt32(fb.width), UInt32(fb.height), UInt32(1)),
-        )
-        VK.cmd_copy_image_to_buffer(cmd, fb.color_image,
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [region])
-
+    length(dst) >= nbytes || error("destination holds $(length(dst)) bytes, need $nbytes")
+    oneshot!(fb.ctx.default_bq; tag = :copy) do e
+        copyattachment!(e.cmd, fb, dst.buf[].buffer, pool_offset(dst.buf[]) + dst.offset)
         hold!(e, dst)
         hold!(e, fb)
     end
@@ -274,20 +273,11 @@ function copy_image_to_buffer!(e::Emitter, dst::LavaArray{T, 1}, image::VK.Image
                                aspect::VK.ImageAspectFlag=VK.IMAGE_ASPECT_COLOR_BIT,
                                region = nothing) where {T}
     # Any element type: the copy moves bytes, `T` says what they mean.
-    x, y, w, h = region === nothing ? (0, 0, width, height) : region
-    nbytes = w * h * pixelbytes(eltypeof(format))
+    rect = region === nothing ? (0, 0, width, height) : region
+    nbytes = rect[3] * rect[4] * pixelbytes(eltypeof(format))
     sizeof(T) * length(dst) >= nbytes ||
         error("destination holds $(sizeof(T) * length(dst)) bytes, need $nbytes")
-    managed = dst.buf[]
-    copyregion = VK.BufferImageCopy(
-        UInt64(pool_offset(managed) + dst.offset), UInt32(0), UInt32(0),
-        VK.ImageSubresourceLayers(aspect,
-            UInt32(0), UInt32(0), UInt32(1)),
-        VK.Offset3D(Int32(x), Int32(y), 0),
-        VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)),
-    )
-    VK.cmd_copy_image_to_buffer(e.cmd, image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, managed.buffer, [copyregion])
+    copyimage!(e.cmd, dst.buf[].buffer, pool_offset(dst.buf[]) + dst.offset, image, rect; aspect)
     hold!(e, dst)
     return dst
 end
@@ -316,52 +306,29 @@ function readback_window(win::VulkanWindow)
 
     # Read after `acquireframe!`, which may have rebuilt the swapchain.
     w, h = size(win)
-    T = eltypeof(win.format)
-    nbytes = w * h * pixelbytes(T)
-
-    # `Readback` is host-cached; see `readback_framebuffer`.
-    dev = lavadevice(ctx)
-    r = acquire!(pool(dev), dev, Readback(), nothing, max(Int(nbytes), 16);
-                 align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
-    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
-
-    frame = oneshot(bq) do e
-        cmd = e.cmd
-        # srcStage COLOR_ATTACHMENT_OUTPUT matches the acquire-semaphore wait
-        # `submit_and_present!` adds; TOP_OF_PIPE would not depend on it.
-        imagebarrier!(cmd, image,
-            from, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
-            VK.AccessFlag(0), VK.ACCESS_TRANSFER_READ_BIT)
-
-        region = VK.BufferImageCopy(
-            UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
-            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_COLOR_BIT,
-                UInt32(0), UInt32(0), UInt32(1)),
-            VK.Offset3D(0, 0, 0),
-            VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)),
-        )
-        VK.cmd_copy_image_to_buffer(cmd, image,
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
-
-        # Not `presentready!`: a read does not draw, so `holdsframe` stays.
-        imagebarrier!(cmd, image,
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))
-        hold!(e, win)
+    return readbackimage(lavadevice(ctx), bq, eltypeof(win.format), w, h) do mb, off
+        frame = oneshot(bq) do e
+            cmd = e.cmd
+            # srcStage COLOR_ATTACHMENT_OUTPUT matches the acquire-semaphore wait
+            # `submit_and_present!` adds; TOP_OF_PIPE would not depend on it.
+            imagebarrier!(cmd, image,
+                from, VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK.PIPELINE_STAGE_TRANSFER_BIT,
+                VK.AccessFlag(0), VK.ACCESS_TRANSFER_READ_BIT)
+            copyimage!(cmd, mb.buffer, off, image, (0, 0, w, h))
+            # Not `presentready!`: a read does not draw, so `holdsframe` stays.
+            imagebarrier!(cmd, image,
+                VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK.PIPELINE_STAGE_TRANSFER_BIT, VK.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                VK.ACCESS_TRANSFER_READ_BIT, VK.AccessFlag(0))
+            hold!(e, win)
+        end
+        # The acquired image must be presented back, or a few readbacks without a
+        # frame block forever in vkAcquireNextImageKHR. The copy rides in the submit
+        # that presents: it waits on the binary acquire semaphore, which a separate
+        # submit would consume.
+        submit_and_present!(bq, win, frame)
     end
-    # The acquired image must be presented back, or a few readbacks without a
-    # frame block forever in vkAcquireNextImageKHR. The copy rides in the submit
-    # that presents: it waits on the binary acquire semaphore, which a separate
-    # submit would consume.
-    tok = submit_and_present!(bq, win, frame)
-    waitfor!(bq, tok)
-
-    pixels = Matrix{T}(undef, w, h)
-    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
-    release!(r)
-    return pixels
 end
 
 """

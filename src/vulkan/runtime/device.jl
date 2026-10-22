@@ -564,16 +564,6 @@ function workgroup_matrix_granularity(ctx::VkContext)
 end
 
 """
-    shader_core_count(ctx) -> Union{Nothing,Int}
-
-SMs (NVIDIA) or active compute units (AMD), or `nothing` when unreported.
-`nothing`, not `0`, so an unguarded division fails instead of silently giving
-zero splits. Supply a fallback explicitly: `something(shader_core_count(ctx), 16)`.
-"""
-shader_core_count(ctx::VkContext) =
-    (c = caps(ctx).cores) == 0 ? nothing : c
-
-"""
     shader_warps_per_sm(ctx) -> Union{Nothing,Int}
 
 Maximum resident subgroups per SM, or `nothing` when unreported (only
@@ -581,14 +571,6 @@ Maximum resident subgroups per SM, or `nothing` when unreported (only
 """
 shader_warps_per_sm(ctx::VkContext) =
     (w = caps(ctx).warps) == 0 ? nothing : w
-
-"""
-    max_shared_memory(ctx) -> Int
-
-`maxComputeSharedMemorySize`: the per-workgroup shared-memory limit in bytes.
-Core Vulkan, so always reported.
-"""
-max_shared_memory(ctx::VkContext) = caps(ctx).sharedbudget
 
 const VK_CONTEXT_REF = Ref{Union{Nothing, VkContext}}(nothing)
 
@@ -686,8 +668,6 @@ function vk_context()
         unlock(VK_CONTEXT_LOCK)
     end
 end
-
-vk_device() = vk_context().device
 
 """
     reset_device!(; select = nothing,
@@ -929,424 +909,119 @@ function VkContext(; select = nothing, debug::DebugConfig = DebugConfig())
 
     # One video-decode queue whenever offered: extensions and queue have no
     # effect until a decode session exists.
+    advertised = deviceextensions(phys_dev)
+    has(e) = e in advertised
     video_qf_idx = find_video_decode_queue_family(phys_dev)
-    has_video_decode = video_qf_idx !== nothing &&
-        has_extension(phys_dev, "VK_KHR_video_queue") &&
-        has_extension(phys_dev, "VK_KHR_video_decode_queue") &&
-        has_extension(phys_dev, "VK_KHR_video_decode_h264")
+    videoexts = ["VK_KHR_video_queue", "VK_KHR_video_decode_queue", "VK_KHR_video_decode_h264"]
+    has_video_decode = video_qf_idx !== nothing && all(has, videoexts)
     has_video_decode || (video_qf_idx = nothing)
     video_qf_idx === nothing ||
         push!(queue_ci, VK.DeviceQueueCreateInfo(video_qf_idx, Float32[1.0]))
 
-    has_rt = has_rt_extensions(phys_dev)
-    has_ray_query = has_rt && has_extension(phys_dev, "VK_KHR_ray_query")
-    # SER (NVIDIA): `reorderThreadWithHitObjectNV` regroups divergent
-    # closest-hit shading into coherent warps. Optional.
-    has_ser = has_rt && has_extension(phys_dev, "VK_NV_ray_tracing_invocation_reorder")
-
-    # Explicit workgroup memory layout: needed for mixed-type shared memory structs.
-    has_wg_explicit = has_extension(phys_dev, "VK_KHR_workgroup_memory_explicit_layout")
-    has_atomic_float = has_extension(phys_dev, "VK_EXT_shader_atomic_float")
-    # 64-bit atomics, asked rather than assumed: the emitter declares
-    # `Int64Atomics`, undefined without the feature
-    # (VUID-VkShaderModuleCreateInfo-pCode-08740), and enabling an unsupported
-    # feature fails device creation.
-    has_int64_atomics = let
-        q = VK.get_physical_device_features_2(phys_dev,
-                VK.PhysicalDeviceVulkan12Features).next
-        (buffer = q.shader_buffer_int_64_atomics, shared = q.shader_shared_int_64_atomics)
-    end
-    # Shader Device scope needs its own feature; QueueFamily is not equivalent
-    # when work can run on the async compute family.
-    has_memory_model_device_scope = VK.get_physical_device_features_2(phys_dev,
-        VK.PhysicalDeviceVulkan12Features).next.vulkan_memory_model_device_scope
-    # Subgroup operations on 8-, 16- and 64-bit types (`subgroup_shuffle` is
-    # bound for 64-bit types) require this feature
-    # (VUID-RuntimeSpirv-None-06275). Asked, as for the atomics.
-    has_subgroup_extended = let
-        q = VK.get_physical_device_features_2(phys_dev,
-                VK.PhysicalDeviceVulkan12Features).next
-        q.shader_subgroup_extended_types
-    end
-    has_pipeline_exec_props = has_extension(phys_dev, "VK_KHR_pipeline_executable_properties")
-    # Per-heap budget and usage for OOM reports.
-    has_memory_budget = has_extension(phys_dev, "VK_EXT_memory_budget")
-    # Device-generated commands: one execute whose sequence count comes from a
-    # device address. Not what `repeat!` lowers to: sequences have no barriers
-    # between them, so they cannot express a loop where iteration k+1 reads
-    # what k wrote.
-    has_dgc = has_extension(phys_dev, "VK_EXT_device_generated_commands")
-    # Conditional rendering: a device-buffer predicate, read at execution,
-    # discards the commands in its scope. `repeat!` records the body `maxiters`
-    # times with barriers between iterations and lets the device skip the
-    # rest; barriers still execute inside a discarded scope.
-    has_cond_render = has_extension(phys_dev, "VK_EXT_conditional_rendering")
-    # VK_KHR_cooperative_matrix. The feature, not only the extension: lavapipe
-    # on macOS lists the extension with `cooperative_matrix` off, and requesting
-    # it fails device creation with FEATURE_NOT_PRESENT.
-    has_coopmat = has_extension(phys_dev, "VK_KHR_cooperative_matrix") &&
-        VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceCooperativeMatrixFeaturesKHR).next.cooperative_matrix
-    # NVIDIA-only. Which sub-features exist is queried below, before device
-    # creation, not assumed from the extension.
-    has_coopmat2 = has_coopmat && has_extension(phys_dev, "VK_NV_cooperative_matrix2")
-    has_coopvec = has_extension(phys_dev, "VK_NV_cooperative_vector")
-    has_max_reconv = has_extension(phys_dev, "VK_KHR_shader_maximal_reconvergence")
-    has_subgroup_ucf = has_extension(phys_dev, "VK_KHR_shader_subgroup_uniform_control_flow")
-    has_subgroup_rotate = has_extension(phys_dev, "VK_KHR_shader_subgroup_rotate")
-    has_mesh_shader = has_extension(phys_dev, "VK_EXT_mesh_shader")
-
-    # A swapchain only where offered (headless lavapipe on macOS has none). The
-    # spec requires enabling `VK_KHR_portability_subset` when advertised.
-    extensions = String[]
-    has_extension(phys_dev, "VK_KHR_swapchain") && push!(extensions, "VK_KHR_swapchain")
-    has_extension(phys_dev, "VK_KHR_portability_subset") &&
-        push!(extensions, "VK_KHR_portability_subset")
-    if has_rt
-        append!(extensions, [
-            "VK_KHR_acceleration_structure",
-            "VK_KHR_ray_tracing_pipeline",
-            "VK_KHR_deferred_host_operations",
-        ])
-    end
-    if has_ray_query
-        push!(extensions, "VK_KHR_ray_query")
-    end
-    if has_ser
-        push!(extensions, "VK_NV_ray_tracing_invocation_reorder")
-    end
-    if has_wg_explicit
-        push!(extensions, "VK_KHR_workgroup_memory_explicit_layout")
-    end
-    if has_atomic_float
-        push!(extensions, "VK_EXT_shader_atomic_float")
-    end
-    # Pipeline executable properties (registers, scratch, ISA) for profiling.
-    # Opt-in via `enable_pipeline_executable_properties!()` before device
-    # creation, because enabling it changes pipeline creation on some drivers.
-    exec_props = has_pipeline_exec_props && PIPELINE_EXEC_PROPERTIES_REQUESTED[]
-    if exec_props
-        push!(extensions, "VK_KHR_pipeline_executable_properties")
-    end
-    if has_memory_budget
-        push!(extensions, "VK_EXT_memory_budget")
-    end
-    if has_dgc
-        push!(extensions, "VK_EXT_device_generated_commands")
-    end
-    if has_cond_render
-        push!(extensions, "VK_EXT_conditional_rendering")
-    end
-    if has_coopmat
-        push!(extensions, "VK_KHR_cooperative_matrix")
-    end
-    if has_coopmat2
-        push!(extensions, "VK_NV_cooperative_matrix2")
-    end
-    if has_coopvec
-        push!(extensions, "VK_NV_cooperative_vector")
-    end
-    if has_max_reconv
-        push!(extensions, "VK_KHR_shader_maximal_reconvergence")
-    end
-    if has_subgroup_ucf
-        push!(extensions, "VK_KHR_shader_subgroup_uniform_control_flow")
-    end
-    if has_subgroup_rotate
-        push!(extensions, "VK_KHR_shader_subgroup_rotate")
-    end
-    if has_mesh_shader
-        push!(extensions, "VK_EXT_mesh_shader")
-    end
-    # Opaque-fd export for GL interop; no effect until a `VulkanExternalImage` exists.
-    has_external_memory = has_extension(phys_dev, "VK_KHR_external_memory_fd")
-    if has_external_memory
+    rtexts = ("VK_KHR_acceleration_structure", "VK_KHR_ray_tracing_pipeline",
+              "VK_KHR_deferred_host_operations")
+    has_rt = all(has, rtexts)
+    # Pipeline executable properties (registers, scratch, ISA) for profiling: opt-in
+    # via `enable_pipeline_executable_properties!()` before device creation, because
+    # enabling it changes pipeline creation on some drivers.
+    exec_props = has("VK_KHR_pipeline_executable_properties") && PIPELINE_EXEC_PROPERTIES_REQUESTED[]
+    # Every optional extension is enabled where advertised; enabling one never fails
+    # device creation, a feature bit the device lacks does. `VK_KHR_portability_subset`
+    # must be enabled when advertised; headless lavapipe on macOS has no swapchain.
+    # Opaque-fd export is for GL interop, host import for `importhost` (weights
+    # mapped from a file).
+    extensions = filter(has, [
+        "VK_KHR_swapchain", "VK_KHR_portability_subset",
+        "VK_KHR_workgroup_memory_explicit_layout", "VK_EXT_shader_atomic_float",
+        "VK_EXT_memory_budget", "VK_EXT_conditional_rendering", "VK_KHR_cooperative_matrix",
+        "VK_NV_cooperative_matrix2", "VK_NV_cooperative_vector",
+        "VK_KHR_shader_maximal_reconvergence", "VK_KHR_shader_subgroup_uniform_control_flow",
+        "VK_KHR_shader_subgroup_rotate", "VK_EXT_mesh_shader",
+        "VK_KHR_external_memory_fd", "VK_EXT_external_memory_host"])
+    has_rt && append!(extensions, rtexts, filter(has, ["VK_KHR_ray_query", "VK_NV_ray_tracing_invocation_reorder"]))
+    exec_props && push!(extensions, "VK_KHR_pipeline_executable_properties")
+    any(has, ("VK_KHR_external_memory_fd", "VK_EXT_external_memory_host")) &&
         push!(extensions, "VK_KHR_external_memory")
-        push!(extensions, "VK_KHR_external_memory_fd")
-    end
-    # Host memory the device reads in place (`importhost`), e.g. weights mapped
-    # from a file.
-    host_import_alignment = 0
-    if has_extension(phys_dev, "VK_EXT_external_memory_host")
-        has_external_memory || push!(extensions, "VK_KHR_external_memory")
-        push!(extensions, "VK_EXT_external_memory_host")
-        host_import_alignment = Int(VK.get_physical_device_properties_2(phys_dev,
-            VK.PhysicalDeviceExternalMemoryHostPropertiesEXT).next.min_imported_host_pointer_alignment)
-    end
-    if has_video_decode
-        append!(extensions, ["VK_KHR_video_queue", "VK_KHR_video_decode_queue",
-                             "VK_KHR_video_decode_h264"])
-        has_extension(phys_dev, "VK_KHR_video_decode_h265") &&
-            push!(extensions, "VK_KHR_video_decode_h265")
-    end
+    has_video_decode && append!(extensions, videoexts, filter(has, ["VK_KHR_video_decode_h265"]))
+    has_external_memory = has("VK_KHR_external_memory_fd")
+    host_import_alignment = has("VK_EXT_external_memory_host") ?
+        Int(VK.get_physical_device_properties_2(phys_dev,
+            VK.PhysicalDeviceExternalMemoryHostPropertiesEXT).next.min_imported_host_pointer_alignment) : 0
+    has_memory_budget = has("VK_EXT_memory_budget")
 
-    # Vulkan 1.2 promoted features go in `Vulkan12Features`, which must not be
-    # chained with their individual structs (e.g. BDA). Variable pointers are
-    # 1.1 and chain separately.
-    var_ptr_features = VK.PhysicalDeviceVariablePointersFeatures(
-        true,   # variable_pointers_storage_buffer
-        true,   # variable_pointers
-    )
-    vulkan12_features = VK._PhysicalDeviceVulkan12Features(
-        false,  # sampler_mirror_clamp_to_edge
-        false,  # draw_indirect_count
-        false,  # storage_buffer_8_bit_access
-        false,  # uniform_and_storage_buffer_8_bit_access
-        false,  # storage_push_constant_8
-        has_int64_atomics.buffer,  # shader_buffer_int_64_atomics, the emitter declares Int64Atomics
-        has_int64_atomics.shared,  # shader_shared_int_64_atomics, same for @localmem
-        true,   # shader_float_16, required: Float16 in SPIR-V
-        true,   # shader_int_8, required: i8 in SPIR-V
-        false,  # descriptor_indexing
-        false,  # shader_input_attachment_array_dynamic_indexing
-        false,  # shader_uniform_texel_buffer_array_dynamic_indexing
-        false,  # shader_storage_texel_buffer_array_dynamic_indexing
-        false,  # shader_uniform_buffer_array_non_uniform_indexing
-        false,  # shader_sampled_image_array_non_uniform_indexing
-        false,  # shader_storage_buffer_array_non_uniform_indexing
-        false,  # shader_storage_image_array_non_uniform_indexing
-        false,  # shader_input_attachment_array_non_uniform_indexing
-        false,  # shader_uniform_texel_buffer_array_non_uniform_indexing
-        false,  # shader_storage_texel_buffer_array_non_uniform_indexing
-        false,  # descriptor_binding_uniform_buffer_update_after_bind
-        false,  # descriptor_binding_sampled_image_update_after_bind
-        false,  # descriptor_binding_storage_image_update_after_bind
-        false,  # descriptor_binding_storage_buffer_update_after_bind
-        false,  # descriptor_binding_uniform_texel_buffer_update_after_bind
-        false,  # descriptor_binding_storage_texel_buffer_update_after_bind
-        false,  # descriptor_binding_update_unused_while_pending
-        false,  # descriptor_binding_partially_bound
-        false,  # descriptor_binding_variable_descriptor_count
-        false,  # runtime_descriptor_array
-        false,  # sampler_filter_minmax
-        true,   # scalar_block_layout, BDA struct layout
-        false,  # imageless_framebuffer
-        false,  # uniform_buffer_standard_layout
-        has_subgroup_extended,  # shader_subgroup_extended_types, 64-bit subgroup shuffles
-        false,  # separate_depth_stencil_layouts
-        false,  # host_query_reset
-        true,   # timeline_semaphore, required: cross-queue sync
-        true,   # buffer_device_address, required
-        false,  # buffer_device_address_capture_replay
-        false,  # buffer_device_address_multi_device
-        true,   # vulkan_memory_model, required: QueueFamily scope
-        has_memory_model_device_scope,  # vulkan_memory_model_device_scope
-        false,  # vulkan_memory_model_availability_visibility_chains
-        false,  # shader_output_viewport_index
-        false,  # shader_output_layer
-        false;  # subgroup_broadcast_dynamic_id
-        next=var_ptr_features
-    )
-    # Vulkan 1.3 core features, all guaranteed by 1.3. `synchronization2` is
-    # required (`vkQueueSubmit2`, `vkCmdPipelineBarrier2`); `dynamic_rendering`
-    # avoids render pass and framebuffer objects.
-    vulkan13_features = VK.PhysicalDeviceVulkan13Features(
-        :synchronization2,
-        :dynamic_rendering,
-        :maintenance4,
-        :subgroup_size_control,
-        :compute_full_subgroups,
-        :pipeline_creation_cache_control,
-        :shader_demote_to_helper_invocation,
-        :shader_terminate_invocation,
-        :shader_integer_dot_product,
-        :shader_zero_initialize_workgroup_memory,
-        :private_data;
-        next=vulkan12_features,
-    )
-
-    feature_chain = vulkan13_features
-    if has_wg_explicit
-        wg_explicit_features = VK.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR(
-            true,   # workgroup_memory_explicit_layout
-            true,   # workgroup_memory_explicit_layout_8_bit_access
-            true,   # workgroup_memory_explicit_layout_16_bit_access
-            true;   # workgroup_memory_explicit_layout_scalar_block_layout
-            next=feature_chain
-        )
-        feature_chain = wg_explicit_features
-    end
-
-    if exec_props
-        exec_props_features = VK.PhysicalDevicePipelineExecutablePropertiesFeaturesKHR(
-            true;  # pipeline_executable_info
-            next=feature_chain
-        )
-        feature_chain = exec_props_features
-    end
-
-    # Atomic float: Lava's reductions use OpAtomicFAdd.
-    if has_atomic_float
-        atomic_float_features = VK.PhysicalDeviceShaderAtomicFloatFeaturesEXT(
-            true,   # shader_buffer_float_32_atomics, OpAtomicStore/Load/Exchange on f32 SSBO
-            true,   # shader_buffer_float_32_atomic_add, required: OpAtomicFAdd on f32 SSBO
-            false,  # shader_buffer_float_64_atomics
-            false,  # shader_buffer_float_64_atomic_add
-            true,   # shader_shared_float_32_atomics, workgroup memory
-            true,   # shader_shared_float_32_atomic_add
-            false,  # shader_shared_float_64_atomics
-            false,  # shader_shared_float_64_atomic_add
-            false,  # shader_image_float_32_atomics
-            false,  # shader_image_float_32_atomic_add
-            false,  # sparse_image_float_32_atomics
-            false;  # sparse_image_float_32_atomic_add
-            next=feature_chain
-        )
-        feature_chain = atomic_float_features
-    end
-
+    # The feature chain, each struct enabling what Mantle uses and the device reports.
+    chain = Any[]
+    feature!(T, want = fieldnames(T); required = ()) = last(push!(chain,
+        devicefeatures(phys_dev, T, want; required, next = isempty(chain) ? C_NULL : last(chain))))
+    feature!(VK.PhysicalDeviceVariablePointersFeatures)
+    # Required: Float16 and i8 in SPIR-V, the BDA struct layout, cross-queue sync, BDA
+    # and QueueFamily memory scope. Wanted: the emitter declares Int64Atomics (also
+    # for @localmem), 64-bit subgroup shuffles need extended types
+    # (VUID-RuntimeSpirv-None-06275), and Device scope is not QueueFamily scope when
+    # work runs on the async compute family.
+    feature!(VK.PhysicalDeviceVulkan12Features,
+        (:shader_buffer_int_64_atomics, :shader_shared_int_64_atomics,
+         :shader_subgroup_extended_types, :vulkan_memory_model_device_scope);
+        required = (:shader_float_16, :shader_int_8, :scalar_block_layout,
+                    :timeline_semaphore, :buffer_device_address, :vulkan_memory_model))
+    # All required by Vulkan 1.3: `synchronization2` for `vkQueueSubmit2` and
+    # `vkCmdPipelineBarrier2`, `dynamic_rendering` instead of render pass objects.
+    feature!(VK.PhysicalDeviceVulkan13Features, ();
+        required = (:synchronization2, :dynamic_rendering, :maintenance4,
+                    :subgroup_size_control, :compute_full_subgroups,
+                    :pipeline_creation_cache_control, :shader_demote_to_helper_invocation,
+                    :shader_terminate_invocation, :shader_integer_dot_product,
+                    :shader_zero_initialize_workgroup_memory, :private_data))
+    # Mixed-type shared-memory structs.
+    has("VK_KHR_workgroup_memory_explicit_layout") &&
+        feature!(VK.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR)
+    exec_props && feature!(VK.PhysicalDevicePipelineExecutablePropertiesFeaturesKHR)
+    # Lava's reductions use OpAtomicFAdd, on storage buffers and workgroup memory.
+    has("VK_EXT_shader_atomic_float") && feature!(VK.PhysicalDeviceShaderAtomicFloatFeaturesEXT,
+        (:shader_buffer_float_32_atomics, :shader_buffer_float_32_atomic_add,
+         :shader_shared_float_32_atomics, :shader_shared_float_32_atomic_add))
     if has_rt
-        as_features = VK.PhysicalDeviceAccelerationStructureFeaturesKHR(
-            true,   # acceleration_structure
-            false,  # acceleration_structure_capture_replay
-            false,  # acceleration_structure_indirect_build
-            false,  # acceleration_structure_host_commands
-            false;  # descriptor_binding_acceleration_structure_update_after_bind
-            next=feature_chain
-        )
-        rt_features = VK.PhysicalDeviceRayTracingPipelineFeaturesKHR(
-            true,   # ray_tracing_pipeline
-            false,  # ray_tracing_pipeline_shader_group_handle_capture_replay
-            false,  # ray_tracing_pipeline_shader_group_handle_capture_replay_mixed
-            true,   # ray_tracing_pipeline_trace_rays_indirect
-            false;  # ray_traversal_primitive_culling
-            next=as_features
-        )
-        feature_chain = rt_features
+        feature!(VK.PhysicalDeviceAccelerationStructureFeaturesKHR, (); required = (:acceleration_structure,))
+        feature!(VK.PhysicalDeviceRayTracingPipelineFeaturesKHR, (:ray_tracing_pipeline_trace_rays_indirect,);
+                 required = (:ray_tracing_pipeline,))
     end
-    if has_ray_query
-        rq_features = VK.PhysicalDeviceRayQueryFeaturesKHR(
-            true;   # ray_query
-            next=feature_chain
-        )
-        feature_chain = rq_features
-    end
-    if has_ser
-        ser_features = VK.PhysicalDeviceRayTracingInvocationReorderFeaturesNV(
-            true;   # ray_tracing_invocation_reorder
-            next=feature_chain
-        )
-        feature_chain = ser_features
-    end
-    if has_coopmat
-        cm_features = VK.PhysicalDeviceCooperativeMatrixFeaturesKHR(
-            true,   # cooperative_matrix
-            false;  # cooperative_matrix_robust_buffer_access
-            next=feature_chain
-        )
-        feature_chain = cm_features
-    end
-    # Each feature struct below is filled from what the device reports:
-    # `vkCreateDevice` fails on an unsupported bit, and an advertised extension
-    # does not imply every bit.
+    enabled(ext, T, f, want = fieldnames(T)) = has(ext) && getfield(feature!(T, want), f)
+    has_ray_query = has_rt && enabled("VK_KHR_ray_query", VK.PhysicalDeviceRayQueryFeaturesKHR, :ray_query)
+    # SER (NVIDIA): `reorderThreadWithHitObjectNV` regroups divergent closest-hit
+    # shading into coherent warps.
+    has_ser = has_rt && enabled("VK_NV_ray_tracing_invocation_reorder",
+        VK.PhysicalDeviceRayTracingInvocationReorderFeaturesNV, :ray_tracing_invocation_reorder)
+    # The feature, not only the extension: lavapipe on macOS lists the extension
+    # with `cooperative_matrix` off.
+    has_coopmat = enabled("VK_KHR_cooperative_matrix", VK.PhysicalDeviceCooperativeMatrixFeaturesKHR,
+                          :cooperative_matrix, (:cooperative_matrix,))
     coopmat2_caps = CoopMat2Caps()
-    if has_coopmat2
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceCooperativeMatrix2FeaturesNV).next
-        coopmat2_caps = CoopMat2Caps(
-            true,
-            q.cooperative_matrix_workgroup_scope,
-            q.cooperative_matrix_flexible_dimensions,
-            q.cooperative_matrix_reductions,
-            q.cooperative_matrix_conversions,
-            q.cooperative_matrix_per_element_operations,
-            q.cooperative_matrix_tensor_addressing,
-            q.cooperative_matrix_block_loads,
-        )
-        feature_chain = VK.PhysicalDeviceCooperativeMatrix2FeaturesNV(
-            coopmat2_caps.workgroup_scope,
-            coopmat2_caps.flexible_dimensions,
-            coopmat2_caps.reductions,
-            coopmat2_caps.conversions,
-            coopmat2_caps.per_element_operations,
-            coopmat2_caps.tensor_addressing,
-            coopmat2_caps.block_loads;
-            next=feature_chain
-        )
+    if has_coopmat && has("VK_NV_cooperative_matrix2")
+        q = feature!(VK.PhysicalDeviceCooperativeMatrix2FeaturesNV)
+        coopmat2_caps = CoopMat2Caps(true, (getfield(q, f) for f in fieldnames(typeof(q)) if f !== :next)...)
     end
-    if has_coopvec
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceCooperativeVectorFeaturesNV).next
-        has_coopvec = q.cooperative_vector
-        if has_coopvec
-            feature_chain = VK.PhysicalDeviceCooperativeVectorFeaturesNV(
-                true,                             # cooperative_vector
-                q.cooperative_vector_training;    # (inference-only is legal)
-                next=feature_chain
-            )
-        end
-    end
-    if has_dgc
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT).next
-        has_dgc = q.device_generated_commands
-        has_dgc && (feature_chain = VK.PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT(
-            true, q.dynamic_generated_pipeline_layout; next = feature_chain))
-    end
-    if has_cond_render
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceConditionalRenderingFeaturesEXT).next
-        has_cond_render = q.conditional_rendering
-        # `inherited_conditional_rendering` (secondary command buffers, unused)
-        # is requested as reported.
-        has_cond_render && (feature_chain = VK.PhysicalDeviceConditionalRenderingFeaturesEXT(
-            true, q.inherited_conditional_rendering; next = feature_chain))
-    end
-    if has_max_reconv
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR).next
-        has_max_reconv = q.shader_maximal_reconvergence
-        has_max_reconv && (feature_chain =
-            VK.PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR(true; next=feature_chain))
-    end
-    if has_subgroup_ucf
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR).next
-        has_subgroup_ucf = q.shader_subgroup_uniform_control_flow
-        has_subgroup_ucf && (feature_chain =
-            VK.PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR(true; next=feature_chain))
-    end
-    if has_mesh_shader
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceMeshShaderFeaturesEXT).next
-        # The task stage is optional: the geometry lowering dispatches mesh
-        # workgroups directly.
-        has_mesh_shader = q.mesh_shader
-        has_mesh_shader && (feature_chain = VK.PhysicalDeviceMeshShaderFeaturesEXT(
-            q.task_shader,       # as reported, nothing amplifies
-            true,                # mesh_shader
-            false,               # multiview_mesh_shader
-            false,               # primitive_fragment_shading_rate_mesh_shader
-            false;               # mesh_shader_queries
-            next = feature_chain))
-    end
-    if has_subgroup_rotate
-        q = VK.get_physical_device_features_2(phys_dev,
-            VK.PhysicalDeviceShaderSubgroupRotateFeaturesKHR).next
-        has_subgroup_rotate = q.shader_subgroup_rotate
-        has_subgroup_rotate && (feature_chain =
-            VK.PhysicalDeviceShaderSubgroupRotateFeaturesKHR(
-                true,                             # shader_subgroup_rotate
-                q.shader_subgroup_rotate_clustered;
-                next=feature_chain))
-    end
+    has_coopvec = enabled("VK_NV_cooperative_vector", VK.PhysicalDeviceCooperativeVectorFeaturesNV,
+                          :cooperative_vector)
+    # Conditional rendering: a device-buffer predicate, read at execution, discards
+    # the commands in its scope; barriers still execute inside a discarded scope.
+    has_cond_render = enabled("VK_EXT_conditional_rendering",
+        VK.PhysicalDeviceConditionalRenderingFeaturesEXT, :conditional_rendering)
+    has_max_reconv = enabled("VK_KHR_shader_maximal_reconvergence",
+        VK.PhysicalDeviceShaderMaximalReconvergenceFeaturesKHR, :shader_maximal_reconvergence)
+    has_subgroup_ucf = enabled("VK_KHR_shader_subgroup_uniform_control_flow",
+        VK.PhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR, :shader_subgroup_uniform_control_flow)
+    has_subgroup_rotate = enabled("VK_KHR_shader_subgroup_rotate",
+        VK.PhysicalDeviceShaderSubgroupRotateFeaturesKHR, :shader_subgroup_rotate)
+    # The task stage as reported: the geometry lowering dispatches mesh workgroups directly.
+    has_mesh_shader = enabled("VK_EXT_mesh_shader", VK.PhysicalDeviceMeshShaderFeaturesEXT,
+                              :mesh_shader, (:task_shader, :mesh_shader))
 
-    core_features = VK.PhysicalDeviceFeatures(
-        :shader_int_64, :shader_float_64,
-        :shader_int_16,
-        :independent_blend,
-        :geometry_shader, :tessellation_shader,
-        :fill_mode_non_solid, :wide_lines, :large_points,
-    )
-
-    device = VK.Device(
-        phys_dev,
-        queue_ci,
-        [],         # layers
-        extensions;
-        enabled_features=core_features,
-        next=feature_chain
-    )
+    device = VK.Device(phys_dev, queue_ci, [], extensions;
+        enabled_features = devicefeatures(phys_dev, VK.PhysicalDeviceFeatures,
+            (:shader_float_64, :shader_int_16, :independent_blend, :geometry_shader,
+             :tessellation_shader, :fill_mode_non_solid, :wide_lines, :large_points);
+            required = (:shader_int_64,)),
+        next = last(chain))
 
     queue = VK.get_device_queue(device, qf_idx, 0)
     # Queue 1 of the primary family, or the primary queue if it has only one.
@@ -1629,27 +1304,33 @@ function find_video_decode_queue_family(phys_dev)
     return nothing
 end
 
-"""Whether `phys_dev` advertises the device extension `ext_name`."""
-function has_extension(phys_dev, ext_name::String)
-    available = unwrap(VK.enumerate_device_extension_properties(phys_dev))
-    for ext in available
-        name = String(filter(!=('\0'), collect(ext.extension_name)))
-        name == ext_name && return true
-    end
-    return false
-end
+"""The device extensions `phys_dev` advertises."""
+deviceextensions(phys_dev) = Set(String(filter(!=('\0'), collect(e.extension_name)))
+                                 for e in unwrap(VK.enumerate_device_extension_properties(phys_dev)))
 
-"""Whether `phys_dev` advertises the three extensions RT needs."""
-function has_rt_extensions(phys_dev)
-    available = unwrap(VK.enumerate_device_extension_properties(phys_dev))
-    names = Set{String}()
-    for ext in available
-        push!(names, String(filter(!=('\0'), collect(ext.extension_name))))
+"""Whether `phys_dev` advertises the device extension `name`."""
+has_extension(phys_dev, name::String) = name in deviceextensions(phys_dev)
+
+"""
+    devicefeatures(phys_dev, T, want; required = (), next = C_NULL) -> T
+
+The feature struct `T` with each field in `want` and `required` enabled where the
+device reports it; a missing `required` field throws. `vkCreateDevice` fails on
+any unsupported bit, and an advertised extension does not imply every bit.
+"""
+function devicefeatures(phys_dev, ::Type{T}, want; required = (), next = C_NULL) where {T}
+    have = supportedfeatures(phys_dev, T)
+    for f in required
+        getfield(have, f) || throw(LavaError("device initialization",
+            "the device lacks the feature $T.$f", "Mantle needs it on every Vulkan device."))
     end
-    return "VK_KHR_acceleration_structure" in names &&
-           "VK_KHR_ray_tracing_pipeline" in names &&
-           "VK_KHR_deferred_host_operations" in names
+    bits = Tuple(getfield(have, f) && (f in want || f in required) for f in fieldnames(T) if f !== :next)
+    return featurestruct(T, bits, next)
 end
+supportedfeatures(phys_dev, ::Type{VK.PhysicalDeviceFeatures}) = VK.get_physical_device_features(phys_dev)
+supportedfeatures(phys_dev, T::Type) = VK.get_physical_device_features_2(phys_dev, T).next
+featurestruct(::Type{VK.PhysicalDeviceFeatures}, bits, next) = VK.PhysicalDeviceFeatures(bits...)
+featurestruct(T::Type, bits, next) = T(bits...; next)
 
 # Debug-utils callback. Runs re-entrantly inside blocking driver calls with
 # driver locks held (GPU-AV reads back its log during `vkWaitSemaphores`), so it
@@ -1825,25 +1506,6 @@ Drain the ring (so errors are logged), then empty the captured list.
 clear_validation_messages!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
     ctx === nothing ? String[] :
         (drain_validation_messages!(ctx); empty!(ctx.validation.messages))
-
-"""
-    get_printf_output(ctx = <bound context>) -> Vector{String}
-
-`@lava_printf` output since the last clear, after draining the ring. Needs a
-device built with `DebugConfig(printf = true)`.
-"""
-get_printf_output(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
-    ctx === nothing ? String[] :
-        (drain_validation_messages!(ctx); copy(ctx.validation.printf))
-
-"""
-    clear_printf_output!(ctx = <bound context>)
-
-Drain the ring, then drop captured `@lava_printf` output.
-"""
-clear_printf_output!(ctx::Union{Nothing,VkContext} = VK_CONTEXT_REF[]) =
-    ctx === nothing ? String[] :
-        (drain_validation_messages!(ctx); empty!(ctx.validation.printf))
 
 """
     check_validation_errors!(context::String, ctx::VkContext)

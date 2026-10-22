@@ -376,9 +376,7 @@ end
 
 # SPIR-V ray-query intersection kinds. Named because `1` means AABB for a
 # candidate and triangle for a committed hit.
-const CANDIDATE_TRIANGLE = UInt32(0)
 const CANDIDATE_AABB     = UInt32(1)
-const COMMITTED_NONE      = UInt32(0)
 const COMMITTED_TRIANGLE  = UInt32(1)
 const COMMITTED_GENERATED = UInt32(2)
 

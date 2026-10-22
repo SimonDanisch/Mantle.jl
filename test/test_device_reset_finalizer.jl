@@ -45,6 +45,14 @@ include(joinpath(@__DIR__, "freshprocess.jl"))
             buf = Mantle.Buffer(dev, ones(Float32, 1000))
             KA.synchronize(b)
             @test Array(d) == fill(1.0f0, 1000)
+            # A region its finalizer freed waits in the pool's lock-free inbox until
+            # the next allocation, and the reset must cope with it there (an `Inbox`
+            # has no `empty!`).
+            gone = Mantle.Buffer(dev, ones(Float32, 1000))
+            gone = nothing
+            GC.gc()
+            GC.gc()
+            @test !isempty(Mantle.pool(dev).pending)
             new = Mantle.reset_device!(dev)
             # A new device, and the default from now on; the old one retired.
             @test new !== dev

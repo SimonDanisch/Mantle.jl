@@ -942,29 +942,15 @@ function readback_target(dev::LavaDevice, t::VulkanTransientImage{T}, rest::Type
     t.image === nothing &&
         error("this target has not been placed yet; readback needs a compiled plan")
     w, h = size(t)
-    nbytes = w * h * sizeof(T)
-    r = acquire!(pool(dev), dev, Readback(), nothing, max(nbytes, 16);
-                 align = ARG_ALIGN, blocksize = READBACK_BLOCK_SIZE)
-    mb = (memoryof(r)::BufferBlock).ref[]::VkManagedBuffer
-    tosrc = ImageBarrier(t, Transition(0, rest, Type[rest], CopySrc))
-    back = ImageBarrier(t, Transition(0, CopySrc, Type[CopySrc], rest))
     bq = batchqueue(dev)
-    tok = oneshot!(bq; tag = :readback) do e
-        emit_barrier!(e, tosrc)
-        region = VK.BufferImageCopy(
-            UInt64(pool_offset(mb) + offset(r)), UInt32(0), UInt32(0),
-            VK.ImageSubresourceLayers(aspect(t), UInt32(0), UInt32(0), UInt32(1)),
-            VK.Offset3D(0, 0, 0), VK.Extent3D(UInt32(w), UInt32(h), UInt32(1)))
-        VK.cmd_copy_image_to_buffer(e.cmd, target_image(t),
-            VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mb.buffer, [region])
-        emit_barrier!(e, back)
-        hold!(e, mb)
+    return readbackimage(dev, bq, T, w, h) do mb, off
+        oneshot!(bq; tag = :readback) do e
+            emit_barrier!(e, ImageBarrier(t, Transition(0, rest, Type[rest], CopySrc)))
+            copyimage!(e.cmd, mb.buffer, off, target_image(t), (0, 0, w, h); aspect = aspect(t))
+            emit_barrier!(e, ImageBarrier(t, Transition(0, CopySrc, Type[CopySrc], rest)))
+            hold!(e, mb)
+        end
     end
-    waitfor!(bq, tok)
-    pixels = Matrix{T}(undef, w, h)
-    unsafe_copyto!(Ptr{UInt8}(pointer(pixels)), mb.mapped_ptr + offset(r), nbytes)
-    release!(r)
-    return pixels
 end
 
 # One begin/end per pass, with the clear as pass configuration.

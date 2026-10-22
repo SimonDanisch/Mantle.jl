@@ -16,26 +16,17 @@ mutable struct VideoImage
 end
 Base.show(io::IO, img::VideoImage) = print(io, "VideoImage($(img.width)×$(img.height), NV12)")
 
-# Record a copy of `img`'s luma plane (display size, tightly packed) to byte
-# `offset` of `buffer`. `img` must be TRANSFER_SRC_OPTIMAL when `cb` executes.
-function record_luma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Integer)
-    VK.cmd_copy_image_to_buffer(cb, img.image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,
-        [VK.BufferImageCopy(UInt64(offset), 0, 0,
-            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1),
-            VK.Offset3D(0, 0, 0), VK.Extent3D(img.width, img.height, 1))])
-    return cb
-end
-
-# Record a copy of `img`'s interleaved U/V plane to byte `offset` of `buffer`:
-# `width × (height ÷ 2)` bytes, tightly packed. Same layout requirement as luma.
-function record_chroma_copy!(cb, img::VideoImage, buffer::VK.Buffer, offset::Integer)
-    VK.cmd_copy_image_to_buffer(cb, img.image,
-        VK.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer,
-        [VK.BufferImageCopy(UInt64(offset), 0, 0,
-            VK.ImageSubresourceLayers(VK.IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1),
-            VK.Offset3D(0, 0, 0), VK.Extent3D(img.width ÷ 2, img.height ÷ 2, 1))])
-    return cb
+# Copy `img`'s luma plane into `y` and, unless `uv === nothing`, its interleaved
+# U/V plane into `uv`, tightly packed. `img` must be TRANSFER_SRC_OPTIMAL.
+function copyplanes!(cb, img::VideoImage, y, uv)
+    yb = y.buf[]
+    copyimage!(cb, yb.buffer, pool_offset(yb) + y.offset, img.image, (0, 0, img.width, img.height);
+               aspect = VK.IMAGE_ASPECT_PLANE_0_BIT)
+    uv === nothing && return nothing
+    ub = uv.buf[]
+    copyimage!(cb, ub.buffer, pool_offset(ub) + uv.offset, img.image, (0, 0, img.width ÷ 2, img.height ÷ 2);
+               aspect = VK.IMAGE_ASPECT_PLANE_1_BIT)
+    return nothing
 end
 
 module VideoDecode
@@ -45,7 +36,7 @@ const Vk = VK
 const C = Vk.VkCore
 
 import ..VideoImage, ..LavaArray, ..pool_offset,
-       ..record_luma_copy!, ..record_chroma_copy!,
+       ..copyplanes!,
        ..oneshot!, ..waitfor!
 
 import ..feed!, ..decodemore!, ..remaining
@@ -209,23 +200,6 @@ pc(x) = Ptr{Cvoid}(rp(x))
 
 abstract type VideoDecoder end
 include("video_common.jl")
-
-"""H.264 decode capability flags: `0x1` DPB_AND_OUTPUT_COINCIDE, `0x2` DPB_AND_OUTPUT_DISTINCT."""
-decode_capability_flags(ctx) =
-    videocaps(ctx, decoderprofile(H264Decoder), codeccapabilities(H264Decoder)).flags
-
-"""H.264 bitstream alignment and DPB/reference limits reported by the device."""
-function video_capabilities(ctx)
-    c = videocaps(ctx, decoderprofile(H264Decoder), codeccapabilities(H264Decoder))
-    return (minBitstreamBufferOffsetAlignment=c.offset, minBitstreamBufferSizeAlignment=c.size,
-            maxDpbSlots=c.slots, maxActiveReferencePictures=c.refs)
-end
-
-"""Whether H.264 may use the DPB image as its decode target."""
-decode_coincide_supported(ctx) = (decode_capability_flags(ctx) & UInt32(0x1)) != 0
-
-"""Whether H.264 supports either the shared-image or separate-image output path."""
-decode_supported(ctx) = (decode_capability_flags(ctx) & UInt32(0x3)) != 0
 
 function video_profile(w)
     hp=Ref(C.VkVideoDecodeH264ProfileInfoKHR(C.VK_STRUCTURE_TYPE_VIDEO_DECODE_H264_PROFILE_INFO_KHR,C_NULL,C.STD_VIDEO_H264_PROFILE_IDC_HIGH,C.VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR))

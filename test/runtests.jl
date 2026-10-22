@@ -555,6 +555,7 @@ if _VULKAN_OK
     check_bounded_staging(Mantle.vk_context())
     check_extent_refusal(Mantle.vk_context())
     check_copy_bounds(Mantle.vk_context())
+    check_append_view(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_gemm_workspace.jl"))
     check_workspace_retirement(Mantle.vk_context())
     include(joinpath(@__DIR__, "vulkan", "test_flush_report.jl"))
@@ -685,9 +686,6 @@ foreachbackend(joinpath(@__DIR__, "test_mul_nonnumeric_eltype.jl"))
 foreachbackend(joinpath(@__DIR__, "test_norm_overflow.jl"))
 foreachbackend(joinpath(@__DIR__, "test_permutedims.jl"))
 foreachbackend(joinpath(@__DIR__, "test_mapreduce_transposed.jl"))
-# …and survives a branch: `when!` records every branch once and the
-# run submits only the pieces its conditions ask for.
-foreachbackend(joinpath(@__DIR__, "test_when.jl"))
 foreachbackend(joinpath(@__DIR__, "test_basealignment_device.jl"))
 foreachbackend(joinpath(@__DIR__, "test_buffer_alias.jl"))
 foreachbackend(joinpath(@__DIR__, "test_download_readback.jl"))
@@ -709,6 +707,7 @@ foreachbackend(joinpath(@__DIR__, "test_tolerated_alloc_failure.jl"))
 # …and the parts that change the process, each in a process of its own: a device
 # reset, the exit hook, and validation, which Metal decides when a process starts.
 foreachbackend(joinpath(@__DIR__, "test_device_reset_finalizer.jl"))
+foreachbackend(joinpath(@__DIR__, "test_readback_layout.jl"))
 foreachbackend(joinpath(@__DIR__, "test_kernel_cache_reset.jl"))
 foreachbackend(joinpath(@__DIR__, "test_twodevice_shutdown.jl"))
 foreachbackend(joinpath(@__DIR__, "test_arena_memory_device_address.jl"))

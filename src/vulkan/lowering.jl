@@ -11,7 +11,6 @@ using ColorTypes.FixedPointNumbers: N0f8
 stage(x) = VK.PipelineStageFlag2(x)
 accessflags(x) = VK.AccessFlag2(x)
 
-const NO_STAGE = stage(0)
 """Where a shader-addressable resource is touched from. Every usage that means "a
 shader reads or writes this" lowers to these three and nothing wider."""
 const SHADER_STAGES = VK.PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
@@ -173,3 +172,21 @@ vkformat(::VulkanAPI, ::Type{UInt32}; srgb::Bool = false) =
     srgb ? error("there is no sRGB integer format") : VK.FORMAT_R32_UINT
 vkformat(::VulkanAPI, ::Type{<:StaticVector{2,UInt32}}; srgb::Bool = false) =
     srgb ? error("there is no sRGB integer format") : VK.FORMAT_R32G32_UINT
+# Tuple spellings, as portable shaders write them.
+vkformat(api::VulkanAPI, ::Type{NTuple{4,UInt8}}; srgb::Bool = false) = vkformat(api, RGBA{N0f8}; srgb)
+vkformat(api::VulkanAPI, ::Type{NTuple{4,Float32}}; srgb::Bool = false) = vkformat(api, RGBA{Float32}; srgb)
+vkformat(::VulkanAPI, ::Type{NTuple{3,Float32}}; srgb::Bool = false) =
+    srgb ? error("there is no sRGB float format") : VK.FORMAT_R32G32B32_SFLOAT
+vkformat(::VulkanAPI, ::Type{NTuple{2,Float32}}; srgb::Bool = false) =
+    srgb ? error("there is no sRGB float format") : VK.FORMAT_R32G32_SFLOAT
+vkformat(::VulkanAPI, ::Type{UInt8}; srgb::Bool = false) =
+    srgb ? error("there is no single-channel sRGB format") : VK.FORMAT_R8_UNORM
+
+"""
+    vksampledformat(T) -> VK.Format
+
+The format of a sampled texture of `T`: as [`vkformat`](@ref), except that a
+scalar `Float32` is `R32_SFLOAT`, since a sampler rejects the depth format.
+"""
+vksampledformat(::Type{Float32}) = VK.FORMAT_R32_SFLOAT
+vksampledformat(T::Type) = vkformat(VulkanAPI(), T)

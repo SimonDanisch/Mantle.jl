@@ -291,8 +291,8 @@ end
 
 # `DeviceCaps` is `KernelInterface`'s; `caps(ctx)` fills it. On this backend
 # `cores` and `warps` are 0 when unreported (only `VK_NV_shader_sm_builtins` and
-# `VK_AMD_shader_core_properties2` report them); read them through
-# `shader_core_count` / `shader_warps_per_sm`, which return `nothing` then.
+# `VK_AMD_shader_core_properties2` report them); `shader_warps_per_sm` returns
+# `nothing` then.
 # `coopmatsubgroup` is not `subgroup`: coopmat pipelines are pinned to
 # `COOPMAT_SUBGROUP` (`pipeline.jl`), so on RDNA 3.5 (default 64, pinned 32) a
 # coopmat workgroup sized in `subgroup` units has twice the threads the kernel indexes.

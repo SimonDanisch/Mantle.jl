@@ -181,12 +181,12 @@ export CullFace, NoCull, CullBack, CullFront
 export DepthMode, DepthLess, DepthLessEq, DepthLessEqReadOnly, DepthGreater, DepthAlways, DepthOff
 export RenderTarget
 
-export Texture, Texture1D, Texture2D, Sampler, SampledTexture, TextureBindings
+export Texture, Texture2D, Sampler, SampledTexture, TextureBindings
 export upload_texture_data!, mipmapped
 export argidentity
 export Framebuffer, WindowTarget, OffscreenTarget, CompiledGraphicsPipeline
 export HWTLAS, AccelBuildContext, ExternalImage
-export SubmitChannel, channelof, deviceof, hold!, oneshot!, acquire!, Submission
+export SubmitChannel, deviceof, hold!, oneshot!, acquire!, Submission
 export ownthread, WrongThread
 export Stamp, stampof, retire!, reclaim!, drain!, handover!
 export allocate_batch_queue!, release_batch_queue!, submit!, waitidle
@@ -214,7 +214,7 @@ export lastgeometrystage, fragmentinputs, fragmentinputtype
 export pass!, viewport!, bindings!, PassRecorder
 export setviewport!, colorimage, depthimage, currentimage, blittarget, todevice
 export lower_geometry_to_mesh, GeometryAsMesh, GeometryPipeline
-export GraphicsPipeline, Rasterizer, TrianglePipeline, LinePipeline
+export GraphicsPipeline, Rasterizer
 export DrawIndirectCommand
 export MeshPipeline, meshconfig, objectconfig
 export supports_mesh_pipeline
