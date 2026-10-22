@@ -53,7 +53,7 @@ end
 # an atomic tally. This is what answered "does the hardware run the lanes at all".
 @kernel cpu=false unsafe_indices=true function wglimit_raw!(who, ran)
     li = KI.get_local_id().x
-    Atomix.@atomic ran[1] += Int32(1)
+    Atomix.@atomic :monotonic ran[1] += Int32(1)
     @inbounds who[li] = Int32(1)
 end
 

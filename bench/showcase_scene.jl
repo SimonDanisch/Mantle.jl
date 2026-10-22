@@ -200,7 +200,7 @@ end
             keep &= (p[1] * c[1] + p[2] * c[2] + p[3] * c[3] + p[4]) >= -c[4]
         end
         if keep
-            slot = Atomix.@atomic counter[1] += UInt32(1)
+            slot = Atomix.@atomic :monotonic counter[1] += UInt32(1)
             visible[slot] = UInt32(i)
         end
     end

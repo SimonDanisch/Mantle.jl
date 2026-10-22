@@ -52,7 +52,7 @@ end
 # `RayTracingPipeline` is declared only on a device that has one (Metal traces
 # through a linked function from an ordinary kernel instead).
 tu_raygen(src, dst) = (@inbounds dst[1] = src[1]; nothing)
-tu_chit(src, dst) = (@inbounds Atomix.@atomic dst[1] += src[1]; nothing)
+tu_chit(src, dst) = (@inbounds Atomix.@atomic :monotonic dst[1] += src[1]; nothing)
 tu_miss(src, dst) = nothing
 
 @testset "traced: trace! applies it to the pass it makes" begin

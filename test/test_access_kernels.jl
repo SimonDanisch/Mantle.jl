@@ -36,7 +36,7 @@ end
 
 @kernel function acc_atomic!(sums, @Const(src))
     i = @index(Global)
-    @inbounds Atomix.@atomic sums[i] += src[i]
+    @inbounds Atomix.@atomic :monotonic sums[i] += src[i]
 end
 
 @kernel function acc_lengthonly!(dst, @Const(other))
@@ -78,7 +78,7 @@ Adapt.@adapt_structure AccQueue
 @kernel function acc_append!(q::AccQueue, @Const(src))
     i = @index(Global)
     v = @inbounds src[i]
-    slot = Atomix.@atomic q.size[1] += Int32(1)
+    slot = Atomix.@atomic :monotonic q.size[1] += Int32(1)
     @inbounds q.items[slot] = v
 end
 

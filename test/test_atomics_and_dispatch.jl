@@ -27,7 +27,7 @@ const KA = KernelAbstractions
 
     @testset "atomic counter (Int32)" begin
         @kernel function atomic_counter_i32!(counter)
-            Atomix.@atomic counter[1] += Int32(1)
+            Atomix.@atomic :monotonic counter[1] += Int32(1)
         end
 
         N = 4096
@@ -39,7 +39,7 @@ const KA = KernelAbstractions
 
     @testset "atomic counter (UInt32)" begin
         @kernel function atomic_counter_u32!(counter)
-            Atomix.@atomic counter[1] += UInt32(1)
+            Atomix.@atomic :monotonic counter[1] += UInt32(1)
         end
 
         N = 4096
@@ -51,7 +51,7 @@ const KA = KernelAbstractions
 
     @testset "atomic counter (Float32)" begin
         @kernel function atomic_counter_f32!(counter)
-            Atomix.@atomic counter[1] += 1.0f0
+            Atomix.@atomic :monotonic counter[1] += 1.0f0
         end
 
         N = 1024
@@ -66,8 +66,8 @@ const KA = KernelAbstractions
         # increment to the same address from every invocation.
         @kernel function any_atomic!(counter, data)
             i = @index(Global)
-            Atomix.@atomic counter[1] += Int32(1)
-            Atomix.@atomic counter[1] += data[i]
+            Atomix.@atomic :monotonic counter[1] += Int32(1)
+            Atomix.@atomic :monotonic counter[1] += data[i]
         end
 
         N = 256
@@ -81,7 +81,7 @@ const KA = KernelAbstractions
     @testset "atomic returns unique values" begin
         @kernel function atomic_unique!(counter, results)
             i = @index(Global)
-            old = Atomix.@atomic counter[1] += Int32(1)
+            old = Atomix.@atomic :monotonic counter[1] += Int32(1)
             @inbounds results[i] = old
         end
 
@@ -94,29 +94,22 @@ const KA = KernelAbstractions
         r = Array(results)
         @test Array(counter)[1] == Int32(N)
         @test length(unique(r)) == N
-        # Atomix.@atomic += returns the new value (1..N)
+        # Atomix.@atomic :monotonic += returns the new value (1..N)
         @test sort(r) == collect(Int32(1):Int32(N))
     end
 
     @testset "cross-workgroup atomic visibility (BVH refit pattern)" begin
-        # Simulates BVH bottom-up refit:
-        # - N leaf threads write data[i] then atomically increment flags[parent]
-        # - When flags[parent] == 2, the second-arriving thread reads BOTH children
-        # - With broken visibility (Relaxed-only), second thread sees stale data
+        # BVH bottom-up refit: each leaf writes its data, then increments its
+        # parent's arrival counter with acquire-release ordering; the second
+        # arriver reads both children. One thread per workgroup, so the sibling's
+        # write is only visible through that ordering.
         @kernel function refit_pattern!(data, flags, results, parents, siblings)
             i = @index(Global)
-            n = @uniform @groupsize()[1] * @ndrange()[1] ÷ @groupsize()[1]
-
-            # Write leaf data (non-atomic)
             @inbounds data[i] = Float32(i * 10)
-
-            # Atomic increment on parent flag
             @inbounds parent = parents[i]
             @inbounds sibling = siblings[i]
-            old = Atomix.@atomic flags[parent] += Int32(1)
-
-            if old == Int32(1)
-                # Second thread: both children done, read sibling data
+            arrived = Atomix.@atomic :acquire_release flags[parent] += Int32(1)
+            if arrived == Int32(2)
                 @inbounds sibling_val = data[sibling]
                 @inbounds my_val = data[i]
                 @inbounds results[parent] = my_val + sibling_val
@@ -136,7 +129,7 @@ const KA = KernelAbstractions
         parents_d = Mantle.devicearray(TESTBACKEND, parents_h)
         siblings_d = Mantle.devicearray(TESTBACKEND, siblings_h)
 
-        refit_pattern!(TESTBACKEND)(data, flags, results, parents_d, siblings_d; ndrange=N)
+        refit_pattern!(TESTBACKEND, 1)(data, flags, results, parents_d, siblings_d; ndrange=N)
         KA.synchronize(TESTBACKEND)
 
         r = Array(results)
@@ -266,7 +259,7 @@ end
 Mantle.supports_int64_atomics(TESTBACKEND) && @testset "Int64/UInt64 atomics" begin
     @testset "Int64 atomic add" begin
         @kernel function atomic_add_i64!(counter)
-            Atomix.@atomic counter[1] += Int64(1)
+            Atomix.@atomic :monotonic counter[1] += Int64(1)
         end
         N = 2048
         c = Mantle.devicearray(TESTBACKEND, Int64[0])
@@ -277,7 +270,7 @@ Mantle.supports_int64_atomics(TESTBACKEND) && @testset "Int64/UInt64 atomics" be
 
     @testset "UInt64 atomic add" begin
         @kernel function atomic_add_u64!(counter)
-            Atomix.@atomic counter[1] += UInt64(1)
+            Atomix.@atomic :monotonic counter[1] += UInt64(1)
         end
         N = 1024
         c = Mantle.devicearray(TESTBACKEND, UInt64[0])
@@ -290,10 +283,10 @@ end
 # Only where the device computes in Float64 at all.
 @testset "Float64 atomics" begin
     @kernel function atomic_add_f64!(counter)
-        Atomix.@atomic counter[1] += 1.0
+        Atomix.@atomic :monotonic counter[1] += 1.0
     end
     @kernel function atomic_sub_f64!(counter)
-        Atomix.@atomic counter[1] -= 1.0
+        Atomix.@atomic :monotonic counter[1] -= 1.0
     end
     for T in testeltypes(Float64)
         @testset "$T atomic add" begin
@@ -318,7 +311,7 @@ end
 
     @testset "Float32 atomic subtract" begin
         @kernel function atomic_sub_f32!(counter)
-            Atomix.@atomic counter[1] -= 1.0f0
+            Atomix.@atomic :monotonic counter[1] -= 1.0f0
         end
 
         N = 1024
@@ -332,7 +325,7 @@ end
         @kernel function atomic_add_3d!(A, idx_array)
             i = @index(Global)
             @inbounds ci = idx_array[i]
-            Atomix.@atomic A[ci] += 1.0f0
+            Atomix.@atomic :monotonic A[ci] += 1.0f0
         end
 
         dims = (4, 4, 4)
@@ -352,7 +345,7 @@ end
         @kernel function atomic_sub_2d!(A, idx_array, val)
             i = @index(Global)
             @inbounds ci = idx_array[i]
-            Atomix.@atomic A[ci] -= val
+            Atomix.@atomic :monotonic A[ci] -= val
         end
 
         dims = (8, 8)
@@ -376,7 +369,7 @@ end
             k = @index(Global, Linear)
             @inbounds i = is[k]
             @inbounds j = js[k]
-            Atomix.@atomic A[i, j] += UInt32(1)
+            Atomix.@atomic :monotonic A[i, j] += UInt32(1)
         end
 
         dims = (6, 5)
