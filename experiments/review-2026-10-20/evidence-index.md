@@ -246,3 +246,7 @@ barrier emission and fixes missing build-input submission tracking. Pooled impor
 now use owning arrays and preserve transforms, masks, visibility and channels.
 206 regression and 86 pooled assertions pass on AMD/NVIDIA; a fresh process repeats
 the pooled checks. Warm AS barrier emission drops from 1,152 Julia bytes to zero.
+
+The [unused AS builder follow-up](consolidation-as-barriers.md#unused-builder-deletion)
+deletes 125 implementation lines with no production callers. The live pooled
+importer and ordinary build API pass the same 86 checks, including fresh loading.

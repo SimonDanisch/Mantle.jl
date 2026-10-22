@@ -8,7 +8,7 @@ function check_accel_barriers(ctx)
     end
     Mantle.defaultdevice!(dev)
     be = Mantle.backend(dev)
-    @testset "pooled builds preserve shared scratch and indirect trace dependencies" begin
+    @testset "pooled and ordinary AS builds preserve dependency contracts" begin
         vertices = [[(x-0.4f0,-0.4f0,0f0),(x+0.4f0,-0.4f0,0f0),(x,0.4f0,0f0)]
                     for x in (0f0,3f0,6f0)]
         indices = [UInt32[0,1,2] for _ in vertices]
@@ -26,7 +26,9 @@ function check_accel_barriers(ctx)
         before = Mantle.driver(ch).next_timeline
         combined = Mantle.HardwareAccel(sw;ctx,bq=ch)
         @test Mantle.driver(ch).next_timeline > before
-        blases = Mantle.build_blas_pooled(vertices,indices;bq=dev.bq)
+        blases = Mantle.build_accel!(dev.bq) do build
+            [Mantle.build_blas(build,vs,is) for (vs,is) in zip(vertices,indices)]
+        end
         tlas = Mantle.build_accel!(dev.bq) do build
             Mantle.build_tlas(build,blases;custom_indices=UInt32[11,12,13],
                              transforms=fill(Tuple(Raycore.mat4_to_mat3x4(xf)),3),masks)

@@ -39,3 +39,18 @@ All 115 source files parse; prose edits preserve definition trees. Source falls
 49,597 → 49,457 physical and 22,752 → 22,717 implementation lines: 29 code lines
 removed plus six lines of formerly unattached context prose reclassified as docs.
 The full Builder/token retirement replacement remains open.
+
+## Unused builder deletion
+
+Against `b44d80f`, remove the private build_blas_pooled and
+build_blas_from_primitives implementations and unused as_queue/as_vkctx accessors.
+Workspace-wide caller checks find no production consumers, exports, target API
+or executable-spec references. The new pooled-builder test was the only caller;
+it now exercises ordinary build_blas as the control for the live HardwareAccel
+importer, which retains pooled allocation and shared-scratch reuse.
+
+All 86 dependency/transform/ID/mask/visibility assertions pass on AMD/NVIDIA,
+both in the existing session and a fresh process with synchronization validation.
+All 115 source files parse. Source falls 49,457 → 49,264 physical and
+22,717 → 22,592 implementation lines: 125 code lines deleted, with no algorithm
+moved elsewhere.
