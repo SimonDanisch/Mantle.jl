@@ -204,14 +204,14 @@ function coopmat_gemm_cm2_sg!(C, A, B, M::Int, N::Int, K::Int; nw::Int = 2)
 end
 
 """
-    coopmat_gemm_cm2!(C, A, B, M, N, K; tiling = nothing, unroll = true, clamp = nothing) -> C
+    coopmat_gemm_cm2!(C, A, B, M, N, K; tiling = nothing, unroll = true, clamp = true) -> C
 
 Launch [`gemm_cm2!`](@ref) for dense column-major operands. Returns `nothing`
 instead of `C` when this device cannot run it, so a caller can fall back. No
 batching, split-K, bias or epilogue while it is unrouted.
 """
 function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
-                           unroll::Bool = true, clamp::Union{Nothing,Bool} = nothing)
+                           unroll::Bool = true, clamp::Bool = true)
     # From the array: an unpinned backend resolves its queue through the global
     # context and would put the work on the wrong GPU.
     backend = KernelAbstractions.get_backend(C)
@@ -226,10 +226,11 @@ function coopmat_gemm_cm2!(C, A, B, M::Int, N::Int, K::Int; tiling = nothing,
         throw(ArgumentError("tiling BM=$BM BN=$BN BK=$BK NT=$NT is not a legal " *
                             "workgroup-scope shape on this device; it reports " *
                             "(invocations, M, N, K) granularities $(dev.wggran)"))
-    # Clamp by default only where a tile can hang off an edge, as the reference
-    # does; `clamp = true` forces it.
-    cl = something(clamp, !(M % BM == 0 && N % BN == 0 && K % BK == 0))
-    cmode = cl ? TENSOR_CLAMP_CONSTANT : TENSOR_CLAMP_UNDEFINED
+    # Clamped even where tiles divide the extents: unclamped loads measure about 3x
+    # slower here. `clamp = false` is only legal when every tile fits.
+    clamp || (M % BM == 0 && N % BN == 0 && K % BK == 0) ||
+        throw(ArgumentError("unclamped loads need M, N, K divisible by the tile $((BM, BN, BK))"))
+    cmode = clamp ? TENSOR_CLAMP_CONSTANT : TENSOR_CLAMP_UNDEFINED
     KI.Kernel(backend, gemm_cm2!)(C, A, B, Int32(M), Int32(N), Int32(K),
                                   Val(BM), Val(BN), Val(BK), Val(unroll), Val(cmode);
                                   numgroups = (cld(M, BM), cld(N, BN)),
