@@ -115,21 +115,21 @@ Every comment and docstring checked against the code and the plan (plan,
 
 | id | item | baseline at 5c2d4c6 | status | evidence |
 |---|---|---|---|---|
-| P0.B1 | `flush_stall_report` reads fields core's `Submission` does not have (`vulkan/runtime/command.jl`) | - | open | |
-| P0.B2 | `gemm_cm2!`/`gemm_cm2_sg!` called as kernel factories (`vulkan/array/gemm_cm2.jl`) | - | open | |
-| P0.B3 | a conditional region can drop a barrier (`graph/build.jl` docstring, `sync/transition.jl` rule) | - | open | |
-| P0.B4 | Metal waits call `Metal.synchronize` (task's queue, not the device's): `waitfor`/`waitidle`, `upload_texture_data!`, `readback_framebuffer`, `metal/hwtlas.jl`, `metal/record.jl` | - | open | |
-| P0.B5 | walked Metal plans keep compile-time arrays with `patchable = true` and no move listener (`metal/record.jl`) | - | open | |
-| P0.B6 | readback and copy leave images in TRANSFER_SRC before a render pass that loads them (`vulkan/graphics/`) | - | open | |
-| P0.B7 | validation checks read `VK_CONTEXT_REF[]` inside functions that hold a context | - | open | |
-| P0.B8 | arena regrowth dereferences tenant weak references without a `nothing` check (`memory/pool.jl`) | - | open | |
-| P0.B9 | `append!` on a `LavaArray` view ignores the view's offset (`vulkan/array/gpuarrays.jl`) | - | open | |
-| P0.B10 | unlocked `live_buffers` delete from a finalizer | - | open | |
-| P0.B11 | H.265 bitstream alignment | - | open | |
-| P0.B12 | the two disagreeing texture format tables | - | open | |
-| P0.B13 | `Ref` without `GC.@preserve` and UserID vs `instance_id` in `metal/trace.jl` | - | open | |
-| P0.B14 | device features enabled without querying them | - | open | |
-| P0.B15 | regression test for `destroy_pool!` calling `empty!` on an `Inbox` (fixed in 2c7dc14) | - | open | |
+| P0.B1 | `flush_stall_report` reads fields core's `Submission` does not have (`vulkan/runtime/command.jl`) | - | done | 4a94f66; test/vulkan/test_flush_report.jl |
+| P0.B2 | `gemm_cm2!`/`gemm_cm2_sg!` called as kernel factories (`vulkan/array/gemm_cm2.jl`) | - | done | f255def launches both cm2 GEMMs through `KI.Kernel`; test/test_gemm_cm2.jl |
+| P0.B3 | a conditional region can drop a barrier (`graph/build.jl` docstring, `sync/transition.jl` rule) | - | done | ab5e296 deletes the host-read `when!`, so no conditional region exists to drop a barrier |
+| P0.B4 | Metal waits call `Metal.synchronize` (task's queue, not the device's): `waitfor`/`waitidle`, `upload_texture_data!`, `readback_framebuffer`, `metal/hwtlas.jl`, `metal/record.jl` | - | done | 2430663: readback, `openrun` and `wait_for_gpu!` wait for the device (`waitidle`); texture uploads keep the task-queue wait for Metal.jl producers. No deterministic test: the old wait raced |
+| P0.B5 | walked Metal plans keep compile-time arrays with `patchable = true` and no move listener (`metal/record.jl`) | - | done | 2430663: a walked dispatch resolves its declared arguments at every run; test/test_recorded_move_patch.jl "a resize!d buffer reaches the next run of a walked plan" (also a KernelInterface dispatch, which the old call passed its first argument twice) |
+| P0.B6 | readback and copy leave images in TRANSFER_SRC before a render pass that loads them (`vulkan/graphics/`) | - | done | ab5e296; test/test_readback_layout.jl, validated, fails without the barrier |
+| P0.B7 | validation checks read `VK_CONTEXT_REF[]` inside functions that hold a context | - | done | 23a0864 |
+| P0.B8 | arena regrowth dereferences tenant weak references without a `nothing` check (`memory/pool.jl`) | - | done | ab5e296: `tenants!` returns strong references |
+| P0.B9 | `append!` on a `LavaArray` view ignores the view's offset (`vulkan/array/gpuarrays.jl`) | - | done | ab5e296; test/vulkan/test_host_upload.jl `check_append_view`, fails on the old code |
+| P0.B10 | unlocked `live_buffers` delete from a finalizer | - | done | f4f5175 |
+| P0.B11 | H.265 bitstream alignment | - | done | 1d0855e checks the alignment at construction; e32977f shares it between H.264 and H.265 |
+| P0.B12 | the two disagreeing texture format tables | - | done | ab5e296: one `vkformat` table, `vksampledformat` for the sampled R32 case |
+| P0.B13 | `Ref` without `GC.@preserve` and UserID vs `instance_id` in `metal/trace.jl` | - | n/a | 2430663 deletes `metal/trace.jl`, which had no caller |
+| P0.B14 | device features enabled without querying them | - | done | ab5e296: `devicefeatures` enables only reported bits and names a missing required one |
+| P0.B15 | regression test for `destroy_pool!` calling `empty!` on an `Inbox` (fixed in 2c7dc14) | - | done | ab5e296; test/test_device_reset_finalizer.jl, fails with `empty!` |
 
 ### Baseline
 
@@ -175,8 +175,8 @@ Every comment and docstring checked against the code and the plan (plan,
 | P1.D2 | delete `buildskernel` | 16 hits, 8 files | open | |
 | P1.D3 | delete `kisupported` | 9 hits, 5 files | open | |
 | P1.D4 | delete `get_or_build_iter_plan` | 7 hits, 4 files | open | |
-| P1.D5 | delete the host-read `when!`: `hostcond` (`Pass.hostcond`) and `RecordingParts.conds`; the name `when!` is reused . Includes the former P1.D19 | 8 hits of `hostcond`, 3 files; 33 hits of `when!` (name reused) | open | |
-| P1.D6 | delete `batchconds` (`RecordingParts.batchconds`, the host-read `when!`'s batching). Includes the former P1.D19 | 4 hits, 1 files | open | |
+| P1.D5 | delete the host-read `when!`: `hostcond` (`Pass.hostcond`) and `RecordingParts.conds`; the name `when!` is reused . Includes the former P1.D19 | 8 hits of `hostcond`, 3 files; 33 hits of `when!` (name reused) | done | ab5e296 |
+| P1.D6 | delete `batchconds` (`RecordingParts.batchconds`, the host-read `when!`'s batching). Includes the former P1.D19 | 4 hits, 1 files | done | ab5e296 |
 | P1.D7 | delete `measure!` | 4 hits, 2 files | open | |
 | P1.D8 | delete `measuring` | 21 hits, 11 files | open | |
 | P1.D9 | delete `partitionranges` | 16 hits, 6 files | open | |
@@ -195,7 +195,7 @@ Every comment and docstring checked against the code and the plan (plan,
 |---|---|---|---|---|
 | P1.W1 | rewrite `test/test_partitioned_recording.jl` | exists | open | |
 | P1.W2 | rewrite `test/test_run_allocates_nothing.jl` | exists | open | |
-| P1.W3 | rewrite `test/test_when.jl` | exists | open | |
+| P1.W3 | rewrite `test/test_when.jl` | exists | done | ab5e296 deletes test/test_when.jl with the feature |
 | P1.G1 | green: pure-record compile counters (P0.T3); GR-01 compile/record once | - | open | |
 | P1.G2 | green: `test/suite/areas/graphs.jl` (SAM 2 encoder and decoder recorded once each; today twice, `census_radv.txt`) | - | open | |
 
