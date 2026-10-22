@@ -1181,11 +1181,30 @@ function download!(host_data::Vector{UInt8}, src::VkManagedBuffer; offset::Int=0
     GC.@preserve host_data copy_buffer!(:download, src, pointer(host_data), length(host_data); offset)
 end
 
-"""Upload plain-bit host values. Dense Arrays transfer directly; other layouts
-materialize once in logical order. The native transfer owns any GPU copy lifetime."""
+const HostArrayView = SubArray{T,N,P} where {T,N,P<:Array}
+const HostReinterpretArray{T} = Base.ReinterpretArray{T,N,S,A} where {N,S,A<:Union{Array,HostArrayView}}
+
+"Whether a host array's logical order is one contiguous, CPU-addressable span."
+function dense_host_storage(data)
+    data isa StridedArray || return false
+    root=data
+    while Base.parent(root)!==root
+        root=Base.parent(root)
+    end
+    root isa Array || return false
+    step=1
+    for d in 1:ndims(data)
+        size(data,d)>1 && Base.stride(data,d)!=step && return false
+        step*=size(data,d)
+    end
+    return true
+end
+
+"""Upload plain-bit host values. Contiguous host views transfer directly; other
+layouts materialize in logical order. The transfer owns any GPU copy lifetime."""
 function upload_typed!(dst::VkManagedBuffer, data::AbstractArray{T}; offset::Int=0) where T
     isbitstype(T) || throw(ArgumentError("upload_typed! requires an isbits element type, got $T"))
-    src = data isa Array ? data : collect(data)
+    src = dense_host_storage(data) ? data : collect(data)
     GC.@preserve src copy_buffer!(:upload, dst, Ptr{UInt8}(pointer(src)),
                                   length(src) * sizeof(T); offset)
 end

@@ -45,6 +45,25 @@ function check_host_upload(ctx)
         @test Mantle.upload!(empty,Float32[]) === nothing
         @test isempty(Array(empty))
         foreach(Mantle.unsafe_free!,(window,parent,empty))
+        bytes=zeros(UInt8,32*1024*1024+8)
+        bytes[5:8]=UInt8[0x19,0x40,0x80,0x7f];bytes[end-4]=0x70
+        words=reinterpret(UInt32,view(bytes,5:length(bytes)-4))
+        gpu=Mantle.LavaArray{UInt32}(undef,(length(words)+2,);bq)
+        try
+            fill!(gpu,UInt32(0x12345678))
+            target=GPUArrays.derive(UInt32,gpu,(length(words),),1)
+            Mantle.upload!(target,words);copyto!(target,1,words,1,length(words))
+            @test (@allocated Mantle.upload!(target,words))<1024*1024
+            @test (@allocated copyto!(target,1,words,1,length(words)))<1024*1024
+            @test_throws BoundsError copyto!(target,1,words,0,1)
+            @test_throws BoundsError copyto!(target,length(target)+1,words,1,1)
+            GC.gc()
+            result=Array(gpu)
+            @test result[2:end-1]==words
+            @test first(result)==last(result)==UInt32(0x12345678)
+        finally
+            Mantle.unsafe_free!(gpu)
+        end
         Mantle.waitidle(Mantle.lavadevice(ctx)); Mantle.drain!(bq)
         @test isempty(Mantle.validationmessages!(Mantle.lavadevice(ctx)))
     end

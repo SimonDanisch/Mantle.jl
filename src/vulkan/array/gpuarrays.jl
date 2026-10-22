@@ -475,6 +475,20 @@ function Base.copyto!(dest::Array{T}, doffs::Integer,
     return dest
 end
 
+# Native file readers can expose typed words over a decoded byte buffer. Keep
+# that buffer as the host owner instead of collecting a second multi-GB array.
+function Base.copyto!(dest::LavaArray{T},doffs::Integer,
+                     src::HostReinterpretArray{T},soffs::Integer,n::Integer) where T
+    n==0 && return dest
+    n>0 || throw(ArgumentError("copy length must be non-negative"))
+    checkbounds(src,soffs:soffs+n-1)
+    checkbounds(dest,doffs:doffs+n-1)
+    dense_host_storage(src) || return copyto!(dest,doffs,collect(src),soffs,n)
+    GC.@preserve src copy_buffer!(:upload,dest.buf[],Ptr{UInt8}(pointer(src,soffs)),n*sizeof(T);
+        offset=dest.offset+(Int(doffs)-1)*sizeof(T))
+    return dest
+end
+
 function Base.copyto!(dest::LavaArray{T}, doffs::Integer,
                       src::LavaArray{T}, soffs::Integer, n::Integer) where T
     n == 0 && return dest
