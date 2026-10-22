@@ -217,3 +217,8 @@ byte checks and 3,492 native packing/move/allocation assertions pass.
 The [kernel preparation follow-up](consolidation-kernel-preparation.md#context-abi-follow-up--2026-10-22)
 deletes Metal's repeated KA context setup through the existing argtype hook.
 284 host/Vulkan and 102 ROCm/host assertions pass; native Metal remains unqualified.
+
+[Shared FFT configuration/generation](consolidation-fft.md) removes repeated
+selection and the runtime-generated-kernel cache/list. It fixes incomplete
+forced-group launches and consumer precompilation; 1,013 native assertions and
+paired byte/allocation checks pass across the qualified targets.

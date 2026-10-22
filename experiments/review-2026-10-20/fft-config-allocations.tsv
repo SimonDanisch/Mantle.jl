@@ -1,0 +1,5 @@
+device	path	launches	old_min_bytes	new_min_bytes
+AMD Radeon RX 7900 XTX (RADV NAVI31)	power2	100	95936	95936
+AMD Radeon RX 7900 XTX (RADV NAVI31)	mixed	100	105536	95872
+NVIDIA RTX 4000 Ada Generation	power2	100	91712	91584
+NVIDIA RTX 4000 Ada Generation	mixed	100	100864	91392

@@ -116,6 +116,9 @@ relerr(got, want) = maximum(abs, got .- want) / maximum(abs, want)
         @test Mantle.fftplan_mixed(960) == (8, 8, 5, 3)     # DeepFilterNet3
         @test Mantle.fftplan_mixed(4096) == (8, 8, 8, 8)    # Demucs
         @test Mantle.fftplan_mixed(97) === nothing          # prime: needs Rader
+        for radices in ((1,2),(0,),(2.0,))
+            @test_throws ArgumentError Mantle.fftplan_mixed(16;radices)
+        end
         for RS in ((8,5,5,2), (8,8,5,3), (8,4,3), (5,4,3))
             @test prod(RS) |> Mantle.fftplan_mixed == RS
         end
@@ -127,7 +130,7 @@ relerr(got, want) = maximum(abs, got .- want) / maximum(abs, want)
         # does not,
         # because its read and write sets happened to be disjoint. Keep all
         # three.
-        for N in (6, 10, 12, 15, 20, 24, 40, 48, 60, 96, 120, 400, 480, 960)
+        for N in (6, 10, 12, 15, 20, 24, 40, 48, 60, 96, 120, 125, 400, 480, 960)
             h = ComplexF32.(randn(ComplexF64, N))
             d = KA.allocate(backend, ComplexF32, N)
             copyto!(d, h)
@@ -190,4 +193,83 @@ relerr(got, want) = maximum(abs, got .- want) / maximum(abs, want)
             @test relerr(ComplexF64.(c), ComplexF64.(a)) < 1.0f-5
         end
     end
+
+    @testset "shared selection refuses incomplete or oversized groups" begin
+        c = (; workgrouplimit=1024,sharedbudget=49152)
+        src = zeros(ComplexF32,64,3); dst=similar(src)
+        for group in (0,-1,2,4,128)
+            @test_throws ArgumentError Mantle.fft_config(dst,src,c;group)
+        end
+        config = Mantle.fft_config(dst,src,c;group=3,skew=true)
+        @test config == (64,8,1,3,3)
+        @test only(Mantle.fftany_launches(dst,src,c;skew=true)).args[6] === Val(true)
+        @test isempty(Mantle.fftany_launches(zeros(ComplexF32,64,0),zeros(ComplexF32,64,0),c))
+        large = zeros(ComplexF32,4096,2)
+        @test_throws ArgumentError Mantle.fft_config(similar(large),large,c;group=2)
+        @test_throws ArgumentError Mantle.fftmixed_config(dst,src,(),c)
+        @test_throws DimensionMismatch Mantle.rfft_geometry(zeros(ComplexF32,33,2),zeros(Float32,64,3))
+        g = Mantle.Graph(Mantle.Device(backend))
+        before = length(g.passes)
+        @test_throws DimensionMismatch Mantle.rfft_dispatch!(g,zeros(ComplexF32,33,3),
+            zeros(Float32,64,3),zeros(ComplexF32,16,6),zeros(ComplexF32,16,6))
+        @test_throws DimensionMismatch Mantle.irfft_dispatch!(g,zeros(Float32,64,3),
+            zeros(ComplexF32,33,2),zeros(ComplexF32,64,3),zeros(ComplexF32,64,3))
+        @test length(g.passes) == before
+        empty = KA.allocate(backend,Float32,64,0)
+        @test size(Mantle.rfft(empty)) == (33,0)
+    end
+
+    @testset "recorded complex FFTs share eager selection" begin
+        dev = Mantle.Device(backend)
+        for N in (64,96), inverse in (false,true)
+            h = randn(ComplexF32,N,3)
+            src = Mantle.Buffer(dev,h); dst=Mantle.Buffer(dev,ComplexF32,size(h))
+            g = Mantle.Graph(dev)
+            Mantle.fftany_dispatch!(g,dst,src;inverse,skew=true)
+            pl = Mantle.Plan(g;budget=Inf)
+            try
+                Mantle.record!(pl)
+                want = hcat((dftref(ComplexF64.(h[:,i]),inverse ? 1 : -1) for i in 1:3)...)
+                for factor in (1f0,2f0)
+                    src[:] = vec(factor .* h)
+                    Mantle.run!(pl); Mantle.waitfor!(pl)
+                    @test relerr(ComplexF64.(Array(dst)),factor .* want) < 1f-4
+                end
+            finally
+                Mantle.free!(pl); Mantle.free!(src); Mantle.free!(dst)
+            end
+        end
+    end
+
+    @testset "recorded real FFT and inverse preserve batches" begin
+        dev = Mantle.Device(backend)
+        for N in (64,400)
+            h=randn(Float32,N,2); H=N÷2
+            src=Mantle.Buffer(dev,h)
+            half=Mantle.Buffer(dev,ComplexF32,(H+1,2))
+            out=Mantle.Buffer(dev,Float32,size(h))
+            g=Mantle.Graph(dev)
+            packed=Mantle.Transient.Buffer(g,ComplexF32,H,2)
+            spectrum=Mantle.Transient.Buffer(g,ComplexF32,H,2)
+            full=Mantle.Transient.Buffer(g,ComplexF32,N,2)
+            transformed=Mantle.Transient.Buffer(g,ComplexF32,N,2)
+            Mantle.rfft_dispatch!(g,half,src,packed,spectrum)
+            Mantle.irfft_dispatch!(g,out,half,full,transformed;scale=1f0/N)
+            pl=Mantle.Plan(g;budget=Inf)
+            try
+                Mantle.record!(pl)
+                want=hcat((dftref(ComplexF64.(h[:,i]))[1:H+1] for i in 1:2)...)
+                for factor in (1f0,2f0)
+                    src[:] = vec(factor .* h)
+                    Mantle.run!(pl); Mantle.waitfor!(pl)
+                    @test relerr(ComplexF64.(Array(half)),factor .* want) < 1f-4
+                    @test Array(out) ≈ factor .* h rtol=1f-4 atol=1f-4
+                end
+            finally
+                Mantle.free!(pl)
+                foreach(Mantle.free!,(src,half,out))
+            end
+        end
+    end
+
 end

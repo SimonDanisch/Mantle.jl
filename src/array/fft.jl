@@ -1,89 +1,13 @@
-# FFT, and it is not the Vulkan backend's — see `array/gemv.jl` for why this
-# file and that one moved out of it together.
-#
-# It named two device facts, both through a `VkContext`: the workgroup limit that
-# bounds the radix, and the shared-memory budget `fftgroup` packs batches into.
-# They are `workgrouplimit(src)` and `sharedbudget(src)` now, which any backend
-# answers, and everything else here was already `KernelAbstractions` and
-# arithmetic. Allocation is `similar` and `KernelAbstractions.allocate`
-# throughout, never a backend array type by name.
-#
-# `fft!`, `rfft!`, `stft` and `hannwindow` are Mantle's own functions, so widening
-# their dispatch from `::LavaArray` to `::AbstractGPUArray` claims nothing that
-# belongs to anyone else.
-
-# Batched 1D FFT, ported from VkFFT (`dev/VkFFT`, MIT, Dmitrii Tolmachev).
-#
-# What was taken from it is the ARRANGEMENT, which is not the obvious one. The
-# obvious design keeps the whole transform in workgroup memory and butterflies it in
-# place. VkFFT does not: its working set lives in **registers**
-# (`logicalStoragePerThread` — `vkFFT_RegisterBoost.h`), `fftDim /
-# logicalStoragePerThread` threads cooperate on one transform, and shared memory
-# is only the *shuffle buffer* between stages
-# (`appendRegistersToShared`/`appendSharedToRegisters`, `vkFFT_RadixShuffle.h`).
-# Registers are faster than shared and, more importantly, holding only one shared
-# array instead of the whole working set is what decides how many transforms fit
-# per workgroup.
-#
-# Constants are NOT taken from it. VkFFT's radix and register choices are tuned
-# across its whole device matrix; per `feedback-port-sota-kernels` the structure
-# ports and every number gets re-measured here.
-#
-# ## One buffer, two barriers
-#
-# Stockham is not in-place: a stage reads with stride `T` and writes with the
-# permuted stride `Ns`. The textbook fix is two buffers, ping-ponged — which for
-# N = 4096 is 2 x 4096 x 8 = 64 KB and does **not fit** in this device's 49152 B
-# (`caps(ctx).sharedbudget`).
-#
-# One buffer suffices with a barrier *between the read and the write*: every
-# thread has finished gathering its R points into registers before any thread
-# writes. That is two barriers per stage instead of one, and it is what makes
-# N = 4096 land at 32 KB and fit at all.
-#
-# ## Where it lands
-#
-# Against a **same-size** copy kernel, interleaved, 2^21 complex points total.
-# "First" is the initial radix-4 version before any of the tuning below.
-#
-#     N      group  threads   ms       GB/s    % of copy   first
-#     64     4      32        0.108    310     42.6%       30.2%
-#     128    2      32        0.073    459     61.5%       45.6%
-#     256    1      32        0.069    485     59.2%       59.8%
-#     512    1      64        0.072    466     57.6%       21.1%   <- Whisper
-#     1024   1      128       0.076    444     55.0%       38.3%   <- DeepFilterNet3
-#     2048   1      256       0.118    284     36.2%       33.9%
-#     4096   1      512       0.186    181     23.0%       16.0%   <- Demucs
-#
-# Same-size matters: an earlier table compared everything against one 128 MB
-# copy and reported 128% for the small shapes, which only meant the FFT working
-# set was cache-resident and the copy was not.
-#
-# **N >= 2048 is the known weak point and it is shared memory.** All of 1024,
-# 2048 and 4096 run four stages, so stage count does not explain the fall-off;
-# shared occupancy does. The `skew` experiment measured the sensitivity
-# directly — a 5.6% larger shared allocation cost 7.3% at N = 4096, 3.6% at
-# N = 1024, and was a *gain* at N = 256. Single-pass Stockham needs N complex in
-# shared and there is no way around that; the fix is VkFFT's multi-pass
-# decomposition (`numAxisUploads > 1`, 4096 = 64 x 64 through global memory),
-# which is not implemented. Demucs is the only model here that wants 4096 and it
-# is not ported, so this is documented rather than built.
-#
-# ## Real and imaginary in separate arrays
-#
-# Not a `Complex` array. Each is then a stride-1 access per lane where an
-# interleaved layout strides by 2, and it keeps `Complex` out of workgroup memory
-# entirely — see `lava-localmem-silent-miscompile` for how quietly that class of
-# thing fails here.
+# Batched FFT/STFT through portable KI kernels and device capabilities.
+# Stockham register/shared-memory arrangement derives from VkFFT (MIT,
+# Dmitrii Tolmachev). Numeric tilings are Mantle's measured choices.
+# Keep real/imaginary shared arrays separate. One shuffle buffer needs uniform
+# barriers both before gathering and between all gathers and all scatters.
 
 """
-The radix-R DFT on R points held in registers, real and imaginary separate.
+Radix-R DFT in registers with separate real/imaginary tuples.
+SIGN=-1 is forward and +1 inverse; Val specialization folds the ±i rotations.
 
-`SIGN` is -1 for the forward transform and +1 for the inverse, and it appears
-only as the sense of the multiply-by-i — which is why it is a `Val` rather than a
-runtime factor: at -1 the rotation is `(a,b) -> (b,-a)`, six of the eight
-radix-4 flops fold away, and a runtime sign would leave a select in the inner
-loop of every stage.
 """
 @inline function fftbutterfly(::Val{2}, xr::NTuple{2}, xi::NTuple{2}, ::Val{SIGN}) where {SIGN}
     return (xr[1] + xr[2], xr[1] - xr[2]), (xi[1] + xi[2], xi[1] - xi[2])
@@ -133,43 +57,17 @@ end
 """
     fft_kernel!(dst, src, Val(N), Val(LEAD), Val(SIGN))
 
-One transform per workgroup, `T = N ÷ 8` threads, **eight points per thread**,
-radix 8 throughout with one leading radix-2 or radix-4 stage when `N` is not a
-power of eight. `LEAD` is that leading radix, or 1 for none.
+NB transforms share a workgroup; each transform uses N÷8 threads and eight
+register points per thread. A leading radix-2/4 stage covers powers not divisible
+by eight; it runs first because every twiddle is one at that stage. Remaining
+stages use radix eight. SKEW optionally pads shared indices for bank conflicts.
 
-## Eight points per thread, not four
-
-This is VkFFT's `registerBoost` (`vkFFT_RegisterBoost.h`): the working set per
-thread is a *tuning parameter*, and raising it removes whole stages. The cost of
-a stage here is not the butterfly — it is the shared-memory round trip and the
-two barriers around it. At four points per thread `N = 4096` took six stages and
-measured **16% of a same-size copy**; the arithmetic was never the problem, the
-6x shared traffic over global was.
-
-Radix 8 makes that four stages, and `N = 512` three.
-
-## Why the odd stage goes first
-
-`N = 2^k` is a power of eight only when `k % 3 == 0`. Otherwise one stage of
-radix 2 (`k % 3 == 1`) or radix 4 (`k % 3 == 2`) makes up the difference, and it
-goes **first** because at `Ns = 1` every twiddle is exactly 1 — the angle is
-`idx/(Ns*R)` and `idx = tid % 1 = 0`. Putting it last would cost a full twiddle
-pass. Each thread runs `8 ÷ LEAD` of those butterflies, so no lane idles.
 """
 function fft_kernel!(
         dst, src, ::Val{N}, ::Val{LEAD}, ::Val{SIGN}, ::Val{SKEW},
         ::Val{NB}) where {N,LEAD,SIGN,SKEW,NB}
-    # `Val` parameters, not locals: a workgroup buffer whose size comes from a local
-    # variable compiles, runs, and writes NOTHING on this backend.
-    # `SKEW` pads the shared arrays so that a stride-8 write does not serialise.
-    # The Stockham store address is `(tid ÷ Ns) * (Ns * 8) + idx`; at `Ns = 1`
-    # that is `tid * 8`, which puts a whole warp on 4 of the 32 banks. Adding
-    # `i ÷ 32` spreads them. Costs N ÷ 32 floats per array.
-    # `NB` transforms per workgroup. At N = 64 one transform needs T = 8
-    # threads, so a workgroup would be a quarter of a warp and three lanes in
-    # four would idle — measured 30.2% of copy against 59.8% at N = 256. Packing
-    # several transforms into the workgroup fixes the shape of the launch
-    # without touching the algorithm.
+    # Shared extents must be compile-time constants. NB packs small transforms;
+    # SKEW adds i÷32 padding to shared indices.
     sre = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(1))
     sim = KI.localmemory(Float32, Val((NB * (SKEW ? N + N ÷ 32 : N),)), Val(2))
     @inline sx(i) = SKEW ? i + i ÷ 32 : i
@@ -205,11 +103,7 @@ function fft_kernel!(
             sim[soff + sx(tid + q * T + m * M) + 1]
         end
         KI.barrier()
-        # `ntuple(Val(...))` rather than `for q in 0:...`: the body indexes the
-        # register tuples `gr`/`gi`, and a tuple indexed by a RUNTIME value is a
-        # stack slot on this backend — the whole working set would spill to
-        # scratch memory. `ntuple` with a `Val` is unrolled and inlined, so every
-        # tuple index below is a literal. The returned tuple is discarded.
+        # Unroll tuple indices so register values do not spill to runtime-indexed stacks.
         ntuple(Val(8 ÷ LEAD)) do qq
             q = qq - 1
             xr = ntuple(m -> gr[q * LEAD + m], Val(LEAD))
@@ -267,29 +161,8 @@ function fft_kernel!(
     return nothing
 end
 
-"""
-Whether the shared arrays are padded to break bank conflicts on the Stockham
-write.
-
-**Measured OFF.** The theory was good and the measurement disagreed. At `Ns = 1`
-the store address is `tid * 8`, which puts a warp on 4 of the 32 banks, so the
-padding should have paid — and against a same-size copy, interleaved, it went
-
-    256x6000    62.3% -> 63.9%   (+2.6%)
-    512x3000    61.2% -> 58.2%   (-4.9%)
-    1024x1500   58.4% -> 56.3%   (-3.6%)
-    4096x512    23.1% -> 21.4%   (-7.3%)
-
-i.e. a loss on three of four shapes. The conflicting stage is one of three or
-four, the skew costs an extra shift-and-add on *every* shared access including
-the conflict-free ones, and at N = 4096 it pushes the shared allocation from
-32 KB to 33.8 KB. Kept as a switch because the sign may differ on another
-device — `fft!(...; skew = true)` — but the default is what measured here.
-
-Caveat on reading those numbers: run-to-run spread on this benchmark is ~5-10%,
-so the three losses are near the noise floor individually. What makes them worth
-acting on is that they are consistent in sign across shapes and the win is not.
-"""
+"""Default shared-index padding. Off in the measured workloads; retain the option
+for device-specific tuning rather than assuming fewer bank conflicts is faster."""
 const FFT_SKEW = false
 
 """
@@ -314,31 +187,10 @@ end
 """
     fftgroup(N, T, nbatch, limit, sharedbudget) -> Int
 
-How many transforms share a workgroup.
+Transforms per workgroup: target 32 threads, then bound by batch divisibility,
+thread limit and half the shared-memory budget. One large transform may use more
+than half the budget. These are measured defaults, not a universal optimum.
 
-One transform per workgroup is `T = N ÷ 8` threads, and at small `N` that is a
-fraction of a warp — `N = 64` gives **8**, so three lanes in four idle. Packing
-transforms into the workgroup fixes the launch shape.
-
-**The target is ONE warp, not two.** That is measured, and the first guess here
-was `cld(64, T)`, which is wrong by a factor of two — it made `N = 256` slower.
-Swept against a same-size copy, interleaved, every candidate a separately
-compiled module:
-
-    N=64   T=8    1:29.6%  2:44.5%  4:46.6%  8:42.3%  16:39.7%
-    N=128  T=16   1:45.3%  2:57.9%  4:58.0%  8:57.3%  16:37.9%
-    N=256  T=32   1:53.4%  2:51.5%  4:51.4%  8:30.5%  16:20.5%
-    N=512  T=64   1:54.7%  2:52.2%  4:33.8%  8:22.4%
-    N=1024 T=128  1:51.7%  2:32.9%  4:21.8%
-
-The optimum is the smallest group reaching 32 threads and it falls off hard
-above ~64 — a bigger group is more shared memory for the same work, and past one
-warp there is nothing left to fill.
-
-Bounded above by three more things: it must divide the batch (no partial group is
-emitted), it must fit the workgroup limit, and it must fit shared memory — where
-the budget asks for **half** the device maximum, because a workgroup claiming the
-whole 48 KB is the only one resident on its SM.
 """
 function fftgroup(N::Int, T::Int, nbatch::Int, limit::Int, sharedbudget::Int)
     want = max(1, cld(32, T))                       # one warp; measured, see above
@@ -367,20 +219,11 @@ callers who fold it into a later op.
 function fft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
               inverse::Bool = false, skew::Bool = FFT_SKEW,
               group::Union{Nothing,Int} = nothing)
-    size(dst) == size(src) || throw(DimensionMismatch(
-        "fft!: destination $(size(dst)) does not match source $(size(src))"))
-    N = size(src, 1)
-    nbatch = length(src) ÷ N
-    T, lead = fftplan(N)
-    backend = get_backend(src)
-    lim = workgrouplimit(src)
-    T <= lim || throw(ArgumentError(
-        "fft!: N=$N needs $T threads, above this device's limit of $lim. " *
-        "A larger radix, or a multi-pass decomposition, is what VkFFT reaches " *
-        "for here (`numAxisUploads > 1`); neither is implemented yet."))
-    nb = group === nothing ? fftgroup(N, T, nbatch, lim, sharedbudget(src)) : group
-    kilaunch!(backend, fft_kernel!, dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1),
-              Val(skew), Val(nb); ndrange = T * nb * (nbatch ÷ nb), workgroupsize = T * nb)
+    be = get_backend(src)
+    N,T,lead,nb,nbatch = fft_config(dst,src,caps(be);skew,group)
+    nbatch == 0 && return dst
+    kilaunch!(be,fft_kernel!,fft_args(dst,src,N,lead,inverse,skew,nb)...;
+              ndrange=T*nbatch,workgroupsize=T*nb)
     return dst
 end
 
@@ -391,7 +234,6 @@ Allocating [`fft!`](@ref).
 """
 fft(src::AbstractGPUArray{ComplexF32}; inverse::Bool = false, skew::Bool = FFT_SKEW) =
     fft!(similar(src), src; inverse, skew)
-
 
 # ─────────────────────────────────────────────────────────── real-input transform
 #
@@ -457,18 +299,14 @@ Costs one `N ÷ 2` complex transform plus a linear pass, so roughly half of
 """
 function rfft!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{Float32};
                skew::Bool = FFT_SKEW)
-    N = size(src, 1)
-    iseven(N) || throw(ArgumentError("rfft!: length $N must be even"))
-    H = N ÷ 2
-    nbatch = length(src) ÷ N
-    size(dst, 1) == H + 1 || throw(DimensionMismatch(
-        "rfft!: destination first dimension is $(size(dst, 1)), expected $(H + 1)"))
+    N,H,nbatch = rfft_geometry(dst,src)
+    nbatch == 0 && return dst
     # The pack, for free: N reals ARE H complex in the interleave the
     # decomposition wants.
     z = reshape(reinterpret(ComplexF32, reshape(src, length(src))), H, nbatch)
     # `fftany!`, not `fft!`: H is 200 for Whisper's 400-point mel and 480 for
     # DeepFilterNet3's 960, neither a power of two.
-    Z = fftany!(similar(z), z)
+    Z = fftany!(similar(z), z; skew)
     backend = get_backend(src)
     kilaunch!(backend, rfft_post_kernel!, dst, Z, Val(N), Val(-1), 1f0;
               ndrange = (H + 1) * nbatch)
@@ -488,31 +326,9 @@ function rfft(src::AbstractGPUArray{Float32}; skew::Bool = FFT_SKEW)
     return dst
 end
 
-
-# ─────────────────────────────────────────────── mixed radix, non-powers of two
-#
-# The tuned kernel above is powers of two only, and **that covers one of the
-# three audio models**. Measured from their own configs:
-#
-#     Whisper mel      n_fft = 400  = 2^4 * 5^2      NOT a power of two
-#     DeepFilterNet3   n_fft = 960  = 2^6 * 3 * 5    NOT a power of two
-#     Demucs htdemucs  n_fft = 4096 = 2^12           power of two
-#
-# Nor can the "one leading stage then radix 8" shape be stretched to reach them:
-# `400 = L * 8^m` has no integer solution for a radix `L`, and `960 = 15 * 8^2`
-# wants a leading 15, which is two stages and not one. They need a genuine
-# **sequence** of radices, which is what VkFFT's `stageRadix[]` is.
-#
-# So there are two kernels, deliberately. The power-of-two one is tuned and
-# measured (see the table at the top); this one is general and is not. Splitting
-# them keeps the tuning from being diluted by a shape it was not measured on,
-# and `fft!` dispatches on `count_ones(N) == 1`, so the fast path stays the fast
-# path.
-#
-# The thread count is `T = N ÷ Rmax`. A stage of radix `r < Rmax` has `N ÷ r`
-# butterflies, which is more than `T`, so each thread runs `cld(Rmax, r)` of them
-# under a bounds guard. VkFFT does the same thing — the `PfIf_lt_start` around
-# each stage in `vkFFT_RegisterBoost.h` is that guard.
+# Mixed radices cover non-power-of-two audio lengths such as 400 and 960.
+# Smaller stages run multiple guarded butterflies per thread while keeping
+# all stage gathers before any scatter. The tuned power-of-two kernel stays distinct.
 
 """
     fftplan_mixed(N; radices = (8, 5, 4, 3, 2)) -> Tuple
@@ -528,6 +344,8 @@ ten a pure radix-2 plan would need.
 function fftplan_mixed(N::Integer; radices = (8, 5, 4, 3, 2))
     n = Int(N)
     n >= 2 || throw(ArgumentError("fft!: length $N is too small"))
+    all(r->r isa Integer && r>=2,radices) ||
+        throw(ArgumentError("fft!: radix choices must be integers >= 2"))
     rs = Int[]
     for r in radices
         while n % r == 0
@@ -539,176 +357,139 @@ function fftplan_mixed(N::Integer; radices = (8, 5, 4, 3, 2))
     return Tuple(rs)
 end
 
+struct MixedFFTKernel{RS,SIGN} <: Function end
+
 """
     fftmixed_kernel(RS, sign) -> kernel
 
-Generate the transform for radix sequence `RS` and direction `sign`.
+Return a zero-size callable specialized by radix sequence and direction.
+Its generated method emits literal Float32 DFT coefficients and fixed indices;
+there are no runtime transcendental coefficient calculations or eval-defined
+methods. Julia owns specialization caching, including downstream precompilation.
+Barriers stay outside guarded butterflies so every workgroup lane reaches them.
 
-## Every constant is a literal, on purpose
-
-The first version called a generic `fftbutterfly(::Val{R}, ...)` that built its
-twiddles with `cospi`/`sinpi` and relied on inference to fold them. **It does not
-fold.** The inner `for m in 1:R` is not unrolled — `R` being a type parameter
-makes the loop *bound* a constant, not the loop — so `m` stays a runtime value
-and `cospi` survives as a Float64 transcendental. On this backend that is not
-merely slow, it is a compile error (`unsupported dynamic function invocation`),
-followed by a page of cascading dynamic-dispatch failures that name `ntuple` and
-`Val` and point nowhere near the cause.
-
-So the DFT matrix is computed **here**, in Julia, at generation time, and spliced
-in as literal `Float32`s. Nothing is left to fold, and zero coefficients are
-dropped from the expression rather than multiplied by.
-
-That also makes `sign` a generation parameter rather than a `Val`, since the
-twiddles depend on it: two kernels per sequence, each compiled once and cached.
-
-The stage structure follows the same rule. `@synchronize` must sit in **uniform**
-control flow, and a stage of radix `r < Rmax` leaves some lanes with no butterfly
-— so the barrier is lifted out of the `if ok` guard, and every index around it is
-a literal.
 """
-const FFT_MIXED_KERNELS = Dict{Tuple{Tuple,Int},Any}()
+fftmixed_kernel(RS::Tuple, sign::Int) = MixedFFTKernel{RS,sign}()
 
-function fftmixed_kernel(RS::Tuple, sign::Int)
-    get!(FFT_MIXED_KERNELS, (RS, sign)) do
-        RMAX = maximum(RS)
-        N = prod(RS)
-        TT = N ÷ RMAX
-        stages = Expr[]
-        Ns = 1
-        for r in RS
-            B = N ÷ r
-            reps = cld(RMAX, r)
-            wc = [Float32(cospi(2 * sign * (k - 1) * (m - 1) / r)) for k in 1:r, m in 1:r]
-            ws = [Float32(sinpi(2 * sign * (k - 1) * (m - 1) / r)) for k in 1:r, m in 1:r]
-            # ── ALL gathers before ANY scatter.
-            #
-            # With `reps > 1` the naive "gather/compute/scatter" per rep is
-            # WRONG, and wrong in a way that passes small cases: rep 1 reads
-            # slots rep 0 has already overwritten. At N = 96 stage 2 (r=4,
-            # Ns=8), rep 0 at j=4 writes slot 12 and rep 1 at j=12 reads it.
-            # Two-stage plans happened to have disjoint sets and passed, which
-            # is exactly how this survived the first round of testing.
-            #
-            # Stockham is not in place: every read of a stage must precede every
-            # write of that stage. So the reps are split into a gather+compute
-            # phase, one barrier, then a scatter phase — each rep keeping its own
-            # registers across it.
-            gathers = Expr[]; scatters = Expr[]
-            for q in 0:(reps - 1)
-                J, OK = Symbol(:j_, q), Symbol(:ok_, q)
-                ex = Expr[]
-                push!(ex, :($J = tid + $(q * TT)))
-                push!(ex, :($OK = $J < $B))
-                for k in 1:r
-                    push!(ex, :($(Symbol(:xr_, q, :_, k)) = $OK ? sre[$J + $((k - 1) * B) + 1] : 0.0f0))
-                    push!(ex, :($(Symbol(:xi_, q, :_, k)) = $OK ? sim[$J + $((k - 1) * B) + 1] : 0.0f0))
-                end
-                push!(ex, :($(Symbol(:idx_, q)) = $J % $Ns))
-                push!(ex, :($(Symbol(:ang_, q)) = $(Float32(sign * 2 * pi / (Ns * r))) *
-                                                  Float32($(Symbol(:idx_, q)))))
-                push!(ex, :(($(Symbol(:sn_, q, :_1)), $(Symbol(:cs_, q, :_1))) =
-                            sincos($(Symbol(:ang_, q)))))
-                for k in 2:(r - 1)
-                    push!(ex, :($(Symbol(:cs_, q, :_, k)) = $(Symbol(:cs_, q, :_, k-1)) * $(Symbol(:cs_, q, :_1)) -
-                                                            $(Symbol(:sn_, q, :_, k-1)) * $(Symbol(:sn_, q, :_1))))
-                    push!(ex, :($(Symbol(:sn_, q, :_, k)) = $(Symbol(:sn_, q, :_, k-1)) * $(Symbol(:cs_, q, :_1)) +
-                                                            $(Symbol(:cs_, q, :_, k-1)) * $(Symbol(:sn_, q, :_1))))
-                end
-                for k in 1:r
-                    xr, xi = Symbol(:xr_, q, :_, k), Symbol(:xi_, q, :_, k)
-                    tr, ti = Symbol(:tr_, q, :_, k), Symbol(:ti_, q, :_, k)
-                    if k == 1
-                        push!(ex, :($tr = $xr)); push!(ex, :($ti = $xi))
-                    else
-                        c, sq = Symbol(:cs_, q, :_, k-1), Symbol(:sn_, q, :_, k-1)
-                        push!(ex, :($tr = $xr * $c - $xi * $sq))
-                        push!(ex, :($ti = $xr * $sq + $xi * $c))
-                    end
-                end
-                for k in 1:r
-                    re = Expr(:call, :+); im = Expr(:call, :+)
-                    for m in 1:r
-                        c, sb = wc[k, m], ws[k, m]
-                        tr, ti = Symbol(:tr_, q, :_, m), Symbol(:ti_, q, :_, m)
-                        if c != 0
-                            push!(re.args, c == 1 ? tr : :($tr * $c))
-                            push!(im.args, c == 1 ? ti : :($ti * $c))
-                        end
-                        if sb != 0
-                            push!(re.args, :(-($ti * $sb)))
-                            push!(im.args, :($tr * $sb))
-                        end
-                    end
-                    push!(ex, :($(Symbol(:yr_, q, :_, k)) = $re))
-                    push!(ex, :($(Symbol(:yi_, q, :_, k)) = $im))
-                end
-                push!(gathers, Expr(:block, ex...))
-                sc = Expr[]
-                for k in 1:r
-                    push!(sc, :(sre[$(Symbol(:out0_, q)) + $((k - 1) * Ns) + 1] = $(Symbol(:yr_, q, :_, k))))
-                    push!(sc, :(sim[$(Symbol(:out0_, q)) + $((k - 1) * Ns) + 1] = $(Symbol(:yi_, q, :_, k))))
-                end
-                push!(scatters, quote
-                    if $OK
-                        $(Symbol(:out0_, q)) = ($J ÷ $Ns) * $(Ns * r) + $(Symbol(:idx_, q))
-                        $(sc...)
-                    end
-                end)
+@generated function (kern::MixedFFTKernel{RS,SIGN})(dst,src) where {RS,SIGN}
+    sign = SIGN
+    RMAX = maximum(RS)
+    N = prod(RS)
+    TT = N ÷ RMAX
+    stages = Expr[]
+    Ns = 1
+    for r in RS
+        B = N ÷ r
+        reps = cld(RMAX, r)
+        wc = [Float32(cospi(2 * sign * (k - 1) * (m - 1) / r)) for k in 1:r, m in 1:r]
+        ws = [Float32(sinpi(2 * sign * (k - 1) * (m - 1) / r)) for k in 1:r, m in 1:r]
+        # Gather/compute every rep before any scatter: Stockham is not in-place.
+        # Keep each rep's register values live across the uniform barrier.
+        gathers = Expr[]; scatters = Expr[]
+        for q in 0:(reps - 1)
+            J, OK = Symbol(:j_, q), Symbol(:ok_, q)
+            ex = Expr[]
+            push!(ex, :($J = tid + $(q * TT)))
+            push!(ex, :($OK = $J < $B))
+            for k in 1:r
+                push!(ex, :($(Symbol(:xr_, q, :_, k)) = $OK ? sre[$J + $((k - 1) * B) + 1] : 0.0f0))
+                push!(ex, :($(Symbol(:xi_, q, :_, k)) = $OK ? sim[$J + $((k - 1) * B) + 1] : 0.0f0))
             end
-            body = Expr[Expr(:block, gathers...),
-                        :(KI.barrier()),          # UNIFORM, between all reads and all writes
-                        Expr(:block, scatters...)]
-            push!(stages, quote
-                KI.barrier()
-                $(body...)
-            end)
-            Ns *= r
-        end
-        load = Expr[]; store = Expr[]
-        for k in 0:(RMAX - 1)
-            push!(load, quote
-                let i = tid + $(k * TT)
-                    if i < $N
-                        z = src[base + i + 1]
-                        sre[i + 1] = real(z)
-                        sim[i + 1] = imag(z)
-                    end
-                end
-            end)
-            push!(store, quote
-                let i = tid + $(k * TT)
-                    if i < $N
-                        dst[base + i + 1] = ComplexF32(sre[i + 1], sim[i + 1])
-                    end
-                end
-            end)
-        end
-        # A DETERMINISTIC name, not `gensym`, which carries a per-session
-        # counter — `##fftmixed#277` one run, `#281` the next. One plan is one
-        # function in every session, so the code a package image holds for it is
-        # found again instead of compiled on every load.
-        kname = Symbol("fftmixed_", join(RS, "_"), sign > 0 ? "_inv" : "_fwd")
-        @eval begin
-            function $kname(dst, src)
-                sre = KI.localmemory(Float32, Val(($N,)), Val(1))
-                sim = KI.localmemory(Float32, Val(($N,)), Val(2))
-                tid = KI.get_local_id().x - 1
-                blk = KI.get_group_id().x - 1
-                base = blk * $N
-                @inbounds begin
-                    $(load...)
-                    $(stages...)
-                    KI.barrier()
-                    $(store...)
-                end
-                return nothing
+            push!(ex, :($(Symbol(:idx_, q)) = $J % $Ns))
+            push!(ex, :($(Symbol(:ang_, q)) = $(Float32(sign * 2 * pi / (Ns * r))) *
+                                              Float32($(Symbol(:idx_, q)))))
+            push!(ex, :(($(Symbol(:sn_, q, :_1)), $(Symbol(:cs_, q, :_1))) =
+                        sincos($(Symbol(:ang_, q)))))
+            for k in 2:(r - 1)
+                push!(ex, :($(Symbol(:cs_, q, :_, k)) = $(Symbol(:cs_, q, :_, k-1)) * $(Symbol(:cs_, q, :_1)) -
+                                                        $(Symbol(:sn_, q, :_, k-1)) * $(Symbol(:sn_, q, :_1))))
+                push!(ex, :($(Symbol(:sn_, q, :_, k)) = $(Symbol(:sn_, q, :_, k-1)) * $(Symbol(:cs_, q, :_1)) +
+                                                        $(Symbol(:cs_, q, :_, k-1)) * $(Symbol(:sn_, q, :_1))))
             end
-            $kname
+            for k in 1:r
+                xr, xi = Symbol(:xr_, q, :_, k), Symbol(:xi_, q, :_, k)
+                tr, ti = Symbol(:tr_, q, :_, k), Symbol(:ti_, q, :_, k)
+                if k == 1
+                    push!(ex, :($tr = $xr)); push!(ex, :($ti = $xi))
+                else
+                    c, sq = Symbol(:cs_, q, :_, k-1), Symbol(:sn_, q, :_, k-1)
+                    push!(ex, :($tr = $xr * $c - $xi * $sq))
+                    push!(ex, :($ti = $xr * $sq + $xi * $c))
+                end
+            end
+            for k in 1:r
+                re = Expr(:call, :+); im = Expr(:call, :+)
+                for m in 1:r
+                    c, sb = wc[k, m], ws[k, m]
+                    tr, ti = Symbol(:tr_, q, :_, m), Symbol(:ti_, q, :_, m)
+                    if c != 0
+                        push!(re.args, c == 1 ? tr : :($tr * $c))
+                        push!(im.args, c == 1 ? ti : :($ti * $c))
+                    end
+                    if sb != 0
+                        push!(re.args, :(-($ti * $sb)))
+                        push!(im.args, :($tr * $sb))
+                    end
+                end
+                push!(ex, :($(Symbol(:yr_, q, :_, k)) = $re))
+                push!(ex, :($(Symbol(:yi_, q, :_, k)) = $im))
+            end
+            push!(gathers, Expr(:block, ex...))
+            sc = Expr[]
+            for k in 1:r
+                push!(sc, :(sre[$(Symbol(:out0_, q)) + $((k - 1) * Ns) + 1] = $(Symbol(:yr_, q, :_, k))))
+                push!(sc, :(sim[$(Symbol(:out0_, q)) + $((k - 1) * Ns) + 1] = $(Symbol(:yi_, q, :_, k))))
+            end
+            push!(scatters, quote
+                if $OK
+                    $(Symbol(:out0_, q)) = ($J ÷ $Ns) * $(Ns * r) + $(Symbol(:idx_, q))
+                    $(sc...)
+                end
+            end)
         end
+        body = Expr[Expr(:block, gathers...),
+                    :(KI.barrier()),          # UNIFORM, between all reads and all writes
+                    Expr(:block, scatters...)]
+        push!(stages, quote
+            KI.barrier()
+            $(body...)
+        end)
+        Ns *= r
+    end
+    load = Expr[]; store = Expr[]
+    for k in 0:(RMAX - 1)
+        push!(load, quote
+            let i = tid + $(k * TT)
+                if i < $N
+                    z = src[base + i + 1]
+                    sre[i + 1] = real(z)
+                    sim[i + 1] = imag(z)
+                end
+            end
+        end)
+        push!(store, quote
+            let i = tid + $(k * TT)
+                if i < $N
+                    dst[base + i + 1] = ComplexF32(sre[i + 1], sim[i + 1])
+                end
+            end
+        end)
+    end
+    return quote
+        sre = KI.localmemory(Float32, Val(($N,)), Val(1))
+        sim = KI.localmemory(Float32, Val(($N,)), Val(2))
+        tid = KI.get_local_id().x - 1
+        blk = KI.get_group_id().x - 1
+        base = blk * $N
+        @inbounds begin
+            $(load...)
+            $(stages...)
+            KI.barrier()
+            $(store...)
+        end
+        return nothing
     end
 end
-
 
 """
     fftmixed!(dst, src, RS; inverse = false) -> dst
@@ -716,53 +497,102 @@ end
 Batched transform over the radix sequence `RS`, for lengths the power-of-two
 kernel cannot take. `prod(RS)` must equal `size(src, 1)`.
 
-Correctness-first and deliberately untuned: no grouping, no skew, a generic
-butterfly for radix 3 and 5. It exists because Whisper's mel (400) and
-DeepFilterNet3 (960) cannot be computed at all without it, and tuning it before
-either is wired up would be tuning against a guess.
+Uses one transform per workgroup without skew or batch grouping. The literal
+butterfly generator supports radix sequences beyond the tuned power-of-two path.
+
 """
 function fftmixed!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32},
                    RS::Tuple; inverse::Bool = false)
-    N = size(src, 1)
-    prod(RS) == N || throw(ArgumentError(
-        "fftmixed!: radix sequence $RS multiplies to $(prod(RS)), not $N"))
-    size(dst) == size(src) || throw(DimensionMismatch(
-        "fftmixed!: destination $(size(dst)) does not match source $(size(src))"))
-    nbatch = length(src) ÷ N
-    T = N ÷ maximum(RS)
-    backend = get_backend(src)
-    lim = workgrouplimit(src)
-    T <= lim || throw(ArgumentError(
-        "fftmixed!: N=$N needs $T threads, above this device's limit of $lim"))
-    # `invokelatest` on the launch: `fftmixed_kernel` `@eval`s the kernel, so it
-    # is newer than this function's world. There is only one call to wrap now —
-    # the kernel is a plain function, where a `@kernel` answered `kern(backend)`
-    # with a method that was itself too new to call from here.
-    kern = fftmixed_kernel(RS, inverse ? 1 : -1)
-    Base.invokelatest(kilaunch!, backend, kern, dst, src;
-                      ndrange = T * nbatch, workgroupsize = T)
+    be = get_backend(src)
+    T,nbatch = fftmixed_config(dst,src,RS,caps(be))
+    nbatch == 0 && return dst
+    kern = fftmixed_kernel(RS,inverse ? 1 : -1)
+    kilaunch!(be,kern,dst,src;ndrange=T*nbatch,workgroupsize=T)
     return dst
 end
 
 """
     fftany!(dst, src; inverse = false) -> dst
 
-Dispatch on the length: the tuned power-of-two kernel where it applies, the
-general mixed-radix one otherwise. This is what a caller who does not control
-`N` should use — `fft!` stays the fast path with a hard requirement, so nothing
-silently falls off it.
+Select the tuned power-of-two kernel or a supported mixed-radix sequence.
+skew controls the power-of-two shared layout; the mixed layout has no skew option.
+
 """
 function fftany!(dst::AbstractGPUArray{ComplexF32}, src::AbstractGPUArray{ComplexF32};
-                 inverse::Bool = false)
-    N = size(src, 1)
-    if count_ones(N) == 1 && N >= 8
-        return fft!(dst, src; inverse)
-    end
+                 inverse::Bool = false, skew::Bool = FFT_SKEW)
+    RS = fft_radices(size(src,1))
+    return RS === nothing ? fft!(dst,src;inverse,skew) : fftmixed!(dst,src,RS;inverse)
+end
+
+function rfft_geometry(dst,src)
+    N = size(src,1)
+    N > 0 && iseven(N) || throw(ArgumentError("rfft!: length $N must be positive and even"))
+    H = N ÷ 2
+    nbatch = length(src) ÷ N
+    size(dst,1) == H+1 && length(dst) == (H+1)*nbatch || throw(DimensionMismatch(
+        "rfft!: destination $(size(dst)) must hold $(H+1) bins for $nbatch batches"))
+    return N,H,nbatch
+end
+
+# Configuration is shared; eager calls keep Val arguments on the direct launch path.
+@inline fft_args(dst,src,N,lead,inverse,skew,nb) =
+    (dst,src,Val(N),Val(lead),Val(inverse ? 1 : -1),Val(skew),Val(nb))
+
+function fft_config(dst,src,c; skew::Bool=FFT_SKEW, group=nothing)
+    size(dst) == size(src) || throw(DimensionMismatch(
+        "fft!: destination $(size(dst)) does not match source $(size(src))"))
+    N = size(src,1)
+    T,lead = fftplan(N)
+    nbatch = length(src) ÷ N
+    nbatch == 0 && return (N,T,lead,0,0)
+    T <= c.workgrouplimit || throw(ArgumentError(
+        "fft!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit). " *
+        "A multi-pass decomposition is not implemented."))
+    nb = group === nothing ? fftgroup(N,T,nbatch,c.workgrouplimit,c.sharedbudget) : group
+    nb > 0 && nbatch % nb == 0 && T*nb <= c.workgrouplimit || throw(ArgumentError(
+        "fft!: group $nb must divide $nbatch batches and fit $(c.workgrouplimit) threads"))
+    shared = 2sizeof(Float32)*nb*(skew ? N+N÷32 : N)
+    shared <= c.sharedbudget || throw(ArgumentError(
+        "fft!: group $nb needs $shared shared bytes, above this device's budget of $(c.sharedbudget)"))
+    return N,T,lead,nb,nbatch
+end
+
+function fftmixed_config(dst,src,RS::Tuple,c)
+    N = size(src,1)
+    !isempty(RS) && all(r->r isa Integer && r>=2,RS) && prod(RS) == N || throw(ArgumentError(
+        "fftmixed!: radix sequence $RS must contain radices >= 2 and multiply to $N"))
+    size(dst) == size(src) || throw(DimensionMismatch(
+        "fftmixed!: destination $(size(dst)) does not match source $(size(src))"))
+    nbatch = length(src) ÷ N
+    nbatch == 0 && return (0,0)
+    T = N ÷ maximum(RS)
+    T <= c.workgrouplimit || throw(ArgumentError(
+        "fftmixed!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
+    shared = 2sizeof(Float32)*N
+    shared <= c.sharedbudget || throw(ArgumentError(
+        "fftmixed!: N=$N needs $shared shared bytes, above this device's budget of $(c.sharedbudget)"))
+    return T,nbatch
+end
+
+function fft_radices(N)
+    count_ones(N) == 1 && N >= 8 && return nothing
     RS = fftplan_mixed(N)
     RS === nothing && throw(ArgumentError(
         "fftany!: length $N does not factorise over radices (8,5,4,3,2); " *
-        "Rader or Bluestein is what VkFFT reaches for here and neither is ported"))
-    return fftmixed!(dst, src, RS; inverse)
+        "Rader and Bluestein transforms are not implemented"))
+    return RS
+end
+
+function fftany_launches(dst,src,c; inverse::Bool=false, skew::Bool=FFT_SKEW)
+    RS = fft_radices(size(src,1))
+    if RS === nothing
+        N,T,lead,nb,nbatch = fft_config(dst,src,c;skew)
+        nbatch == 0 && return ()
+        return (ArrayLaunch(fft_kernel!,fft_args(dst,src,N,lead,inverse,skew,nb),T*nbatch,T*nb),)
+    end
+    T,nbatch = fftmixed_config(dst,src,RS,c)
+    nbatch == 0 && return ()
+    return (ArrayLaunch(fftmixed_kernel(RS,inverse ? 1 : -1),(dst,src),T*nbatch,T),)
 end
 
 # ─────────────────────────────────────────────────────── declared graph forms
@@ -796,7 +626,6 @@ function irfft_real_kernel!(
     return nothing
 end
 
-
 """
     fftany_dispatch!(graph, dst, src; inverse = false, name = "fft") -> dst
 
@@ -804,32 +633,9 @@ Declare a batched complex FFT along the first dimension.  This is the graph
 form of [`fftany!`](@ref): it selects the same tuned power-of-two or generated
 mixed-radix kernel, but records the launch rather than executing it.
 """
-function fftany_dispatch!(g, dst, src; inverse::Bool = false,
+function fftany_dispatch!(g, dst, src; inverse::Bool = false, skew::Bool = FFT_SKEW,
                           name::AbstractString = "fft")
-    size(dst) == size(src) || throw(DimensionMismatch(
-        "fftany_dispatch!: destination $(size(dst)) does not match source $(size(src))"))
-    N = size(src, 1)
-    nbatch = length(src) ÷ N
-    c = caps(backend(g.dev))
-    if count_ones(N) == 1 && N >= 8
-        T, lead = fftplan(N)
-        T <= c.workgrouplimit || throw(ArgumentError(
-            "fftany_dispatch!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
-        nb = fftgroup(N, T, nbatch, c.workgrouplimit, c.sharedbudget)
-        dispatch!(g, fft_kernel!,
-                  (dst, src, Val(N), Val(lead), Val(inverse ? 1 : -1),
-                   Val(FFT_SKEW), Val(nb)),
-                  T * nb * (nbatch ÷ nb); group = T * nb, name)
-    else
-        RS = fftplan_mixed(N)
-        RS === nothing && throw(ArgumentError(
-            "fftany_dispatch!: length $N does not factorise over radices (8,5,4,3,2)"))
-        T = N ÷ maximum(RS)
-        T <= c.workgrouplimit || throw(ArgumentError(
-            "fftany_dispatch!: N=$N needs $T threads, above this device's limit of $(c.workgrouplimit)"))
-        dispatch!(g, fftmixed_kernel(RS, inverse ? 1 : -1), (dst, src),
-                  T * nbatch; group = T, name)
-    end
+    dispatchlaunches!(g,fftany_launches(dst,src,caps(backend(g.dev)); inverse,skew);name)
     return dst
 end
 
@@ -843,16 +649,14 @@ visible to the graph placer.
 function rfft_dispatch!(g, dst, src, packed, spectrum;
                         scale::Real = 1f0,
                         name::AbstractString = "rfft")
-    N = size(src, 1)
-    iseven(N) || throw(ArgumentError("rfft_dispatch!: length $N must be even"))
-    H = N ÷ 2
-    nbatch = length(src) ÷ N
-    size(dst, 1) == H + 1 || throw(DimensionMismatch(
-        "rfft_dispatch!: destination first dimension is $(size(dst, 1)), expected $(H + 1)"))
+    N,H,nbatch = rfft_geometry(dst,src)
+    size(packed,1) == H || throw(DimensionMismatch(
+        "rfft_dispatch!: packed scratch first dimension is $(size(packed,1)), expected $H"))
     length(packed) == H * nbatch || throw(DimensionMismatch(
         "rfft_dispatch!: packed scratch has $(length(packed)) elements, expected $(H * nbatch)"))
     size(spectrum) == size(packed) || throw(DimensionMismatch(
         "rfft_dispatch!: spectrum scratch $(size(spectrum)) does not match packed $(size(packed))"))
+    nbatch == 0 && return dst
     dispatch!(g, rfft_pack_kernel!, (packed, src), H * nbatch;
               name = "$name/pack")
     fftany_dispatch!(g, spectrum, packed; name = "$name/fft")
@@ -874,12 +678,18 @@ function irfft_dispatch!(g, dst, src, full, transformed;
                          name::AbstractString = "irfft")
     N = size(dst, 1)
     NB = size(src, 1)
+    N >= 2 || throw(ArgumentError("irfft_dispatch!: length $N must be at least 2"))
+    length(src) == NB*(length(dst)÷N) || throw(DimensionMismatch(
+        "irfft_dispatch!: source and destination batch counts differ"))
+    size(full,1) == N || throw(DimensionMismatch(
+        "irfft_dispatch!: scratch first dimension is $(size(full,1)), expected $N"))
     NB == N ÷ 2 + 1 || throw(DimensionMismatch(
         "irfft_dispatch!: half spectrum has $NB bins, expected $(N ÷ 2 + 1) for length $N"))
     size(full) == size(transformed) || throw(DimensionMismatch(
         "irfft_dispatch!: scratch shapes $(size(full)) and $(size(transformed)) differ"))
     length(full) == length(dst) || throw(DimensionMismatch(
         "irfft_dispatch!: full scratch has $(length(full)) elements, expected $(length(dst))"))
+    length(dst) == 0 && return dst
     dispatch!(g, irfft_extend_kernel!, (full, src, Val(N), Val(NB)), length(full);
               name = "$name/extend")
     fftany_dispatch!(g, transformed, full; inverse = true, name = "$name/fft")
@@ -887,52 +697,6 @@ function irfft_dispatch!(g, dst, src, full, transformed;
               name = "$name/real")
     return dst
 end
-
-"""
-    FFT_PREGENERATED
-
-Non-power-of-two transform lengths whose kernels are built when **Lava loads**
-rather than on first use.
-
-[`fftmixed_kernel`](@ref) is a real code generator — the butterfly for a radix
-sequence is spliced together as literals, so it cannot be a `Val`-parameterised
-method the way an ordinary sized kernel can. That leaves an `@eval` on the
-runtime path, and an `@eval` on the runtime path **cannot be precompiled**: a
-downstream package whose `@compile_workload` runs an iSTFT dies with
-
-    Evaluation into the closed module `Lava` breaks incremental compilation
-
-so the workload silently skips and every first call in a fresh process pays the
-compile the Runner packages exist to remove. `KokoroRunner` found this: its
-vocoder is an iSTFT at `n_fft = 20`, and nothing in its workload was ever precompiled.
-
-Generating them here moves the `@eval` to module load, where it is ordinary. The
-lengths are the ones the shipped models transform:
-
-  * **10, 20** — Kokoro's iSTFTNet vocoder (`n_fft = 20`, hop 5), forward and
-    inverse. The 10 is the half-length complex transform the real-input trick
-    uses.
-  * **400** — Whisper's mel front end (`n_fft = 400`, hop 160), which plans as
-    `(8, 5, 5, 2)`.
-
-Powers of two are absent on purpose: `fftany!` sends those to the tuned `fft!`,
-which is an ordinary method and needs nothing here.
-
-A length not on this list still works — the runtime generator is the fallback —
-it just cannot be compiled into a package image. Adding a model that transforms a
-new length means adding it here, and the symptom if it is forgotten is a slow
-first call rather than a wrong answer.
-"""
-const FFT_PREGENERATED = (10, 20, 400)
-
-for n in FFT_PREGENERATED
-    rs = fftplan_mixed(n)
-    rs === nothing && error("FFT_PREGENERATED: $n does not factorise over the radices")
-    for sign in (-1, 1)
-        fftmixed_kernel(rs, sign)
-    end
-end
-
 
 # ────────────────────────────────────────────────────────────────────────── STFT
 

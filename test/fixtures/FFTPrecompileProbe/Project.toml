@@ -1,0 +1,6 @@
+name = "FFTPrecompileProbe"
+uuid = "9f2935b4-e51e-40da-b233-ed013916f73a"
+version = "0.1.0"
+
+[deps]
+Mantle = "8f4c1f2e-6a3d-4b71-9c05-2e7d8a1b6f34"
