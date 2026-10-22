@@ -212,8 +212,10 @@ function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bo
         # and its live resources; run! records it again on its next use.
         # Never sweep an open recording's positional hold frame.
         isempty(bq.holds) || return (0, 0)
+        all(ch -> ch.thread==Threads.threadid() && isempty(ch.holds),ctx.extra_queues) || return (0, 0)
         device_lost(ctx) && return (0, 0)
         flush!(bq)
+        foreach(flush!,ctx.extra_queues)
         waitidle(lavadevice(ctx))
         seen=IdDict{Any,Nothing}()
         for arena in values(spans(ctx).arenas), weak in tenants!(arena)
@@ -225,6 +227,10 @@ function trim_gpu_pool!(ctx::VkContext = vk_context(); invalidate_recordings::Bo
         end
     end
     quiesce_before_reclaim!(bq) || return (0, 0)
+    if invalidate_recordings
+        foreach(drain!,ctx.extra_queues)
+        reclaim!(spans(ctx),lavadevice(ctx);wait=true)
+    end
     return reclaim_empty_pool_blocks!(bq)
 end
 

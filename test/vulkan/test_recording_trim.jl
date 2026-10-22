@@ -41,6 +41,15 @@ function check_recording_trim(backend)
             Mantle.oneshot!(dev.bq) do _
                 @test Mantle.trim_gpu_pool!(;invalidate_recordings=true)==(0,0)
             end
+            other=Mantle.allocate_batch_queue!(dev)
+            try
+                Mantle.oneshot!(other) do _
+                    @test Mantle.trim_gpu_pool!(;invalidate_recordings=true)==(0,0)
+                end
+            finally
+                Mantle.waitidle(dev)
+                Mantle.release_batch_queue!(other)
+            end
             Mantle.run!(plan);Mantle.waitfor!(plan)
             @test Array(output)==fill(9f0,256)
         finally
