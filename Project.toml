@@ -36,6 +36,7 @@ AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 MantleROCmExt = "AMDGPU"
 
 [sources]
+GPUArrays = {url = "https://github.com/SimonDanisch/GPUArrays.jl", rev = "61e30cea215e93202261d3f0b38df991f36c9081"}
 Raycore = {url = "https://github.com/JuliaGeometry/Raycore.jl", rev = "sd/with-texture"}
 
 [compat]

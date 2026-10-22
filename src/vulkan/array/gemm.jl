@@ -3,31 +3,10 @@
 """
     mul!(C, A, B, α, β) -> C
 
-`C = A*B*α + C*β` on the device.
-
-Dispatch is on the *destination* rather than on the operands, because an operand
-can be wrapped to any depth — an exported ATen graph routinely hands us a reshape
-of a permuted array — and no union of wrapper types catches all of those. If `C`
-lives on the device then the multiply happens on the device, whatever the
-operands look like; `gemmstrides` unwraps them and only genuinely non-strided
-ones are copied.
-
-Uses cooperative matrices when the operands are dense fp16 into an fp32 result,
-the extents suit the tile, and the device implements it. Failing that it uses the
-staged scalar GEMM, and failing *that* the per-element one; see `staged_gemm_ok`
-for which, and the header of this file for what the three are. That choice is an
-implementation detail: the result is the same either way, to fp32 reassociation.
-
-The `T<:Number` bound is required, not decoration. These kernels accumulate
-in the destination's element type — `muladd(T(A[…]), T(B[…]), acc)` — and scale
-by `T(α)`, both of which assume `T` can be constructed from the operand and
-scalar types. An element type that is merely `+`- and `*`-able does not satisfy
-that: a matrix of a two-field struct entered as `mul!(C, A, B, true, false)` and
-threw `Duo{Float16}(true)`, and removing only the scalar conversion just moved
-the failure into the kernel at `T(B[…])`. Outside the bound,
-`LinearAlgebra.mul!` reaches `GPUArrays.generic_matmatmul!`, which multiplies
-with the types' own `*` and promotes the accumulator, which is the correct thing
-for those and is already a GPU kernel. Widening this signature takes that away.
+Compute C = A*B*α + C*β on C's device. Stride projection supports wrapped
+operands; non-strided inputs are densified. Eligible dense fp16 inputs into
+fp32 output use cooperative matrices; other numeric shapes use core scalar
+kernels. Non-Number elements retain GPUArrays' generic arithmetic.
 """
 function LinearAlgebra.mul!(C::LavaArray{T,2}, A::AbstractVecOrMat,
                             B::AbstractVecOrMat, α::Number, β::Number) where {T<:Number}
@@ -35,21 +14,9 @@ function LinearAlgebra.mul!(C::LavaArray{T,2}, A::AbstractVecOrMat,
     N = size(B, 2)
     size(B, 1) == K && size(C) == (M, N) ||
         throw(DimensionMismatch("mul!: $(size(C)) = $(size(A)) * $(size(B))"))
-    # `KA.get_backend(C)`, NOT `LavaBackend()`. An unpinned backend resolves
-    # its queue through `vk_context()`, so on a second device this dispatches on
-    # whichever context happens to be global — the work lands on the wrong GPU
-    # and the buffer's own device never sees it. `get_backend` derives the
-    # context from the array's buffer, which has always carried it.
+    # Both queue and capability selection follow the output allocation.
     backend = KernelAbstractions.get_backend(C)
 
-    # …and `vk_context(C)` for the same reason, which the line above got right and
-    # this one did not. A no-argument `coopmat_gemm_available()` asks whichever
-    # context is global, so on a second device it answered for the FIRST one:
-    # lavapipe (8-lane subgroups, no pinning to 32) was told it had tensor cores
-    # because the NVIDIA card does, took the cooperative-matrix path, and returned
-    # the right answer only because 32 lanes of redundant subgroups happen to
-    # agree. The two-device probe found it; a capability query is exactly as
-    # device-specific as the handle caches are.
     if T === Float32 && eltype(A) === Float16 && eltype(B) === Float16 &&
        isone(α) && iszero(β) && A isa LavaArray && B isa LavaArray &&
        K % GEMM_TILE == 0 && M % GEMM_TILE == 0 && N % GEMM_TILE == 0 &&
@@ -86,92 +53,31 @@ function LinearAlgebra.mul!(C::LavaArray{T,1}, A::AbstractVecOrMat,
     gemmlaunch!(C, A, B, M, 1, K, T(α), T(β))
 end
 
-# Disambiguation: Diagonal * matrix.
-#
-# `mul!(C::LavaArray{T,2}, ::AbstractVecOrMat, ::AbstractVecOrMat, α, β)` above and
-# GPUArrays' `mul!(::AbstractGPUVecOrMat, ::Diagonal{<:Any,<:AbstractGPUArray}, …)`
-# are both applicable to `mul!(::LavaArray{Float32,2}, ::Diagonal{Float32,LavaArray{Float32,1}}, ::LavaArray{Float32,2}, α, β)`
-# and neither is more specific, so the call is an ambiguity error rather than a
-# dispatch to either. Lava's method became applicable when the GEMM landed.
-#
-# GPUArrays' is the one that should win: a diagonal operand is a scaling, and
-# routing it through the dense GEMM would materialise the zeros and do O(n)
-# times the work. This mirrors its implementation rather than `invoke`-ing it,
-# because the signature to invoke through is unwieldy and would silently rot if
-# GPUArrays retyped it.
-#
-# The `T<:Number` bound has to match the general `mul!` above. These two are
-# disambiguated only by being narrower in the operand positions, so if the
-# general one is narrower in `C`'s element type and these are not, neither method
-# wins and every diagonal multiply raises an ambiguity instead of running.
-# `test_diagonal_mul.jl` is what catches that.
+# Resolve the dense-GEMM/Diagonal intersection; GPUArrays owns scaling,
+# dimension checks and diagonal/off-diagonal initialization.
 function LinearAlgebra.mul!(C::LavaArray{T,2},
                             D::Diagonal{<:Any, <:AbstractGPUArray},
                             B::Union{AbstractGPUArray,
                                      Adjoint{S, <:AbstractGPUArray{S}},
                                      Transpose{S, <:AbstractGPUArray{S}}},
                             α::Number, β::Number) where {T<:Number, S}
-    dd = D.diag
-    d = length(dd)
-    m, n = size(B, 1), size(B, 2)
-    m′, n′ = size(C, 1), size(C, 2)
-    m == d || throw(DimensionMismatch("right hand side has $m rows but D is $d by $d"))
-    (m, n) == (m′, n′) ||
-        throw(DimensionMismatch("expect output to be $m by $n, but got $m′ by $n′"))
-    @. C = α * dd * B + β * C
-    C
+    return GPUArrays.generic_diagonal_mul!(C, D, B, α, β)
 end
 
-# Disambiguation: matrix * Diagonal — the mirror of the case above.
-#
-# Same collision, other operand: GPUArrays has a second method
-# `mul!(::AbstractGPUVecOrMat, ::Union{AbstractGPUArray,Adjoint,Transpose}, ::Diagonal{<:Any,<:AbstractGPUArray}, α, β)`
-# which is equally ambiguous against Lava's dense GEMM, so both sides need a
-# method. GPUArrays' own linalg/diagonal testset covers each, for Float32 and
-# ComplexF32.
-#
-# `D` scales COLUMNS here (A[:,j] * d[j]), so the broadcast transposes `dd`.
 function LinearAlgebra.mul!(C::LavaArray{T,2},
                             A::Union{AbstractGPUArray,
                                      Adjoint{S, <:AbstractGPUArray{S}},
                                      Transpose{S, <:AbstractGPUArray{S}}},
                             D::Diagonal{<:Any, <:AbstractGPUArray},
                             α::Number, β::Number) where {T<:Number, S}
-    dd = D.diag
-    d = length(dd)
-    m, n = size(A, 1), size(A, 2)
-    m′, n′ = size(C, 1), size(C, 2)
-    n == d || throw(DimensionMismatch("left hand side has $n columns but D is $d by $d"))
-    (m, n) == (m′, n′) ||
-        throw(DimensionMismatch("expect output to be $m by $n, but got $m′ by $n′"))
-    # `ddT` MUST be hoisted out of the `@.`: inside it, `transpose(dd)` becomes
-    # `transpose.(dd)`, which broadcasts transpose over each scalar (a no-op) and
-    # leaves a length-n column, scaling ROWS instead of columns. GPUArrays hoists
-    # it for the same reason.
-    ddT = transpose(dd)
-    @. C = α * A * ddT + β * C
-    C
+    return GPUArrays.generic_diagonal_mul!(C, A, D, α, β)
 end
 
-# Disambiguation: Diagonal * Diagonal, the third of the set. Both operands are
-# Diagonals, which neither method above takes, and GPUArrays'
-# `mul!(::AbstractGPUArray, ::Diagonal, ::Diagonal, α, β)` is as ambiguous
-# against the dense GEMM as the other two were. Its body, for the same reason
-# theirs is mirrored: a product of two diagonals touches only the diagonal.
 function LinearAlgebra.mul!(C::LavaArray{T,2},
                             A::Diagonal{<:Any, <:AbstractGPUArray},
                             B::Diagonal{<:Any, <:AbstractGPUArray},
                             α::Number, β::Number) where {T<:Number}
-    dc = view(C, LinearAlgebra.diagind(C))
-    da, db = A.diag, B.diag
-    d = length(dc)
-    length(da) == d || throw(DimensionMismatch("right hand side has $(length(da)) rows but output is $d by $d"))
-    length(db) == d || throw(DimensionMismatch("left hand side has $(length(db)) rows but output is $d by $d"))
-    # `C` may be uninitialised, so a zero `β` fills rather than scales: `0 * NaN`
-    # is `NaN`.
-    iszero(β) ? fill!(C, zero(T)) : rmul!(C, β)
-    @. dc += α * da * db
-    return C
+    return GPUArrays.generic_diagonal_mul!(C, A, B, α, β)
 end
 
 """Does this device implement the tile `mul!` wants?"""

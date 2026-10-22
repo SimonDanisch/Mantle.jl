@@ -234,3 +234,9 @@ mutable catalogs and shares staging eligibility with DNNKernels. Native output,
 shader, timing, convolution and fresh-precompilation checks pass. An explicit
 backend assertion corrects the earlier mislabeled manual ROCm runs; 2,019 actual
 ROCm/host assertions now pass, with one capability-based graphics skip.
+
+[Shared diagonal multiplication](consolidation-diagonal.md) removes three copied
+GPUArrays algorithms from Vulkan. Paired bytes, wrapped/dimension cases and
+drained allocations pass; a fresh process fetches the pinned published dependency
+and passes native checks. The aggregate implementation decrease includes the
+small helper added in GPUArrays.
