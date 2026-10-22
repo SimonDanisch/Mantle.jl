@@ -213,3 +213,7 @@ paired zero-allocation store/drain checks also pass.
 [Redundant native argument packers](consolidation-argument-packers.md) deletes
 two methods already covered by generic primitive/aggregate packing. 24 paired
 byte checks and 3,492 native packing/move/allocation assertions pass.
+
+The [kernel preparation follow-up](consolidation-kernel-preparation.md#context-abi-follow-up--2026-10-22)
+deletes Metal's repeated KA context setup through the existing argtype hook.
+284 host/Vulkan and 102 ROCm/host assertions pass; native Metal remains unqualified.

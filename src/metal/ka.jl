@@ -1,52 +1,7 @@
-# Running a Mantle graph on Metal.
-#
-# Two methods. That is the whole compute path, and it is the measurement this
-# refactor was for: the Vulkan backend's equivalent is `array/ka_backend.jl`,
-# 1,122 lines, because it implements a KernelAbstractions backend from scratch —
-# `LavaBackend <: KA.Backend`, `launch_config`, `mkcontext`, ndrange padding, the
-# kernel object, indirect dispatch.
-#
-# None of that is needed here twice over. Metal.jl already IS a KA backend, so
-# the launch machinery is its; and `graph/kalaunch.jl` already IS the plan
-# execution, so the baking is Mantle's. What is
-# genuinely this backend's is how a graph resource becomes a kernel argument,
-# and whether barriers have to be emitted.
-
-# ── Why an interpreted run needs no barriers, and a recorded one does ────────
-#
-# Not because every pooled allocation is `Shared` (images are
-# `PrivateStorage`), and not because the driver's hazard tracking stands in for
-# something unfinished.
-#
-# It is COMMIT ORDER. Every render and copy pass opens its own
-# `MTLCommandBuffer` and commits it before the call returns, all on one queue,
-# and Metal runs command buffers on a queue in the order they were committed.
-# For a plan walked per frame, the order the graph scheduled IS the order they
-# execute, with nothing between them to arrange — which is why
-# `emitbarriers!(::Immediate, …)`, core's no-op, is still the right answer for
-# that path.
-#
-# A RECORDED plan has no commit order to lean on. Its commands live in one
-# indirect command buffer and run CONCURRENTLY unless a command carries a
-# barrier (`Metal/test/indirect_command_buffer.jl` measures it: 32 serialised
-# read-modify-writes sum to 32, the same 32 concurrent sum short). So the graph
-# has to derive the hazards after all, and this backend takes the portable rule
-# in `sync/transition.jl` — read after read needs nothing, anything with a write
-# in it does — rather than answering `false` and deriving none. `passbarriers`
-# in `record.jl` is where they come back out.
-#
-# Nothing about the heap changes. Measured 2026-09-08, a chained graph (render
-# A, copy A, render B, copy B) at 2048x2048, median of five runs of forty
-# frames:
-#
-#     Tracked      0.364 ms/frame     4194304 pixels correct
-#     Untracked    0.332 ms/frame     4194304 pixels correct
-#
-# Hazard tracking costs about 9% and buys nothing for the interpreted path, and
-# the heap stays `Tracked` anyway: untracked is only safe BECAUSE of the one
-# command buffer per pass, and object reuse batching two passes into one would
-# turn the 9% into a race.
-
+# Metal argument adaptation, access signatures and native library dispatch.
+# Immediate passes submit in graph order on one queue with tracked resources.
+# Recorded ICB commands can execute concurrently: derive read/write hazards and
+# emit their barriers. Retain tracked heaps when changing submission boundaries.
 
 syncbackend(::MetalDevice) = MetalAPI()
 
@@ -57,11 +12,7 @@ function intrinsic_usage(::MetalAPI, name::Symbol)
     s = String(name)
     startswith(s, "air.simdgroup_matrix_8x8_load.") && return READ
     startswith(s, "air.simdgroup_matrix_8x8_store.") && return WRITE
-    # Inline tensors are descriptors over the bound device arrays.  The
-    # initializer preserves that resource dependency through an opaque AIR
-    # call, and matmul2d consumes both operands while writing its destination.
-    # `intrinsic_usage` applies to every traced resource argument, so ATOMIC is
-    # the conservative combined read/write classification for the latter.
+    # Tensor descriptors retain operand dependencies; matmul consumes and writes them.
     startswith(s, "air.init_strided_private_tensor.i32.global") && return READ
     startswith(s, "__tensorops_impl_matmul2d_op_run") && return ATOMIC
     if startswith(s, "air.atomic.global.") || startswith(s, "air.atomic.local.")
@@ -71,21 +22,12 @@ function intrinsic_usage(::MetalAPI, name::Symbol)
     end
     s == "__metal_linked_closest" && return READ
     s == "__metal_linked_any" && return READ
-    # The procedural pair reads the same things the triangle pair does — the
-    # acceleration structure, and through the argument buffer the candidate's
-    # table and the payload — and writes nothing. Without these the access walk
-    # stops at the `ccall` and refuses the whole kernel, which reads as a
-    # Hikari problem and is this list being one entry short.
+    # Procedural trace calls read acceleration/candidate data through opaque intrinsics.
     s == "__metal_linked_closest_proc" && return READ
     s == "__metal_linked_any_proc" && return READ
     # The candidate itself, when a kernel happens to name it.
     startswith(s, PROCEDURAL_CANDIDATE_PREFIX) && return READ
-    # A mesh stage's outputs (`Metal/src/compiler/mesh.jl`). All five write
-    # through the mesh object, the stage's own output in address space 7, and
-    # read nothing. The object is the stage's lead argument, so its entry is
-    # dropped before anyone sees it; what these declare is only that the walk
-    # may go on past them. Without them a `MeshPipeline` drawn through the graph
-    # was refused at its first `set_primitive_count_mesh`.
+    # Mesh-stage outputs write through the stage-owned leading object argument.
     (s == "air.set_position_mesh" || s == "air.set_index_mesh" ||
      s == "air.set_primitive_count_mesh" ||
      startswith(s, "air.set_vertex_data_mesh.") ||
@@ -93,45 +35,17 @@ function intrinsic_usage(::MetalAPI, name::Symbol)
     return nothing
 end
 
-# `resolve` is NOT overridden here. Core's default is `storage(x)`, and that is
-# already right: a `Buffer`'s storage is `deviceview(dev, store)` — the borrowed
-# `MtlArray` over its pool region — and a transient's is what `materialize!`
-# below put in `block`. The hook exists; this backend has nothing to say to it.
-
-"""
-Give a transient its slice of the pool block.
-
-`block` holds the borrowed `MtlArray` a launch will pass, built once here
-rather than per launch — core's `storage(::TransientBuffer)` hands it straight
-back.
-
-The slab is an `MTLBuffer`, where the Vulkan backend's is a `BufferBlock`. Same
-hook, two storages.
-"""
+"""Borrow a typed slice of the pool's MTLBuffer; the DataRef never frees it."""
 function deviceslice(d::MetalDevice, ::Type{T}, dims::Dims{N},
                      buf::MTL.MTLBuffer, off::Int) where {T,N}
     ref = GPUArrays.DataRef(_ -> nothing, managedbuffer(d, buf))
     MtlArray{T,N}(ref, dims; maxsize = Int(buf.length) - off, offset = off)
 end
 
-"""
-16 bytes, not Vulkan's 256 and not the host's cache line.
-
-Metal has no `minStorageBufferOffsetAlignment`: a buffer binding needs only its
-element type's natural alignment, and 16 covers every vector type MSL has.
-Over-aligning would waste arena space the placer could have packed.
-"""
+# Metal buffer bindings need natural element alignment; 16 covers MSL vectors.
 alignment(::MetalDevice, ::TransientBuffer) = 16
 
-
-# ── What a pass touches, read off its kernels ────────────────────────────────
-#
-# Core walks the IR (`graph/access.jl`); what is here is the three things only a
-# Metal dispatch knows: that arguments are `mtlconvert`ed on their way to the
-# shader, that a `KernelAbstractions` kernel takes its iteration context as a
-# leading argument, and that the method table the kernel will be compiled
-# against is Metal.jl's, overlays and all.
-
+# Infer through the same converted argument ABI the shader receives.
 Mantle.argtype(::MetalDevice, @nospecialize(y)) = Core.Typeof(Metal.mtlconvert(y))
 
 # What `Adapt.adapt_storage(::Metal.Adaptor, ::MtlArray)` produces, which is what
@@ -141,10 +55,7 @@ Mantle.devicebuffertype(::MetalDevice, ::Type{T}, N::Int) where {T} =
 
 Mantle.isdevicearray(::Metal.MtlArray) = true
 
-# The address of the first element, which a wide load is aligned against: the
-# buffer's own GPU address plus the array's byte offset into it. Without this a
-# Metal array fell to the `1` of "nothing known", and every kernel that reads
-# sixteen bytes at a time took its narrow path.
+# Include derived-array offsets when choosing aligned wide loads.
 Mantle.basealignment(a::Metal.MtlArray) =
     Mantle.powalign(UInt64(a.data[].buffer.gpuAddress) + UInt64(a.offset))
 
@@ -153,19 +64,9 @@ Mantle.native_gemm_available(::Union{MetalDevice,Metal.MetalBackend},
                              ::Type{A}, ::Type{B}, ::Type{C}) where {A,B,C} =
     Metal.gemm_simd_eltype(A, B, C)
 
-"""
-Declare this backend's fastest product for these operands.
-
-Apple's MPSGraph product where it covers the operands and the activation, this
-backend's `matmul2d` kernel otherwise, with the parts the chosen one could not fold
-reported back so the caller declares them as passes.
-
-`librarygemm` is asked first by the declaring caller and answers for exactly the same
-cases, so what reaches HERE is either a product it never asked about — the
-convolution's im2col GEMM — or one the library cannot express. Both routes are tried
-in the same order either way, which is why the library is offered again here rather
-than left to the one call site that happens to ask for it.
-"""
+"""Declare MPSGraph GEMM when eligible, otherwise a native kernel. Report which
+post-operations were fused so callers can declare the remainder. Im2col callers
+may enter here without asking librarygemm first, so both routes are considered."""
 function Mantle.native_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
                                       bias = nothing, epilogue = identity, name)
     denseoperands(out, A, B, bias) || return nothing
@@ -197,25 +98,9 @@ function Mantle.native_batched_gemm_dispatch!(dev::MetalDevice, g, out, A, B;
     return true
 end
 
-# ── Apple's libraries, as pass members ───────────────────────────────────────
-#
-# MPSGraph builds a pipeline and encodes it; there is no Julia kernel to record, so
-# these are CALLS (`dispatch!` with no ndrange) and a recording keeps a hole for each.
-# See `runscalls` and `replaywithcalls!` in `device.jl`/`record.jl` for how a hole is
-# replayed, and `Mantle.Call` for why it is core's type rather than one of ours.
-#
-# A type per operation rather than a closure, because `argument_usage` has to be
-# declarable: a call is opaque to the access walk — the body is on the other side of
-# the boundary — and core's answer to an undeclared argument is read-AND-write, which
-# would order every product after every other one and serialise the frame.
-
-"""
-Apple's MPSGraph matrix product, `out = act.(A * B .+ bias)`, as a pass member.
-
-The activation rides on the callable — a `Symbol` naming which one, from
-`Mantle.activationkind` — rather than being a fourth argument, because it is decided
-at declare time and is not a resource.
-"""
+# Library calls are opaque graph members with explicit resource access directions.
+# Operation configuration lives on the callable; resources remain its arguments.
+"""MPSGraph matrix product with a declaration-time activation kind."""
 struct MPSGraphGemm
     act::Symbol
 end
@@ -226,15 +111,8 @@ Mantle.argument_usage(::Type{MPSGraphGemm}, ::Type{<:Tuple{Any,Any,Any,Any}}) =
 (c::MPSGraphGemm)(out, A, B, bias) =
     (Metal.MPSGraphs.gemm_batched!(out, A, B, bias, c.act); nothing)
 
-"""
-Apple's fused scaled dot-product attention as a pass member.
-
-The three layout keys ride on the callable rather than in the argument list. An
-operand is often a strided window on a shared projection buffer — q, k and v are
-three windows on one array — and what a call passes are RESOURCES, so the window is
-described here, once, at declare time. `Metal.MPSGraphs.packoperand` says which
-windows qualify and the graph does the narrowing.
-"""
+"""MPSGraph attention. Layout keys describe strided projection windows;
+packoperand determines eligibility before the graph narrows their storage."""
 struct MPSGraphAttention{Q,K,V}
     scale::Float32
     q::Q
@@ -248,21 +126,8 @@ Mantle.argument_usage(::Type{<:MPSGraphAttention}, ::Type{<:Tuple{Any,Any,Any,An
 (c::MPSGraphAttention)(out, q, k, v) =
     (Metal.MPSGraphs.sdpa_batched!(out, q, k, v, c.q, c.k, c.v, c.scale); nothing)
 
-"""
-Apple's own product where it covers the operands, which is measurably faster than
-this backend's best recordable kernel.
-
-The ACTIVATION goes into the graph too, where MPSGraph has a node for it: an
-activation applied to a product already rounded to half loses accuracy twice, so the
-graph widens to Float32 after the product and rounds once, which is what the kernel
-this replaces does with its accumulator. `Mantle.activationkind` is how the
-activation is named without this backend knowing whose function it is.
-
-Measured on an M5 over SAM 2.1's encoder, fp16, the 195 `addmm` products of one
-frame: 213 ms through `gemm_tensor!` against 130 through MPSGraph. What is left for
-`native_gemm_dispatch!` — asked next by the caller — is a product MPSGraph does not
-cover, or one whose activation it has no node for.
-"""
+"""Return a supported MPSGraph GEMM call or nothing. The library fuses activation
+before the final output rounding; the epilogue is named through activationkind."""
 function Mantle.librarygemm(d::MetalDevice, out, A, B, bias, epilogue)
     # The question is about this device's RUN path, and it is core's to answer.
     Mantle.runscalls(d) || return nothing
@@ -275,26 +140,10 @@ end
 """
     denseoperands(xs...) -> Bool
 
-Whether every operand is one this backend can hand a dense kernel or Apple's
-library: a graph resource it will place, or an array it already holds.
+Whether operands have native dense storage or graph resources that become it.
+Logical shape/type alone is insufficient: packed weight wrappers can expose a
+matrix shape while storing encoded UInt32 words. Decline them before replay.
 
-`gemm_shape_supported` and its siblings are deliberately duck-typed — they are asked
-of graph RESOURCES, before anything is placed, so nothing in them is more specific
-than `eltype`, `ndims` and `size`. A caller's own wrapper answers all three like a
-matrix without being one. Qwen-Image 2.1's text encoder projects through a packed
-int8 weight whose `size` and `eltype` are its LOGICAL ones and whose storage is
-`UInt32`; it passed every shape test and then found no `gemm_batched!` method at
-replay, thirteen gigabytes into the run.
-
-Asked by every hook here, not just the library ones: `gemm_tensor_kernel!` is typed
-`MtlDeviceArray` too, so declining to the library and then handing the same operand
-to this backend's own kernel only moves the `MethodError`. A caller that packs its
-own weights has its own product for them, and what it needs from these hooks is a
-`nothing`.
-
-Here rather than in `Metal.MPSGraphs`, because this is the one place that knows both
-vocabularies: what a graph resource is, and what an `MtlArray` is. The library knows
-only the second and the caller only the first.
 """
 denseoperands(xs...) = all(xs) do x
     x === nothing && return true
@@ -311,9 +160,7 @@ struct MPSGraphConv2D
     dilation::NTuple{2,Int}
     groups::Int
     act::Symbol
-    # A transposed convolution is the SAME MPSGraph node's data gradient, so it is a
-    # field here rather than a second callable: the operands, the descriptor and the
-    # epilogue are identical and only which node is built differs.
+    # MPSGraph uses the same descriptor's data-gradient node for transposed convolution.
     transposed::Bool
 end
 
@@ -324,18 +171,8 @@ Mantle.argument_usage(::Type{MPSGraphConv2D}, ::Type{<:Tuple{Any,Any,Any,Any}}) 
     (Metal.MPSGraphs.conv2d_batched!(out, x, w, bias, c.stride, c.pad, c.dilation,
                                      c.groups, c.act; c.transposed); nothing)
 
-"""
-Apple's direct convolution where it covers the operands.
-
-Nothing recordable on this backend competes with it. The alternative is an im2col
-matrix materialised into a transient and a product over a padded reduction axis —
-20.0 MiB written and read back before SAM 2.1's `7x7x3` stem starts, whose product
-alone was the single dearest pass in the frame at 6.35 ms.
-
-`nothing` when the graph cannot express it, and then the caller's own lowering runs:
-this declines rather than falling back, because a convolution has four of those and
-choosing between them is the caller's arithmetic, not a backend's.
-"""
+"""Declare a supported MPSGraph convolution; return nothing for caller lowering.
+Report fused bias/activation separately when a bias cannot bind at its offset."""
 function Mantle.native_conv2d_dispatch!(dev::MetalDevice, g, out, x, w;
                                         bias = nothing, stride, pad, dilation,
                                         groups, epilogue = identity,
@@ -345,14 +182,7 @@ function Mantle.native_conv2d_dispatch!(dev::MetalDevice, g, out, x, w;
     act = Mantle.activationkind(epilogue)
     ok(b) = Metal.MPSGraphs.conv2d_shape_supported(out, x, w, b, act;
                                                    transposed, groups = Int(groups))
-    # A bias MPSGraph cannot BIND is not a reason to hand back the whole
-    # convolution. One value per output channel is a single axis, so there is no flat
-    # shape to fall back to and a channel count whose bytes are not a multiple of
-    # sixteen cannot be bound at an offset -- RIFE's decoder has 52 channels, which is
-    # 104 bytes. The `(; bias, epilogue)` answer exists precisely so a caller can be
-    # told which post-operations were folded, and adding a bias afterwards is one
-    # elementwise pass over the result. Refusing instead cost seven transposed
-    # convolutions their library node and 438 ms of a 581 ms frame.
+    # Keep an eligible library convolution when only bias needs a separate pass.
     fold = bias
     if !ok(fold)
         (fold === nothing || !ok(nothing)) && return nothing
@@ -365,21 +195,9 @@ function Mantle.native_conv2d_dispatch!(dev::MetalDevice, g, out, x, w;
     return (; bias = fold !== nothing, epilogue = true)
 end
 
-"""
-Declare attention: Apple's fused op where it fits, this backend's fused kernel
-otherwise.
-
-Measured on an M5 over the same frame, the 42 attention ops: 78 ms through the
-`matmul2d` kernel against 24 ms through `scaledDotProductAttentionWithQueryTensor`.
-
-A WINDOWED operand needs no copy on either route. SAM 2.1's projection leaves q, k
-and v as three windows on one buffer, and both the library and the kernel read them
-where they lie — the library because `sdpa_operands` hands the dense array to the
-graph and narrows it there, the kernel because a tensor descriptor carries a leading
-dimension. Materialising those would have been most of what the library saves.
-
-A PERMUTED operand is the other case and wants the opposite answer; see below.
-"""
+"""Declare supported MPSGraph attention, otherwise a native fused kernel.
+Strided windows are read in place. Permuted descriptors may be declined so the
+caller can materialize and retry the library path."""
 function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
                                           scale, name)
     if Mantle.runscalls(dev) && denseoperands(out, q, k, v)
@@ -390,24 +208,8 @@ function Mantle.native_attention_dispatch!(dev::MetalDevice, g, out, q, k, v;
             return true
         end
     end
-    # A PERMUTED operand arrives as a strides-and-offset descriptor, which the library
-    # cannot bind at all — so the branch above was never even asked, and taking the
-    # operand here with this backend's kernel is choosing the slower of two routes
-    # without comparing them. Decline instead: the caller materialises on a decline and
-    # asks again, and that second ask reaches Apple's op. Its own comment is the
-    # contract — "Refusing the VIEW is not refusing the operation ... Materialised, it
-    # is asked again, so the copies are paid only where they buy the fused kernel."
-    #
-    # Measured on Hunyuan3D's geometry decoder (16 heads, 8000 queries, 4096 keys,
-    # E=64, fp16): 45.1 ms through `attn_flash_tensor_kernel!` against 11.3 through
-    # `scaledDotProductAttentionWithQueryTensor`, against ~0.4 ms for the three
-    # transposes that buy it. The tiling is not what is costing it — a sweep of every
-    # (BQ, BK, nsimd) that divides these lengths and fits threadgroup memory puts the
-    # chosen 16/128/4 first.
-    #
-    # A WINDOW is not a permute and is not affected: SAM 2.1's projection leaves q, k
-    # and v as three windows on one buffer, `packoperand` narrows those in the graph,
-    # and they take the branch above on the first ask with no copy at all.
+    # The library cannot bind permuted descriptors; the caller owns materialize/retry.
+    # Ordinary projection windows already took the no-copy library route above.
     Mantle.runscalls(dev) && any(x -> x isa NamedTuple, (q, k, v)) && return false
     config = Metal.attention_kernel_config(out, q, k, v; scale)
     config === nothing && return false
@@ -418,14 +220,8 @@ end
 
 Mantle.accesscache(d::MetalDevice) = d.accesses
 
-"""
-The interpreter whose method table this backend's kernels are compiled against.
-
-Metal.jl's, not Julia's: `@device_override` puts `vertex_index`, `clip_y`,
-`sample_texture_2d` and the rest in an overlay table, and a walk through the
-host's would see the host bodies — which for those names are `error` calls, so
-every access they reach would be missed.
-"""
+"""Infer against Metal's compiler overlay, where device intrinsics have their
+shader bodies rather than host error stubs."""
 function metalinterpreter(@nospecialize(f), @nospecialize(tt))
     config = Metal.compiler_config(Metal.device())
     source = GPUCompiler.methodinstance(Core.Typeof(f), tt)
@@ -434,30 +230,6 @@ end
 
 """The interpreter a macro-free kernel is compiled through on Metal."""
 Mantle.kernelinterpreter(::MetalDevice, kernel, tt) = metalinterpreter(kernel, tt)
-
-"""
-The signature a retained KernelAbstractions kernel is compiled at on Metal.
-
-Core's (`graph/access.jl`), except for the iteration context's type: the kernel
-receives `mtlconvert(ctx)`, Metal.jl's device-side form, and inferring it at the
-host type infers different code. Core's `kerneltouches` does the rest, the walk
-and which leading entries to drop, for every backend. This file used to carry
-its own copy of that, and with it the macro-free path, which is why Metal had no
-`kernelinterpreter` and the vocabulary test listed the name as lonely.
-
-`group` is threaded through because the context's TYPE depends on it: the same
-`launch_config`/`mkcontext` pair `compile_dispatch` uses, so the signature walked
-here is the signature compiled there.
-"""
-function Mantle.kakernelaccesssignature(dev::MetalDevice, kernel, argT::Tuple, ndrange, group)
-    obj = Mantle.kernelfor(kernel, group, Mantle.backend(dev))
-    ndr, _ws, iterspace, _ = KA.launch_config(obj, Mantle.dispatchrange(ndrange),
-                                              Mantle.callgroup(obj, group))
-    ctx = KA.mkcontext(obj, ndr, iterspace)
-    tt = (Core.Typeof(Metal.mtlconvert(ctx)), argT...)
-    return metalinterpreter(obj.f, Base.to_tuple_type(tt)), obj.f, tt
-end
-
 
 """
 What a vertex stage does to each of its arguments.
@@ -478,11 +250,7 @@ function Mantle.vertextouches(dev::MetalDevice, shader, args::Tuple)
     return stagetouches(dev, f, args; lead)
 end
 
-# A mesh pipeline has no vertex stage: the draw's first argument list belongs
-# to the MESH stage, which is what `compile_draw` hands it to. Walked at the
-# signature `compile_pipeline` compiles it at, object pointer first. The graph
-# asked `shader.vertex` of a `MeshPipeline` until this existed, so any FEM or
-# meshlet draw recorded through `draw!` failed before it could be compiled.
+# Mesh arguments lead with the mesh-stage object, matching native compilation.
 Mantle.vertextouches(dev::MetalDevice, shader::Mantle.MeshPipeline, args::Tuple) =
     stagetouches(dev, Mantle.stagefunction(shader.mesh), args;
                  lead = mesh_stage_lead(shader))

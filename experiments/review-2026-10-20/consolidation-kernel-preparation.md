@@ -55,3 +55,21 @@ lower-level work; Metal's `Immediate` still handles pending front-of-run work.
 Those callers must migrate with the pending-change and resource-lifetime owners
 before deleting the old execution layers. This batch removes repeated preparation
 and policy, not those remaining ownership domains.
+
+## Context ABI follow-up — 2026-10-22
+
+Compared with `69f2ff4`, core's ordinary KA signature converts the iteration
+context through the existing argtype hook. Metal's duplicate setup is deleted;
+its mtlconvert expression now comes from that hook. Vulkan retains its IterPlan
+override. A host fixture with a different device-context type fails against the
+old unconverted signature and passes for default/explicit/2-D workgroups.
+
+284 host/Vulkan access and preparation assertions pass, with empty validation
+and synchronization drains. ROCm's 77 backend assertions plus 25 host preparation
+checks pass using the pinned SDK source in test/rocm/README.md. Native Metal
+execution remains unqualified; source preserves its converted signature.
+
+Metal KA comments now state current access, library eligibility and submission
+contracts. Prose edits preserve definitions. All 115 source files parse; source
+falls 50,570 → 50,338 physical and 22,824 → 22,816 implementation lines (eight
+implementation lines removed, no prose reclassification).

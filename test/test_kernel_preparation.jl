@@ -92,3 +92,21 @@ Mantle.backend(::UnsupportedPreparationDevice) = :no_ki_backend
     @test !Mantle.kisupported(UnsupportedPreparationDevice(), f)
     @test_throws r"macro-free kernel" Mantle.kikernel(f, UnsupportedPreparationDevice(), (arg,))
 end
+
+struct ContextPreparationDevice <: Mantle.Device end
+struct ConvertedAccessContext{C} end
+Mantle.backend(::ContextPreparationDevice) = KernelAbstractions.CPU()
+Mantle.argtype(::ContextPreparationDevice, ctx) = ConvertedAccessContext{typeof(ctx)}
+Mantle.kernelinterpreter(::ContextPreparationDevice, f, tt) = tt
+
+@testset "KA access signatures use the converted context ABI" begin
+    dev = ContextPreparationDevice()
+    for (dims,group) in ((64,nothing),(64,8),((16,16),(4,4)))
+        interp,body,tt = Mantle.kakernelaccesssignature(
+            dev,preparation_group!,(Vector{Int32},),dims,group)
+        @test tt[1] <: ConvertedAccessContext
+        @test tt[2] === Vector{Int32}
+        @test interp === Tuple{tt...}
+        @test body === Mantle.kernelfor(preparation_group!,group,Mantle.backend(dev)).f
+    end
+end

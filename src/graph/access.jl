@@ -1230,8 +1230,8 @@ Interpreter, body and signature of a retained KernelAbstractions kernel.
 
 The ordinary KA launch shape is backend-independent: construct the retained
 kernel, ask KA for its iteration space, make its context, then ask the device
-for the compiler interpreter. Backends override this only when the signature
-they actually compile differs from KA's ordinary launch (Lava retains an
+for the converted context type and compiler interpreter. Backends override this
+only when their signature differs from KA's ordinary launch (Lava retains an
 `IterPlan`; the host constructs one block's CPU context).
 """
 function kakernelaccesssignature(dev, kernel, argT::Tuple, ndrange, group)
@@ -1240,7 +1240,7 @@ function kakernelaccesssignature(dev, kernel, argT::Tuple, ndrange, group)
     cg = callgroup(obj, group)
     ndr, _, iterspace, _ = KA.launch_config(obj, nd, cg)
     ctx = KA.mkcontext(obj, ndr, iterspace)
-    tt = (typeof(ctx), argT...)
+    tt = (argtype(dev, ctx), argT...)
     return kernelinterpreter(dev, obj.f, Tuple{tt...}), obj.f, tt
 end
 
